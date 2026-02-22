@@ -1,0 +1,519 @@
+[
+  {
+    "timestamp": "2026-02-19T04:10:55.4997812+01:00",
+    "processes": [
+      {
+        "ProcessId": 4788,
+        "ParentProcessId": 126644,
+        "Name": "4kvideodownloaderplus.exe",
+        "ExecutablePath": "C:\\Program Files\\4KDownload\\4kvideodownloaderplus\\4kvideodownloaderplus.exe",
+        "CommandLine": "\"C:\\Program Files\\4KDownload\\4kvideodownloaderplus\\4kvideodownloaderplus.exe\" "
+      },
+      {
+        "ProcessId": 95492,
+        "ParentProcessId": 4788,
+        "Name": "crashpad_handler.exe",
+        "ExecutablePath": "C:\\Program Files\\4KDownload\\4kvideodownloaderplus\\crashpad_handler.exe",
+        "CommandLine": "\"C:/Program Files/4KDownload/4kvideodownloaderplus/crashpad_handler.exe\" \"--database=C:/Users/<user>/AppData/Local/4kdownload.com/4K Video Downloader+/4K Video Downloader+/../crashdb\" \"--metrics-dir=C:/Users/<user>/AppData/Local/4kdownload.com/4K Video Downloader+/4K Video Downloader+/../crashdb\" --url=https://o354938.ingest.sentry.io/api/4505076032667648/minidump/?sentry_key=<redacted> --annotation=format=minidump --annotation=sentry[release]=26.0.4.0286 \"--attachment=C:/Users/<user>/AppData/Local/4kdownload.com/4K Video Downloader+/4K Video Downloader+\\app_2026_02_19__04_10_49+0100.log\" --initial-client-data=0x55c,0x560,0x564,0x538,0x568,0x7ff7bb4b9058,0x7ff7bb4b9070,0x7ff7bb4b9088"
+      }
+    ],
+    "connections": [
+      {
+        "OwningProcess": 4788,
+        "LocalAddress": "<private-ip>",
+        "LocalPort": 54733,
+        "RemoteAddress": "<private-ip>",
+        "RemotePort": 0,
+        "State": 100
+      },
+      {
+        "OwningProcess": 4788,
+        "LocalAddress": "<private-ip>",
+        "LocalPort": 54733,
+        "RemoteAddress": "34.213.215.111",
+        "RemotePort": 8018,
+        "State": 5
+      }
+    ]
+  },
+  {
+    "timestamp": "2026-02-19T04:10:58.3706290+01:00",
+    "processes": [
+      {
+        "ProcessId": 4788,
+        "ParentProcessId": 126644,
+        "Name": "4kvideodownloaderplus.exe",
+        "ExecutablePath": "C:\\Program Files\\4KDownload\\4kvideodownloaderplus\\4kvideodownloaderplus.exe",
+        "CommandLine": "\"C:\\Program Files\\4KDownload\\4kvideodownloaderplus\\4kvideodownloaderplus.exe\" "
+      },
+      {
+        "ProcessId": 95492,
+        "ParentProcessId": 4788,
+        "Name": "crashpad_handler.exe",
+        "ExecutablePath": "C:\\Program Files\\4KDownload\\4kvideodownloaderplus\\crashpad_handler.exe",
+        "CommandLine": "\"C:/Program Files/4KDownload/4kvideodownloaderplus/crashpad_handler.exe\" \"--database=C:/Users/<user>/AppData/Local/4kdownload.com/4K Video Downloader+/4K Video Downloader+/../crashdb\" \"--metrics-dir=C:/Users/<user>/AppData/Local/4kdownload.com/4K Video Downloader+/4K Video Downloader+/../crashdb\" --url=https://o354938.ingest.sentry.io/api/4505076032667648/minidump/?sentry_key=<redacted> --annotation=format=minidump --annotation=sentry[release]=26.0.4.0286 \"--attachment=C:/Users/<user>/AppData/Local/4kdownload.com/4K Video Downloader+/4K Video Downloader+\\app_2026_02_19__04_10_49+0100.log\" --initial-client-data=0x55c,0x560,0x564,0x538,0x568,0x7ff7bb4b9058,0x7ff7bb4b9070,0x7ff7bb4b9088"
+      }
+    ],
+    "connections": []
+  },
+  {
+    "timestamp": "2026-02-19T04:11:01.1045481+01:00",
+    "processes": [
+      {
+        "ProcessId": 4788,
+        "ParentProcessId": 126644,
+        "Name": "4kvideodownloaderplus.exe",
+        "ExecutablePath": "C:\\Program Files\\4KDownload\\4kvideodownloaderplus\\4kvideodownloaderplus.exe",
+        "CommandLine": "\"C:\\Program Files\\4KDownload\\4kvideodownloaderplus\\4kvideodownloaderplus.exe\" "
+      },
+      {
+        "ProcessId": 95492,
+        "ParentProcessId": 4788,
+        "Name": "crashpad_handler.exe",
+        "ExecutablePath": "C:\\Program Files\\4KDownload\\4kvideodownloaderplus\\crashpad_handler.exe",
+        "CommandLine": "\"C:/Program Files/4KDownload/4kvideodownloaderplus/crashpad_handler.exe\" \"--database=C:/Users/<user>/AppData/Local/4kdownload.com/4K Video Downloader+/4K Video Downloader+/../crashdb\" \"--metrics-dir=C:/Users/<user>/AppData/Local/4kdownload.com/4K Video Downloader+/4K Video Downloader+/../crashdb\" --url=https://o354938.ingest.sentry.io/api/4505076032667648/minidump/?sentry_key=<redacted> --annotation=format=minidump --annotation=sentry[release]=26.0.4.0286 \"--attachment=C:/Users/<user>/AppData/Local/4kdownload.com/4K Video Downloader+/4K Video Downloader+\\app_2026_02_19__04_10_49+0100.log\" --initial-client-data=0x55c,0x560,0x564,0x538,0x568,0x7ff7bb4b9058,0x7ff7bb4b9070,0x7ff7bb4b9088"
+      }
+    ],
+    "connections": []
+  },
+  {
+    "timestamp": "2026-02-19T04:11:03.8909770+01:00",
+    "processes": [
+      {
+        "ProcessId": 4788,
+        "ParentProcessId": 126644,
+        "Name": "4kvideodownloaderplus.exe",
+        "ExecutablePath": "C:\\Program Files\\4KDownload\\4kvideodownloaderplus\\4kvideodownloaderplus.exe",
+        "CommandLine": "\"C:\\Program Files\\4KDownload\\4kvideodownloaderplus\\4kvideodownloaderplus.exe\" "
+      },
+      {
+        "ProcessId": 95492,
+        "ParentProcessId": 4788,
+        "Name": "crashpad_handler.exe",
+        "ExecutablePath": "C:\\Program Files\\4KDownload\\4kvideodownloaderplus\\crashpad_handler.exe",
+        "CommandLine": "\"C:/Program Files/4KDownload/4kvideodownloaderplus/crashpad_handler.exe\" \"--database=C:/Users/<user>/AppData/Local/4kdownload.com/4K Video Downloader+/4K Video Downloader+/../crashdb\" \"--metrics-dir=C:/Users/<user>/AppData/Local/4kdownload.com/4K Video Downloader+/4K Video Downloader+/../crashdb\" --url=https://o354938.ingest.sentry.io/api/4505076032667648/minidump/?sentry_key=<redacted> --annotation=format=minidump --annotation=sentry[release]=26.0.4.0286 \"--attachment=C:/Users/<user>/AppData/Local/4kdownload.com/4K Video Downloader+/4K Video Downloader+\\app_2026_02_19__04_10_49+0100.log\" --initial-client-data=0x55c,0x560,0x564,0x538,0x568,0x7ff7bb4b9058,0x7ff7bb4b9070,0x7ff7bb4b9088"
+      }
+    ],
+    "connections": []
+  },
+  {
+    "timestamp": "2026-02-19T04:11:06.5300910+01:00",
+    "processes": [
+      {
+        "ProcessId": 4788,
+        "ParentProcessId": 126644,
+        "Name": "4kvideodownloaderplus.exe",
+        "ExecutablePath": "C:\\Program Files\\4KDownload\\4kvideodownloaderplus\\4kvideodownloaderplus.exe",
+        "CommandLine": "\"C:\\Program Files\\4KDownload\\4kvideodownloaderplus\\4kvideodownloaderplus.exe\" "
+      },
+      {
+        "ProcessId": 95492,
+        "ParentProcessId": 4788,
+        "Name": "crashpad_handler.exe",
+        "ExecutablePath": "C:\\Program Files\\4KDownload\\4kvideodownloaderplus\\crashpad_handler.exe",
+        "CommandLine": "\"C:/Program Files/4KDownload/4kvideodownloaderplus/crashpad_handler.exe\" \"--database=C:/Users/<user>/AppData/Local/4kdownload.com/4K Video Downloader+/4K Video Downloader+/../crashdb\" \"--metrics-dir=C:/Users/<user>/AppData/Local/4kdownload.com/4K Video Downloader+/4K Video Downloader+/../crashdb\" --url=https://o354938.ingest.sentry.io/api/4505076032667648/minidump/?sentry_key=<redacted> --annotation=format=minidump --annotation=sentry[release]=26.0.4.0286 \"--attachment=C:/Users/<user>/AppData/Local/4kdownload.com/4K Video Downloader+/4K Video Downloader+\\app_2026_02_19__04_10_49+0100.log\" --initial-client-data=0x55c,0x560,0x564,0x538,0x568,0x7ff7bb4b9058,0x7ff7bb4b9070,0x7ff7bb4b9088"
+      }
+    ],
+    "connections": []
+  },
+  {
+    "timestamp": "2026-02-19T04:11:09.4800751+01:00",
+    "processes": [
+      {
+        "ProcessId": 4788,
+        "ParentProcessId": 126644,
+        "Name": "4kvideodownloaderplus.exe",
+        "ExecutablePath": "C:\\Program Files\\4KDownload\\4kvideodownloaderplus\\4kvideodownloaderplus.exe",
+        "CommandLine": "\"C:\\Program Files\\4KDownload\\4kvideodownloaderplus\\4kvideodownloaderplus.exe\" "
+      },
+      {
+        "ProcessId": 95492,
+        "ParentProcessId": 4788,
+        "Name": "crashpad_handler.exe",
+        "ExecutablePath": "C:\\Program Files\\4KDownload\\4kvideodownloaderplus\\crashpad_handler.exe",
+        "CommandLine": "\"C:/Program Files/4KDownload/4kvideodownloaderplus/crashpad_handler.exe\" \"--database=C:/Users/<user>/AppData/Local/4kdownload.com/4K Video Downloader+/4K Video Downloader+/../crashdb\" \"--metrics-dir=C:/Users/<user>/AppData/Local/4kdownload.com/4K Video Downloader+/4K Video Downloader+/../crashdb\" --url=https://o354938.ingest.sentry.io/api/4505076032667648/minidump/?sentry_key=<redacted> --annotation=format=minidump --annotation=sentry[release]=26.0.4.0286 \"--attachment=C:/Users/<user>/AppData/Local/4kdownload.com/4K Video Downloader+/4K Video Downloader+\\app_2026_02_19__04_10_49+0100.log\" --initial-client-data=0x55c,0x560,0x564,0x538,0x568,0x7ff7bb4b9058,0x7ff7bb4b9070,0x7ff7bb4b9088"
+      }
+    ],
+    "connections": []
+  },
+  {
+    "timestamp": "2026-02-19T04:11:12.3599111+01:00",
+    "processes": [
+      {
+        "ProcessId": 4788,
+        "ParentProcessId": 126644,
+        "Name": "4kvideodownloaderplus.exe",
+        "ExecutablePath": "C:\\Program Files\\4KDownload\\4kvideodownloaderplus\\4kvideodownloaderplus.exe",
+        "CommandLine": "\"C:\\Program Files\\4KDownload\\4kvideodownloaderplus\\4kvideodownloaderplus.exe\" "
+      },
+      {
+        "ProcessId": 95492,
+        "ParentProcessId": 4788,
+        "Name": "crashpad_handler.exe",
+        "ExecutablePath": "C:\\Program Files\\4KDownload\\4kvideodownloaderplus\\crashpad_handler.exe",
+        "CommandLine": "\"C:/Program Files/4KDownload/4kvideodownloaderplus/crashpad_handler.exe\" \"--database=C:/Users/<user>/AppData/Local/4kdownload.com/4K Video Downloader+/4K Video Downloader+/../crashdb\" \"--metrics-dir=C:/Users/<user>/AppData/Local/4kdownload.com/4K Video Downloader+/4K Video Downloader+/../crashdb\" --url=https://o354938.ingest.sentry.io/api/4505076032667648/minidump/?sentry_key=<redacted> --annotation=format=minidump --annotation=sentry[release]=26.0.4.0286 \"--attachment=C:/Users/<user>/AppData/Local/4kdownload.com/4K Video Downloader+/4K Video Downloader+\\app_2026_02_19__04_10_49+0100.log\" --initial-client-data=0x55c,0x560,0x564,0x538,0x568,0x7ff7bb4b9058,0x7ff7bb4b9070,0x7ff7bb4b9088"
+      }
+    ],
+    "connections": []
+  },
+  {
+    "timestamp": "2026-02-19T04:11:15.2665205+01:00",
+    "processes": [
+      {
+        "ProcessId": 4788,
+        "ParentProcessId": 126644,
+        "Name": "4kvideodownloaderplus.exe",
+        "ExecutablePath": "C:\\Program Files\\4KDownload\\4kvideodownloaderplus\\4kvideodownloaderplus.exe",
+        "CommandLine": "\"C:\\Program Files\\4KDownload\\4kvideodownloaderplus\\4kvideodownloaderplus.exe\" "
+      },
+      {
+        "ProcessId": 95492,
+        "ParentProcessId": 4788,
+        "Name": "crashpad_handler.exe",
+        "ExecutablePath": "C:\\Program Files\\4KDownload\\4kvideodownloaderplus\\crashpad_handler.exe",
+        "CommandLine": "\"C:/Program Files/4KDownload/4kvideodownloaderplus/crashpad_handler.exe\" \"--database=C:/Users/<user>/AppData/Local/4kdownload.com/4K Video Downloader+/4K Video Downloader+/../crashdb\" \"--metrics-dir=C:/Users/<user>/AppData/Local/4kdownload.com/4K Video Downloader+/4K Video Downloader+/../crashdb\" --url=https://o354938.ingest.sentry.io/api/4505076032667648/minidump/?sentry_key=<redacted> --annotation=format=minidump --annotation=sentry[release]=26.0.4.0286 \"--attachment=C:/Users/<user>/AppData/Local/4kdownload.com/4K Video Downloader+/4K Video Downloader+\\app_2026_02_19__04_10_49+0100.log\" --initial-client-data=0x55c,0x560,0x564,0x538,0x568,0x7ff7bb4b9058,0x7ff7bb4b9070,0x7ff7bb4b9088"
+      }
+    ],
+    "connections": []
+  },
+  {
+    "timestamp": "2026-02-19T04:11:18.0181012+01:00",
+    "processes": [
+      {
+        "ProcessId": 4788,
+        "ParentProcessId": 126644,
+        "Name": "4kvideodownloaderplus.exe",
+        "ExecutablePath": "C:\\Program Files\\4KDownload\\4kvideodownloaderplus\\4kvideodownloaderplus.exe",
+        "CommandLine": "\"C:\\Program Files\\4KDownload\\4kvideodownloaderplus\\4kvideodownloaderplus.exe\" "
+      },
+      {
+        "ProcessId": 95492,
+        "ParentProcessId": 4788,
+        "Name": "crashpad_handler.exe",
+        "ExecutablePath": "C:\\Program Files\\4KDownload\\4kvideodownloaderplus\\crashpad_handler.exe",
+        "CommandLine": "\"C:/Program Files/4KDownload/4kvideodownloaderplus/crashpad_handler.exe\" \"--database=C:/Users/<user>/AppData/Local/4kdownload.com/4K Video Downloader+/4K Video Downloader+/../crashdb\" \"--metrics-dir=C:/Users/<user>/AppData/Local/4kdownload.com/4K Video Downloader+/4K Video Downloader+/../crashdb\" --url=https://o354938.ingest.sentry.io/api/4505076032667648/minidump/?sentry_key=<redacted> --annotation=format=minidump --annotation=sentry[release]=26.0.4.0286 \"--attachment=C:/Users/<user>/AppData/Local/4kdownload.com/4K Video Downloader+/4K Video Downloader+\\app_2026_02_19__04_10_49+0100.log\" --initial-client-data=0x55c,0x560,0x564,0x538,0x568,0x7ff7bb4b9058,0x7ff7bb4b9070,0x7ff7bb4b9088"
+      }
+    ],
+    "connections": []
+  },
+  {
+    "timestamp": "2026-02-19T04:11:20.6577910+01:00",
+    "processes": [
+      {
+        "ProcessId": 4788,
+        "ParentProcessId": 126644,
+        "Name": "4kvideodownloaderplus.exe",
+        "ExecutablePath": "C:\\Program Files\\4KDownload\\4kvideodownloaderplus\\4kvideodownloaderplus.exe",
+        "CommandLine": "\"C:\\Program Files\\4KDownload\\4kvideodownloaderplus\\4kvideodownloaderplus.exe\" "
+      },
+      {
+        "ProcessId": 95492,
+        "ParentProcessId": 4788,
+        "Name": "crashpad_handler.exe",
+        "ExecutablePath": "C:\\Program Files\\4KDownload\\4kvideodownloaderplus\\crashpad_handler.exe",
+        "CommandLine": "\"C:/Program Files/4KDownload/4kvideodownloaderplus/crashpad_handler.exe\" \"--database=C:/Users/<user>/AppData/Local/4kdownload.com/4K Video Downloader+/4K Video Downloader+/../crashdb\" \"--metrics-dir=C:/Users/<user>/AppData/Local/4kdownload.com/4K Video Downloader+/4K Video Downloader+/../crashdb\" --url=https://o354938.ingest.sentry.io/api/4505076032667648/minidump/?sentry_key=<redacted> --annotation=format=minidump --annotation=sentry[release]=26.0.4.0286 \"--attachment=C:/Users/<user>/AppData/Local/4kdownload.com/4K Video Downloader+/4K Video Downloader+\\app_2026_02_19__04_10_49+0100.log\" --initial-client-data=0x55c,0x560,0x564,0x538,0x568,0x7ff7bb4b9058,0x7ff7bb4b9070,0x7ff7bb4b9088"
+      }
+    ],
+    "connections": []
+  },
+  {
+    "timestamp": "2026-02-19T04:11:23.5283898+01:00",
+    "processes": [
+      {
+        "ProcessId": 4788,
+        "ParentProcessId": 126644,
+        "Name": "4kvideodownloaderplus.exe",
+        "ExecutablePath": "C:\\Program Files\\4KDownload\\4kvideodownloaderplus\\4kvideodownloaderplus.exe",
+        "CommandLine": "\"C:\\Program Files\\4KDownload\\4kvideodownloaderplus\\4kvideodownloaderplus.exe\" "
+      },
+      {
+        "ProcessId": 95492,
+        "ParentProcessId": 4788,
+        "Name": "crashpad_handler.exe",
+        "ExecutablePath": "C:\\Program Files\\4KDownload\\4kvideodownloaderplus\\crashpad_handler.exe",
+        "CommandLine": "\"C:/Program Files/4KDownload/4kvideodownloaderplus/crashpad_handler.exe\" \"--database=C:/Users/<user>/AppData/Local/4kdownload.com/4K Video Downloader+/4K Video Downloader+/../crashdb\" \"--metrics-dir=C:/Users/<user>/AppData/Local/4kdownload.com/4K Video Downloader+/4K Video Downloader+/../crashdb\" --url=https://o354938.ingest.sentry.io/api/4505076032667648/minidump/?sentry_key=<redacted> --annotation=format=minidump --annotation=sentry[release]=26.0.4.0286 \"--attachment=C:/Users/<user>/AppData/Local/4kdownload.com/4K Video Downloader+/4K Video Downloader+\\app_2026_02_19__04_10_49+0100.log\" --initial-client-data=0x55c,0x560,0x564,0x538,0x568,0x7ff7bb4b9058,0x7ff7bb4b9070,0x7ff7bb4b9088"
+      }
+    ],
+    "connections": []
+  },
+  {
+    "timestamp": "2026-02-19T04:11:26.2593315+01:00",
+    "processes": [
+      {
+        "ProcessId": 4788,
+        "ParentProcessId": 126644,
+        "Name": "4kvideodownloaderplus.exe",
+        "ExecutablePath": "C:\\Program Files\\4KDownload\\4kvideodownloaderplus\\4kvideodownloaderplus.exe",
+        "CommandLine": "\"C:\\Program Files\\4KDownload\\4kvideodownloaderplus\\4kvideodownloaderplus.exe\" "
+      },
+      {
+        "ProcessId": 95492,
+        "ParentProcessId": 4788,
+        "Name": "crashpad_handler.exe",
+        "ExecutablePath": "C:\\Program Files\\4KDownload\\4kvideodownloaderplus\\crashpad_handler.exe",
+        "CommandLine": "\"C:/Program Files/4KDownload/4kvideodownloaderplus/crashpad_handler.exe\" \"--database=C:/Users/<user>/AppData/Local/4kdownload.com/4K Video Downloader+/4K Video Downloader+/../crashdb\" \"--metrics-dir=C:/Users/<user>/AppData/Local/4kdownload.com/4K Video Downloader+/4K Video Downloader+/../crashdb\" --url=https://o354938.ingest.sentry.io/api/4505076032667648/minidump/?sentry_key=<redacted> --annotation=format=minidump --annotation=sentry[release]=26.0.4.0286 \"--attachment=C:/Users/<user>/AppData/Local/4kdownload.com/4K Video Downloader+/4K Video Downloader+\\app_2026_02_19__04_10_49+0100.log\" --initial-client-data=0x55c,0x560,0x564,0x538,0x568,0x7ff7bb4b9058,0x7ff7bb4b9070,0x7ff7bb4b9088"
+      }
+    ],
+    "connections": []
+  },
+  {
+    "timestamp": "2026-02-19T04:11:29.4689216+01:00",
+    "processes": [
+      {
+        "ProcessId": 4788,
+        "ParentProcessId": 126644,
+        "Name": "4kvideodownloaderplus.exe",
+        "ExecutablePath": "C:\\Program Files\\4KDownload\\4kvideodownloaderplus\\4kvideodownloaderplus.exe",
+        "CommandLine": "\"C:\\Program Files\\4KDownload\\4kvideodownloaderplus\\4kvideodownloaderplus.exe\" "
+      },
+      {
+        "ProcessId": 95492,
+        "ParentProcessId": 4788,
+        "Name": "crashpad_handler.exe",
+        "ExecutablePath": "C:\\Program Files\\4KDownload\\4kvideodownloaderplus\\crashpad_handler.exe",
+        "CommandLine": "\"C:/Program Files/4KDownload/4kvideodownloaderplus/crashpad_handler.exe\" \"--database=C:/Users/<user>/AppData/Local/4kdownload.com/4K Video Downloader+/4K Video Downloader+/../crashdb\" \"--metrics-dir=C:/Users/<user>/AppData/Local/4kdownload.com/4K Video Downloader+/4K Video Downloader+/../crashdb\" --url=https://o354938.ingest.sentry.io/api/4505076032667648/minidump/?sentry_key=<redacted> --annotation=format=minidump --annotation=sentry[release]=26.0.4.0286 \"--attachment=C:/Users/<user>/AppData/Local/4kdownload.com/4K Video Downloader+/4K Video Downloader+\\app_2026_02_19__04_10_49+0100.log\" --initial-client-data=0x55c,0x560,0x564,0x538,0x568,0x7ff7bb4b9058,0x7ff7bb4b9070,0x7ff7bb4b9088"
+      }
+    ],
+    "connections": []
+  },
+  {
+    "timestamp": "2026-02-19T04:11:32.1664746+01:00",
+    "processes": [
+      {
+        "ProcessId": 4788,
+        "ParentProcessId": 126644,
+        "Name": "4kvideodownloaderplus.exe",
+        "ExecutablePath": "C:\\Program Files\\4KDownload\\4kvideodownloaderplus\\4kvideodownloaderplus.exe",
+        "CommandLine": "\"C:\\Program Files\\4KDownload\\4kvideodownloaderplus\\4kvideodownloaderplus.exe\" "
+      },
+      {
+        "ProcessId": 95492,
+        "ParentProcessId": 4788,
+        "Name": "crashpad_handler.exe",
+        "ExecutablePath": "C:\\Program Files\\4KDownload\\4kvideodownloaderplus\\crashpad_handler.exe",
+        "CommandLine": "\"C:/Program Files/4KDownload/4kvideodownloaderplus/crashpad_handler.exe\" \"--database=C:/Users/<user>/AppData/Local/4kdownload.com/4K Video Downloader+/4K Video Downloader+/../crashdb\" \"--metrics-dir=C:/Users/<user>/AppData/Local/4kdownload.com/4K Video Downloader+/4K Video Downloader+/../crashdb\" --url=https://o354938.ingest.sentry.io/api/4505076032667648/minidump/?sentry_key=<redacted> --annotation=format=minidump --annotation=sentry[release]=26.0.4.0286 \"--attachment=C:/Users/<user>/AppData/Local/4kdownload.com/4K Video Downloader+/4K Video Downloader+\\app_2026_02_19__04_10_49+0100.log\" --initial-client-data=0x55c,0x560,0x564,0x538,0x568,0x7ff7bb4b9058,0x7ff7bb4b9070,0x7ff7bb4b9088"
+      }
+    ],
+    "connections": []
+  },
+  {
+    "timestamp": "2026-02-19T04:11:34.8774921+01:00",
+    "processes": [
+      {
+        "ProcessId": 4788,
+        "ParentProcessId": 126644,
+        "Name": "4kvideodownloaderplus.exe",
+        "ExecutablePath": "C:\\Program Files\\4KDownload\\4kvideodownloaderplus\\4kvideodownloaderplus.exe",
+        "CommandLine": "\"C:\\Program Files\\4KDownload\\4kvideodownloaderplus\\4kvideodownloaderplus.exe\" "
+      },
+      {
+        "ProcessId": 95492,
+        "ParentProcessId": 4788,
+        "Name": "crashpad_handler.exe",
+        "ExecutablePath": "C:\\Program Files\\4KDownload\\4kvideodownloaderplus\\crashpad_handler.exe",
+        "CommandLine": "\"C:/Program Files/4KDownload/4kvideodownloaderplus/crashpad_handler.exe\" \"--database=C:/Users/<user>/AppData/Local/4kdownload.com/4K Video Downloader+/4K Video Downloader+/../crashdb\" \"--metrics-dir=C:/Users/<user>/AppData/Local/4kdownload.com/4K Video Downloader+/4K Video Downloader+/../crashdb\" --url=https://o354938.ingest.sentry.io/api/4505076032667648/minidump/?sentry_key=<redacted> --annotation=format=minidump --annotation=sentry[release]=26.0.4.0286 \"--attachment=C:/Users/<user>/AppData/Local/4kdownload.com/4K Video Downloader+/4K Video Downloader+\\app_2026_02_19__04_10_49+0100.log\" --initial-client-data=0x55c,0x560,0x564,0x538,0x568,0x7ff7bb4b9058,0x7ff7bb4b9070,0x7ff7bb4b9088"
+      }
+    ],
+    "connections": []
+  },
+  {
+    "timestamp": "2026-02-19T04:11:37.5397304+01:00",
+    "processes": [
+      {
+        "ProcessId": 4788,
+        "ParentProcessId": 126644,
+        "Name": "4kvideodownloaderplus.exe",
+        "ExecutablePath": "C:\\Program Files\\4KDownload\\4kvideodownloaderplus\\4kvideodownloaderplus.exe",
+        "CommandLine": "\"C:\\Program Files\\4KDownload\\4kvideodownloaderplus\\4kvideodownloaderplus.exe\" "
+      },
+      {
+        "ProcessId": 95492,
+        "ParentProcessId": 4788,
+        "Name": "crashpad_handler.exe",
+        "ExecutablePath": "C:\\Program Files\\4KDownload\\4kvideodownloaderplus\\crashpad_handler.exe",
+        "CommandLine": "\"C:/Program Files/4KDownload/4kvideodownloaderplus/crashpad_handler.exe\" \"--database=C:/Users/<user>/AppData/Local/4kdownload.com/4K Video Downloader+/4K Video Downloader+/../crashdb\" \"--metrics-dir=C:/Users/<user>/AppData/Local/4kdownload.com/4K Video Downloader+/4K Video Downloader+/../crashdb\" --url=https://o354938.ingest.sentry.io/api/4505076032667648/minidump/?sentry_key=<redacted> --annotation=format=minidump --annotation=sentry[release]=26.0.4.0286 \"--attachment=C:/Users/<user>/AppData/Local/4kdownload.com/4K Video Downloader+/4K Video Downloader+\\app_2026_02_19__04_10_49+0100.log\" --initial-client-data=0x55c,0x560,0x564,0x538,0x568,0x7ff7bb4b9058,0x7ff7bb4b9070,0x7ff7bb4b9088"
+      }
+    ],
+    "connections": []
+  },
+  {
+    "timestamp": "2026-02-19T04:11:40.0884252+01:00",
+    "processes": [
+      {
+        "ProcessId": 4788,
+        "ParentProcessId": 126644,
+        "Name": "4kvideodownloaderplus.exe",
+        "ExecutablePath": "C:\\Program Files\\4KDownload\\4kvideodownloaderplus\\4kvideodownloaderplus.exe",
+        "CommandLine": "\"C:\\Program Files\\4KDownload\\4kvideodownloaderplus\\4kvideodownloaderplus.exe\" "
+      },
+      {
+        "ProcessId": 95492,
+        "ParentProcessId": 4788,
+        "Name": "crashpad_handler.exe",
+        "ExecutablePath": "C:\\Program Files\\4KDownload\\4kvideodownloaderplus\\crashpad_handler.exe",
+        "CommandLine": "\"C:/Program Files/4KDownload/4kvideodownloaderplus/crashpad_handler.exe\" \"--database=C:/Users/<user>/AppData/Local/4kdownload.com/4K Video Downloader+/4K Video Downloader+/../crashdb\" \"--metrics-dir=C:/Users/<user>/AppData/Local/4kdownload.com/4K Video Downloader+/4K Video Downloader+/../crashdb\" --url=https://o354938.ingest.sentry.io/api/4505076032667648/minidump/?sentry_key=<redacted> --annotation=format=minidump --annotation=sentry[release]=26.0.4.0286 \"--attachment=C:/Users/<user>/AppData/Local/4kdownload.com/4K Video Downloader+/4K Video Downloader+\\app_2026_02_19__04_10_49+0100.log\" --initial-client-data=0x55c,0x560,0x564,0x538,0x568,0x7ff7bb4b9058,0x7ff7bb4b9070,0x7ff7bb4b9088"
+      }
+    ],
+    "connections": []
+  },
+  {
+    "timestamp": "2026-02-19T04:11:42.6684232+01:00",
+    "processes": [
+      {
+        "ProcessId": 4788,
+        "ParentProcessId": 126644,
+        "Name": "4kvideodownloaderplus.exe",
+        "ExecutablePath": "C:\\Program Files\\4KDownload\\4kvideodownloaderplus\\4kvideodownloaderplus.exe",
+        "CommandLine": "\"C:\\Program Files\\4KDownload\\4kvideodownloaderplus\\4kvideodownloaderplus.exe\" "
+      },
+      {
+        "ProcessId": 95492,
+        "ParentProcessId": 4788,
+        "Name": "crashpad_handler.exe",
+        "ExecutablePath": "C:\\Program Files\\4KDownload\\4kvideodownloaderplus\\crashpad_handler.exe",
+        "CommandLine": "\"C:/Program Files/4KDownload/4kvideodownloaderplus/crashpad_handler.exe\" \"--database=C:/Users/<user>/AppData/Local/4kdownload.com/4K Video Downloader+/4K Video Downloader+/../crashdb\" \"--metrics-dir=C:/Users/<user>/AppData/Local/4kdownload.com/4K Video Downloader+/4K Video Downloader+/../crashdb\" --url=https://o354938.ingest.sentry.io/api/4505076032667648/minidump/?sentry_key=<redacted> --annotation=format=minidump --annotation=sentry[release]=26.0.4.0286 \"--attachment=C:/Users/<user>/AppData/Local/4kdownload.com/4K Video Downloader+/4K Video Downloader+\\app_2026_02_19__04_10_49+0100.log\" --initial-client-data=0x55c,0x560,0x564,0x538,0x568,0x7ff7bb4b9058,0x7ff7bb4b9070,0x7ff7bb4b9088"
+      }
+    ],
+    "connections": []
+  },
+  {
+    "timestamp": "2026-02-19T04:11:45.1832238+01:00",
+    "processes": [
+      {
+        "ProcessId": 4788,
+        "ParentProcessId": 126644,
+        "Name": "4kvideodownloaderplus.exe",
+        "ExecutablePath": "C:\\Program Files\\4KDownload\\4kvideodownloaderplus\\4kvideodownloaderplus.exe",
+        "CommandLine": "\"C:\\Program Files\\4KDownload\\4kvideodownloaderplus\\4kvideodownloaderplus.exe\" "
+      },
+      {
+        "ProcessId": 95492,
+        "ParentProcessId": 4788,
+        "Name": "crashpad_handler.exe",
+        "ExecutablePath": "C:\\Program Files\\4KDownload\\4kvideodownloaderplus\\crashpad_handler.exe",
+        "CommandLine": "\"C:/Program Files/4KDownload/4kvideodownloaderplus/crashpad_handler.exe\" \"--database=C:/Users/<user>/AppData/Local/4kdownload.com/4K Video Downloader+/4K Video Downloader+/../crashdb\" \"--metrics-dir=C:/Users/<user>/AppData/Local/4kdownload.com/4K Video Downloader+/4K Video Downloader+/../crashdb\" --url=https://o354938.ingest.sentry.io/api/4505076032667648/minidump/?sentry_key=<redacted> --annotation=format=minidump --annotation=sentry[release]=26.0.4.0286 \"--attachment=C:/Users/<user>/AppData/Local/4kdownload.com/4K Video Downloader+/4K Video Downloader+\\app_2026_02_19__04_10_49+0100.log\" --initial-client-data=0x55c,0x560,0x564,0x538,0x568,0x7ff7bb4b9058,0x7ff7bb4b9070,0x7ff7bb4b9088"
+      }
+    ],
+    "connections": []
+  },
+  {
+    "timestamp": "2026-02-19T04:11:47.7688715+01:00",
+    "processes": [
+      {
+        "ProcessId": 4788,
+        "ParentProcessId": 126644,
+        "Name": "4kvideodownloaderplus.exe",
+        "ExecutablePath": "C:\\Program Files\\4KDownload\\4kvideodownloaderplus\\4kvideodownloaderplus.exe",
+        "CommandLine": "\"C:\\Program Files\\4KDownload\\4kvideodownloaderplus\\4kvideodownloaderplus.exe\" "
+      },
+      {
+        "ProcessId": 95492,
+        "ParentProcessId": 4788,
+        "Name": "crashpad_handler.exe",
+        "ExecutablePath": "C:\\Program Files\\4KDownload\\4kvideodownloaderplus\\crashpad_handler.exe",
+        "CommandLine": "\"C:/Program Files/4KDownload/4kvideodownloaderplus/crashpad_handler.exe\" \"--database=C:/Users/<user>/AppData/Local/4kdownload.com/4K Video Downloader+/4K Video Downloader+/../crashdb\" \"--metrics-dir=C:/Users/<user>/AppData/Local/4kdownload.com/4K Video Downloader+/4K Video Downloader+/../crashdb\" --url=https://o354938.ingest.sentry.io/api/4505076032667648/minidump/?sentry_key=<redacted> --annotation=format=minidump --annotation=sentry[release]=26.0.4.0286 \"--attachment=C:/Users/<user>/AppData/Local/4kdownload.com/4K Video Downloader+/4K Video Downloader+\\app_2026_02_19__04_10_49+0100.log\" --initial-client-data=0x55c,0x560,0x564,0x538,0x568,0x7ff7bb4b9058,0x7ff7bb4b9070,0x7ff7bb4b9088"
+      }
+    ],
+    "connections": []
+  },
+  {
+    "timestamp": "2026-02-19T04:11:50.5249771+01:00",
+    "processes": [
+      {
+        "ProcessId": 4788,
+        "ParentProcessId": 126644,
+        "Name": "4kvideodownloaderplus.exe",
+        "ExecutablePath": "C:\\Program Files\\4KDownload\\4kvideodownloaderplus\\4kvideodownloaderplus.exe",
+        "CommandLine": "\"C:\\Program Files\\4KDownload\\4kvideodownloaderplus\\4kvideodownloaderplus.exe\" "
+      },
+      {
+        "ProcessId": 95492,
+        "ParentProcessId": 4788,
+        "Name": "crashpad_handler.exe",
+        "ExecutablePath": "C:\\Program Files\\4KDownload\\4kvideodownloaderplus\\crashpad_handler.exe",
+        "CommandLine": "\"C:/Program Files/4KDownload/4kvideodownloaderplus/crashpad_handler.exe\" \"--database=C:/Users/<user>/AppData/Local/4kdownload.com/4K Video Downloader+/4K Video Downloader+/../crashdb\" \"--metrics-dir=C:/Users/<user>/AppData/Local/4kdownload.com/4K Video Downloader+/4K Video Downloader+/../crashdb\" --url=https://o354938.ingest.sentry.io/api/4505076032667648/minidump/?sentry_key=<redacted> --annotation=format=minidump --annotation=sentry[release]=26.0.4.0286 \"--attachment=C:/Users/<user>/AppData/Local/4kdownload.com/4K Video Downloader+/4K Video Downloader+\\app_2026_02_19__04_10_49+0100.log\" --initial-client-data=0x55c,0x560,0x564,0x538,0x568,0x7ff7bb4b9058,0x7ff7bb4b9070,0x7ff7bb4b9088"
+      }
+    ],
+    "connections": []
+  },
+  {
+    "timestamp": "2026-02-19T04:11:53.1145908+01:00",
+    "processes": [
+      {
+        "ProcessId": 4788,
+        "ParentProcessId": 126644,
+        "Name": "4kvideodownloaderplus.exe",
+        "ExecutablePath": "C:\\Program Files\\4KDownload\\4kvideodownloaderplus\\4kvideodownloaderplus.exe",
+        "CommandLine": "\"C:\\Program Files\\4KDownload\\4kvideodownloaderplus\\4kvideodownloaderplus.exe\" "
+      },
+      {
+        "ProcessId": 95492,
+        "ParentProcessId": 4788,
+        "Name": "crashpad_handler.exe",
+        "ExecutablePath": "C:\\Program Files\\4KDownload\\4kvideodownloaderplus\\crashpad_handler.exe",
+        "CommandLine": "\"C:/Program Files/4KDownload/4kvideodownloaderplus/crashpad_handler.exe\" \"--database=C:/Users/<user>/AppData/Local/4kdownload.com/4K Video Downloader+/4K Video Downloader+/../crashdb\" \"--metrics-dir=C:/Users/<user>/AppData/Local/4kdownload.com/4K Video Downloader+/4K Video Downloader+/../crashdb\" --url=https://o354938.ingest.sentry.io/api/4505076032667648/minidump/?sentry_key=<redacted> --annotation=format=minidump --annotation=sentry[release]=26.0.4.0286 \"--attachment=C:/Users/<user>/AppData/Local/4kdownload.com/4K Video Downloader+/4K Video Downloader+\\app_2026_02_19__04_10_49+0100.log\" --initial-client-data=0x55c,0x560,0x564,0x538,0x568,0x7ff7bb4b9058,0x7ff7bb4b9070,0x7ff7bb4b9088"
+      }
+    ],
+    "connections": []
+  },
+  {
+    "timestamp": "2026-02-19T04:11:55.7440416+01:00",
+    "processes": [
+      {
+        "ProcessId": 4788,
+        "ParentProcessId": 126644,
+        "Name": "4kvideodownloaderplus.exe",
+        "ExecutablePath": "C:\\Program Files\\4KDownload\\4kvideodownloaderplus\\4kvideodownloaderplus.exe",
+        "CommandLine": "\"C:\\Program Files\\4KDownload\\4kvideodownloaderplus\\4kvideodownloaderplus.exe\" "
+      },
+      {
+        "ProcessId": 95492,
+        "ParentProcessId": 4788,
+        "Name": "crashpad_handler.exe",
+        "ExecutablePath": "C:\\Program Files\\4KDownload\\4kvideodownloaderplus\\crashpad_handler.exe",
+        "CommandLine": "\"C:/Program Files/4KDownload/4kvideodownloaderplus/crashpad_handler.exe\" \"--database=C:/Users/<user>/AppData/Local/4kdownload.com/4K Video Downloader+/4K Video Downloader+/../crashdb\" \"--metrics-dir=C:/Users/<user>/AppData/Local/4kdownload.com/4K Video Downloader+/4K Video Downloader+/../crashdb\" --url=https://o354938.ingest.sentry.io/api/4505076032667648/minidump/?sentry_key=<redacted> --annotation=format=minidump --annotation=sentry[release]=26.0.4.0286 \"--attachment=C:/Users/<user>/AppData/Local/4kdownload.com/4K Video Downloader+/4K Video Downloader+\\app_2026_02_19__04_10_49+0100.log\" --initial-client-data=0x55c,0x560,0x564,0x538,0x568,0x7ff7bb4b9058,0x7ff7bb4b9070,0x7ff7bb4b9088"
+      }
+    ],
+    "connections": []
+  },
+  {
+    "timestamp": "2026-02-19T04:11:58.4765481+01:00",
+    "processes": [
+      {
+        "ProcessId": 4788,
+        "ParentProcessId": 126644,
+        "Name": "4kvideodownloaderplus.exe",
+        "ExecutablePath": "C:\\Program Files\\4KDownload\\4kvideodownloaderplus\\4kvideodownloaderplus.exe",
+        "CommandLine": "\"C:\\Program Files\\4KDownload\\4kvideodownloaderplus\\4kvideodownloaderplus.exe\" "
+      },
+      {
+        "ProcessId": 95492,
+        "ParentProcessId": 4788,
+        "Name": "crashpad_handler.exe",
+        "ExecutablePath": "C:\\Program Files\\4KDownload\\4kvideodownloaderplus\\crashpad_handler.exe",
+        "CommandLine": "\"C:/Program Files/4KDownload/4kvideodownloaderplus/crashpad_handler.exe\" \"--database=C:/Users/<user>/AppData/Local/4kdownload.com/4K Video Downloader+/4K Video Downloader+/../crashdb\" \"--metrics-dir=C:/Users/<user>/AppData/Local/4kdownload.com/4K Video Downloader+/4K Video Downloader+/../crashdb\" --url=https://o354938.ingest.sentry.io/api/4505076032667648/minidump/?sentry_key=<redacted> --annotation=format=minidump --annotation=sentry[release]=26.0.4.0286 \"--attachment=C:/Users/<user>/AppData/Local/4kdownload.com/4K Video Downloader+/4K Video Downloader+\\app_2026_02_19__04_10_49+0100.log\" --initial-client-data=0x55c,0x560,0x564,0x538,0x568,0x7ff7bb4b9058,0x7ff7bb4b9070,0x7ff7bb4b9088"
+      }
+    ],
+    "connections": []
+  },
+  {
+    "timestamp": "2026-02-19T04:12:01.2418717+01:00",
+    "processes": [
+      {
+        "ProcessId": 4788,
+        "ParentProcessId": 126644,
+        "Name": "4kvideodownloaderplus.exe",
+        "ExecutablePath": "C:\\Program Files\\4KDownload\\4kvideodownloaderplus\\4kvideodownloaderplus.exe",
+        "CommandLine": "\"C:\\Program Files\\4KDownload\\4kvideodownloaderplus\\4kvideodownloaderplus.exe\" "
+      },
+      {
+        "ProcessId": 95492,
+        "ParentProcessId": 4788,
+        "Name": "crashpad_handler.exe",
+        "ExecutablePath": "C:\\Program Files\\4KDownload\\4kvideodownloaderplus\\crashpad_handler.exe",
+        "CommandLine": "\"C:/Program Files/4KDownload/4kvideodownloaderplus/crashpad_handler.exe\" \"--database=C:/Users/<user>/AppData/Local/4kdownload.com/4K Video Downloader+/4K Video Downloader+/../crashdb\" \"--metrics-dir=C:/Users/<user>/AppData/Local/4kdownload.com/4K Video Downloader+/4K Video Downloader+/../crashdb\" --url=https://o354938.ingest.sentry.io/api/4505076032667648/minidump/?sentry_key=<redacted> --annotation=format=minidump --annotation=sentry[release]=26.0.4.0286 \"--attachment=C:/Users/<user>/AppData/Local/4kdownload.com/4K Video Downloader+/4K Video Downloader+\\app_2026_02_19__04_10_49+0100.log\" --initial-client-data=0x55c,0x560,0x564,0x538,0x568,0x7ff7bb4b9058,0x7ff7bb4b9070,0x7ff7bb4b9088"
+      }
+    ],
+    "connections": []
+  }
+]

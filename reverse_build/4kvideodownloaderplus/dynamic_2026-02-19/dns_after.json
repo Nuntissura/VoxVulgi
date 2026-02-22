@@ -1,0 +1,98 @@
+[
+  {
+    "RecordName": null,
+    "RecordType": null,
+    "Data": "34.213.215.111",
+    "TimeToLive": 6441
+  },
+  {
+    "RecordName": null,
+    "RecordType": null,
+    "Data": "<redacted-hostname>shome.net",
+    "TimeToLive": 0
+  },
+  {
+    "RecordName": null,
+    "RecordType": null,
+    "Data": null,
+    "TimeToLive": 0
+  },
+  {
+    "RecordName": null,
+    "RecordType": null,
+    "Data": "<private-ip>",
+    "TimeToLive": 0
+  },
+  {
+    "RecordName": null,
+    "RecordType": null,
+    "Data": "34.54.84.110",
+    "TimeToLive": 3051
+  },
+  {
+    "RecordName": null,
+    "RecordType": null,
+    "Data": null,
+    "TimeToLive": 0
+  },
+  {
+    "RecordName": null,
+    "RecordType": null,
+    "Data": "<private-ip>",
+    "TimeToLive": 0
+  },
+  {
+    "RecordName": null,
+    "RecordType": null,
+    "Data": null,
+    "TimeToLive": 0
+  },
+  {
+    "RecordName": null,
+    "RecordType": null,
+    "Data": "<private-ip>",
+    "TimeToLive": 0
+  },
+  {
+    "RecordName": null,
+    "RecordType": null,
+    "Data": "kubernetes.docker.internal",
+    "TimeToLive": 0
+  },
+  {
+    "RecordName": null,
+    "RecordType": null,
+    "Data": "host.docker.internal",
+    "TimeToLive": 0
+  },
+  {
+    "RecordName": null,
+    "RecordType": null,
+    "Data": "gateway.docker.internal",
+    "TimeToLive": 0
+  },
+  {
+    "RecordName": null,
+    "RecordType": null,
+    "Data": null,
+    "TimeToLive": 0
+  },
+  {
+    "RecordName": null,
+    "RecordType": null,
+    "Data": "<private-ip>",
+    "TimeToLive": 0
+  },
+  {
+    "RecordName": null,
+    "RecordType": null,
+    "Data": "pki-goog.l.google.com",
+    "TimeToLive": 185
+  },
+  {
+    "RecordName": null,
+    "RecordType": null,
+    "Data": "64.233.184.94",
+    "TimeToLive": 185
+  }
+]

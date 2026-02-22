@@ -1,0 +1,45 @@
+{
+  "schema_version": 1,
+  "models": [
+    {
+      "id": "demo-ja-asr",
+      "name": "Demo JA ASR (placeholder)",
+      "task": "asr",
+      "source_lang": "ja",
+      "target_lang": null,
+      "version": "0.0.1",
+      "license": "N/A",
+      "files": [
+        {
+          "path": "demo.txt",
+          "size_bytes": 33,
+          "sha256": "df1b2aefa095e5ca23729eab0d3556867c4c97bd0611dbde3b10adac327bc2ff",
+          "source": {
+            "type": "bundled",
+            "resource_id": "demo/demo.txt"
+          }
+        }
+      ]
+    },
+    {
+      "id": "whispercpp-tiny",
+      "name": "Whisper.cpp Tiny (multilingual)",
+      "task": "asr",
+      "source_lang": null,
+      "target_lang": null,
+      "version": "d153938",
+      "license": "MIT (OpenAI Whisper)",
+      "files": [
+        {
+          "path": "ggml-tiny.bin",
+          "size_bytes": 77691713,
+          "sha256": "be07e048e1e599ad46341c8d2a135645097a538221678b7acdd1b1919c6e1b21",
+          "source": {
+            "type": "url",
+            "url": "https://huggingface.co/ggerganov/whisper.cpp/resolve/d15393806e24a74f60827e23e986f0c10750b358/ggml-tiny.bin"
+          }
+        }
+      ]
+    }
+  ]
+}
