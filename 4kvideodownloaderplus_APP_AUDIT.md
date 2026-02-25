@@ -7,7 +7,7 @@ Method: static inspection of installed artifacts + inspection of runtime artifac
 
 Install directory analyzed:
 
-- `C:\Program Files\4KDownload\4kvideodownloaderplus`
+- `%ProgramFiles%\4KDownload\4kvideodownloaderplus`
 
 Runtime artifacts analyzed (high-level; contents not extracted):
 

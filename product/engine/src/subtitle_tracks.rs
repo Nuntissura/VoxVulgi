@@ -277,7 +277,7 @@ INSERT INTO library_item (
                 "local_file",
                 "file:///tmp",
                 "Test",
-                "C:\\tmp\\test.mp4"
+                "media/test.mp4"
             ],
         )
         .expect("insert item");

@@ -10,7 +10,8 @@ Targets:
 - CSV capture files (modified files lists)
 
 Redactions:
-- User profile paths (C:\\Users\\<name> / C:/Users/<name>)
+- User profile paths (<drive>:\\Users\\<name> / <drive>:/Users/<name>)
+- Windows drive letters in absolute paths (for example, X:\\... / X:/...)
 - Common hostnames like Desktop-<name>...
 - Private IPv4 addresses (RFC1918)
 - in-addr.arpa reverse lookup records
@@ -27,8 +28,9 @@ from pathlib import Path
 from typing import Any
 
 
-_RE_WIN_USER = re.compile(r"C:\\Users\\[^\\]+")
-_RE_POSIX_USER = re.compile(r"C:/Users/[^/]+")
+_RE_WIN_USER = re.compile(r"[A-Za-z]:\\Users\\[^\\]+")
+_RE_POSIX_USER = re.compile(r"[A-Za-z]:/Users/[^/]+")
+_RE_WIN_DRIVE = re.compile(r"\b[A-Za-z]:(?=[\\/])")
 _RE_HOST_DESKTOP = re.compile(r"Desktop-[^\\s\"/]+")
 _RE_IPV4 = re.compile(r"\b\d{1,3}(?:\.\d{1,3}){3}\b")
 _RE_SENTRY_KEY = re.compile(r"(sentry_key=)[0-9a-fA-F]+")
@@ -49,8 +51,9 @@ def _sanitize_string(text: str) -> str:
     # Strip UTF-8 BOM if present as a character (common when we ingest tool output).
     text = text.lstrip("\ufeff")
 
-    text = _RE_WIN_USER.sub(r"C:\\Users\\<user>", text)
-    text = _RE_POSIX_USER.sub("C:/Users/<user>", text)
+    text = _RE_WIN_USER.sub(r"<drive>:\\Users\\<user>", text)
+    text = _RE_POSIX_USER.sub("<drive>:/Users/<user>", text)
+    text = _RE_WIN_DRIVE.sub("<drive>:", text)
     text = _RE_SENTRY_KEY.sub(r"\1<redacted>", text)
     text = _RE_IN_ADDR.sub("<redacted.in-addr.arpa>", text)
     text = _RE_HOST_DESKTOP.sub("<redacted-hostname>", text)

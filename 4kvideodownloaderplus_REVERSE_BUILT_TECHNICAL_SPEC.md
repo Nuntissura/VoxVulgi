@@ -15,7 +15,7 @@ No decompilation was performed. Limited runtime execution was used only to produ
 
 ### Install artifacts
 
-- `C:\Program Files\4KDownload\4kvideodownloaderplus\` (EXE/DLLs/resources)
+- `%ProgramFiles%\4KDownload\4kvideodownloaderplus\` (EXE/DLLs/resources)
 
 ### Runtime artifacts (LocalAppData)
 
@@ -205,7 +205,7 @@ The `getinfo` response is logged and includes "external IP info" (value redacted
 Qt WebEngine locale search warning observed:
 
 - searched for `en-US.pak` in:
-  - `C:\Program Files\4KDownload\4kvideodownloaderplus\translations\qtwebengine_locales\`
+  - `%ProgramFiles%\4KDownload\4kvideodownloaderplus\translations\qtwebengine_locales\`
   - `%USERPROFILE%\.4K Video Downloader+` (path searched even if not present)
 
 ## 7) Download/Extractor Engine (Confirmed + Inferred)

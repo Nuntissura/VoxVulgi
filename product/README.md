@@ -43,7 +43,7 @@ The app installs runtime tools/models into its app-data folder (local-first; exp
 - Script: `scripts/image_batch_downloader.py`
 - Install dependencies: `python -m pip install requests beautifulsoup4`
 - Example run:
-  `python scripts/image_batch_downloader.py "https://example.com/blog" "https://example.com/forum" --output "P:\YT fetch\downloads\dad-images" --max-pages 1500`
+  `python scripts/image_batch_downloader.py "https://example.com/blog" "https://example.com/forum" --output "./downloads/dad-images" --max-pages 1500`
 - It crawls pagination and post/thread links, skips likely profile/avatar photos, and prefers full-size images over thumbnail variants.
 - Use `--dry-run` first to validate what it will collect without writing files.
 - Use `--skip-url-keyword` (repeatable) for site-specific exclusions, for example:
