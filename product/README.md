@@ -16,6 +16,14 @@ From `product/desktop/`:
 - `npm install`
 - `npm run tauri dev`
 
+## Build output policy (desktop)
+
+From `product/desktop/`:
+
+- Build with managed target folder: `npm run build:desktop:target`
+- Build artifacts are written to `Build Target/Current`
+- Previous builds are archived to `Build Target/Old versions`
+
 ## Runtime deps (FFmpeg + models)
 
 The app installs runtime tools/models into its app-data folder (local-first; explicit action required).
