@@ -20,6 +20,7 @@ Rationale:
 - Avoid bundling a full Chromium runtime (smaller than QtWebEngine).
 - Keep a "real" job engine independent of the UI thread.
 - Python remains best-of-breed for diarization/separation tooling; Rust handles orchestration and packaging.
+- Python toolchain is managed as an app-data sidecar (`tools/python/venv`) surfaced in Diagnostics. Windows "full" installers bundle and bootstrap this sidecar by default; explicit install actions remain for slim/dev builds.
 
 ### Option B (stay Qt)
 
@@ -33,19 +34,34 @@ Base app dir (example):
 
 - `%APPDATA%\com.voxvulgi.voxvulgi\`
   - `library\` (original media; or pointers to user-selected locations)
-  - `derived\` (subtitles, transcripts, stems, dubbed audio)
+  - `derived\` (subtitles, transcripts, stems, dubbed audio; per-job artifacts + outputs)
   - `db\app.sqlite`
   - `logs\app.jsonl` (rotated)
   - `cache\` (model caches, temporary ffmpeg output)
+    - `cache\thumbs\` (thumbnail disk cache; bounded and safe to clear)
 
 Design goals:
 
 - Always allow "show in Explorer".
+- Do not write derived outputs next to the source media path by default; exporting is explicit and user-directed.
 - Allow "clear cache" without touching library media.
+- Avoid storing large thumbnail blobs inside SQLite; store thumbnails on disk and keep the DB as metadata-only.
 - Keep derived outputs per item (reproducible and debuggable).
 - Explicit consent mechanisms must not be implemented.
 - Anti-abuse controls must not be included.
 - These features must not appear in development or the final product. Users must comply with all local regulations.
+
+### 2.1 Windows "full" installer (bundled dependencies)
+
+To minimize setup friction and support offline use, the Windows "full" installer bundles the core local toolchain for Phase 1 + Phase 2 (FFmpeg/ffprobe, yt-dlp, whisper model(s), portable Python + venv, and Phase 2 packs/models).
+
+Implementation notes (desktop):
+
+- The installer includes an `offline/` resource payload:
+  - `offline/manifest.json`
+  - `offline/payload.zip` (contains `tools/`, `models/`, and `cache/huggingface/`)
+- On first run, the app extracts the payload into the user app-data dir and writes a marker (`config/offline_bundle_applied_v1.json`) so it only applies once per bundle id.
+- Build policy: desktop installer packaging must refresh `src-tauri/offline/payload.zip` before each release build so bundled dependencies match the current engine/toolchain state.
 
 ## 3) Data Model (SQLite)
 
@@ -68,6 +84,20 @@ Core tables (suggested):
   - `params_json`, `created_at_ms`, `started_at_ms`, `finished_at_ms`, `logs_path`
 - `speaker_profile`:
   - `id`, `item_id`, `label`, `tts_voice_id` (MVP), `voice_clone_ref` (advanced, optional)
+- `youtube_subscription`:
+  - `id`, `title`, `source_url`, `folder_map`, `output_dir_override`, `active`
+  - `refresh_interval_minutes` (integer, clamped range; user-editable in Library UI)
+  - `use_browser_cookies`, `last_queued_at_ms`, `created_at_ms`, `updated_at_ms`
+  - `source_url` is unique (merge key for import/upsert)
+
+Additional tables (planned; large-subscription UX hardening):
+
+- `youtube_subscription_group`:
+  - `id`, `name`, `created_at_ms`, `updated_at_ms`
+- `youtube_subscription_group_member`:
+  - `group_id`, `subscription_id`
+- (optional) backoff fields (either in `youtube_subscription` or a separate state table):
+  - `consecutive_failures`, `last_error_at_ms`, `next_allowed_refresh_at_ms`
 
 ## 4) Job System
 
@@ -76,6 +106,7 @@ Requirements:
 - Durable: jobs resume after restart.
 - Non-blocking: UI subscribes to job updates.
 - Inspectable: each job has logs and artifacts.
+- Recovery: support a **Safe Mode** startup path that disables auto-refresh and heavy background work so users can always export/manage their data.
 
 Implementation sketch:
 
@@ -127,6 +158,7 @@ Recommended outputs per item:
 
 - Run diarization model to label time spans by speaker.
 - Merge with ASR segments to produce speaker-attributed captions.
+- Phase 2 baseline: `diarize_local_v1` (resemblyzer partial embeddings + clustering) writes `speaker` labels into subtitle JSON. In Windows "full" installers this pack is bundled; explicit install remains for slim/dev paths.
 
 ### 5.4 Translate CC (JA/KO -> EN)
 
@@ -159,12 +191,19 @@ Outputs:
 Baseline approach (recommended to ship safely):
 
 1. Source separation -> `vocals.wav` + `background.wav` (best-effort).
+   - Phase 2 baseline: Spleeter 2-stem separation via bundled Python pack in Windows "full" installers (explicit install remains for slim/dev paths; no silent background downloads).
 2. For each speaker segment:
    - translate text,
    - TTS to English using a selected voice per speaker,
    - time-stretch/align to fit segment window.
 3. Mix generated speech with `background.wav`.
 4. Loudness normalize + export final dub audio.
+
+Phase 2 preview implementation notes (current):
+
+- TTS preview: `tts_preview_pyttsx3_v1` renders per-segment wavs + a manifest (system TTS; quality varies by OS).
+- Mix preview: `mix_dub_preview_v1` overlays TTS segments onto the separation background stem into a single wav.
+- Mux preview: `mux_dub_preview_v1` muxes the preview dub audio onto the original media into an MP4.
 
 Voice-preserving approach (core feature):
 
@@ -173,6 +212,9 @@ Voice-preserving approach (core feature):
   - ability to fall back to non-cloned voices,
   - strong logging/redaction + export provenance,
   - deletion controls for any stored voice representations.
+
+R&D plan: see `governance/spec/VOICE_PRESERVING_DUBBING_RD_PLAN.md`.
+Tooling landscape research: see `governance/spec/VOICE_DUBBING_TOOLING_LANDSCAPE_2026.md`.
 
 ## 5.6 Downloader (Phase 2)
 
@@ -190,18 +232,57 @@ Design goal: keep downloading isolated behind a provider interface.
 MVP UX + safety requirements:
 
 - Any use of authentication helpers (user-supplied cookie header, `--cookies-from-browser`) must be explicitly user-initiated and disclosed in the UI.
-- If the app bootstraps external tools (e.g., downloading `yt-dlp` on Windows), it must be explicitly disclosed and user-controllable.
+- Full installers may ship with bundled external tools. If the app bootstraps or downloads tools at runtime (e.g., slim installers), it must be explicitly user-initiated and disclosed.
 - Logs must redact tokens/cookies and avoid storing secrets in durable job params; prefer short-lived files or OS keychain.
 
-Phase 1 implementation status (2026-02-21):
+Phase 1 implementation status (2026-02-22):
 
 - URL ingest is implemented as a `download_direct_url` job with provider routing:
   - `direct_http_v1` for direct media asset URLs (strict http/https),
   - `youtube_yt_dlp_v1` for YouTube and other webpage video links (yt-dlp expand + download).
-- Windows bootstrap: if `yt-dlp` is unavailable, the engine can fetch the official `yt-dlp.exe` release into app-data `tools/yt-dlp/` (network egress; should be disclosed/controllable).
+- yt-dlp is bundled in Windows full installers; Diagnostics can install it if missing (network egress is user-initiated; jobs do not auto-download tools during execution).
 - Instagram batch ingest expands instagram.com URLs (posts/reels/stories/profiles) into direct media asset URLs where possible, then downloads via `direct_http_v1` into `downloads/instagram/` by default (optional session cookie header for private content).
 - Downloaded media is imported into `library_item`, provenance is persisted in `ingest_provenance`, and downloads are grouped via `job.batch_id` for UI batching.
-- Known gaps: cookie headers are currently serialized into job params; and tool bootstrap lacks explicit confirmation UI.
+  - Privacy hardening: cookie headers are not persisted in `job.params_json` and browser-cookie usage is opt-in via explicit Library toggles.
+
+Phase 1 extension status (2026-02-25):
+
+- Added persistent YouTube subscriptions in SQLite (`youtube_subscription`) with a per-subscription folder map.
+- Added per-subscription refresh interval (`refresh_interval_minutes`) so users can control how often each subscription should be refreshed.
+- Queue-all-active honors interval gating by comparing `last_queued_at_ms` against each subscription's `refresh_interval_minutes`; users can still queue a specific subscription directly.
+- Queueing a subscription expands its URL(s) through the existing provider pipeline and applies subscription-specific output mapping:
+  - default mapped path: `downloads/video/subscriptions/<folder_map>/`
+  - optional absolute output override per subscription (`output_dir_override`)
+- Added JSON export/import for subscription portability:
+  - export path is user selected in desktop UI,
+  - import uses URL-keyed upsert (`source_url`) and keeps existing rows not present in the import file.
+- Subscriptions are loaded from DB whenever the Library page mounts, so pane/window switches do not clear loaded subscription state.
+
+Responsiveness hardening:
+
+- Startup log-pruning is best-effort background work (runner boot does not block app launch on log scan/delete).
+- URL/Instagram batch enqueue path avoids blocking pre-expansion on the invoke/UI thread; expensive extraction work is deferred to job execution.
+
+Subscription export JSON shape (v1):
+
+```json
+{
+  "schema_version": 1,
+  "exported_at_ms": 0,
+  "app": "VoxVulgi",
+  "subscriptions": [
+    {
+      "title": "My Channel",
+      "source_url": "https://www.youtube.com/@example/videos",
+      "folder_map": "my_channel",
+      "output_dir_override": null,
+      "use_browser_cookies": false,
+      "active": true,
+      "refresh_interval_minutes": 60
+    }
+  ]
+}
+```
 
 
 ## 6) Diagnostics & Observability (Must-Have)
@@ -223,12 +304,14 @@ Phase 1 implementation status (2026-02-21):
 
 ### 6.2 "Export diagnostics bundle"
 
-- Include:
-  - app version/build
-  - OS version
-  - selected config
-  - last N job logs
-  - DB schema version and counts (not full content unless user opts in)
+- Bundle is a zip that is safe-by-default and redacts secrets/PII:
+  - `manifest.json`: app/engine/os, storage summary, models inventory summary, DB schema version + table counts, recent jobs (<= 200) + recent failed jobs (<= 20), retention policy, and a minimal config summary.
+  - `storage.json`: byte breakdown for library/derived/cache/logs/DB.
+  - `jobs_failed.json`: recent failed jobs (<= 20) with redacted errors.
+  - `logs/jobs/*`: redacted per-job JSONL logs for up to 10 failed jobs (including rotated backups); each log file is truncated to 2 MiB.
+- Redaction rules:
+  - redact values for JSON keys containing `cookie`, `authorization`, `token`, `secret`, `password`, `api_key` (replace with `<redacted>`),
+  - in free text, redact bearer tokens, reduce URLs to origin only, and redact absolute paths (replace with `<redacted_path>`).
 
 ### 6.3 Privacy
 

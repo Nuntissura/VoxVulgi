@@ -24,6 +24,9 @@ pub enum EngineError {
     #[error("io error: {0}")]
     Io(#[from] std::io::Error),
 
+    #[error("csv error: {0}")]
+    Csv(#[from] csv::Error),
+
     #[error("external tool is missing: {tool}")]
     ExternalToolMissing { tool: String },
 

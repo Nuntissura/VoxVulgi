@@ -10,5 +10,5 @@ Keep scripts:
 ## Scripts
 
 - `bootstrap_dev.ps1` - installs dev dependencies (npm/cargo) and bootstraps runtime assets (FFmpeg tools + `whispercpp-tiny` model) into the app data directory.
-- `build_desktop_target.ps1` - builds the desktop app with `CARGO_TARGET_DIR` pinned to `product/desktop/Build Target/Current` and archives prior build outputs to `product/desktop/Build Target/Old versions`.
+- `build_desktop_target.ps1` - builds the desktop app with `CARGO_TARGET_DIR` pinned to `product/desktop/Build Target/Current`, refreshes the offline bundle payload (Phase 1 + Phase 2) before packaging, and archives prior build outputs to `product/desktop/Build Target/Old versions`.
 - `cleanup_artifacts.ps1` - dry-run by default; with `-Force` removes generated test/tool artifacts (`tmp_*`, Rust `target*`, and offline tool/model caches). Use `-IncludeBuildTarget` to also clean desktop build outputs.

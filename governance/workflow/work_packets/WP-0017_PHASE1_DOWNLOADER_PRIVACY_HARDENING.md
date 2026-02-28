@@ -2,8 +2,8 @@
 
 ## Metadata
 - ID: WP-0017
-- Owner:
-- Status: BACKLOG
+- Owner: Codex
+- Status: DONE
 - Created: 2026-02-21
 - Target milestone: Phase 1 (MVP hardening)
 
@@ -45,3 +45,15 @@ Out of scope:
 
 - Cross-platform secure storage: decide on a keychain strategy for macOS/Windows/Linux.
 - UX: balance friction vs safety; keep defaults conservative.
+
+## Status updates
+
+- 2026-02-22: Started implementation (remove cookie persistence from job params/logs; explicit yt-dlp install + browser-cookie toggle UX).
+- 2026-02-22: Completed.
+  - Cookies are not persisted in `job.params_json`; per-job cookie secrets are stored on disk outside the DB and removed at job start and during cancel/flush cleanup.
+  - `yt-dlp` no longer auto-downloads during job execution; explicit install is exposed in Diagnostics and tool availability is visible.
+  - Browser-cookie usage for `yt-dlp` is opt-in via explicit Library checkboxes.
+  - Verified:
+    - `cargo test --manifest-path product/engine/Cargo.toml --locked`
+    - `cargo test --manifest-path product/desktop/src-tauri/Cargo.toml --locked`
+    - `npm run build` (from `product/desktop/`)

@@ -158,6 +158,37 @@ pub fn extract_audio_wav_16k_mono(paths: &AppPaths, input: &Path, output_wav: &P
     Ok(())
 }
 
+pub fn extract_audio_wav_44k_stereo(paths: &AppPaths, input: &Path, output_wav: &Path) -> Result<()> {
+    if let Some(parent) = output_wav.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+
+    let output = cmd::command(paths.ffmpeg_cmd())
+        .args(["-nostdin", "-y"])
+        .arg("-i")
+        .arg(input)
+        .args(["-vn", "-ac", "2", "-ar", "44100"])
+        .args(["-c:a", "pcm_s16le"])
+        .arg(output_wav)
+        .output()
+        .map_err(|e| match e.kind() {
+            std::io::ErrorKind::NotFound => EngineError::ExternalToolMissing {
+                tool: "ffmpeg".to_string(),
+            },
+            _ => EngineError::Io(e),
+        })?;
+
+    if !output.status.success() {
+        return Err(EngineError::ExternalToolFailed {
+            tool: "ffmpeg".to_string(),
+            code: output.status.code(),
+            stderr: String::from_utf8_lossy(&output.stderr).trim().to_string(),
+        });
+    }
+
+    Ok(())
+}
+
 #[derive(Debug, Clone, Deserialize)]
 struct FfprobeOutput {
     streams: Option<Vec<FfprobeStream>>,

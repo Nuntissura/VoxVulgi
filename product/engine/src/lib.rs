@@ -1,6 +1,8 @@
 pub mod asr;
 pub mod cmd;
+pub mod config;
 pub mod db;
+pub mod diagnostics;
 mod error;
 pub mod ffmpeg;
 pub mod image_batch;
@@ -8,8 +10,10 @@ pub mod jobs;
 pub mod library;
 pub mod models;
 pub mod paths;
+pub mod speakers;
 pub mod subtitle_tracks;
 pub mod subtitles;
+pub mod subscriptions;
 pub mod tools;
 pub mod translate;
 

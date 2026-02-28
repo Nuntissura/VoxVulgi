@@ -1,7 +1,7 @@
 import { Fragment, useCallback, useEffect, useMemo, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
-import { revealItemInDir } from "@tauri-apps/plugin-opener";
-import { confirm } from "@tauri-apps/plugin-dialog";
+import { openPath, revealItemInDir } from "@tauri-apps/plugin-opener";
+import { confirm, save } from "@tauri-apps/plugin-dialog";
 
 type JobStatus = "queued" | "running" | "succeeded" | "failed" | "canceled";
 
@@ -40,6 +40,44 @@ type JobFlushSummary = {
   removed_output_dirs: number;
   removed_cache_entries: number;
 };
+
+type FfmpegToolsStatus = {
+  installed: boolean;
+  ffmpeg_path: string;
+  ffprobe_path: string;
+  ffmpeg_version: string | null;
+  ffprobe_version: string | null;
+};
+
+type DiagnosticsInfo = {
+  app_data_dir: string;
+};
+
+type ItemOutputs = {
+  item_id: string;
+  derived_item_dir: string;
+  dub_preview_dir: string;
+  mix_dub_preview_v1_wav_path: string;
+  mix_dub_preview_v1_wav_exists: boolean;
+  mux_dub_preview_v1_mp4_path: string;
+  mux_dub_preview_v1_mp4_exists: boolean;
+  mux_dub_preview_v1_mkv_path: string;
+  mux_dub_preview_v1_mkv_exists: boolean;
+  export_pack_v1_zip_path: string;
+  export_pack_v1_zip_exists: boolean;
+};
+
+type ExportedFile = {
+  out_path: string;
+  file_bytes: number;
+};
+
+function joinPath(dir: string, file: string): string {
+  const d = dir.trim().replace(/[\\/]+$/, "");
+  const f = file.trim().replace(/^[\\/]+/, "");
+  const sep = d.includes("\\") ? "\\" : "/";
+  return d && f ? `${d}${sep}${f}` : d || f;
+}
 
 function formatTs(ms: number | null): string {
   if (!ms) return "-";
@@ -94,9 +132,19 @@ function summarizeFinishedTs(jobs: JobRow[]): number | null {
   return jobs.reduce((max, job) => Math.max(max, job.finished_at_ms ?? 0), jobs[0].finished_at_ms ?? 0);
 }
 
+function parseExternalToolMissing(error: string | null): string | null {
+  if (!error) return null;
+  const prefix = "external tool missing:";
+  const idx = error.toLowerCase().indexOf(prefix);
+  if (idx < 0) return null;
+  const tool = error.slice(idx + prefix.length).trim();
+  return tool ? tool.split(/\s+/)[0] : null;
+}
+
 export function JobsPage() {
   const [jobs, setJobs] = useState<JobRow[]>([]);
   const [expandedGroups, setExpandedGroups] = useState<Record<string, boolean>>({});
+  const [appDataDir, setAppDataDir] = useState<string>("");
   const [error, setError] = useState<string | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
@@ -118,6 +166,12 @@ export function JobsPage() {
   useEffect(() => {
     refresh().catch((e) => setError(String(e)));
   }, [refresh]);
+
+  useEffect(() => {
+    invoke<DiagnosticsInfo>("diagnostics_info")
+      .then((info) => setAppDataDir(info.app_data_dir ?? ""))
+      .catch(() => undefined);
+  }, []);
 
   const hasActive = useMemo(
     () => jobs.some((job) => isActive(job.status)),
@@ -275,6 +329,112 @@ export function JobsPage() {
     }
   }
 
+  async function openJobArtifactsDir(jobId: string) {
+    if (!appDataDir) return;
+
+    const derivedDir = joinPath(appDataDir, "derived");
+    const artifactsDir = joinPath(joinPath(derivedDir, "jobs"), jobId);
+
+    setError(null);
+    try {
+      await openPath(artifactsDir);
+      setNotice(`Artifacts folder: ${artifactsDir}`);
+    } catch (e) {
+      setError(String(e));
+    }
+  }
+
+  async function openItemOutputsDir(itemId: string) {
+    if (!appDataDir) return;
+
+    const derivedDir = joinPath(appDataDir, "derived");
+    const outputsDir = joinPath(joinPath(derivedDir, "items"), itemId);
+
+    setError(null);
+    try {
+      await openPath(outputsDir);
+      setNotice(`Outputs folder: ${outputsDir}`);
+    } catch (e) {
+      setError(String(e));
+    }
+  }
+
+  async function revealMuxedPreview(itemId: string) {
+    setError(null);
+    try {
+      const outputs = await invoke<ItemOutputs>("item_outputs", { itemId });
+      const path = outputs.mux_dub_preview_v1_mp4_exists
+        ? outputs.mux_dub_preview_v1_mp4_path
+        : outputs.mux_dub_preview_v1_mkv_exists
+          ? outputs.mux_dub_preview_v1_mkv_path
+          : "";
+      if (!path) {
+        throw new Error(
+          "Muxed preview not found yet. Run the 'mux_dub_preview_v1' job first.",
+        );
+      }
+      await revealItemInDir(path);
+    } catch (e) {
+      setError(String(e));
+    }
+  }
+
+  async function exportMuxedPreview(itemId: string, suggestedStem: string) {
+    setError(null);
+    let preferredExt = "mp4";
+    try {
+      const outputs = await invoke<ItemOutputs>("item_outputs", { itemId });
+      if (outputs.mux_dub_preview_v1_mp4_exists) preferredExt = "mp4";
+      else if (outputs.mux_dub_preview_v1_mkv_exists) preferredExt = "mkv";
+    } catch {
+      // ignore
+    }
+
+    const out = await save({
+      title: `Export muxed preview (${preferredExt.toUpperCase()})`,
+      defaultPath: `${suggestedStem}.${preferredExt}`,
+      filters: [
+        { name: "MP4", extensions: ["mp4"] },
+        { name: "MKV", extensions: ["mkv"] },
+      ],
+    });
+    if (!out || typeof out !== "string") return;
+
+    setBusy(true);
+    setNotice(null);
+    try {
+      const result = await invoke<ExportedFile>("item_export_mux_preview_mp4", {
+        itemId,
+        outPath: out,
+      });
+      setNotice(`Exported preview: ${result.out_path}`);
+      try {
+        await revealItemInDir(result.out_path);
+      } catch {
+        // ignore
+      }
+    } catch (e) {
+      setError(String(e));
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function installFfmpegTools() {
+    setBusy(true);
+    setError(null);
+    setNotice("Installing FFmpeg tools. This may take a minute.");
+    try {
+      await invoke<FfmpegToolsStatus>("tools_ffmpeg_install");
+      setNotice("FFmpeg tools installed. Retry the failed job.");
+      await refresh();
+    } catch (e) {
+      setError(String(e));
+    } finally {
+      setBusy(false);
+    }
+  }
+
   async function setPauseAll(paused: boolean) {
     setBusy(true);
     setError(null);
@@ -363,6 +523,22 @@ export function JobsPage() {
   }
 
   function renderJobRow(job: JobRow, nested: boolean) {
+    const missingTool = parseExternalToolMissing(job.error);
+    const canInstallFfmpegTools =
+      missingTool === "ffprobe" || missingTool === "ffmpeg";
+    const canRevealMuxedPreview =
+      job.status === "succeeded" &&
+      job.job_type === "mux_dub_preview_v1" &&
+      Boolean(job.item_id);
+    const derivedDir = appDataDir ? joinPath(appDataDir, "derived") : "";
+    const artifactsDir = derivedDir ? joinPath(joinPath(derivedDir, "jobs"), job.id) : "";
+    const outputsDir =
+      derivedDir && job.item_id
+        ? joinPath(joinPath(derivedDir, "items"), job.item_id)
+        : "";
+    const canOpenArtifacts = Boolean(artifactsDir) && job.status !== "queued";
+    const canOpenOutputs = Boolean(outputsDir);
+
     return (
       <tr key={job.id} className={nested ? "batch-child-row" : undefined}>
         <td>
@@ -394,6 +570,34 @@ export function JobsPage() {
             >
               Retry
             </button>
+            {canInstallFfmpegTools ? (
+              <button type="button" disabled={busy} onClick={installFfmpegTools}>
+                Install FFmpeg tools
+              </button>
+            ) : null}
+            {canRevealMuxedPreview ? (
+              <button
+                type="button"
+                disabled={busy}
+                onClick={() => revealMuxedPreview(job.item_id ?? "")}
+              >
+                Reveal preview
+              </button>
+            ) : null}
+            {canRevealMuxedPreview ? (
+              <button
+                type="button"
+                disabled={busy}
+                onClick={() =>
+                  exportMuxedPreview(
+                    job.item_id ?? "",
+                    `voxvulgi-dub-preview-${(job.item_id ?? job.id).slice(0, 8)}`,
+                  )
+                }
+              >
+                Export preview…
+              </button>
+            ) : null}
             <button
               type="button"
               disabled={!job.logs_path}
@@ -401,7 +605,33 @@ export function JobsPage() {
             >
               Reveal log
             </button>
+            {canOpenOutputs ? (
+              <button
+                type="button"
+                disabled={busy}
+                onClick={() => openItemOutputsDir(job.item_id ?? "")}
+              >
+                Open outputs
+              </button>
+            ) : null}
+            {canOpenArtifacts ? (
+              <button type="button" disabled={busy} onClick={() => openJobArtifactsDir(job.id)}>
+                Open artifacts
+              </button>
+            ) : null}
           </div>
+          {artifactsDir ? (
+            <div style={{ marginTop: 6, color: "#4b5563", fontSize: 12, lineHeight: 1.3 }}>
+              <div>
+                Artifacts: <code>{artifactsDir}</code>
+              </div>
+              {outputsDir ? (
+                <div>
+                  Outputs: <code>{outputsDir}</code>
+                </div>
+              ) : null}
+            </div>
+          ) : null}
         </td>
       </tr>
     );

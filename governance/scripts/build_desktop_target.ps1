@@ -1,6 +1,7 @@
 param(
   [switch]$NoArchiveCurrent,
   [switch]$CleanCurrent,
+  [switch]$SkipOfflineBundlePrep,
   [Parameter(ValueFromRemainingArguments = $true)]
   [string[]]$TauriArgs
 )
@@ -20,6 +21,21 @@ $oldVersionsDir = Join-Path $buildRoot "Old versions"
 
 Step "Repo root: $repoRoot"
 New-Item -ItemType Directory -Force -Path $buildRoot, $currentDir, $oldVersionsDir | Out-Null
+
+if (-not $SkipOfflineBundlePrep) {
+  $prepScript = Join-Path $repoRoot "governance\scripts\prep_offline_bundle.ps1"
+  if (-not (Test-Path -LiteralPath $prepScript)) {
+    throw "Offline bundle prep script not found: $prepScript"
+  }
+
+  Step "Refreshing offline bundle payload (Phase 1 + Phase 2)"
+  & $prepScript -Force
+  if ($LASTEXITCODE -ne 0) {
+    throw "Offline bundle prep failed with exit code $LASTEXITCODE"
+  }
+} else {
+  Step "Skipping offline bundle payload refresh (requested)"
+}
 
 if (-not $NoArchiveCurrent) {
   $currentItems = Get-ChildItem -LiteralPath $currentDir -Force -ErrorAction SilentlyContinue

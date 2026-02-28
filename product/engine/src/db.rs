@@ -95,6 +95,36 @@ CREATE TABLE IF NOT EXISTS subtitle_track (
   FOREIGN KEY (item_id) REFERENCES library_item(id) ON DELETE CASCADE
 );
 
+CREATE TABLE IF NOT EXISTS item_speaker (
+  item_id TEXT NOT NULL,
+  speaker_key TEXT NOT NULL,
+  display_name TEXT,
+  tts_voice_id TEXT,
+  created_at_ms INTEGER NOT NULL,
+  updated_at_ms INTEGER NOT NULL,
+  PRIMARY KEY (item_id, speaker_key),
+  FOREIGN KEY (item_id) REFERENCES library_item(id) ON DELETE CASCADE
+);
+
+CREATE INDEX IF NOT EXISTS idx_item_speaker_item ON item_speaker(item_id);
+
+CREATE TABLE IF NOT EXISTS youtube_subscription (
+  id TEXT PRIMARY KEY,
+  title TEXT NOT NULL,
+  source_url TEXT NOT NULL UNIQUE,
+  folder_map TEXT NOT NULL,
+  output_dir_override TEXT,
+  use_browser_cookies INTEGER NOT NULL DEFAULT 0,
+  active INTEGER NOT NULL DEFAULT 1,
+  refresh_interval_minutes INTEGER NOT NULL DEFAULT 60,
+  last_queued_at_ms INTEGER,
+  created_at_ms INTEGER NOT NULL,
+  updated_at_ms INTEGER NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_youtube_subscription_active_updated
+  ON youtube_subscription(active, updated_at_ms);
+
 CREATE TABLE IF NOT EXISTS job (
   id TEXT PRIMARY KEY,
   item_id TEXT,
@@ -138,7 +168,47 @@ CREATE INDEX IF NOT EXISTS idx_ingest_provenance_created ON ingest_provenance(cr
         [],
     )?;
 
-    let current_schema_version = 3;
+    let has_tts_voice_profile_path = {
+        let mut stmt = conn.prepare("PRAGMA table_info(item_speaker)")?;
+        let mut rows = stmt.query([])?;
+        let mut found = false;
+        while let Some(row) = rows.next()? {
+            let name: String = row.get(1)?;
+            if name == "tts_voice_profile_path" {
+                found = true;
+                break;
+            }
+        }
+        found
+    };
+    if !has_tts_voice_profile_path {
+        conn.execute(
+            "ALTER TABLE item_speaker ADD COLUMN tts_voice_profile_path TEXT",
+            [],
+        )?;
+    }
+
+    let has_subscription_refresh_interval_minutes = {
+        let mut stmt = conn.prepare("PRAGMA table_info(youtube_subscription)")?;
+        let mut rows = stmt.query([])?;
+        let mut found = false;
+        while let Some(row) = rows.next()? {
+            let name: String = row.get(1)?;
+            if name == "refresh_interval_minutes" {
+                found = true;
+                break;
+            }
+        }
+        found
+    };
+    if !has_subscription_refresh_interval_minutes {
+        conn.execute(
+            "ALTER TABLE youtube_subscription ADD COLUMN refresh_interval_minutes INTEGER NOT NULL DEFAULT 60",
+            [],
+        )?;
+    }
+
+    let current_schema_version = 6;
     let existing: Option<String> = conn
         .query_row(
             "SELECT value FROM meta WHERE key='schema_version'",
@@ -231,5 +301,39 @@ CREATE TABLE IF NOT EXISTS job (
             }
         }
         assert!(has_batch_id, "batch_id column should exist after migrate");
+    }
+
+    #[test]
+    fn migrate_creates_youtube_subscription_table() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let paths = AppPaths::new(dir.path().to_path_buf());
+        let conn = open(&paths).expect("open");
+        migrate(&conn).expect("migrate");
+
+        let mut stmt = conn
+            .prepare("SELECT name FROM sqlite_master WHERE type='table' AND name='youtube_subscription'")
+            .expect("prepare");
+        let found: Option<String> = stmt
+            .query_row([], |row| row.get(0))
+            .optional()
+            .expect("query");
+        assert_eq!(found.as_deref(), Some("youtube_subscription"));
+
+        let mut col_stmt = conn
+            .prepare("PRAGMA table_info(youtube_subscription)")
+            .expect("table_info");
+        let mut rows = col_stmt.query([]).expect("table_info query");
+        let mut has_refresh_interval = false;
+        while let Some(row) = rows.next().expect("next col") {
+            let name: String = row.get(1).expect("col name");
+            if name == "refresh_interval_minutes" {
+                has_refresh_interval = true;
+                break;
+            }
+        }
+        assert!(
+            has_refresh_interval,
+            "refresh_interval_minutes column should exist after migrate"
+        );
     }
 }

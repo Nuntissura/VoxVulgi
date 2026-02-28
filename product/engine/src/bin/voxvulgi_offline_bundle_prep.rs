@@ -307,7 +307,7 @@ fn export_offline_payload(paths: &AppPaths, out_dir: &Path) -> Result<()> {
 
     let bundle_id = format!(
         "offline_full_win64_{}",
-        chrono_yyyymmdd()
+        chrono_yyyymmdd_hhmmss()
     );
     let manifest = serde_json::json!({
         "schema_version": 1,
@@ -436,17 +436,21 @@ fn now_ms() -> i64 {
         .as_millis() as i64
 }
 
-fn chrono_yyyymmdd() -> String {
-    // Avoid extra dependencies: format based on local date via system time (UTC is fine for IDs).
-    // YYYYMMDD is sufficient for our bundle id.
+fn chrono_yyyymmdd_hhmmss() -> String {
+    // Avoid extra dependencies: format based on system time (UTC is fine for IDs).
+    // Include time so each prep run gets a unique bundle id.
     let secs = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap_or_default()
         .as_secs();
     let days = secs / 86_400;
+    let seconds_of_day = secs % 86_400;
     // 1970-01-01 is day 0; use a simple civil-from-days conversion.
     let (y, m, d) = civil_from_days(days as i64);
-    format!("{y:04}{m:02}{d:02}")
+    let hour = seconds_of_day / 3_600;
+    let minute = (seconds_of_day % 3_600) / 60;
+    let second = seconds_of_day % 60;
+    format!("{y:04}{m:02}{d:02}_{hour:02}{minute:02}{second:02}")
 }
 
 // Howard Hinnant's civil-from-days (public domain).

@@ -3,7 +3,7 @@
 ## Metadata
 - ID: WP-0013
 - Owner: Codex
-- Status: IN_PROGRESS
+- Status: DONE
 - Created: 2026-02-19
 - Target milestone: Phase 1 (MVP)
 
@@ -53,3 +53,5 @@ Out of scope:
 ## Status updates
 
 - 2026-02-22: Started implementation (Diagnostics UI: storage breakdown, failures view, export bundle, cleanup actions).
+- 2026-02-22: Implemented Diagnostics UI (build info, FFmpeg versions, model inventory, storage breakdown, recent failures) + retention/export tools (clear cache, prune job logs, export redacted diagnostics bundle).
+- 2026-02-22: Verified via `cargo test` (engine + desktop) and `npm run build`; added unit tests for log pruning + bundle redaction.

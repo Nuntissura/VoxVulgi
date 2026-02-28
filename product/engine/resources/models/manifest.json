@@ -13,7 +13,7 @@
         {
           "path": "demo.txt",
           "size_bytes": 33,
-          "sha256": "df1b2aefa095e5ca23729eab0d3556867c4c97bd0611dbde3b10adac327bc2ff",
+          "sha256": "4c26f072b1df771a3cfe6250caa6718a0d05d9f0c9e1e3b0a5c389115cd01ef3",
           "source": {
             "type": "bundled",
             "resource_id": "demo/demo.txt"

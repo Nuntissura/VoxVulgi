@@ -199,12 +199,33 @@ fn import_media_file(
         .unwrap_or_else(|| "Untitled".to_string());
     let media_path_str = media_path.to_string_lossy().to_string();
 
-    let probe = ffmpeg::probe(paths, media_path)?;
-
     let derived_dir = paths.derived_item_dir(&id);
     std::fs::create_dir_all(&derived_dir)?;
-    let thumbnail_path = derived_dir.join("thumb.jpg");
 
+    // Import should remain possible even when ffmpeg/ffprobe is not installed. Metadata and
+    // thumbnails are best-effort.
+    let probe = match ffmpeg::probe(paths, media_path) {
+        Ok(v) => v,
+        Err(crate::EngineError::ExternalToolMissing { .. }) => ffmpeg::MediaProbe {
+            duration_ms: None,
+            container: None,
+            video_codec: None,
+            audio_codec: None,
+            width: None,
+            height: None,
+        },
+        Err(crate::EngineError::ExternalToolFailed { .. }) => ffmpeg::MediaProbe {
+            duration_ms: None,
+            container: None,
+            video_codec: None,
+            audio_codec: None,
+            width: None,
+            height: None,
+        },
+        Err(e) => return Err(e),
+    };
+
+    let thumbnail_path = derived_dir.join("thumb.jpg");
     let timestamp_seconds = match probe.duration_ms {
         Some(ms) if ms > 0 => {
             let dur_s = (ms as f64) / 1000.0;
@@ -213,9 +234,12 @@ fn import_media_file(
         _ => 0.0,
     };
 
-    ffmpeg::generate_thumbnail(paths, media_path, &thumbnail_path, timestamp_seconds)?;
-
-    let thumbnail_path_str = thumbnail_path.to_string_lossy().to_string();
+    let thumbnail_path_str = match ffmpeg::generate_thumbnail(paths, media_path, &thumbnail_path, timestamp_seconds) {
+        Ok(()) => Some(thumbnail_path.to_string_lossy().to_string()),
+        Err(crate::EngineError::ExternalToolMissing { .. }) => None,
+        Err(crate::EngineError::ExternalToolFailed { .. }) => None,
+        Err(_) => None,
+    };
 
     conn.execute(
         r#"
@@ -248,7 +272,7 @@ INSERT INTO library_item (
             probe.container,
             probe.video_codec,
             probe.audio_codec,
-            &thumbnail_path_str,
+            thumbnail_path_str,
         ],
     )?;
 
@@ -265,7 +289,7 @@ INSERT INTO library_item (
         container: probe.container,
         video_codec: probe.video_codec,
         audio_codec: probe.audio_codec,
-        thumbnail_path: Some(thumbnail_path.to_string_lossy().to_string()),
+        thumbnail_path: thumbnail_path_str,
     })
 }
 

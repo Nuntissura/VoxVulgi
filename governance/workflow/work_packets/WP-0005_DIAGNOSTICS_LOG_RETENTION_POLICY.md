@@ -2,8 +2,8 @@
 
 ## Metadata
 - ID: WP-0005
-- Owner:
-- Status: BACKLOG
+- Owner: Codex
+- Status: DONE
 - Created: 2026-02-19
 - Target milestone: Phase 1 (MVP)
 
@@ -52,3 +52,8 @@ Out of scope:
 - How to handle user-provided media paths (can leak PII) in diagnostics exports.
 - How to balance debug usefulness vs privacy.
 
+## Status updates
+
+- 2026-02-22: Reconciled with implementation.
+  - Policy is documented in `governance/spec/TECHNICAL_DESIGN.md` under "Diagnostics & Observability" (caps, redaction rules, bundle contents, disclosure).
+  - Diagnostics UI + tooling is implemented in WP-0013.

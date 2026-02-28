@@ -1,6 +1,8 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { convertFileSrc, invoke } from "@tauri-apps/api/core";
-import { confirm, message, open } from "@tauri-apps/plugin-dialog";
+import { confirm, message, open, save } from "@tauri-apps/plugin-dialog";
+import { openPath } from "@tauri-apps/plugin-opener";
+import { safeLocalStorageGet, safeLocalStorageSet } from "../lib/persist";
 
 type LibraryItem = {
   id: string;
@@ -92,6 +94,11 @@ type LibraryPageProps = {
   onOpenEditor?: (itemId: string) => void;
 };
 
+type ItemOutputs = {
+  item_id: string;
+  derived_item_dir: string;
+};
+
 type DownloadDirStatus = {
   current_dir: string;
   default_dir: string;
@@ -99,31 +106,161 @@ type DownloadDirStatus = {
   using_default: boolean;
 };
 
+type FfmpegToolsStatus = {
+  installed: boolean;
+  ffmpeg_path: string;
+  ffprobe_path: string;
+  ffmpeg_version: string | null;
+  ffprobe_version: string | null;
+};
+
+type BatchOnImportRules = {
+  auto_asr: boolean;
+  auto_translate: boolean;
+  auto_separate: boolean;
+  auto_diarize: boolean;
+  auto_dub_preview: boolean;
+};
+
+type YoutubeSubscriptionRow = {
+  id: string;
+  title: string;
+  source_url: string;
+  folder_map: string;
+  output_dir_override: string | null;
+  use_browser_cookies: boolean;
+  active: boolean;
+  refresh_interval_minutes: number;
+  last_queued_at_ms: number | null;
+  created_at_ms: number;
+  updated_at_ms: number;
+};
+
+type YoutubeSubscriptionUpsert = {
+  id: string | null;
+  title: string;
+  source_url: string;
+  folder_map: string | null;
+  output_dir_override: string | null;
+  use_browser_cookies: boolean;
+  active: boolean;
+  refresh_interval_minutes: number | null;
+};
+
+type YoutubeSubscriptionsExportSummary = {
+  out_path: string;
+  count: number;
+};
+
+type YoutubeSubscriptionsImportSummary = {
+  total_in_file: number;
+  inserted: number;
+  updated: number;
+};
+
+type YoutubeSubscriptionsImport4kvdpSummary = {
+  total_in_subscriptions_json: number;
+  imported_subscriptions: number;
+  inserted: number;
+  updated: number;
+  skipped_non_youtube: number;
+  archive_seeded_subscriptions: number;
+  archive_seeded_entries: number;
+  archive_skipped_entries: number;
+  archive_seed_failures: number;
+};
+
 export function LibraryPage({ onOpenEditor }: LibraryPageProps) {
   const maxBatchUrls = 1500;
   const maxInstagramBatchUrls = 1500;
   const maxImageBatchUrls = 1500;
+  const minSubscriptionRefreshIntervalMinutes = 5;
+  const maxSubscriptionRefreshIntervalMinutes = 10080;
   const [items, setItems] = useState<LibraryItem[]>([]);
+  const [subscriptions, setSubscriptions] = useState<YoutubeSubscriptionRow[]>([]);
+  const [batchRules, setBatchRules] = useState<BatchOnImportRules | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
-  const [asrLang, setAsrLang] = useState<"auto" | "ja" | "ko">("auto");
+  const [asrLang, setAsrLang] = useState<"auto" | "ja" | "ko">(() => {
+    const raw = safeLocalStorageGet("voxvulgi.v1.settings.asr_lang");
+    if (raw === "ja" || raw === "ko") return raw;
+    return "auto";
+  });
   const [urlBatchText, setUrlBatchText] = useState("");
-  const [urlBatchOutputDir, setUrlBatchOutputDir] = useState("");
+  const [urlBatchOutputDir, setUrlBatchOutputDir] = useState(() => {
+    return safeLocalStorageGet("voxvulgi.v1.library.url_batch_output_dir") ?? "";
+  });
+  const [urlBatchUseBrowserCookies, setUrlBatchUseBrowserCookies] = useState(() => {
+    return safeLocalStorageGet("voxvulgi.v1.library.url_batch_use_browser_cookies") === "1";
+  });
   const [instagramBatchText, setInstagramBatchText] = useState("");
   const [instagramBatchAuthCookie, setInstagramBatchAuthCookie] = useState("");
-  const [instagramBatchOutputDir, setInstagramBatchOutputDir] = useState("");
+  const [instagramBatchOutputDir, setInstagramBatchOutputDir] = useState(() => {
+    return safeLocalStorageGet("voxvulgi.v1.library.instagram_batch_output_dir") ?? "";
+  });
+  const [instagramBatchUseBrowserCookies, setInstagramBatchUseBrowserCookies] = useState(() => {
+    return safeLocalStorageGet("voxvulgi.v1.library.instagram_batch_use_browser_cookies") === "1";
+  });
   const [imageBatchUrlsText, setImageBatchUrlsText] = useState("");
-  const [imageBatchMaxPages, setImageBatchMaxPages] = useState(1500);
-  const [imageBatchDelaySeconds, setImageBatchDelaySeconds] = useState(0.35);
-  const [imageBatchAllowCrossDomain, setImageBatchAllowCrossDomain] = useState(false);
-  const [imageBatchFollowContentLinks, setImageBatchFollowContentLinks] = useState(false);
-  const [imageBatchSkipKeywords, setImageBatchSkipKeywords] = useState(
-    "avatar profile userpic gravatar",
-  );
-  const [imageBatchOutputDir, setImageBatchOutputDir] = useState("");
+  const [imageBatchMaxPages, setImageBatchMaxPages] = useState(() => {
+    const raw = safeLocalStorageGet("voxvulgi.v1.library.image_batch_max_pages");
+    const parsed = raw ? Number(raw) : NaN;
+    if (Number.isFinite(parsed) && parsed >= 1) return parsed;
+    return 1500;
+  });
+  const [imageBatchDelaySeconds, setImageBatchDelaySeconds] = useState(() => {
+    const raw = safeLocalStorageGet("voxvulgi.v1.library.image_batch_delay_seconds");
+    const parsed = raw ? Number(raw) : NaN;
+    if (Number.isFinite(parsed) && parsed >= 0) return parsed;
+    return 0.35;
+  });
+  const [imageBatchAllowCrossDomain, setImageBatchAllowCrossDomain] = useState(() => {
+    return safeLocalStorageGet("voxvulgi.v1.library.image_batch_allow_cross_domain") === "1";
+  });
+  const [imageBatchFollowContentLinks, setImageBatchFollowContentLinks] = useState(() => {
+    return safeLocalStorageGet("voxvulgi.v1.library.image_batch_follow_content_links") === "1";
+  });
+  const [imageBatchSkipKeywords, setImageBatchSkipKeywords] = useState(() => {
+    return (
+      safeLocalStorageGet("voxvulgi.v1.library.image_batch_skip_keywords") ??
+      "avatar profile userpic gravatar"
+    );
+  });
+  const [imageBatchOutputDir, setImageBatchOutputDir] = useState(() => {
+    return safeLocalStorageGet("voxvulgi.v1.library.image_batch_output_dir") ?? "";
+  });
   const [imageBatchAuthCookie, setImageBatchAuthCookie] = useState("");
   const [downloadDir, setDownloadDir] = useState<DownloadDirStatus | null>(null);
+  const [subscriptionEditId, setSubscriptionEditId] = useState<string | null>(null);
+  const [subscriptionTitle, setSubscriptionTitle] = useState("");
+  const [subscriptionUrl, setSubscriptionUrl] = useState("");
+  const [subscriptionFolderMap, setSubscriptionFolderMap] = useState(() => {
+    return safeLocalStorageGet("voxvulgi.v1.library.youtube_subscription_folder_map") ?? "";
+  });
+  const [subscriptionOutputDirOverride, setSubscriptionOutputDirOverride] = useState(() => {
+    return (
+      safeLocalStorageGet("voxvulgi.v1.library.youtube_subscription_output_dir_override") ?? ""
+    );
+  });
+  const [subscriptionUseBrowserCookies, setSubscriptionUseBrowserCookies] = useState(() => {
+    return safeLocalStorageGet("voxvulgi.v1.library.youtube_subscription_use_browser_cookies") === "1";
+  });
+  const [subscriptionActive, setSubscriptionActive] = useState(() => {
+    const raw = safeLocalStorageGet("voxvulgi.v1.library.youtube_subscription_active");
+    return raw === null ? true : raw === "1";
+  });
+  const [subscriptionRefreshIntervalMinutes, setSubscriptionRefreshIntervalMinutes] = useState(() => {
+    const raw = safeLocalStorageGet("voxvulgi.v1.library.youtube_subscription_refresh_interval_minutes");
+    const parsed = raw ? Number(raw) : NaN;
+    if (Number.isFinite(parsed)) {
+      return Math.max(
+        minSubscriptionRefreshIntervalMinutes,
+        Math.min(maxSubscriptionRefreshIntervalMinutes, Math.round(parsed)),
+      );
+    }
+    return 60;
+  });
   const missingFolderPrompted = useRef(false);
   const parsedUrlCount = useMemo(
     () =>
@@ -149,14 +286,21 @@ export function LibraryPage({ onOpenEditor }: LibraryPageProps) {
         .filter(Boolean).length,
     [imageBatchUrlsText],
   );
+  const activeSubscriptionCount = useMemo(
+    () => subscriptions.filter((sub) => sub.active).length,
+    [subscriptions],
+  );
 
   const refresh = useCallback(async () => {
     setError(null);
-    const next = await invoke<LibraryItem[]>("library_list", {
-      limit: 100,
-      offset: 0,
-    });
-    setItems(next);
+    const [nextItems, nextRules, nextSubscriptions] = await Promise.all([
+      invoke<LibraryItem[]>("library_list", { limit: 100, offset: 0 }),
+      invoke<BatchOnImportRules>("config_batch_on_import_get").catch(() => null),
+      invoke<YoutubeSubscriptionRow[]>("youtube_subscriptions_list").catch(() => []),
+    ]);
+    setItems(nextItems);
+    if (nextRules) setBatchRules(nextRules);
+    setSubscriptions(nextSubscriptions);
   }, []);
 
   const refreshDownloadDir = useCallback(async () => {
@@ -255,9 +399,119 @@ export function LibraryPage({ onOpenEditor }: LibraryPageProps) {
     }
   }, []);
 
+  const chooseSubscriptionOutputDir = useCallback(async () => {
+    setError(null);
+    setNotice(null);
+    try {
+      const selected = await open({
+        multiple: false,
+        directory: true,
+        title: "Select subscription output folder",
+      });
+      if (!selected || typeof selected !== "string") return;
+      setSubscriptionOutputDirOverride(selected);
+    } catch (e) {
+      setError(String(e));
+    }
+  }, []);
+
   useEffect(() => {
     Promise.all([refresh(), refreshDownloadDir()]).catch((e) => setError(String(e)));
   }, [refresh, refreshDownloadDir]);
+
+  useEffect(() => {
+    safeLocalStorageSet("voxvulgi.v1.settings.asr_lang", asrLang);
+  }, [asrLang]);
+
+  useEffect(() => {
+    safeLocalStorageSet("voxvulgi.v1.library.url_batch_output_dir", urlBatchOutputDir);
+  }, [urlBatchOutputDir]);
+
+  useEffect(() => {
+    safeLocalStorageSet(
+      "voxvulgi.v1.library.url_batch_use_browser_cookies",
+      urlBatchUseBrowserCookies ? "1" : "0",
+    );
+  }, [urlBatchUseBrowserCookies]);
+
+  useEffect(() => {
+    safeLocalStorageSet("voxvulgi.v1.library.instagram_batch_output_dir", instagramBatchOutputDir);
+  }, [instagramBatchOutputDir]);
+
+  useEffect(() => {
+    safeLocalStorageSet(
+      "voxvulgi.v1.library.instagram_batch_use_browser_cookies",
+      instagramBatchUseBrowserCookies ? "1" : "0",
+    );
+  }, [instagramBatchUseBrowserCookies]);
+
+  useEffect(() => {
+    safeLocalStorageSet("voxvulgi.v1.library.image_batch_max_pages", String(imageBatchMaxPages));
+  }, [imageBatchMaxPages]);
+
+  useEffect(() => {
+    safeLocalStorageSet(
+      "voxvulgi.v1.library.image_batch_delay_seconds",
+      String(imageBatchDelaySeconds),
+    );
+  }, [imageBatchDelaySeconds]);
+
+  useEffect(() => {
+    safeLocalStorageSet(
+      "voxvulgi.v1.library.image_batch_allow_cross_domain",
+      imageBatchAllowCrossDomain ? "1" : "0",
+    );
+  }, [imageBatchAllowCrossDomain]);
+
+  useEffect(() => {
+    safeLocalStorageSet(
+      "voxvulgi.v1.library.image_batch_follow_content_links",
+      imageBatchFollowContentLinks ? "1" : "0",
+    );
+  }, [imageBatchFollowContentLinks]);
+
+  useEffect(() => {
+    safeLocalStorageSet("voxvulgi.v1.library.image_batch_skip_keywords", imageBatchSkipKeywords);
+  }, [imageBatchSkipKeywords]);
+
+  useEffect(() => {
+    safeLocalStorageSet("voxvulgi.v1.library.image_batch_output_dir", imageBatchOutputDir);
+  }, [imageBatchOutputDir]);
+
+  useEffect(() => {
+    safeLocalStorageSet(
+      "voxvulgi.v1.library.youtube_subscription_folder_map",
+      subscriptionFolderMap,
+    );
+  }, [subscriptionFolderMap]);
+
+  useEffect(() => {
+    safeLocalStorageSet(
+      "voxvulgi.v1.library.youtube_subscription_output_dir_override",
+      subscriptionOutputDirOverride,
+    );
+  }, [subscriptionOutputDirOverride]);
+
+  useEffect(() => {
+    safeLocalStorageSet(
+      "voxvulgi.v1.library.youtube_subscription_use_browser_cookies",
+      subscriptionUseBrowserCookies ? "1" : "0",
+    );
+  }, [subscriptionUseBrowserCookies]);
+
+  useEffect(() => {
+    safeLocalStorageSet(
+      "voxvulgi.v1.library.youtube_subscription_active",
+      subscriptionActive ? "1" : "0",
+    );
+  }, [subscriptionActive]);
+
+  useEffect(() => {
+    safeLocalStorageSet(
+      "voxvulgi.v1.library.youtube_subscription_refresh_interval_minutes",
+      String(subscriptionRefreshIntervalMinutes),
+    );
+  }, [subscriptionRefreshIntervalMinutes]);
 
   useEffect(() => {
     if (!downloadDir || downloadDir.exists || missingFolderPrompted.current) return;
@@ -292,6 +546,27 @@ export function LibraryPage({ onOpenEditor }: LibraryPageProps) {
     setError(null);
     setNotice(null);
     try {
+      const ffmpeg = await invoke<FfmpegToolsStatus>("tools_ffmpeg_status");
+      if (!ffmpeg.ffmpeg_version || !ffmpeg.ffprobe_version) {
+        const ok = await confirm(
+          "FFmpeg tools improve import (metadata + thumbnails) and are required for many audio/video jobs.\n\nInstall FFmpeg tools now? (Offline-full installers already include them; this ensures they are available.)\n\nIf you continue without installing, import will still work but some features may be unavailable until you install FFmpeg.",
+          {
+            title: "FFmpeg required",
+            kind: "warning",
+            okLabel: "Install FFmpeg tools",
+            cancelLabel: "Import anyway",
+          },
+        );
+        if (ok) {
+          setNotice(
+            "Installing FFmpeg tools. This may take a minute.",
+          );
+          await invoke<FfmpegToolsStatus>("tools_ffmpeg_install");
+        } else {
+          setNotice("Importing without FFmpeg metadata/thumbnail support.");
+        }
+      }
+
       const selected = await open({
         multiple: false,
         directory: false,
@@ -323,6 +598,63 @@ export function LibraryPage({ onOpenEditor }: LibraryPageProps) {
     }
   }
 
+  async function runSeparation(itemId: string) {
+    setBusy(true);
+    setError(null);
+    setNotice(null);
+    try {
+      await invoke("jobs_enqueue_separate_audio_spleeter", { itemId });
+      setNotice("Queued separation job.");
+    } catch (e) {
+      setError(String(e));
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function runMixDubPreview(itemId: string) {
+    setBusy(true);
+    setError(null);
+    setNotice(null);
+    try {
+      await invoke("jobs_enqueue_mix_dub_preview_v1", { itemId });
+      setNotice("Queued dub preview mix job.");
+    } catch (e) {
+      setError(String(e));
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function runMuxDubPreview(itemId: string) {
+    setBusy(true);
+    setError(null);
+    setNotice(null);
+    try {
+      await invoke("jobs_enqueue_mux_dub_preview_v1", { itemId });
+      setNotice("Queued dub preview mux job.");
+    } catch (e) {
+      setError(String(e));
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function openItemOutputs(itemId: string) {
+    setBusy(true);
+    setError(null);
+    setNotice(null);
+    try {
+      const outputs = await invoke<ItemOutputs>("item_outputs", { itemId });
+      setNotice(`Outputs folder: ${outputs.derived_item_dir}`);
+      await openPath(outputs.derived_item_dir);
+    } catch (e) {
+      setError(String(e));
+    } finally {
+      setBusy(false);
+    }
+  }
+
   async function enqueueUrlBatch() {
     setBusy(true);
     setError(null);
@@ -347,6 +679,7 @@ export function LibraryPage({ onOpenEditor }: LibraryPageProps) {
       const queued = await invoke<Array<{ id: string }>>("jobs_enqueue_download_batch", {
         urls,
         outputDir: urlBatchOutputDir.trim() || null,
+        useBrowserCookies: urlBatchUseBrowserCookies,
       });
       setUrlBatchText("");
       setNotice(`Queued ${queued.length} download job${queued.length === 1 ? "" : "s"}.`);
@@ -383,6 +716,7 @@ export function LibraryPage({ onOpenEditor }: LibraryPageProps) {
         urls,
         authCookie: instagramBatchAuthCookie.trim() || null,
         outputDir: instagramBatchOutputDir.trim() || null,
+        useBrowserCookies: instagramBatchUseBrowserCookies,
       });
 
       setInstagramBatchText("");
@@ -451,6 +785,193 @@ export function LibraryPage({ onOpenEditor }: LibraryPageProps) {
     }
   }
 
+  function resetSubscriptionEditor() {
+    setSubscriptionEditId(null);
+    setSubscriptionTitle("");
+    setSubscriptionUrl("");
+    setSubscriptionFolderMap("");
+  }
+
+  function editSubscription(sub: YoutubeSubscriptionRow) {
+    setSubscriptionEditId(sub.id);
+    setSubscriptionTitle(sub.title);
+    setSubscriptionUrl(sub.source_url);
+    setSubscriptionFolderMap(sub.folder_map);
+    setSubscriptionOutputDirOverride(sub.output_dir_override ?? "");
+    setSubscriptionUseBrowserCookies(sub.use_browser_cookies);
+    setSubscriptionActive(sub.active);
+    setSubscriptionRefreshIntervalMinutes(sub.refresh_interval_minutes);
+  }
+
+  async function saveSubscription() {
+    setBusy(true);
+    setError(null);
+    setNotice(null);
+    try {
+      const payload: YoutubeSubscriptionUpsert = {
+        id: subscriptionEditId,
+        title: subscriptionTitle.trim(),
+        source_url: subscriptionUrl.trim(),
+        folder_map: subscriptionFolderMap.trim() || null,
+        output_dir_override: subscriptionOutputDirOverride.trim() || null,
+        use_browser_cookies: subscriptionUseBrowserCookies,
+        active: subscriptionActive,
+        refresh_interval_minutes: Math.max(
+          minSubscriptionRefreshIntervalMinutes,
+          Math.min(
+            maxSubscriptionRefreshIntervalMinutes,
+            Math.round(subscriptionRefreshIntervalMinutes),
+          ),
+        ),
+      };
+      if (!payload.title) throw new Error("Subscription title is required.");
+      if (!payload.source_url) throw new Error("Subscription URL is required.");
+
+      const saved = await invoke<YoutubeSubscriptionRow>("youtube_subscriptions_upsert", {
+        subscription: payload,
+      });
+      setNotice(`Saved subscription: ${saved.title}`);
+      resetSubscriptionEditor();
+      await refresh();
+    } catch (e) {
+      setError(String(e));
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function deleteSubscription(id: string) {
+    setBusy(true);
+    setError(null);
+    setNotice(null);
+    try {
+      await invoke("youtube_subscriptions_delete", { id });
+      if (subscriptionEditId === id) {
+        resetSubscriptionEditor();
+      }
+      setNotice("Subscription deleted.");
+      await refresh();
+    } catch (e) {
+      setError(String(e));
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function queueSubscription(id: string) {
+    setBusy(true);
+    setError(null);
+    setNotice(null);
+    try {
+      const queued = await invoke<Array<{ id: string }>>("youtube_subscriptions_queue_one", { id });
+      setNotice(`Queued ${queued.length} job${queued.length === 1 ? "" : "s"} from subscription.`);
+      await refresh();
+    } catch (e) {
+      setError(String(e));
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function queueAllActiveSubscriptions() {
+    setBusy(true);
+    setError(null);
+    setNotice(null);
+    try {
+      const queued = await invoke<Array<{ id: string }>>("youtube_subscriptions_queue_all_active");
+      setNotice(
+        `Queued ${queued.length} due job${queued.length === 1 ? "" : "s"} from active subscriptions.`,
+      );
+      await refresh();
+    } catch (e) {
+      setError(String(e));
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function exportSubscriptionsJson() {
+    setBusy(true);
+    setError(null);
+    setNotice(null);
+    try {
+      const out = await save({
+        title: "Export YouTube subscriptions",
+        defaultPath: "youtube_subscriptions_export.json",
+        filters: [{ name: "JSON", extensions: ["json"] }],
+      });
+      if (!out || typeof out !== "string") return;
+
+      const summary = await invoke<YoutubeSubscriptionsExportSummary>(
+        "youtube_subscriptions_export_json",
+        {
+          outPath: out,
+        },
+      );
+      setNotice(`Exported ${summary.count} subscription(s) to ${summary.out_path}`);
+    } catch (e) {
+      setError(String(e));
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function importSubscriptionsJson() {
+    setBusy(true);
+    setError(null);
+    setNotice(null);
+    try {
+      const selected = await open({
+        multiple: false,
+        directory: false,
+        filters: [{ name: "JSON", extensions: ["json"] }],
+        title: "Import YouTube subscriptions JSON",
+      });
+      if (!selected || typeof selected !== "string") return;
+      const summary = await invoke<YoutubeSubscriptionsImportSummary>(
+        "youtube_subscriptions_import_json",
+        {
+          inPath: selected,
+        },
+      );
+      setNotice(
+        `Imported ${summary.total_in_file} entries (inserted ${summary.inserted}, updated ${summary.updated}).`,
+      );
+      await refresh();
+    } catch (e) {
+      setError(String(e));
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function import4kvdpSubscriptionsDir() {
+    setBusy(true);
+    setError(null);
+    setNotice(null);
+    try {
+      const selected = await open({
+        multiple: false,
+        directory: true,
+        title: "Select 4K Video Downloader+ exports folder",
+      });
+      if (!selected || typeof selected !== "string") return;
+
+      const summary = await invoke<YoutubeSubscriptionsImport4kvdpSummary>(
+        "youtube_subscriptions_import_4kvdp_dir",
+        { dirPath: selected },
+      );
+      setNotice(
+        `Imported ${summary.imported_subscriptions} subscription(s) (inserted ${summary.inserted}, updated ${summary.updated}). Seeded ${summary.archive_seeded_subscriptions} archive file(s).`,
+      );
+      await refresh();
+    } catch (e) {
+      setError(String(e));
+    } finally {
+      setBusy(false);
+    }
+  }
+
   return (
     <section>
       <h1>Library</h1>
@@ -477,6 +998,19 @@ export function LibraryPage({ onOpenEditor }: LibraryPageProps) {
               <option value="ko">ko</option>
             </select>
           </label>
+        </div>
+        <div style={{ marginTop: 10, color: "#4b5563" }}>
+          {(() => {
+            if (!batchRules) return "Batch-on-import: -";
+            const tasks: string[] = [];
+            if (batchRules.auto_asr) tasks.push("ASR");
+            if (batchRules.auto_translate) tasks.push("Translate->EN");
+            if (batchRules.auto_separate) tasks.push("Separate stems");
+            if (batchRules.auto_diarize) tasks.push("Diarize speakers");
+            if (batchRules.auto_dub_preview) tasks.push("Dub preview (TTS->Mix->Mux)");
+            if (!tasks.length) return "Batch-on-import: off (no background jobs queued).";
+            return `Batch-on-import: will queue ${tasks.join(", ")}. Configure in Diagnostics.`;
+          })()}
         </div>
       </div>
 
@@ -547,6 +1081,20 @@ export function LibraryPage({ onOpenEditor }: LibraryPageProps) {
             Choose folder
           </button>
         </div>
+        <div className="row">
+          <label style={{ display: "flex", alignItems: "center", gap: 8 }}>
+            <input
+              type="checkbox"
+              checked={urlBatchUseBrowserCookies}
+              disabled={busy}
+              onChange={(e) => setUrlBatchUseBrowserCookies(e.currentTarget.checked)}
+            />
+            <span>Use browser cookies (Chrome) for yt-dlp</span>
+          </label>
+          <div style={{ color: "#4b5563" }}>
+            Runs yt-dlp with <code>--cookies-from-browser chrome</code> when enabled.
+          </div>
+        </div>
         <div style={{ color: "#4b5563", marginTop: 8 }}>
           Parsed URLs: {parsedUrlCount}
         </div>
@@ -554,6 +1102,187 @@ export function LibraryPage({ onOpenEditor }: LibraryPageProps) {
           <button type="button" disabled={busy || parsedUrlCount === 0} onClick={enqueueUrlBatch}>
             Queue URL batch ({parsedUrlCount})
           </button>
+        </div>
+      </div>
+
+      <div className="card">
+        <h2>YouTube subscriptions</h2>
+        <div style={{ color: "#4b5563", marginBottom: 8 }}>
+          Save channels/playlists as reusable subscriptions. Each subscription maps downloads into
+          its own folder and can set its own refresh interval. Loaded subscriptions come from the
+          local DB and stay available when you switch panes/windows.
+        </div>
+        <div className="row">
+          <label style={{ display: "flex", alignItems: "center", gap: 8, flex: 1 }}>
+            <span>Title</span>
+            <input
+              value={subscriptionTitle}
+              disabled={busy}
+              onChange={(e) => setSubscriptionTitle(e.currentTarget.value)}
+              placeholder="My channel subscription"
+              style={{ width: "100%" }}
+            />
+          </label>
+          <label style={{ display: "flex", alignItems: "center", gap: 8, flex: 1 }}>
+            <span>YouTube URL</span>
+            <input
+              value={subscriptionUrl}
+              disabled={busy}
+              onChange={(e) => setSubscriptionUrl(e.currentTarget.value)}
+              placeholder="https://www.youtube.com/@channel/videos"
+              style={{ width: "100%" }}
+            />
+          </label>
+        </div>
+        <div className="row">
+          <label style={{ display: "flex", alignItems: "center", gap: 8, flex: 1 }}>
+            <span>Folder map</span>
+            <input
+              value={subscriptionFolderMap}
+              disabled={busy}
+              onChange={(e) => setSubscriptionFolderMap(e.currentTarget.value)}
+              placeholder="channel_map_name"
+              style={{ width: "100%" }}
+            />
+          </label>
+          <label style={{ display: "flex", alignItems: "center", gap: 8, flex: 1 }}>
+            <span>Output override</span>
+            <input
+              value={subscriptionOutputDirOverride}
+              disabled={busy}
+              onChange={(e) => setSubscriptionOutputDirOverride(e.currentTarget.value)}
+              placeholder="Optional absolute folder path"
+              style={{ width: "100%" }}
+            />
+          </label>
+          <button type="button" disabled={busy} onClick={chooseSubscriptionOutputDir}>
+            Choose folder
+          </button>
+        </div>
+        <div className="row">
+          <label style={{ display: "flex", alignItems: "center", gap: 8 }}>
+            <input
+              type="checkbox"
+              checked={subscriptionUseBrowserCookies}
+              disabled={busy}
+              onChange={(e) => setSubscriptionUseBrowserCookies(e.currentTarget.checked)}
+            />
+            <span>Use browser cookies (Chrome)</span>
+          </label>
+          <label style={{ display: "flex", alignItems: "center", gap: 8 }}>
+            <input
+              type="checkbox"
+              checked={subscriptionActive}
+              disabled={busy}
+              onChange={(e) => setSubscriptionActive(e.currentTarget.checked)}
+            />
+            <span>Active</span>
+          </label>
+          <label style={{ display: "flex", alignItems: "center", gap: 8 }}>
+            <span>Refresh every (min)</span>
+            <input
+              type="number"
+              min={minSubscriptionRefreshIntervalMinutes}
+              max={maxSubscriptionRefreshIntervalMinutes}
+              value={subscriptionRefreshIntervalMinutes}
+              disabled={busy}
+              onChange={(e) =>
+                setSubscriptionRefreshIntervalMinutes(
+                  Math.max(
+                    minSubscriptionRefreshIntervalMinutes,
+                    Math.min(
+                      maxSubscriptionRefreshIntervalMinutes,
+                      Number(e.currentTarget.value) || minSubscriptionRefreshIntervalMinutes,
+                    ),
+                  ),
+                )
+              }
+              style={{ width: 110 }}
+            />
+          </label>
+        </div>
+        <div style={{ color: "#4b5563", marginTop: 6 }}>
+          Queue due active uses each subscription interval against its last queued time.
+        </div>
+        <div className="row">
+          <button type="button" disabled={busy} onClick={saveSubscription}>
+            {subscriptionEditId ? "Update subscription" : "Save subscription"}
+          </button>
+          <button type="button" disabled={busy} onClick={resetSubscriptionEditor}>
+            Clear editor
+          </button>
+          <button
+            type="button"
+            disabled={busy || activeSubscriptionCount === 0}
+            onClick={queueAllActiveSubscriptions}
+          >
+            Queue due active ({activeSubscriptionCount})
+          </button>
+          <button type="button" disabled={busy} onClick={exportSubscriptionsJson}>
+            Export JSON
+          </button>
+          <button type="button" disabled={busy} onClick={importSubscriptionsJson}>
+            Import JSON
+          </button>
+          <button type="button" disabled={busy} onClick={import4kvdpSubscriptionsDir}>
+            Import 4KVDP exports
+          </button>
+          <button type="button" disabled={busy} onClick={() => refresh()}>
+            Refresh subscriptions
+          </button>
+        </div>
+        <div style={{ color: "#4b5563", marginTop: 8 }}>
+          Saved subscriptions: {subscriptions.length}
+        </div>
+        <div className="table-wrap">
+          <table>
+            <thead>
+              <tr>
+                <th>Title</th>
+                <th>URL</th>
+                <th>Folder map</th>
+                <th>Active</th>
+                <th>Interval (min)</th>
+                <th>Last queued</th>
+                <th>Actions</th>
+              </tr>
+            </thead>
+            <tbody>
+              {subscriptions.length ? (
+                subscriptions.map((sub) => (
+                  <tr key={sub.id}>
+                    <td>{sub.title}</td>
+                    <td style={{ maxWidth: 360 }}>{sub.source_url}</td>
+                    <td>{sub.folder_map}</td>
+                    <td>{sub.active ? "yes" : "no"}</td>
+                    <td>{sub.refresh_interval_minutes}</td>
+                    <td>
+                      {sub.last_queued_at_ms
+                        ? new Date(sub.last_queued_at_ms).toLocaleString()
+                        : "-"}
+                    </td>
+                    <td>
+                      <div className="row" style={{ marginTop: 0 }}>
+                        <button type="button" disabled={busy} onClick={() => editSubscription(sub)}>
+                          Edit
+                        </button>
+                        <button type="button" disabled={busy} onClick={() => queueSubscription(sub.id)}>
+                          Queue
+                        </button>
+                        <button type="button" disabled={busy} onClick={() => deleteSubscription(sub.id)}>
+                          Delete
+                        </button>
+                      </div>
+                    </td>
+                  </tr>
+                ))
+              ) : (
+                <tr>
+                  <td colSpan={7}>No subscriptions yet.</td>
+                </tr>
+              )}
+            </tbody>
+          </table>
         </div>
       </div>
 
@@ -583,6 +1312,20 @@ export function LibraryPage({ onOpenEditor }: LibraryPageProps) {
               style={{ width: "100%" }}
             />
           </label>
+        </div>
+        <div className="row">
+          <label style={{ display: "flex", alignItems: "center", gap: 8 }}>
+            <input
+              type="checkbox"
+              checked={instagramBatchUseBrowserCookies}
+              disabled={busy}
+              onChange={(e) => setInstagramBatchUseBrowserCookies(e.currentTarget.checked)}
+            />
+            <span>Use browser cookies (Chrome) for yt-dlp fallback</span>
+          </label>
+          <div style={{ color: "#4b5563" }}>
+            Only used when enabled and only for yt-dlp-based extraction.
+          </div>
         </div>
         <div className="row">
           <label style={{ display: "flex", alignItems: "center", gap: 8, flex: 1 }}>
@@ -729,6 +1472,9 @@ export function LibraryPage({ onOpenEditor }: LibraryPageProps) {
 
       <div className="card">
         <h2>Items</h2>
+        <div style={{ color: "#4b5563", marginTop: 6 }}>
+          Outputs/artifacts are stored under the app-data folder (open Diagnostics -&gt; App data dir, or use the Outputs button).
+        </div>
         <div className="table-wrap">
           <table>
             <thead>
@@ -766,12 +1512,24 @@ export function LibraryPage({ onOpenEditor }: LibraryPageProps) {
                         <button type="button" disabled={busy} onClick={() => runAsr(item.id)}>
                           ASR
                         </button>
+                        <button type="button" disabled={busy} onClick={() => runSeparation(item.id)}>
+                          Separate
+                        </button>
+                        <button type="button" disabled={busy} onClick={() => runMixDubPreview(item.id)}>
+                          Mix dub
+                        </button>
+                        <button type="button" disabled={busy} onClick={() => runMuxDubPreview(item.id)}>
+                          Mux
+                        </button>
                         <button
                           type="button"
                           disabled={busy || !onOpenEditor}
                           onClick={() => onOpenEditor?.(item.id)}
                         >
                           Edit subs
+                        </button>
+                        <button type="button" disabled={busy} onClick={() => openItemOutputs(item.id)}>
+                          Outputs
                         </button>
                       </div>
                     </td>

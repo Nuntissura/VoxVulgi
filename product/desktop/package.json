@@ -7,6 +7,7 @@
     "dev": "vite",
     "build": "tsc && vite build",
     "build:desktop:target": "powershell -ExecutionPolicy Bypass -File ../../governance/scripts/build_desktop_target.ps1",
+    "build:desktop:target:no-prep": "powershell -ExecutionPolicy Bypass -File ../../governance/scripts/build_desktop_target.ps1 -SkipOfflineBundlePrep",
     "cleanup:artifacts": "powershell -ExecutionPolicy Bypass -File ../../governance/scripts/cleanup_artifacts.ps1",
     "cleanup:artifacts:force": "powershell -ExecutionPolicy Bypass -File ../../governance/scripts/cleanup_artifacts.ps1 -Force",
     "cleanup:artifacts:full": "powershell -ExecutionPolicy Bypass -File ../../governance/scripts/cleanup_artifacts.ps1 -Force -IncludeBuildTarget -PruneOldBuilds",

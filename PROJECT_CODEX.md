@@ -45,3 +45,8 @@ Pick the first real implementation WP from `governance/workflow/ROADMAP.md` and 
 
 - create the WP file
 - add it to `governance/workflow/TASK_BOARD.md`
+
+## 6) Data safety (library + subscriptions)
+
+- Any work involving user libraries/subscriptions or third-party migration sources must be **backup-first** and **non-destructive by default**.
+- Do not delete/overwrite user lists/subscriptions unless explicitly requested and called out in the Work Packet.

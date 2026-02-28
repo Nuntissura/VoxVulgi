@@ -42,6 +42,16 @@ Initial language focus: **Korean + Japanese → English**.
   - YouTube (and many webpage video links) via `yt-dlp` (local tool),
   - Instagram batch ingest (posts/reels/stories/profiles) that expands into media targets (optional session cookie header for private content),
   - provenance captured per ingest (provider + source URL).
+- Add YouTube subscription management:
+  - save persistent subscriptions (channel/playlist/video feed URLs),
+  - define a folder map per subscription so each subscription writes into its own mapped folder,
+  - set a per-subscription refresh interval (minutes) that can be edited in the Library UI,
+  - queue refresh for one subscription or all active subscriptions,
+  - keep loaded subscriptions stable across pane switches and window focus changes.
+- Add subscription export/import:
+  - export all subscriptions to JSON (portable backup/migration file),
+  - import from JSON with merge-by-URL behavior (upsert existing, add missing),
+  - no subscription deletion on import unless explicitly requested by the user.
 - Add an in-app **image archive batch** mode for blogs/forums:
   - accepts multiple start URLs in one submission,
   - crawls pagination + post/thread links,
@@ -49,6 +59,9 @@ Initial language focus: **Korean + Japanese → English**.
   - prefers full-size image URLs over thumbnail variants,
   - writes a manifest for audit/review.
 - Auto-extract metadata (duration, codecs, resolution) + generate thumbnails.
+- Performance stance (large libraries):
+  - thumbnails should be stored on disk (cache) and lazy-loaded (no giant DB BLOB storage),
+  - Library list/grid should be virtualized to stay responsive with very large libraries.
 - Library list with:
   - search (title/tags/text),
   - filters (language, status, date, source),
@@ -86,6 +99,8 @@ Initial language focus: **Korean + Japanese → English**.
   - last job errors with copy/export.
 - Log rotation and retention (cap by size + age).
 - “Export diagnostics bundle” (logs + job metadata + redacted config).
+- Recovery UX:
+  - a **Safe Mode** startup path to open the app without auto-refresh or heavy background work (so users can export/manage data even when providers regress).
 
 ## 5) Phase 2 (Voice-preserving dubbing MVP)
 
@@ -128,9 +143,10 @@ Initial language focus: **Korean + Japanese → English**.
 ## 7) UX Principles
 
 - Fast: UI never blocks on AI jobs (always queued with progress).
+- Fast: queueing URL/subscription downloads must return quickly; heavy URL expansion/extraction runs in worker jobs, not on the UI thread.
 - Transparent: show what data is stored and where; easy cleanup.
 - Editable: every AI output is reviewable and editable.
-- Offline by default: no background network egress unless explicitly enabled (optional cloud providers, model downloads, update checks).
+- Offline by default: no background network egress. Windows "full" installers bundle required local tools/models for Phase 1+2 and bootstrap them into app-data on first launch, so the core pipeline can run fully offline without manual pack installs.
 - Safe defaults: no voice cloning by default.
 
 ## 8) Key UX Screens
@@ -149,7 +165,37 @@ Initial language focus: **Korean + Japanese → English**.
 - **Jobs/Queue**: running/failed/completed, retry, logs link.
 - **Diagnostics**: storage usage, logs export, version info, privacy settings.
 
-## 9) Locked-in answers (from operator)
+## 9) Top 20 ROI backlog (next additions)
+
+Current direction keeps baseline values intact; these are explicitly deferred/planned features.
+
+ROI-01. One-click Phase 2 Packs installer UI (no consent gate), progress, and disk impact estimates.  
+ROI-02. Portable Python distribution option so system Python is not required.  
+ROI-03. Neural TTS baseline (commercial-friendly default) to replace system TTS preview.  
+ROI-04. Voice-preserving dubbing backend (OpenVoice/CosyVoice) with per-speaker mapping UI.  
+ROI-05. Single-pass audio mixer (replace iterative overlay) with ducking + loudness normalization.  
+ROI-06. Speaker label UI for rename/merge/split and propagation across tracks.  
+ROI-07. In-app audio preview player for stems/dub outputs with A/B comparison.  
+ROI-08. Timing-fit tools for dub outputs (time-stretch alignment to segment windows).  
+ROI-09. Subtitle-to-dub QC report (CPS/line length, timing mismatch, overlaps, untranslated coverage).  
+ROI-10. Optional vocal cleanup (noise reduction and de-reverb) as an explicit-install pipeline option.  
+ROI-11. Mux options: keep original audio as extra track, container choice, language metadata tags.  
+ROI-12. Batch processing rules on import (auto ASR/auto translate/auto dub preview).  
+ROI-13. Better separation backend option when license/model fit is favorable.  
+ROI-14. Better diarization backend option (BYO gated models) for power users, off by default.  
+ROI-15. Pack/model integrity with pinned versions and hash verification for reproducible installs.  
+ROI-16. Derived output browser showing per-item artifacts timeline, reveal/open log, rerun.  
+ROI-17. Export pack (audio + subtitles + muxed video + provenance manifest) as a single zip.  
+ROI-18. Performance tiering (CPU baseline vs GPU) with recommended settings and runtime checks.  
+ROI-19. Crash-safe resumable external steps with checkpoint and clear resume behavior.  
+ROI-20. Licensing/attribution report for all installed packs and models.
+ROI-21. Safe Mode startup (no auto-refresh; minimal background work; export-first recovery).  
+ROI-22. Thumbnail disk cache + Library virtualization + bounded cache eviction (LRU).  
+ROI-23. Subscription groups/tags + failure backoff so large subscription sets remain manageable.  
+ROI-24. Output folder/file templates + reusable downloader presets (“Smart Mode”-like).  
+ROI-25. Migration hardening: scan existing download folders to seed dedupe archives + optional index-only library import.
+
+## 10) Locked-in answers (from operator)
 
 1) Platform: cross-platform.
 2) AI runtime: local-first by default; optional cloud providers only with explicit user opt-in and clear disclosure.

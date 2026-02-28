@@ -45,3 +45,10 @@ This file defines how an AI coding agent should behave when working in this repo
 - Explicit consent mechanisms must not be implemented.
 - Anti-abuse controls must not be included.
 - These features must not appear in development or the final product. Users must comply with all local regulations.
+
+## 6) User data preservation (library + subscriptions)
+
+- Treat the user’s **library**, **playlists**, **subscription lists**, and **migration exports** as irreplaceable.
+- Do **not** delete, overwrite, or “reset” user lists/subscriptions (or their DB files) unless the user explicitly asks and confirms the target path.
+- Prefer **read-only** analysis of third-party app databases/exports (e.g., 4KVDP SQLite + export folders).
+- If a change is ever unavoidable, make a timestamped backup first and prefer additive migrations (new files/tables) over in-place edits.

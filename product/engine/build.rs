@@ -23,6 +23,23 @@ fn main() {
 
     let include_whisper = whisper_root.join("include");
     let include_ggml = whisper_root.join("ggml").join("include");
+    let target_arch = std::env::var("CARGO_CFG_TARGET_ARCH").unwrap_or_else(|_| String::new());
+    let mut cpu_arch_sources = Vec::new();
+    if target_arch == "x86_64" || target_arch == "x86" {
+        cpu_arch_sources.push(ggml_cpu.join("arch\\x86\\quants.c"));
+        cpu_arch_sources.push(ggml_cpu.join("arch\\x86\\repack.cpp"));
+    } else if target_arch == "aarch64" || target_arch == "arm" {
+        cpu_arch_sources.push(ggml_cpu.join("arch\\arm\\quants.c"));
+        cpu_arch_sources.push(ggml_cpu.join("arch\\arm\\repack.cpp"));
+    } else if target_arch == "riscv64" {
+        cpu_arch_sources.push(ggml_cpu.join("arch\\riscv\\quants.c"));
+    } else if target_arch == "powerpc64" || target_arch == "powerpc" {
+        cpu_arch_sources.push(ggml_cpu.join("arch\\powerpc\\quants.c"));
+    } else if target_arch == "s390x" {
+        cpu_arch_sources.push(ggml_cpu.join("arch\\s390\\quants.c"));
+    } else if target_arch == "loongarch64" {
+        cpu_arch_sources.push(ggml_cpu.join("arch\\loongarch\\quants.c"));
+    }
 
     // Build C sources as C.
     let mut build_c = cc::Build::new();
@@ -32,6 +49,7 @@ fn main() {
         .include(&include_ggml)
         .include(ggml_src.clone())
         .include(ggml_cpu.clone())
+        .define("GGML_USE_CPU", None)
         .define("GGML_VERSION", Some("\"0.0.0\""))
         .define("GGML_COMMIT", Some("\"unknown\""))
         .file(ggml_src.join("ggml.c"))
@@ -57,11 +75,19 @@ fn main() {
         .include(&include_ggml)
         .include(ggml_src.clone())
         .include(ggml_cpu.clone())
+        .define("GGML_USE_CPU", None)
         .define("GGML_VERSION", Some("\"0.0.0\""))
         .define("GGML_COMMIT", Some("\"unknown\""))
         .define("WHISPER_VERSION", Some("\"0.0.0\""))
         .file(bridge)
         .file(whisper_root.join("src").join("whisper.cpp"))
+        .files(
+            cpu_arch_sources
+                .iter()
+                .map(|path| path.as_path())
+                .collect::<Vec<_>>()
+                .as_slice(),
+        )
         .file(ggml_src.join("ggml.cpp"))
         .file(ggml_src.join("ggml-backend.cpp"))
         .file(ggml_src.join("ggml-backend-dl.cpp"))

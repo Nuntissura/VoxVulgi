@@ -70,7 +70,7 @@ char *ytf_whisper_transcribe_json(const char *model_path,
     whisper_context_params cparams = whisper_context_default_params();
     cparams.use_gpu = false;
     cparams.flash_attn = false;
-    cparams.gpu_device = 0;
+    cparams.gpu_device = -1;
 
     whisper_context *ctx = whisper_init_from_file_with_params(model_path, cparams);
     if (!ctx) {
@@ -152,4 +152,3 @@ char *ytf_whisper_transcribe_json(const char *model_path,
 }
 
 } // extern "C"
-

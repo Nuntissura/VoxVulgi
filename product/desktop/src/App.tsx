@@ -1,6 +1,7 @@
 import { useMemo, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import "./App.css";
+import { diagnosticsTrace } from "./lib/diagnosticsTrace";
 import { DiagnosticsPage } from "./pages/DiagnosticsPage";
 import { JobsPage } from "./pages/JobsPage";
 import { LibraryPage } from "./pages/LibraryPage";
@@ -20,6 +21,12 @@ function isDragExemptTarget(target: EventTarget | null): boolean {
 function App() {
   const [page, setPage] = useState<AppPage>("library");
   const [editorItemId, setEditorItemId] = useState<string | null>(null);
+  const [mountedPages, setMountedPages] = useState<Record<AppPage, boolean>>({
+    library: true,
+    jobs: false,
+    diagnostics: false,
+    editor: false,
+  });
 
   async function startWindowDrag() {
     try {
@@ -53,31 +60,51 @@ function App() {
     }
   }
 
-  const content = useMemo(() => {
-    switch (page) {
-      case "library":
-        return (
-          <LibraryPage
-            onOpenEditor={(itemId) => {
-              setEditorItemId(itemId);
-              setPage("editor");
-            }}
-          />
-        );
-      case "jobs":
-        return <JobsPage />;
-      case "diagnostics":
-        return <DiagnosticsPage />;
-      case "editor":
-        return editorItemId ? (
-          <SubtitleEditorPage itemId={editorItemId} />
-        ) : (
-          <div className="card">Pick an item in the Library first.</div>
-        );
-      default:
-        return null;
-    }
-  }, [page, editorItemId]);
+  function switchPage(next: AppPage, details?: Record<string, unknown>) {
+    setMountedPages((prev) => ({ ...prev, [next]: true }));
+    setPage(next);
+    void diagnosticsTrace("panel_switch", { page: next, ...(details ?? {}) });
+  }
+
+  const content = useMemo(
+    () => (
+      <>
+        {mountedPages.library ? (
+          <div style={{ display: page === "library" ? "block" : "none" }}>
+            <LibraryPage
+              onOpenEditor={(itemId) => {
+                setEditorItemId(itemId);
+                switchPage("editor", { item_id: itemId });
+              }}
+            />
+          </div>
+        ) : null}
+
+        {mountedPages.jobs ? (
+          <div style={{ display: page === "jobs" ? "block" : "none" }}>
+            <JobsPage />
+          </div>
+        ) : null}
+
+        {mountedPages.diagnostics ? (
+          <div style={{ display: page === "diagnostics" ? "block" : "none" }}>
+            <DiagnosticsPage />
+          </div>
+        ) : null}
+
+        {mountedPages.editor ? (
+          <div style={{ display: page === "editor" ? "block" : "none" }}>
+            {editorItemId ? (
+              <SubtitleEditorPage key={editorItemId} itemId={editorItemId} />
+            ) : (
+              <div className="card">Pick an item in the Library first.</div>
+            )}
+          </div>
+        ) : null}
+      </>
+    ),
+    [page, editorItemId, mountedPages],
+  );
 
   return (
     <div
@@ -99,33 +126,33 @@ function App() {
             <nav className="nav">
               <button
                 className={page === "library" ? "active" : ""}
-                onClick={() => setPage("library")}
+                onClick={() => switchPage("library")}
                 type="button"
               >
                 Library
               </button>
               <button
                 className={page === "jobs" ? "active" : ""}
-                onClick={() => setPage("jobs")}
+                onClick={() => switchPage("jobs")}
                 type="button"
               >
                 Jobs
               </button>
               <button
                 className={page === "diagnostics" ? "active" : ""}
-                onClick={() => setPage("diagnostics")}
+                onClick={() => switchPage("diagnostics")}
                 type="button"
               >
                 Diagnostics
               </button>
               <button
                 className={page === "editor" ? "active" : ""}
-                onClick={() => setPage("editor")}
+                onClick={() => switchPage("editor")}
                 type="button"
                 disabled={!editorItemId}
-                title={!editorItemId ? "Open an item from Library first" : "Subtitle editor"}
+                title={!editorItemId ? "Open an item from Library first" : "Localization Studio"}
               >
-                Editor
+                Localization Studio
               </button>
             </nav>
             <div className="window-controls">
@@ -153,3 +180,4 @@ function App() {
 }
 
 export default App;
+
