@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { type UIEvent, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { convertFileSrc, invoke } from "@tauri-apps/api/core";
 import { confirm, message, open, save } from "@tauri-apps/plugin-dialog";
 import { openPath } from "@tauri-apps/plugin-opener";
@@ -130,8 +130,13 @@ type YoutubeSubscriptionRow = {
   output_dir_override: string | null;
   use_browser_cookies: boolean;
   active: boolean;
+  preset_id: string | null;
+  group_ids: string[];
   refresh_interval_minutes: number;
   last_queued_at_ms: number | null;
+  last_error_at_ms: number | null;
+  consecutive_failures: number;
+  next_allowed_refresh_at_ms: number | null;
   created_at_ms: number;
   updated_at_ms: number;
 };
@@ -144,7 +149,52 @@ type YoutubeSubscriptionUpsert = {
   output_dir_override: string | null;
   use_browser_cookies: boolean;
   active: boolean;
+  preset_id: string | null;
+  group_ids: string[];
   refresh_interval_minutes: number | null;
+};
+
+type YoutubeSubscriptionGroupRow = {
+  id: string;
+  name: string;
+  created_at_ms: number;
+  updated_at_ms: number;
+};
+
+type YoutubeSubscriptionGroupUpsert = {
+  id: string | null;
+  name: string;
+};
+
+type YoutubeSubscriptionArchiveSeedSummary = {
+  scanned_dir: string;
+  archive_files_updated: number;
+  inferred_ids: number;
+  appended_ids: number;
+  skipped_existing_ids: number;
+};
+
+type ExistingDownloadsImportSummary = {
+  scanned_dir: string;
+  discovered_media_files: number;
+  imported_items: number;
+  skipped_existing_items: number;
+  failures: number;
+};
+
+type DownloadPreset = {
+  id: string;
+  title: string;
+  path_template: string;
+  filename_template: string;
+  format_preference: string | null;
+  quality_preference: string | null;
+  subtitle_mode: string | null;
+};
+
+type DownloadPresetsConfig = {
+  default_preset_id: string | null;
+  presets: DownloadPreset[];
 };
 
 type YoutubeSubscriptionsExportSummary = {
@@ -174,10 +224,20 @@ export function LibraryPage({ onOpenEditor }: LibraryPageProps) {
   const maxBatchUrls = 1500;
   const maxInstagramBatchUrls = 1500;
   const maxImageBatchUrls = 1500;
+  const libraryPageSize = 200;
+  const libraryVirtualRowHeight = 132;
+  const libraryVirtualViewportHeight = 560;
+  const libraryVirtualOverscan = 5;
   const minSubscriptionRefreshIntervalMinutes = 5;
   const maxSubscriptionRefreshIntervalMinutes = 10080;
   const [items, setItems] = useState<LibraryItem[]>([]);
+  const [itemsOffset, setItemsOffset] = useState(0);
+  const [itemsHasMore, setItemsHasMore] = useState(true);
+  const [itemsLoadingMore, setItemsLoadingMore] = useState(false);
+  const [itemsScrollTop, setItemsScrollTop] = useState(0);
   const [subscriptions, setSubscriptions] = useState<YoutubeSubscriptionRow[]>([]);
+  const [subscriptionGroups, setSubscriptionGroups] = useState<YoutubeSubscriptionGroupRow[]>([]);
+  const [downloadPresets, setDownloadPresets] = useState<DownloadPresetsConfig | null>(null);
   const [batchRules, setBatchRules] = useState<BatchOnImportRules | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
@@ -250,6 +310,9 @@ export function LibraryPage({ onOpenEditor }: LibraryPageProps) {
     const raw = safeLocalStorageGet("voxvulgi.v1.library.youtube_subscription_active");
     return raw === null ? true : raw === "1";
   });
+  const [subscriptionPresetId, setSubscriptionPresetId] = useState<string>("");
+  const [subscriptionGroupIds, setSubscriptionGroupIds] = useState<string[]>([]);
+  const [subscriptionGroupFilterId, setSubscriptionGroupFilterId] = useState<string>("");
   const [subscriptionRefreshIntervalMinutes, setSubscriptionRefreshIntervalMinutes] = useState(() => {
     const raw = safeLocalStorageGet("voxvulgi.v1.library.youtube_subscription_refresh_interval_minutes");
     const parsed = raw ? Number(raw) : NaN;
@@ -261,6 +324,18 @@ export function LibraryPage({ onOpenEditor }: LibraryPageProps) {
     }
     return 60;
   });
+  const [urlBatchPresetId, setUrlBatchPresetId] = useState(() => {
+    return safeLocalStorageGet("voxvulgi.v1.library.url_batch_preset_id") ?? "";
+  });
+  const [groupEditId, setGroupEditId] = useState<string | null>(null);
+  const [groupName, setGroupName] = useState("");
+  const [presetEditId, setPresetEditId] = useState<string | null>(null);
+  const [presetTitle, setPresetTitle] = useState("");
+  const [presetPathTemplate, setPresetPathTemplate] = useState("{provider}/{channel}");
+  const [presetFilenameTemplate, setPresetFilenameTemplate] = useState("{title}_{id}");
+  const [presetFormatPreference, setPresetFormatPreference] = useState("bestvideo+bestaudio/best");
+  const [presetQualityPreference, setPresetQualityPreference] = useState("best");
+  const [presetSubtitleMode, setPresetSubtitleMode] = useState("auto");
   const missingFolderPrompted = useRef(false);
   const parsedUrlCount = useMemo(
     () =>
@@ -286,22 +361,108 @@ export function LibraryPage({ onOpenEditor }: LibraryPageProps) {
         .filter(Boolean).length,
     [imageBatchUrlsText],
   );
+  const groupNameById = useMemo(() => {
+    const map = new Map<string, string>();
+    for (const group of subscriptionGroups) {
+      map.set(group.id, group.name);
+    }
+    return map;
+  }, [subscriptionGroups]);
+
+  const visibleSubscriptions = useMemo(() => {
+    if (!subscriptionGroupFilterId) return subscriptions;
+    return subscriptions.filter((sub) => sub.group_ids.includes(subscriptionGroupFilterId));
+  }, [subscriptionGroupFilterId, subscriptions]);
+
   const activeSubscriptionCount = useMemo(
-    () => subscriptions.filter((sub) => sub.active).length,
-    [subscriptions],
+    () => visibleSubscriptions.filter((sub) => sub.active).length,
+    [visibleSubscriptions],
   );
 
   const refresh = useCallback(async () => {
     setError(null);
-    const [nextItems, nextRules, nextSubscriptions] = await Promise.all([
-      invoke<LibraryItem[]>("library_list", { limit: 100, offset: 0 }),
+    const [nextItems, nextRules, nextSubscriptions, nextGroups, nextPresets] = await Promise.all([
+      invoke<LibraryItem[]>("library_list", { limit: libraryPageSize, offset: 0 }),
       invoke<BatchOnImportRules>("config_batch_on_import_get").catch(() => null),
       invoke<YoutubeSubscriptionRow[]>("youtube_subscriptions_list").catch(() => []),
+      invoke<YoutubeSubscriptionGroupRow[]>("youtube_subscription_groups_list").catch(() => []),
+      invoke<DownloadPresetsConfig>("download_presets_get").catch(() => null),
     ]);
     setItems(nextItems);
+    setItemsOffset(nextItems.length);
+    setItemsHasMore(nextItems.length >= libraryPageSize);
+    setItemsScrollTop(0);
+    setItemsLoadingMore(false);
     if (nextRules) setBatchRules(nextRules);
     setSubscriptions(nextSubscriptions);
-  }, []);
+    setSubscriptionGroups(nextGroups);
+    if (nextPresets) {
+      setDownloadPresets(nextPresets);
+      setUrlBatchPresetId((current) => current || nextPresets.default_preset_id || "");
+    }
+  }, [libraryPageSize]);
+
+  const loadMoreItems = useCallback(async () => {
+    if (itemsLoadingMore || !itemsHasMore) return;
+    setItemsLoadingMore(true);
+    setError(null);
+    try {
+      const nextItems = await invoke<LibraryItem[]>("library_list", {
+        limit: libraryPageSize,
+        offset: itemsOffset,
+      });
+      setItems((prev) => [...prev, ...nextItems]);
+      setItemsOffset((prev) => prev + nextItems.length);
+      setItemsHasMore(nextItems.length >= libraryPageSize);
+    } catch (e) {
+      setError(String(e));
+    } finally {
+      setItemsLoadingMore(false);
+    }
+  }, [itemsHasMore, itemsLoadingMore, itemsOffset, libraryPageSize]);
+
+  const handleItemsScroll = useCallback(
+    (event: UIEvent<HTMLDivElement>) => {
+      const target = event.currentTarget;
+      setItemsScrollTop(target.scrollTop);
+      const remaining = target.scrollHeight - (target.scrollTop + target.clientHeight);
+      if (remaining <= libraryVirtualRowHeight * 4 && itemsHasMore && !itemsLoadingMore) {
+        void loadMoreItems();
+      }
+    },
+    [itemsHasMore, itemsLoadingMore, libraryVirtualRowHeight, loadMoreItems],
+  );
+
+  const libraryVirtualWindow = useMemo(() => {
+    const visibleCount = Math.max(
+      1,
+      Math.ceil(libraryVirtualViewportHeight / libraryVirtualRowHeight),
+    );
+    const startIndex = Math.max(
+      0,
+      Math.floor(itemsScrollTop / libraryVirtualRowHeight) - libraryVirtualOverscan,
+    );
+    const endIndex = Math.min(
+      items.length,
+      startIndex + visibleCount + libraryVirtualOverscan * 2,
+    );
+    return {
+      startIndex,
+      endIndex,
+      topSpacerHeight: startIndex * libraryVirtualRowHeight,
+      bottomSpacerHeight: Math.max(
+        0,
+        (items.length - endIndex) * libraryVirtualRowHeight,
+      ),
+      visibleItems: items.slice(startIndex, endIndex),
+    };
+  }, [
+    items,
+    itemsScrollTop,
+    libraryVirtualOverscan,
+    libraryVirtualRowHeight,
+    libraryVirtualViewportHeight,
+  ]);
 
   const refreshDownloadDir = useCallback(async () => {
     const status = await invoke<DownloadDirStatus>("downloads_dir_status");
@@ -426,6 +587,10 @@ export function LibraryPage({ onOpenEditor }: LibraryPageProps) {
   useEffect(() => {
     safeLocalStorageSet("voxvulgi.v1.library.url_batch_output_dir", urlBatchOutputDir);
   }, [urlBatchOutputDir]);
+
+  useEffect(() => {
+    safeLocalStorageSet("voxvulgi.v1.library.url_batch_preset_id", urlBatchPresetId);
+  }, [urlBatchPresetId]);
 
   useEffect(() => {
     safeLocalStorageSet(
@@ -680,6 +845,7 @@ export function LibraryPage({ onOpenEditor }: LibraryPageProps) {
         urls,
         outputDir: urlBatchOutputDir.trim() || null,
         useBrowserCookies: urlBatchUseBrowserCookies,
+        presetId: urlBatchPresetId.trim() || null,
       });
       setUrlBatchText("");
       setNotice(`Queued ${queued.length} download job${queued.length === 1 ? "" : "s"}.`);
@@ -790,6 +956,12 @@ export function LibraryPage({ onOpenEditor }: LibraryPageProps) {
     setSubscriptionTitle("");
     setSubscriptionUrl("");
     setSubscriptionFolderMap("");
+    setSubscriptionOutputDirOverride("");
+    setSubscriptionUseBrowserCookies(false);
+    setSubscriptionActive(true);
+    setSubscriptionPresetId("");
+    setSubscriptionGroupIds([]);
+    setSubscriptionRefreshIntervalMinutes(60);
   }
 
   function editSubscription(sub: YoutubeSubscriptionRow) {
@@ -800,6 +972,8 @@ export function LibraryPage({ onOpenEditor }: LibraryPageProps) {
     setSubscriptionOutputDirOverride(sub.output_dir_override ?? "");
     setSubscriptionUseBrowserCookies(sub.use_browser_cookies);
     setSubscriptionActive(sub.active);
+    setSubscriptionPresetId(sub.preset_id ?? "");
+    setSubscriptionGroupIds(sub.group_ids ?? []);
     setSubscriptionRefreshIntervalMinutes(sub.refresh_interval_minutes);
   }
 
@@ -816,6 +990,8 @@ export function LibraryPage({ onOpenEditor }: LibraryPageProps) {
         output_dir_override: subscriptionOutputDirOverride.trim() || null,
         use_browser_cookies: subscriptionUseBrowserCookies,
         active: subscriptionActive,
+        preset_id: subscriptionPresetId.trim() || null,
+        group_ids: subscriptionGroupIds,
         refresh_interval_minutes: Math.max(
           minSubscriptionRefreshIntervalMinutes,
           Math.min(
@@ -878,7 +1054,11 @@ export function LibraryPage({ onOpenEditor }: LibraryPageProps) {
     setError(null);
     setNotice(null);
     try {
-      const queued = await invoke<Array<{ id: string }>>("youtube_subscriptions_queue_all_active");
+      const queued = subscriptionGroupFilterId
+        ? await invoke<Array<{ id: string }>>("youtube_subscriptions_queue_group", {
+            groupId: subscriptionGroupFilterId,
+          })
+        : await invoke<Array<{ id: string }>>("youtube_subscriptions_queue_all_active");
       setNotice(
         `Queued ${queued.length} due job${queued.length === 1 ? "" : "s"} from active subscriptions.`,
       );
@@ -963,6 +1143,292 @@ export function LibraryPage({ onOpenEditor }: LibraryPageProps) {
       );
       setNotice(
         `Imported ${summary.imported_subscriptions} subscription(s) (inserted ${summary.inserted}, updated ${summary.updated}). Seeded ${summary.archive_seeded_subscriptions} archive file(s).`,
+      );
+      await refresh();
+    } catch (e) {
+      setError(String(e));
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  function toggleSubscriptionGroup(groupId: string) {
+    setSubscriptionGroupIds((prev) => {
+      if (prev.includes(groupId)) {
+        return prev.filter((id) => id !== groupId);
+      }
+      return [...prev, groupId];
+    });
+  }
+
+  function editGroup(group: YoutubeSubscriptionGroupRow) {
+    setGroupEditId(group.id);
+    setGroupName(group.name);
+  }
+
+  function resetGroupEditor() {
+    setGroupEditId(null);
+    setGroupName("");
+  }
+
+  async function saveGroup() {
+    setBusy(true);
+    setError(null);
+    setNotice(null);
+    try {
+      const payload: YoutubeSubscriptionGroupUpsert = {
+        id: groupEditId,
+        name: groupName.trim(),
+      };
+      if (!payload.name) throw new Error("Group name is required.");
+      const saved = await invoke<YoutubeSubscriptionGroupRow>("youtube_subscription_groups_upsert", {
+        group: payload,
+      });
+      setNotice(`Saved group: ${saved.name}`);
+      resetGroupEditor();
+      await refresh();
+    } catch (e) {
+      setError(String(e));
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function deleteGroup(groupId: string) {
+    setBusy(true);
+    setError(null);
+    setNotice(null);
+    try {
+      await invoke("youtube_subscription_groups_delete", { id: groupId });
+      setNotice("Group deleted.");
+      if (subscriptionGroupFilterId === groupId) {
+        setSubscriptionGroupFilterId("");
+      }
+      setSubscriptionGroupIds((prev) => prev.filter((id) => id !== groupId));
+      await refresh();
+    } catch (e) {
+      setError(String(e));
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  function editPreset(preset: DownloadPreset) {
+    setPresetEditId(preset.id);
+    setPresetTitle(preset.title);
+    setPresetPathTemplate(preset.path_template);
+    setPresetFilenameTemplate(preset.filename_template);
+    setPresetFormatPreference(preset.format_preference ?? "");
+    setPresetQualityPreference(preset.quality_preference ?? "");
+    setPresetSubtitleMode(preset.subtitle_mode ?? "auto");
+  }
+
+  function resetPresetEditor() {
+    setPresetEditId(null);
+    setPresetTitle("");
+    setPresetPathTemplate("{provider}/{channel}");
+    setPresetFilenameTemplate("{title}_{id}");
+    setPresetFormatPreference("bestvideo+bestaudio/best");
+    setPresetQualityPreference("best");
+    setPresetSubtitleMode("auto");
+  }
+
+  async function savePreset() {
+    setBusy(true);
+    setError(null);
+    setNotice(null);
+    try {
+      const current = downloadPresets ?? {
+        default_preset_id: null,
+        presets: [],
+      };
+      const id = presetEditId ?? `preset_${Date.now()}`;
+      const nextPreset: DownloadPreset = {
+        id,
+        title: presetTitle.trim() || "Preset",
+        path_template: presetPathTemplate.trim() || "{provider}/{channel}",
+        filename_template: presetFilenameTemplate.trim() || "{title}_{id}",
+        format_preference: presetFormatPreference.trim() || null,
+        quality_preference: presetQualityPreference.trim() || null,
+        subtitle_mode: presetSubtitleMode.trim() || null,
+      };
+
+      const nextPresets = current.presets.filter((preset) => preset.id !== id);
+      nextPresets.push(nextPreset);
+      const nextConfig: DownloadPresetsConfig = {
+        default_preset_id: current.default_preset_id ?? id,
+        presets: nextPresets,
+      };
+      const saved = await invoke<DownloadPresetsConfig>("download_presets_set", {
+        config_value: nextConfig,
+        configValue: nextConfig,
+      });
+      setDownloadPresets(saved);
+      setNotice(`Saved preset: ${nextPreset.title}`);
+      resetPresetEditor();
+      await refresh();
+    } catch (e) {
+      setError(String(e));
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function deletePreset(presetId: string) {
+    setBusy(true);
+    setError(null);
+    setNotice(null);
+    try {
+      const current = downloadPresets;
+      if (!current) return;
+      const nextPresets = current.presets.filter((preset) => preset.id !== presetId);
+      const nextDefault =
+        current.default_preset_id === presetId ? nextPresets[0]?.id ?? null : current.default_preset_id;
+      const saved = await invoke<DownloadPresetsConfig>("download_presets_set", {
+        config_value: {
+          default_preset_id: nextDefault,
+          presets: nextPresets,
+        },
+        configValue: {
+          default_preset_id: nextDefault,
+          presets: nextPresets,
+        },
+      });
+      setDownloadPresets(saved);
+      if (urlBatchPresetId === presetId) {
+        setUrlBatchPresetId(saved.default_preset_id ?? "");
+      }
+      if (subscriptionPresetId === presetId) {
+        setSubscriptionPresetId("");
+      }
+      setNotice("Preset deleted.");
+      await refresh();
+    } catch (e) {
+      setError(String(e));
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function setDefaultPreset(presetId: string) {
+    setBusy(true);
+    setError(null);
+    setNotice(null);
+    try {
+      if (!downloadPresets) return;
+      const saved = await invoke<DownloadPresetsConfig>("download_presets_set", {
+        config_value: {
+          ...downloadPresets,
+          default_preset_id: presetId,
+        },
+        configValue: {
+          ...downloadPresets,
+          default_preset_id: presetId,
+        },
+      });
+      setDownloadPresets(saved);
+      setUrlBatchPresetId(presetId);
+      setNotice("Default preset updated.");
+      await refresh();
+    } catch (e) {
+      setError(String(e));
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function exportPresetsJson() {
+    setBusy(true);
+    setError(null);
+    setNotice(null);
+    try {
+      const out = await save({
+        title: "Export download presets",
+        defaultPath: "download_presets_export.json",
+        filters: [{ name: "JSON", extensions: ["json"] }],
+      });
+      if (!out || typeof out !== "string") return;
+      await invoke("download_presets_export_json", { outPath: out });
+      setNotice(`Exported presets to ${out}`);
+    } catch (e) {
+      setError(String(e));
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function importPresetsJson() {
+    setBusy(true);
+    setError(null);
+    setNotice(null);
+    try {
+      const selected = await open({
+        multiple: false,
+        directory: false,
+        filters: [{ name: "JSON", extensions: ["json"] }],
+        title: "Import download presets JSON",
+      });
+      if (!selected || typeof selected !== "string") return;
+      const saved = await invoke<DownloadPresetsConfig>("download_presets_import_json", {
+        inPath: selected,
+      });
+      setDownloadPresets(saved);
+      setNotice("Imported presets.");
+      await refresh();
+    } catch (e) {
+      setError(String(e));
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function scanFolderSeedArchive(subscriptionId?: string) {
+    setBusy(true);
+    setError(null);
+    setNotice(null);
+    try {
+      const selected = await open({
+        multiple: false,
+        directory: true,
+        title: "Scan folder and seed archive",
+      });
+      if (!selected || typeof selected !== "string") return;
+      const summary = await invoke<YoutubeSubscriptionArchiveSeedSummary>(
+        "youtube_subscriptions_seed_archive_scan",
+        {
+          scanDir: selected,
+          subscriptionId: subscriptionId ?? null,
+        },
+      );
+      setNotice(
+        `Scanned ${summary.scanned_dir}. Inferred ${summary.inferred_ids} IDs; appended ${summary.appended_ids} across ${summary.archive_files_updated} archive file(s).`,
+      );
+    } catch (e) {
+      setError(String(e));
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function importExistingDownloads() {
+    setBusy(true);
+    setError(null);
+    setNotice(null);
+    try {
+      const selected = await open({
+        multiple: false,
+        directory: true,
+        title: "Import existing downloads (index-only)",
+      });
+      if (!selected || typeof selected !== "string") return;
+      const summary = await invoke<ExistingDownloadsImportSummary>(
+        "youtube_subscriptions_import_existing_downloads",
+        {
+          scanDir: selected,
+        },
+      );
+      setNotice(
+        `Scanned ${summary.discovered_media_files} file(s); imported ${summary.imported_items}, skipped ${summary.skipped_existing_items}, failures ${summary.failures}.`,
       );
       await refresh();
     } catch (e) {
@@ -1083,6 +1549,26 @@ export function LibraryPage({ onOpenEditor }: LibraryPageProps) {
         </div>
         <div className="row">
           <label style={{ display: "flex", alignItems: "center", gap: 8 }}>
+            <span>Preset</span>
+            <select
+              value={urlBatchPresetId}
+              disabled={busy || !downloadPresets}
+              onChange={(e) => setUrlBatchPresetId(e.currentTarget.value)}
+            >
+              <option value="">(Default preset)</option>
+              {(downloadPresets?.presets ?? []).map((preset) => (
+                <option key={preset.id} value={preset.id}>
+                  {preset.title}
+                </option>
+              ))}
+            </select>
+          </label>
+          <div style={{ color: "#4b5563" }}>
+            Applies output template + quality/subtitle preferences for this batch.
+          </div>
+        </div>
+        <div className="row">
+          <label style={{ display: "flex", alignItems: "center", gap: 8 }}>
             <input
               type="checkbox"
               checked={urlBatchUseBrowserCookies}
@@ -1102,6 +1588,224 @@ export function LibraryPage({ onOpenEditor }: LibraryPageProps) {
           <button type="button" disabled={busy || parsedUrlCount === 0} onClick={enqueueUrlBatch}>
             Queue URL batch ({parsedUrlCount})
           </button>
+        </div>
+      </div>
+
+      <div className="card">
+        <h2>Download presets + templates</h2>
+        <div style={{ color: "#4b5563", marginBottom: 8 }}>
+          Define reusable output folder/file templates and quality/subtitle preferences.
+          Supported variables: <code>{"{provider}"}</code>, <code>{"{channel}"}</code>,{" "}
+          <code>{"{playlist}"}</code>, <code>{"{upload_date}"}</code>, <code>{"{title}"}</code>,{" "}
+          <code>{"{id}"}</code>.
+        </div>
+        <div className="row">
+          <label style={{ display: "flex", alignItems: "center", gap: 8, flex: 1 }}>
+            <span>Title</span>
+            <input
+              value={presetTitle}
+              disabled={busy}
+              onChange={(e) => setPresetTitle(e.currentTarget.value)}
+              placeholder="Preset name"
+              style={{ width: "100%" }}
+            />
+          </label>
+          <label style={{ display: "flex", alignItems: "center", gap: 8, flex: 1 }}>
+            <span>Path template</span>
+            <input
+              value={presetPathTemplate}
+              disabled={busy}
+              onChange={(e) => setPresetPathTemplate(e.currentTarget.value)}
+              placeholder="{provider}/{channel}"
+              style={{ width: "100%" }}
+            />
+          </label>
+          <label style={{ display: "flex", alignItems: "center", gap: 8, flex: 1 }}>
+            <span>Filename template</span>
+            <input
+              value={presetFilenameTemplate}
+              disabled={busy}
+              onChange={(e) => setPresetFilenameTemplate(e.currentTarget.value)}
+              placeholder="{title}_{id}"
+              style={{ width: "100%" }}
+            />
+          </label>
+        </div>
+        <div className="row">
+          <label style={{ display: "flex", alignItems: "center", gap: 8 }}>
+            <span>Format</span>
+            <input
+              value={presetFormatPreference}
+              disabled={busy}
+              onChange={(e) => setPresetFormatPreference(e.currentTarget.value)}
+              placeholder="bestvideo+bestaudio/best"
+            />
+          </label>
+          <label style={{ display: "flex", alignItems: "center", gap: 8 }}>
+            <span>Quality</span>
+            <input
+              value={presetQualityPreference}
+              disabled={busy}
+              onChange={(e) => setPresetQualityPreference(e.currentTarget.value)}
+              placeholder="best or 1080p"
+            />
+          </label>
+          <label style={{ display: "flex", alignItems: "center", gap: 8 }}>
+            <span>Subtitles</span>
+            <select
+              value={presetSubtitleMode}
+              disabled={busy}
+              onChange={(e) => setPresetSubtitleMode(e.currentTarget.value)}
+            >
+              <option value="auto">auto</option>
+              <option value="embed">embed</option>
+              <option value="">off</option>
+            </select>
+          </label>
+        </div>
+        <div className="row">
+          <button type="button" disabled={busy} onClick={savePreset}>
+            {presetEditId ? "Update preset" : "Save preset"}
+          </button>
+          <button type="button" disabled={busy} onClick={resetPresetEditor}>
+            Clear editor
+          </button>
+          <button type="button" disabled={busy} onClick={exportPresetsJson}>
+            Export presets
+          </button>
+          <button type="button" disabled={busy} onClick={importPresetsJson}>
+            Import presets
+          </button>
+        </div>
+        <div style={{ color: "#4b5563", marginTop: 8 }}>
+          Default preset:{" "}
+          {downloadPresets?.presets.find((preset) => preset.id === downloadPresets.default_preset_id)?.title ??
+            "-"}
+        </div>
+        <div className="table-wrap">
+          <table>
+            <thead>
+              <tr>
+                <th>Title</th>
+                <th>Path template</th>
+                <th>Filename template</th>
+                <th>Default</th>
+                <th>Actions</th>
+              </tr>
+            </thead>
+            <tbody>
+              {(downloadPresets?.presets ?? []).length ? (
+                (downloadPresets?.presets ?? []).map((preset) => (
+                  <tr key={preset.id}>
+                    <td>{preset.title}</td>
+                    <td>{preset.path_template}</td>
+                    <td>{preset.filename_template}</td>
+                    <td>{downloadPresets?.default_preset_id === preset.id ? "yes" : "no"}</td>
+                    <td>
+                      <div className="row" style={{ marginTop: 0 }}>
+                        <button type="button" disabled={busy} onClick={() => editPreset(preset)}>
+                          Edit
+                        </button>
+                        <button type="button" disabled={busy} onClick={() => setDefaultPreset(preset.id)}>
+                          Set default
+                        </button>
+                        <button type="button" disabled={busy} onClick={() => deletePreset(preset.id)}>
+                          Delete
+                        </button>
+                      </div>
+                    </td>
+                  </tr>
+                ))
+              ) : (
+                <tr>
+                  <td colSpan={5}>No presets yet.</td>
+                </tr>
+              )}
+            </tbody>
+          </table>
+        </div>
+      </div>
+
+      <div className="card">
+        <h2>Subscription groups</h2>
+        <div style={{ color: "#4b5563", marginBottom: 8 }}>
+          Organize subscriptions into groups for filtering and queueing. Deleting a group does not
+          delete subscriptions.
+        </div>
+        <div className="row">
+          <label style={{ display: "flex", alignItems: "center", gap: 8, flex: 1 }}>
+            <span>Group name</span>
+            <input
+              value={groupName}
+              disabled={busy}
+              onChange={(e) => setGroupName(e.currentTarget.value)}
+              placeholder="My group"
+              style={{ width: "100%" }}
+            />
+          </label>
+        </div>
+        <div className="row">
+          <button type="button" disabled={busy} onClick={saveGroup}>
+            {groupEditId ? "Update group" : "Save group"}
+          </button>
+          <button type="button" disabled={busy} onClick={resetGroupEditor}>
+            Clear editor
+          </button>
+          <label style={{ display: "flex", alignItems: "center", gap: 8 }}>
+            <span>Filter subscriptions</span>
+            <select
+              value={subscriptionGroupFilterId}
+              disabled={busy}
+              onChange={(e) => setSubscriptionGroupFilterId(e.currentTarget.value)}
+            >
+              <option value="">All groups</option>
+              {subscriptionGroups.map((group) => (
+                <option key={group.id} value={group.id}>
+                  {group.name}
+                </option>
+              ))}
+            </select>
+          </label>
+        </div>
+        <div className="table-wrap">
+          <table>
+            <thead>
+              <tr>
+                <th>Name</th>
+                <th>Actions</th>
+              </tr>
+            </thead>
+            <tbody>
+              {subscriptionGroups.length ? (
+                subscriptionGroups.map((group) => (
+                  <tr key={group.id}>
+                    <td>{group.name}</td>
+                    <td>
+                      <div className="row" style={{ marginTop: 0 }}>
+                        <button type="button" disabled={busy} onClick={() => editGroup(group)}>
+                          Edit
+                        </button>
+                        <button type="button" disabled={busy} onClick={() => deleteGroup(group.id)}>
+                          Delete
+                        </button>
+                        <button
+                          type="button"
+                          disabled={busy}
+                          onClick={() => setSubscriptionGroupFilterId(group.id)}
+                        >
+                          Filter
+                        </button>
+                      </div>
+                    </td>
+                  </tr>
+                ))
+              ) : (
+                <tr>
+                  <td colSpan={2}>No groups yet.</td>
+                </tr>
+              )}
+            </tbody>
+          </table>
         </div>
       </div>
 
@@ -1179,6 +1883,21 @@ export function LibraryPage({ onOpenEditor }: LibraryPageProps) {
             <span>Active</span>
           </label>
           <label style={{ display: "flex", alignItems: "center", gap: 8 }}>
+            <span>Preset</span>
+            <select
+              value={subscriptionPresetId}
+              disabled={busy}
+              onChange={(e) => setSubscriptionPresetId(e.currentTarget.value)}
+            >
+              <option value="">(Default preset)</option>
+              {(downloadPresets?.presets ?? []).map((preset) => (
+                <option key={preset.id} value={preset.id}>
+                  {preset.title}
+                </option>
+              ))}
+            </select>
+          </label>
+          <label style={{ display: "flex", alignItems: "center", gap: 8 }}>
             <span>Refresh every (min)</span>
             <input
               type="number"
@@ -1201,6 +1920,24 @@ export function LibraryPage({ onOpenEditor }: LibraryPageProps) {
             />
           </label>
         </div>
+        <div className="row">
+          <span style={{ color: "#4b5563" }}>Groups</span>
+          {subscriptionGroups.length ? (
+            subscriptionGroups.map((group) => (
+              <label key={group.id} style={{ display: "flex", alignItems: "center", gap: 6 }}>
+                <input
+                  type="checkbox"
+                  checked={subscriptionGroupIds.includes(group.id)}
+                  disabled={busy}
+                  onChange={() => toggleSubscriptionGroup(group.id)}
+                />
+                <span>{group.name}</span>
+              </label>
+            ))
+          ) : (
+            <span style={{ color: "#4b5563" }}>No groups yet.</span>
+          )}
+        </div>
         <div style={{ color: "#4b5563", marginTop: 6 }}>
           Queue due active uses each subscription interval against its last queued time.
         </div>
@@ -1216,7 +1953,7 @@ export function LibraryPage({ onOpenEditor }: LibraryPageProps) {
             disabled={busy || activeSubscriptionCount === 0}
             onClick={queueAllActiveSubscriptions}
           >
-            Queue due active ({activeSubscriptionCount})
+            {subscriptionGroupFilterId ? "Queue due in group" : "Queue due active"} ({activeSubscriptionCount})
           </button>
           <button type="button" disabled={busy} onClick={exportSubscriptionsJson}>
             Export JSON
@@ -1227,12 +1964,19 @@ export function LibraryPage({ onOpenEditor }: LibraryPageProps) {
           <button type="button" disabled={busy} onClick={import4kvdpSubscriptionsDir}>
             Import 4KVDP exports
           </button>
+          <button type="button" disabled={busy} onClick={() => scanFolderSeedArchive()}>
+            Scan folder + seed archive
+          </button>
+          <button type="button" disabled={busy} onClick={importExistingDownloads}>
+            Import existing downloads
+          </button>
           <button type="button" disabled={busy} onClick={() => refresh()}>
             Refresh subscriptions
           </button>
         </div>
         <div style={{ color: "#4b5563", marginTop: 8 }}>
           Saved subscriptions: {subscriptions.length}
+          {subscriptionGroupFilterId ? ` (filtered: ${groupNameById.get(subscriptionGroupFilterId) ?? "group"})` : ""}
         </div>
         <div className="table-wrap">
           <table>
@@ -1241,25 +1985,46 @@ export function LibraryPage({ onOpenEditor }: LibraryPageProps) {
                 <th>Title</th>
                 <th>URL</th>
                 <th>Folder map</th>
+                <th>Groups</th>
                 <th>Active</th>
+                <th>Preset</th>
                 <th>Interval (min)</th>
                 <th>Last queued</th>
+                <th>Backoff</th>
                 <th>Actions</th>
               </tr>
             </thead>
             <tbody>
-              {subscriptions.length ? (
-                subscriptions.map((sub) => (
+              {visibleSubscriptions.length ? (
+                visibleSubscriptions.map((sub) => (
                   <tr key={sub.id}>
                     <td>{sub.title}</td>
                     <td style={{ maxWidth: 360 }}>{sub.source_url}</td>
                     <td>{sub.folder_map}</td>
+                    <td>
+                      {sub.group_ids.length
+                        ? sub.group_ids.map((id) => groupNameById.get(id) ?? id).join(", ")
+                        : "-"}
+                    </td>
                     <td>{sub.active ? "yes" : "no"}</td>
+                    <td>
+                      {sub.preset_id
+                        ? downloadPresets?.presets.find((preset) => preset.id === sub.preset_id)?.title ??
+                          sub.preset_id
+                        : "(default)"}
+                    </td>
                     <td>{sub.refresh_interval_minutes}</td>
                     <td>
                       {sub.last_queued_at_ms
                         ? new Date(sub.last_queued_at_ms).toLocaleString()
                         : "-"}
+                    </td>
+                    <td>
+                      {sub.next_allowed_refresh_at_ms &&
+                      sub.next_allowed_refresh_at_ms > Date.now()
+                        ? `retry after ${new Date(sub.next_allowed_refresh_at_ms).toLocaleString()}`
+                        : "ready"}
+                      {sub.consecutive_failures > 0 ? ` (${sub.consecutive_failures} fail)` : ""}
                     </td>
                     <td>
                       <div className="row" style={{ marginTop: 0 }}>
@@ -1272,13 +2037,20 @@ export function LibraryPage({ onOpenEditor }: LibraryPageProps) {
                         <button type="button" disabled={busy} onClick={() => deleteSubscription(sub.id)}>
                           Delete
                         </button>
+                        <button
+                          type="button"
+                          disabled={busy}
+                          onClick={() => scanFolderSeedArchive(sub.id)}
+                        >
+                          Seed archive
+                        </button>
                       </div>
                     </td>
                   </tr>
                 ))
               ) : (
                 <tr>
-                  <td colSpan={7}>No subscriptions yet.</td>
+                  <td colSpan={10}>No subscriptions yet.</td>
                 </tr>
               )}
             </tbody>
@@ -1475,7 +2247,11 @@ export function LibraryPage({ onOpenEditor }: LibraryPageProps) {
         <div style={{ color: "#4b5563", marginTop: 6 }}>
           Outputs/artifacts are stored under the app-data folder (open Diagnostics -&gt; App data dir, or use the Outputs button).
         </div>
-        <div className="table-wrap">
+        <div
+          className="table-wrap"
+          style={{ maxHeight: libraryVirtualViewportHeight, overflowY: "auto" }}
+          onScroll={handleItemsScroll}
+        >
           <table>
             <thead>
               <tr>
@@ -1490,51 +2266,63 @@ export function LibraryPage({ onOpenEditor }: LibraryPageProps) {
             </thead>
             <tbody>
               {items.length ? (
-                items.map((item) => (
-                  <tr key={item.id}>
-                    <td>
-                      {item.thumbnail_path ? (
-                        <ThumbnailPreview path={item.thumbnail_path} />
-                      ) : (
-                        "-"
-                      )}
-                    </td>
-                    <td>{item.title}</td>
-                    <td>{formatDuration(item.duration_ms)}</td>
-                    <td>
-                      {item.width && item.height ? `${item.width}x${item.height}` : "-"}
-                      {item.video_codec ? ` (${item.video_codec})` : ""}
-                    </td>
-                    <td>{item.audio_codec ?? "-"}</td>
-                    <td style={{ maxWidth: 420 }}>{item.media_path}</td>
-                    <td>
-                      <div className="row" style={{ marginTop: 0 }}>
-                        <button type="button" disabled={busy} onClick={() => runAsr(item.id)}>
-                          ASR
-                        </button>
-                        <button type="button" disabled={busy} onClick={() => runSeparation(item.id)}>
-                          Separate
-                        </button>
-                        <button type="button" disabled={busy} onClick={() => runMixDubPreview(item.id)}>
-                          Mix dub
-                        </button>
-                        <button type="button" disabled={busy} onClick={() => runMuxDubPreview(item.id)}>
-                          Mux
-                        </button>
-                        <button
-                          type="button"
-                          disabled={busy || !onOpenEditor}
-                          onClick={() => onOpenEditor?.(item.id)}
-                        >
-                          Edit subs
-                        </button>
-                        <button type="button" disabled={busy} onClick={() => openItemOutputs(item.id)}>
-                          Outputs
-                        </button>
-                      </div>
-                    </td>
-                  </tr>
-                ))
+                <>
+                  {libraryVirtualWindow.topSpacerHeight > 0 ? (
+                    <tr aria-hidden="true">
+                      <td colSpan={7} style={{ height: libraryVirtualWindow.topSpacerHeight, padding: 0, border: "none" }} />
+                    </tr>
+                  ) : null}
+                  {libraryVirtualWindow.visibleItems.map((item) => (
+                    <tr key={item.id} style={{ height: libraryVirtualRowHeight }}>
+                      <td>
+                        {item.thumbnail_path ? (
+                          <ThumbnailPreview path={item.thumbnail_path} />
+                        ) : (
+                          "-"
+                        )}
+                      </td>
+                      <td>{item.title}</td>
+                      <td>{formatDuration(item.duration_ms)}</td>
+                      <td>
+                        {item.width && item.height ? `${item.width}x${item.height}` : "-"}
+                        {item.video_codec ? ` (${item.video_codec})` : ""}
+                      </td>
+                      <td>{item.audio_codec ?? "-"}</td>
+                      <td style={{ maxWidth: 420 }}>{item.media_path}</td>
+                      <td>
+                        <div className="row" style={{ marginTop: 0 }}>
+                          <button type="button" disabled={busy} onClick={() => runAsr(item.id)}>
+                            ASR
+                          </button>
+                          <button type="button" disabled={busy} onClick={() => runSeparation(item.id)}>
+                            Separate
+                          </button>
+                          <button type="button" disabled={busy} onClick={() => runMixDubPreview(item.id)}>
+                            Mix dub
+                          </button>
+                          <button type="button" disabled={busy} onClick={() => runMuxDubPreview(item.id)}>
+                            Mux
+                          </button>
+                          <button
+                            type="button"
+                            disabled={busy || !onOpenEditor}
+                            onClick={() => onOpenEditor?.(item.id)}
+                          >
+                            Edit subs
+                          </button>
+                          <button type="button" disabled={busy} onClick={() => openItemOutputs(item.id)}>
+                            Outputs
+                          </button>
+                        </div>
+                      </td>
+                    </tr>
+                  ))}
+                  {libraryVirtualWindow.bottomSpacerHeight > 0 ? (
+                    <tr aria-hidden="true">
+                      <td colSpan={7} style={{ height: libraryVirtualWindow.bottomSpacerHeight, padding: 0, border: "none" }} />
+                    </tr>
+                  ) : null}
+                </>
               ) : (
                 <tr>
                   <td colSpan={7}>No items yet.</td>
@@ -1542,6 +2330,15 @@ export function LibraryPage({ onOpenEditor }: LibraryPageProps) {
               )}
             </tbody>
           </table>
+        </div>
+        <div className="row">
+          <div style={{ color: "#4b5563" }}>
+            Loaded {items.length} item{items.length === 1 ? "" : "s"}
+            {itemsHasMore ? " (more available)" : ""}.
+          </div>
+          <button type="button" disabled={busy || itemsLoadingMore || !itemsHasMore} onClick={loadMoreItems}>
+            {itemsLoadingMore ? "Loading..." : "Load more"}
+          </button>
         </div>
       </div>
     </section>

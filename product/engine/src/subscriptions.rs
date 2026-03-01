@@ -1,12 +1,14 @@
 use crate::paths::AppPaths;
-use crate::{db, jobs, EngineError, Result};
+use crate::{db, jobs, library, EngineError, Result};
 use csv::ReaderBuilder;
+use regex::Regex;
 use rusqlite::params;
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
 use std::io::{BufRead, BufReader, Write};
 use std::path::Path;
 use std::path::PathBuf;
+use std::sync::OnceLock;
 use url::Url;
 use uuid::Uuid;
 
@@ -28,10 +30,16 @@ pub struct YoutubeSubscriptionRow {
     pub output_dir_override: Option<String>,
     pub use_browser_cookies: bool,
     pub active: bool,
+    pub preset_id: Option<String>,
     pub refresh_interval_minutes: i64,
     pub last_queued_at_ms: Option<i64>,
+    pub last_error_at_ms: Option<i64>,
+    pub consecutive_failures: i64,
+    pub next_allowed_refresh_at_ms: Option<i64>,
     pub created_at_ms: i64,
     pub updated_at_ms: i64,
+    #[serde(default)]
+    pub group_ids: Vec<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -43,7 +51,42 @@ pub struct YoutubeSubscriptionUpsert {
     pub output_dir_override: Option<String>,
     pub use_browser_cookies: bool,
     pub active: bool,
+    pub preset_id: Option<String>,
+    #[serde(default)]
+    pub group_ids: Vec<String>,
     pub refresh_interval_minutes: Option<i64>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct YoutubeSubscriptionGroupRow {
+    pub id: String,
+    pub name: String,
+    pub created_at_ms: i64,
+    pub updated_at_ms: i64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct YoutubeSubscriptionGroupUpsert {
+    pub id: Option<String>,
+    pub name: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct YoutubeSubscriptionArchiveSeedSummary {
+    pub scanned_dir: String,
+    pub archive_files_updated: usize,
+    pub inferred_ids: usize,
+    pub appended_ids: usize,
+    pub skipped_existing_ids: usize,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ExistingDownloadsImportSummary {
+    pub scanned_dir: String,
+    pub discovered_media_files: usize,
+    pub imported_items: usize,
+    pub skipped_existing_items: usize,
+    pub failures: usize,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -89,6 +132,10 @@ struct YoutubeSubscriptionsExportEntry {
     use_browser_cookies: bool,
     active: bool,
     #[serde(default)]
+    preset_id: Option<String>,
+    #[serde(default)]
+    group_ids: Vec<String>,
+    #[serde(default)]
     refresh_interval_minutes: Option<i64>,
 }
 
@@ -106,8 +153,12 @@ SELECT
   output_dir_override,
   use_browser_cookies,
   active,
+  preset_id,
   refresh_interval_minutes,
   last_queued_at_ms,
+  last_error_at_ms,
+  consecutive_failures,
+  next_allowed_refresh_at_ms,
   created_at_ms,
   updated_at_ms
 FROM youtube_subscription
@@ -118,7 +169,7 @@ ORDER BY active DESC, updated_at_ms DESC, created_at_ms DESC
     let rows = stmt
         .query_map([], row_to_subscription)?
         .collect::<rusqlite::Result<Vec<_>>>()?;
-    Ok(rows)
+    hydrate_group_ids(&conn, rows)
 }
 
 pub fn upsert_youtube_subscription(
@@ -144,9 +195,10 @@ SET
   output_dir_override = ?4,
   use_browser_cookies = ?5,
   active = ?6,
-  refresh_interval_minutes = ?7,
-  updated_at_ms = ?8
-WHERE id = ?9
+  preset_id = ?7,
+  refresh_interval_minutes = ?8,
+  updated_at_ms = ?9
+WHERE id = ?10
 "#,
             params![
                 &normalized.title,
@@ -155,6 +207,7 @@ WHERE id = ?9
                 &normalized.output_dir_override,
                 bool_to_i64(normalized.use_browser_cookies),
                 bool_to_i64(normalized.active),
+                &normalized.preset_id,
                 normalized.refresh_interval_minutes,
                 now,
                 id,
@@ -177,17 +230,22 @@ INSERT INTO youtube_subscription (
   output_dir_override,
   use_browser_cookies,
   active,
+  preset_id,
   refresh_interval_minutes,
   last_queued_at_ms,
+  last_error_at_ms,
+  consecutive_failures,
+  next_allowed_refresh_at_ms,
   created_at_ms,
   updated_at_ms
-) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, NULL, ?9, ?9)
+) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, NULL, NULL, 0, NULL, ?10, ?10)
 ON CONFLICT(source_url) DO UPDATE SET
   title = excluded.title,
   folder_map = excluded.folder_map,
   output_dir_override = excluded.output_dir_override,
   use_browser_cookies = excluded.use_browser_cookies,
   active = excluded.active,
+  preset_id = excluded.preset_id,
   refresh_interval_minutes = excluded.refresh_interval_minutes,
   updated_at_ms = excluded.updated_at_ms
 "#,
@@ -199,14 +257,18 @@ ON CONFLICT(source_url) DO UPDATE SET
                 &normalized.output_dir_override,
                 bool_to_i64(normalized.use_browser_cookies),
                 bool_to_i64(normalized.active),
+                &normalized.preset_id,
                 normalized.refresh_interval_minutes,
                 now,
             ],
         )?;
     }
 
-    subscription_by_source_url_conn(&conn, normalized.source_url.as_str())?
-        .ok_or_else(|| EngineError::InstallFailed("failed to load saved subscription".to_string()))
+    let mut row = subscription_by_source_url_conn(&conn, normalized.source_url.as_str())?
+        .ok_or_else(|| EngineError::InstallFailed("failed to load saved subscription".to_string()))?;
+    set_subscription_group_memberships_conn(&conn, &row.id, &normalized.group_ids)?;
+    row.group_ids = normalized.group_ids;
+    Ok(row)
 }
 
 pub fn delete_youtube_subscription(paths: &AppPaths, id: &str) -> Result<()> {
@@ -219,7 +281,12 @@ pub fn delete_youtube_subscription(paths: &AppPaths, id: &str) -> Result<()> {
 pub fn get_youtube_subscription_by_id(paths: &AppPaths, id: &str) -> Result<Option<YoutubeSubscriptionRow>> {
     let conn = db::open(paths)?;
     db::migrate(&conn)?;
-    subscription_by_id_conn(&conn, id)
+    let row = subscription_by_id_conn(&conn, id)?;
+    let Some(row) = row else {
+        return Ok(None);
+    };
+    let mut hydrated = hydrate_group_ids(&conn, vec![row])?;
+    Ok(hydrated.pop())
 }
 
 pub fn queue_youtube_subscription(paths: &AppPaths, id: &str) -> Result<Vec<jobs::JobRow>> {
@@ -244,8 +311,12 @@ SELECT
   output_dir_override,
   use_browser_cookies,
   active,
+  preset_id,
   refresh_interval_minutes,
   last_queued_at_ms,
+  last_error_at_ms,
+  consecutive_failures,
+  next_allowed_refresh_at_ms,
   created_at_ms,
   updated_at_ms
 FROM youtube_subscription
@@ -266,6 +337,9 @@ ORDER BY updated_at_ms DESC, created_at_ms DESC
         if !is_subscription_due(&sub, now) {
             continue;
         }
+        if !is_subscription_backoff_ready(&sub, now) {
+            continue;
+        }
         let mut queued = queue_subscription_internal(paths, &sub, batch_id.clone())?;
         all_jobs.append(&mut queued);
     }
@@ -282,6 +356,294 @@ fn is_subscription_due(sub: &YoutubeSubscriptionRow, now_ms_value: i64) -> bool 
         .saturating_mul(60)
         .saturating_mul(1000);
     now_ms_value.saturating_sub(last_queued) >= interval_ms
+}
+
+fn is_subscription_backoff_ready(sub: &YoutubeSubscriptionRow, now_ms_value: i64) -> bool {
+    match sub.next_allowed_refresh_at_ms {
+        Some(next_allowed) => now_ms_value >= next_allowed,
+        None => true,
+    }
+}
+
+pub fn list_youtube_subscription_groups(paths: &AppPaths) -> Result<Vec<YoutubeSubscriptionGroupRow>> {
+    let conn = db::open(paths)?;
+    db::migrate(&conn)?;
+    list_groups_conn(&conn)
+}
+
+pub fn upsert_youtube_subscription_group(
+    paths: &AppPaths,
+    req: YoutubeSubscriptionGroupUpsert,
+) -> Result<YoutubeSubscriptionGroupRow> {
+    let conn = db::open(paths)?;
+    db::migrate(&conn)?;
+    let now = now_ms();
+    let name = req.name.trim();
+    if name.is_empty() {
+        return Err(EngineError::InstallFailed(
+            "group name cannot be empty".to_string(),
+        ));
+    }
+
+    let mut normalized_name = name.to_string();
+    if normalized_name.len() > 100 {
+        normalized_name.truncate(100);
+    }
+
+    if let Some(id) = req.id.as_deref().map(str::trim).filter(|v| !v.is_empty()) {
+        let changed = conn.execute(
+            "UPDATE youtube_subscription_group SET name = ?1, updated_at_ms = ?2 WHERE id = ?3",
+            params![normalized_name, now, id],
+        )?;
+        if changed > 0 {
+            return get_group_by_id_conn(&conn, id)?
+                .ok_or_else(|| EngineError::InstallFailed("group save failed".to_string()));
+        }
+    }
+
+    let id = req
+        .id
+        .as_deref()
+        .map(|v| v.trim().to_string())
+        .filter(|v| !v.is_empty())
+        .unwrap_or_else(|| Uuid::new_v4().to_string());
+    conn.execute(
+        r#"
+INSERT INTO youtube_subscription_group (id, name, created_at_ms, updated_at_ms)
+VALUES (?1, ?2, ?3, ?3)
+ON CONFLICT(id) DO UPDATE SET
+  name = excluded.name,
+  updated_at_ms = excluded.updated_at_ms
+"#,
+        params![id, normalized_name, now],
+    )?;
+    get_group_by_id_conn(&conn, &id)?
+        .ok_or_else(|| EngineError::InstallFailed("group save failed".to_string()))
+}
+
+pub fn delete_youtube_subscription_group(paths: &AppPaths, group_id: &str) -> Result<()> {
+    let conn = db::open(paths)?;
+    db::migrate(&conn)?;
+    conn.execute("DELETE FROM youtube_subscription_group WHERE id = ?1", params![group_id])?;
+    Ok(())
+}
+
+pub fn set_youtube_subscription_groups(
+    paths: &AppPaths,
+    subscription_id: &str,
+    group_ids: Vec<String>,
+) -> Result<Vec<String>> {
+    let conn = db::open(paths)?;
+    db::migrate(&conn)?;
+    set_subscription_group_memberships_conn(&conn, subscription_id, &group_ids)?;
+    list_group_ids_for_subscription_conn(&conn, subscription_id)
+}
+
+pub fn queue_youtube_subscription_group(
+    paths: &AppPaths,
+    group_id: &str,
+) -> Result<Vec<jobs::JobRow>> {
+    let conn = db::open(paths)?;
+    db::migrate(&conn)?;
+    let mut stmt = conn.prepare(
+        r#"
+SELECT
+  sub.id,
+  sub.title,
+  sub.source_url,
+  sub.folder_map,
+  sub.output_dir_override,
+  sub.use_browser_cookies,
+  sub.active,
+  sub.preset_id,
+  sub.refresh_interval_minutes,
+  sub.last_queued_at_ms,
+  sub.last_error_at_ms,
+  sub.consecutive_failures,
+  sub.next_allowed_refresh_at_ms,
+  sub.created_at_ms,
+  sub.updated_at_ms
+FROM youtube_subscription sub
+JOIN youtube_subscription_group_member gm ON gm.subscription_id = sub.id
+WHERE gm.group_id = ?1 AND sub.active = 1
+ORDER BY sub.updated_at_ms DESC, sub.created_at_ms DESC
+"#,
+    )?;
+    let rows = stmt
+        .query_map(params![group_id], row_to_subscription)?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+    drop(stmt);
+    drop(conn);
+
+    let now = now_ms();
+    let batch_id = Some(Uuid::new_v4().to_string());
+    let mut queued_jobs: Vec<jobs::JobRow> = Vec::new();
+    for sub in rows {
+        if !is_subscription_due(&sub, now) {
+            continue;
+        }
+        if !is_subscription_backoff_ready(&sub, now) {
+            continue;
+        }
+        let mut queued = queue_subscription_internal(paths, &sub, batch_id.clone())?;
+        queued_jobs.append(&mut queued);
+    }
+    Ok(queued_jobs)
+}
+
+pub fn record_subscription_refresh_success(paths: &AppPaths, subscription_id: &str) -> Result<()> {
+    let conn = db::open(paths)?;
+    db::migrate(&conn)?;
+    conn.execute(
+        r#"
+UPDATE youtube_subscription
+SET
+  consecutive_failures = 0,
+  last_error_at_ms = NULL,
+  next_allowed_refresh_at_ms = NULL,
+  updated_at_ms = ?1
+WHERE id = ?2
+"#,
+        params![now_ms(), subscription_id],
+    )?;
+    Ok(())
+}
+
+pub fn record_subscription_refresh_failure(
+    paths: &AppPaths,
+    subscription_id: &str,
+) -> Result<()> {
+    let conn = db::open(paths)?;
+    db::migrate(&conn)?;
+    let now = now_ms();
+    let current_failures: i64 = conn
+        .query_row(
+            "SELECT consecutive_failures FROM youtube_subscription WHERE id = ?1",
+            params![subscription_id],
+            |row| row.get(0),
+        )
+        .optional()?
+        .unwrap_or(0);
+
+    let next_failures = current_failures.saturating_add(1);
+    let delay_minutes = 5_i64.saturating_mul(1_i64 << (next_failures.saturating_sub(1).min(6) as u32));
+    let delay_ms = delay_minutes
+        .saturating_mul(60)
+        .saturating_mul(1000)
+        .min(24 * 60 * 60 * 1000);
+
+    conn.execute(
+        r#"
+UPDATE youtube_subscription
+SET
+  consecutive_failures = ?1,
+  last_error_at_ms = ?2,
+  next_allowed_refresh_at_ms = ?3,
+  updated_at_ms = ?2
+WHERE id = ?4
+"#,
+        params![next_failures, now, now.saturating_add(delay_ms), subscription_id],
+    )?;
+    Ok(())
+}
+
+pub fn seed_archive_from_scan(
+    paths: &AppPaths,
+    scan_dir: &Path,
+    subscription_id: Option<String>,
+) -> Result<YoutubeSubscriptionArchiveSeedSummary> {
+    let scan_dir = scan_dir.canonicalize().unwrap_or_else(|_| scan_dir.to_path_buf());
+    if !scan_dir.exists() || !scan_dir.is_dir() {
+        return Err(EngineError::InstallFailed(format!(
+            "scan folder not found: {}",
+            scan_dir.to_string_lossy()
+        )));
+    }
+
+    let inferred_ids = infer_youtube_ids_from_dir(&scan_dir);
+    if inferred_ids.is_empty() {
+        return Ok(YoutubeSubscriptionArchiveSeedSummary {
+            scanned_dir: scan_dir.to_string_lossy().to_string(),
+            archive_files_updated: 0,
+            inferred_ids: 0,
+            appended_ids: 0,
+            skipped_existing_ids: 0,
+        });
+    }
+
+    let target_subscriptions = resolve_seed_target_subscriptions(paths, &scan_dir, subscription_id)?;
+    let mut archive_files_updated = 0_usize;
+    let mut appended_ids = 0_usize;
+    let mut skipped_existing_ids = 0_usize;
+    for sub in target_subscriptions {
+        let archive_path = youtube_subscription_archive_path(paths, &sub)?;
+        if let Some(parent) = archive_path.parent() {
+            std::fs::create_dir_all(parent)?;
+        }
+        let (appended, skipped_existing) = merge_archive_file(&archive_path, &inferred_ids)?;
+        if appended > 0 {
+            archive_files_updated += 1;
+        }
+        appended_ids = appended_ids.saturating_add(appended);
+        skipped_existing_ids = skipped_existing_ids.saturating_add(skipped_existing);
+    }
+
+    Ok(YoutubeSubscriptionArchiveSeedSummary {
+        scanned_dir: scan_dir.to_string_lossy().to_string(),
+        archive_files_updated,
+        inferred_ids: inferred_ids.len(),
+        appended_ids,
+        skipped_existing_ids,
+    })
+}
+
+pub fn import_existing_downloads_index_only(
+    paths: &AppPaths,
+    scan_dir: &Path,
+) -> Result<ExistingDownloadsImportSummary> {
+    let scan_dir = scan_dir.canonicalize().unwrap_or_else(|_| scan_dir.to_path_buf());
+    if !scan_dir.exists() || !scan_dir.is_dir() {
+        return Err(EngineError::InstallFailed(format!(
+            "scan folder not found: {}",
+            scan_dir.to_string_lossy()
+        )));
+    }
+
+    let media_files = collect_media_files(&scan_dir, 6, 10000);
+    let mut imported_items = 0_usize;
+    let mut skipped_existing_items = 0_usize;
+    let mut failures = 0_usize;
+    let conn = db::open(paths)?;
+    db::migrate(&conn)?;
+
+    for file in media_files.iter() {
+        let canonical = file.canonicalize().unwrap_or_else(|_| file.clone());
+        let media_path = canonical.to_string_lossy().to_string();
+        let exists: Option<String> = conn
+            .query_row(
+                "SELECT id FROM library_item WHERE media_path = ?1 LIMIT 1",
+                params![media_path],
+                |row| row.get(0),
+            )
+            .optional()?;
+        if exists.is_some() {
+            skipped_existing_items += 1;
+            continue;
+        }
+
+        match library::import_local_file(paths, &canonical) {
+            Ok(_) => imported_items += 1,
+            Err(_) => failures += 1,
+        }
+    }
+
+    Ok(ExistingDownloadsImportSummary {
+        scanned_dir: scan_dir.to_string_lossy().to_string(),
+        discovered_media_files: media_files.len(),
+        imported_items,
+        skipped_existing_items,
+        failures,
+    })
 }
 
 pub fn export_youtube_subscriptions_json(
@@ -302,6 +664,8 @@ pub fn export_youtube_subscriptions_json(
                 output_dir_override: row.output_dir_override.clone(),
                 use_browser_cookies: row.use_browser_cookies,
                 active: row.active,
+                preset_id: row.preset_id.clone(),
+                group_ids: row.group_ids.clone(),
                 refresh_interval_minutes: Some(row.refresh_interval_minutes),
             })
             .collect(),
@@ -346,6 +710,8 @@ pub fn import_youtube_subscriptions_json(
             output_dir_override: raw.output_dir_override.clone(),
             use_browser_cookies: raw.use_browser_cookies,
             active: raw.active,
+            preset_id: raw.preset_id.clone(),
+            group_ids: raw.group_ids.clone(),
             refresh_interval_minutes: raw.refresh_interval_minutes,
         })?;
 
@@ -360,17 +726,22 @@ INSERT INTO youtube_subscription (
   output_dir_override,
   use_browser_cookies,
   active,
+  preset_id,
   refresh_interval_minutes,
   last_queued_at_ms,
+  last_error_at_ms,
+  consecutive_failures,
+  next_allowed_refresh_at_ms,
   created_at_ms,
   updated_at_ms
-) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, NULL, ?9, ?9)
+) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, NULL, NULL, 0, NULL, ?10, ?10)
 ON CONFLICT(source_url) DO UPDATE SET
   title = excluded.title,
   folder_map = excluded.folder_map,
   output_dir_override = excluded.output_dir_override,
   use_browser_cookies = excluded.use_browser_cookies,
   active = excluded.active,
+  preset_id = excluded.preset_id,
   refresh_interval_minutes = excluded.refresh_interval_minutes,
   updated_at_ms = excluded.updated_at_ms
 "#,
@@ -382,10 +753,14 @@ ON CONFLICT(source_url) DO UPDATE SET
                 normalized.output_dir_override,
                 bool_to_i64(normalized.use_browser_cookies),
                 bool_to_i64(normalized.active),
+                normalized.preset_id,
                 normalized.refresh_interval_minutes,
                 now,
             ],
         )?;
+        if let Some(saved) = subscription_by_source_url_conn(&conn, normalized.source_url.as_str())? {
+            set_subscription_group_memberships_conn(&conn, &saved.id, &normalized.group_ids)?;
+        }
 
         if existed {
             updated += 1;
@@ -483,6 +858,8 @@ pub fn import_youtube_subscriptions_4kvdp_dir(
             output_dir_override,
             use_browser_cookies: false,
             active,
+            preset_id: None,
+            group_ids: Vec::new(),
             refresh_interval_minutes: Some(DEFAULT_REFRESH_INTERVAL_MINUTES),
         })?;
 
@@ -497,17 +874,22 @@ INSERT INTO youtube_subscription (
   output_dir_override,
   use_browser_cookies,
   active,
+  preset_id,
   refresh_interval_minutes,
   last_queued_at_ms,
+  last_error_at_ms,
+  consecutive_failures,
+  next_allowed_refresh_at_ms,
   created_at_ms,
   updated_at_ms
-) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, NULL, ?9, ?9)
+) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, NULL, NULL, 0, NULL, ?10, ?10)
 ON CONFLICT(source_url) DO UPDATE SET
   title = excluded.title,
   folder_map = excluded.folder_map,
   output_dir_override = excluded.output_dir_override,
   use_browser_cookies = excluded.use_browser_cookies,
   active = excluded.active,
+  preset_id = excluded.preset_id,
   refresh_interval_minutes = excluded.refresh_interval_minutes,
   updated_at_ms = excluded.updated_at_ms
 "#,
@@ -519,6 +901,7 @@ ON CONFLICT(source_url) DO UPDATE SET
                 normalized.output_dir_override,
                 bool_to_i64(normalized.use_browser_cookies),
                 bool_to_i64(normalized.active),
+                normalized.preset_id,
                 normalized.refresh_interval_minutes,
                 now,
             ],
@@ -619,7 +1002,7 @@ fn seed_archives_from_4kvdp_entries(
             }
         }
 
-        if let Err(_) = merge_archive_file(&archive_path, &ids) {
+        if merge_archive_file(&archive_path, &ids).is_err() {
             failures += 1;
             continue;
         }
@@ -629,7 +1012,7 @@ fn seed_archives_from_4kvdp_entries(
     Ok((seeded_subs, seeded_entries, skipped_entries, failures))
 }
 
-fn merge_archive_file(path: &Path, video_ids: &HashSet<String>) -> std::io::Result<()> {
+fn merge_archive_file(path: &Path, video_ids: &HashSet<String>) -> std::io::Result<(usize, usize)> {
     let mut existing: HashSet<String> = HashSet::new();
     if path.exists() {
         if let Ok(file) = std::fs::File::open(path) {
@@ -651,9 +1034,14 @@ fn merge_archive_file(path: &Path, video_ids: &HashSet<String>) -> std::io::Resu
     }
 
     let mut merged: Vec<String> = existing.into_iter().collect();
+    let mut appended = 0_usize;
+    let mut skipped_existing = 0_usize;
     for id in video_ids {
         if !merged.iter().any(|v| v == id) {
             merged.push(id.clone());
+            appended += 1;
+        } else {
+            skipped_existing += 1;
         }
     }
     merged.sort();
@@ -662,7 +1050,7 @@ fn merge_archive_file(path: &Path, video_ids: &HashSet<String>) -> std::io::Resu
     for id in merged {
         writeln!(file, "youtube {id}")?;
     }
-    Ok(())
+    Ok((appended, skipped_existing))
 }
 
 pub fn youtube_subscription_output_dir(paths: &AppPaths, sub: &YoutubeSubscriptionRow) -> Result<PathBuf> {
@@ -799,6 +1187,253 @@ fn queue_subscription_internal(
     Ok(vec![queued])
 }
 
+fn hydrate_group_ids(
+    conn: &rusqlite::Connection,
+    mut rows: Vec<YoutubeSubscriptionRow>,
+) -> Result<Vec<YoutubeSubscriptionRow>> {
+    for row in rows.iter_mut() {
+        row.group_ids = list_group_ids_for_subscription_conn(conn, &row.id)?;
+    }
+    Ok(rows)
+}
+
+fn list_groups_conn(conn: &rusqlite::Connection) -> Result<Vec<YoutubeSubscriptionGroupRow>> {
+    let mut stmt = conn.prepare(
+        r#"
+SELECT id, name, created_at_ms, updated_at_ms
+FROM youtube_subscription_group
+ORDER BY lower(name) ASC, created_at_ms ASC
+"#,
+    )?;
+    let rows = stmt
+        .query_map([], |row| {
+            Ok(YoutubeSubscriptionGroupRow {
+                id: row.get(0)?,
+                name: row.get(1)?,
+                created_at_ms: row.get(2)?,
+                updated_at_ms: row.get(3)?,
+            })
+        })?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+    Ok(rows)
+}
+
+fn get_group_by_id_conn(
+    conn: &rusqlite::Connection,
+    group_id: &str,
+) -> Result<Option<YoutubeSubscriptionGroupRow>> {
+    conn.query_row(
+        "SELECT id, name, created_at_ms, updated_at_ms FROM youtube_subscription_group WHERE id = ?1",
+        params![group_id],
+        |row| {
+            Ok(YoutubeSubscriptionGroupRow {
+                id: row.get(0)?,
+                name: row.get(1)?,
+                created_at_ms: row.get(2)?,
+                updated_at_ms: row.get(3)?,
+            })
+        },
+    )
+    .optional()
+    .map_err(Into::into)
+}
+
+fn list_group_ids_for_subscription_conn(
+    conn: &rusqlite::Connection,
+    subscription_id: &str,
+) -> Result<Vec<String>> {
+    let mut stmt = conn.prepare(
+        "SELECT group_id FROM youtube_subscription_group_member WHERE subscription_id = ?1 ORDER BY group_id ASC",
+    )?;
+    let rows = stmt
+        .query_map(params![subscription_id], |row| row.get::<_, String>(0))?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+    Ok(rows)
+}
+
+fn set_subscription_group_memberships_conn(
+    conn: &rusqlite::Connection,
+    subscription_id: &str,
+    group_ids: &[String],
+) -> Result<()> {
+    let mut seen: HashSet<String> = HashSet::new();
+    let mut normalized: Vec<String> = Vec::new();
+    for raw in group_ids {
+        let trimmed = raw.trim();
+        if trimmed.is_empty() || !seen.insert(trimmed.to_string()) {
+            continue;
+        }
+        normalized.push(trimmed.to_string());
+    }
+
+    conn.execute(
+        "DELETE FROM youtube_subscription_group_member WHERE subscription_id = ?1",
+        params![subscription_id],
+    )?;
+    let now = now_ms();
+    for group_id in normalized {
+        let exists = get_group_by_id_conn(conn, &group_id)?.is_some();
+        if !exists {
+            continue;
+        }
+        conn.execute(
+            "INSERT OR IGNORE INTO youtube_subscription_group_member (subscription_id, group_id, created_at_ms) VALUES (?1, ?2, ?3)",
+            params![subscription_id, group_id, now],
+        )?;
+    }
+    Ok(())
+}
+
+fn resolve_seed_target_subscriptions(
+    paths: &AppPaths,
+    scan_dir: &Path,
+    subscription_id: Option<String>,
+) -> Result<Vec<YoutubeSubscriptionRow>> {
+    if let Some(id) = subscription_id
+        .as_deref()
+        .map(str::trim)
+        .filter(|v| !v.is_empty())
+    {
+        if let Some(sub) = get_youtube_subscription_by_id(paths, id)? {
+            return Ok(vec![sub]);
+        }
+        return Err(EngineError::InstallFailed(format!(
+            "subscription not found: {id}"
+        )));
+    }
+
+    let mut subs = list_youtube_subscriptions(paths)?
+        .into_iter()
+        .filter(|sub| sub.active)
+        .collect::<Vec<_>>();
+    if subs.is_empty() {
+        return Ok(Vec::new());
+    }
+
+    let scan_dir = scan_dir.canonicalize().unwrap_or_else(|_| scan_dir.to_path_buf());
+    let mut matched: Vec<YoutubeSubscriptionRow> = Vec::new();
+    for sub in subs.iter() {
+        let output_dir = youtube_subscription_output_dir(paths, sub)?
+            .canonicalize()
+            .unwrap_or_else(|_| youtube_subscription_output_dir(paths, sub).unwrap_or_default());
+        if scan_dir.starts_with(&output_dir) || output_dir.starts_with(&scan_dir) {
+            matched.push(sub.clone());
+        }
+    }
+    if matched.is_empty() {
+        matched.append(&mut subs);
+    }
+    Ok(matched)
+}
+
+fn infer_youtube_ids_from_dir(scan_dir: &Path) -> HashSet<String> {
+    static YT_ID_RE: OnceLock<Regex> = OnceLock::new();
+    let regex = YT_ID_RE
+        .get_or_init(|| Regex::new(r"(?i)(?:^|[^A-Za-z0-9_-])([A-Za-z0-9_-]{11})(?:$|[^A-Za-z0-9_-])").unwrap());
+    let mut ids: HashSet<String> = HashSet::new();
+    let mut stack = vec![scan_dir.to_path_buf()];
+    let max_depth = 6_usize;
+    while let Some(dir) = stack.pop() {
+        let depth = dir
+            .strip_prefix(scan_dir)
+            .ok()
+            .map(|p| p.components().count())
+            .unwrap_or(0);
+        let Ok(entries) = std::fs::read_dir(&dir) else {
+            continue;
+        };
+        for entry in entries.flatten() {
+            let path = entry.path();
+            let Ok(file_type) = entry.file_type() else {
+                continue;
+            };
+            if file_type.is_dir() {
+                if depth < max_depth {
+                    stack.push(path);
+                }
+                continue;
+            }
+            if !file_type.is_file() {
+                continue;
+            }
+            let candidate = path
+                .file_stem()
+                .and_then(|v| v.to_str())
+                .unwrap_or_default()
+                .to_string();
+            for caps in regex.captures_iter(&candidate) {
+                if let Some(m) = caps.get(1) {
+                    let value = m.as_str();
+                    if value
+                        .chars()
+                        .any(|ch| ch.is_ascii_digit() || ch == '-' || ch == '_')
+                    {
+                        ids.insert(value.to_string());
+                    }
+                }
+            }
+        }
+    }
+    ids
+}
+
+fn collect_media_files(scan_dir: &Path, max_depth: usize, max_files: usize) -> Vec<PathBuf> {
+    let mut files: Vec<PathBuf> = Vec::new();
+    let mut stack: Vec<(PathBuf, usize)> = vec![(scan_dir.to_path_buf(), 0)];
+    while let Some((dir, depth)) = stack.pop() {
+        let Ok(entries) = std::fs::read_dir(&dir) else {
+            continue;
+        };
+        for entry in entries.flatten() {
+            let path = entry.path();
+            let Ok(file_type) = entry.file_type() else {
+                continue;
+            };
+            if file_type.is_dir() {
+                if depth < max_depth {
+                    stack.push((path, depth + 1));
+                }
+                continue;
+            }
+            if !file_type.is_file() {
+                continue;
+            }
+            if !is_media_file_ext(&path) {
+                continue;
+            }
+            files.push(path);
+            if files.len() >= max_files {
+                return files;
+            }
+        }
+    }
+    files
+}
+
+fn is_media_file_ext(path: &Path) -> bool {
+    let ext = path
+        .extension()
+        .and_then(|v| v.to_str())
+        .unwrap_or_default()
+        .to_ascii_lowercase();
+    matches!(
+        ext.as_str(),
+        "mp4"
+            | "mkv"
+            | "mov"
+            | "webm"
+            | "m4v"
+            | "avi"
+            | "mp3"
+            | "m4a"
+            | "wav"
+            | "flac"
+            | "aac"
+            | "ogg"
+            | "opus"
+    )
+}
+
 fn subscription_by_id_conn(conn: &rusqlite::Connection, id: &str) -> Result<Option<YoutubeSubscriptionRow>> {
     let mut stmt = conn.prepare(
         r#"
@@ -810,8 +1445,12 @@ SELECT
   output_dir_override,
   use_browser_cookies,
   active,
+  preset_id,
   refresh_interval_minutes,
   last_queued_at_ms,
+  last_error_at_ms,
+  consecutive_failures,
+  next_allowed_refresh_at_ms,
   created_at_ms,
   updated_at_ms
 FROM youtube_subscription
@@ -839,8 +1478,12 @@ SELECT
   output_dir_override,
   use_browser_cookies,
   active,
+  preset_id,
   refresh_interval_minutes,
   last_queued_at_ms,
+  last_error_at_ms,
+  consecutive_failures,
+  next_allowed_refresh_at_ms,
   created_at_ms,
   updated_at_ms
 FROM youtube_subscription
@@ -864,6 +1507,17 @@ fn normalize_upsert(req: YoutubeSubscriptionUpsert) -> Result<NormalizedSubscrip
         .filter(|v| !v.is_empty())
         .unwrap_or_else(|| default_folder_map(&title, &source_url));
     let output_dir_override = normalize_output_dir(req.output_dir_override);
+    let preset_id = req
+        .preset_id
+        .as_deref()
+        .map(|v| v.trim().to_string())
+        .filter(|v| !v.is_empty());
+    let group_ids = req
+        .group_ids
+        .into_iter()
+        .map(|v| v.trim().to_string())
+        .filter(|v| !v.is_empty())
+        .collect::<Vec<_>>();
     let id = req
         .id
         .as_deref()
@@ -878,6 +1532,8 @@ fn normalize_upsert(req: YoutubeSubscriptionUpsert) -> Result<NormalizedSubscrip
         output_dir_override,
         use_browser_cookies: req.use_browser_cookies,
         active: req.active,
+        preset_id,
+        group_ids,
         refresh_interval_minutes: normalize_refresh_interval_minutes(req.refresh_interval_minutes),
     })
 }
@@ -990,10 +1646,15 @@ fn row_to_subscription(row: &rusqlite::Row<'_>) -> rusqlite::Result<YoutubeSubsc
         output_dir_override: row.get(4)?,
         use_browser_cookies: i64_to_bool(row.get::<_, i64>(5)?),
         active: i64_to_bool(row.get::<_, i64>(6)?),
-        refresh_interval_minutes: row.get(7)?,
-        last_queued_at_ms: row.get(8)?,
-        created_at_ms: row.get(9)?,
-        updated_at_ms: row.get(10)?,
+        preset_id: row.get(7)?,
+        refresh_interval_minutes: row.get(8)?,
+        last_queued_at_ms: row.get(9)?,
+        last_error_at_ms: row.get(10)?,
+        consecutive_failures: row.get(11)?,
+        next_allowed_refresh_at_ms: row.get(12)?,
+        created_at_ms: row.get(13)?,
+        updated_at_ms: row.get(14)?,
+        group_ids: Vec::new(),
     })
 }
 
@@ -1025,6 +1686,8 @@ struct NormalizedSubscriptionInput {
     output_dir_override: Option<String>,
     use_browser_cookies: bool,
     active: bool,
+    preset_id: Option<String>,
+    group_ids: Vec<String>,
     refresh_interval_minutes: i64,
 }
 
@@ -1063,6 +1726,8 @@ mod tests {
                 output_dir_override: None,
                 use_browser_cookies: false,
                 active: true,
+                preset_id: None,
+                group_ids: Vec::new(),
                 refresh_interval_minutes: Some(DEFAULT_REFRESH_INTERVAL_MINUTES),
             },
         )
@@ -1136,6 +1801,8 @@ mod tests {
                 output_dir_override: None,
                 use_browser_cookies: false,
                 active: true,
+                preset_id: None,
+                group_ids: Vec::new(),
                 refresh_interval_minutes: Some(DEFAULT_REFRESH_INTERVAL_MINUTES),
             },
         )
@@ -1181,6 +1848,8 @@ mod tests {
                 output_dir_override: None,
                 use_browser_cookies: false,
                 active: true,
+                preset_id: None,
+                group_ids: Vec::new(),
                 refresh_interval_minutes: Some(1),
             },
         )
@@ -1197,6 +1866,8 @@ mod tests {
                 output_dir_override: None,
                 use_browser_cookies: false,
                 active: true,
+                preset_id: None,
+                group_ids: Vec::new(),
                 refresh_interval_minutes: Some(999999),
             },
         )
@@ -1220,6 +1891,8 @@ mod tests {
                 output_dir_override: None,
                 use_browser_cookies: false,
                 active: true,
+                preset_id: None,
+                group_ids: Vec::new(),
                 refresh_interval_minutes: Some(5),
             },
         )
@@ -1234,6 +1907,8 @@ mod tests {
                 output_dir_override: None,
                 use_browser_cookies: false,
                 active: true,
+                preset_id: None,
+                group_ids: Vec::new(),
                 refresh_interval_minutes: Some(60),
             },
         )
@@ -1341,5 +2016,62 @@ downloader_subscription_info_id,entry_id,reference,status\n\
         assert!(a_text.contains("youtube AAAA1111"));
         assert!(!a_text.contains("BBBB2222")); // status=0 should not seed
         assert!(b_text.contains("youtube CCCC3333"));
+    }
+
+    #[test]
+    fn infer_youtube_ids_from_dir_extracts_ids_from_media_filenames() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let root = dir.path();
+        let nested = root.join("nested");
+        std::fs::create_dir_all(&nested).expect("mkdir");
+
+        std::fs::write(root.join("ChannelName - dQw4w9WgXcQ.mp4"), b"x").expect("seed root file");
+        std::fs::write(nested.join("download_[5NV6Rdv1a3I].mkv"), b"x")
+            .expect("seed nested file");
+        std::fs::write(nested.join("ignore_text_only.mp4"), b"x").expect("seed text file");
+
+        let ids = infer_youtube_ids_from_dir(root);
+        assert!(ids.contains("dQw4w9WgXcQ"));
+        assert!(ids.contains("5NV6Rdv1a3I"));
+        assert_eq!(ids.len(), 2);
+    }
+
+    #[test]
+    fn queue_all_active_skips_subscriptions_under_backoff() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let paths = AppPaths::new(dir.path().to_path_buf());
+        crate::db::ensure_schema(&paths).expect("schema");
+
+        let sub = upsert_youtube_subscription(
+            &paths,
+            YoutubeSubscriptionUpsert {
+                id: None,
+                title: "Backoff".to_string(),
+                source_url: "https://www.youtube.com/watch?v=dQw4w9WgXcQ".to_string(),
+                folder_map: Some("backoff".to_string()),
+                output_dir_override: None,
+                use_browser_cookies: false,
+                active: true,
+                preset_id: None,
+                group_ids: Vec::new(),
+                refresh_interval_minutes: Some(MIN_REFRESH_INTERVAL_MINUTES),
+            },
+        )
+        .expect("upsert");
+
+        record_subscription_refresh_failure(&paths, &sub.id).expect("record failure");
+        let blocked = queue_all_active_youtube_subscriptions(&paths).expect("queue blocked");
+        assert!(blocked.is_empty(), "subscription should be blocked by backoff");
+
+        let conn = crate::db::open(&paths).expect("open");
+        crate::db::migrate(&conn).expect("migrate");
+        conn.execute(
+            "UPDATE youtube_subscription SET next_allowed_refresh_at_ms = ?1, last_queued_at_ms = NULL WHERE id = ?2",
+            params![now_ms().saturating_sub(1000), &sub.id],
+        )
+        .expect("force ready");
+
+        let queued = queue_all_active_youtube_subscriptions(&paths).expect("queue ready");
+        assert_eq!(queued.len(), 1);
     }
 }

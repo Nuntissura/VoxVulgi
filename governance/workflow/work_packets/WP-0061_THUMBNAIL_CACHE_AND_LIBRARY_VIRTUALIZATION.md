@@ -3,7 +3,7 @@
 ## Metadata
 - ID: WP-0061
 - Owner: Codex
-- Status: BACKLOG
+- Status: DONE
 - Created: 2026-02-28
 - Target milestone: Phase 1 (downloader UX hardening)
 
@@ -43,4 +43,4 @@ Out of scope:
 ## Status updates
 
 - 2026-02-28: Created.
-
+- 2026-02-28: Implemented bounded disk thumbnail cache (`cache/thumbs`) with age/size eviction, diagnostics status + clear action, and Library list virtualization/incremental loading for large datasets. Added engine unit tests for cache keying/eviction. Verified with `cargo test` (`product/engine`) and `npm -C product/desktop run build`.

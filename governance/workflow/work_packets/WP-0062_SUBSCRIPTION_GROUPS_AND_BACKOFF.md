@@ -3,7 +3,7 @@
 ## Metadata
 - ID: WP-0062
 - Owner: Codex
-- Status: BACKLOG
+- Status: DONE
 - Created: 2026-02-28
 - Target milestone: Phase 1 (subscriptions hardening)
 
@@ -51,4 +51,4 @@ Out of scope:
 ## Status updates
 
 - 2026-02-28: Created.
-
+- 2026-02-28: Added subscription groups/memberships, per-group queueing, per-subscription failure tracking, and exponential backoff gating in queue-all/group queue paths. Added engine tests for backoff queue gating. Verified with `cargo test` (`product/engine`, `product/desktop/src-tauri`) and `npm -C product/desktop run build`.

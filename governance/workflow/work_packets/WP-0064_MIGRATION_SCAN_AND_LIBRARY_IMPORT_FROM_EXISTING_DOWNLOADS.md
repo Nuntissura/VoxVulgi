@@ -3,7 +3,7 @@
 ## Metadata
 - ID: WP-0064
 - Owner: Codex
-- Status: BACKLOG
+- Status: DONE
 - Created: 2026-02-28
 - Target milestone: Phase 1 (migration polish)
 
@@ -44,4 +44,4 @@ Out of scope:
 ## Status updates
 
 - 2026-02-28: Created.
-
+- 2026-02-28: Added folder scan archive seeding and index-only existing-download import commands/UI flows; archive merge is additive and non-destructive. Added unit coverage for ID inference heuristics from media filenames. Verified with `cargo test` (`product/engine`) and desktop build/test validation.

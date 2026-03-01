@@ -50,6 +50,158 @@ pub fn save_batch_on_import_rules(paths: &AppPaths, rules: &BatchOnImportRules) 
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SafeModeConfig {
+    pub enabled: bool,
+}
+
+impl Default for SafeModeConfig {
+    fn default() -> Self {
+        Self { enabled: false }
+    }
+}
+
+pub fn load_safe_mode_config(paths: &AppPaths) -> Result<SafeModeConfig> {
+    let path = paths.safe_mode_config_path();
+    if !path.exists() {
+        return Ok(SafeModeConfig::default());
+    }
+
+    let bytes = std::fs::read(&path)?;
+    let parsed: SafeModeConfig = serde_json::from_slice(&bytes).map_err(|e| {
+        EngineError::InstallFailed(format!(
+            "failed to parse safe mode config at {}: {e}",
+            path.to_string_lossy()
+        ))
+    })?;
+    Ok(parsed)
+}
+
+pub fn save_safe_mode_config(paths: &AppPaths, config: &SafeModeConfig) -> Result<()> {
+    let path = paths.safe_mode_config_path();
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    let json = serde_json::to_string_pretty(config)?;
+    std::fs::write(&path, format!("{json}\n"))?;
+    Ok(())
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DownloadPreset {
+    pub id: String,
+    pub title: String,
+    pub path_template: String,
+    pub filename_template: String,
+    pub format_preference: Option<String>,
+    pub quality_preference: Option<String>,
+    pub subtitle_mode: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DownloadPresetsConfig {
+    pub default_preset_id: Option<String>,
+    pub presets: Vec<DownloadPreset>,
+}
+
+impl Default for DownloadPresetsConfig {
+    fn default() -> Self {
+        let preset = DownloadPreset {
+            id: "default".to_string(),
+            title: "Default".to_string(),
+            path_template: "{provider}/{channel}".to_string(),
+            filename_template: "{title}_{id}".to_string(),
+            format_preference: Some("bestvideo+bestaudio/best".to_string()),
+            quality_preference: Some("best".to_string()),
+            subtitle_mode: Some("auto".to_string()),
+        };
+        Self {
+            default_preset_id: Some(preset.id.clone()),
+            presets: vec![preset],
+        }
+    }
+}
+
+pub fn load_download_presets_config(paths: &AppPaths) -> Result<DownloadPresetsConfig> {
+    let path = paths.download_presets_config_path();
+    if !path.exists() {
+        return Ok(DownloadPresetsConfig::default());
+    }
+    let bytes = std::fs::read(&path)?;
+    let parsed: DownloadPresetsConfig = serde_json::from_slice(&bytes).map_err(|e| {
+        EngineError::InstallFailed(format!(
+            "failed to parse download presets config at {}: {e}",
+            path.to_string_lossy()
+        ))
+    })?;
+    normalize_download_presets_config(parsed)
+}
+
+pub fn save_download_presets_config(paths: &AppPaths, config: &DownloadPresetsConfig) -> Result<()> {
+    let normalized = normalize_download_presets_config(config.clone())?;
+    let path = paths.download_presets_config_path();
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    let json = serde_json::to_string_pretty(&normalized)?;
+    std::fs::write(&path, format!("{json}\n"))?;
+    Ok(())
+}
+
+fn normalize_download_presets_config(mut config: DownloadPresetsConfig) -> Result<DownloadPresetsConfig> {
+    let mut cleaned: Vec<DownloadPreset> = Vec::new();
+    for preset in config.presets.into_iter() {
+        let id = preset.id.trim();
+        let title = preset.title.trim();
+        if id.is_empty() || title.is_empty() {
+            continue;
+        }
+        let path_template = preset.path_template.trim();
+        let filename_template = preset.filename_template.trim();
+        cleaned.push(DownloadPreset {
+            id: id.to_string(),
+            title: title.to_string(),
+            path_template: if path_template.is_empty() {
+                "{provider}/{channel}".to_string()
+            } else {
+                path_template.to_string()
+            },
+            filename_template: if filename_template.is_empty() {
+                "{title}_{id}".to_string()
+            } else {
+                filename_template.to_string()
+            },
+            format_preference: preset
+                .format_preference
+                .map(|v| v.trim().to_string())
+                .filter(|v| !v.is_empty()),
+            quality_preference: preset
+                .quality_preference
+                .map(|v| v.trim().to_string())
+                .filter(|v| !v.is_empty()),
+            subtitle_mode: preset
+                .subtitle_mode
+                .map(|v| v.trim().to_string())
+                .filter(|v| !v.is_empty()),
+        });
+    }
+    if cleaned.is_empty() {
+        return Ok(DownloadPresetsConfig::default());
+    }
+
+    let default_id = config
+        .default_preset_id
+        .as_deref()
+        .map(|v| v.trim().to_string())
+        .filter(|v| !v.is_empty())
+        .filter(|id| cleaned.iter().any(|preset| preset.id == *id))
+        .or_else(|| cleaned.first().map(|preset| preset.id.clone()));
+
+    config.presets = cleaned;
+    config.default_preset_id = default_id;
+    Ok(config)
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct OptionalDiarizationBackendConfig {
     pub enabled: bool,
     /// Backend id (e.g. "baseline", "pyannote_byo_v1").
@@ -156,4 +308,3 @@ fn write_secret_token(path: &Path, token: &str) -> Result<()> {
     std::fs::write(path, format!("{token}\n"))?;
     Ok(())
 }
-

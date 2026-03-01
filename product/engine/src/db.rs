@@ -116,14 +116,37 @@ CREATE TABLE IF NOT EXISTS youtube_subscription (
   output_dir_override TEXT,
   use_browser_cookies INTEGER NOT NULL DEFAULT 0,
   active INTEGER NOT NULL DEFAULT 1,
+  preset_id TEXT,
   refresh_interval_minutes INTEGER NOT NULL DEFAULT 60,
   last_queued_at_ms INTEGER,
+  last_error_at_ms INTEGER,
+  consecutive_failures INTEGER NOT NULL DEFAULT 0,
+  next_allowed_refresh_at_ms INTEGER,
   created_at_ms INTEGER NOT NULL,
   updated_at_ms INTEGER NOT NULL
 );
 
 CREATE INDEX IF NOT EXISTS idx_youtube_subscription_active_updated
   ON youtube_subscription(active, updated_at_ms);
+
+CREATE TABLE IF NOT EXISTS youtube_subscription_group (
+  id TEXT PRIMARY KEY,
+  name TEXT NOT NULL UNIQUE,
+  created_at_ms INTEGER NOT NULL,
+  updated_at_ms INTEGER NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS youtube_subscription_group_member (
+  subscription_id TEXT NOT NULL,
+  group_id TEXT NOT NULL,
+  created_at_ms INTEGER NOT NULL,
+  PRIMARY KEY (subscription_id, group_id),
+  FOREIGN KEY (subscription_id) REFERENCES youtube_subscription(id) ON DELETE CASCADE,
+  FOREIGN KEY (group_id) REFERENCES youtube_subscription_group(id) ON DELETE CASCADE
+);
+
+CREATE INDEX IF NOT EXISTS idx_youtube_subscription_group_member_group
+  ON youtube_subscription_group_member(group_id, subscription_id);
 
 CREATE TABLE IF NOT EXISTS job (
   id TEXT PRIMARY KEY,
@@ -208,7 +231,116 @@ CREATE INDEX IF NOT EXISTS idx_ingest_provenance_created ON ingest_provenance(cr
         )?;
     }
 
-    let current_schema_version = 6;
+    let has_subscription_preset_id = {
+        let mut stmt = conn.prepare("PRAGMA table_info(youtube_subscription)")?;
+        let mut rows = stmt.query([])?;
+        let mut found = false;
+        while let Some(row) = rows.next()? {
+            let name: String = row.get(1)?;
+            if name == "preset_id" {
+                found = true;
+                break;
+            }
+        }
+        found
+    };
+    if !has_subscription_preset_id {
+        conn.execute(
+            "ALTER TABLE youtube_subscription ADD COLUMN preset_id TEXT",
+            [],
+        )?;
+    }
+
+    let has_subscription_last_error_at_ms = {
+        let mut stmt = conn.prepare("PRAGMA table_info(youtube_subscription)")?;
+        let mut rows = stmt.query([])?;
+        let mut found = false;
+        while let Some(row) = rows.next()? {
+            let name: String = row.get(1)?;
+            if name == "last_error_at_ms" {
+                found = true;
+                break;
+            }
+        }
+        found
+    };
+    if !has_subscription_last_error_at_ms {
+        conn.execute(
+            "ALTER TABLE youtube_subscription ADD COLUMN last_error_at_ms INTEGER",
+            [],
+        )?;
+    }
+
+    let has_subscription_consecutive_failures = {
+        let mut stmt = conn.prepare("PRAGMA table_info(youtube_subscription)")?;
+        let mut rows = stmt.query([])?;
+        let mut found = false;
+        while let Some(row) = rows.next()? {
+            let name: String = row.get(1)?;
+            if name == "consecutive_failures" {
+                found = true;
+                break;
+            }
+        }
+        found
+    };
+    if !has_subscription_consecutive_failures {
+        conn.execute(
+            "ALTER TABLE youtube_subscription ADD COLUMN consecutive_failures INTEGER NOT NULL DEFAULT 0",
+            [],
+        )?;
+    }
+
+    let has_subscription_next_allowed_refresh_at_ms = {
+        let mut stmt = conn.prepare("PRAGMA table_info(youtube_subscription)")?;
+        let mut rows = stmt.query([])?;
+        let mut found = false;
+        while let Some(row) = rows.next()? {
+            let name: String = row.get(1)?;
+            if name == "next_allowed_refresh_at_ms" {
+                found = true;
+                break;
+            }
+        }
+        found
+    };
+    if !has_subscription_next_allowed_refresh_at_ms {
+        conn.execute(
+            "ALTER TABLE youtube_subscription ADD COLUMN next_allowed_refresh_at_ms INTEGER",
+            [],
+        )?;
+    }
+
+    conn.execute(
+        "CREATE TABLE IF NOT EXISTS youtube_subscription_group (
+          id TEXT PRIMARY KEY,
+          name TEXT NOT NULL UNIQUE,
+          created_at_ms INTEGER NOT NULL,
+          updated_at_ms INTEGER NOT NULL
+        )",
+        [],
+    )?;
+    conn.execute(
+        "CREATE TABLE IF NOT EXISTS youtube_subscription_group_member (
+          subscription_id TEXT NOT NULL,
+          group_id TEXT NOT NULL,
+          created_at_ms INTEGER NOT NULL,
+          PRIMARY KEY (subscription_id, group_id),
+          FOREIGN KEY (subscription_id) REFERENCES youtube_subscription(id) ON DELETE CASCADE,
+          FOREIGN KEY (group_id) REFERENCES youtube_subscription_group(id) ON DELETE CASCADE
+        )",
+        [],
+    )?;
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_youtube_subscription_group_member_group ON youtube_subscription_group_member(group_id, subscription_id)",
+        [],
+    )?;
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_youtube_subscription_next_allowed ON youtube_subscription(active, next_allowed_refresh_at_ms)",
+        [],
+    )?;
+
+    let current_schema_version = 7;
     let existing: Option<String> = conn
         .query_row(
             "SELECT value FROM meta WHERE key='schema_version'",

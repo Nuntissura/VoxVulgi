@@ -3,7 +3,7 @@
 ## Metadata
 - ID: WP-0063
 - Owner: Codex
-- Status: BACKLOG
+- Status: DONE
 - Created: 2026-02-28
 - Target milestone: Phase 1 (downloader UX parity)
 
@@ -51,4 +51,4 @@ Out of scope:
 ## Status updates
 
 - 2026-02-28: Created.
-
+- 2026-02-28: Added download presets config (default + per-subscription override), output path/filename template rendering for yt-dlp, and preset export/import commands + UI management. Added unit tests for template mapping/sanitization/output template behavior. Verified with `cargo test` (`product/engine`, `product/desktop/src-tauri`) and `npm -C product/desktop run build`.

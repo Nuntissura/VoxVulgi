@@ -3,7 +3,7 @@
 ## Metadata
 - ID: WP-0060
 - Owner: Codex
-- Status: BACKLOG
+- Status: DONE
 - Created: 2026-02-28
 - Target milestone: Phase 1 (downloader UX hardening)
 
@@ -49,4 +49,4 @@ Out of scope:
 ## Status updates
 
 - 2026-02-28: Created.
-
+- 2026-02-28: Implemented safe-mode config + startup gating (no auto heavy startup work, queue paused), added Tauri safe-mode commands, and added UI banner/toggle for recovery mode. Verified with `cargo test` (`product/engine`, `product/desktop/src-tauri`) and `npm -C product/desktop run build`.

@@ -1,4 +1,8 @@
 use tauri::{Manager, State};
+use std::sync::{
+    atomic::{AtomicBool, Ordering},
+    Arc,
+};
 use voxvulgi_engine::models::ModelStore;
 use voxvulgi_engine::paths::AppPaths;
 use voxvulgi_engine::{
@@ -33,6 +37,8 @@ struct ArtifactInfo {
 struct AppState {
     paths: AppPaths,
     runner: jobs::JobRunnerHandle,
+    safe_mode_enabled: Arc<AtomicBool>,
+    safe_mode_cli: bool,
 }
 
 impl Drop for AppState {
@@ -56,6 +62,14 @@ struct DownloadDirStatus {
     default_dir: String,
     exists: bool,
     using_default: bool,
+}
+
+#[derive(Debug, Clone, serde::Serialize)]
+struct SafeModeStatus {
+    enabled: bool,
+    persisted_enabled: bool,
+    cli_enabled: bool,
+    queue_paused: bool,
 }
 
 #[derive(Debug, Clone, serde::Serialize)]
@@ -966,6 +980,28 @@ async fn diagnostics_clear_cache(
 }
 
 #[tauri::command]
+async fn diagnostics_thumbnail_cache_status(
+    state: State<'_, AppState>,
+) -> Result<library::ThumbnailCacheStatus, String> {
+    let paths = state.paths.clone();
+    tauri::async_runtime::spawn_blocking(move || library::thumbnail_cache_status(&paths))
+        .await
+        .map_err(|e| e.to_string())?
+        .map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+async fn diagnostics_thumbnail_cache_clear(
+    state: State<'_, AppState>,
+) -> Result<library::ThumbnailCacheClearSummary, String> {
+    let paths = state.paths.clone();
+    tauri::async_runtime::spawn_blocking(move || library::clear_thumbnail_cache(&paths))
+        .await
+        .map_err(|e| e.to_string())?
+        .map_err(|e| e.to_string())
+}
+
+#[tauri::command]
 async fn diagnostics_export_bundle(
     app: tauri::AppHandle,
     state: State<'_, AppState>,
@@ -1037,6 +1073,37 @@ fn window_close(window: tauri::Window) -> Result<(), String> {
 #[tauri::command]
 fn window_start_drag(window: tauri::Window) -> Result<(), String> {
     window.start_dragging().map_err(|e| e.to_string())
+}
+
+fn build_safe_mode_status(state: &AppState) -> Result<SafeModeStatus, String> {
+    let persisted_enabled = config::load_safe_mode_config(&state.paths)
+        .map(|value| value.enabled)
+        .unwrap_or(false);
+    let queue_paused = jobs::get_queue_control(&state.paths)
+        .map(|value| value.paused)
+        .unwrap_or(false);
+
+    Ok(SafeModeStatus {
+        enabled: state.safe_mode_enabled.load(Ordering::SeqCst),
+        persisted_enabled,
+        cli_enabled: state.safe_mode_cli,
+        queue_paused,
+    })
+}
+
+#[tauri::command]
+fn safe_mode_status(state: State<'_, AppState>) -> Result<SafeModeStatus, String> {
+    build_safe_mode_status(&state)
+}
+
+#[tauri::command]
+fn safe_mode_set(state: State<'_, AppState>, enabled: bool) -> Result<SafeModeStatus, String> {
+    config::save_safe_mode_config(&state.paths, &config::SafeModeConfig { enabled })
+        .map_err(|e| e.to_string())?;
+    state.safe_mode_enabled.store(enabled, Ordering::SeqCst);
+
+    let _ = jobs::set_queue_paused(&state.paths, enabled);
+    build_safe_mode_status(&state)
 }
 
 #[tauri::command]
@@ -1579,6 +1646,115 @@ fn youtube_subscriptions_import_4kvdp_dir(
 }
 
 #[tauri::command]
+fn youtube_subscription_groups_list(
+    state: State<'_, AppState>,
+) -> Result<Vec<subscriptions::YoutubeSubscriptionGroupRow>, String> {
+    subscriptions::list_youtube_subscription_groups(&state.paths).map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+fn youtube_subscription_groups_upsert(
+    state: State<'_, AppState>,
+    group: subscriptions::YoutubeSubscriptionGroupUpsert,
+) -> Result<subscriptions::YoutubeSubscriptionGroupRow, String> {
+    subscriptions::upsert_youtube_subscription_group(&state.paths, group).map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+fn youtube_subscription_groups_delete(
+    state: State<'_, AppState>,
+    id: String,
+) -> Result<(), String> {
+    subscriptions::delete_youtube_subscription_group(&state.paths, &id).map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+fn youtube_subscription_groups_set_for_subscription(
+    state: State<'_, AppState>,
+    subscription_id: String,
+    group_ids: Vec<String>,
+) -> Result<Vec<String>, String> {
+    subscriptions::set_youtube_subscription_groups(&state.paths, &subscription_id, group_ids)
+        .map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+fn youtube_subscriptions_queue_group(
+    state: State<'_, AppState>,
+    group_id: String,
+) -> Result<Vec<jobs::JobRow>, String> {
+    subscriptions::queue_youtube_subscription_group(&state.paths, &group_id).map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+fn youtube_subscriptions_seed_archive_scan(
+    state: State<'_, AppState>,
+    scan_dir: String,
+    subscription_id: Option<String>,
+) -> Result<subscriptions::YoutubeSubscriptionArchiveSeedSummary, String> {
+    subscriptions::seed_archive_from_scan(
+        &state.paths,
+        &std::path::PathBuf::from(scan_dir),
+        subscription_id,
+    )
+    .map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+fn youtube_subscriptions_import_existing_downloads(
+    state: State<'_, AppState>,
+    scan_dir: String,
+) -> Result<subscriptions::ExistingDownloadsImportSummary, String> {
+    subscriptions::import_existing_downloads_index_only(
+        &state.paths,
+        &std::path::PathBuf::from(scan_dir),
+    )
+    .map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+fn download_presets_get(
+    state: State<'_, AppState>,
+) -> Result<config::DownloadPresetsConfig, String> {
+    config::load_download_presets_config(&state.paths).map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+fn download_presets_set(
+    state: State<'_, AppState>,
+    config_value: config::DownloadPresetsConfig,
+) -> Result<config::DownloadPresetsConfig, String> {
+    config::save_download_presets_config(&state.paths, &config_value).map_err(|e| e.to_string())?;
+    config::load_download_presets_config(&state.paths).map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+fn download_presets_export_json(
+    state: State<'_, AppState>,
+    out_path: String,
+) -> Result<(), String> {
+    let config_value = config::load_download_presets_config(&state.paths).map_err(|e| e.to_string())?;
+    let out_path = std::path::PathBuf::from(out_path);
+    if let Some(parent) = out_path.parent() {
+        std::fs::create_dir_all(parent).map_err(|e| e.to_string())?;
+    }
+    let json = serde_json::to_string_pretty(&config_value).map_err(|e| e.to_string())?;
+    std::fs::write(out_path, format!("{json}\n")).map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+fn download_presets_import_json(
+    state: State<'_, AppState>,
+    in_path: String,
+) -> Result<config::DownloadPresetsConfig, String> {
+    let bytes = std::fs::read(std::path::PathBuf::from(in_path)).map_err(|e| e.to_string())?;
+    let parsed: config::DownloadPresetsConfig =
+        serde_json::from_slice(&bytes).map_err(|e| e.to_string())?;
+    config::save_download_presets_config(&state.paths, &parsed).map_err(|e| e.to_string())?;
+    config::load_download_presets_config(&state.paths).map_err(|e| e.to_string())
+}
+
+#[tauri::command]
 fn subtitles_list_tracks(
     state: State<'_, AppState>,
     item_id: String,
@@ -1650,6 +1826,7 @@ fn jobs_enqueue_download_batch(
     auth_cookie: Option<String>,
     output_dir: Option<String>,
     use_browser_cookies: Option<bool>,
+    preset_id: Option<String>,
 ) -> Result<Vec<jobs::JobRow>, String> {
     jobs::enqueue_download_direct_url_batch(
         &state.paths,
@@ -1657,6 +1834,7 @@ fn jobs_enqueue_download_batch(
         auth_cookie,
         output_dir,
         use_browser_cookies,
+        preset_id,
     )
     .map_err(|e| e.to_string())
 }
@@ -1966,13 +2144,28 @@ pub fn run() {
             let base_dir = app.path().app_data_dir()?;
             let paths = AppPaths::new(AppPaths::normalize_base_dir(&base_dir));
             paths.ensure_dirs()?;
+            let cli_safe_mode = std::env::args().any(|value| value.trim() == "--safe-mode");
+            let persisted_safe_mode = config::load_safe_mode_config(&paths)
+                .map(|value| value.enabled)
+                .unwrap_or(false);
+            let safe_mode_enabled = cli_safe_mode || persisted_safe_mode;
             if let Ok(resource_dir) = app.path().resource_dir() {
-                apply_offline_bundle_if_present(&paths, &resource_dir)
-                    .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e))?;
+                if !safe_mode_enabled {
+                    apply_offline_bundle_if_present(&paths, &resource_dir)
+                        .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e))?;
+                }
             }
             db::ensure_schema(&paths)?;
+            if safe_mode_enabled {
+                let _ = jobs::set_queue_paused(&paths, true);
+            }
             let runner = jobs::start_runner(paths.clone())?;
-            app.manage(AppState { paths, runner });
+            app.manage(AppState {
+                paths,
+                runner,
+                safe_mode_enabled: Arc::new(AtomicBool::new(safe_mode_enabled)),
+                safe_mode_cli: cli_safe_mode,
+            });
             Ok(())
         })
         .plugin(tauri_plugin_dialog::init())
@@ -1980,6 +2173,8 @@ pub fn run() {
          .invoke_handler(tauri::generate_handler![
              diagnostics_info,
              diagnostics_clear_cache,
+             diagnostics_thumbnail_cache_clear,
+             diagnostics_thumbnail_cache_status,
              diagnostics_export_bundle,
              diagnostics_generate_licensing_report,
              diagnostics_storage_breakdown,
@@ -1992,6 +2187,8 @@ pub fn run() {
              diagnostics_trace_dir_status,
              diagnostics_trace_dir_use_default,
              diagnostics_trace_write_event,
+             safe_mode_set,
+             safe_mode_status,
              downloads_dir_set,
              downloads_dir_status,
              downloads_dir_use_default,
@@ -2000,16 +2197,27 @@ pub fn run() {
              config_diarization_optional_clear_token,
              config_diarization_optional_set,
              config_diarization_optional_status,
+             download_presets_export_json,
+             download_presets_get,
+             download_presets_import_json,
+             download_presets_set,
              library_get,
              library_list,
+             youtube_subscription_groups_delete,
+             youtube_subscription_groups_list,
+             youtube_subscription_groups_set_for_subscription,
+             youtube_subscription_groups_upsert,
              youtube_subscriptions_list,
-             youtube_subscriptions_upsert,
+              youtube_subscriptions_upsert,
              youtube_subscriptions_delete,
+             youtube_subscriptions_import_existing_downloads,
              youtube_subscriptions_queue_one,
              youtube_subscriptions_queue_all_active,
+             youtube_subscriptions_queue_group,
              youtube_subscriptions_export_json,
              youtube_subscriptions_import_json,
              youtube_subscriptions_import_4kvdp_dir,
+             youtube_subscriptions_seed_archive_scan,
              jobs_cancel,
              jobs_cancel_all,
              jobs_enqueue_dummy,

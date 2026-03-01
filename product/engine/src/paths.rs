@@ -58,6 +58,10 @@ impl AppPaths {
         self.base_dir.join("cache")
     }
 
+    pub fn thumbnail_cache_dir(&self) -> PathBuf {
+        self.cache_dir().join("thumbs")
+    }
+
     pub fn secrets_dir(&self) -> PathBuf {
         self.base_dir.join("secrets")
     }
@@ -256,6 +260,14 @@ impl AppPaths {
         self.config_dir().join("batch_on_import_rules.json")
     }
 
+    pub fn safe_mode_config_path(&self) -> PathBuf {
+        self.config_dir().join("safe_mode.json")
+    }
+
+    pub fn download_presets_config_path(&self) -> PathBuf {
+        self.config_dir().join("download_presets.json")
+    }
+
     pub fn diarization_optional_backend_config_path(&self) -> PathBuf {
         self.config_dir().join("diarization_optional_backend.json")
     }
@@ -320,6 +332,7 @@ impl AppPaths {
         std::fs::create_dir_all(self.job_logs_dir())?;
         std::fs::create_dir_all(self.default_diagnostics_trace_dir())?;
         std::fs::create_dir_all(self.cache_dir())?;
+        std::fs::create_dir_all(self.thumbnail_cache_dir())?;
         std::fs::create_dir_all(self.job_secrets_dir())?;
         std::fs::create_dir_all(self.models_dir())?;
         std::fs::create_dir_all(self.ffmpeg_dir())?;

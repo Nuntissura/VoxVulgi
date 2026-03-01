@@ -126,6 +126,19 @@ type CacheClearSummary = {
   removed_bytes: number;
 };
 
+type ThumbnailCacheStatus = {
+  cache_dir: string;
+  total_bytes: number;
+  total_files: number;
+  max_bytes: number;
+  max_age_days: number;
+};
+
+type ThumbnailCacheClearSummary = {
+  removed_entries: number;
+  removed_bytes: number;
+};
+
 type JobLogRetentionPolicy = {
   rotate_bytes: number;
   max_backups: number;
@@ -270,6 +283,7 @@ export function DiagnosticsPage() {
   const [diarizationOptionalTokenDraft, setDiarizationOptionalTokenDraft] = useState("");
   const [licensingReport, setLicensingReport] = useState<LicensingReportResult | null>(null);
   const [storage, setStorage] = useState<StorageBreakdown | null>(null);
+  const [thumbnailCache, setThumbnailCache] = useState<ThumbnailCacheStatus | null>(null);
   const [policy, setPolicy] = useState<JobLogRetentionPolicy | null>(null);
   const [diagnosticsTraceDir, setDiagnosticsTraceDir] =
     useState<DiagnosticsTraceDirStatus | null>(null);
@@ -300,6 +314,7 @@ export function DiagnosticsPage() {
       nextBatchRules,
       nextDiarizationOptional,
       nextStorage,
+      nextThumbnailCache,
       nextPolicy,
       nextDiagnosticsTraceDir,
       nextJobs,
@@ -323,6 +338,7 @@ export function DiagnosticsPage() {
       invoke<BatchOnImportRules>("config_batch_on_import_get"),
       invoke<OptionalDiarizationBackendStatus>("config_diarization_optional_status"),
       invoke<StorageBreakdown>("diagnostics_storage_breakdown"),
+      invoke<ThumbnailCacheStatus>("diagnostics_thumbnail_cache_status"),
       invoke<JobLogRetentionPolicy>("jobs_log_retention_policy"),
       invoke<DiagnosticsTraceDirStatus>("diagnostics_trace_dir_status"),
       invoke<JobRow[]>("jobs_list", { limit: 200, offset: 0 }),
@@ -347,6 +363,7 @@ export function DiagnosticsPage() {
     setDiarizationOptional(nextDiarizationOptional);
     setDiarizationOptionalDraft((prev) => prev ?? nextDiarizationOptional.config);
     setStorage(nextStorage);
+    setThumbnailCache(nextThumbnailCache);
     setPolicy(nextPolicy);
     setDiagnosticsTraceDir(nextDiagnosticsTraceDir);
     setJobs(nextJobs);
@@ -830,6 +847,32 @@ export function DiagnosticsPage() {
       const summary = await invoke<CacheClearSummary>("diagnostics_clear_cache");
       setNotice(
         `Cleared ${summary.removed_entries} cache entr${summary.removed_entries === 1 ? "y" : "ies"} (${formatBytes(summary.removed_bytes)}).`,
+      );
+      await refresh();
+    } catch (e) {
+      setError(String(e));
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function clearThumbnailCache() {
+    const ok = await confirm(
+      "Clear thumbnail cache files? This will not delete library media or metadata.",
+      {
+        title: "Clear thumbnail cache",
+        kind: "warning",
+      },
+    );
+    if (!ok) return;
+
+    setBusy(true);
+    setError(null);
+    setNotice(null);
+    try {
+      const summary = await invoke<ThumbnailCacheClearSummary>("diagnostics_thumbnail_cache_clear");
+      setNotice(
+        `Cleared ${summary.removed_entries} thumbnail entr${summary.removed_entries === 1 ? "y" : "ies"} (${formatBytes(summary.removed_bytes)}).`,
       );
       await refresh();
     } catch (e) {
@@ -1747,6 +1790,26 @@ export function DiagnosticsPage() {
           <div className="v">{storage ? formatBytes(storage.cache_bytes) : "-"}</div>
         </div>
         <div className="kv">
+          <div className="k">Thumbnail cache</div>
+          <div className="v">
+            {thumbnailCache
+              ? `${formatBytes(thumbnailCache.total_bytes)} across ${thumbnailCache.total_files} file${thumbnailCache.total_files === 1 ? "" : "s"}`
+              : "-"}
+          </div>
+        </div>
+        <div className="kv">
+          <div className="k">Thumbnail cache policy</div>
+          <div className="v">
+            {thumbnailCache
+              ? `max ${formatBytes(thumbnailCache.max_bytes)}, age ${thumbnailCache.max_age_days}d`
+              : "-"}
+          </div>
+        </div>
+        <div className="kv">
+          <div className="k">Thumbnail cache dir</div>
+          <div className="v">{thumbnailCache?.cache_dir ?? "-"}</div>
+        </div>
+        <div className="kv">
           <div className="k">Logs</div>
           <div className="v">{storage ? formatBytes(storage.logs_bytes) : "-"}</div>
         </div>
@@ -1765,6 +1828,9 @@ export function DiagnosticsPage() {
           </button>
           <button type="button" disabled={busy} onClick={clearCache}>
             Clear cache
+          </button>
+          <button type="button" disabled={busy} onClick={clearThumbnailCache}>
+            Clear thumbnail cache
           </button>
           <button type="button" disabled={busy} onClick={flushJobsCache}>
             Flush job history

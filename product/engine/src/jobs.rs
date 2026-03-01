@@ -380,6 +380,18 @@ struct DownloadDirectUrlParams {
     use_browser_cookies: bool,
     #[serde(default)]
     subscription_id: Option<String>,
+    #[serde(default)]
+    preset_id: Option<String>,
+    #[serde(default)]
+    output_path_template: Option<String>,
+    #[serde(default)]
+    filename_template: Option<String>,
+    #[serde(default)]
+    format_preference: Option<String>,
+    #[serde(default)]
+    quality_preference: Option<String>,
+    #[serde(default)]
+    subtitle_mode: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -691,6 +703,7 @@ pub fn enqueue_download_direct_url_batch(
     auth_cookie: Option<String>,
     output_dir: Option<String>,
     use_browser_cookies: Option<bool>,
+    preset_id: Option<String>,
 ) -> Result<Vec<JobRow>> {
     enqueue_download_direct_url_batch_raw(
         paths,
@@ -699,6 +712,7 @@ pub fn enqueue_download_direct_url_batch(
         auth_cookie,
         output_dir,
         use_browser_cookies,
+        preset_id,
         None,
     )
 }
@@ -710,6 +724,7 @@ pub fn enqueue_download_direct_url_batch_raw(
     auth_cookie: Option<String>,
     output_dir: Option<String>,
     use_browser_cookies: Option<bool>,
+    preset_id: Option<String>,
     batch_id: Option<String>,
 ) -> Result<Vec<JobRow>> {
     enqueue_download_direct_url_batch_raw_with_subscription(
@@ -719,6 +734,7 @@ pub fn enqueue_download_direct_url_batch_raw(
         auth_cookie,
         output_dir,
         use_browser_cookies,
+        preset_id,
         batch_id,
         None,
     )
@@ -758,6 +774,7 @@ fn enqueue_download_direct_url_batch_raw_with_subscription(
     auth_cookie: Option<String>,
     output_dir: Option<String>,
     use_browser_cookies: Option<bool>,
+    preset_id: Option<String>,
     batch_id: Option<String>,
     subscription_id: Option<String>,
 ) -> Result<Vec<JobRow>> {
@@ -782,6 +799,7 @@ fn enqueue_download_direct_url_batch_raw_with_subscription(
         .map(|v| v.trim().to_string())
         .filter(|v| !v.is_empty())
         .unwrap_or_else(|| DOWNLOAD_PROVIDER_DIRECT_HTTP.to_string());
+    let preset = resolve_download_preset(paths, preset_id.as_deref())?;
     let batch_id = batch_id.or_else(|| Some(Uuid::new_v4().to_string()));
     let mut jobs: Vec<JobRow> = Vec::with_capacity(urls.len());
     for url in urls {
@@ -794,6 +812,12 @@ fn enqueue_download_direct_url_batch_raw_with_subscription(
             output_dir: output_dir.clone(),
             use_browser_cookies,
             subscription_id: subscription_id.clone(),
+            preset_id: Some(preset.id.clone()),
+            output_path_template: Some(preset.path_template.clone()),
+            filename_template: Some(preset.filename_template.clone()),
+            format_preference: preset.format_preference.clone(),
+            quality_preference: preset.quality_preference.clone(),
+            subtitle_mode: preset.subtitle_mode.clone(),
         })?;
         let job = enqueue_with_type_item_and_batch_id(
             paths,
@@ -853,6 +877,7 @@ pub fn enqueue_download_instagram_batch(
         auth_cookie,
         output_dir,
         Some(use_browser_cookies),
+        None,
         None,
     )
 }
@@ -1707,6 +1732,11 @@ fn execute_job(paths: &AppPaths, job_id: &str, type_str: &str, params_json: &str
                     output_dir.as_deref(),
                     output_subdir.as_deref(),
                     use_browser_cookies,
+                    p.output_path_template.as_deref(),
+                    p.filename_template.as_deref(),
+                    p.format_preference.as_deref(),
+                    p.quality_preference.as_deref(),
+                    p.subtitle_mode.as_deref(),
                 )?;
             set_progress(paths, job_id, 0.70)?;
 
@@ -1767,93 +1797,107 @@ fn execute_job(paths: &AppPaths, job_id: &str, type_str: &str, params_json: &str
                 return Ok(());
             }
 
-            let sub = subscriptions::get_youtube_subscription_by_id(paths, &p.subscription_id)?
-                .ok_or_else(|| EngineError::InstallFailed(format!("subscription not found: {}", p.subscription_id)))?;
+            let refresh_result: Result<()> = (|| {
+                let sub = subscriptions::get_youtube_subscription_by_id(paths, &p.subscription_id)?
+                    .ok_or_else(|| EngineError::InstallFailed(format!("subscription not found: {}", p.subscription_id)))?;
 
-            let max_items = p.max_items.unwrap_or(200).clamp(1, MAX_DOWNLOAD_BATCH_URLS);
-            let output_dir = subscriptions::youtube_subscription_output_dir(paths, &sub)?;
-            std::fs::create_dir_all(&output_dir)?;
+                let max_items = p.max_items.unwrap_or(200).clamp(1, MAX_DOWNLOAD_BATCH_URLS);
+                let output_dir = subscriptions::youtube_subscription_output_dir(paths, &sub)?;
+                std::fs::create_dir_all(&output_dir)?;
 
-            let archive_path = subscriptions::youtube_subscription_archive_path(paths, &sub)?;
-            let archived = read_ytdlp_archive_ids(&archive_path).unwrap_or_default();
+                let archive_path = subscriptions::youtube_subscription_archive_path(paths, &sub)?;
+                let archived = read_ytdlp_archive_ids(&archive_path).unwrap_or_default();
 
-            log_line(
-                paths,
-                job_id,
-                "info",
-                "youtube_subscription_refresh_begin",
-                serde_json::json!({
-                    "subscription_id": sub.id,
-                    "source_url": redact_url_for_log(&sub.source_url),
-                    "max_items": max_items,
-                }),
-            )?;
+                log_line(
+                    paths,
+                    job_id,
+                    "info",
+                    "youtube_subscription_refresh_begin",
+                    serde_json::json!({
+                        "subscription_id": sub.id,
+                        "source_url": redact_url_for_log(&sub.source_url),
+                        "max_items": max_items,
+                    }),
+                )?;
 
-            let expanded = expand_yt_dlp_urls(
-                paths,
-                &sub.source_url,
-                max_items,
-                None,
-                use_browser_cookies_for_url(&sub.source_url, sub.use_browser_cookies),
-            )?;
-            set_progress(paths, job_id, 0.40)?;
+                let expanded = expand_yt_dlp_urls(
+                    paths,
+                    &sub.source_url,
+                    max_items,
+                    None,
+                    use_browser_cookies_for_url(&sub.source_url, sub.use_browser_cookies),
+                )?;
+                set_progress(paths, job_id, 0.40)?;
 
-            if is_canceled(paths, job_id)? {
-                log_line(paths, job_id, "info", "job_canceled", serde_json::json!({}))?;
-                return Ok(());
-            }
-
-            let mut new_urls: Vec<String> = Vec::new();
-            let mut skipped_archived = 0_usize;
-            for candidate in expanded {
-                let Some(video_id) = subscriptions::youtube_video_id_from_url(candidate.as_str()) else {
-                    continue;
-                };
-                if archived.contains(video_id.as_str()) {
-                    skipped_archived += 1;
-                    continue;
+                if is_canceled(paths, job_id)? {
+                    log_line(paths, job_id, "info", "job_canceled", serde_json::json!({}))?;
+                    return Ok(());
                 }
-                new_urls.push(candidate);
-            }
 
-            if new_urls.is_empty() {
+                let mut new_urls: Vec<String> = Vec::new();
+                let mut skipped_archived = 0_usize;
+                for candidate in expanded {
+                    let Some(video_id) = subscriptions::youtube_video_id_from_url(candidate.as_str()) else {
+                        continue;
+                    };
+                    if archived.contains(video_id.as_str()) {
+                        skipped_archived += 1;
+                        continue;
+                    }
+                    new_urls.push(candidate);
+                }
+
+                if new_urls.is_empty() {
+                    set_progress(paths, job_id, 1.0)?;
+                    log_line(
+                        paths,
+                        job_id,
+                        "info",
+                        "youtube_subscription_refresh_done",
+                        serde_json::json!({
+                            "queued": 0,
+                            "skipped_archived": skipped_archived,
+                        }),
+                    )?;
+                    return Ok(());
+                }
+
+                let queued = enqueue_download_direct_url_batch_raw_with_subscription(
+                    paths,
+                    new_urls,
+                    Some(DOWNLOAD_PROVIDER_YOUTUBE_YT_DLP.to_string()),
+                    None,
+                    Some(output_dir.to_string_lossy().to_string()),
+                    Some(sub.use_browser_cookies),
+                    sub.preset_id.clone(),
+                    Some(job_id.to_string()),
+                    Some(sub.id.clone()),
+                )?;
                 set_progress(paths, job_id, 1.0)?;
+
                 log_line(
                     paths,
                     job_id,
                     "info",
                     "youtube_subscription_refresh_done",
                     serde_json::json!({
-                        "queued": 0,
+                        "queued": queued.len(),
                         "skipped_archived": skipped_archived,
+                        "archive_path": archive_path.to_string_lossy().to_string(),
                     }),
                 )?;
-                return Ok(());
+                Ok(())
+            })();
+
+            match refresh_result {
+                Ok(()) => {
+                    let _ = subscriptions::record_subscription_refresh_success(paths, &p.subscription_id);
+                }
+                Err(err) => {
+                    let _ = subscriptions::record_subscription_refresh_failure(paths, &p.subscription_id);
+                    return Err(err);
+                }
             }
-
-            let queued = enqueue_download_direct_url_batch_raw_with_subscription(
-                paths,
-                new_urls,
-                Some(DOWNLOAD_PROVIDER_YOUTUBE_YT_DLP.to_string()),
-                None,
-                Some(output_dir.to_string_lossy().to_string()),
-                Some(sub.use_browser_cookies),
-                Some(job_id.to_string()),
-                Some(sub.id.clone()),
-            )?;
-            set_progress(paths, job_id, 1.0)?;
-
-            log_line(
-                paths,
-                job_id,
-                "info",
-                "youtube_subscription_refresh_done",
-                serde_json::json!({
-                    "queued": queued.len(),
-                    "skipped_archived": skipped_archived,
-                    "archive_path": archive_path.to_string_lossy().to_string(),
-                }),
-            )?;
         }
         JobType::DownloadImageBatch => {
             set_progress(paths, job_id, 0.05)?;
@@ -7930,6 +7974,11 @@ fn download_url_to_library(
     output_dir: Option<&str>,
     output_subdir: Option<&str>,
     use_browser_cookies: bool,
+    output_path_template: Option<&str>,
+    filename_template: Option<&str>,
+    format_preference: Option<&str>,
+    quality_preference: Option<&str>,
+    subtitle_mode: Option<&str>,
 ) -> Result<PathBuf> {
     if provider == DOWNLOAD_PROVIDER_YOUTUBE_YT_DLP {
         return download_yt_dlp_url_to_library(
@@ -7940,10 +7989,27 @@ fn download_url_to_library(
             output_dir,
             output_subdir,
             use_browser_cookies,
+            output_path_template,
+            filename_template,
+            format_preference,
+            quality_preference,
+            subtitle_mode,
         );
     }
 
-    match download_direct_http_url_to_library(paths, url, job_id, auth_cookie, output_dir, output_subdir) {
+    match download_direct_http_url_to_library(
+        paths,
+        url,
+        job_id,
+        auth_cookie,
+        output_dir,
+        output_subdir,
+        output_path_template,
+        filename_template,
+        format_preference,
+        quality_preference,
+        subtitle_mode,
+    ) {
         Ok(path) => Ok(path),
         Err(direct_err) => {
             if is_canceled(paths, job_id).unwrap_or(false) {
@@ -7958,6 +8024,11 @@ fn download_url_to_library(
                 output_dir,
                 output_subdir,
                 use_browser_cookies,
+                output_path_template,
+                filename_template,
+                format_preference,
+                quality_preference,
+                subtitle_mode,
             ) {
                 Ok(path) => Ok(path),
                 Err(yt_err) => Err(EngineError::InstallFailed(format!(
@@ -8045,6 +8116,95 @@ fn default_job_folder_name(job_id: &str) -> String {
     format!("job_{}_{}", now_ms(), suffix)
 }
 
+fn normalize_non_empty(value: Option<&str>) -> Option<String> {
+    value
+        .map(|v| v.trim().to_string())
+        .filter(|v| !v.is_empty())
+}
+
+fn parse_quality_limit(value: &str) -> Option<u32> {
+    let lowered = value.to_ascii_lowercase();
+    let parsed = if let Some(rest) = lowered.strip_suffix('p') {
+        rest.trim().parse::<u32>().ok()
+    } else {
+        lowered.trim().parse::<u32>().ok()
+    }?;
+    if parsed < 144 || parsed > 4320 {
+        return None;
+    }
+    Some(parsed)
+}
+
+fn replace_template_var(template: &str, var: &str, replacement: &str) -> String {
+    template.replace(var, replacement)
+}
+
+fn sanitize_template_literal(value: &str) -> String {
+    let mut out = String::with_capacity(value.len());
+    for ch in value.chars() {
+        if ch.is_ascii_alphanumeric() || matches!(ch, '-' | '_' | '.' | '/' | '\\' | '%' | '(' | ')') {
+            out.push(ch);
+        } else {
+            out.push('_');
+        }
+    }
+    out
+}
+
+fn convert_download_template_to_ytdlp(value: &str) -> String {
+    let mut out = value.to_string();
+    out = replace_template_var(&out, "{provider}", "%(extractor)s");
+    out = replace_template_var(&out, "{channel}", "%(channel)s");
+    out = replace_template_var(&out, "{playlist}", "%(playlist)s");
+    out = replace_template_var(&out, "{upload_date}", "%(upload_date)s");
+    out = replace_template_var(&out, "{title}", "%(title).80B");
+    out = replace_template_var(&out, "{id}", "%(id)s");
+    sanitize_template_literal(&out)
+}
+
+fn build_yt_dlp_output_template(
+    job_id: &str,
+    output_path_template: Option<&str>,
+    filename_template: Option<&str>,
+) -> String {
+    let path_template = normalize_non_empty(output_path_template)
+        .map(|value| convert_download_template_to_ytdlp(&value))
+        .unwrap_or_else(|| "%(extractor)s/%(channel)s".to_string());
+
+    let mut file_template = normalize_non_empty(filename_template)
+        .map(|value| convert_download_template_to_ytdlp(&value))
+        .unwrap_or_else(|| "%(title).80B_%(id)s".to_string());
+    if !file_template.contains("%(id)") {
+        file_template.push_str("_%(id)s");
+    }
+
+    let suffix = &job_id[..job_id.len().min(8)];
+    format!("{path_template}/{file_template}_{suffix}.%(ext)s")
+}
+
+fn resolve_download_preset(
+    paths: &AppPaths,
+    requested_preset_id: Option<&str>,
+) -> Result<config::DownloadPreset> {
+    let presets = config::load_download_presets_config(paths)?;
+    let mut presets_list = presets.presets;
+    let target_id = requested_preset_id
+        .map(|v| v.trim().to_string())
+        .filter(|v| !v.is_empty())
+        .or_else(|| presets.default_preset_id.clone());
+
+    if let Some(id) = target_id {
+        if let Some(index) = presets_list.iter().position(|preset| preset.id == id) {
+            return Ok(presets_list.remove(index));
+        }
+    }
+
+    presets_list
+        .into_iter()
+        .next()
+        .ok_or_else(|| EngineError::InstallFailed("no download presets configured".to_string()))
+}
+
 fn default_direct_job_output_dir(
     paths: &AppPaths,
     _provider: &str,
@@ -8081,6 +8241,11 @@ fn download_direct_http_url_to_library(
     auth_cookie: Option<&str>,
     output_dir: Option<&str>,
     output_subdir: Option<&str>,
+    output_path_template: Option<&str>,
+    filename_template: Option<&str>,
+    format_preference: Option<&str>,
+    quality_preference: Option<&str>,
+    subtitle_mode: Option<&str>,
 ) -> Result<PathBuf> {
     let mut last_err =
         match download_direct_media_asset(paths, url, job_id, auth_cookie, output_dir, output_subdir) {
@@ -8116,6 +8281,11 @@ fn download_direct_http_url_to_library(
                 output_dir,
                 output_subdir,
                 use_browser_cookies_for_url(&candidate, false),
+                output_path_template,
+                filename_template,
+                format_preference,
+                quality_preference,
+                subtitle_mode,
             ) {
                 Ok(path) => return Ok(path),
                 Err(e) => last_err = Some(e.to_string()),
@@ -8679,11 +8849,14 @@ fn download_yt_dlp_url_to_library(
     output_dir: Option<&str>,
     output_subdir: Option<&str>,
     use_browser_cookies: bool,
+    output_path_template: Option<&str>,
+    filename_template: Option<&str>,
+    format_preference: Option<&str>,
+    quality_preference: Option<&str>,
+    subtitle_mode: Option<&str>,
 ) -> Result<PathBuf> {
     let downloads_dir = resolve_downloads_dir_with_override(paths, output_dir, output_subdir)?;
-
-    let suffix = &job_id[..job_id.len().min(8)];
-    let template = format!("%(title).80B_{suffix}_%(id)s.%(ext)s");
+    let template = build_yt_dlp_output_template(job_id, output_path_template, filename_template);
 
     let mut args = vec![
         "--socket-timeout".to_string(),
@@ -8704,6 +8877,26 @@ fn download_yt_dlp_url_to_library(
         template,
         url.to_string(),
     ];
+
+    if let Some(format_value) = normalize_non_empty(format_preference) {
+        args.push("-f".to_string());
+        args.push(format_value);
+    }
+
+    if let Some(quality_value) = normalize_non_empty(quality_preference) {
+        if let Some(limit) = parse_quality_limit(&quality_value) {
+            args.push("-S".to_string());
+            args.push(format!("res:{limit}"));
+        }
+    }
+
+    if matches!(
+        normalize_non_empty(subtitle_mode).as_deref(),
+        Some("auto") | Some("embed")
+    ) {
+        args.push("--write-subs".to_string());
+        args.push("--write-auto-subs".to_string());
+    }
 
     if !is_playlist_candidate_url(url) {
         args.insert(0, "--no-playlist".to_string());
@@ -9427,6 +9620,36 @@ mod tests {
         let name = suggested_download_filename("https://example.com/video", "12345678-abcd");
         assert!(name.starts_with("video_12345678."));
         assert!(name.ends_with(".mp4"));
+    }
+
+    #[test]
+    fn convert_download_template_to_ytdlp_maps_known_variables() {
+        let rendered = convert_download_template_to_ytdlp(
+            "{provider}/{channel}/{playlist}/{upload_date}/{title}_{id}",
+        );
+        assert_eq!(
+            rendered,
+            "%(extractor)s/%(channel)s/%(playlist)s/%(upload_date)s/%(title).80B_%(id)s"
+        );
+    }
+
+    #[test]
+    fn build_yt_dlp_output_template_appends_id_when_missing() {
+        let template = build_yt_dlp_output_template(
+            "12345678-1234-1234-1234-123456789abc",
+            Some("{provider}/{channel}"),
+            Some("{title}"),
+        );
+        assert_eq!(
+            template,
+            "%(extractor)s/%(channel)s/%(title).80B_%(id)s_12345678.%(ext)s"
+        );
+    }
+
+    #[test]
+    fn convert_download_template_to_ytdlp_sanitizes_unsafe_literals() {
+        let rendered = convert_download_template_to_ytdlp("{title}:*?");
+        assert_eq!(rendered, "%(title).80B___");
     }
 
     #[test]

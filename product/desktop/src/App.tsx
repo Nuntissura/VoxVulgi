@@ -1,4 +1,4 @@
-import { useMemo, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import "./App.css";
 import { diagnosticsTrace } from "./lib/diagnosticsTrace";
@@ -8,6 +8,12 @@ import { LibraryPage } from "./pages/LibraryPage";
 import { SubtitleEditorPage } from "./pages/SubtitleEditorPage";
 
 type AppPage = "library" | "jobs" | "diagnostics" | "editor";
+type SafeModeStatus = {
+  enabled: boolean;
+  persisted_enabled: boolean;
+  cli_enabled: boolean;
+  queue_paused: boolean;
+};
 
 function isDragExemptTarget(target: EventTarget | null): boolean {
   if (!(target instanceof Element)) return false;
@@ -21,12 +27,19 @@ function isDragExemptTarget(target: EventTarget | null): boolean {
 function App() {
   const [page, setPage] = useState<AppPage>("library");
   const [editorItemId, setEditorItemId] = useState<string | null>(null);
+  const [safeMode, setSafeMode] = useState<SafeModeStatus | null>(null);
   const [mountedPages, setMountedPages] = useState<Record<AppPage, boolean>>({
     library: true,
     jobs: false,
     diagnostics: false,
     editor: false,
   });
+
+  useEffect(() => {
+    invoke<SafeModeStatus>("safe_mode_status")
+      .then((status) => setSafeMode(status))
+      .catch(() => undefined);
+  }, []);
 
   async function startWindowDrag() {
     try {
@@ -57,6 +70,18 @@ function App() {
       await invoke("window_close");
     } catch {
       // Ignore window API errors.
+    }
+  }
+
+  async function setSafeModeEnabled(enabled: boolean) {
+    try {
+      const status = await invoke<SafeModeStatus>("safe_mode_set", { enabled });
+      setSafeMode(status);
+      void diagnosticsTrace(enabled ? "safe_mode_enabled" : "safe_mode_disabled", {
+        queue_paused: status.queue_paused,
+      });
+    } catch {
+      // Ignore safe mode API errors.
     }
   }
 
@@ -174,7 +199,29 @@ function App() {
           </div>
         </div>
       </header>
-      <main className="content">{content}</main>
+      <main className="content">
+        {safeMode?.enabled ? (
+          <div className="card">
+            <strong>Safe Mode is ON.</strong> Startup auto-refresh is disabled and background jobs
+            are paused so you can recover/export data safely.
+            <div className="row">
+              <button type="button" onClick={() => void setSafeModeEnabled(false)}>
+                Exit Safe Mode
+              </button>
+            </div>
+          </div>
+        ) : (
+          <div className="card">
+            <strong>Recovery:</strong> If startup feels unstable, turn on Safe Mode.
+            <div className="row">
+              <button type="button" onClick={() => void setSafeModeEnabled(true)}>
+                Enable Safe Mode
+              </button>
+            </div>
+          </div>
+        )}
+        {content}
+      </main>
     </div>
   );
 }
