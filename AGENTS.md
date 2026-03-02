@@ -4,6 +4,10 @@
 
 - For desktop release builds, use `governance/scripts/build_desktop_target.ps1` (or `npm run build:desktop:target` from `product/desktop`).
 - Desktop installer builds must refresh the bundled offline payload so Phase 1 + Phase 2 dependencies are included in the installer resources.
+- Every desktop target build must increment the desktop semantic version.
+- Every desktop target build must append an entry to `governance/release/BUILD_CHANGELOG.md` with included Work Packet IDs.
+- Build logs for each desktop target build must be written under:
+  - `product/desktop/Build Target/logs`
 - Build outputs must go under:
   - `product/desktop/Build Target/Current`
 - Previous build outputs must be archived under:

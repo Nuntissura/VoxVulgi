@@ -31,6 +31,7 @@ Rules:
 
 - Product decisions and requirements: `governance/spec/PRODUCT_SPEC.md`
 - Technical architecture decisions: `governance/spec/TECHNICAL_DESIGN.md`
+- Desktop release build history and included WPs: `governance/release/BUILD_CHANGELOG.md`
 - Delivery phases and milestones: `governance/workflow/ROADMAP.md`
 - AI agent behavior + safety rules: `MODEL_BEHAVIOR.md`
 
@@ -50,3 +51,11 @@ Pick the first real implementation WP from `governance/workflow/ROADMAP.md` and 
 
 - Any work involving user libraries/subscriptions or third-party migration sources must be **backup-first** and **non-destructive by default**.
 - Do not delete/overwrite user lists/subscriptions unless explicitly requested and called out in the Work Packet.
+
+## 7) Desktop build traceability
+
+- Every desktop target build must:
+  - increment the desktop semantic version,
+  - append an entry in `governance/release/BUILD_CHANGELOG.md`,
+  - list included Work Packet IDs in that entry,
+  - write a build log file under `product/desktop/Build Target/logs`.
