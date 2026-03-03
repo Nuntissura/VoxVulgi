@@ -165,6 +165,38 @@ Initial language focus: **Korean + Japanese → English**.
 - **Jobs/Queue**: running/failed/completed, retry, logs link.
 - **Diagnostics**: storage usage, logs export, version info, privacy settings.
 
+## 8.1) Stabilization priorities for commercial readiness (2026-03-03)
+
+### 8.1.1 Operator goals and needs
+
+- Localization Studio (Dub/CC) must be the primary, first-visible workspace.
+- Navigation must be split into clear top-level windows for ingest/archive/localization work.
+- Window switching, Diagnostics entry, and startup must stay responsive (no visible freezing).
+- Jobs "Open outputs" actions must reliably open paths without ACL errors.
+- UX must be fast enough for daily production use before any commercial release.
+
+### 8.1.2 Required top-level window model
+
+- Localization Studio (Dub/CC) - default first-run window and main feature surface.
+- Video Ingest - local ingest + YouTube ingest + playlist/subscription/folder-map flows.
+- Instagram Archive - dedicated archive workflow.
+- Image Archive - dedicated archive workflow.
+- Jobs/Queue - execution visibility + controls.
+- Diagnostics - health/recovery tooling with non-blocking load.
+- "Items" must be either clearly defined and renamed or merged into a clearer workspace label.
+
+### 8.1.3 Performance and responsiveness budgets (target)
+
+- Startup: app shell becomes interactable before heavyweight background initialization completes.
+- Startup instrumentation: boot timeline markers must identify slow phases in logs/diagnostics.
+- Window switching: no multi-second freezes during normal navigation.
+- Diagnostics entry: render shell immediately and load sections incrementally with explicit readiness states.
+
+### 8.1.4 Reliability requirement: output path opening
+
+- Queue/Library/Diagnostics open-path actions must work for valid output/artifact paths.
+- Blocked/invalid paths must return actionable errors with copy-path fallback.
+
 ## 9) Top 20 ROI backlog (next additions)
 
 Current direction keeps baseline values intact; these are explicitly deferred/planned features.

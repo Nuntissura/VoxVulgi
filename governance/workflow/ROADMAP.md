@@ -2,6 +2,15 @@
 
 Date: 2026-02-19
 
+## Immediate Track - Stabilization + IA Refresh (2026-03)
+
+- WP-0065: Fix Jobs "Open outputs" ACL failures and standardize open-path behavior.
+- WP-0066: Make Localization Studio first and split windows by core workflows.
+- WP-0067: Remove window-switch freezes (mount/poll lifecycle cleanup).
+- WP-0068: Make Diagnostics non-blocking with per-section readiness states.
+- WP-0069: Stage startup initialization and add boot-timing instrumentation.
+- WP-0070: Clarify/rename "Items" window to match real user intent.
+
 ## Phase 0 — Decisions (1–2 days)
 
 - Pick stack: Tauri/Rust + Python workers (recommended) vs Qt vs Electron.
