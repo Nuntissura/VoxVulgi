@@ -1,7 +1,7 @@
 use tauri::{Manager, State};
 use std::sync::{
     atomic::{AtomicBool, Ordering},
-    Arc,
+    Arc, Mutex,
 };
 use voxvulgi_engine::models::ModelStore;
 use voxvulgi_engine::paths::AppPaths;
@@ -39,6 +39,7 @@ struct AppState {
     runner: jobs::JobRunnerHandle,
     safe_mode_enabled: Arc<AtomicBool>,
     safe_mode_cli: bool,
+    startup: Arc<Mutex<StartupTracker>>,
 }
 
 impl Drop for AppState {
@@ -54,6 +55,33 @@ struct DiagnosticsInfo {
     app_name: String,
     app_version: String,
     engine_version: String,
+}
+
+#[derive(Debug, Clone)]
+struct StartupTracker {
+    offline_bundle_state: String,
+    offline_bundle_started_at_ms: Option<i64>,
+    offline_bundle_finished_at_ms: Option<i64>,
+    offline_bundle_error: Option<String>,
+}
+
+impl StartupTracker {
+    fn new() -> Self {
+        Self {
+            offline_bundle_state: "not_started".to_string(),
+            offline_bundle_started_at_ms: None,
+            offline_bundle_finished_at_ms: None,
+            offline_bundle_error: None,
+        }
+    }
+}
+
+#[derive(Debug, Clone, serde::Serialize)]
+struct StartupStatus {
+    offline_bundle_state: String,
+    offline_bundle_started_at_ms: Option<i64>,
+    offline_bundle_finished_at_ms: Option<i64>,
+    offline_bundle_error: Option<String>,
 }
 
 #[derive(Debug, Clone, serde::Serialize)]
@@ -119,6 +147,13 @@ struct ZipExtractSummary {
     extracted_files: u64,
     skipped_files: u64,
     extracted_bytes: u64,
+}
+
+fn now_epoch_ms_i64() -> i64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis() as i64
 }
 
 fn is_safe_relative_path(path: &std::path::Path) -> bool {
@@ -1094,6 +1129,20 @@ fn build_safe_mode_status(state: &AppState) -> Result<SafeModeStatus, String> {
 #[tauri::command]
 fn safe_mode_status(state: State<'_, AppState>) -> Result<SafeModeStatus, String> {
     build_safe_mode_status(&state)
+}
+
+#[tauri::command]
+fn startup_status(state: State<'_, AppState>) -> Result<StartupStatus, String> {
+    let startup = state
+        .startup
+        .lock()
+        .map_err(|_| "startup status lock poisoned".to_string())?;
+    Ok(StartupStatus {
+        offline_bundle_state: startup.offline_bundle_state.clone(),
+        offline_bundle_started_at_ms: startup.offline_bundle_started_at_ms,
+        offline_bundle_finished_at_ms: startup.offline_bundle_finished_at_ms,
+        offline_bundle_error: startup.offline_bundle_error.clone(),
+    })
 }
 
 #[tauri::command]
@@ -2149,11 +2198,44 @@ pub fn run() {
                 .map(|value| value.enabled)
                 .unwrap_or(false);
             let safe_mode_enabled = cli_safe_mode || persisted_safe_mode;
-            if let Ok(resource_dir) = app.path().resource_dir() {
-                if !safe_mode_enabled {
-                    apply_offline_bundle_if_present(&paths, &resource_dir)
-                        .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e))?;
+            let startup = Arc::new(Mutex::new(StartupTracker::new()));
+            if safe_mode_enabled {
+                if let Ok(mut status) = startup.lock() {
+                    status.offline_bundle_state = "skipped_safe_mode".to_string();
+                    status.offline_bundle_finished_at_ms = Some(now_epoch_ms_i64());
                 }
+            } else if let Ok(resource_dir) = app.path().resource_dir() {
+                if let Ok(mut status) = startup.lock() {
+                    status.offline_bundle_state = "pending".to_string();
+                }
+                let startup_for_thread = Arc::clone(&startup);
+                let paths_for_bundle = paths.clone();
+                std::thread::spawn(move || {
+                    if let Ok(mut status) = startup_for_thread.lock() {
+                        status.offline_bundle_state = "running".to_string();
+                        status.offline_bundle_started_at_ms = Some(now_epoch_ms_i64());
+                        status.offline_bundle_error = None;
+                    }
+
+                    let result = apply_offline_bundle_if_present(&paths_for_bundle, &resource_dir);
+                    if let Ok(mut status) = startup_for_thread.lock() {
+                        status.offline_bundle_finished_at_ms = Some(now_epoch_ms_i64());
+                        match result {
+                            Ok(()) => {
+                                status.offline_bundle_state = "ready".to_string();
+                                status.offline_bundle_error = None;
+                            }
+                            Err(e) => {
+                                status.offline_bundle_state = "error".to_string();
+                                status.offline_bundle_error = Some(e);
+                            }
+                        }
+                    }
+                });
+            } else if let Ok(mut status) = startup.lock() {
+                status.offline_bundle_state = "error".to_string();
+                status.offline_bundle_finished_at_ms = Some(now_epoch_ms_i64());
+                status.offline_bundle_error = Some("resource directory unavailable".to_string());
             }
             db::ensure_schema(&paths)?;
             if safe_mode_enabled {
@@ -2165,6 +2247,7 @@ pub fn run() {
                 runner,
                 safe_mode_enabled: Arc::new(AtomicBool::new(safe_mode_enabled)),
                 safe_mode_cli: cli_safe_mode,
+                startup,
             });
             Ok(())
         })
@@ -2189,6 +2272,7 @@ pub fn run() {
              diagnostics_trace_write_event,
              safe_mode_set,
              safe_mode_status,
+             startup_status,
              downloads_dir_set,
              downloads_dir_status,
              downloads_dir_use_default,

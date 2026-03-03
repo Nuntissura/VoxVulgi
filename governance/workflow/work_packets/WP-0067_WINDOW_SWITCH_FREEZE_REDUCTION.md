@@ -3,7 +3,7 @@
 ## Metadata
 - ID: WP-0067
 - Owner: Codex
-- Status: BACKLOG
+- Status: DONE
 - Created: 2026-03-03
 - Target milestone: Stabilization sprint (UI responsiveness)
 
@@ -41,3 +41,4 @@ Out of scope:
 ## Status updates
 
 - 2026-03-03: Created.
+- 2026-03-03: Removed mount-all hidden-page strategy, switched to per-window render with lazy-loaded pages, and eliminated hidden-window polling side effects by unmounting inactive windows. Verified with desktop build.

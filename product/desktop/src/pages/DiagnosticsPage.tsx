@@ -1,7 +1,8 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
-import { openPath, revealItemInDir } from "@tauri-apps/plugin-opener";
+import { revealItemInDir } from "@tauri-apps/plugin-opener";
 import { confirm, open, save } from "@tauri-apps/plugin-dialog";
+import { copyPathToClipboard, openPathBestEffort, revealPath as revealFilesystemPath } from "../lib/pathOpener";
 
 type DiagnosticsInfo = {
   app_data_dir: string;
@@ -231,6 +232,13 @@ type DiagnosticsTraceClearSummary = {
   removed_bytes: number;
 };
 
+type DiagnosticsSectionKey = "build" | "tools" | "phase2" | "storage" | "jobs" | "trace";
+type DiagnosticsSectionState = "idle" | "loading" | "ready" | "failed";
+type DiagnosticsSectionStatus = {
+  state: DiagnosticsSectionState;
+  error: string | null;
+};
+
 function formatBytes(bytes: number): string {
   if (!Number.isFinite(bytes)) return "-";
   if (bytes < 1024) return `${bytes} B`;
@@ -291,87 +299,262 @@ export function DiagnosticsPage() {
   const [error, setError] = useState<string | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
+  const [sectionStatus, setSectionStatus] = useState<Record<DiagnosticsSectionKey, DiagnosticsSectionStatus>>({
+    build: { state: "idle", error: null },
+    tools: { state: "idle", error: null },
+    phase2: { state: "idle", error: null },
+    storage: { state: "idle", error: null },
+    jobs: { state: "idle", error: null },
+    trace: { state: "idle", error: null },
+  });
+
+  const updateSectionStatus = useCallback(
+    (key: DiagnosticsSectionKey, state: DiagnosticsSectionState, sectionError: string | null = null) => {
+      setSectionStatus((prev) => ({
+        ...prev,
+        [key]: {
+          state,
+          error: sectionError,
+        },
+      }));
+    },
+    [],
+  );
 
   const refresh = useCallback(async () => {
     setError(null);
-    const [
-      nextInfo,
-      nextInventory,
-      nextFfmpeg,
-      nextYtdlp,
-      nextPython,
-      nextPortablePython,
-      nextPhase2Plan,
-      nextPhase2Latest,
-      nextSpleeter,
-      nextDemucs,
-      nextDiarization,
-      nextTtsPreview,
-      nextTtsNeuralLocalV1,
-      nextTtsVoicePreservingLocalV1,
-      nextIntegrity,
-      nextPerfTier,
-      nextBatchRules,
-      nextDiarizationOptional,
-      nextStorage,
-      nextThumbnailCache,
-      nextPolicy,
-      nextDiagnosticsTraceDir,
-      nextJobs,
-    ] = await Promise.all([
-      invoke<DiagnosticsInfo>("diagnostics_info"),
-      invoke<ModelInventory>("models_inventory"),
-      invoke<FfmpegToolsStatus>("tools_ffmpeg_status"),
-      invoke<YtDlpToolsStatus>("tools_ytdlp_status"),
-      invoke<PythonToolchainStatus>("tools_python_status"),
-      invoke<PortablePythonStatus>("tools_python_portable_status"),
-      invoke<Phase2PackPlanItem[]>("tools_phase2_packs_install_plan"),
-      invoke<Phase2InstallLatestState>("tools_phase2_packs_install_latest_state"),
-      invoke<SpleeterPackStatus>("tools_spleeter_status"),
-      invoke<DemucsPackStatus>("tools_demucs_status"),
-      invoke<DiarizationPackStatus>("tools_diarization_status"),
-      invoke<TtsPreviewPackStatus>("tools_tts_preview_status"),
-      invoke<TtsNeuralLocalV1PackStatus>("tools_tts_neural_local_v1_status"),
-      invoke<TtsVoicePreservingLocalV1PackStatus>("tools_tts_voice_preserving_local_v1_status"),
-      invoke<PackIntegrityManifestStatus>("tools_pack_integrity_manifest_status"),
-      invoke<PerformanceTierStatus>("tools_performance_tier_status"),
-      invoke<BatchOnImportRules>("config_batch_on_import_get"),
-      invoke<OptionalDiarizationBackendStatus>("config_diarization_optional_status"),
-      invoke<StorageBreakdown>("diagnostics_storage_breakdown"),
-      invoke<ThumbnailCacheStatus>("diagnostics_thumbnail_cache_status"),
-      invoke<JobLogRetentionPolicy>("jobs_log_retention_policy"),
-      invoke<DiagnosticsTraceDirStatus>("diagnostics_trace_dir_status"),
-      invoke<JobRow[]>("jobs_list", { limit: 200, offset: 0 }),
-    ]);
-    setInfo(nextInfo);
-    setInventory(nextInventory);
-    setFfmpeg(nextFfmpeg);
-    setYtdlp(nextYtdlp);
-    setPython(nextPython);
-    setPortablePython(nextPortablePython);
-    setPhase2Plan(nextPhase2Plan);
-    setPhase2Latest(nextPhase2Latest);
-    setSpleeter(nextSpleeter);
-    setDemucs(nextDemucs);
-    setDiarization(nextDiarization);
-    setTtsPreview(nextTtsPreview);
-    setTtsNeuralLocalV1(nextTtsNeuralLocalV1);
-    setTtsVoicePreservingLocalV1(nextTtsVoicePreservingLocalV1);
-    setIntegrity(nextIntegrity);
-    setPerfTier(nextPerfTier);
-    setBatchRules(nextBatchRules);
-    setDiarizationOptional(nextDiarizationOptional);
-    setDiarizationOptionalDraft((prev) => prev ?? nextDiarizationOptional.config);
-    setStorage(nextStorage);
-    setThumbnailCache(nextThumbnailCache);
-    setPolicy(nextPolicy);
-    setDiagnosticsTraceDir(nextDiagnosticsTraceDir);
-    setJobs(nextJobs);
-  }, []);
+    (["build", "tools", "phase2", "storage", "jobs", "trace"] as DiagnosticsSectionKey[]).forEach(
+      (key) => updateSectionStatus(key, "loading"),
+    );
+    try {
+      const [
+        nextInfo,
+        nextInventory,
+        nextFfmpeg,
+        nextYtdlp,
+        nextPython,
+        nextPortablePython,
+        nextPhase2Plan,
+        nextPhase2Latest,
+        nextSpleeter,
+        nextDemucs,
+        nextDiarization,
+        nextTtsPreview,
+        nextTtsNeuralLocalV1,
+        nextTtsVoicePreservingLocalV1,
+        nextIntegrity,
+        nextPerfTier,
+        nextBatchRules,
+        nextDiarizationOptional,
+        nextStorage,
+        nextThumbnailCache,
+        nextPolicy,
+        nextDiagnosticsTraceDir,
+        nextJobs,
+      ] = await Promise.all([
+        invoke<DiagnosticsInfo>("diagnostics_info"),
+        invoke<ModelInventory>("models_inventory"),
+        invoke<FfmpegToolsStatus>("tools_ffmpeg_status"),
+        invoke<YtDlpToolsStatus>("tools_ytdlp_status"),
+        invoke<PythonToolchainStatus>("tools_python_status"),
+        invoke<PortablePythonStatus>("tools_python_portable_status"),
+        invoke<Phase2PackPlanItem[]>("tools_phase2_packs_install_plan"),
+        invoke<Phase2InstallLatestState>("tools_phase2_packs_install_latest_state"),
+        invoke<SpleeterPackStatus>("tools_spleeter_status"),
+        invoke<DemucsPackStatus>("tools_demucs_status"),
+        invoke<DiarizationPackStatus>("tools_diarization_status"),
+        invoke<TtsPreviewPackStatus>("tools_tts_preview_status"),
+        invoke<TtsNeuralLocalV1PackStatus>("tools_tts_neural_local_v1_status"),
+        invoke<TtsVoicePreservingLocalV1PackStatus>("tools_tts_voice_preserving_local_v1_status"),
+        invoke<PackIntegrityManifestStatus>("tools_pack_integrity_manifest_status"),
+        invoke<PerformanceTierStatus>("tools_performance_tier_status"),
+        invoke<BatchOnImportRules>("config_batch_on_import_get"),
+        invoke<OptionalDiarizationBackendStatus>("config_diarization_optional_status"),
+        invoke<StorageBreakdown>("diagnostics_storage_breakdown"),
+        invoke<ThumbnailCacheStatus>("diagnostics_thumbnail_cache_status"),
+        invoke<JobLogRetentionPolicy>("jobs_log_retention_policy"),
+        invoke<DiagnosticsTraceDirStatus>("diagnostics_trace_dir_status"),
+        invoke<JobRow[]>("jobs_list", { limit: 200, offset: 0 }),
+      ]);
+      setInfo(nextInfo);
+      setInventory(nextInventory);
+      setFfmpeg(nextFfmpeg);
+      setYtdlp(nextYtdlp);
+      setPython(nextPython);
+      setPortablePython(nextPortablePython);
+      setPhase2Plan(nextPhase2Plan);
+      setPhase2Latest(nextPhase2Latest);
+      setSpleeter(nextSpleeter);
+      setDemucs(nextDemucs);
+      setDiarization(nextDiarization);
+      setTtsPreview(nextTtsPreview);
+      setTtsNeuralLocalV1(nextTtsNeuralLocalV1);
+      setTtsVoicePreservingLocalV1(nextTtsVoicePreservingLocalV1);
+      setIntegrity(nextIntegrity);
+      setPerfTier(nextPerfTier);
+      setBatchRules(nextBatchRules);
+      setDiarizationOptional(nextDiarizationOptional);
+      setDiarizationOptionalDraft((prev) => prev ?? nextDiarizationOptional.config);
+      setStorage(nextStorage);
+      setThumbnailCache(nextThumbnailCache);
+      setPolicy(nextPolicy);
+      setDiagnosticsTraceDir(nextDiagnosticsTraceDir);
+      setJobs(nextJobs);
+      (["build", "tools", "phase2", "storage", "jobs", "trace"] as DiagnosticsSectionKey[]).forEach(
+        (key) => updateSectionStatus(key, "ready"),
+      );
+    } catch (e) {
+      (["build", "tools", "phase2", "storage", "jobs", "trace"] as DiagnosticsSectionKey[]).forEach(
+        (key) => updateSectionStatus(key, "failed", String(e)),
+      );
+      throw e;
+    }
+  }, [updateSectionStatus]);
+
+  const loadBuildSection = useCallback(async () => {
+    updateSectionStatus("build", "loading");
+    try {
+      const [nextInfo, nextInventory, nextBatchRules, nextDiarizationOptional, nextPolicy] =
+        await Promise.all([
+          invoke<DiagnosticsInfo>("diagnostics_info"),
+          invoke<ModelInventory>("models_inventory"),
+          invoke<BatchOnImportRules>("config_batch_on_import_get"),
+          invoke<OptionalDiarizationBackendStatus>("config_diarization_optional_status"),
+          invoke<JobLogRetentionPolicy>("jobs_log_retention_policy"),
+        ]);
+      setInfo(nextInfo);
+      setInventory(nextInventory);
+      setBatchRules(nextBatchRules);
+      setDiarizationOptional(nextDiarizationOptional);
+      setDiarizationOptionalDraft((prev) => prev ?? nextDiarizationOptional.config);
+      setPolicy(nextPolicy);
+      updateSectionStatus("build", "ready");
+    } catch (e) {
+      updateSectionStatus("build", "failed", String(e));
+      setError((prev) => prev ?? String(e));
+    }
+  }, [updateSectionStatus]);
+
+  const loadToolsSection = useCallback(async () => {
+    updateSectionStatus("tools", "loading");
+    try {
+      const [
+        nextFfmpeg,
+        nextYtdlp,
+        nextPython,
+        nextPortablePython,
+        nextSpleeter,
+        nextDemucs,
+        nextDiarization,
+        nextTtsPreview,
+        nextTtsNeuralLocalV1,
+        nextTtsVoicePreservingLocalV1,
+        nextIntegrity,
+        nextPerfTier,
+      ] = await Promise.all([
+        invoke<FfmpegToolsStatus>("tools_ffmpeg_status"),
+        invoke<YtDlpToolsStatus>("tools_ytdlp_status"),
+        invoke<PythonToolchainStatus>("tools_python_status"),
+        invoke<PortablePythonStatus>("tools_python_portable_status"),
+        invoke<SpleeterPackStatus>("tools_spleeter_status"),
+        invoke<DemucsPackStatus>("tools_demucs_status"),
+        invoke<DiarizationPackStatus>("tools_diarization_status"),
+        invoke<TtsPreviewPackStatus>("tools_tts_preview_status"),
+        invoke<TtsNeuralLocalV1PackStatus>("tools_tts_neural_local_v1_status"),
+        invoke<TtsVoicePreservingLocalV1PackStatus>("tools_tts_voice_preserving_local_v1_status"),
+        invoke<PackIntegrityManifestStatus>("tools_pack_integrity_manifest_status"),
+        invoke<PerformanceTierStatus>("tools_performance_tier_status"),
+      ]);
+      setFfmpeg(nextFfmpeg);
+      setYtdlp(nextYtdlp);
+      setPython(nextPython);
+      setPortablePython(nextPortablePython);
+      setSpleeter(nextSpleeter);
+      setDemucs(nextDemucs);
+      setDiarization(nextDiarization);
+      setTtsPreview(nextTtsPreview);
+      setTtsNeuralLocalV1(nextTtsNeuralLocalV1);
+      setTtsVoicePreservingLocalV1(nextTtsVoicePreservingLocalV1);
+      setIntegrity(nextIntegrity);
+      setPerfTier(nextPerfTier);
+      updateSectionStatus("tools", "ready");
+    } catch (e) {
+      updateSectionStatus("tools", "failed", String(e));
+      setError((prev) => prev ?? String(e));
+    }
+  }, [updateSectionStatus]);
+
+  const loadPhase2Section = useCallback(async () => {
+    updateSectionStatus("phase2", "loading");
+    try {
+      const [nextPhase2Plan, nextPhase2Latest] = await Promise.all([
+        invoke<Phase2PackPlanItem[]>("tools_phase2_packs_install_plan"),
+        invoke<Phase2InstallLatestState>("tools_phase2_packs_install_latest_state"),
+      ]);
+      setPhase2Plan(nextPhase2Plan);
+      setPhase2Latest(nextPhase2Latest);
+      updateSectionStatus("phase2", "ready");
+    } catch (e) {
+      updateSectionStatus("phase2", "failed", String(e));
+      setError((prev) => prev ?? String(e));
+    }
+  }, [updateSectionStatus]);
+
+  const loadStorageSection = useCallback(async () => {
+    updateSectionStatus("storage", "loading");
+    try {
+      const [nextStorage, nextThumbnailCache] = await Promise.all([
+        invoke<StorageBreakdown>("diagnostics_storage_breakdown"),
+        invoke<ThumbnailCacheStatus>("diagnostics_thumbnail_cache_status"),
+      ]);
+      setStorage(nextStorage);
+      setThumbnailCache(nextThumbnailCache);
+      updateSectionStatus("storage", "ready");
+    } catch (e) {
+      updateSectionStatus("storage", "failed", String(e));
+      setError((prev) => prev ?? String(e));
+    }
+  }, [updateSectionStatus]);
+
+  const loadTraceSection = useCallback(async () => {
+    updateSectionStatus("trace", "loading");
+    try {
+      const nextDiagnosticsTraceDir = await invoke<DiagnosticsTraceDirStatus>(
+        "diagnostics_trace_dir_status",
+      );
+      setDiagnosticsTraceDir(nextDiagnosticsTraceDir);
+      updateSectionStatus("trace", "ready");
+    } catch (e) {
+      updateSectionStatus("trace", "failed", String(e));
+      setError((prev) => prev ?? String(e));
+    }
+  }, [updateSectionStatus]);
+
+  const loadJobsSection = useCallback(async () => {
+    updateSectionStatus("jobs", "loading");
+    try {
+      const nextJobs = await invoke<JobRow[]>("jobs_list", { limit: 200, offset: 0 });
+      setJobs(nextJobs);
+      updateSectionStatus("jobs", "ready");
+    } catch (e) {
+      updateSectionStatus("jobs", "failed", String(e));
+      setError((prev) => prev ?? String(e));
+    }
+  }, [updateSectionStatus]);
 
   useEffect(() => {
-    refresh().catch((e) => setError(String(e)));
-  }, [refresh]);
+    setError(null);
+    const timers: number[] = [];
+    void loadBuildSection();
+    timers.push(window.setTimeout(() => void loadToolsSection(), 0));
+    timers.push(window.setTimeout(() => void loadPhase2Section(), 40));
+    timers.push(window.setTimeout(() => void loadStorageSection(), 80));
+    timers.push(window.setTimeout(() => void loadTraceSection(), 120));
+    timers.push(window.setTimeout(() => void loadJobsSection(), 160));
+    return () => {
+      timers.forEach((id) => window.clearTimeout(id));
+    };
+  }, [loadBuildSection, loadJobsSection, loadPhase2Section, loadStorageSection, loadToolsSection, loadTraceSection]);
 
   const demoModel = useMemo(
     () => inventory?.models.find((m) => m.id === "demo-ja-asr") ?? null,
@@ -621,9 +804,11 @@ export function DiagnosticsPage() {
     const trimmed = (path ?? "").trim();
     if (!trimmed) return;
     try {
-      await revealItemInDir(trimmed);
+      await revealFilesystemPath(trimmed);
     } catch (e) {
-      setError(String(e));
+      const copied = await copyPathToClipboard(trimmed);
+      const suffix = copied ? " Path copied to clipboard." : "";
+      setError(`Reveal path failed: ${String(e)}.${suffix}`);
     }
   }
 
@@ -723,9 +908,16 @@ export function DiagnosticsPage() {
     setError(null);
     if (!info?.app_data_dir) return;
     try {
-      await openPath(info.app_data_dir);
+      const opened = await openPathBestEffort(info.app_data_dir);
+      setNotice(
+        opened.method === "open_path"
+          ? `App data folder: ${opened.path}`
+          : `App data folder revealed in file explorer: ${opened.path}`,
+      );
     } catch (e) {
-      setError(String(e));
+      const copied = await copyPathToClipboard(info.app_data_dir);
+      const suffix = copied ? " Path copied to clipboard." : "";
+      setError(`Open app data folder failed: ${String(e)}.${suffix}`);
     }
   }
 
@@ -744,9 +936,16 @@ export function DiagnosticsPage() {
     const path = diagnosticsTraceDir?.current_dir?.trim() ?? "";
     if (!path) return;
     try {
-      await openPath(path);
+      const opened = await openPathBestEffort(path);
+      setNotice(
+        opened.method === "open_path"
+          ? `Diagnostics trace folder: ${opened.path}`
+          : `Diagnostics trace folder revealed in file explorer: ${opened.path}`,
+      );
     } catch (e) {
-      setError(String(e));
+      const copied = await copyPathToClipboard(path);
+      const suffix = copied ? " Path copied to clipboard." : "";
+      setError(`Open Diagnostics trace folder failed: ${String(e)}.${suffix}`);
     }
   }
 
@@ -980,12 +1179,47 @@ export function DiagnosticsPage() {
     }
   }
 
+  const sectionEntries: Array<[DiagnosticsSectionKey, string]> = [
+    ["build", "Build + core"],
+    ["tools", "Tools"],
+    ["phase2", "Phase 2 packs"],
+    ["storage", "Storage"],
+    ["trace", "Diagnostics trace"],
+    ["jobs", "Recent jobs"],
+  ];
+
   return (
     <section>
       <h1>Diagnostics</h1>
 
       {error ? <div className="error">{error}</div> : null}
       {notice ? <div className="card">{notice}</div> : null}
+      <div className="card">
+        <h2>Loading status</h2>
+        <div style={{ color: "#4b5563", marginBottom: 8 }}>
+          Diagnostics sections load independently so this page stays responsive.
+        </div>
+        <div className="table-wrap">
+          <table>
+            <thead>
+              <tr>
+                <th>Section</th>
+                <th>Status</th>
+                <th>Error</th>
+              </tr>
+            </thead>
+            <tbody>
+              {sectionEntries.map(([key, label]) => (
+                <tr key={key}>
+                  <td>{label}</td>
+                  <td>{sectionStatus[key].state}</td>
+                  <td>{sectionStatus[key].error ?? "-"}</td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      </div>
 
       <div className="card">
         <h2>Build</h2>

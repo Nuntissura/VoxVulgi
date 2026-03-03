@@ -1,7 +1,8 @@
 import { Fragment, useCallback, useEffect, useMemo, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
-import { openPath, revealItemInDir } from "@tauri-apps/plugin-opener";
+import { revealItemInDir } from "@tauri-apps/plugin-opener";
 import { confirm, save } from "@tauri-apps/plugin-dialog";
+import { copyPathToClipboard, openPathBestEffort, requireOpenablePath } from "../lib/pathOpener";
 
 type JobStatus = "queued" | "running" | "succeeded" | "failed" | "canceled";
 
@@ -151,6 +152,12 @@ export function JobsPage() {
   const [dummySeconds, setDummySeconds] = useState(10);
   const [queuePaused, setQueuePaused] = useState(false);
   const [maxConcurrency, setMaxConcurrency] = useState(4);
+
+  async function handlePathOpenFailure(path: string, error: unknown, actionLabel: string) {
+    const copied = await copyPathToClipboard(path);
+    const suffix = copied ? " Path copied to clipboard." : "";
+    setError(`${actionLabel} failed: ${String(error)}.${suffix}`);
+  }
 
   const refresh = useCallback(async () => {
     const [next, control, runtime] = await Promise.all([
@@ -323,7 +330,8 @@ export function JobsPage() {
   async function revealLogs(path: string) {
     setError(null);
     try {
-      await revealItemInDir(path);
+      const target = requireOpenablePath(path, "Log path");
+      await revealItemInDir(target);
     } catch (e) {
       setError(String(e));
     }
@@ -337,10 +345,14 @@ export function JobsPage() {
 
     setError(null);
     try {
-      await openPath(artifactsDir);
-      setNotice(`Artifacts folder: ${artifactsDir}`);
+      const opened = await openPathBestEffort(artifactsDir);
+      setNotice(
+        opened.method === "open_path"
+          ? `Artifacts folder: ${opened.path}`
+          : `Artifacts folder revealed in file explorer: ${opened.path}`,
+      );
     } catch (e) {
-      setError(String(e));
+      await handlePathOpenFailure(artifactsDir, e, "Open artifacts");
     }
   }
 
@@ -352,10 +364,14 @@ export function JobsPage() {
 
     setError(null);
     try {
-      await openPath(outputsDir);
-      setNotice(`Outputs folder: ${outputsDir}`);
+      const opened = await openPathBestEffort(outputsDir);
+      setNotice(
+        opened.method === "open_path"
+          ? `Outputs folder: ${opened.path}`
+          : `Outputs folder revealed in file explorer: ${opened.path}`,
+      );
     } catch (e) {
-      setError(String(e));
+      await handlePathOpenFailure(outputsDir, e, "Open outputs");
     }
   }
 

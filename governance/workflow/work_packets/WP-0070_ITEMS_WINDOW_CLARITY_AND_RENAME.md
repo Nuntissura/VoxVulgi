@@ -3,7 +3,7 @@
 ## Metadata
 - ID: WP-0070
 - Owner: Codex
-- Status: BACKLOG
+- Status: DONE
 - Created: 2026-03-03
 - Target milestone: Stabilization sprint (UX clarity)
 
@@ -41,3 +41,4 @@ Out of scope:
 ## Status updates
 
 - 2026-03-03: Created.
+- 2026-03-03: Replaced ambiguous `Items` window label with `Media Library`, updated workspace heading/copy to define its purpose, and aligned navigation terminology. Verified with desktop build.

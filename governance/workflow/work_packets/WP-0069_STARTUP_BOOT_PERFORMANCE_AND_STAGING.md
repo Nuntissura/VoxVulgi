@@ -3,7 +3,7 @@
 ## Metadata
 - ID: WP-0069
 - Owner: Codex
-- Status: BACKLOG
+- Status: DONE
 - Created: 2026-03-03
 - Target milestone: Stabilization sprint (startup performance)
 
@@ -42,3 +42,4 @@ Out of scope:
 ## Status updates
 
 - 2026-03-03: Created.
+- 2026-03-03: Moved offline bundle application off the blocking setup path into background startup staging, added startup status command/state, and surfaced startup-progress messaging in shell UI. Verified with desktop build + tauri cargo check.

@@ -1,7 +1,7 @@
 import { type UIEvent, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { convertFileSrc, invoke } from "@tauri-apps/api/core";
 import { confirm, message, open, save } from "@tauri-apps/plugin-dialog";
-import { openPath } from "@tauri-apps/plugin-opener";
+import { copyPathToClipboard, openPathBestEffort } from "../lib/pathOpener";
 import { safeLocalStorageGet, safeLocalStorageSet } from "../lib/persist";
 
 type LibraryItem = {
@@ -92,7 +92,15 @@ function formatDuration(ms: number | null): string {
 
 type LibraryPageProps = {
   onOpenEditor?: (itemId: string) => void;
+  mode?: LibraryPageMode;
 };
+
+export type LibraryPageMode =
+  | "all"
+  | "video_ingest"
+  | "instagram_archive"
+  | "image_archive"
+  | "media_library";
 
 type ItemOutputs = {
   item_id: string;
@@ -220,7 +228,7 @@ type YoutubeSubscriptionsImport4kvdpSummary = {
   archive_seed_failures: number;
 };
 
-export function LibraryPage({ onOpenEditor }: LibraryPageProps) {
+export function LibraryPage({ onOpenEditor, mode = "all" }: LibraryPageProps) {
   const maxBatchUrls = 1500;
   const maxInstagramBatchUrls = 1500;
   const maxImageBatchUrls = 1500;
@@ -230,6 +238,22 @@ export function LibraryPage({ onOpenEditor }: LibraryPageProps) {
   const libraryVirtualOverscan = 5;
   const minSubscriptionRefreshIntervalMinutes = 5;
   const maxSubscriptionRefreshIntervalMinutes = 10080;
+  const showVideoIngest = mode === "all" || mode === "video_ingest";
+  const showInstagramArchive = mode === "all" || mode === "instagram_archive";
+  const showImageArchive = mode === "all" || mode === "image_archive";
+  const showMediaLibrary = mode === "all" || mode === "media_library";
+  const showImportControls = showVideoIngest || showMediaLibrary;
+  const showDownloadFolder = showVideoIngest || showInstagramArchive || showImageArchive;
+  const title =
+    mode === "video_ingest"
+      ? "Video Ingest"
+      : mode === "instagram_archive"
+        ? "Instagram Archive"
+        : mode === "image_archive"
+          ? "Image Archive"
+          : mode === "media_library"
+            ? "Media Library"
+            : "Library";
   const [items, setItems] = useState<LibraryItem[]>([]);
   const [itemsOffset, setItemsOffset] = useState(0);
   const [itemsHasMore, setItemsHasMore] = useState(true);
@@ -381,12 +405,25 @@ export function LibraryPage({ onOpenEditor }: LibraryPageProps) {
 
   const refresh = useCallback(async () => {
     setError(null);
+    const wantsItems = showMediaLibrary;
+    const wantsVideo = showVideoIngest;
+    const wantsBatchRules = showImportControls;
     const [nextItems, nextRules, nextSubscriptions, nextGroups, nextPresets] = await Promise.all([
-      invoke<LibraryItem[]>("library_list", { limit: libraryPageSize, offset: 0 }),
-      invoke<BatchOnImportRules>("config_batch_on_import_get").catch(() => null),
-      invoke<YoutubeSubscriptionRow[]>("youtube_subscriptions_list").catch(() => []),
-      invoke<YoutubeSubscriptionGroupRow[]>("youtube_subscription_groups_list").catch(() => []),
-      invoke<DownloadPresetsConfig>("download_presets_get").catch(() => null),
+      wantsItems
+        ? invoke<LibraryItem[]>("library_list", { limit: libraryPageSize, offset: 0 })
+        : Promise.resolve([] as LibraryItem[]),
+      wantsBatchRules
+        ? invoke<BatchOnImportRules>("config_batch_on_import_get").catch(() => null)
+        : Promise.resolve(null),
+      wantsVideo
+        ? invoke<YoutubeSubscriptionRow[]>("youtube_subscriptions_list").catch(() => [])
+        : Promise.resolve([] as YoutubeSubscriptionRow[]),
+      wantsVideo
+        ? invoke<YoutubeSubscriptionGroupRow[]>("youtube_subscription_groups_list").catch(() => [])
+        : Promise.resolve([] as YoutubeSubscriptionGroupRow[]),
+      wantsVideo
+        ? invoke<DownloadPresetsConfig>("download_presets_get").catch(() => null)
+        : Promise.resolve(null),
     ]);
     setItems(nextItems);
     setItemsOffset(nextItems.length);
@@ -400,7 +437,7 @@ export function LibraryPage({ onOpenEditor }: LibraryPageProps) {
       setDownloadPresets(nextPresets);
       setUrlBatchPresetId((current) => current || nextPresets.default_preset_id || "");
     }
-  }, [libraryPageSize]);
+  }, [libraryPageSize, showImportControls, showMediaLibrary, showVideoIngest]);
 
   const loadMoreItems = useCallback(async () => {
     if (itemsLoadingMore || !itemsHasMore) return;
@@ -809,12 +846,20 @@ export function LibraryPage({ onOpenEditor }: LibraryPageProps) {
     setBusy(true);
     setError(null);
     setNotice(null);
+    let targetPath = "";
     try {
       const outputs = await invoke<ItemOutputs>("item_outputs", { itemId });
-      setNotice(`Outputs folder: ${outputs.derived_item_dir}`);
-      await openPath(outputs.derived_item_dir);
+      targetPath = outputs.derived_item_dir ?? "";
+      const opened = await openPathBestEffort(targetPath);
+      setNotice(
+        opened.method === "open_path"
+          ? `Outputs folder: ${opened.path}`
+          : `Outputs folder revealed in file explorer: ${opened.path}`,
+      );
     } catch (e) {
-      setError(String(e));
+      const copied = await copyPathToClipboard(targetPath);
+      const suffix = copied ? " Output path copied to clipboard." : "";
+      setError(`Open outputs failed: ${String(e)}.${suffix}`);
     } finally {
       setBusy(false);
     }
@@ -1440,12 +1485,13 @@ export function LibraryPage({ onOpenEditor }: LibraryPageProps) {
 
   return (
     <section>
-      <h1>Library</h1>
+      <h1>{title}</h1>
 
       {error ? <div className="error">{error}</div> : null}
       {notice ? <div className="card">{notice}</div> : null}
 
-      <div className="card">
+      {showImportControls ? (
+        <div className="card">
         <div className="row">
           <button type="button" disabled={busy} onClick={importFile}>
             Import file
@@ -1478,9 +1524,11 @@ export function LibraryPage({ onOpenEditor }: LibraryPageProps) {
             return `Batch-on-import: will queue ${tasks.join(", ")}. Configure in Diagnostics.`;
           })()}
         </div>
-      </div>
+        </div>
+      ) : null}
 
-      <div className="card">
+      {showDownloadFolder ? (
+        <div className="card">
         <h2>Download folder</h2>
         <div className="kv">
           <div className="k">Current</div>
@@ -1513,9 +1561,11 @@ export function LibraryPage({ onOpenEditor }: LibraryPageProps) {
             Refresh folder status
           </button>
         </div>
-      </div>
+        </div>
+      ) : null}
 
-      <div className="card">
+      {showVideoIngest ? (
+        <div className="card">
         <h2>Video URL ingest (batch)</h2>
         <div style={{ color: "#4b5563", marginBottom: 8 }}>
           Paste many links at once (direct media URLs or YouTube video/playlist/channel links).
@@ -1589,9 +1639,11 @@ export function LibraryPage({ onOpenEditor }: LibraryPageProps) {
             Queue URL batch ({parsedUrlCount})
           </button>
         </div>
-      </div>
+        </div>
+      ) : null}
 
-      <div className="card">
+      {showVideoIngest ? (
+        <div className="card">
         <h2>Download presets + templates</h2>
         <div style={{ color: "#4b5563", marginBottom: 8 }}>
           Define reusable output folder/file templates and quality/subtitle preferences.
@@ -1724,9 +1776,11 @@ export function LibraryPage({ onOpenEditor }: LibraryPageProps) {
             </tbody>
           </table>
         </div>
-      </div>
+        </div>
+      ) : null}
 
-      <div className="card">
+      {showVideoIngest ? (
+        <div className="card">
         <h2>Subscription groups</h2>
         <div style={{ color: "#4b5563", marginBottom: 8 }}>
           Organize subscriptions into groups for filtering and queueing. Deleting a group does not
@@ -1807,9 +1861,11 @@ export function LibraryPage({ onOpenEditor }: LibraryPageProps) {
             </tbody>
           </table>
         </div>
-      </div>
+        </div>
+      ) : null}
 
-      <div className="card">
+      {showVideoIngest ? (
+        <div className="card">
         <h2>YouTube subscriptions</h2>
         <div style={{ color: "#4b5563", marginBottom: 8 }}>
           Save channels/playlists as reusable subscriptions. Each subscription maps downloads into
@@ -2056,9 +2112,11 @@ export function LibraryPage({ onOpenEditor }: LibraryPageProps) {
             </tbody>
           </table>
         </div>
-      </div>
+        </div>
+      ) : null}
 
-      <div className="card">
+      {showInstagramArchive ? (
+        <div className="card">
         <h2>Instagram archive (batch)</h2>
         <div style={{ color: "#4b5563", marginBottom: 8 }}>
           Paste Instagram post/reel/profile links. Use your session cookie for private content.
@@ -2126,9 +2184,11 @@ export function LibraryPage({ onOpenEditor }: LibraryPageProps) {
             Queue Instagram batch ({parsedInstagramUrlCount})
           </button>
         </div>
-      </div>
+        </div>
+      ) : null}
 
-      <div className="card">
+      {showImageArchive ? (
+        <div className="card">
         <h2>Image archive (batch)</h2>
         <div style={{ color: "#4b5563", marginBottom: 8 }}>
           Crawl blog/forum pages, follow next pages, skip likely profile photos, and download
@@ -2240,12 +2300,16 @@ export function LibraryPage({ onOpenEditor }: LibraryPageProps) {
             Queue image batch ({parsedImageUrlCount})
           </button>
         </div>
-      </div>
+        </div>
+      ) : null}
 
-      <div className="card">
-        <h2>Items</h2>
+      {showMediaLibrary ? (
+        <div className="card">
+        <h2>Media library items</h2>
         <div style={{ color: "#4b5563", marginTop: 6 }}>
-          Outputs/artifacts are stored under the app-data folder (open Diagnostics -&gt; App data dir, or use the Outputs button).
+          Browse imported/downloaded media and launch localization actions. Outputs/artifacts are
+          stored under the app-data folder (open Diagnostics -&gt; App data dir, or use the Outputs
+          button).
         </div>
         <div
           className="table-wrap"
@@ -2340,7 +2404,8 @@ export function LibraryPage({ onOpenEditor }: LibraryPageProps) {
             {itemsLoadingMore ? "Loading..." : "Load more"}
           </button>
         </div>
-      </div>
+        </div>
+      ) : null}
     </section>
   );
 }

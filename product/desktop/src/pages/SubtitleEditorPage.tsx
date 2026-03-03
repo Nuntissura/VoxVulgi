@@ -1,8 +1,9 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { convertFileSrc, invoke } from "@tauri-apps/api/core";
 import { confirm, open, save } from "@tauri-apps/plugin-dialog";
-import { openPath, revealItemInDir } from "@tauri-apps/plugin-opener";
+import { revealItemInDir } from "@tauri-apps/plugin-opener";
 import { diagnosticsTrace } from "../lib/diagnosticsTrace";
+import { copyPathToClipboard, openPathBestEffort } from "../lib/pathOpener";
 import { safeLocalStorageGet, safeLocalStorageSet } from "../lib/persist";
 
 type LibraryItem = {
@@ -1722,9 +1723,16 @@ export function SubtitleEditorPage({ itemId }: { itemId: string }) {
     setError(null);
     if (!outputs?.derived_item_dir) return;
     try {
-      await openPath(outputs.derived_item_dir);
+      const opened = await openPathBestEffort(outputs.derived_item_dir);
+      setNotice(
+        opened.method === "open_path"
+          ? `Outputs folder: ${opened.path}`
+          : `Outputs folder revealed in file explorer: ${opened.path}`,
+      );
     } catch (e) {
-      setError(String(e));
+      const copied = await copyPathToClipboard(outputs.derived_item_dir);
+      const suffix = copied ? " Output path copied to clipboard." : "";
+      setError(`Open outputs folder failed: ${String(e)}.${suffix}`);
     }
   }
 
@@ -1835,7 +1843,7 @@ export function SubtitleEditorPage({ itemId }: { itemId: string }) {
     if (isVideoPath(artifact.path)) {
       setVideoPreviewMode("original");
       try {
-        await openPath(artifact.path);
+        await openPathBestEffort(artifact.path);
       } catch {
         // ignore
       }
@@ -2779,7 +2787,7 @@ export function SubtitleEditorPage({ itemId }: { itemId: string }) {
                           <button
                             type="button"
                             disabled={busy || !a.path}
-                            onClick={() => openPath(a.path).catch(() => undefined)}
+                            onClick={() => openPathBestEffort(a.path).catch(() => undefined)}
                           >
                             Open
                           </button>

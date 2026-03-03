@@ -3,7 +3,7 @@
 ## Metadata
 - ID: WP-0068
 - Owner: Codex
-- Status: BACKLOG
+- Status: DONE
 - Created: 2026-03-03
 - Target milestone: Stabilization sprint (diagnostics UX)
 
@@ -41,3 +41,4 @@ Out of scope:
 ## Status updates
 
 - 2026-03-03: Created.
+- 2026-03-03: Implemented staged Diagnostics loading by independent sections (build/tools/phase2/storage/trace/jobs) with explicit per-section `loading/ready/failed` states and non-blocking render. Verified with desktop build.

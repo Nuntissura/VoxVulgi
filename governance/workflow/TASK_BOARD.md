@@ -78,9 +78,9 @@ This is the single source of truth for work status.
 | WP-0062 | Subscription groups/tags + failure backoff | DONE | Codex | Added subscription groups, membership assignment/filtering, group queueing, and per-subscription exponential failure backoff gating. |
 | WP-0063 | Output templates + “Smart presets” | DONE | Codex | Added reusable download presets (default + per-subscription override), template-based output naming, and preset import/export flows. |
 | WP-0064 | Migration scan + optional index-only library import | DONE | Codex | Added folder scan to seed yt-dlp archives and optional index-only import of existing downloads into Library DB (non-destructive). |
-| WP-0065 | Jobs "Open outputs" ACL fix | BACKLOG | Codex | Fix ACL-denied opener path (`plugin:opener|open_path`) for outputs/artifacts and add explicit fallback messaging. |
-| WP-0066 | Localization Studio first + window architecture refresh | BACKLOG | Codex | Make Dub/CC the first/default workspace and split clear top-level windows for ingest/archive flows. |
-| WP-0067 | Window switch freeze reduction | BACKLOG | Codex | Replace freeze-prone mount/poll behavior with lazy load/unmount and background activity throttling. |
-| WP-0068 | Diagnostics non-blocking load | BACKLOG | Codex | Render Diagnostics shell immediately and load each diagnostics module incrementally with clear readiness states. |
-| WP-0069 | Startup boot performance + staged initialization | BACKLOG | Codex | Profile startup phases, move heavy init off first paint, and publish boot budget targets. |
-| WP-0070 | "Items" window clarity + rename | BACKLOG | Codex | Define purpose, rename for clarity, and align UI/docs terminology. |
+| WP-0065 | Jobs "Open outputs" ACL fix | DONE | Codex | Added opener ACL permission + shared safe path opener with `open_path`/`reveal_item_in_dir` fallback and copy-path guidance across windows. |
+| WP-0066 | Localization Studio first + window architecture refresh | DONE | Codex | Localization Studio is now the first/default workspace; navigation split into Video Ingest, Instagram Archive, Image Archive, Media Library, Jobs/Queue, Diagnostics. |
+| WP-0067 | Window switch freeze reduction | DONE | Codex | Replaced mount-all hidden-page approach with lazy-loaded single-active window rendering to reduce switch stalls/background work. |
+| WP-0068 | Diagnostics non-blocking load | DONE | Codex | Diagnostics now loads section-by-section with explicit `loading/ready/failed` states while keeping UI responsive. |
+| WP-0069 | Startup boot performance + staged initialization | DONE | Codex | Startup no longer blocks on offline bundle apply; background staging + startup status surfaced in shell UI. |
+| WP-0070 | "Items" window clarity + rename | DONE | Codex | Renamed Items workspace to Media Library and clarified purpose in UI copy/navigation. |

@@ -3,7 +3,7 @@
 ## Metadata
 - ID: WP-0065
 - Owner: Codex
-- Status: BACKLOG
+- Status: DONE
 - Created: 2026-03-03
 - Target milestone: Stabilization sprint (usability + reliability)
 
@@ -42,3 +42,4 @@ Out of scope:
 ## Status updates
 
 - 2026-03-03: Created.
+- 2026-03-03: Implemented opener ACL fix (`opener:allow-open-path`), centralized path-open fallback (`open_path` -> `reveal_item_in_dir`), and explicit copy-path fallback messaging across Jobs/Library/Subtitle Editor/Diagnostics. Verified with desktop build + tauri cargo check.

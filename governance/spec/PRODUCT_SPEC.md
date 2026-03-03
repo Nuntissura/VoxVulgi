@@ -165,6 +165,16 @@ Initial language focus: **Korean + Japanese → English**.
 - **Jobs/Queue**: running/failed/completed, retry, logs link.
 - **Diagnostics**: storage usage, logs export, version info, privacy settings.
 
+### 8.0.1 Current top-level windows (implemented 2026-03-03)
+
+- **Localization Studio**: first/default window, focused on subtitles + dubbing workflow.
+- **Video Ingest**: local import + URL batch ingest + presets/templates + YouTube subscriptions/groups.
+- **Instagram Archive**: dedicated Instagram batch ingest workflow.
+- **Image Archive**: dedicated crawler-based image archive ingest workflow.
+- **Media Library**: renamed from ambiguous â€œItemsâ€; browse imported media and hand off to Localization Studio.
+- **Jobs/Queue**: execution state + retry/cancel + logs and output reveal.
+- **Diagnostics**: non-blocking, section-by-section loading with explicit readiness states.
+
 ## 8.1) Stabilization priorities for commercial readiness (2026-03-03)
 
 ### 8.1.1 Operator goals and needs

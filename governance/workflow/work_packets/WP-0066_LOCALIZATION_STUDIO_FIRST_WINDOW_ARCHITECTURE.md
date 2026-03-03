@@ -3,7 +3,7 @@
 ## Metadata
 - ID: WP-0066
 - Owner: Codex
-- Status: BACKLOG
+- Status: DONE
 - Created: 2026-03-03
 - Target milestone: Stabilization sprint (information architecture)
 
@@ -46,3 +46,4 @@ Out of scope:
 ## Status updates
 
 - 2026-03-03: Created.
+- 2026-03-03: Implemented top-level navigation order with `Localization Studio` first, split ingest/archive/media windows, and persisted active window state with first-run default to Localization Studio. Verified with desktop build.
