@@ -213,6 +213,7 @@ Initial language focus: **Korean + Japanese → English**.
   - Update/Repair in place,
   - Full reinstall (uninstall then install),
   - Uninstall.
+- For existing installs, show a short explainer page before maintenance choice so operators see one-line outcomes for each mode.
 - Uninstall flow must explicitly indicate that app-data lives under `%APPDATA%\com.voxvulgi.voxvulgi` and is only removed when the operator chooses delete-app-data.
 
 ## 9) Top 20 ROI backlog (next additions)

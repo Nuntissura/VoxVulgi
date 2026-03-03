@@ -85,3 +85,4 @@ This is the single source of truth for work status.
 | WP-0069 | Startup boot performance + staged initialization | DONE | Codex | Startup no longer blocks on offline bundle apply; background staging + startup status surfaced in shell UI. |
 | WP-0070 | "Items" window clarity + rename | DONE | Codex | Renamed Items workspace to Media Library and clarified purpose in UI copy/navigation. |
 | WP-0071 | Installer mode clarity + uninstall transparency | DONE | Codex | Added custom NSIS language strings so setup clearly communicates Update/Repair, Full reinstall, and Uninstall; made app-data deletion text explicit (`%APPDATA%`). |
+| WP-0072 | NSIS pre-maintenance explainer page | DONE | Codex | Added custom NSIS template page shown before maintenance choice, with one-line explanations for Update/Repair, Full reinstall, and Uninstall (including app-data behavior). |

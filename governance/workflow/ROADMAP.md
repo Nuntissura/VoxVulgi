@@ -11,6 +11,7 @@ Date: 2026-02-19
 - WP-0069: Stage startup initialization and add boot-timing instrumentation.
 - WP-0070: Clarify/rename "Items" window to match real user intent.
 - WP-0071: Clarify installer maintenance modes (Update/Repair vs Full reinstall vs Uninstall).
+- WP-0072: Add pre-maintenance explainer page before NSIS maintenance action selection.
 
 ## Phase 0 — Decisions (1–2 days)
 

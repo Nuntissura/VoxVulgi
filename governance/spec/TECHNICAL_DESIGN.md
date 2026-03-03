@@ -76,6 +76,7 @@ User app-data under `%APPDATA%\com.voxvulgi.voxvulgi` is retained by default unl
 Implementation note:
 
 - Custom NSIS language strings are defined in `product/desktop/src-tauri/installer/languages/English.nsh` and wired in `tauri.conf.json`.
+- Custom NSIS template is defined in `product/desktop/src-tauri/installer/templates/installer.nsi` and inserts a short explainer page before maintenance option selection when an existing installation is detected.
 
 ## 3) Data Model (SQLite)
 
