@@ -84,3 +84,4 @@ This is the single source of truth for work status.
 | WP-0068 | Diagnostics non-blocking load | DONE | Codex | Diagnostics now loads section-by-section with explicit `loading/ready/failed` states while keeping UI responsive. |
 | WP-0069 | Startup boot performance + staged initialization | DONE | Codex | Startup no longer blocks on offline bundle apply; background staging + startup status surfaced in shell UI. |
 | WP-0070 | "Items" window clarity + rename | DONE | Codex | Renamed Items workspace to Media Library and clarified purpose in UI copy/navigation. |
+| WP-0071 | Installer mode clarity + uninstall transparency | DONE | Codex | Added custom NSIS language strings so setup clearly communicates Update/Repair, Full reinstall, and Uninstall; made app-data deletion text explicit (`%APPDATA%`). |

@@ -30,3 +30,12 @@ This changelog tracks desktop installer builds produced by `governance/scripts/b
   - `product/desktop/Build Target/Current/release/bundle/nsis/VoxVulgi_0.1.0_x64-setup.exe`
   - `product/desktop/Build Target/Current/release/bundle/msi/VoxVulgi_0.1.0_x64_en-US.msi`
 - Notes: Baseline build before automated build changelog/version policy enforcement.
+
+## 0.1.2 - 2026-03-03T06:41:59Z
+- Work Packets: `WP-0071`
+- Commit: `47fd7a6`
+- Offline Bundle ID: `offline_full_win64_20260303_061326`
+- Artifacts:
+  - `product/desktop/Build Target/Current/release/bundle/nsis/VoxVulgi_0.1.2_x64-setup.exe`
+  - `product/desktop/Build Target/Current/release/bundle/msi/VoxVulgi_0.1.2_x64_en-US.msi`
+- Notes: Installer UX clarity: explicit Update/Repair vs Full reinstall vs Uninstall wording; app-data deletion text clarified.

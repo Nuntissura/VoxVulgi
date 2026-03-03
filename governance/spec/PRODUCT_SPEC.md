@@ -207,6 +207,14 @@ Initial language focus: **Korean + Japanese → English**.
 - Queue/Library/Diagnostics open-path actions must work for valid output/artifact paths.
 - Blocked/invalid paths must return actionable errors with copy-path fallback.
 
+### 8.1.5 Installer and uninstall clarity requirement
+
+- Setup/maintenance UI must clearly present:
+  - Update/Repair in place,
+  - Full reinstall (uninstall then install),
+  - Uninstall.
+- Uninstall flow must explicitly indicate that app-data lives under `%APPDATA%\com.voxvulgi.voxvulgi` and is only removed when the operator chooses delete-app-data.
+
 ## 9) Top 20 ROI backlog (next additions)
 
 Current direction keeps baseline values intact; these are explicitly deferred/planned features.

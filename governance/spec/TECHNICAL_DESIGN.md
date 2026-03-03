@@ -63,6 +63,20 @@ Implementation notes (desktop):
 - On first run, the app extracts the payload into the user app-data dir and writes a marker (`config/offline_bundle_applied_v1.json`) so it only applies once per bundle id.
 - Build policy: desktop installer packaging must refresh `src-tauri/offline/payload.zip` before each release build so bundled dependencies match the current engine/toolchain state.
 
+### 2.1.1 Installer maintenance mode clarity
+
+Windows NSIS installer UX must explicitly communicate maintenance outcomes:
+
+- **Update/Repair in place**: keeps current install and user app-data.
+- **Full reinstall**: uninstalls first, then installs.
+- **Uninstall**: removes installed app files.
+
+User app-data under `%APPDATA%\com.voxvulgi.voxvulgi` is retained by default unless the installer's delete-app-data option is explicitly selected by the operator.
+
+Implementation note:
+
+- Custom NSIS language strings are defined in `product/desktop/src-tauri/installer/languages/English.nsh` and wired in `tauri.conf.json`.
+
 ## 3) Data Model (SQLite)
 
 Core tables (suggested):
