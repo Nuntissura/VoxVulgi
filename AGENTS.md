@@ -13,6 +13,18 @@
 - Previous build outputs must be archived under:
   - `product/desktop/Build Target/Old versions`
 
+## Installer Maintenance Mode Policy
+
+- Preserve these exact installer maintenance labels:
+  - `Update/Repair`
+  - `Full reinstall`
+  - `Uninstall`
+- Keep existing-install flow clear: show the pre-maintenance explainer before maintenance selection.
+- Keep app-data behavior explicit: `%APPDATA%\\com.voxvulgi.voxvulgi` is retained unless delete-app-data is explicitly chosen.
+- If wording semantics need to change, update canonical policy docs first:
+  - `governance/spec/PRODUCT_SPEC.md`
+  - `governance/spec/TECHNICAL_DESIGN.md`
+
 ## Artifact Cleanup Policy
 
 - Use `governance/scripts/cleanup_artifacts.ps1` to remove generated test/tool artifacts.

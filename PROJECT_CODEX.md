@@ -59,3 +59,13 @@ Pick the first real implementation WP from `governance/workflow/ROADMAP.md` and 
   - append an entry in `governance/release/BUILD_CHANGELOG.md`,
   - list included Work Packet IDs in that entry,
   - write a build log file under `product/desktop/Build Target/logs`.
+
+## 8) Installer mode policy (Windows)
+
+- Use and preserve these maintenance labels in installer UX/copy:
+  - `Update/Repair`
+  - `Full reinstall`
+  - `Uninstall`
+- Canonical source of truth:
+  - `governance/spec/PRODUCT_SPEC.md` (installer clarity requirement)
+  - `governance/spec/TECHNICAL_DESIGN.md` (installer maintenance mode implementation policy)
