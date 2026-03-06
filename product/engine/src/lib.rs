@@ -16,6 +16,7 @@ pub mod subtitle_tracks;
 pub mod subtitles;
 pub mod tools;
 pub mod translate;
+pub mod voice_cast_packs;
 pub mod voice_templates;
 
 pub use error::{EngineError, Result};

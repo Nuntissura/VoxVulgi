@@ -19,21 +19,21 @@ Date: 2026-02-19
 
 ## Voice-Cloning Expansion Program (Post-WP-0076)
 
-- WP-0077: Reusable cast packs for recurring show roles across episodes.
-- WP-0078: Multi-reference cloning with several clean clips per template speaker.
-- WP-0079: Auto-match suggestions between diarized speakers and saved templates/cast packs.
-- WP-0080: Per-speaker style presets (neutral, documentary, game-show, soft, authoritative).
-- WP-0081: Pronunciation locks for names, places, and glossary terms.
-- WP-0082: Emotion/prosody controls and reusable delivery presets.
-- WP-0083: Voice QC for references and dubbed outputs.
-- WP-0084: Batch dubbing across folders, playlists, seasons, or selected item sets.
-- WP-0085: A/B voice previewing before committing to a final voice setup.
-- WP-0086: Export stems and alternate dubbed versions.
-- WP-0087: Cross-episode voice memory for recurring speakers.
-- WP-0088: Reference cleanup before cloning (denoise, de-reverb, isolate, normalize).
-- WP-0089: Hybrid mode combining cloned major speakers with standard TTS for minor speakers.
-- WP-0090: Subtitle-aware prosody driven by punctuation, line breaks, and timing structure.
-- WP-0091: Character libraries for reusable fictional narrator or teaching voices.
+- WP-0077: Reusable cast packs for recurring show roles across episodes. DONE.
+- WP-0078: Multi-reference cloning with several clean clips per template speaker. DONE.
+- WP-0079: Auto-match suggestions between diarized speakers and saved templates/cast packs. DONE.
+- WP-0080: Per-speaker style presets (neutral, documentary, game-show, soft, authoritative). DONE.
+- WP-0081: Pronunciation locks for names, places, and glossary terms. DONE.
+- WP-0082: Emotion/prosody controls and reusable delivery presets. DONE.
+- WP-0083: Voice QC for references and dubbed outputs. BACKLOG.
+- WP-0084: Batch dubbing across folders, playlists, seasons, or selected item sets. BACKLOG.
+- WP-0085: A/B voice previewing before committing to a final voice setup. BACKLOG.
+- WP-0086: Export stems and alternate dubbed versions. BACKLOG.
+- WP-0087: Cross-episode voice memory for recurring speakers. BACKLOG.
+- WP-0088: Reference cleanup before cloning (denoise, de-reverb, isolate, normalize). BACKLOG.
+- WP-0089: Hybrid mode combining cloned major speakers with standard TTS for minor speakers. DONE.
+- WP-0090: Subtitle-aware prosody driven by punctuation, line breaks, and timing structure. IN_PROGRESS.
+- WP-0091: Character libraries for reusable fictional narrator or teaching voices. BACKLOG.
 
 ## Phase 0 — Decisions (1–2 days)
 

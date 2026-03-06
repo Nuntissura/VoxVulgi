@@ -3,7 +3,7 @@
 ## Metadata
 - ID: WP-0078
 - Owner: Codex
-- Status: BACKLOG
+- Status: DONE
 - Created: 2026-03-06
 - Target milestone: Phase 2 quality hardening
 
@@ -41,3 +41,4 @@ Out of scope:
 ## Status updates
 
 - 2026-03-06: Created from the voice-cloning quality backlog after reusable template support landed.
+- 2026-03-06: Implemented backward-compatible multi-reference speaker storage plus OpenVoice multi-reference extraction and template-reference management UI; verified via engine `cargo test`, desktop Tauri `cargo test`, desktop `npm run build`, and proof bundle `product/desktop/Build Target/tool_artifacts/wp_runs/WP-0078/20260306_172806/`.

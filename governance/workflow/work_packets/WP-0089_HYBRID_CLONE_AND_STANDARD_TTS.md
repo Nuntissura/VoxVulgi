@@ -3,7 +3,7 @@
 ## Metadata
 - ID: WP-0089
 - Owner: Codex
-- Status: BACKLOG
+- Status: DONE
 - Created: 2026-03-06
 - Target milestone: Phase 3 efficient dubbing strategies
 
@@ -40,3 +40,4 @@ Out of scope:
 ## Status updates
 
 - 2026-03-06: Created as a pragmatic scale/cost-quality compromise for multi-speaker material.
+- 2026-03-06: Implemented per-speaker render-mode routing so one item can mix cloned and standard-TTS speakers inside the same dubbing/mix/mux pipeline; verified via engine `cargo test`, desktop Tauri `cargo test`, desktop `npm run build`, and proof bundle `product/desktop/Build Target/tool_artifacts/wp_runs/WP-0089/20260306_172806/`.

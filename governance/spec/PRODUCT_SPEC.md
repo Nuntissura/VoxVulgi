@@ -111,10 +111,12 @@ Initial language focus: **Korean + Japanese → English**.
   - a TTS voice (MVP-safe approach), or
   - a voice-preserved model (advanced).
 - Operators must be able to save reusable voice templates for recurring speakers/series and re-apply them to later items through explicit speaker-slot mapping.
-- Planned expansion after reusable voice templates:
-  - reusable cast packs for recurring show roles (`host`, `narrator`, `contestant`, `guest`, and custom roles),
-  - multi-reference speaker cloning (3-10 clean clips per template speaker),
+- Current reusable-voice support includes:
+  - reusable cast packs for recurring show roles (`host`, `narrator`, `contestant`, `guest`, and custom roles via template labels),
+  - multi-reference speaker cloning with backward-compatible single-reference fallback,
   - operator-reviewed auto-match suggestions from diarized speakers to saved template speakers or cast-pack roles,
+  - per-speaker render-mode routing so clone and standard-TTS speakers can coexist in one item.
+- Remaining planned expansion after the reusable-library tranche:
   - cross-episode voice memory for recurring speakers.
 
 ### 5.2 Background preservation
@@ -123,13 +125,14 @@ Initial language focus: **Korean + Japanese → English**.
 - Generate English speech per segment and mix back with background.
 - Provide mix controls:
   - ducking, loudness normalization, fade, noise reduction (optional).
-- Planned dubbing-quality controls:
+- Current dubbing-quality controls:
   - per-speaker style presets,
   - pronunciation locks for names/places/glossary terms,
-  - emotion/prosody controls,
-  - subtitle-aware prosody,
+  - emotion/prosody controls with reusable presets,
+  - hybrid mode where major speakers use cloning and minor/background speakers use standard TTS.
+- Remaining planned quality controls:
+  - explicit subtitle-aware prosody toggles/review controls,
   - optional reference cleanup before cloning,
-  - hybrid mode where major speakers use cloning and minor/background speakers use standard TTS,
   - voice QC for reference and output quality.
 
 ### 5.3 Export

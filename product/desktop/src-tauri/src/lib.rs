@@ -8,7 +8,7 @@ use voxvulgi_engine::models::ModelStore;
 use voxvulgi_engine::paths::AppPaths;
 use voxvulgi_engine::{
     config, db, diagnostics, jobs, library, speakers, subscriptions, subtitle_tracks, subtitles,
-    tools, voice_templates,
+    tools, voice_cast_packs, voice_templates,
 };
 
 #[derive(Debug, Clone, serde::Deserialize)]
@@ -1763,6 +1763,11 @@ fn speakers_upsert(
     display_name: Option<String>,
     tts_voice_id: Option<String>,
     tts_voice_profile_path: Option<String>,
+    tts_voice_profile_paths: Option<Vec<String>>,
+    style_preset: Option<String>,
+    prosody_preset: Option<String>,
+    pronunciation_overrides: Option<String>,
+    render_mode: Option<String>,
 ) -> Result<speakers::ItemSpeakerSetting, String> {
     speakers::upsert_item_speaker_setting(
         &state.paths,
@@ -1771,6 +1776,11 @@ fn speakers_upsert(
         display_name,
         tts_voice_id,
         tts_voice_profile_path,
+        tts_voice_profile_paths,
+        style_preset,
+        prosody_preset,
+        pronunciation_overrides,
+        render_mode,
     )
     .map_err(|e| e.to_string())
 }
@@ -1829,6 +1839,66 @@ async fn voice_templates_delete(
 }
 
 #[tauri::command]
+async fn voice_templates_update_speaker(
+    state: State<'_, AppState>,
+    template_id: String,
+    speaker_key: String,
+    update: voice_templates::VoiceTemplateSpeakerUpdate,
+) -> Result<voice_templates::VoiceTemplateDetail, String> {
+    let paths = state.paths.clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        voice_templates::update_voice_template_speaker(&paths, &template_id, &speaker_key, update)
+            .map_err(|e| e.to_string())
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
+#[tauri::command]
+async fn voice_templates_add_reference(
+    state: State<'_, AppState>,
+    template_id: String,
+    speaker_key: String,
+    source_path: String,
+    label: Option<String>,
+) -> Result<voice_templates::VoiceTemplateDetail, String> {
+    let paths = state.paths.clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        voice_templates::add_voice_template_reference(
+            &paths,
+            &template_id,
+            &speaker_key,
+            &source_path,
+            label,
+        )
+        .map_err(|e| e.to_string())
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
+#[tauri::command]
+async fn voice_templates_remove_reference(
+    state: State<'_, AppState>,
+    template_id: String,
+    speaker_key: String,
+    reference_id: String,
+) -> Result<voice_templates::VoiceTemplateDetail, String> {
+    let paths = state.paths.clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        voice_templates::remove_voice_template_reference(
+            &paths,
+            &template_id,
+            &speaker_key,
+            &reference_id,
+        )
+        .map_err(|e| e.to_string())
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
+#[tauri::command]
 async fn voice_templates_apply_to_item(
     state: State<'_, AppState>,
     item_id: String,
@@ -1838,6 +1908,90 @@ async fn voice_templates_apply_to_item(
     let paths = state.paths.clone();
     tauri::async_runtime::spawn_blocking(move || {
         voice_templates::apply_voice_template_to_item(&paths, &item_id, &template_id, &mappings)
+            .map_err(|e| e.to_string())
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
+#[tauri::command]
+async fn voice_cast_packs_list(
+    state: State<'_, AppState>,
+) -> Result<Vec<voice_cast_packs::VoiceCastPack>, String> {
+    let paths = state.paths.clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        voice_cast_packs::list_voice_cast_packs(&paths).map_err(|e| e.to_string())
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
+#[tauri::command]
+async fn voice_cast_packs_get(
+    state: State<'_, AppState>,
+    pack_id: String,
+) -> Result<voice_cast_packs::VoiceCastPackDetail, String> {
+    let paths = state.paths.clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        voice_cast_packs::get_voice_cast_pack(&paths, &pack_id).map_err(|e| e.to_string())
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
+#[tauri::command]
+async fn voice_cast_packs_create_from_template(
+    state: State<'_, AppState>,
+    template_id: String,
+    name: String,
+) -> Result<voice_cast_packs::VoiceCastPackDetail, String> {
+    let paths = state.paths.clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        voice_cast_packs::create_voice_cast_pack_from_template(&paths, &template_id, &name)
+            .map_err(|e| e.to_string())
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
+#[tauri::command]
+async fn voice_cast_packs_update(
+    state: State<'_, AppState>,
+    pack_id: String,
+    name: String,
+) -> Result<voice_cast_packs::VoiceCastPackDetail, String> {
+    let paths = state.paths.clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        voice_cast_packs::update_voice_cast_pack(&paths, &pack_id, &name)
+            .map_err(|e| e.to_string())
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
+#[tauri::command]
+async fn voice_cast_packs_delete(
+    state: State<'_, AppState>,
+    pack_id: String,
+) -> Result<(), String> {
+    let paths = state.paths.clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        voice_cast_packs::delete_voice_cast_pack(&paths, &pack_id).map_err(|e| e.to_string())
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
+#[tauri::command]
+async fn voice_cast_packs_apply_to_item(
+    state: State<'_, AppState>,
+    item_id: String,
+    pack_id: String,
+    mappings: Vec<voice_cast_packs::VoiceCastPackApplyMapping>,
+) -> Result<Vec<speakers::ItemSpeakerSetting>, String> {
+    let paths = state.paths.clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        voice_cast_packs::apply_voice_cast_pack_to_item(&paths, &item_id, &pack_id, &mappings)
             .map_err(|e| e.to_string())
     })
     .await
@@ -2588,10 +2742,19 @@ pub fn run() {
             speakers_list,
             speakers_upsert,
             voice_templates_apply_to_item,
+            voice_templates_add_reference,
             voice_templates_create_from_item,
             voice_templates_delete,
             voice_templates_get,
             voice_templates_list,
+            voice_templates_remove_reference,
+            voice_templates_update_speaker,
+            voice_cast_packs_apply_to_item,
+            voice_cast_packs_create_from_template,
+            voice_cast_packs_delete,
+            voice_cast_packs_get,
+            voice_cast_packs_list,
+            voice_cast_packs_update,
             subtitles_export_doc_srt,
             subtitles_export_doc_vtt,
             subtitles_list_tracks,

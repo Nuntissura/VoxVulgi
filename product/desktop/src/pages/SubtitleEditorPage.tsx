@@ -118,6 +118,33 @@ function stemFromPath(path: string): string {
   return fileName.slice(0, dot);
 }
 
+function trimOrNull(value: string | null | undefined): string | null {
+  const next = (value ?? "").trim();
+  return next ? next : null;
+}
+
+function uniquePaths(paths: Array<string | null | undefined>): string[] {
+  const seen = new Set<string>();
+  const next: string[] = [];
+  for (const raw of paths) {
+    const value = (raw ?? "").trim();
+    if (!value || seen.has(value)) continue;
+    seen.add(value);
+    next.push(value);
+  }
+  return next;
+}
+
+function speakerProfilePaths(setting: {
+  tts_voice_profile_path: string | null;
+  tts_voice_profile_paths?: string[];
+} | null): string[] {
+  if (!setting) return [];
+  const many = uniquePaths(setting.tts_voice_profile_paths ?? []);
+  if (many.length) return many;
+  return uniquePaths([setting.tts_voice_profile_path]);
+}
+
 type Pyttsx3Voice = {
   id: string;
   name: string;
@@ -129,6 +156,11 @@ type ItemSpeakerSetting = {
   display_name: string | null;
   tts_voice_id: string | null;
   tts_voice_profile_path: string | null;
+  tts_voice_profile_paths: string[];
+  style_preset: string | null;
+  prosody_preset: string | null;
+  pronunciation_overrides: string | null;
+  render_mode: string | null;
   created_at_ms: number;
   updated_at_ms: number;
 };
@@ -148,6 +180,22 @@ type VoiceTemplateSpeaker = {
   display_name: string | null;
   tts_voice_id: string | null;
   tts_voice_profile_path: string | null;
+  tts_voice_profile_paths: string[];
+  style_preset: string | null;
+  prosody_preset: string | null;
+  pronunciation_overrides: string | null;
+  render_mode: string | null;
+  created_at_ms: number;
+  updated_at_ms: number;
+};
+
+type VoiceTemplateReference = {
+  template_id: string;
+  speaker_key: string;
+  reference_id: string;
+  label: string | null;
+  path: string;
+  sort_order: number;
   created_at_ms: number;
   updated_at_ms: number;
 };
@@ -155,12 +203,80 @@ type VoiceTemplateSpeaker = {
 type VoiceTemplateDetail = {
   template: VoiceTemplate;
   speakers: VoiceTemplateSpeaker[];
+  references: VoiceTemplateReference[];
 };
 
 type VoiceTemplateApplyMapping = {
   item_speaker_key: string;
   template_speaker_key: string;
 };
+
+type VoiceTemplateSpeakerUpdate = {
+  display_name: string | null;
+  tts_voice_id: string | null;
+  style_preset: string | null;
+  prosody_preset: string | null;
+  pronunciation_overrides: string | null;
+  render_mode: string | null;
+};
+
+type VoiceCastPack = {
+  id: string;
+  name: string;
+  role_count: number;
+  created_at_ms: number;
+  updated_at_ms: number;
+};
+
+type VoiceCastPackRole = {
+  pack_id: string;
+  role_key: string;
+  display_name: string | null;
+  template_id: string;
+  template_speaker_key: string;
+  style_preset: string | null;
+  prosody_preset: string | null;
+  pronunciation_overrides: string | null;
+  render_mode: string | null;
+  sort_order: number;
+  created_at_ms: number;
+  updated_at_ms: number;
+};
+
+type VoiceCastPackDetail = {
+  pack: VoiceCastPack;
+  roles: VoiceCastPackRole[];
+};
+
+type VoiceCastPackApplyMapping = {
+  item_speaker_key: string;
+  pack_role_key: string;
+};
+
+const STYLE_PRESET_OPTIONS = [
+  { value: "", label: "Default style" },
+  { value: "neutral", label: "Neutral" },
+  { value: "documentary_narrator", label: "Documentary narrator" },
+  { value: "game_show_energy", label: "Game show energy" },
+  { value: "soft", label: "Soft" },
+  { value: "authoritative", label: "Authoritative" },
+] as const;
+
+const PROSODY_PRESET_OPTIONS = [
+  { value: "", label: "Default prosody" },
+  { value: "natural", label: "Natural" },
+  { value: "slower", label: "Slower" },
+  { value: "warmer", label: "Warmer" },
+  { value: "more_excited", label: "More excited" },
+  { value: "less_robotic", label: "Less robotic" },
+  { value: "tighter_timing", label: "Tighter timing" },
+] as const;
+
+const RENDER_MODE_OPTIONS = [
+  { value: "", label: "Clone when references exist" },
+  { value: "clone", label: "Always clone" },
+  { value: "standard_tts", label: "Standard TTS fallback" },
+] as const;
 
 function formatTc(ms: number): string {
   const clamped = Math.max(0, Math.floor(ms));
@@ -426,6 +542,14 @@ export function SubtitleEditorPage({ itemId }: { itemId: string }) {
   const [selectedVoiceTemplateDetail, setSelectedVoiceTemplateDetail] =
     useState<VoiceTemplateDetail | null>(null);
   const [voiceTemplateMappings, setVoiceTemplateMappings] = useState<Record<string, string>>({});
+  const [voiceCastPacks, setVoiceCastPacks] = useState<VoiceCastPack[]>([]);
+  const [voiceCastPacksBusy, setVoiceCastPacksBusy] = useState(false);
+  const [voiceCastPackActionBusy, setVoiceCastPackActionBusy] = useState(false);
+  const [voiceCastPackName, setVoiceCastPackName] = useState("");
+  const [selectedVoiceCastPackId, setSelectedVoiceCastPackId] = useState("");
+  const [selectedVoiceCastPackDetail, setSelectedVoiceCastPackDetail] =
+    useState<VoiceCastPackDetail | null>(null);
+  const [voiceCastPackMappings, setVoiceCastPackMappings] = useState<Record<string, string>>({});
   const [selectedSegments, setSelectedSegments] = useState<Set<number>>(() => new Set());
   const [bulkSpeakerKey, setBulkSpeakerKey] = useState("");
   const [bulkNewSpeakerKey, setBulkNewSpeakerKey] = useState("");
@@ -433,6 +557,15 @@ export function SubtitleEditorPage({ itemId }: { itemId: string }) {
   const [mergeFromSpeakerKey, setMergeFromSpeakerKey] = useState("");
   const [mergeToSpeakerKey, setMergeToSpeakerKey] = useState("");
   const [speakerNameDrafts, setSpeakerNameDrafts] = useState<Record<string, string>>({});
+  const [speakerPronunciationDrafts, setSpeakerPronunciationDrafts] = useState<Record<string, string>>(
+    {},
+  );
+  const [templateSpeakerNameDrafts, setTemplateSpeakerNameDrafts] = useState<
+    Record<string, string>
+  >({});
+  const [templateSpeakerPronunciationDrafts, setTemplateSpeakerPronunciationDrafts] = useState<
+    Record<string, string>
+  >({});
 
   useEffect(() => {
     safeLocalStorageSet("voxvulgi.v1.settings.asr_lang", asrLang);
@@ -560,6 +693,12 @@ export function SubtitleEditorPage({ itemId }: { itemId: string }) {
     return next;
   }, []);
 
+  const refreshVoiceCastPacks = useCallback(async () => {
+    const next = await invoke<VoiceCastPack[]>("voice_cast_packs_list");
+    setVoiceCastPacks(next);
+    return next;
+  }, []);
+
   const refreshOutputs = useCallback(async () => {
     const next = await invoke<ItemOutputs>("item_outputs", { itemId });
     setOutputs(next);
@@ -615,6 +754,7 @@ export function SubtitleEditorPage({ itemId }: { itemId: string }) {
       refreshTracks(),
       refreshSpeakerSettings(),
       refreshVoiceTemplates(),
+      refreshVoiceCastPacks(),
       refreshOutputs(),
       refreshArtifacts(),
       refreshItemJobs(),
@@ -638,6 +778,7 @@ export function SubtitleEditorPage({ itemId }: { itemId: string }) {
     refreshTracks,
     refreshSpeakerSettings,
     refreshVoiceTemplates,
+    refreshVoiceCastPacks,
     refreshOutputs,
     refreshArtifacts,
     refreshItemJobs,
@@ -666,6 +807,16 @@ export function SubtitleEditorPage({ itemId }: { itemId: string }) {
     for (const s of speakerSettings) m.set(s.speaker_key, s);
     return m;
   }, [speakerSettings]);
+
+  const selectedTemplateReferencesBySpeaker = useMemo(() => {
+    const next = new Map<string, VoiceTemplateReference[]>();
+    for (const reference of selectedVoiceTemplateDetail?.references ?? []) {
+      const existing = next.get(reference.speaker_key) ?? [];
+      existing.push(reference);
+      next.set(reference.speaker_key, existing);
+    }
+    return next;
+  }, [selectedVoiceTemplateDetail]);
 
   const speakersInTrack = useMemo(() => {
     const set = new Set<string>();
@@ -697,11 +848,37 @@ export function SubtitleEditorPage({ itemId }: { itemId: string }) {
   }, [speakerSettingsByKey, speakersInTrack]);
 
   useEffect(() => {
+    setSpeakerPronunciationDrafts((prev) => {
+      let changed = false;
+      const next: Record<string, string> = { ...prev };
+      for (const speakerKey of speakersInTrack) {
+        if (next[speakerKey] === undefined) {
+          next[speakerKey] =
+            speakerSettingsByKey.get(speakerKey)?.pronunciation_overrides ?? "";
+          changed = true;
+        }
+      }
+      for (const key of Object.keys(next)) {
+        if (!speakersInTrack.includes(key)) {
+          delete next[key];
+          changed = true;
+        }
+      }
+      return changed ? next : prev;
+    });
+  }, [speakerSettingsByKey, speakersInTrack]);
+
+  useEffect(() => {
     if (!item) return;
     setVoiceTemplateName((prev) => {
       if (prev.trim()) return prev;
       const fallback = stemFromPath(item.media_path) || item.title || "Voice template";
       return `${fallback} voice template`;
+    });
+    setVoiceCastPackName((prev) => {
+      if (prev.trim()) return prev;
+      const fallback = stemFromPath(item.media_path) || item.title || "Cast pack";
+      return `${fallback} cast pack`;
     });
   }, [item]);
 
@@ -759,6 +936,51 @@ export function SubtitleEditorPage({ itemId }: { itemId: string }) {
   }, [selectedVoiceTemplateId]);
 
   useEffect(() => {
+    setTemplateSpeakerNameDrafts((prev) => {
+      if (!selectedVoiceTemplateDetail) return {};
+      let changed = false;
+      const next = { ...prev };
+      for (const speaker of selectedVoiceTemplateDetail.speakers) {
+        if (next[speaker.speaker_key] === undefined) {
+          next[speaker.speaker_key] = speaker.display_name ?? "";
+          changed = true;
+        }
+      }
+      for (const key of Object.keys(next)) {
+        if (!selectedVoiceTemplateDetail.speakers.some((speaker) => speaker.speaker_key === key)) {
+          delete next[key];
+          changed = true;
+        }
+      }
+      return changed ? next : prev;
+    });
+    setTemplateSpeakerPronunciationDrafts((prev) => {
+      if (!selectedVoiceTemplateDetail) return {};
+      let changed = false;
+      const next = { ...prev };
+      for (const speaker of selectedVoiceTemplateDetail.speakers) {
+        if (next[speaker.speaker_key] === undefined) {
+          next[speaker.speaker_key] = speaker.pronunciation_overrides ?? "";
+          changed = true;
+        }
+      }
+      for (const key of Object.keys(next)) {
+        if (!selectedVoiceTemplateDetail.speakers.some((speaker) => speaker.speaker_key === key)) {
+          delete next[key];
+          changed = true;
+        }
+      }
+      return changed ? next : prev;
+    });
+    setVoiceCastPackName((prev) => {
+      if (prev.trim()) return prev;
+      if (!selectedVoiceTemplateDetail) return prev;
+      const templateName = selectedVoiceTemplateDetail.template.name.trim();
+      return templateName ? `${templateName} cast pack` : prev;
+    });
+  }, [selectedVoiceTemplateDetail]);
+
+  useEffect(() => {
     setVoiceTemplateMappings((prev) => {
       if (!selectedVoiceTemplateDetail) return {};
       const next: Record<string, string> = { ...prev };
@@ -800,6 +1022,81 @@ export function SubtitleEditorPage({ itemId }: { itemId: string }) {
       return changed ? next : prev;
     });
   }, [selectedVoiceTemplateDetail, speakerNameDrafts, speakerSettingsByKey, speakersInTrack]);
+
+  useEffect(() => {
+    if (!selectedVoiceCastPackId) {
+      setSelectedVoiceCastPackDetail(null);
+      setVoiceCastPackMappings({});
+      return;
+    }
+
+    let cancelled = false;
+    setVoiceCastPacksBusy(true);
+    invoke<VoiceCastPackDetail>("voice_cast_packs_get", {
+      packId: selectedVoiceCastPackId,
+    })
+      .then((detail) => {
+        if (cancelled) return;
+        setSelectedVoiceCastPackDetail(detail);
+      })
+      .catch((e) => {
+        if (cancelled) return;
+        setError(String(e));
+      })
+      .finally(() => {
+        if (!cancelled) setVoiceCastPacksBusy(false);
+      });
+
+    return () => {
+      cancelled = true;
+    };
+  }, [selectedVoiceCastPackId]);
+
+  useEffect(() => {
+    if (!selectedVoiceCastPackDetail) return;
+    setVoiceCastPackName(selectedVoiceCastPackDetail.pack.name);
+  }, [selectedVoiceCastPackDetail]);
+
+  useEffect(() => {
+    setVoiceCastPackMappings((prev) => {
+      if (!selectedVoiceCastPackDetail) return {};
+      const next: Record<string, string> = { ...prev };
+      let changed = false;
+      const rolesByDisplay = new Map<string, string>();
+      for (const role of selectedVoiceCastPackDetail.roles) {
+        const display = (role.display_name ?? "").trim().toLowerCase();
+        if (display && !rolesByDisplay.has(display)) {
+          rolesByDisplay.set(display, role.role_key);
+        }
+      }
+      for (const speakerKey of speakersInTrack) {
+        const currentValue = next[speakerKey];
+        if (
+          currentValue &&
+          selectedVoiceCastPackDetail.roles.some((role) => role.role_key === currentValue)
+        ) {
+          continue;
+        }
+        const currentName =
+          (speakerNameDrafts[speakerKey] ?? speakerSettingsByKey.get(speakerKey)?.display_name ?? "")
+            .trim()
+            .toLowerCase();
+        const matched =
+          (currentName ? rolesByDisplay.get(currentName) : undefined) ??
+          selectedVoiceCastPackDetail.roles.find((role) => role.role_key === speakerKey)?.role_key ??
+          "";
+        next[speakerKey] = matched;
+        changed = true;
+      }
+      for (const key of Object.keys(next)) {
+        if (!speakersInTrack.includes(key)) {
+          delete next[key];
+          changed = true;
+        }
+      }
+      return changed ? next : prev;
+    });
+  }, [selectedVoiceCastPackDetail, speakerNameDrafts, speakerSettingsByKey, speakersInTrack]);
 
   useEffect(() => {
     if (videoPreviewMode === "mux_mp4" && !outputs?.mux_dub_preview_v1_mp4_exists) {
@@ -1320,17 +1617,46 @@ export function SubtitleEditorPage({ itemId }: { itemId: string }) {
     }
   }
 
-  async function setSpeakerDisplayName(speakerKey: string, displayName: string | null) {
+  async function saveSpeakerSetting(
+    speakerKey: string,
+    patch: Partial<{
+      display_name: string | null;
+      tts_voice_id: string | null;
+      tts_voice_profile_paths: string[];
+      style_preset: string | null;
+      prosody_preset: string | null;
+      pronunciation_overrides: string | null;
+      render_mode: string | null;
+    }>,
+  ) {
     setError(null);
     setSpeakerSettingsBusy(true);
     try {
       const existing = speakerSettingsByKey.get(speakerKey);
+      const ttsVoiceProfilePaths = uniquePaths(
+        patch.tts_voice_profile_paths ?? speakerProfilePaths(existing ?? null),
+      );
       await invoke<ItemSpeakerSetting>("speakers_upsert", {
         itemId,
         speakerKey,
-        displayName,
-        ttsVoiceId: existing?.tts_voice_id ?? null,
-        ttsVoiceProfilePath: existing?.tts_voice_profile_path ?? null,
+        displayName:
+          patch.display_name !== undefined ? patch.display_name : existing?.display_name ?? null,
+        ttsVoiceId:
+          patch.tts_voice_id !== undefined ? patch.tts_voice_id : existing?.tts_voice_id ?? null,
+        ttsVoiceProfilePath: ttsVoiceProfilePaths[0] ?? null,
+        ttsVoiceProfilePaths,
+        stylePreset:
+          patch.style_preset !== undefined ? patch.style_preset : existing?.style_preset ?? null,
+        prosodyPreset:
+          patch.prosody_preset !== undefined
+            ? patch.prosody_preset
+            : existing?.prosody_preset ?? null,
+        pronunciationOverrides:
+          patch.pronunciation_overrides !== undefined
+            ? patch.pronunciation_overrides
+            : existing?.pronunciation_overrides ?? null,
+        renderMode:
+          patch.render_mode !== undefined ? patch.render_mode : existing?.render_mode ?? null,
       });
       await refreshSpeakerSettings();
     } catch (e) {
@@ -1338,50 +1664,72 @@ export function SubtitleEditorPage({ itemId }: { itemId: string }) {
     } finally {
       setSpeakerSettingsBusy(false);
     }
+  }
+
+  async function setSpeakerDisplayName(speakerKey: string, displayName: string | null) {
+    await saveSpeakerSetting(speakerKey, { display_name: displayName });
   }
 
   async function setSpeakerVoice(speakerKey: string, ttsVoiceId: string | null) {
-    setError(null);
-    setSpeakerSettingsBusy(true);
-    try {
-      const existing = speakerSettingsByKey.get(speakerKey);
-      await invoke<ItemSpeakerSetting>("speakers_upsert", {
-        itemId,
-        speakerKey,
-        displayName: existing?.display_name ?? null,
-        ttsVoiceId,
-        ttsVoiceProfilePath: existing?.tts_voice_profile_path ?? null,
-      });
-      await refreshSpeakerSettings();
-    } catch (e) {
-      setError(String(e));
-    } finally {
-      setSpeakerSettingsBusy(false);
-    }
+    await saveSpeakerSetting(speakerKey, { tts_voice_id: ttsVoiceId });
   }
 
-  async function pickSpeakerVoiceProfile(speakerKey: string) {
+  async function setSpeakerStylePreset(speakerKey: string, stylePreset: string | null) {
+    await saveSpeakerSetting(speakerKey, { style_preset: stylePreset });
+  }
+
+  async function setSpeakerProsodyPreset(speakerKey: string, prosodyPreset: string | null) {
+    await saveSpeakerSetting(speakerKey, { prosody_preset: prosodyPreset });
+  }
+
+  async function setSpeakerRenderMode(speakerKey: string, renderMode: string | null) {
+    await saveSpeakerSetting(speakerKey, { render_mode: renderMode });
+  }
+
+  async function setSpeakerPronunciationOverrides(
+    speakerKey: string,
+    pronunciationOverrides: string | null,
+  ) {
+    await saveSpeakerSetting(speakerKey, {
+      pronunciation_overrides: pronunciationOverrides,
+    });
+  }
+
+  async function pickSpeakerVoiceProfiles(speakerKey: string) {
     setError(null);
     setSpeakerSettingsBusy(true);
     try {
       const selection = await open({
-        multiple: false,
+        multiple: true,
         directory: false,
         filters: [
           { name: "Audio", extensions: ["wav", "mp3", "m4a", "flac", "ogg", "aac", "opus"] },
           { name: "All files", extensions: ["*"] },
         ],
       });
-      const picked = Array.isArray(selection) ? selection[0] : selection;
-      if (!picked || typeof picked !== "string") return;
+      const pickedPaths = Array.isArray(selection)
+        ? selection.filter((value): value is string => typeof value === "string")
+        : typeof selection === "string"
+          ? [selection]
+          : [];
+      if (!pickedPaths.length) return;
 
       const existing = speakerSettingsByKey.get(speakerKey);
+      const nextPaths = uniquePaths([
+        ...pickedPaths,
+        ...speakerProfilePaths(existing ?? null),
+      ]);
       await invoke<ItemSpeakerSetting>("speakers_upsert", {
         itemId,
         speakerKey,
         displayName: existing?.display_name ?? null,
         ttsVoiceId: existing?.tts_voice_id ?? null,
-        ttsVoiceProfilePath: picked,
+        ttsVoiceProfilePath: nextPaths[0] ?? null,
+        ttsVoiceProfilePaths: nextPaths,
+        stylePreset: existing?.style_preset ?? null,
+        prosodyPreset: existing?.prosody_preset ?? null,
+        pronunciationOverrides: existing?.pronunciation_overrides ?? null,
+        renderMode: existing?.render_mode ?? null,
       });
       await refreshSpeakerSettings();
     } catch (e) {
@@ -1391,24 +1739,8 @@ export function SubtitleEditorPage({ itemId }: { itemId: string }) {
     }
   }
 
-  async function clearSpeakerVoiceProfile(speakerKey: string) {
-    setError(null);
-    setSpeakerSettingsBusy(true);
-    try {
-      const existing = speakerSettingsByKey.get(speakerKey);
-      await invoke<ItemSpeakerSetting>("speakers_upsert", {
-        itemId,
-        speakerKey,
-        displayName: existing?.display_name ?? null,
-        ttsVoiceId: existing?.tts_voice_id ?? null,
-        ttsVoiceProfilePath: null,
-      });
-      await refreshSpeakerSettings();
-    } catch (e) {
-      setError(String(e));
-    } finally {
-      setSpeakerSettingsBusy(false);
-    }
+  async function clearSpeakerVoiceProfiles(speakerKey: string) {
+    await saveSpeakerSetting(speakerKey, { tts_voice_profile_paths: [] });
   }
 
   async function saveCurrentVoiceTemplate() {
@@ -1428,6 +1760,117 @@ export function SubtitleEditorPage({ itemId }: { itemId: string }) {
       setSelectedVoiceTemplateDetail(detail);
       await refreshVoiceTemplates();
       setNotice(`Saved voice template "${detail.template.name}".`);
+    } catch (e) {
+      setError(String(e));
+    } finally {
+      setVoiceTemplateActionBusy(false);
+    }
+  }
+
+  async function updateSelectedVoiceTemplateSpeaker(
+    speakerKey: string,
+    patch: Partial<VoiceTemplateSpeakerUpdate>,
+  ) {
+    if (!selectedVoiceTemplateId || !selectedVoiceTemplateDetail) {
+      setError("Choose a voice template first.");
+      return;
+    }
+    const existing =
+      selectedVoiceTemplateDetail.speakers.find((speaker) => speaker.speaker_key === speakerKey) ??
+      null;
+    if (!existing) {
+      setError(`Template speaker not found: ${speakerKey}`);
+      return;
+    }
+    setError(null);
+    setVoiceTemplateActionBusy(true);
+    try {
+      const detail = await invoke<VoiceTemplateDetail>("voice_templates_update_speaker", {
+        templateId: selectedVoiceTemplateId,
+        speakerKey,
+        update: {
+          display_name:
+            patch.display_name !== undefined ? patch.display_name : existing.display_name,
+          tts_voice_id: patch.tts_voice_id !== undefined ? patch.tts_voice_id : existing.tts_voice_id,
+          style_preset:
+            patch.style_preset !== undefined ? patch.style_preset : existing.style_preset,
+          prosody_preset:
+            patch.prosody_preset !== undefined ? patch.prosody_preset : existing.prosody_preset,
+          pronunciation_overrides:
+            patch.pronunciation_overrides !== undefined
+              ? patch.pronunciation_overrides
+              : existing.pronunciation_overrides,
+          render_mode:
+            patch.render_mode !== undefined ? patch.render_mode : existing.render_mode,
+        },
+      });
+      setSelectedVoiceTemplateDetail(detail);
+      await refreshVoiceTemplates();
+    } catch (e) {
+      setError(String(e));
+    } finally {
+      setVoiceTemplateActionBusy(false);
+    }
+  }
+
+  async function addVoiceTemplateReferences(speakerKey: string) {
+    if (!selectedVoiceTemplateId) {
+      setError("Choose a voice template first.");
+      return;
+    }
+    setError(null);
+    const selection = await open({
+      multiple: true,
+      directory: false,
+      filters: [
+        { name: "Audio", extensions: ["wav", "mp3", "m4a", "flac", "ogg", "aac", "opus"] },
+        { name: "All files", extensions: ["*"] },
+      ],
+    });
+    const paths = Array.isArray(selection)
+      ? selection.filter((value): value is string => typeof value === "string")
+      : typeof selection === "string"
+        ? [selection]
+        : [];
+    if (!paths.length) return;
+
+    setVoiceTemplateActionBusy(true);
+    try {
+      let detail: VoiceTemplateDetail | null = selectedVoiceTemplateDetail;
+      for (const sourcePath of paths) {
+        detail = await invoke<VoiceTemplateDetail>("voice_templates_add_reference", {
+          templateId: selectedVoiceTemplateId,
+          speakerKey,
+          sourcePath,
+          label: stemFromPath(sourcePath) || null,
+        });
+      }
+      if (detail) {
+        setSelectedVoiceTemplateDetail(detail);
+      }
+      await refreshVoiceTemplates();
+    } catch (e) {
+      setError(String(e));
+    } finally {
+      setVoiceTemplateActionBusy(false);
+    }
+  }
+
+  async function removeVoiceTemplateReference(speakerKey: string, referenceId: string) {
+    if (!selectedVoiceTemplateId) {
+      setError("Choose a voice template first.");
+      return;
+    }
+    setError(null);
+    setVoiceTemplateActionBusy(true);
+    try {
+      const detail = await invoke<VoiceTemplateDetail>("voice_templates_remove_reference", {
+        templateId: selectedVoiceTemplateId,
+        speakerKey,
+        referenceId,
+      });
+      setSelectedVoiceTemplateDetail(detail);
+      await refreshVoiceTemplates();
     } catch (e) {
       setError(String(e));
     } finally {
@@ -1467,11 +1910,14 @@ export function SubtitleEditorPage({ itemId }: { itemId: string }) {
       });
       setSpeakerSettings(next);
       const nextDrafts: Record<string, string> = {};
+      const nextPronunciations: Record<string, string> = {};
       for (const speakerKey of speakersInTrack) {
         const setting = next.find((value) => value.speaker_key === speakerKey) ?? null;
         nextDrafts[speakerKey] = setting?.display_name ?? "";
+        nextPronunciations[speakerKey] = setting?.pronunciation_overrides ?? "";
       }
       setSpeakerNameDrafts((prev) => ({ ...prev, ...nextDrafts }));
+      setSpeakerPronunciationDrafts((prev) => ({ ...prev, ...nextPronunciations }));
       setNotice(`Applied voice template to ${mappings.length} speaker(s).`);
     } catch (e) {
       setError(String(e));
@@ -1501,6 +1947,133 @@ export function SubtitleEditorPage({ itemId }: { itemId: string }) {
       setError(String(e));
     } finally {
       setVoiceTemplateActionBusy(false);
+    }
+  }
+
+  async function createVoiceCastPackFromSelectedTemplate() {
+    if (!selectedVoiceTemplateId || !selectedVoiceTemplateDetail) {
+      setError("Choose a voice template first.");
+      return;
+    }
+    const name = voiceCastPackName.trim();
+    if (!name) {
+      setError("Cast pack name is empty.");
+      return;
+    }
+    setError(null);
+    setVoiceCastPackActionBusy(true);
+    try {
+      const detail = await invoke<VoiceCastPackDetail>("voice_cast_packs_create_from_template", {
+        templateId: selectedVoiceTemplateId,
+        name,
+      });
+      setSelectedVoiceCastPackId(detail.pack.id);
+      setSelectedVoiceCastPackDetail(detail);
+      await refreshVoiceCastPacks();
+      setNotice(`Saved cast pack "${detail.pack.name}".`);
+    } catch (e) {
+      setError(String(e));
+    } finally {
+      setVoiceCastPackActionBusy(false);
+    }
+  }
+
+  async function renameSelectedVoiceCastPack() {
+    if (!selectedVoiceCastPackId || !selectedVoiceCastPackDetail) {
+      setError("Choose a cast pack first.");
+      return;
+    }
+    const name = voiceCastPackName.trim();
+    if (!name) {
+      setError("Cast pack name is empty.");
+      return;
+    }
+    setError(null);
+    setVoiceCastPackActionBusy(true);
+    try {
+      const detail = await invoke<VoiceCastPackDetail>("voice_cast_packs_update", {
+        packId: selectedVoiceCastPackId,
+        name,
+      });
+      setSelectedVoiceCastPackDetail(detail);
+      await refreshVoiceCastPacks();
+      setNotice(`Renamed cast pack to "${detail.pack.name}".`);
+    } catch (e) {
+      setError(String(e));
+    } finally {
+      setVoiceCastPackActionBusy(false);
+    }
+  }
+
+  async function applySelectedVoiceCastPack() {
+    if (!selectedVoiceCastPackId) {
+      setError("Choose a cast pack first.");
+      return;
+    }
+    const mappings: VoiceCastPackApplyMapping[] = speakersInTrack
+      .map((speakerKey) => ({
+        item_speaker_key: speakerKey,
+        pack_role_key: (voiceCastPackMappings[speakerKey] ?? "").trim(),
+      }))
+      .filter((mapping) => mapping.pack_role_key);
+    if (!mappings.length) {
+      setError("Map at least one current speaker to a cast pack role.");
+      return;
+    }
+
+    const ok = await confirm(
+      `Apply cast pack mappings to ${mappings.length} speaker(s) on this item?`,
+      { title: "Apply cast pack", kind: "warning" },
+    );
+    if (!ok) return;
+
+    setError(null);
+    setVoiceCastPackActionBusy(true);
+    try {
+      const next = await invoke<ItemSpeakerSetting[]>("voice_cast_packs_apply_to_item", {
+        itemId,
+        packId: selectedVoiceCastPackId,
+        mappings,
+      });
+      setSpeakerSettings(next);
+      const nextDrafts: Record<string, string> = {};
+      const nextPronunciations: Record<string, string> = {};
+      for (const speakerKey of speakersInTrack) {
+        const setting = next.find((value) => value.speaker_key === speakerKey) ?? null;
+        nextDrafts[speakerKey] = setting?.display_name ?? "";
+        nextPronunciations[speakerKey] = setting?.pronunciation_overrides ?? "";
+      }
+      setSpeakerNameDrafts((prev) => ({ ...prev, ...nextDrafts }));
+      setSpeakerPronunciationDrafts((prev) => ({ ...prev, ...nextPronunciations }));
+      setNotice(`Applied cast pack to ${mappings.length} speaker(s).`);
+    } catch (e) {
+      setError(String(e));
+    } finally {
+      setVoiceCastPackActionBusy(false);
+    }
+  }
+
+  async function deleteSelectedVoiceCastPack() {
+    if (!selectedVoiceCastPackId || !selectedVoiceCastPackDetail) return;
+    const ok = await confirm(
+      `Delete cast pack "${selectedVoiceCastPackDetail.pack.name}"?`,
+      { title: "Delete cast pack", kind: "warning" },
+    );
+    if (!ok) return;
+
+    setError(null);
+    setVoiceCastPackActionBusy(true);
+    try {
+      await invoke("voice_cast_packs_delete", { packId: selectedVoiceCastPackId });
+      setSelectedVoiceCastPackId("");
+      setSelectedVoiceCastPackDetail(null);
+      setVoiceCastPackMappings({});
+      await refreshVoiceCastPacks();
+      setNotice("Deleted cast pack.");
+    } catch (e) {
+      setError(String(e));
+    } finally {
+      setVoiceCastPackActionBusy(false);
     }
   }
 
@@ -2937,40 +3510,120 @@ export function SubtitleEditorPage({ itemId }: { itemId: string }) {
                 <div style={{ marginTop: 8, display: "flex", flexDirection: "column", gap: 8 }}>
                   {speakersInTrack.map((speakerKey) => {
                     const setting = speakerSettingsByKey.get(speakerKey) ?? null;
-                    const profilePath = (setting?.tts_voice_profile_path ?? "").trim();
-                    const profileLabel = profilePath
-                      ? profilePath.split(/[/\\]/).pop() ?? profilePath
+                    const profilePaths = speakerProfilePaths(setting);
+                    const primaryProfilePath = profilePaths[0] ?? "";
+                    const profileLabel = profilePaths.length
+                      ? `${profilePaths.length} ref${profilePaths.length === 1 ? "" : "s"}: ${fileNameFromPath(primaryProfilePath)}`
                       : "None";
                     return (
                       <div
                         key={`profile-${speakerKey}`}
-                        className="row"
-                        style={{ alignItems: "center", gap: 10, flexWrap: "wrap" }}
+                        style={{
+                          display: "flex",
+                          flexDirection: "column",
+                          gap: 8,
+                          border: "1px solid #e5e7eb",
+                          borderRadius: 8,
+                          padding: 10,
+                        }}
                       >
                         <code style={{ minWidth: 180 }} title={speakerKey}>
                           {(speakerNameDrafts[speakerKey] ?? "").trim() || speakerKey}
                         </code>
-                        <code style={{ opacity: 0.85 }} title={profilePath || ""}>
+                        <code style={{ opacity: 0.85 }} title={primaryProfilePath || ""}>
                           {profileLabel}
                         </code>
                         <button
                           type="button"
                           disabled={speakerSettingsBusy}
                           onClick={() => {
-                            pickSpeakerVoiceProfile(speakerKey).catch(() => undefined);
+                            pickSpeakerVoiceProfiles(speakerKey).catch(() => undefined);
                           }}
                         >
                           Choose…
                         </button>
                         <button
                           type="button"
-                          disabled={speakerSettingsBusy || !profilePath}
+                          disabled={speakerSettingsBusy || !profilePaths.length}
                           onClick={() => {
-                            clearSpeakerVoiceProfile(speakerKey).catch(() => undefined);
+                            clearSpeakerVoiceProfiles(speakerKey).catch(() => undefined);
                           }}
                         >
-                          Clear
+                          Clear refs
                         </button>
+                        {profilePaths.length ? (
+                          <div style={{ fontSize: 12, opacity: 0.75 }}>
+                            {profilePaths.map((path) => fileNameFromPath(path)).join(" | ")}
+                          </div>
+                        ) : null}
+                        <div className="row" style={{ alignItems: "center", gap: 10, flexWrap: "wrap" }}>
+                          <select
+                            value={setting?.render_mode ?? ""}
+                            disabled={speakerSettingsBusy}
+                            onChange={(e) => {
+                              setSpeakerRenderMode(
+                                speakerKey,
+                                trimOrNull(e.currentTarget.value),
+                              ).catch(() => undefined);
+                            }}
+                          >
+                            {RENDER_MODE_OPTIONS.map((option) => (
+                              <option key={option.value} value={option.value}>
+                                {option.label}
+                              </option>
+                            ))}
+                          </select>
+                          <select
+                            value={setting?.style_preset ?? ""}
+                            disabled={speakerSettingsBusy}
+                            onChange={(e) => {
+                              setSpeakerStylePreset(
+                                speakerKey,
+                                trimOrNull(e.currentTarget.value),
+                              ).catch(() => undefined);
+                            }}
+                          >
+                            {STYLE_PRESET_OPTIONS.map((option) => (
+                              <option key={option.value} value={option.value}>
+                                {option.label}
+                              </option>
+                            ))}
+                          </select>
+                          <select
+                            value={setting?.prosody_preset ?? ""}
+                            disabled={speakerSettingsBusy}
+                            onChange={(e) => {
+                              setSpeakerProsodyPreset(
+                                speakerKey,
+                                trimOrNull(e.currentTarget.value),
+                              ).catch(() => undefined);
+                            }}
+                          >
+                            {PROSODY_PRESET_OPTIONS.map((option) => (
+                              <option key={option.value} value={option.value}>
+                                {option.label}
+                              </option>
+                            ))}
+                          </select>
+                        </div>
+                        <input
+                          value={speakerPronunciationDrafts[speakerKey] ?? ""}
+                          disabled={speakerSettingsBusy}
+                          onChange={(e) =>
+                            setSpeakerPronunciationDrafts((prev) => ({
+                              ...prev,
+                              [speakerKey]: e.currentTarget.value,
+                            }))
+                          }
+                          onBlur={(e) => {
+                            setSpeakerPronunciationOverrides(
+                              speakerKey,
+                              trimOrNull(e.currentTarget.value),
+                            ).catch(() => undefined);
+                          }}
+                          placeholder="Pronunciation locks, e.g. Seoul=>Soul; Jeju=>Jay-joo"
+                          style={{ width: "100%" }}
+                        />
                       </div>
                     );
                   })}
@@ -3073,6 +3726,162 @@ export function SubtitleEditorPage({ itemId }: { itemId: string }) {
                       {selectedVoiceTemplateDetail.speakers.length === 1 ? "" : "s"}
                     </div>
                   </div>
+                  <div className="kv">
+                    <div className="k">Saved references</div>
+                    <div className="v">{selectedVoiceTemplateDetail.references.length}</div>
+                  </div>
+                  <div style={{ marginTop: 10, display: "flex", flexDirection: "column", gap: 10 }}>
+                    {selectedVoiceTemplateDetail.speakers.map((speaker) => {
+                      const references =
+                        selectedTemplateReferencesBySpeaker.get(speaker.speaker_key) ?? [];
+                      return (
+                        <div
+                          key={`template-speaker-${speaker.speaker_key}`}
+                          style={{
+                            display: "flex",
+                            flexDirection: "column",
+                            gap: 8,
+                            border: "1px solid #e5e7eb",
+                            borderRadius: 8,
+                            padding: 10,
+                          }}
+                        >
+                          <div className="row" style={{ alignItems: "center", gap: 10, flexWrap: "wrap" }}>
+                            <code style={{ minWidth: 160 }}>{speaker.speaker_key}</code>
+                            <input
+                              value={templateSpeakerNameDrafts[speaker.speaker_key] ?? ""}
+                              disabled={voiceTemplateActionBusy}
+                              onChange={(e) =>
+                                setTemplateSpeakerNameDrafts((prev) => ({
+                                  ...prev,
+                                  [speaker.speaker_key]: e.currentTarget.value,
+                                }))
+                              }
+                              onBlur={(e) => {
+                                updateSelectedVoiceTemplateSpeaker(speaker.speaker_key, {
+                                  display_name: trimOrNull(e.currentTarget.value),
+                                }).catch(() => undefined);
+                              }}
+                              placeholder="Template speaker label"
+                              style={{ minWidth: 220 }}
+                            />
+                            <button
+                              type="button"
+                              disabled={voiceTemplateActionBusy}
+                              onClick={() => {
+                                addVoiceTemplateReferences(speaker.speaker_key).catch(
+                                  () => undefined,
+                                );
+                              }}
+                            >
+                              Add refs...
+                            </button>
+                            <div style={{ fontSize: 12, opacity: 0.65 }}>
+                              {references.length} ref{references.length === 1 ? "" : "s"}
+                            </div>
+                          </div>
+                          <div className="row" style={{ alignItems: "center", gap: 10, flexWrap: "wrap" }}>
+                            <select
+                              value={speaker.render_mode ?? ""}
+                              disabled={voiceTemplateActionBusy}
+                              onChange={(e) => {
+                                updateSelectedVoiceTemplateSpeaker(speaker.speaker_key, {
+                                  render_mode: trimOrNull(e.currentTarget.value),
+                                }).catch(() => undefined);
+                              }}
+                            >
+                              {RENDER_MODE_OPTIONS.map((option) => (
+                                <option key={option.value} value={option.value}>
+                                  {option.label}
+                                </option>
+                              ))}
+                            </select>
+                            <select
+                              value={speaker.style_preset ?? ""}
+                              disabled={voiceTemplateActionBusy}
+                              onChange={(e) => {
+                                updateSelectedVoiceTemplateSpeaker(speaker.speaker_key, {
+                                  style_preset: trimOrNull(e.currentTarget.value),
+                                }).catch(() => undefined);
+                              }}
+                            >
+                              {STYLE_PRESET_OPTIONS.map((option) => (
+                                <option key={option.value} value={option.value}>
+                                  {option.label}
+                                </option>
+                              ))}
+                            </select>
+                            <select
+                              value={speaker.prosody_preset ?? ""}
+                              disabled={voiceTemplateActionBusy}
+                              onChange={(e) => {
+                                updateSelectedVoiceTemplateSpeaker(speaker.speaker_key, {
+                                  prosody_preset: trimOrNull(e.currentTarget.value),
+                                }).catch(() => undefined);
+                              }}
+                            >
+                              {PROSODY_PRESET_OPTIONS.map((option) => (
+                                <option key={option.value} value={option.value}>
+                                  {option.label}
+                                </option>
+                              ))}
+                            </select>
+                          </div>
+                          <input
+                            value={templateSpeakerPronunciationDrafts[speaker.speaker_key] ?? ""}
+                            disabled={voiceTemplateActionBusy}
+                            onChange={(e) =>
+                              setTemplateSpeakerPronunciationDrafts((prev) => ({
+                                ...prev,
+                                [speaker.speaker_key]: e.currentTarget.value,
+                              }))
+                            }
+                            onBlur={(e) => {
+                              updateSelectedVoiceTemplateSpeaker(speaker.speaker_key, {
+                                pronunciation_overrides: trimOrNull(e.currentTarget.value),
+                              }).catch(() => undefined);
+                            }}
+                            placeholder="Template pronunciation locks"
+                            style={{ width: "100%" }}
+                          />
+                          {references.length ? (
+                            <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
+                              {references.map((reference) => (
+                                <div
+                                  key={reference.reference_id}
+                                  className="row"
+                                  style={{ alignItems: "center", gap: 10, flexWrap: "wrap" }}
+                                >
+                                  <code title={reference.path}>
+                                    {reference.label?.trim() || fileNameFromPath(reference.path)}
+                                  </code>
+                                  <div style={{ fontSize: 12, opacity: 0.65 }}>
+                                    {fileNameFromPath(reference.path)}
+                                  </div>
+                                  <button
+                                    type="button"
+                                    disabled={voiceTemplateActionBusy}
+                                    onClick={() => {
+                                      removeVoiceTemplateReference(
+                                        speaker.speaker_key,
+                                        reference.reference_id,
+                                      ).catch(() => undefined);
+                                    }}
+                                  >
+                                    Remove
+                                  </button>
+                                </div>
+                              ))}
+                            </div>
+                          ) : (
+                            <div style={{ fontSize: 12, opacity: 0.6 }}>
+                              No copied references yet for this template speaker.
+                            </div>
+                          )}
+                        </div>
+                      );
+                    })}
+                  </div>
                   <div style={{ marginTop: 10, display: "flex", flexDirection: "column", gap: 8 }}>
                     {speakersInTrack.length ? (
                       speakersInTrack.map((speakerKey) => {
@@ -3085,6 +3894,14 @@ export function SubtitleEditorPage({ itemId }: { itemId: string }) {
                           selectedVoiceTemplateDetail.speakers.find(
                             (speaker) => speaker.speaker_key === mappedTemplateKey,
                           ) ?? null;
+                        const mappedTemplateSuggestion = mappedTemplate
+                          ? mappedTemplate.speaker_key === speakerKey
+                            ? "auto match: exact speaker key"
+                            : ((mappedTemplate.display_name ?? "").trim().toLowerCase() ===
+                                  currentLabel.trim().toLowerCase()
+                                ? "auto match: exact display name"
+                                : "manual or approximate match")
+                          : "";
                         return (
                           <div
                             key={`template-map-${speakerKey}`}
@@ -3123,9 +3940,13 @@ export function SubtitleEditorPage({ itemId }: { itemId: string }) {
                                     mappedTemplate.tts_voice_id
                                       ? `pyttsx3 ${mappedTemplate.tts_voice_id}`
                                       : "no pyttsx3 override",
-                                    mappedTemplate.tts_voice_profile_path
-                                      ? `profile ${fileNameFromPath(mappedTemplate.tts_voice_profile_path)}`
+                                    speakerProfilePaths(mappedTemplate).length
+                                      ? `${speakerProfilePaths(mappedTemplate).length} ref${speakerProfilePaths(mappedTemplate).length === 1 ? "" : "s"}`
                                       : "no reference clip",
+                                    mappedTemplate.render_mode
+                                      ? `mode ${mappedTemplate.render_mode}`
+                                      : "default mode",
+                                    mappedTemplateSuggestion,
                                   ].join(" | ")
                                 : "No template speaker selected"}
                             </div>
@@ -3165,6 +3986,200 @@ export function SubtitleEditorPage({ itemId }: { itemId: string }) {
                 <div style={{ marginTop: 10, fontSize: 12, opacity: 0.6 }}>
                   Choose a saved template to map this item&apos;s speakers to the stored voice
                   references.
+                </div>
+              )}
+            </div>
+
+            <div style={{ marginTop: 16 }}>
+              <div className="row" style={{ alignItems: "center", gap: 10, flexWrap: "wrap" }}>
+                <div style={{ fontSize: 12, opacity: 0.85 }}>Reusable cast packs</div>
+                <button
+                  type="button"
+                  disabled={
+                    voiceCastPackActionBusy || voiceTemplateActionBusy || !selectedVoiceTemplateDetail
+                  }
+                  onClick={() => {
+                    createVoiceCastPackFromSelectedTemplate().catch(() => undefined);
+                  }}
+                >
+                  Save cast pack from selected template
+                </button>
+                <button
+                  type="button"
+                  disabled={voiceCastPacksBusy || voiceCastPackActionBusy}
+                  onClick={() => {
+                    refreshVoiceCastPacks().catch((e) => setError(String(e)));
+                  }}
+                >
+                  Reload cast packs
+                </button>
+                <div style={{ fontSize: 12, opacity: 0.6 }}>
+                  Cast packs let you reuse show roles like host, narrator, contestant, or guest.
+                </div>
+              </div>
+
+              <div
+                className="row"
+                style={{ marginTop: 8, alignItems: "center", gap: 10, flexWrap: "wrap" }}
+              >
+                <input
+                  value={voiceCastPackName}
+                  disabled={voiceCastPackActionBusy || !selectedVoiceTemplateDetail}
+                  onChange={(e) => setVoiceCastPackName(e.currentTarget.value)}
+                  placeholder="Cast pack name"
+                  style={{ minWidth: 280 }}
+                />
+                <div style={{ fontSize: 12, opacity: 0.6 }}>
+                  {voiceCastPacks.length
+                    ? `${voiceCastPacks.length} saved cast pack(s)`
+                    : "No saved cast packs yet"}
+                </div>
+              </div>
+
+              <div
+                className="row"
+                style={{ marginTop: 8, alignItems: "center", gap: 10, flexWrap: "wrap" }}
+              >
+                <select
+                  value={selectedVoiceCastPackId}
+                  disabled={voiceCastPacksBusy || voiceCastPackActionBusy || !voiceCastPacks.length}
+                  onChange={(e) => setSelectedVoiceCastPackId(e.currentTarget.value)}
+                  style={{ minWidth: 320 }}
+                >
+                  <option value="">Choose cast pack...</option>
+                  {voiceCastPacks.map((pack) => (
+                    <option key={pack.id} value={pack.id}>
+                      {pack.name} ({pack.role_count} role{pack.role_count === 1 ? "" : "s"})
+                    </option>
+                  ))}
+                </select>
+                <button
+                  type="button"
+                  disabled={voiceCastPackActionBusy || !selectedVoiceCastPackDetail}
+                  onClick={() => {
+                    renameSelectedVoiceCastPack().catch(() => undefined);
+                  }}
+                >
+                  Rename cast pack
+                </button>
+                <button
+                  type="button"
+                  disabled={voiceCastPackActionBusy || !selectedVoiceCastPackDetail}
+                  onClick={() => {
+                    deleteSelectedVoiceCastPack().catch(() => undefined);
+                  }}
+                >
+                  Delete cast pack
+                </button>
+              </div>
+
+              {selectedVoiceCastPackDetail ? (
+                <>
+                  <div className="kv" style={{ marginTop: 10 }}>
+                    <div className="k">Saved roles</div>
+                    <div className="v">
+                      {selectedVoiceCastPackDetail.roles.length} role
+                      {selectedVoiceCastPackDetail.roles.length === 1 ? "" : "s"}
+                    </div>
+                  </div>
+                  <div style={{ marginTop: 10, display: "flex", flexDirection: "column", gap: 8 }}>
+                    {speakersInTrack.length ? (
+                      speakersInTrack.map((speakerKey) => {
+                        const currentSetting = speakerSettingsByKey.get(speakerKey) ?? null;
+                        const currentLabel =
+                          (speakerNameDrafts[speakerKey] ?? currentSetting?.display_name ?? "").trim() ||
+                          speakerKey;
+                        const mappedRoleKey = voiceCastPackMappings[speakerKey] ?? "";
+                        const mappedRole =
+                          selectedVoiceCastPackDetail.roles.find((role) => role.role_key === mappedRoleKey) ??
+                          null;
+                        const mappedRoleSuggestion = mappedRole
+                          ? mappedRole.role_key === speakerKey
+                            ? "auto match: exact role key"
+                            : ((mappedRole.display_name ?? "").trim().toLowerCase() ===
+                                  currentLabel.trim().toLowerCase()
+                                ? "auto match: exact display name"
+                                : "manual or approximate match")
+                          : "";
+                        return (
+                          <div
+                            key={`cast-pack-map-${speakerKey}`}
+                            className="row"
+                            style={{ alignItems: "center", gap: 10, flexWrap: "wrap" }}
+                          >
+                            <code style={{ minWidth: 180 }} title={speakerKey}>
+                              {currentLabel}
+                            </code>
+                            <span style={{ opacity: 0.7 }}>uses</span>
+                            <select
+                              value={mappedRoleKey}
+                              disabled={voiceCastPackActionBusy || voiceCastPacksBusy}
+                              onChange={(e) =>
+                                setVoiceCastPackMappings((prev) => ({
+                                  ...prev,
+                                  [speakerKey]: e.currentTarget.value,
+                                }))
+                              }
+                              style={{ minWidth: 260 }}
+                            >
+                              <option value="">Skip this speaker</option>
+                              {selectedVoiceCastPackDetail.roles.map((role) => (
+                                <option key={role.role_key} value={role.role_key}>
+                                  {(role.display_name ?? "").trim() || role.role_key}
+                                </option>
+                              ))}
+                            </select>
+                            <div style={{ fontSize: 12, opacity: 0.6 }}>
+                              {mappedRole
+                                ? [
+                                    mappedRole.render_mode
+                                      ? `mode ${mappedRole.render_mode}`
+                                      : "default mode",
+                                    mappedRole.style_preset
+                                      ? `style ${mappedRole.style_preset}`
+                                      : "default style",
+                                    mappedRole.prosody_preset
+                                      ? `prosody ${mappedRole.prosody_preset}`
+                                      : "default prosody",
+                                    mappedRoleSuggestion,
+                                  ].join(" | ")
+                                : "No cast role selected"}
+                            </div>
+                          </div>
+                        );
+                      })
+                    ) : (
+                      <div style={{ fontSize: 12, opacity: 0.6 }}>
+                        No speakers found in the current subtitle track yet.
+                      </div>
+                    )}
+                  </div>
+
+                  <div
+                    className="row"
+                    style={{ marginTop: 10, alignItems: "center", gap: 10, flexWrap: "wrap" }}
+                  >
+                    <button
+                      type="button"
+                      disabled={
+                        voiceCastPackActionBusy ||
+                        !speakersInTrack.length ||
+                        !Object.values(voiceCastPackMappings).some((value) => value.trim())
+                      }
+                      onClick={() => {
+                        applySelectedVoiceCastPack().catch(() => undefined);
+                      }}
+                    >
+                      Apply cast pack to current item
+                    </button>
+                    <div style={{ fontSize: 12, opacity: 0.6 }}>
+                      Auto-suggests roles by display name and speaker key before you apply them.
+                    </div>
+                  </div>
+                </>
+              ) : (
+                <div style={{ marginTop: 10, fontSize: 12, opacity: 0.6 }}>
+                  Choose a saved cast pack to map this item&apos;s speakers to saved roles.
                 </div>
               )}
             </div>

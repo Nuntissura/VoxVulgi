@@ -3,7 +3,7 @@
 ## Metadata
 - ID: WP-0081
 - Owner: Codex
-- Status: BACKLOG
+- Status: DONE
 - Created: 2026-03-06
 - Target milestone: Phase 2 language quality controls
 
@@ -40,3 +40,4 @@ Out of scope:
 ## Status updates
 
 - 2026-03-06: Created to extend text glossary control into spoken-output consistency.
+- 2026-03-06: Implemented reusable pronunciation-override text across item/template/cast-pack speaker settings and applied deterministic replacements in preview plus voice-preserving jobs; verified via engine `cargo test`, desktop Tauri `cargo test`, desktop `npm run build`, and proof bundle `product/desktop/Build Target/tool_artifacts/wp_runs/WP-0081/20260306_172806/`.

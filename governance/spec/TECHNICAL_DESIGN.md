@@ -253,11 +253,13 @@ Voice-preserving approach (core feature):
   - strong logging/redaction + export provenance,
   - deletion controls for any stored voice representations.
 - Reusable voice templates should be stored in app data, copy their reference clips into app-managed storage, and apply back onto per-item speaker settings so existing jobs do not need a separate template-aware request format.
-- Planned expansion layers on top of reusable templates:
+- Current reusable-voice layers on top of reusable templates:
   - reusable cast packs that group template speakers into recurring series roles,
-  - multi-reference speaker profiles with 1..N reference clips and optional cleaned derivatives,
+  - multi-reference speaker profiles with 1..N reference clips and backward-compatible single-reference fallback,
   - advisory auto-match suggestions for diarized speakers (non-destructive, operator-reviewed),
-  - style/prosody presets, pronunciation locks, and subtitle-aware prosody hints passed through one unified speaker settings layer,
+  - style/prosody presets, pronunciation locks, and hybrid clone-vs-standard-TTS routing passed through one unified speaker settings layer.
+- Remaining planned expansion layers:
+  - explicit subtitle-aware prosody controls and review surfaces,
   - voice QC reports for both reference quality and output quality,
   - batch dubbing orchestration that applies cast/template settings to many items,
   - A/B preview variants stored as separate artifacts before final selection,

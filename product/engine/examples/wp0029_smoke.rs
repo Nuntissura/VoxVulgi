@@ -282,6 +282,11 @@ fn main() -> Result<()> {
             None,
             None,
             Some(ref_wav.to_string_lossy().to_string()),
+            Some(vec![ref_wav.to_string_lossy().to_string()]),
+            None,
+            None,
+            None,
+            Some("clone".to_string()),
         )?;
     }
     eprintln!(

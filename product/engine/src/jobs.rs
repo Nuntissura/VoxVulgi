@@ -2980,13 +2980,7 @@ INSERT INTO subtitle_track (
 
             let item = library::get_item_by_id(paths, &p.item_id)?;
 
-            let mut voice_id_by_speaker: HashMap<String, String> = HashMap::new();
-            let speaker_settings = speakers::list_item_speaker_settings(paths, &item.id)?;
-            for s in speaker_settings {
-                if let Some(voice_id) = s.tts_voice_id {
-                    voice_id_by_speaker.insert(s.speaker_key, voice_id);
-                }
-            }
+            let speaker_settings_by_key = speaker_render_settings_by_key(paths, &item.id)?;
 
             let out_dir = paths
                 .derived_item_dir(&item.id)
@@ -3058,15 +3052,19 @@ INSERT INTO subtitle_track (
                     .as_ref()
                     .map(|s| s.trim().to_string())
                     .filter(|s| !s.is_empty());
-                let voice_id = speaker
+                let render_settings = speaker
                     .as_ref()
-                    .and_then(|k| voice_id_by_speaker.get(k).cloned());
+                    .and_then(|k| speaker_settings_by_key.get(k))
+                    .cloned()
+                    .unwrap_or_default();
+                let voice_id = render_settings.voice_id.clone();
+                let text = prepare_tts_text(text, &render_settings);
                 let out_path = segments_dir.join(format!("seg_{:04}.wav", seg.index));
                 request.push(TtsRequestSegment {
                     index: seg.index,
                     speaker,
                     voice_id,
-                    text: text.to_string(),
+                    text,
                     out_path: out_path.to_string_lossy().to_string(),
                 });
             }
@@ -3230,16 +3228,19 @@ if __name__ == "__main__":
                     .as_ref()
                     .map(|s| s.trim().to_string())
                     .filter(|s| !s.is_empty());
-                let tts_voice_id = speaker
+                let render_settings = speaker
                     .as_ref()
-                    .and_then(|k| voice_id_by_speaker.get(k).cloned());
+                    .and_then(|k| speaker_settings_by_key.get(k))
+                    .cloned()
+                    .unwrap_or_default();
+                let tts_voice_id = render_settings.voice_id.clone();
                 manifest_segments.push(TtsManifestSegment {
                     index: seg.index,
                     start_ms: seg.start_ms,
                     end_ms: seg.end_ms,
                     speaker,
                     tts_voice_id,
-                    text: seg.text.clone(),
+                    text: prepare_tts_text(&seg.text, &render_settings),
                     audio_path: if exists {
                         Some(audio_path.to_string_lossy().to_string())
                     } else {
@@ -3342,13 +3343,7 @@ if __name__ == "__main__":
             let doc = subtitle_tracks::load_document(paths, &p.source_track_id)?;
             let item = library::get_item_by_id(paths, &p.item_id)?;
 
-            let mut voice_id_by_speaker: HashMap<String, String> = HashMap::new();
-            let speaker_settings = speakers::list_item_speaker_settings(paths, &item.id)?;
-            for s in speaker_settings {
-                if let Some(voice_id) = s.tts_voice_id {
-                    voice_id_by_speaker.insert(s.speaker_key, voice_id);
-                }
-            }
+            let speaker_settings_by_key = speaker_render_settings_by_key(paths, &item.id)?;
 
             let out_dir = paths
                 .derived_item_dir(&item.id)
@@ -3420,15 +3415,19 @@ if __name__ == "__main__":
                     .as_ref()
                     .map(|s| s.trim().to_string())
                     .filter(|s| !s.is_empty());
-                let voice_id = speaker
+                let render_settings = speaker
                     .as_ref()
-                    .and_then(|k| voice_id_by_speaker.get(k).cloned());
+                    .and_then(|k| speaker_settings_by_key.get(k))
+                    .cloned()
+                    .unwrap_or_default();
+                let voice_id = render_settings.voice_id.clone();
+                let text = prepare_tts_text(text, &render_settings);
                 let out_path = segments_dir.join(format!("seg_{:04}.wav", seg.index));
                 request.push(TtsRequestSegment {
                     index: seg.index,
                     speaker,
                     voice_id,
-                    text: text.to_string(),
+                    text,
                     out_path: out_path.to_string_lossy().to_string(),
                 });
             }
@@ -3703,16 +3702,19 @@ if __name__ == "__main__":
                     .as_ref()
                     .map(|s| s.trim().to_string())
                     .filter(|s| !s.is_empty());
-                let tts_voice_id = speaker
+                let render_settings = speaker
                     .as_ref()
-                    .and_then(|k| voice_id_by_speaker.get(k).cloned());
+                    .and_then(|k| speaker_settings_by_key.get(k))
+                    .cloned()
+                    .unwrap_or_default();
+                let tts_voice_id = render_settings.voice_id.clone();
                 manifest_segments.push(TtsManifestSegment {
                     index: seg.index,
                     start_ms: seg.start_ms,
                     end_ms: seg.end_ms,
                     speaker,
                     tts_voice_id,
-                    text: seg.text.clone(),
+                    text: prepare_tts_text(&seg.text, &render_settings),
                     audio_path: if exists {
                         Some(audio_path.to_string_lossy().to_string())
                     } else {
@@ -3831,17 +3833,7 @@ if __name__ == "__main__":
             let doc = subtitle_tracks::load_document(paths, &p.source_track_id)?;
             let item = library::get_item_by_id(paths, &p.item_id)?;
 
-            let mut tts_voice_profile_path_by_speaker: HashMap<String, String> = HashMap::new();
-            let mut tts_voice_id_by_speaker: HashMap<String, String> = HashMap::new();
-            let speaker_settings = speakers::list_item_speaker_settings(paths, &item.id)?;
-            for s in speaker_settings {
-                if let Some(voice_id) = s.tts_voice_id {
-                    tts_voice_id_by_speaker.insert(s.speaker_key.clone(), voice_id);
-                }
-                if let Some(voice_profile_path) = s.tts_voice_profile_path {
-                    tts_voice_profile_path_by_speaker.insert(s.speaker_key, voice_profile_path);
-                }
-            }
+            let speaker_settings_by_key = speaker_render_settings_by_key(paths, &item.id)?;
 
             let out_dir = paths
                 .derived_item_dir(&item.id)
@@ -3861,6 +3853,10 @@ if __name__ == "__main__":
                 voice_id: Option<String>,
                 #[serde(default)]
                 tts_voice_profile_path: Option<String>,
+                #[serde(default)]
+                tts_voice_profile_paths: Vec<String>,
+                #[serde(default)]
+                render_mode: Option<String>,
                 start_ms: i64,
                 end_ms: i64,
                 text: String,
@@ -3879,12 +3875,25 @@ if __name__ == "__main__":
                     .as_ref()
                     .map(|s| s.trim().to_string())
                     .filter(|s| !s.is_empty());
-                let voice_id = speaker
+                let render_settings = speaker
                     .as_ref()
-                    .and_then(|k| tts_voice_id_by_speaker.get(k).cloned());
-                let tts_voice_profile_path = speaker
-                    .as_ref()
-                    .and_then(|k| tts_voice_profile_path_by_speaker.get(k).cloned());
+                    .and_then(|k| speaker_settings_by_key.get(k))
+                    .cloned()
+                    .unwrap_or_default();
+                let voice_id = render_settings.voice_id.clone();
+                let render_mode = render_settings.render_mode.clone();
+                let use_voice_preserving = render_mode.as_deref() != Some("standard_tts");
+                let tts_voice_profile_path = if use_voice_preserving {
+                    render_settings.primary_profile_path.clone()
+                } else {
+                    None
+                };
+                let tts_voice_profile_paths = if use_voice_preserving {
+                    render_settings.profile_paths.clone()
+                } else {
+                    Vec::new()
+                };
+                let text = prepare_tts_text(text, &render_settings);
                 let base_out_path = base_segments_dir.join(format!("seg_{:04}.wav", seg.index));
                 let out_path = segments_dir.join(format!("seg_{:04}.wav", seg.index));
                 request.push(TtsRequestSegment {
@@ -3892,9 +3901,11 @@ if __name__ == "__main__":
                     speaker,
                     voice_id,
                     tts_voice_profile_path,
+                    tts_voice_profile_paths,
+                    render_mode,
                     start_ms: seg.start_ms,
                     end_ms: seg.end_ms,
-                    text: text.to_string(),
+                    text,
                     base_out_path: base_out_path.to_string_lossy().to_string(),
                     out_path: out_path.to_string_lossy().to_string(),
                 });
@@ -4154,28 +4165,46 @@ def main() -> None:
     tmp_root = os.path.join(report_dir, "voice_preserving_tmp")
     os.makedirs(tmp_root, exist_ok=True)
 
-    speaker_profile: dict[str, str] = {}
+    speaker_profile: dict[str, list[str]] = {}
     for item in items:
         speaker = (item.get("speaker") or "").strip()
-        profile = (item.get("tts_voice_profile_path") or "").strip()
-        if not speaker or not profile:
+        profiles = item.get("tts_voice_profile_paths") or []
+        if not isinstance(profiles, list):
+            profiles = []
+        normalized_profiles = []
+        for profile in profiles:
+            profile = str(profile or "").strip()
+            if not profile:
+                continue
+            if not os.path.exists(profile):
+                continue
+            if profile in normalized_profiles:
+                continue
+            normalized_profiles.append(profile)
+        if not normalized_profiles:
+            profile = (item.get("tts_voice_profile_path") or "").strip()
+            if profile and os.path.exists(profile):
+                normalized_profiles.append(profile)
+        if not speaker or not normalized_profiles:
             continue
-        if not os.path.exists(profile):
-            continue
-        speaker_profile.setdefault(speaker, profile)
+        speaker_profile.setdefault(speaker, normalized_profiles)
 
     speaker_se: dict[str, Any] = {}
-    for speaker, profile in speaker_profile.items():
+    for speaker, profiles in speaker_profile.items():
         try:
-            ref_wav = run_ffmpeg_convert(
-                args.ffmpeg,
-                profile,
-                os.path.join(tmp_root, f"ref_{safe_slug(speaker)}.wav"),
-            )
-            speaker_se[speaker] = converter.extract_se([ref_wav])
+            ref_wavs = []
+            for index, profile in enumerate(profiles):
+                ref_wavs.append(
+                    run_ffmpeg_convert(
+                        args.ffmpeg,
+                        profile,
+                        os.path.join(tmp_root, f"ref_{safe_slug(speaker)}_{index:02d}.wav"),
+                    )
+                )
+            speaker_se[speaker] = converter.extract_se(ref_wavs)
         except Exception as e:
             print(
-                f"WARN speaker_embedding_failed speaker={speaker!r} profile={profile!r} err={e}",
+                f"WARN speaker_embedding_failed speaker={speaker!r} profiles={profiles!r} err={e}",
                 file=sys.stderr,
             )
 
@@ -4391,6 +4420,10 @@ if __name__ == "__main__":
                 speaker: Option<String>,
                 #[serde(default)]
                 tts_voice_profile_path: Option<String>,
+                #[serde(default)]
+                tts_voice_profile_paths: Vec<String>,
+                #[serde(default)]
+                render_mode: Option<String>,
                 text: String,
                 audio_path: Option<String>,
                 audio_exists: bool,
@@ -4414,16 +4447,32 @@ if __name__ == "__main__":
                     .as_ref()
                     .map(|s| s.trim().to_string())
                     .filter(|s| !s.is_empty());
-                let tts_voice_profile_path = speaker
+                let render_settings = speaker
                     .as_ref()
-                    .and_then(|k| tts_voice_profile_path_by_speaker.get(k).cloned());
+                    .and_then(|k| speaker_settings_by_key.get(k))
+                    .cloned()
+                    .unwrap_or_default();
+                let render_mode = render_settings.render_mode.clone();
+                let use_voice_preserving = render_mode.as_deref() != Some("standard_tts");
+                let tts_voice_profile_path = if use_voice_preserving {
+                    render_settings.primary_profile_path.clone()
+                } else {
+                    None
+                };
+                let tts_voice_profile_paths = if use_voice_preserving {
+                    render_settings.profile_paths.clone()
+                } else {
+                    Vec::new()
+                };
                 manifest_segments.push(TtsManifestSegment {
                     index: seg.index,
                     start_ms: seg.start_ms,
                     end_ms: seg.end_ms,
                     speaker,
                     tts_voice_profile_path,
-                    text: seg.text.clone(),
+                    tts_voice_profile_paths,
+                    render_mode,
+                    text: prepare_tts_text(&seg.text, &render_settings),
                     audio_path: if exists {
                         Some(audio_path.to_string_lossy().to_string())
                     } else {
@@ -9458,6 +9507,144 @@ fn normalize_lang_tag(raw: Option<&str>) -> Option<&'static str> {
     }
 }
 
+#[derive(Debug, Clone, Default)]
+struct SpeakerRenderSettings {
+    voice_id: Option<String>,
+    primary_profile_path: Option<String>,
+    profile_paths: Vec<String>,
+    style_preset: Option<String>,
+    prosody_preset: Option<String>,
+    pronunciation_overrides: Option<String>,
+    render_mode: Option<String>,
+}
+
+fn speaker_render_settings_by_key(
+    paths: &AppPaths,
+    item_id: &str,
+) -> Result<HashMap<String, SpeakerRenderSettings>> {
+    let mut map = HashMap::new();
+    for setting in speakers::list_item_speaker_settings(paths, item_id)? {
+        map.insert(
+            setting.speaker_key,
+            SpeakerRenderSettings {
+                voice_id: setting.tts_voice_id,
+                primary_profile_path: setting.tts_voice_profile_path,
+                profile_paths: setting.tts_voice_profile_paths,
+                style_preset: setting.style_preset,
+                prosody_preset: setting.prosody_preset,
+                pronunciation_overrides: setting.pronunciation_overrides,
+                render_mode: setting.render_mode,
+            },
+        );
+    }
+    Ok(map)
+}
+
+fn apply_pronunciation_overrides(text: &str, overrides: Option<&str>) -> String {
+    let Some(overrides) = overrides.and_then(|value| {
+        let trimmed = value.trim();
+        if trimmed.is_empty() {
+            None
+        } else {
+            Some(trimmed)
+        }
+    }) else {
+        return text.to_string();
+    };
+
+    let mut rules: Vec<(String, String)> = Vec::new();
+    for raw_line in overrides.lines() {
+        let line = raw_line.trim();
+        if line.is_empty() || line.starts_with('#') {
+            continue;
+        }
+        let separator = if let Some(index) = line.find("=>") {
+            Some((index, 2_usize))
+        } else if let Some(index) = line.find("->") {
+            Some((index, 2_usize))
+        } else if let Some(index) = line.find('=') {
+            Some((index, 1_usize))
+        } else {
+            None
+        };
+        let Some((index, separator_len)) = separator else {
+            continue;
+        };
+        let from = line[..index].trim();
+        let to = line[index + separator_len..].trim();
+        if from.is_empty() || to.is_empty() {
+            continue;
+        }
+        rules.push((from.to_string(), to.to_string()));
+    }
+    rules.sort_by(|a, b| b.0.len().cmp(&a.0.len()).then_with(|| a.0.cmp(&b.0)));
+
+    let mut out = text.to_string();
+    for (from, to) in rules {
+        out = out.replace(&from, &to);
+    }
+    out
+}
+
+fn prepare_tts_text(text: &str, settings: &SpeakerRenderSettings) -> String {
+    let mut out = apply_pronunciation_overrides(text, settings.pronunciation_overrides.as_deref());
+
+    let lines: Vec<&str> = out
+        .lines()
+        .map(str::trim)
+        .filter(|line| !line.is_empty())
+        .collect();
+    if !lines.is_empty() {
+        let joiner = match settings.prosody_preset.as_deref() {
+            Some("slower") | Some("warmer") => ", ",
+            Some("more_excited") => "! ",
+            Some("less_robotic") => "; ",
+            Some("tighter_timing") => " ",
+            _ => ". ",
+        };
+        out = lines.join(joiner);
+    }
+
+    if matches!(settings.prosody_preset.as_deref(), Some("slower")) {
+        out = out.replace(';', ".").replace(" - ", ", ");
+    } else if matches!(settings.prosody_preset.as_deref(), Some("less_robotic")) {
+        out = out.replace(" - ", ", ");
+    } else if matches!(settings.prosody_preset.as_deref(), Some("tighter_timing")) {
+        out = out.replace(" - ", " ").replace(", ", " ").replace("; ", " ");
+    }
+
+    out = out.split_whitespace().collect::<Vec<_>>().join(" ");
+    if out.is_empty() {
+        return out;
+    }
+
+    let desired_terminal = match (
+        settings.style_preset.as_deref(),
+        settings.prosody_preset.as_deref(),
+    ) {
+        (_, Some("more_excited")) | (Some("game_show_energy"), _) => Some("!"),
+        (_, Some("tighter_timing")) => None,
+        (Some("soft"), _) => Some("..."),
+        (Some("documentary_narrator"), _) | (Some("authoritative"), _) => Some("."),
+        _ => Some("."),
+    };
+
+    match desired_terminal {
+        Some("!") if out.ends_with('.') => {
+            out.pop();
+            out.push('!');
+        }
+        Some(terminal)
+            if !matches!(out.chars().last(), Some('.' | '!' | '?' | '…')) =>
+        {
+            out.push_str(terminal);
+        }
+        _ => {}
+    }
+
+    out
+}
+
 fn now_ms() -> i64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -9469,6 +9656,28 @@ fn now_ms() -> i64 {
 mod tests {
     use super::*;
     use rusqlite::params;
+
+    #[test]
+    fn prepare_tts_text_applies_pronunciation_and_line_break_pacing() {
+        let settings = SpeakerRenderSettings {
+            pronunciation_overrides: Some("Seoul=>Soul".to_string()),
+            prosody_preset: Some("slower".to_string()),
+            ..Default::default()
+        };
+        let text = prepare_tts_text("Visit Seoul\nright now", &settings);
+        assert_eq!(text, "Visit Soul, right now.");
+    }
+
+    #[test]
+    fn prepare_tts_text_can_bias_excited_delivery() {
+        let settings = SpeakerRenderSettings {
+            style_preset: Some("game_show_energy".to_string()),
+            prosody_preset: Some("more_excited".to_string()),
+            ..Default::default()
+        };
+        let text = prepare_tts_text("Final round starts now", &settings);
+        assert_eq!(text, "Final round starts now!");
+    }
 
     #[test]
     fn running_jobs_are_marked_failed_after_restart_recovery() {

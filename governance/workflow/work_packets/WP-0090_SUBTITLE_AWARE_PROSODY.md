@@ -3,7 +3,7 @@
 ## Metadata
 - ID: WP-0090
 - Owner: Codex
-- Status: BACKLOG
+- Status: IN_PROGRESS
 - Created: 2026-03-06
 - Target milestone: Phase 3 naturalness improvements
 
@@ -40,3 +40,4 @@ Out of scope:
 ## Status updates
 
 - 2026-03-06: Created to improve naturalness using data already present in subtitle tracks.
+- 2026-03-06: Initial groundwork landed through line-break and punctuation shaping inside TTS text preparation, but explicit operator toggles/review remain open.

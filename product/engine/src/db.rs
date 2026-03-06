@@ -100,6 +100,12 @@ CREATE TABLE IF NOT EXISTS item_speaker (
   speaker_key TEXT NOT NULL,
   display_name TEXT,
   tts_voice_id TEXT,
+  tts_voice_profile_path TEXT,
+  tts_voice_profile_paths_json TEXT,
+  style_preset TEXT,
+  prosody_preset TEXT,
+  pronunciation_overrides TEXT,
+  render_mode TEXT,
   created_at_ms INTEGER NOT NULL,
   updated_at_ms INTEGER NOT NULL,
   PRIMARY KEY (item_id, speaker_key),
@@ -121,15 +127,67 @@ CREATE TABLE IF NOT EXISTS voice_template_speaker (
   display_name TEXT,
   tts_voice_id TEXT,
   tts_voice_profile_path TEXT,
+  tts_voice_profile_paths_json TEXT,
+  style_preset TEXT,
+  prosody_preset TEXT,
+  pronunciation_overrides TEXT,
+  render_mode TEXT,
   created_at_ms INTEGER NOT NULL,
   updated_at_ms INTEGER NOT NULL,
   PRIMARY KEY (template_id, speaker_key),
   FOREIGN KEY (template_id) REFERENCES voice_template(id) ON DELETE CASCADE
 );
 
+CREATE TABLE IF NOT EXISTS voice_template_reference (
+  template_id TEXT NOT NULL,
+  speaker_key TEXT NOT NULL,
+  reference_id TEXT NOT NULL,
+  label TEXT,
+  path TEXT NOT NULL,
+  sort_order INTEGER NOT NULL,
+  created_at_ms INTEGER NOT NULL,
+  updated_at_ms INTEGER NOT NULL,
+  PRIMARY KEY (template_id, speaker_key, reference_id),
+  FOREIGN KEY (template_id, speaker_key)
+    REFERENCES voice_template_speaker(template_id, speaker_key)
+    ON DELETE CASCADE
+);
+
 CREATE INDEX IF NOT EXISTS idx_voice_template_updated ON voice_template(updated_at_ms DESC);
 CREATE INDEX IF NOT EXISTS idx_voice_template_speaker_template
   ON voice_template_speaker(template_id, speaker_key);
+CREATE INDEX IF NOT EXISTS idx_voice_template_reference_template
+  ON voice_template_reference(template_id, speaker_key, sort_order, created_at_ms);
+
+CREATE TABLE IF NOT EXISTS voice_cast_pack (
+  id TEXT PRIMARY KEY,
+  name TEXT NOT NULL,
+  created_at_ms INTEGER NOT NULL,
+  updated_at_ms INTEGER NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS voice_cast_pack_role (
+  pack_id TEXT NOT NULL,
+  role_key TEXT NOT NULL,
+  display_name TEXT,
+  template_id TEXT NOT NULL,
+  template_speaker_key TEXT NOT NULL,
+  style_preset TEXT,
+  prosody_preset TEXT,
+  pronunciation_overrides TEXT,
+  render_mode TEXT,
+  sort_order INTEGER NOT NULL,
+  created_at_ms INTEGER NOT NULL,
+  updated_at_ms INTEGER NOT NULL,
+  PRIMARY KEY (pack_id, role_key),
+  FOREIGN KEY (pack_id) REFERENCES voice_cast_pack(id) ON DELETE CASCADE,
+  FOREIGN KEY (template_id, template_speaker_key)
+    REFERENCES voice_template_speaker(template_id, speaker_key)
+);
+
+CREATE INDEX IF NOT EXISTS idx_voice_cast_pack_updated ON voice_cast_pack(updated_at_ms DESC);
+CREATE INDEX IF NOT EXISTS idx_voice_cast_pack_role_pack
+  ON voice_cast_pack_role(pack_id, sort_order, role_key);
 
 CREATE TABLE IF NOT EXISTS youtube_subscription (
   id TEXT PRIMARY KEY,
@@ -233,6 +291,26 @@ CREATE INDEX IF NOT EXISTS idx_ingest_provenance_created ON ingest_provenance(cr
             [],
         )?;
     }
+    ensure_column(conn, "item_speaker", "tts_voice_profile_paths_json", "TEXT")?;
+    ensure_column(conn, "item_speaker", "style_preset", "TEXT")?;
+    ensure_column(conn, "item_speaker", "prosody_preset", "TEXT")?;
+    ensure_column(conn, "item_speaker", "pronunciation_overrides", "TEXT")?;
+    ensure_column(conn, "item_speaker", "render_mode", "TEXT")?;
+    ensure_column(
+        conn,
+        "voice_template_speaker",
+        "tts_voice_profile_paths_json",
+        "TEXT",
+    )?;
+    ensure_column(conn, "voice_template_speaker", "style_preset", "TEXT")?;
+    ensure_column(conn, "voice_template_speaker", "prosody_preset", "TEXT")?;
+    ensure_column(
+        conn,
+        "voice_template_speaker",
+        "pronunciation_overrides",
+        "TEXT",
+    )?;
+    ensure_column(conn, "voice_template_speaker", "render_mode", "TEXT")?;
 
     let has_subscription_refresh_interval_minutes = {
         let mut stmt = conn.prepare("PRAGMA table_info(youtube_subscription)")?;
@@ -386,6 +464,23 @@ CREATE INDEX IF NOT EXISTS idx_ingest_provenance_created ON ingest_provenance(cr
     Ok(())
 }
 
+fn ensure_column(conn: &Connection, table: &str, column: &str, column_def: &str) -> Result<()> {
+    let mut stmt = conn.prepare(&format!("PRAGMA table_info({table})"))?;
+    let mut rows = stmt.query([])?;
+    while let Some(row) = rows.next()? {
+        let name: String = row.get(1)?;
+        if name == column {
+            return Ok(());
+        }
+    }
+
+    conn.execute(
+        &format!("ALTER TABLE {table} ADD COLUMN {column} {column_def}"),
+        [],
+    )?;
+    Ok(())
+}
+
 pub fn ensure_schema(paths: &AppPaths) -> Result<()> {
     let conn = open(paths)?;
     migrate(&conn)?;
@@ -516,6 +611,35 @@ CREATE TABLE IF NOT EXISTS job (
             vec![
                 "voice_template".to_string(),
                 "voice_template_speaker".to_string()
+            ]
+        );
+    }
+
+    #[test]
+    fn migrate_creates_extended_voice_feature_tables() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let paths = AppPaths::new(dir.path().to_path_buf());
+        let conn = open(&paths).expect("open");
+        migrate(&conn).expect("migrate");
+
+        let mut stmt = conn
+            .prepare(
+                "SELECT name FROM sqlite_master WHERE type='table' AND name IN ('voice_template_reference', 'voice_cast_pack', 'voice_cast_pack_role') ORDER BY name",
+            )
+            .expect("prepare");
+        let rows = stmt
+            .query_map([], |row| row.get::<_, String>(0))
+            .expect("query");
+        let names = rows
+            .collect::<rusqlite::Result<Vec<_>>>()
+            .expect("collect rows");
+
+        assert_eq!(
+            names,
+            vec![
+                "voice_cast_pack".to_string(),
+                "voice_cast_pack_role".to_string(),
+                "voice_template_reference".to_string()
             ]
         );
     }

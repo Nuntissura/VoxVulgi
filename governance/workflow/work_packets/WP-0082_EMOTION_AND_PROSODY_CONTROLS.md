@@ -3,7 +3,7 @@
 ## Metadata
 - ID: WP-0082
 - Owner: Codex
-- Status: BACKLOG
+- Status: DONE
 - Created: 2026-03-06
 - Target milestone: Phase 2 dubbing naturalness controls
 
@@ -40,3 +40,4 @@ Out of scope:
 ## Status updates
 
 - 2026-03-06: Created as the structured control layer above raw timing-fit and voice identity.
+- 2026-03-06: Implemented reusable prosody presets across item/template/cast-pack speaker settings and fed heuristic pacing/terminal shaping into preview plus voice-preserving jobs; verified via engine `cargo test`, desktop Tauri `cargo test`, desktop `npm run build`, and proof bundle `product/desktop/Build Target/tool_artifacts/wp_runs/WP-0082/20260306_172806/`.
