@@ -266,6 +266,12 @@ Voice-preserving approach (core feature):
   - export modes for speech stem, background stem, final mix, and alternate versions,
   - cross-episode voice memory plus character libraries as separate reusable asset classes,
   - reference cleanup manifests and cleaned-reference reuse under per-item voice artifact folders.
+- Hardening requirements for the current voice stack:
+  - artifact-browser job/status/log resolution must be keyed by artifact identity, including variant label, track id, and mux container where applicable,
+  - artifact rerun helpers must accept and preserve variant/base context instead of assuming the base artifact path,
+  - reference cleanup storage must use collision-safe speaker keys and stay backward-compatible with previously written cleanup manifests,
+  - applying cleaned references must support non-destructive multi-reference reuse,
+  - batch dubbing item selection must page through the full library and keep selections stable without hidden caps.
 - Dubbing-control expansion remains operator-directed; the app should not add content-judgment or censorship workflows as part of these features.
 
 R&D plan: see `governance/spec/VOICE_PRESERVING_DUBBING_RD_PLAN.md`.

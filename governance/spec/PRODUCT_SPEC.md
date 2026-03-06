@@ -133,6 +133,10 @@ Initial language focus: **Korean + Japanese → English**.
   - explicit subtitle-aware prosody toggles on speaker/template/profile data,
   - optional reference cleanup before cloning,
   - voice QC for reference and output quality.
+- Cleanup and review integrity requirements:
+  - when a speaker has multiple reference clips, cleanup must let the operator choose which reference to process,
+  - applying a cleaned reference must preserve the broader reference set unless the operator explicitly narrows it,
+  - cleanup history must remain separated per real speaker key and not collide because of sanitized labels alone.
 
 ### 5.3 Export
 
@@ -149,6 +153,10 @@ Current implementation status:
 
 - Localization Studio surfaces batch dubbing, A/B speaker previews, export stems/alternates visibility, voice memory, character libraries, and reference cleanup controls.
 - Export packs include speech stems and alternate dubbed variants when available.
+- Artifact-browser actions must remain variant-aware:
+  - rerun, status, and log links for A/B/alternate artifacts must target the matching variant/track/container instead of falling back to the base artifact state,
+  - unsupported artifact rows must not expose misleading rerun actions.
+- Batch dubbing item selection must scale across the full library and must not silently truncate selected item sets.
 
 ## 6) Phase 3 (Power Features)
 

@@ -35,6 +35,12 @@ Date: 2026-02-19
 - WP-0090: Subtitle-aware prosody driven by punctuation, line breaks, and timing structure. DONE.
 - WP-0091: Character libraries for reusable fictional narrator or teaching voices. DONE.
 
+## Voice Workflow Remediation Hardening (2026-03)
+
+- WP-0092: Variant-aware artifact actions, status, and logs for A/B previews, alternates, QC, and export packs. IN PROGRESS.
+- WP-0093: Cleanup integrity for multi-reference voices and collision-safe cleanup storage. IN PROGRESS.
+- WP-0094: Library-scale batch dubbing selection without hidden 500-item caps. IN PROGRESS.
+
 ## Phase 0 — Decisions (1–2 days)
 
 - Pick stack: Tauri/Rust + Python workers (recommended) vs Qt vs Electron.
