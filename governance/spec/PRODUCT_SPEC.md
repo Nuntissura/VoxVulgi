@@ -110,6 +110,7 @@ Initial language focus: **Korean + Japanese → English**.
 - UI to map speaker labels to:
   - a TTS voice (MVP-safe approach), or
   - a voice-preserved model (advanced).
+- Operators must be able to save reusable voice templates for recurring speakers/series and re-apply them to later items through explicit speaker-slot mapping.
 
 ### 5.2 Background preservation
 
@@ -160,6 +161,7 @@ Initial language focus: **Korean + Japanese → English**.
 - **Subtitle editor**:
   - timeline + segment table,
   - speaker labels,
+  - reusable voice-template save/apply for recurring speaker setups,
   - translation side-by-side,
   - QC warnings (too fast, too long).
 - **Jobs/Queue**: running/failed/completed, retry, logs link.

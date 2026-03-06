@@ -35,6 +35,7 @@ Base app dir (example):
 - `%APPDATA%\com.voxvulgi.voxvulgi\`
   - `library\` (original media; or pointers to user-selected locations)
   - `derived\` (subtitles, transcripts, stems, dubbed audio; per-job artifacts + outputs)
+  - `voice_templates\` (reusable speaker-template manifests + copied reference clips)
   - `db\app.sqlite`
   - `logs\app.jsonl` (rotated)
   - `cache\` (model caches, temporary ffmpeg output)
@@ -100,6 +101,10 @@ Core tables (suggested):
   - `params_json`, `created_at_ms`, `started_at_ms`, `finished_at_ms`, `logs_path`
 - `speaker_profile`:
   - `id`, `item_id`, `label`, `tts_voice_id` (MVP), `voice_clone_ref` (advanced, optional)
+- `voice_template`:
+  - `id`, `name`, `created_at_ms`, `updated_at_ms`
+- `voice_template_speaker`:
+  - `template_id`, `speaker_key`, `display_name`, `tts_voice_id`, `tts_voice_profile_path`, `created_at_ms`, `updated_at_ms`
 - `youtube_subscription`:
   - `id`, `title`, `source_url`, `folder_map`, `output_dir_override`, `active`
   - `refresh_interval_minutes` (integer, clamped range; user-editable in Library UI)
@@ -232,6 +237,7 @@ Voice-preserving approach (core feature):
   - ability to fall back to non-cloned voices,
   - strong logging/redaction + export provenance,
   - deletion controls for any stored voice representations.
+- Reusable voice templates should be stored in app data, copy their reference clips into app-managed storage, and apply back onto per-item speaker settings so existing jobs do not need a separate template-aware request format.
 
 R&D plan: see `governance/spec/VOICE_PRESERVING_DUBBING_RD_PLAN.md`.
 Tooling landscape research: see `governance/spec/VOICE_DUBBING_TOOLING_LANDSCAPE_2026.md`.

@@ -14,6 +14,8 @@ Date: 2026-02-19
 - WP-0072: Add pre-maintenance explainer page before NSIS maintenance action selection.
 - WP-0073: Add governance-level policy pointers for installer maintenance mode wording.
 - WP-0074: Clarify localization output locations, prefer MP4 defaults, repair thumbnail recovery, and remove remaining first-open freezes.
+- WP-0075: Fix the voice-preserving dub regression where jobs succeed with silent spoken audio.
+- WP-0076: Add reusable voice-template save/apply flow for recurring speaker setups in Localization Studio.
 
 ## Phase 0 — Decisions (1–2 days)
 
