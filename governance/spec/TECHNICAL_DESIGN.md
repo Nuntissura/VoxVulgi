@@ -105,6 +105,21 @@ Core tables (suggested):
   - `id`, `name`, `created_at_ms`, `updated_at_ms`
 - `voice_template_speaker`:
   - `template_id`, `speaker_key`, `display_name`, `tts_voice_id`, `tts_voice_profile_path`, `created_at_ms`, `updated_at_ms`
+- Planned voice-dubbing expansion tables:
+  - `voice_template_reference`:
+    - `template_id`, `speaker_key`, `reference_id`, `path`, `label`, `sort_order`, `cleaned_from_path`, `created_at_ms`, `updated_at_ms`
+  - `voice_cast_pack`:
+    - `id`, `name`, `series_key`, `created_at_ms`, `updated_at_ms`
+  - `voice_cast_pack_role`:
+    - `pack_id`, `role_key`, `display_name`, `template_id`, `template_speaker_key`, `style_preset`, `prosody_preset`, `created_at_ms`, `updated_at_ms`
+  - `voice_pronunciation_lock`:
+    - `id`, `scope_kind`, `scope_id`, `term`, `spoken_override`, `notes`, `created_at_ms`, `updated_at_ms`
+  - `voice_preview_variant`:
+    - `id`, `item_id`, `speaker_key`, `label`, `settings_json`, `artifact_path`, `created_at_ms`
+  - `voice_memory_profile`:
+    - `id`, `series_key`, `speaker_identity_key`, `template_id`, `template_speaker_key`, `settings_json`, `created_at_ms`, `updated_at_ms`
+  - `character_voice`:
+    - `id`, `name`, `style_preset`, `prosody_preset`, `template_id`, `template_speaker_key`, `created_at_ms`, `updated_at_ms`
 - `youtube_subscription`:
   - `id`, `title`, `source_url`, `folder_map`, `output_dir_override`, `active`
   - `refresh_interval_minutes` (integer, clamped range; user-editable in Library UI)
@@ -238,6 +253,17 @@ Voice-preserving approach (core feature):
   - strong logging/redaction + export provenance,
   - deletion controls for any stored voice representations.
 - Reusable voice templates should be stored in app data, copy their reference clips into app-managed storage, and apply back onto per-item speaker settings so existing jobs do not need a separate template-aware request format.
+- Planned expansion layers on top of reusable templates:
+  - reusable cast packs that group template speakers into recurring series roles,
+  - multi-reference speaker profiles with 1..N reference clips and optional cleaned derivatives,
+  - advisory auto-match suggestions for diarized speakers (non-destructive, operator-reviewed),
+  - style/prosody presets, pronunciation locks, and subtitle-aware prosody hints passed through one unified speaker settings layer,
+  - voice QC reports for both reference quality and output quality,
+  - batch dubbing orchestration that applies cast/template settings to many items,
+  - A/B preview variants stored as separate artifacts before final selection,
+  - export modes for speech stem, background stem, final mix, and alternate versions,
+  - cross-episode voice memory plus character libraries as separate reusable asset classes.
+- Dubbing-control expansion remains operator-directed; the app should not add content-judgment or censorship workflows as part of these features.
 
 R&D plan: see `governance/spec/VOICE_PRESERVING_DUBBING_RD_PLAN.md`.
 Tooling landscape research: see `governance/spec/VOICE_DUBBING_TOOLING_LANDSCAPE_2026.md`.

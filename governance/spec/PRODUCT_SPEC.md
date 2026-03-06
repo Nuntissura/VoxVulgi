@@ -111,6 +111,11 @@ Initial language focus: **Korean + Japanese → English**.
   - a TTS voice (MVP-safe approach), or
   - a voice-preserved model (advanced).
 - Operators must be able to save reusable voice templates for recurring speakers/series and re-apply them to later items through explicit speaker-slot mapping.
+- Planned expansion after reusable voice templates:
+  - reusable cast packs for recurring show roles (`host`, `narrator`, `contestant`, `guest`, and custom roles),
+  - multi-reference speaker cloning (3-10 clean clips per template speaker),
+  - operator-reviewed auto-match suggestions from diarized speakers to saved template speakers or cast-pack roles,
+  - cross-episode voice memory for recurring speakers.
 
 ### 5.2 Background preservation
 
@@ -118,6 +123,14 @@ Initial language focus: **Korean + Japanese → English**.
 - Generate English speech per segment and mix back with background.
 - Provide mix controls:
   - ducking, loudness normalization, fade, noise reduction (optional).
+- Planned dubbing-quality controls:
+  - per-speaker style presets,
+  - pronunciation locks for names/places/glossary terms,
+  - emotion/prosody controls,
+  - subtitle-aware prosody,
+  - optional reference cleanup before cloning,
+  - hybrid mode where major speakers use cloning and minor/background speakers use standard TTS,
+  - voice QC for reference and output quality.
 
 ### 5.3 Export
 
@@ -125,6 +138,10 @@ Initial language focus: **Korean + Japanese → English**.
   - dubbed audio track (WAV/AAC),
   - muxed video with new audio track (MP4/MKV),
   - subtitles as sidecar or burned-in.
+- Planned export/review additions:
+  - A/B preview variants before committing to a final voice choice,
+  - batch dubbing across item sets or seasons,
+  - export stems (speech only, background only, final mix) and alternate dubbed versions.
 
 ## 6) Phase 3 (Power Features)
 
@@ -140,6 +157,10 @@ Initial language focus: **Korean + Japanese → English**.
   - shared glossary,
   - subtitle review comments,
   - export reports.
+- Advanced dubbing library features:
+  - character libraries for reusable narrator/persona voices,
+  - cross-episode voice memory for recurring real speakers,
+  - reference cleanup and subtitle-aware prosody as reusable preprocessing/control layers.
 
 ## 7) UX Principles
 
@@ -149,6 +170,7 @@ Initial language focus: **Korean + Japanese → English**.
 - Editable: every AI output is reviewable and editable.
 - Offline by default: no background network egress. Windows "full" installers bundle required local tools/models for Phase 1+2 and bootstrap them into app-data on first launch, so the core pipeline can run fully offline without manual pack installs.
 - Safe defaults: no voice cloning by default.
+- Voice and dubbing controls remain operator-directed; VoxVulgi should not add content-judgment or censorship workflows as part of these features.
 
 ## 8) Key UX Screens
 
