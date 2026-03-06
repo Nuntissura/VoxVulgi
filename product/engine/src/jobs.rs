@@ -1,7 +1,7 @@
 use crate::paths::AppPaths;
 use crate::{
     asr, cmd, config, db, ffmpeg, image_batch, library, speakers, subscriptions, subtitle_tracks,
-    subtitles, tools, translate, EngineError, Result,
+    subtitles, tools, translate, voice_cast_packs, voice_templates, EngineError, Result,
 };
 use regex::Regex;
 use rusqlite::params;
@@ -232,6 +232,8 @@ struct TranslateLocalParams {
     model_id: String,
     #[serde(default)]
     batch_on_import: bool,
+    #[serde(default)]
+    pipeline: Option<LocalizationPipelineOptions>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -266,6 +268,8 @@ struct DubVoicePreservingV1Params {
     source_track_id: String,
     #[serde(default)]
     batch_on_import: bool,
+    #[serde(default)]
+    pipeline: Option<LocalizationPipelineOptions>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -283,6 +287,8 @@ struct MixDubPreviewV1Params {
     timing_fit_max_factor: Option<f32>,
     #[serde(default)]
     batch_on_import: bool,
+    #[serde(default)]
+    pipeline: Option<LocalizationPipelineOptions>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -298,6 +304,8 @@ struct MuxDubPreviewV1Params {
     original_audio_lang: Option<String>,
     #[serde(default)]
     batch_on_import: bool,
+    #[serde(default)]
+    pipeline: Option<LocalizationPipelineOptions>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -323,11 +331,106 @@ struct CleanVocalsV1Params {
 struct QcReportV1Params {
     item_id: String,
     track_id: String,
+    #[serde(default)]
+    variant_label: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct ExportPackV1Params {
     item_id: String,
+    #[serde(default)]
+    include_alternates: bool,
+    #[serde(default)]
+    variant_label: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct SpeakerRenderOverride {
+    pub speaker_key: String,
+    pub tts_voice_id: Option<String>,
+    pub tts_voice_profile_path: Option<String>,
+    #[serde(default)]
+    pub tts_voice_profile_paths: Vec<String>,
+    pub style_preset: Option<String>,
+    pub prosody_preset: Option<String>,
+    pub pronunciation_overrides: Option<String>,
+    pub render_mode: Option<String>,
+    pub subtitle_prosody_mode: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+struct LocalizationPipelineOptions {
+    #[serde(default)]
+    auto_pipeline: bool,
+    #[serde(default)]
+    source_track_id: Option<String>,
+    #[serde(default)]
+    separation_backend: Option<String>,
+    #[serde(default)]
+    queue_export_pack: bool,
+    #[serde(default)]
+    queue_qc: bool,
+    #[serde(default)]
+    variant_label: Option<String>,
+    #[serde(default)]
+    speaker_overrides: Vec<SpeakerRenderOverride>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct LocalizationBatchRequest {
+    pub item_ids: Vec<String>,
+    pub template_id: Option<String>,
+    pub cast_pack_id: Option<String>,
+    pub separation_backend: Option<String>,
+    #[serde(default)]
+    pub queue_export_pack: bool,
+    #[serde(default)]
+    pub queue_qc: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct LocalizationBatchItemResult {
+    pub item_id: String,
+    pub title: String,
+    pub track_id: Option<String>,
+    pub applied_mapping_count: usize,
+    pub warnings: Vec<String>,
+    pub queued_jobs: Vec<JobRow>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct LocalizationBatchQueueSummary {
+    pub batch_id: String,
+    pub queued_jobs_total: usize,
+    pub items: Vec<LocalizationBatchItemResult>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct VoiceAbPreviewRequest {
+    pub item_id: String,
+    pub source_track_id: String,
+    pub speaker_key: String,
+    pub separation_backend: Option<String>,
+    #[serde(default)]
+    pub queue_qc: bool,
+    #[serde(default)]
+    pub queue_export_pack: bool,
+    #[serde(default)]
+    pub variant_a_label: Option<String>,
+    #[serde(default)]
+    pub variant_b_label: Option<String>,
+    #[serde(default)]
+    pub variant_a_override: SpeakerRenderOverride,
+    #[serde(default)]
+    pub variant_b_override: SpeakerRenderOverride,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct VoiceAbPreviewQueueSummary {
+    pub batch_id: String,
+    pub variant_a_label: String,
+    pub variant_b_label: String,
+    pub queued_jobs: Vec<JobRow>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -354,9 +457,95 @@ struct TtsPreviewManifestSegment {
     start_ms: i64,
     end_ms: i64,
     #[serde(default)]
+    speaker: Option<String>,
+    #[serde(default)]
     audio_path: Option<String>,
     #[serde(default)]
     audio_exists: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct QcThresholds {
+    cps_warn: f32,
+    cps_fail: f32,
+    line_chars_warn: usize,
+    line_chars_fail: usize,
+    overlap_warn_ms: i64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct QcSummary {
+    total_segments: usize,
+    issues_total: usize,
+    issues_by_kind: std::collections::BTreeMap<String, usize>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct QcIssueRecord {
+    kind: String,
+    severity: String,
+    segment_index: u32,
+    start_ms: i64,
+    end_ms: i64,
+    message: String,
+    value: Option<f64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    speaker_key: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    artifact_path: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+struct VoiceAudioStats {
+    duration_ms: i64,
+    sample_rate: u32,
+    peak_abs: f32,
+    rms: f32,
+    clipped_ratio: f32,
+    silence_ratio: f32,
+    zero_cross_ratio: f32,
+    pitch_hz: Option<f32>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct VoiceReferenceQcRecord {
+    speaker_key: String,
+    path: String,
+    label: Option<String>,
+    stats: VoiceAudioStats,
+    warnings: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct VoiceOutputQcRecord {
+    speaker_key: Option<String>,
+    segment_index: u32,
+    path: String,
+    stats: VoiceAudioStats,
+    warnings: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+struct VoiceQcReportSection {
+    references: Vec<VoiceReferenceQcRecord>,
+    outputs: Vec<VoiceOutputQcRecord>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct QcReportV1 {
+    schema_version: u32,
+    generated_at_ms: i64,
+    item_id: String,
+    track_id: String,
+    lang: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    variant_label: Option<String>,
+    thresholds: QcThresholds,
+    tts_backend: Option<String>,
+    tts_manifest_path: Option<String>,
+    issues: Vec<QcIssueRecord>,
+    voice: VoiceQcReportSection,
+    summary: QcSummary,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -483,6 +672,7 @@ pub fn enqueue_translate_local(
         source_track_id,
         model_id,
         batch_on_import: false,
+        pipeline: None,
     })?;
 
     enqueue_with_type_and_item_id(paths, JobType::TranslateLocal, params_json, Some(item_id))
@@ -562,6 +752,7 @@ pub fn enqueue_dub_voice_preserving_v1(
         item_id: item_id.clone(),
         source_track_id,
         batch_on_import: false,
+        pipeline: None,
     })?;
     enqueue_with_type_and_item_id(
         paths,
@@ -580,6 +771,7 @@ pub fn enqueue_mix_dub_preview_v1(paths: &AppPaths, item_id: String) -> Result<J
         timing_fit_min_factor: None,
         timing_fit_max_factor: None,
         batch_on_import: false,
+        pipeline: None,
     })?;
     enqueue_with_type_and_item_id(paths, JobType::MixDubPreviewV1, params_json, Some(item_id))
 }
@@ -601,6 +793,7 @@ pub fn enqueue_mix_dub_preview_v1_with_options(
         timing_fit_min_factor,
         timing_fit_max_factor,
         batch_on_import: false,
+        pipeline: None,
     })?;
     enqueue_with_type_and_item_id(paths, JobType::MixDubPreviewV1, params_json, Some(item_id))
 }
@@ -613,6 +806,7 @@ pub fn enqueue_mux_dub_preview_v1(paths: &AppPaths, item_id: String) -> Result<J
         dubbed_audio_lang: None,
         original_audio_lang: None,
         batch_on_import: false,
+        pipeline: None,
     })?;
     enqueue_with_type_and_item_id(paths, JobType::MuxDubPreviewV1, params_json, Some(item_id))
 }
@@ -632,6 +826,7 @@ pub fn enqueue_mux_dub_preview_v1_with_options(
         dubbed_audio_lang,
         original_audio_lang,
         batch_on_import: false,
+        pipeline: None,
     })?;
     enqueue_with_type_and_item_id(paths, JobType::MuxDubPreviewV1, params_json, Some(item_id))
 }
@@ -673,6 +868,21 @@ pub fn enqueue_qc_report_v1(paths: &AppPaths, item_id: String, track_id: String)
     let params_json = serde_json::to_string(&QcReportV1Params {
         item_id: item_id.clone(),
         track_id,
+        variant_label: None,
+    })?;
+    enqueue_with_type_and_item_id(paths, JobType::QcReportV1, params_json, Some(item_id))
+}
+
+pub fn enqueue_qc_report_v1_with_variant(
+    paths: &AppPaths,
+    item_id: String,
+    track_id: String,
+    variant_label: Option<String>,
+) -> Result<JobRow> {
+    let params_json = serde_json::to_string(&QcReportV1Params {
+        item_id: item_id.clone(),
+        track_id,
+        variant_label,
     })?;
     enqueue_with_type_and_item_id(paths, JobType::QcReportV1, params_json, Some(item_id))
 }
@@ -680,8 +890,237 @@ pub fn enqueue_qc_report_v1(paths: &AppPaths, item_id: String, track_id: String)
 pub fn enqueue_export_pack_v1(paths: &AppPaths, item_id: String) -> Result<JobRow> {
     let params_json = serde_json::to_string(&ExportPackV1Params {
         item_id: item_id.clone(),
+        include_alternates: true,
+        variant_label: None,
     })?;
     enqueue_with_type_and_item_id(paths, JobType::ExportPackV1, params_json, Some(item_id))
+}
+
+pub fn enqueue_localization_batch_v1(
+    paths: &AppPaths,
+    request: LocalizationBatchRequest,
+) -> Result<LocalizationBatchQueueSummary> {
+    let item_ids = normalize_localization_batch_item_ids(request.item_ids)?;
+    if item_ids.is_empty() {
+        return Err(EngineError::InstallFailed(
+            "choose at least one item for batch dubbing".to_string(),
+        ));
+    }
+    let batch_id = Uuid::new_v4().to_string();
+    let mut items: Vec<LocalizationBatchItemResult> = Vec::new();
+    let separation_backend = normalize_separation_backend(request.separation_backend.as_deref());
+
+    for item_id in item_ids {
+        let item = library::get_item_by_id(paths, &item_id)?;
+        let mut warnings: Vec<String> = Vec::new();
+        let mut applied_mapping_count = 0usize;
+        let selected_track = select_localization_batch_track(paths, &item_id)?;
+        let track = match selected_track {
+            Some(track) => track,
+            None => {
+                items.push(LocalizationBatchItemResult {
+                    item_id: item_id.clone(),
+                    title: item.title.clone(),
+                    track_id: None,
+                    applied_mapping_count,
+                    warnings: vec!["No subtitle track found for this item.".to_string()],
+                    queued_jobs: Vec::new(),
+                });
+                continue;
+            }
+        };
+
+        let current_speakers = subtitle_tracks::load_document(paths, &track.id)?
+            .segments
+            .into_iter()
+            .filter_map(|segment| segment.speaker)
+            .map(|speaker| speaker.trim().to_string())
+            .filter(|speaker| !speaker.is_empty())
+            .collect::<HashSet<_>>();
+
+        if let Some(template_id) = request.template_id.as_deref() {
+            let mappings =
+                auto_match_template_speakers(paths, template_id, &item_id, &current_speakers)?;
+            if mappings.is_empty() {
+                warnings.push(
+                    "Template selected, but no speakers auto-matched on this item.".to_string(),
+                );
+            } else {
+                applied_mapping_count += mappings.len();
+                let _ = voice_templates::apply_voice_template_to_item(
+                    paths,
+                    &item_id,
+                    template_id,
+                    &mappings,
+                )?;
+            }
+        }
+
+        if let Some(pack_id) = request.cast_pack_id.as_deref() {
+            let mappings = auto_match_cast_pack_roles(paths, pack_id, &item_id, &current_speakers)?;
+            if mappings.is_empty() {
+                warnings.push(
+                    "Cast pack selected, but no roles auto-matched on this item.".to_string(),
+                );
+            } else {
+                applied_mapping_count += mappings.len();
+                let _ = voice_cast_packs::apply_voice_cast_pack_to_item(
+                    paths, &item_id, pack_id, &mappings,
+                )?;
+            }
+        }
+
+        let pipeline = LocalizationPipelineOptions {
+            auto_pipeline: true,
+            source_track_id: Some(track.id.clone()),
+            separation_backend: separation_backend.clone(),
+            queue_export_pack: request.queue_export_pack,
+            queue_qc: request.queue_qc,
+            variant_label: None,
+            speaker_overrides: Vec::new(),
+        };
+
+        let mut queued_jobs: Vec<JobRow> = Vec::new();
+        if track.kind == "translated" || normalize_lang_tag(Some(&track.lang)) == Some("eng") {
+            let dub_params = serde_json::to_string(&DubVoicePreservingV1Params {
+                item_id: item_id.clone(),
+                source_track_id: track.id.clone(),
+                batch_on_import: false,
+                pipeline: Some(pipeline.clone()),
+            })?;
+            queued_jobs.push(enqueue_with_type_item_and_batch_id(
+                paths,
+                JobType::DubVoicePreservingV1,
+                dub_params,
+                Some(item_id.clone()),
+                Some(batch_id.clone()),
+            )?);
+            let sep_job_type = if separation_backend.as_deref() == Some("demucs") {
+                JobType::SeparateAudioDemucsV1
+            } else {
+                JobType::SeparateAudioSpleeter
+            };
+            let sep_params = match sep_job_type {
+                JobType::SeparateAudioDemucsV1 => {
+                    serde_json::to_string(&SeparateAudioDemucsV1Params {
+                        item_id: item_id.clone(),
+                        batch_on_import: false,
+                    })?
+                }
+                _ => serde_json::to_string(&SeparateAudioSpleeterParams {
+                    item_id: item_id.clone(),
+                    batch_on_import: false,
+                })?,
+            };
+            queued_jobs.push(enqueue_with_type_item_and_batch_id(
+                paths,
+                sep_job_type,
+                sep_params,
+                Some(item_id.clone()),
+                Some(batch_id.clone()),
+            )?);
+        } else {
+            let params_json = serde_json::to_string(&TranslateLocalParams {
+                item_id: item_id.clone(),
+                source_track_id: track.id.clone(),
+                model_id: "whispercpp-tiny".to_string(),
+                batch_on_import: false,
+                pipeline: Some(pipeline.clone()),
+            })?;
+            queued_jobs.push(enqueue_with_type_item_and_batch_id(
+                paths,
+                JobType::TranslateLocal,
+                params_json,
+                Some(item_id.clone()),
+                Some(batch_id.clone()),
+            )?);
+        }
+
+        items.push(LocalizationBatchItemResult {
+            item_id,
+            title: item.title,
+            track_id: Some(track.id),
+            applied_mapping_count,
+            warnings,
+            queued_jobs,
+        });
+    }
+
+    let queued_jobs_total = items.iter().map(|item| item.queued_jobs.len()).sum();
+    Ok(LocalizationBatchQueueSummary {
+        batch_id,
+        queued_jobs_total,
+        items,
+    })
+}
+
+pub fn enqueue_voice_ab_preview_v1(
+    paths: &AppPaths,
+    request: VoiceAbPreviewRequest,
+) -> Result<VoiceAbPreviewQueueSummary> {
+    let item_id = request.item_id.trim().to_string();
+    let source_track_id = request.source_track_id.trim().to_string();
+    let speaker_key = request.speaker_key.trim().to_string();
+    if item_id.is_empty() || source_track_id.is_empty() || speaker_key.is_empty() {
+        return Err(EngineError::InstallFailed(
+            "item_id, source_track_id, and speaker_key are required".to_string(),
+        ));
+    }
+
+    let mut variant_a_label = normalize_variant_label(request.variant_a_label.as_deref())
+        .unwrap_or_else(|| "a".to_string());
+    let mut variant_b_label = normalize_variant_label(request.variant_b_label.as_deref())
+        .unwrap_or_else(|| "b".to_string());
+    if variant_a_label == variant_b_label {
+        variant_b_label = format!("{variant_b_label}_2");
+    }
+    if variant_a_label == variant_b_label {
+        variant_a_label = "a".to_string();
+        variant_b_label = "b".to_string();
+    }
+
+    let mut override_a = request.variant_a_override;
+    let mut override_b = request.variant_b_override;
+    override_a.speaker_key = speaker_key.clone();
+    override_b.speaker_key = speaker_key.clone();
+
+    let batch_id = Uuid::new_v4().to_string();
+    let separation_backend = normalize_separation_backend(request.separation_backend.as_deref());
+    let mut queued_jobs: Vec<JobRow> = Vec::new();
+
+    for (variant_label, override_value) in [
+        (variant_a_label.clone(), override_a),
+        (variant_b_label.clone(), override_b),
+    ] {
+        let params_json = serde_json::to_string(&DubVoicePreservingV1Params {
+            item_id: item_id.clone(),
+            source_track_id: source_track_id.clone(),
+            batch_on_import: false,
+            pipeline: Some(LocalizationPipelineOptions {
+                auto_pipeline: true,
+                source_track_id: Some(source_track_id.clone()),
+                separation_backend: separation_backend.clone(),
+                queue_export_pack: request.queue_export_pack,
+                queue_qc: request.queue_qc,
+                variant_label: Some(variant_label),
+                speaker_overrides: vec![override_value],
+            }),
+        })?;
+        queued_jobs.push(enqueue_with_type_item_and_batch_id(
+            paths,
+            JobType::DubVoicePreservingV1,
+            params_json,
+            Some(item_id.clone()),
+            Some(batch_id.clone()),
+        )?);
+    }
+
+    Ok(VoiceAbPreviewQueueSummary {
+        batch_id,
+        variant_a_label,
+        variant_b_label,
+        queued_jobs,
+    })
 }
 
 pub fn enqueue_download_direct_url_batch(
@@ -2169,6 +2608,7 @@ INSERT INTO subtitle_track (
                             source_track_id: track_id.clone(),
                             model_id: "whispercpp-tiny".to_string(),
                             batch_on_import: true,
+                            pipeline: None,
                         })?;
                         let _ = enqueue_with_type_item_and_batch_id(
                             paths,
@@ -2344,7 +2784,62 @@ INSERT INTO subtitle_track (
                 }),
             )?;
 
-            if p.batch_on_import {
+            let pipeline = p.pipeline.clone().unwrap_or_default();
+            if pipeline.auto_pipeline {
+                let batch_id = job_batch_id(paths, job_id).ok().flatten();
+                let next_pipeline = LocalizationPipelineOptions {
+                    source_track_id: Some(track_id.clone()),
+                    ..pipeline.clone()
+                };
+
+                if !item_has_active_job(paths, &item.id, JobType::DubVoicePreservingV1.as_str())
+                    .unwrap_or(false)
+                {
+                    let params_json = serde_json::to_string(&DubVoicePreservingV1Params {
+                        item_id: item.id.clone(),
+                        source_track_id: track_id.clone(),
+                        batch_on_import: false,
+                        pipeline: Some(next_pipeline.clone()),
+                    })?;
+                    let _ = enqueue_with_type_item_and_batch_id(
+                        paths,
+                        JobType::DubVoicePreservingV1,
+                        params_json,
+                        Some(item.id.clone()),
+                        batch_id.clone(),
+                    )?;
+                }
+
+                let sep_job_type = if next_pipeline.separation_backend.as_deref() == Some("demucs")
+                {
+                    JobType::SeparateAudioDemucsV1
+                } else {
+                    JobType::SeparateAudioSpleeter
+                };
+                if !item_has_active_job(paths, &item.id, sep_job_type.as_str()).unwrap_or(false)
+                    && separation_background_path_best_effort(paths, &item.id).is_none()
+                {
+                    let params_json = match sep_job_type {
+                        JobType::SeparateAudioDemucsV1 => {
+                            serde_json::to_string(&SeparateAudioDemucsV1Params {
+                                item_id: item.id.clone(),
+                                batch_on_import: false,
+                            })?
+                        }
+                        _ => serde_json::to_string(&SeparateAudioSpleeterParams {
+                            item_id: item.id.clone(),
+                            batch_on_import: false,
+                        })?,
+                    };
+                    let _ = enqueue_with_type_item_and_batch_id(
+                        paths,
+                        sep_job_type,
+                        params_json,
+                        Some(item.id.clone()),
+                        batch_id.clone(),
+                    )?;
+                }
+            } else if p.batch_on_import {
                 let rules = config::load_batch_on_import_rules(paths).unwrap_or_default();
                 if rules.auto_dub_preview {
                     let batch_id = job_batch_id(paths, job_id).ok().flatten();
@@ -3016,6 +3511,7 @@ INSERT INTO subtitle_track (
                             timing_fit_min_factor: None,
                             timing_fit_max_factor: None,
                             batch_on_import: true,
+                            pipeline: None,
                         })?;
                         let _ = enqueue_with_type_item_and_batch_id(
                             paths,
@@ -3292,6 +3788,7 @@ if __name__ == "__main__":
                         timing_fit_min_factor: None,
                         timing_fit_max_factor: None,
                         batch_on_import: true,
+                        pipeline: None,
                     })?;
                     let _ = enqueue_with_type_item_and_batch_id(
                         paths,
@@ -3379,6 +3876,7 @@ if __name__ == "__main__":
                             timing_fit_min_factor: None,
                             timing_fit_max_factor: None,
                             batch_on_import: true,
+                            pipeline: None,
                         })?;
                         let _ = enqueue_with_type_item_and_batch_id(
                             paths,
@@ -3766,6 +4264,7 @@ if __name__ == "__main__":
                         timing_fit_min_factor: None,
                         timing_fit_max_factor: None,
                         batch_on_import: true,
+                        pipeline: None,
                     })?;
                     let _ = enqueue_with_type_item_and_batch_id(
                         paths,
@@ -3833,12 +4332,17 @@ if __name__ == "__main__":
             let doc = subtitle_tracks::load_document(paths, &p.source_track_id)?;
             let item = library::get_item_by_id(paths, &p.item_id)?;
 
-            let speaker_settings_by_key = speaker_render_settings_by_key(paths, &item.id)?;
+            let pipeline = p.pipeline.clone().unwrap_or_default();
+            let mut speaker_settings_by_key = speaker_render_settings_by_key(paths, &item.id)?;
+            apply_speaker_overrides(&mut speaker_settings_by_key, &pipeline.speaker_overrides);
 
-            let out_dir = paths
-                .derived_item_dir(&item.id)
-                .join("tts_preview")
-                .join("dub_voice_preserving_v1");
+            let item_dir = paths.derived_item_dir(&item.id);
+            let variant_label = normalize_variant_label(pipeline.variant_label.as_deref());
+            let out_dir = tts_variant_dir(
+                &item_dir,
+                "dub_voice_preserving_v1",
+                variant_label.as_deref(),
+            );
             let segments_dir = out_dir.join("segments");
             let base_segments_dir = out_dir.join("base_segments");
             std::fs::create_dir_all(&segments_dir)?;
@@ -3911,7 +4415,10 @@ if __name__ == "__main__":
                 });
             }
 
-            let request_path = artifacts_dir.join("tts_voice_preserving_request.json");
+            let request_path = artifacts_dir.join(match variant_label.as_deref() {
+                Some(label) => format!("tts_voice_preserving_request_{label}.json"),
+                None => "tts_voice_preserving_request.json".to_string(),
+            });
             std::fs::write(
                 &request_path,
                 format!("{}\n", serde_json::to_string_pretty(&request)?),
@@ -4309,7 +4816,10 @@ if __name__ == "__main__":
                 .arg("--models-dir")
                 .arg(paths.python_models_dir().join("openvoice_v2"));
             py_cmd.arg("--ffmpeg").arg(paths.ffmpeg_cmd());
-            let report_path = artifacts_dir.join("tts_voice_preserving_report.json");
+            let report_path = artifacts_dir.join(match variant_label.as_deref() {
+                Some(label) => format!("tts_voice_preserving_report_{label}.json"),
+                None => "tts_voice_preserving_report.json".to_string(),
+            });
             py_cmd.arg("--report").arg(&report_path);
             py_cmd.env("PYTHONNOUSERSITE", "1");
             py_cmd.env(
@@ -4504,13 +5014,75 @@ if __name__ == "__main__":
                 "tts_preview_done",
                 serde_json::json!({
                     "manifest_path": &manifest_path,
-                    "segments_dir": &segments_dir
+                    "segments_dir": &segments_dir,
+                    "variant_label": variant_label
                 }),
             )?;
+
+            if pipeline.auto_pipeline {
+                let batch_id = job_batch_id(paths, job_id).ok().flatten();
+                if separation_background_path_best_effort(paths, &item.id).is_some() {
+                    if !item_has_active_job(paths, &item.id, JobType::MixDubPreviewV1.as_str())
+                        .unwrap_or(false)
+                    {
+                        let params_json = serde_json::to_string(&MixDubPreviewV1Params {
+                            item_id: item.id.clone(),
+                            ducking_strength: None,
+                            loudness_target_lufs: None,
+                            timing_fit_enabled: None,
+                            timing_fit_min_factor: None,
+                            timing_fit_max_factor: None,
+                            batch_on_import: false,
+                            pipeline: Some(LocalizationPipelineOptions {
+                                source_track_id: Some(source_track.id.clone()),
+                                variant_label: variant_label.clone(),
+                                ..pipeline.clone()
+                            }),
+                        })?;
+                        let _ = enqueue_with_type_item_and_batch_id(
+                            paths,
+                            JobType::MixDubPreviewV1,
+                            params_json,
+                            Some(item.id.clone()),
+                            batch_id.clone(),
+                        )?;
+                    }
+                } else {
+                    let sep_job_type = if pipeline.separation_backend.as_deref() == Some("demucs") {
+                        JobType::SeparateAudioDemucsV1
+                    } else {
+                        JobType::SeparateAudioSpleeter
+                    };
+                    if !item_has_active_job(paths, &item.id, sep_job_type.as_str()).unwrap_or(false)
+                    {
+                        let params_json = match sep_job_type {
+                            JobType::SeparateAudioDemucsV1 => {
+                                serde_json::to_string(&SeparateAudioDemucsV1Params {
+                                    item_id: item.id.clone(),
+                                    batch_on_import: false,
+                                })?
+                            }
+                            _ => serde_json::to_string(&SeparateAudioSpleeterParams {
+                                item_id: item.id.clone(),
+                                batch_on_import: false,
+                            })?,
+                        };
+                        let _ = enqueue_with_type_item_and_batch_id(
+                            paths,
+                            sep_job_type,
+                            params_json,
+                            Some(item.id.clone()),
+                            batch_id.clone(),
+                        )?;
+                    }
+                }
+            }
         }
         JobType::MixDubPreviewV1 => {
             set_progress(paths, job_id, 0.05)?;
             let p: MixDubPreviewV1Params = serde_json::from_str(params_json)?;
+            let pipeline = p.pipeline.clone().unwrap_or_default();
+            let variant_label = normalize_variant_label(pipeline.variant_label.as_deref());
 
             if is_canceled(paths, job_id)? {
                 log_line(paths, job_id, "info", "job_canceled", serde_json::json!({}))?;
@@ -4536,18 +5108,15 @@ if __name__ == "__main__":
                     )
                 })?;
 
-            let voice_preserving_manifest = item_dir
-                .join("tts_preview")
-                .join("dub_voice_preserving_v1")
-                .join("manifest.json");
-            let neural_manifest = item_dir
-                .join("tts_preview")
-                .join("tts_neural_local_v1")
-                .join("manifest.json");
-            let pyttsx3_manifest = item_dir
-                .join("tts_preview")
-                .join("pyttsx3_v1")
-                .join("manifest.json");
+            let voice_preserving_manifest = tts_manifest_path(
+                &item_dir,
+                "dub_voice_preserving_v1",
+                variant_label.as_deref(),
+            );
+            let neural_manifest =
+                tts_manifest_path(&item_dir, "tts_neural_local_v1", variant_label.as_deref());
+            let pyttsx3_manifest =
+                tts_manifest_path(&item_dir, "pyttsx3_v1", variant_label.as_deref());
 
             let manifest_path = if voice_preserving_manifest.exists() {
                 voice_preserving_manifest
@@ -4568,7 +5137,7 @@ if __name__ == "__main__":
             let manifest_bytes = std::fs::read(&manifest_path)?;
             let manifest: TtsPreviewManifest = serde_json::from_slice(&manifest_bytes)?;
 
-            let out_dir = item_dir.join("dub_preview");
+            let out_dir = dub_variant_dir(&item_dir, variant_label.as_deref());
             std::fs::create_dir_all(&out_dir)?;
             let final_path = out_dir.join("mix_dub_preview_v1.wav");
 
@@ -4584,7 +5153,33 @@ if __name__ == "__main__":
                     serde_json::json!({ "out_path": &final_path }),
                 )?;
 
-                if p.batch_on_import {
+                if pipeline.auto_pipeline {
+                    let batch_id = job_batch_id(paths, job_id).ok().flatten();
+                    if !item_has_active_job(paths, &item.id, JobType::MuxDubPreviewV1.as_str())
+                        .unwrap_or(false)
+                    {
+                        let params_json = serde_json::to_string(&MuxDubPreviewV1Params {
+                            item_id: item.id.clone(),
+                            output_container: None,
+                            keep_original_audio: None,
+                            dubbed_audio_lang: None,
+                            original_audio_lang: None,
+                            batch_on_import: false,
+                            pipeline: Some(LocalizationPipelineOptions {
+                                source_track_id: pipeline.source_track_id.clone(),
+                                variant_label: variant_label.clone(),
+                                ..pipeline.clone()
+                            }),
+                        })?;
+                        let _ = enqueue_with_type_item_and_batch_id(
+                            paths,
+                            JobType::MuxDubPreviewV1,
+                            params_json,
+                            Some(item.id.clone()),
+                            batch_id,
+                        )?;
+                    }
+                } else if p.batch_on_import {
                     let rules = config::load_batch_on_import_rules(paths).unwrap_or_default();
                     if rules.auto_dub_preview
                         && !mux_output_exists(paths, &item.id)
@@ -4599,6 +5194,7 @@ if __name__ == "__main__":
                             dubbed_audio_lang: None,
                             original_audio_lang: None,
                             batch_on_import: true,
+                            pipeline: None,
                         })?;
                         let _ = enqueue_with_type_item_and_batch_id(
                             paths,
@@ -4663,6 +5259,7 @@ if __name__ == "__main__":
             let use_single_pass = inputs.len() <= max_single_pass_segments;
 
             let mut timing_fit_entries: Vec<TimingFitEntry> = Vec::new();
+            let mut applied_factors_by_index: HashMap<u32, f32> = HashMap::new();
             if timing_fit_enabled {
                 for (seg, audio_path) in &inputs {
                     let window_ms = (seg.end_ms - seg.start_ms).max(0);
@@ -4739,6 +5336,9 @@ if __name__ == "__main__":
                                 entry.note = note.clone();
                             }
                         }
+                    }
+                    if let Some(factor) = applied_factor {
+                        applied_factors_by_index.insert(seg.index, factor);
                     }
 
                     filter.push_str(&format!(
@@ -4949,6 +5549,73 @@ if __name__ == "__main__":
                 std::fs::write(&report_path, format!("{report_json}\n"))?;
             }
 
+            let speech_stem_path = out_dir.join("speech_dub_preview_v1.wav");
+            if !inputs.is_empty() {
+                let mut filter = String::new();
+                for (i, (seg, _audio_path)) in inputs.iter().enumerate() {
+                    let delay_ms = seg.start_ms.max(0);
+                    let window_ms = (seg.end_ms - seg.start_ms).max(0);
+                    let window_s = (window_ms as f64) / 1000.0;
+                    filter.push_str(&format!(
+                        "[{i}:a]aresample=44100,aformat=sample_fmts=fltp:channel_layouts=stereo"
+                    ));
+                    if let Some(factor) = applied_factors_by_index.get(&seg.index).copied() {
+                        if factor > 1.001 {
+                            filter.push(',');
+                            filter.push_str(&atempo_chain_for_factor(factor));
+                        }
+                        if timing_fit_enabled {
+                            filter.push(',');
+                            filter.push_str(&format!("atrim=end={window_s:.3}"));
+                        }
+                    } else if timing_fit_enabled {
+                        filter.push(',');
+                        filter.push_str(&format!("atrim=end={window_s:.3}"));
+                    }
+                    filter.push_str(&format!(",adelay={delay_ms}|{delay_ms}[s{i}];"));
+                }
+                for i in 0..inputs.len() {
+                    filter.push_str(&format!("[s{i}]"));
+                }
+                filter.push_str(&format!(
+                    "amix=inputs={}:duration=longest:dropout_transition=0:normalize=0[speech]",
+                    inputs.len()
+                ));
+
+                let mut ff = cmd::command(paths.ffmpeg_cmd());
+                ff.args(["-nostdin", "-y"]);
+                for (_, audio_path) in &inputs {
+                    ff.arg("-i").arg(audio_path);
+                }
+                ff.arg("-filter_complex").arg(&filter);
+                ff.args(["-map", "[speech]"]);
+                ff.args(["-c:a", "pcm_s16le", "-ar", "44100", "-ac", "2"]);
+                ff.arg(&speech_stem_path);
+                match ff.output() {
+                    Ok(output) if output.status.success() => {}
+                    Ok(output) => {
+                        log_line(
+                            paths,
+                            job_id,
+                            "warn",
+                            "mix_dub_preview_speech_stem_failed",
+                            serde_json::json!({
+                                "stderr": String::from_utf8_lossy(&output.stderr).trim().to_string()
+                            }),
+                        )?;
+                    }
+                    Err(error) => {
+                        log_line(
+                            paths,
+                            job_id,
+                            "warn",
+                            "mix_dub_preview_speech_stem_error",
+                            serde_json::json!({ "error": error.to_string() }),
+                        )?;
+                    }
+                }
+            }
+
             set_progress(paths, job_id, 0.95)?;
             log_line(
                 paths,
@@ -4961,11 +5628,38 @@ if __name__ == "__main__":
                     "mode": if used_legacy { "legacy_fallback" } else { "single_pass" },
                     "ducking_strength": ducking_strength,
                     "loudness_target_lufs": loudness_target_lufs,
-                    "timing_fit_enabled": timing_fit_enabled
+                    "timing_fit_enabled": timing_fit_enabled,
+                    "variant_label": variant_label.clone()
                 }),
             )?;
 
-            if p.batch_on_import {
+            if pipeline.auto_pipeline {
+                if !item_has_active_job(paths, &item.id, JobType::MuxDubPreviewV1.as_str())
+                    .unwrap_or(false)
+                {
+                    let batch_id = job_batch_id(paths, job_id).ok().flatten();
+                    let params_json = serde_json::to_string(&MuxDubPreviewV1Params {
+                        item_id: item.id.clone(),
+                        output_container: None,
+                        keep_original_audio: None,
+                        dubbed_audio_lang: None,
+                        original_audio_lang: None,
+                        batch_on_import: false,
+                        pipeline: Some(LocalizationPipelineOptions {
+                            source_track_id: pipeline.source_track_id.clone(),
+                            variant_label: variant_label.clone(),
+                            ..pipeline.clone()
+                        }),
+                    })?;
+                    let _ = enqueue_with_type_item_and_batch_id(
+                        paths,
+                        JobType::MuxDubPreviewV1,
+                        params_json,
+                        Some(item.id.clone()),
+                        batch_id,
+                    )?;
+                }
+            } else if p.batch_on_import {
                 let rules = config::load_batch_on_import_rules(paths).unwrap_or_default();
                 if rules.auto_dub_preview
                     && !mux_output_exists(paths, &item.id)
@@ -4980,6 +5674,7 @@ if __name__ == "__main__":
                         dubbed_audio_lang: None,
                         original_audio_lang: None,
                         batch_on_import: true,
+                        pipeline: None,
                     })?;
                     let _ = enqueue_with_type_item_and_batch_id(
                         paths,
@@ -4994,6 +5689,8 @@ if __name__ == "__main__":
         JobType::MuxDubPreviewV1 => {
             set_progress(paths, job_id, 0.05)?;
             let p: MuxDubPreviewV1Params = serde_json::from_str(params_json)?;
+            let pipeline = p.pipeline.clone().unwrap_or_default();
+            let variant_label = normalize_variant_label(pipeline.variant_label.as_deref());
 
             if is_canceled(paths, job_id)? {
                 log_line(paths, job_id, "info", "job_canceled", serde_json::json!({}))?;
@@ -5017,14 +5714,15 @@ if __name__ == "__main__":
             }
 
             let item_dir = paths.derived_item_dir(&item.id);
-            let dub_audio_path = item_dir.join("dub_preview").join("mix_dub_preview_v1.wav");
+            let dub_dir = dub_variant_dir(&item_dir, variant_label.as_deref());
+            let dub_audio_path = dub_dir.join("mix_dub_preview_v1.wav");
             if !dub_audio_path.exists() {
                 return Err(EngineError::InstallFailed(
                     "dub preview audio not found; run Mix dub first".to_string(),
                 ));
             }
 
-            let out_dir = item_dir.join("dub_preview");
+            let out_dir = dub_dir;
             std::fs::create_dir_all(&out_dir)?;
             let container = p
                 .output_container
@@ -5100,8 +5798,56 @@ if __name__ == "__main__":
                 job_id,
                 "info",
                 "mux_dub_preview_done",
-                serde_json::json!({ "out_path": &out_path, "container": ext, "keep_original_audio": keep_original_audio, "dubbed_lang": dubbed_lang, "original_lang": original_lang }),
+                serde_json::json!({
+                    "out_path": &out_path,
+                    "container": ext,
+                    "keep_original_audio": keep_original_audio,
+                    "dubbed_lang": dubbed_lang,
+                    "original_lang": original_lang,
+                    "variant_label": variant_label.clone()
+                }),
             )?;
+
+            if pipeline.auto_pipeline {
+                let batch_id = job_batch_id(paths, job_id).ok().flatten();
+                if pipeline.queue_qc {
+                    if let Some(track_id) = pipeline.source_track_id.clone() {
+                        if !item_has_active_job(paths, &item.id, JobType::QcReportV1.as_str())
+                            .unwrap_or(false)
+                        {
+                            let params_json = serde_json::to_string(&QcReportV1Params {
+                                item_id: item.id.clone(),
+                                track_id,
+                                variant_label: variant_label.clone(),
+                            })?;
+                            let _ = enqueue_with_type_item_and_batch_id(
+                                paths,
+                                JobType::QcReportV1,
+                                params_json,
+                                Some(item.id.clone()),
+                                batch_id.clone(),
+                            )?;
+                        }
+                    }
+                }
+                if pipeline.queue_export_pack
+                    && !item_has_active_job(paths, &item.id, JobType::ExportPackV1.as_str())
+                        .unwrap_or(false)
+                {
+                    let params_json = serde_json::to_string(&ExportPackV1Params {
+                        item_id: item.id.clone(),
+                        include_alternates: true,
+                        variant_label: variant_label.clone(),
+                    })?;
+                    let _ = enqueue_with_type_item_and_batch_id(
+                        paths,
+                        JobType::ExportPackV1,
+                        params_json,
+                        Some(item.id.clone()),
+                        batch_id,
+                    )?;
+                }
+            }
         }
         JobType::SeparateAudioSpleeter => {
             set_progress(paths, job_id, 0.05)?;
@@ -5173,6 +5919,7 @@ if __name__ == "__main__":
                             timing_fit_min_factor: None,
                             timing_fit_max_factor: None,
                             batch_on_import: true,
+                            pipeline: None,
                         })?;
                         let _ = enqueue_with_type_item_and_batch_id(
                             paths,
@@ -5517,6 +6264,7 @@ if __name__ == "__main__":
                         timing_fit_min_factor: None,
                         timing_fit_max_factor: None,
                         batch_on_import: true,
+                        pipeline: None,
                     })?;
                     let _ = enqueue_with_type_item_and_batch_id(
                         paths,
@@ -5598,6 +6346,7 @@ if __name__ == "__main__":
                             timing_fit_min_factor: None,
                             timing_fit_max_factor: None,
                             batch_on_import: true,
+                            pipeline: None,
                         })?;
                         let _ = enqueue_with_type_item_and_batch_id(
                             paths,
@@ -5769,6 +6518,7 @@ if __name__ == "__main__":
                         timing_fit_min_factor: None,
                         timing_fit_max_factor: None,
                         batch_on_import: true,
+                        pipeline: None,
                     })?;
                     let _ = enqueue_with_type_item_and_batch_id(
                         paths,
@@ -5882,10 +6632,15 @@ if __name__ == "__main__":
 
             let doc = subtitle_tracks::load_document(paths, &p.track_id)?;
             let item = library::get_item_by_id(paths, &p.item_id)?;
+            let variant_label = normalize_variant_label(p.variant_label.as_deref());
 
             let out_dir = paths.derived_item_dir(&item.id).join("qc");
             std::fs::create_dir_all(&out_dir)?;
-            let out_path = out_dir.join(format!("qc_report_v1_{}.json", p.track_id));
+            let out_name = match variant_label.as_deref() {
+                Some(label) => format!("qc_report_v1_{}_{}.json", p.track_id, label),
+                None => format!("qc_report_v1_{}.json", p.track_id),
+            };
+            let out_path = out_dir.join(out_name);
 
             if out_path.exists() && std::fs::metadata(&out_path).map(|m| m.len()).unwrap_or(0) > 0 {
                 set_progress(paths, job_id, 1.0)?;
@@ -5897,47 +6652,6 @@ if __name__ == "__main__":
                     serde_json::json!({ "out_path": &out_path }),
                 )?;
                 return Ok(());
-            }
-
-            #[derive(Debug, Clone, Serialize)]
-            struct QcThresholds {
-                cps_warn: f32,
-                cps_fail: f32,
-                line_chars_warn: usize,
-                line_chars_fail: usize,
-                overlap_warn_ms: i64,
-            }
-
-            #[derive(Debug, Clone, Serialize)]
-            struct QcIssue {
-                kind: String,
-                severity: String,
-                segment_index: u32,
-                start_ms: i64,
-                end_ms: i64,
-                message: String,
-                value: Option<f64>,
-            }
-
-            #[derive(Debug, Clone, Serialize)]
-            struct QcSummary {
-                total_segments: usize,
-                issues_total: usize,
-                issues_by_kind: std::collections::BTreeMap<String, usize>,
-            }
-
-            #[derive(Debug, Clone, Serialize)]
-            struct QcReportV1 {
-                schema_version: u32,
-                generated_at_ms: i64,
-                item_id: String,
-                track_id: String,
-                lang: String,
-                thresholds: QcThresholds,
-                tts_backend: Option<String>,
-                tts_manifest_path: Option<String>,
-                issues: Vec<QcIssue>,
-                summary: QcSummary,
             }
 
             fn wav_duration_ms_best_effort(path: &Path) -> Option<i64> {
@@ -5963,22 +6677,21 @@ if __name__ == "__main__":
 
             let item_dir = paths.derived_item_dir(&item.id);
             let mut tts_backend: Option<String> = None;
-            let mut tts_manifest_path: Option<String> = None;
+            let mut tts_manifest_file_path: Option<String> = None;
             let mut tts_duration_by_index: HashMap<u32, i64> = HashMap::new();
+            let mut manifest_segments: Vec<TtsPreviewManifestSegment> = Vec::new();
 
             let manifest_candidates = [
-                item_dir
-                    .join("tts_preview")
-                    .join("dub_voice_preserving_v1")
-                    .join("manifest.json"),
-                item_dir
-                    .join("tts_preview")
-                    .join("tts_neural_local_v1")
-                    .join("manifest.json"),
-                item_dir
-                    .join("tts_preview")
-                    .join("pyttsx3_v1")
-                    .join("manifest.json"),
+                tts_manifest_path(
+                    &item_dir,
+                    "dub_voice_preserving_v1",
+                    variant_label.as_deref(),
+                ),
+                tts_manifest_path(&item_dir, "tts_neural_local_v1", variant_label.as_deref()),
+                tts_manifest_path(&item_dir, "pyttsx3_v1", variant_label.as_deref()),
+                tts_manifest_path(&item_dir, "dub_voice_preserving_v1", None),
+                tts_manifest_path(&item_dir, "tts_neural_local_v1", None),
+                tts_manifest_path(&item_dir, "pyttsx3_v1", None),
             ];
 
             for manifest_path in manifest_candidates {
@@ -6004,7 +6717,8 @@ if __name__ == "__main__":
                 }
 
                 tts_backend = meta.backend.clone();
-                tts_manifest_path = Some(manifest_path.to_string_lossy().to_string());
+                tts_manifest_file_path = Some(manifest_path.to_string_lossy().to_string());
+                manifest_segments = meta.segments.clone();
 
                 for seg in meta.segments {
                     if !seg.audio_exists {
@@ -6043,7 +6757,7 @@ if __name__ == "__main__":
                 overlap_warn_ms: 40,
             };
 
-            let mut issues: Vec<QcIssue> = Vec::new();
+            let mut issues: Vec<QcIssueRecord> = Vec::new();
             let mut prev_end_ms: Option<i64> = None;
 
             for seg in &doc.segments {
@@ -6053,7 +6767,7 @@ if __name__ == "__main__":
                 let char_count = text.chars().filter(|c| !c.is_whitespace()).count();
 
                 if text.is_empty() {
-                    issues.push(QcIssue {
+                    issues.push(QcIssueRecord {
                         kind: "empty_text".to_string(),
                         severity: "warn".to_string(),
                         segment_index: seg.index,
@@ -6061,13 +6775,15 @@ if __name__ == "__main__":
                         end_ms: seg.end_ms,
                         message: "Segment text is empty.".to_string(),
                         value: None,
+                        speaker_key: seg.speaker.clone(),
+                        artifact_path: None,
                     });
                 }
 
                 for line in seg.text.replace('\r', "").split('\n') {
                     let len = line.chars().count();
                     if len >= thresholds.line_chars_fail {
-                        issues.push(QcIssue {
+                        issues.push(QcIssueRecord {
                             kind: "line_length".to_string(),
                             severity: "fail".to_string(),
                             segment_index: seg.index,
@@ -6078,9 +6794,11 @@ if __name__ == "__main__":
                                 thresholds.line_chars_fail, len
                             ),
                             value: Some(len as f64),
+                            speaker_key: seg.speaker.clone(),
+                            artifact_path: None,
                         });
                     } else if len >= thresholds.line_chars_warn {
-                        issues.push(QcIssue {
+                        issues.push(QcIssueRecord {
                             kind: "line_length".to_string(),
                             severity: "warn".to_string(),
                             segment_index: seg.index,
@@ -6091,6 +6809,8 @@ if __name__ == "__main__":
                                 thresholds.line_chars_warn, len
                             ),
                             value: Some(len as f64),
+                            speaker_key: seg.speaker.clone(),
+                            artifact_path: None,
                         });
                     }
                 }
@@ -6098,7 +6818,7 @@ if __name__ == "__main__":
                 if seconds > 0.05 && char_count > 0 {
                     let cps = (char_count as f64) / seconds;
                     if cps >= thresholds.cps_fail as f64 {
-                        issues.push(QcIssue {
+                        issues.push(QcIssueRecord {
                             kind: "cps".to_string(),
                             severity: "fail".to_string(),
                             segment_index: seg.index,
@@ -6106,9 +6826,11 @@ if __name__ == "__main__":
                             end_ms: seg.end_ms,
                             message: format!("High reading speed: {:.1} CPS.", cps),
                             value: Some(cps),
+                            speaker_key: seg.speaker.clone(),
+                            artifact_path: None,
                         });
                     } else if cps >= thresholds.cps_warn as f64 {
-                        issues.push(QcIssue {
+                        issues.push(QcIssueRecord {
                             kind: "cps".to_string(),
                             severity: "warn".to_string(),
                             segment_index: seg.index,
@@ -6116,13 +6838,15 @@ if __name__ == "__main__":
                             end_ms: seg.end_ms,
                             message: format!("Reading speed: {:.1} CPS.", cps),
                             value: Some(cps),
+                            speaker_key: seg.speaker.clone(),
+                            artifact_path: None,
                         });
                     }
                 }
 
                 if let Some(prev_end) = prev_end_ms {
                     if seg.start_ms < prev_end - thresholds.overlap_warn_ms {
-                        issues.push(QcIssue {
+                        issues.push(QcIssueRecord {
                             kind: "overlap".to_string(),
                             severity: "warn".to_string(),
                             segment_index: seg.index,
@@ -6133,6 +6857,8 @@ if __name__ == "__main__":
                                 (prev_end - seg.start_ms).max(0)
                             ),
                             value: Some(((prev_end - seg.start_ms).max(0)) as f64),
+                            speaker_key: seg.speaker.clone(),
+                            artifact_path: None,
                         });
                     }
                 }
@@ -6140,7 +6866,7 @@ if __name__ == "__main__":
 
                 if let Some(tts_ms) = tts_duration_by_index.get(&seg.index).copied() {
                     if window_ms > 0 && tts_ms > window_ms + 120 {
-                        issues.push(QcIssue {
+                        issues.push(QcIssueRecord {
                             kind: "tts_timing".to_string(),
                             severity: "fail".to_string(),
                             segment_index: seg.index,
@@ -6151,9 +6877,11 @@ if __name__ == "__main__":
                                 tts_ms, window_ms
                             ),
                             value: Some(((tts_ms - window_ms) as f64).max(0.0)),
+                            speaker_key: seg.speaker.clone(),
+                            artifact_path: None,
                         });
                     } else if window_ms > 0 && tts_ms < (window_ms / 2).saturating_sub(200) {
-                        issues.push(QcIssue {
+                        issues.push(QcIssueRecord {
                             kind: "tts_timing".to_string(),
                             severity: "warn".to_string(),
                             segment_index: seg.index,
@@ -6164,10 +6892,20 @@ if __name__ == "__main__":
                                 tts_ms, window_ms
                             ),
                             value: Some(((window_ms - tts_ms) as f64).max(0.0)),
+                            speaker_key: seg.speaker.clone(),
+                            artifact_path: None,
                         });
                     }
                 }
             }
+
+            set_progress(paths, job_id, 0.65)?;
+            let qc_temp_dir = out_dir.join(format!("tmp_{job_id}"));
+            std::fs::create_dir_all(&qc_temp_dir)?;
+            let (voice_report, voice_issues) =
+                collect_voice_qc(paths, &item.id, &manifest_segments, &qc_temp_dir)?;
+            issues.extend(voice_issues);
+            let _ = std::fs::remove_dir_all(&qc_temp_dir);
 
             let mut by_kind: std::collections::BTreeMap<String, usize> =
                 std::collections::BTreeMap::new();
@@ -6181,10 +6919,12 @@ if __name__ == "__main__":
                 item_id: item.id.clone(),
                 track_id: track.id.clone(),
                 lang: doc.lang.clone(),
+                variant_label: variant_label.clone(),
                 thresholds,
                 tts_backend,
-                tts_manifest_path,
+                tts_manifest_path: tts_manifest_file_path,
                 issues: issues.clone(),
+                voice: voice_report,
                 summary: QcSummary {
                     total_segments: doc.segments.len(),
                     issues_total: issues.len(),
@@ -6201,7 +6941,11 @@ if __name__ == "__main__":
                 job_id,
                 "info",
                 "qc_report_done",
-                serde_json::json!({ "out_path": &out_path, "issues": report.summary.issues_total }),
+                serde_json::json!({
+                    "out_path": &out_path,
+                    "issues": report.summary.issues_total,
+                    "variant_label": variant_label
+                }),
             )?;
         }
         JobType::ExportPackV1 => {
@@ -6225,9 +6969,14 @@ if __name__ == "__main__":
             let item_dir = paths.derived_item_dir(&item.id);
             let export_dir = item_dir.join("exports");
             std::fs::create_dir_all(&export_dir)?;
+            let selected_variant = normalize_variant_label(p.variant_label.as_deref());
 
-            let out_path = export_dir.join("export_pack_v1.zip");
-            let tmp_path = export_dir.join(format!("export_pack_v1.{job_id}.tmp.zip"));
+            let out_name = match selected_variant.as_deref() {
+                Some(label) => format!("export_pack_v1_{label}.zip"),
+                None => "export_pack_v1.zip".to_string(),
+            };
+            let out_path = export_dir.join(&out_name);
+            let tmp_path = export_dir.join(format!("{out_name}.{job_id}.tmp"));
 
             if tmp_path.exists() {
                 let _ = std::fs::remove_file(&tmp_path);
@@ -6256,18 +7005,48 @@ if __name__ == "__main__":
 
             let mut files: Vec<(PathBuf, String)> = Vec::new();
 
-            let dub_dir = item_dir.join("dub_preview");
-            let mix_wav = dub_dir.join("mix_dub_preview_v1.wav");
-            if mix_wav.exists() {
-                files.push((mix_wav, "dub_preview/mix_dub_preview_v1.wav".to_string()));
-            }
-
-            let mux_mp4 = dub_dir.join("mux_dub_preview_v1.mp4");
-            let mux_mkv = dub_dir.join("mux_dub_preview_v1.mkv");
-            if mux_mp4.exists() {
-                files.push((mux_mp4, "dub_preview/mux_dub_preview_v1.mp4".to_string()));
-            } else if mux_mkv.exists() {
-                files.push((mux_mkv, "dub_preview/mux_dub_preview_v1.mkv".to_string()));
+            let mut push_dub_artifacts = |variant_label: Option<&str>, zip_root: String| {
+                let dub_dir = dub_variant_dir(&item_dir, variant_label);
+                let mix_wav = dub_dir.join("mix_dub_preview_v1.wav");
+                if mix_wav.exists() {
+                    files.push((mix_wav, format!("{zip_root}/mix_dub_preview_v1.wav")));
+                }
+                let speech_stem = dub_dir.join("speech_dub_preview_v1.wav");
+                if speech_stem.exists() {
+                    files.push((speech_stem, format!("{zip_root}/speech_dub_preview_v1.wav")));
+                }
+                let mux_mp4 = dub_dir.join("mux_dub_preview_v1.mp4");
+                let mux_mkv = dub_dir.join("mux_dub_preview_v1.mkv");
+                if mux_mp4.exists() {
+                    files.push((mux_mp4, format!("{zip_root}/mux_dub_preview_v1.mp4")));
+                } else if mux_mkv.exists() {
+                    files.push((mux_mkv, format!("{zip_root}/mux_dub_preview_v1.mkv")));
+                }
+            };
+            push_dub_artifacts(
+                selected_variant.as_deref(),
+                match selected_variant.as_deref() {
+                    Some(label) => format!("alternates/{label}"),
+                    None => "dub_preview".to_string(),
+                },
+            );
+            if selected_variant.is_none() && p.include_alternates {
+                let alternates_dir = item_dir.join("dub_preview").join("alternates");
+                if alternates_dir.exists() {
+                    if let Ok(entries) = std::fs::read_dir(&alternates_dir) {
+                        for entry in entries.flatten() {
+                            let path = entry.path();
+                            if !path.is_dir() {
+                                continue;
+                            }
+                            let Some(label) = path.file_name().and_then(|value| value.to_str())
+                            else {
+                                continue;
+                            };
+                            push_dub_artifacts(Some(label), format!("alternates/{label}"));
+                        }
+                    }
+                }
             }
 
             if let Some(bg) = separation_background_path_best_effort(paths, &item.id) {
@@ -9507,6 +10286,261 @@ fn normalize_lang_tag(raw: Option<&str>) -> Option<&'static str> {
     }
 }
 
+fn normalize_variant_label(raw: Option<&str>) -> Option<String> {
+    let raw = raw?.trim();
+    if raw.is_empty() {
+        return None;
+    }
+    let mut out = String::new();
+    let mut prev_underscore = false;
+    for ch in raw.chars() {
+        let mapped = if ch.is_ascii_alphanumeric() {
+            ch.to_ascii_lowercase()
+        } else {
+            '_'
+        };
+        if mapped == '_' {
+            if prev_underscore {
+                continue;
+            }
+            prev_underscore = true;
+        } else {
+            prev_underscore = false;
+        }
+        out.push(mapped);
+    }
+    let out = out.trim_matches('_');
+    if out.is_empty() {
+        None
+    } else {
+        Some(out.to_string())
+    }
+}
+
+fn normalize_separation_backend(raw: Option<&str>) -> Option<String> {
+    match raw.map(|value| value.trim().to_ascii_lowercase()) {
+        Some(value) if value == "demucs" || value == "demucs_two_stems_v1" => {
+            Some("demucs".to_string())
+        }
+        Some(value) if value == "spleeter" || value == "spleeter_2stems" => {
+            Some("spleeter".to_string())
+        }
+        Some(_) => Some("spleeter".to_string()),
+        None => None,
+    }
+}
+
+fn tts_variant_dir(item_dir: &Path, backend_dir: &str, variant_label: Option<&str>) -> PathBuf {
+    let mut dir = item_dir.join("tts_preview").join(backend_dir);
+    if let Some(label) = normalize_variant_label(variant_label) {
+        dir = dir.join("variants").join(label);
+    }
+    dir
+}
+
+fn dub_variant_dir(item_dir: &Path, variant_label: Option<&str>) -> PathBuf {
+    let mut dir = item_dir.join("dub_preview");
+    if let Some(label) = normalize_variant_label(variant_label) {
+        dir = dir.join("alternates").join(label);
+    }
+    dir
+}
+
+fn tts_manifest_path(item_dir: &Path, backend_dir: &str, variant_label: Option<&str>) -> PathBuf {
+    tts_variant_dir(item_dir, backend_dir, variant_label).join("manifest.json")
+}
+
+fn normalize_localization_batch_item_ids(item_ids: Vec<String>) -> Result<Vec<String>> {
+    let mut out: Vec<String> = Vec::new();
+    let mut seen: HashSet<String> = HashSet::new();
+    for item_id in item_ids {
+        let item_id = item_id.trim().to_string();
+        if item_id.is_empty() || !seen.insert(item_id.clone()) {
+            continue;
+        }
+        out.push(item_id);
+    }
+    if out.len() > 500 {
+        return Err(EngineError::InstallFailed(
+            "batch dubbing supports at most 500 items per submission".to_string(),
+        ));
+    }
+    Ok(out)
+}
+
+fn select_localization_batch_track(
+    paths: &AppPaths,
+    item_id: &str,
+) -> Result<Option<subtitle_tracks::SubtitleTrackRow>> {
+    let tracks = subtitle_tracks::list_tracks(paths, item_id)?;
+    let translated = tracks
+        .iter()
+        .filter(|track| {
+            track.kind == "translated" && normalize_lang_tag(Some(&track.lang)) == Some("eng")
+        })
+        .max_by_key(|track| track.version)
+        .cloned();
+    if translated.is_some() {
+        return Ok(translated);
+    }
+    Ok(tracks
+        .into_iter()
+        .filter(|track| track.kind == "source")
+        .max_by_key(|track| track.version))
+}
+
+fn auto_match_template_speakers(
+    paths: &AppPaths,
+    template_id: &str,
+    item_id: &str,
+    current_speakers: &HashSet<String>,
+) -> Result<Vec<voice_templates::VoiceTemplateApplyMapping>> {
+    let detail = voice_templates::get_voice_template(paths, template_id)?;
+    let existing_by_key: HashMap<String, speakers::ItemSpeakerSetting> =
+        speakers::list_item_speaker_settings(paths, item_id)?
+            .into_iter()
+            .map(|setting| (setting.speaker_key.clone(), setting))
+            .collect();
+    let mut template_display_map: HashMap<String, String> = HashMap::new();
+    for speaker in &detail.speakers {
+        let key = speaker
+            .display_name
+            .as_deref()
+            .map(normalize_match_token)
+            .filter(|value| !value.is_empty())
+            .unwrap_or_default();
+        if !key.is_empty() {
+            template_display_map
+                .entry(key)
+                .or_insert_with(|| speaker.speaker_key.clone());
+        }
+    }
+    let mut used_template_keys: HashSet<String> = HashSet::new();
+    let mut mappings: Vec<voice_templates::VoiceTemplateApplyMapping> = Vec::new();
+    let only_template_key = if detail.speakers.len() == 1 {
+        detail
+            .speakers
+            .first()
+            .map(|speaker| speaker.speaker_key.clone())
+    } else {
+        None
+    };
+
+    let mut current = current_speakers.iter().cloned().collect::<Vec<_>>();
+    current.sort();
+    for item_speaker_key in current {
+        let current_label = existing_by_key
+            .get(&item_speaker_key)
+            .and_then(|setting| setting.display_name.clone())
+            .unwrap_or_else(|| item_speaker_key.clone());
+        let direct = detail
+            .speakers
+            .iter()
+            .find(|speaker| speaker.speaker_key == item_speaker_key)
+            .map(|speaker| speaker.speaker_key.clone());
+        let by_name = template_display_map
+            .get(&normalize_match_token(&current_label))
+            .cloned();
+        let mapped = direct.or(by_name).or_else(|| {
+            if current_speakers.len() == 1 {
+                only_template_key.clone()
+            } else {
+                None
+            }
+        });
+        let Some(template_speaker_key) = mapped else {
+            continue;
+        };
+        if !used_template_keys.insert(template_speaker_key.clone()) {
+            continue;
+        }
+        mappings.push(voice_templates::VoiceTemplateApplyMapping {
+            item_speaker_key,
+            template_speaker_key,
+        });
+    }
+    Ok(mappings)
+}
+
+fn auto_match_cast_pack_roles(
+    paths: &AppPaths,
+    pack_id: &str,
+    item_id: &str,
+    current_speakers: &HashSet<String>,
+) -> Result<Vec<voice_cast_packs::VoiceCastPackApplyMapping>> {
+    let detail = voice_cast_packs::get_voice_cast_pack(paths, pack_id)?;
+    let existing_by_key: HashMap<String, speakers::ItemSpeakerSetting> =
+        speakers::list_item_speaker_settings(paths, item_id)?
+            .into_iter()
+            .map(|setting| (setting.speaker_key.clone(), setting))
+            .collect();
+    let mut role_display_map: HashMap<String, String> = HashMap::new();
+    for role in &detail.roles {
+        let key = role
+            .display_name
+            .as_deref()
+            .map(normalize_match_token)
+            .filter(|value| !value.is_empty())
+            .unwrap_or_default();
+        if !key.is_empty() {
+            role_display_map
+                .entry(key)
+                .or_insert_with(|| role.role_key.clone());
+        }
+    }
+    let only_role_key = if detail.roles.len() == 1 {
+        detail.roles.first().map(|role| role.role_key.clone())
+    } else {
+        None
+    };
+    let mut used_roles: HashSet<String> = HashSet::new();
+    let mut current = current_speakers.iter().cloned().collect::<Vec<_>>();
+    current.sort();
+    let mut mappings: Vec<voice_cast_packs::VoiceCastPackApplyMapping> = Vec::new();
+    for item_speaker_key in current {
+        let current_label = existing_by_key
+            .get(&item_speaker_key)
+            .and_then(|setting| setting.display_name.clone())
+            .unwrap_or_else(|| item_speaker_key.clone());
+        let direct = detail
+            .roles
+            .iter()
+            .find(|role| role.role_key == item_speaker_key)
+            .map(|role| role.role_key.clone());
+        let by_name = role_display_map
+            .get(&normalize_match_token(&current_label))
+            .cloned();
+        let mapped = direct.or(by_name).or_else(|| {
+            if current_speakers.len() == 1 {
+                only_role_key.clone()
+            } else {
+                None
+            }
+        });
+        let Some(pack_role_key) = mapped else {
+            continue;
+        };
+        if !used_roles.insert(pack_role_key.clone()) {
+            continue;
+        }
+        mappings.push(voice_cast_packs::VoiceCastPackApplyMapping {
+            item_speaker_key,
+            pack_role_key,
+        });
+    }
+    Ok(mappings)
+}
+
+fn normalize_match_token(value: &str) -> String {
+    let mut out = String::new();
+    for ch in value.trim().chars() {
+        if ch.is_ascii_alphanumeric() {
+            out.push(ch.to_ascii_lowercase());
+        }
+    }
+    out
+}
+
 #[derive(Debug, Clone, Default)]
 struct SpeakerRenderSettings {
     voice_id: Option<String>,
@@ -9516,6 +10550,7 @@ struct SpeakerRenderSettings {
     prosody_preset: Option<String>,
     pronunciation_overrides: Option<String>,
     render_mode: Option<String>,
+    subtitle_prosody_mode: Option<String>,
 }
 
 fn speaker_render_settings_by_key(
@@ -9534,10 +10569,75 @@ fn speaker_render_settings_by_key(
                 prosody_preset: setting.prosody_preset,
                 pronunciation_overrides: setting.pronunciation_overrides,
                 render_mode: setting.render_mode,
+                subtitle_prosody_mode: setting.subtitle_prosody_mode,
             },
         );
     }
     Ok(map)
+}
+
+fn apply_speaker_overrides(
+    settings_by_key: &mut HashMap<String, SpeakerRenderSettings>,
+    overrides: &[SpeakerRenderOverride],
+) {
+    for override_value in overrides {
+        let speaker_key = override_value.speaker_key.trim();
+        if speaker_key.is_empty() {
+            continue;
+        }
+        let entry = settings_by_key.entry(speaker_key.to_string()).or_default();
+        if let Some(tts_voice_id) = normalize_non_empty(override_value.tts_voice_id.as_deref()) {
+            entry.voice_id = Some(tts_voice_id.to_string());
+        }
+        let profile_paths = normalize_profile_override_paths(
+            override_value.tts_voice_profile_path.as_deref(),
+            &override_value.tts_voice_profile_paths,
+        );
+        if !profile_paths.is_empty() {
+            entry.primary_profile_path = profile_paths.first().cloned();
+            entry.profile_paths = profile_paths;
+        }
+        if let Some(value) = normalize_non_empty(override_value.style_preset.as_deref()) {
+            entry.style_preset = Some(value.to_string());
+        }
+        if let Some(value) = normalize_non_empty(override_value.prosody_preset.as_deref()) {
+            entry.prosody_preset = Some(value.to_string());
+        }
+        if let Some(value) = normalize_non_empty(override_value.pronunciation_overrides.as_deref())
+        {
+            entry.pronunciation_overrides = Some(value.to_string());
+        }
+        if let Some(value) = normalize_non_empty(override_value.render_mode.as_deref()) {
+            entry.render_mode = Some(value.to_string());
+        }
+        if let Some(value) = normalize_non_empty(override_value.subtitle_prosody_mode.as_deref()) {
+            entry.subtitle_prosody_mode = Some(value.to_string());
+        }
+    }
+}
+
+fn normalize_profile_override_paths(
+    single_path: Option<&str>,
+    profile_paths: &[String],
+) -> Vec<String> {
+    let mut out: Vec<String> = Vec::new();
+    for path in profile_paths {
+        let trimmed = path.trim();
+        if trimmed.is_empty() || out.iter().any(|existing| existing == trimmed) {
+            continue;
+        }
+        out.push(trimmed.to_string());
+    }
+    if out.is_empty() {
+        if let Some(single_path) = normalize_non_empty(single_path) {
+            out.push(single_path.to_string());
+        }
+    }
+    out
+}
+
+fn subtitle_prosody_enabled(settings: &SpeakerRenderSettings) -> bool {
+    settings.subtitle_prosody_mode.as_deref() != Some("off")
 }
 
 fn apply_pronunciation_overrides(text: &str, overrides: Option<&str>) -> String {
@@ -9588,29 +10688,35 @@ fn apply_pronunciation_overrides(text: &str, overrides: Option<&str>) -> String 
 
 fn prepare_tts_text(text: &str, settings: &SpeakerRenderSettings) -> String {
     let mut out = apply_pronunciation_overrides(text, settings.pronunciation_overrides.as_deref());
+    if subtitle_prosody_enabled(settings) {
+        let lines: Vec<&str> = out
+            .lines()
+            .map(str::trim)
+            .filter(|line| !line.is_empty())
+            .collect();
+        if !lines.is_empty() {
+            let joiner = match settings.prosody_preset.as_deref() {
+                Some("slower") | Some("warmer") => ", ",
+                Some("more_excited") => "! ",
+                Some("less_robotic") => "; ",
+                Some("tighter_timing") => " ",
+                _ => ". ",
+            };
+            out = lines.join(joiner);
+        }
 
-    let lines: Vec<&str> = out
-        .lines()
-        .map(str::trim)
-        .filter(|line| !line.is_empty())
-        .collect();
-    if !lines.is_empty() {
-        let joiner = match settings.prosody_preset.as_deref() {
-            Some("slower") | Some("warmer") => ", ",
-            Some("more_excited") => "! ",
-            Some("less_robotic") => "; ",
-            Some("tighter_timing") => " ",
-            _ => ". ",
-        };
-        out = lines.join(joiner);
-    }
-
-    if matches!(settings.prosody_preset.as_deref(), Some("slower")) {
-        out = out.replace(';', ".").replace(" - ", ", ");
-    } else if matches!(settings.prosody_preset.as_deref(), Some("less_robotic")) {
-        out = out.replace(" - ", ", ");
-    } else if matches!(settings.prosody_preset.as_deref(), Some("tighter_timing")) {
-        out = out.replace(" - ", " ").replace(", ", " ").replace("; ", " ");
+        if matches!(settings.prosody_preset.as_deref(), Some("slower")) {
+            out = out.replace(';', ".").replace(" - ", ", ");
+        } else if matches!(settings.prosody_preset.as_deref(), Some("less_robotic")) {
+            out = out.replace(" - ", ", ");
+        } else if matches!(settings.prosody_preset.as_deref(), Some("tighter_timing")) {
+            out = out
+                .replace(" - ", " ")
+                .replace(", ", " ")
+                .replace("; ", " ");
+        }
+    } else {
+        out = out.replace('\n', " ");
     }
 
     out = out.split_whitespace().collect::<Vec<_>>().join(" ");
@@ -9634,14 +10740,442 @@ fn prepare_tts_text(text: &str, settings: &SpeakerRenderSettings) -> String {
             out.pop();
             out.push('!');
         }
-        Some(terminal)
-            if !matches!(out.chars().last(), Some('.' | '!' | '?' | '…')) =>
-        {
+        Some(terminal) if !matches!(out.chars().last(), Some('.' | '!' | '?' | '…')) => {
             out.push_str(terminal);
         }
         _ => {}
     }
 
+    out
+}
+
+fn analyze_audio_for_qc(
+    paths: &AppPaths,
+    input_path: &Path,
+    temp_dir: &Path,
+    slug: &str,
+) -> Result<VoiceAudioStats> {
+    std::fs::create_dir_all(temp_dir)?;
+    let temp_path = temp_dir.join(format!("{slug}.wav"));
+    ffmpeg::extract_audio_wav_16k_mono(paths, input_path, &temp_path)?;
+    analyze_wav_stats(&temp_path)
+}
+
+fn analyze_wav_stats(path: &Path) -> Result<VoiceAudioStats> {
+    let mut reader = hound::WavReader::open(path).map_err(|e| {
+        EngineError::InstallFailed(format!(
+            "open wav for QC failed ({}): {e}",
+            path.to_string_lossy()
+        ))
+    })?;
+    let spec = reader.spec();
+    let sample_rate = spec.sample_rate.max(1);
+    let samples = if spec.sample_format == hound::SampleFormat::Float {
+        reader.samples::<f32>().flatten().collect::<Vec<_>>()
+    } else {
+        let scale = if spec.bits_per_sample <= 1 {
+            1.0_f32
+        } else {
+            ((1_u64 << (spec.bits_per_sample - 1)) - 1) as f32
+        };
+        reader
+            .samples::<i32>()
+            .flatten()
+            .map(|sample| (sample as f32) / scale.max(1.0))
+            .collect::<Vec<_>>()
+    };
+    if samples.is_empty() {
+        return Ok(VoiceAudioStats::default());
+    }
+
+    let mut peak_abs = 0.0_f32;
+    let mut sum_sq = 0.0_f64;
+    let mut clipped = 0usize;
+    let mut silent = 0usize;
+    let mut zero_cross = 0usize;
+    let mut prev_sign = 0i8;
+
+    for sample in &samples {
+        let abs = sample.abs();
+        peak_abs = peak_abs.max(abs);
+        sum_sq += (abs as f64) * (abs as f64);
+        if abs >= 0.995 {
+            clipped += 1;
+        }
+        if abs <= 0.0015 {
+            silent += 1;
+        }
+        let sign = if *sample > 0.0 {
+            1
+        } else if *sample < 0.0 {
+            -1
+        } else {
+            0
+        };
+        if prev_sign != 0 && sign != 0 && sign != prev_sign {
+            zero_cross += 1;
+        }
+        if sign != 0 {
+            prev_sign = sign;
+        }
+    }
+
+    let duration_ms = ((samples.len() as f64) * 1000.0 / (sample_rate as f64)).round() as i64;
+    let rms = (sum_sq / samples.len() as f64).sqrt() as f32;
+    Ok(VoiceAudioStats {
+        duration_ms,
+        sample_rate,
+        peak_abs,
+        rms,
+        clipped_ratio: clipped as f32 / samples.len() as f32,
+        silence_ratio: silent as f32 / samples.len() as f32,
+        zero_cross_ratio: zero_cross as f32 / samples.len() as f32,
+        pitch_hz: estimate_pitch_hz(&samples, sample_rate),
+    })
+}
+
+fn estimate_pitch_hz(samples: &[f32], sample_rate: u32) -> Option<f32> {
+    if samples.len() < 800 {
+        return None;
+    }
+    let window = samples.len().min((sample_rate as usize) * 2);
+    let slice = &samples[..window];
+    let mean = slice.iter().copied().sum::<f32>() / slice.len() as f32;
+    let centered = slice.iter().map(|sample| sample - mean).collect::<Vec<_>>();
+    let energy = centered.iter().map(|sample| sample * sample).sum::<f32>() / centered.len() as f32;
+    if energy < 0.00002 {
+        return None;
+    }
+    let min_lag = ((sample_rate as f32) / 320.0).round() as usize;
+    let max_lag = ((sample_rate as f32) / 70.0).round() as usize;
+    let mut best_lag = 0usize;
+    let mut best_score = 0.0_f32;
+    for lag in min_lag.max(1)..max_lag.min(centered.len().saturating_sub(1)) {
+        let mut score = 0.0_f32;
+        for i in 0..(centered.len() - lag) {
+            score += centered[i] * centered[i + lag];
+        }
+        if score > best_score {
+            best_score = score;
+            best_lag = lag;
+        }
+    }
+    if best_lag == 0 || best_score <= 0.0 {
+        return None;
+    }
+    let normalized = best_score / centered.len() as f32;
+    if normalized < 0.01 {
+        return None;
+    }
+    Some(sample_rate as f32 / best_lag as f32)
+}
+
+fn median_pitch_hz(values: &[f32]) -> Option<f32> {
+    if values.is_empty() {
+        return None;
+    }
+    let mut ordered = values.to_vec();
+    ordered.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+    Some(ordered[ordered.len() / 2])
+}
+
+fn collect_voice_qc(
+    paths: &AppPaths,
+    item_id: &str,
+    manifest_segments: &[TtsPreviewManifestSegment],
+    temp_dir: &Path,
+) -> Result<(VoiceQcReportSection, Vec<QcIssueRecord>)> {
+    let speaker_settings = speakers::list_item_speaker_settings(paths, item_id)?;
+    let mut report = VoiceQcReportSection::default();
+    let mut issues: Vec<QcIssueRecord> = Vec::new();
+    let mut reference_pitch_by_speaker: HashMap<String, Vec<f32>> = HashMap::new();
+
+    for setting in &speaker_settings {
+        for (index, path) in setting.tts_voice_profile_paths.iter().enumerate() {
+            let path = PathBuf::from(path);
+            if !path.exists() {
+                issues.push(QcIssueRecord {
+                    kind: "voice_reference_missing".to_string(),
+                    severity: "fail".to_string(),
+                    segment_index: 0,
+                    start_ms: 0,
+                    end_ms: 0,
+                    message: format!(
+                        "Speaker {} reference file is missing: {}",
+                        setting.speaker_key,
+                        path.to_string_lossy()
+                    ),
+                    value: None,
+                    speaker_key: Some(setting.speaker_key.clone()),
+                    artifact_path: Some(path.to_string_lossy().to_string()),
+                });
+                continue;
+            }
+            let stats = analyze_audio_for_qc(
+                paths,
+                &path,
+                temp_dir,
+                &format!(
+                    "ref_{}_{}",
+                    normalize_match_token(&setting.speaker_key),
+                    index
+                ),
+            )?;
+            if let Some(pitch_hz) = stats.pitch_hz {
+                reference_pitch_by_speaker
+                    .entry(setting.speaker_key.clone())
+                    .or_default()
+                    .push(pitch_hz);
+            }
+            let warnings = voice_qc_messages(&stats, true, None, Some(&setting.speaker_key));
+            for (kind, severity, message, value) in &warnings {
+                issues.push(QcIssueRecord {
+                    kind: kind.clone(),
+                    severity: severity.clone(),
+                    segment_index: 0,
+                    start_ms: 0,
+                    end_ms: 0,
+                    message: message.clone(),
+                    value: *value,
+                    speaker_key: Some(setting.speaker_key.clone()),
+                    artifact_path: Some(path.to_string_lossy().to_string()),
+                });
+            }
+            report.references.push(VoiceReferenceQcRecord {
+                speaker_key: setting.speaker_key.clone(),
+                path: path.to_string_lossy().to_string(),
+                label: Some(
+                    path.file_name()
+                        .and_then(|value| value.to_str())
+                        .unwrap_or_default()
+                        .to_string(),
+                ),
+                stats,
+                warnings: warnings
+                    .into_iter()
+                    .map(|(_, _, message, _)| message)
+                    .collect(),
+            });
+        }
+    }
+
+    for (speaker_key, pitches) in &reference_pitch_by_speaker {
+        if pitches.len() > 1 {
+            let min_pitch = pitches
+                .iter()
+                .copied()
+                .fold(f32::INFINITY, |acc, value| acc.min(value));
+            let max_pitch = pitches
+                .iter()
+                .copied()
+                .fold(0.0_f32, |acc, value| acc.max(value));
+            if min_pitch > 0.0 && max_pitch / min_pitch > 1.6 {
+                issues.push(QcIssueRecord {
+                    kind: "voice_reference_inconsistent".to_string(),
+                    severity: "warn".to_string(),
+                    segment_index: 0,
+                    start_ms: 0,
+                    end_ms: 0,
+                    message: format!(
+                        "Speaker {} references vary strongly in pitch; cloning may sound unstable.",
+                        speaker_key
+                    ),
+                    value: Some((max_pitch / min_pitch) as f64),
+                    speaker_key: Some(speaker_key.clone()),
+                    artifact_path: None,
+                });
+            }
+        }
+    }
+
+    let reference_medians: HashMap<String, f32> = reference_pitch_by_speaker
+        .into_iter()
+        .filter_map(|(speaker_key, values)| {
+            median_pitch_hz(&values).map(|pitch| (speaker_key, pitch))
+        })
+        .collect();
+
+    for segment in manifest_segments {
+        if !segment.audio_exists {
+            continue;
+        }
+        let Some(audio_path) = segment
+            .audio_path
+            .as_deref()
+            .map(PathBuf::from)
+            .filter(|path| path.exists())
+        else {
+            continue;
+        };
+        let stats = analyze_audio_for_qc(
+            paths,
+            &audio_path,
+            temp_dir,
+            &format!("out_{:04}", segment.index),
+        )?;
+        let warnings = voice_qc_messages(
+            &stats,
+            false,
+            segment
+                .speaker
+                .as_ref()
+                .and_then(|speaker_key| reference_medians.get(speaker_key))
+                .copied(),
+            segment.speaker.as_deref(),
+        );
+        for (kind, severity, message, value) in &warnings {
+            issues.push(QcIssueRecord {
+                kind: kind.clone(),
+                severity: severity.clone(),
+                segment_index: segment.index,
+                start_ms: segment.start_ms,
+                end_ms: segment.end_ms,
+                message: message.clone(),
+                value: *value,
+                speaker_key: segment.speaker.clone(),
+                artifact_path: Some(audio_path.to_string_lossy().to_string()),
+            });
+        }
+        report.outputs.push(VoiceOutputQcRecord {
+            speaker_key: segment.speaker.clone(),
+            segment_index: segment.index,
+            path: audio_path.to_string_lossy().to_string(),
+            stats,
+            warnings: warnings
+                .into_iter()
+                .map(|(_, _, message, _)| message)
+                .collect(),
+        });
+    }
+
+    Ok((report, issues))
+}
+
+fn voice_qc_messages(
+    stats: &VoiceAudioStats,
+    is_reference: bool,
+    reference_pitch_hz: Option<f32>,
+    speaker_key: Option<&str>,
+) -> Vec<(String, String, String, Option<f64>)> {
+    let subject = if is_reference {
+        "Reference clip"
+    } else {
+        "Dub output"
+    };
+    let speaker_prefix = speaker_key
+        .map(|value| format!("Speaker {value}: "))
+        .unwrap_or_default();
+    let mut out: Vec<(String, String, String, Option<f64>)> = Vec::new();
+    if stats.duration_ms <= 0 {
+        out.push((
+            if is_reference {
+                "voice_reference_missing".to_string()
+            } else {
+                "voice_output_missing".to_string()
+            },
+            "fail".to_string(),
+            format!("{speaker_prefix}{subject} has no decodable audio."),
+            None,
+        ));
+        return out;
+    }
+    if is_reference && stats.duration_ms < 1000 {
+        out.push((
+            "voice_reference_too_short".to_string(),
+            "fail".to_string(),
+            format!("{speaker_prefix}{subject} is shorter than 1 second."),
+            Some(stats.duration_ms as f64),
+        ));
+    } else if is_reference && stats.duration_ms < 2500 {
+        out.push((
+            "voice_reference_too_short".to_string(),
+            "warn".to_string(),
+            format!("{speaker_prefix}{subject} is short; 3-10 seconds is safer."),
+            Some(stats.duration_ms as f64),
+        ));
+    }
+    if stats.rms < 0.008 || stats.silence_ratio > 0.90 {
+        out.push((
+            if is_reference {
+                "voice_reference_silence".to_string()
+            } else {
+                "voice_output_silence".to_string()
+            },
+            "fail".to_string(),
+            format!("{speaker_prefix}{subject} is mostly silent."),
+            Some(stats.silence_ratio as f64),
+        ));
+    } else if stats.rms < 0.02 || stats.silence_ratio > 0.65 {
+        out.push((
+            if is_reference {
+                "voice_reference_low_level".to_string()
+            } else {
+                "voice_output_low_level".to_string()
+            },
+            "warn".to_string(),
+            format!("{speaker_prefix}{subject} is very quiet or sparse."),
+            Some(stats.rms as f64),
+        ));
+    }
+    if stats.clipped_ratio > 0.02 {
+        out.push((
+            if is_reference {
+                "voice_reference_clipping".to_string()
+            } else {
+                "voice_output_clipping".to_string()
+            },
+            "fail".to_string(),
+            format!("{speaker_prefix}{subject} appears clipped."),
+            Some(stats.clipped_ratio as f64),
+        ));
+    } else if stats.clipped_ratio > 0.003 {
+        out.push((
+            if is_reference {
+                "voice_reference_clipping".to_string()
+            } else {
+                "voice_output_clipping".to_string()
+            },
+            "warn".to_string(),
+            format!("{speaker_prefix}{subject} has some clipping."),
+            Some(stats.clipped_ratio as f64),
+        ));
+    }
+    if stats.zero_cross_ratio > 0.22 && stats.rms > 0.015 {
+        out.push((
+            if is_reference {
+                "voice_reference_noise".to_string()
+            } else {
+                "voice_output_noise".to_string()
+            },
+            "warn".to_string(),
+            format!("{speaker_prefix}{subject} may contain hiss or broadband noise."),
+            Some(stats.zero_cross_ratio as f64),
+        ));
+    }
+    if !is_reference {
+        if let (Some(pitch_hz), Some(reference_pitch_hz)) = (stats.pitch_hz, reference_pitch_hz) {
+            let ratio = if pitch_hz > reference_pitch_hz {
+                pitch_hz / reference_pitch_hz
+            } else {
+                reference_pitch_hz / pitch_hz.max(1.0)
+            };
+            if ratio > 1.9 {
+                out.push((
+                    "voice_similarity_weak".to_string(),
+                    "warn".to_string(),
+                    format!("{speaker_prefix}{subject} pitch is far from the reference; clone similarity may be weak."),
+                    Some(ratio as f64),
+                ));
+            } else if ratio > 1.5 {
+                out.push((
+                    "voice_impression_mismatch".to_string(),
+                    "warn".to_string(),
+                    format!("{speaker_prefix}{subject} sounds noticeably higher or lower than the reference."),
+                    Some(ratio as f64),
+                ));
+            }
+        }
+    }
     out
 }
 

@@ -99,6 +99,7 @@ CREATE TABLE IF NOT EXISTS item_speaker (
   item_id TEXT NOT NULL,
   speaker_key TEXT NOT NULL,
   display_name TEXT,
+  voice_profile_id TEXT,
   tts_voice_id TEXT,
   tts_voice_profile_path TEXT,
   tts_voice_profile_paths_json TEXT,
@@ -106,6 +107,7 @@ CREATE TABLE IF NOT EXISTS item_speaker (
   prosody_preset TEXT,
   pronunciation_overrides TEXT,
   render_mode TEXT,
+  subtitle_prosody_mode TEXT,
   created_at_ms INTEGER NOT NULL,
   updated_at_ms INTEGER NOT NULL,
   PRIMARY KEY (item_id, speaker_key),
@@ -132,6 +134,7 @@ CREATE TABLE IF NOT EXISTS voice_template_speaker (
   prosody_preset TEXT,
   pronunciation_overrides TEXT,
   render_mode TEXT,
+  subtitle_prosody_mode TEXT,
   created_at_ms INTEGER NOT NULL,
   updated_at_ms INTEGER NOT NULL,
   PRIMARY KEY (template_id, speaker_key),
@@ -176,6 +179,7 @@ CREATE TABLE IF NOT EXISTS voice_cast_pack_role (
   prosody_preset TEXT,
   pronunciation_overrides TEXT,
   render_mode TEXT,
+  subtitle_prosody_mode TEXT,
   sort_order INTEGER NOT NULL,
   created_at_ms INTEGER NOT NULL,
   updated_at_ms INTEGER NOT NULL,
@@ -188,6 +192,41 @@ CREATE TABLE IF NOT EXISTS voice_cast_pack_role (
 CREATE INDEX IF NOT EXISTS idx_voice_cast_pack_updated ON voice_cast_pack(updated_at_ms DESC);
 CREATE INDEX IF NOT EXISTS idx_voice_cast_pack_role_pack
   ON voice_cast_pack_role(pack_id, sort_order, role_key);
+
+CREATE TABLE IF NOT EXISTS voice_library_profile (
+  id TEXT PRIMARY KEY,
+  kind TEXT NOT NULL,
+  name TEXT NOT NULL,
+  description TEXT,
+  display_name TEXT,
+  tts_voice_id TEXT,
+  tts_voice_profile_path TEXT,
+  tts_voice_profile_paths_json TEXT,
+  style_preset TEXT,
+  prosody_preset TEXT,
+  pronunciation_overrides TEXT,
+  render_mode TEXT,
+  subtitle_prosody_mode TEXT,
+  created_at_ms INTEGER NOT NULL,
+  updated_at_ms INTEGER NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS voice_library_reference (
+  profile_id TEXT NOT NULL,
+  reference_id TEXT NOT NULL,
+  label TEXT,
+  path TEXT NOT NULL,
+  sort_order INTEGER NOT NULL,
+  created_at_ms INTEGER NOT NULL,
+  updated_at_ms INTEGER NOT NULL,
+  PRIMARY KEY (profile_id, reference_id),
+  FOREIGN KEY (profile_id) REFERENCES voice_library_profile(id) ON DELETE CASCADE
+);
+
+CREATE INDEX IF NOT EXISTS idx_voice_library_profile_kind_updated
+  ON voice_library_profile(kind, updated_at_ms DESC, name COLLATE NOCASE);
+CREATE INDEX IF NOT EXISTS idx_voice_library_reference_profile
+  ON voice_library_reference(profile_id, sort_order, created_at_ms);
 
 CREATE TABLE IF NOT EXISTS youtube_subscription (
   id TEXT PRIMARY KEY,
@@ -296,6 +335,8 @@ CREATE INDEX IF NOT EXISTS idx_ingest_provenance_created ON ingest_provenance(cr
     ensure_column(conn, "item_speaker", "prosody_preset", "TEXT")?;
     ensure_column(conn, "item_speaker", "pronunciation_overrides", "TEXT")?;
     ensure_column(conn, "item_speaker", "render_mode", "TEXT")?;
+    ensure_column(conn, "item_speaker", "voice_profile_id", "TEXT")?;
+    ensure_column(conn, "item_speaker", "subtitle_prosody_mode", "TEXT")?;
     ensure_column(
         conn,
         "voice_template_speaker",
@@ -311,6 +352,18 @@ CREATE INDEX IF NOT EXISTS idx_ingest_provenance_created ON ingest_provenance(cr
         "TEXT",
     )?;
     ensure_column(conn, "voice_template_speaker", "render_mode", "TEXT")?;
+    ensure_column(
+        conn,
+        "voice_template_speaker",
+        "subtitle_prosody_mode",
+        "TEXT",
+    )?;
+    ensure_column(
+        conn,
+        "voice_cast_pack_role",
+        "subtitle_prosody_mode",
+        "TEXT",
+    )?;
 
     let has_subscription_refresh_interval_minutes = {
         let mut stmt = conn.prepare("PRAGMA table_info(youtube_subscription)")?;
@@ -441,7 +494,7 @@ CREATE INDEX IF NOT EXISTS idx_ingest_provenance_created ON ingest_provenance(cr
         [],
     )?;
 
-    let current_schema_version = 7;
+    let current_schema_version = 8;
     let existing: Option<String> = conn
         .query_row(
             "SELECT value FROM meta WHERE key='schema_version'",
@@ -624,7 +677,7 @@ CREATE TABLE IF NOT EXISTS job (
 
         let mut stmt = conn
             .prepare(
-                "SELECT name FROM sqlite_master WHERE type='table' AND name IN ('voice_template_reference', 'voice_cast_pack', 'voice_cast_pack_role') ORDER BY name",
+                "SELECT name FROM sqlite_master WHERE type='table' AND name IN ('voice_template_reference', 'voice_cast_pack', 'voice_cast_pack_role', 'voice_library_profile', 'voice_library_reference') ORDER BY name",
             )
             .expect("prepare");
         let rows = stmt
@@ -639,6 +692,8 @@ CREATE TABLE IF NOT EXISTS job (
             vec![
                 "voice_cast_pack".to_string(),
                 "voice_cast_pack_role".to_string(),
+                "voice_library_profile".to_string(),
+                "voice_library_reference".to_string(),
                 "voice_template_reference".to_string()
             ]
         );

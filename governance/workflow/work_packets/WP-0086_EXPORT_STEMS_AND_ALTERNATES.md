@@ -3,7 +3,7 @@
 ## Metadata
 - ID: WP-0086
 - Owner: Codex
-- Status: BACKLOG
+- Status: DONE
 - Created: 2026-03-06
 - Target milestone: Phase 2 export maturity
 
@@ -40,3 +40,4 @@ Out of scope:
 ## Status updates
 
 - 2026-03-06: Created to expand deliverables beyond one final preview mix.
+- 2026-03-06: Completed. Speech stems and alternate variant outputs now appear as first-class item artifacts and are included in export-pack generation when present. Proof: `product/desktop/Build Target/tool_artifacts/wp_runs/WP-0086/20260306_204301/summary.md`.

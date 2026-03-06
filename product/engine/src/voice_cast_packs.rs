@@ -26,6 +26,7 @@ pub struct VoiceCastPackRole {
     pub prosody_preset: Option<String>,
     pub pronunciation_overrides: Option<String>,
     pub render_mode: Option<String>,
+    pub subtitle_prosody_mode: Option<String>,
     pub sort_order: i64,
     pub created_at_ms: i64,
     pub updated_at_ms: i64,
@@ -122,6 +123,7 @@ SELECT
   prosody_preset,
   pronunciation_overrides,
   render_mode,
+  subtitle_prosody_mode,
   sort_order,
   created_at_ms,
   updated_at_ms
@@ -142,9 +144,10 @@ ORDER BY sort_order ASC, role_key ASC
                 prosody_preset: row.get(6)?,
                 pronunciation_overrides: row.get(7)?,
                 render_mode: row.get(8)?,
-                sort_order: row.get(9)?,
-                created_at_ms: row.get(10)?,
-                updated_at_ms: row.get(11)?,
+                subtitle_prosody_mode: row.get(9)?,
+                sort_order: row.get(10)?,
+                created_at_ms: row.get(11)?,
+                updated_at_ms: row.get(12)?,
             })
         })?
         .collect::<rusqlite::Result<Vec<_>>>()?;
@@ -161,7 +164,9 @@ pub fn create_voice_cast_pack_from_template(
     let name = normalize_non_empty(name)
         .ok_or_else(|| EngineError::InstallFailed("cast pack name is empty".to_string()))?;
     if template_id.is_empty() {
-        return Err(EngineError::InstallFailed("template_id is empty".to_string()));
+        return Err(EngineError::InstallFailed(
+            "template_id is empty".to_string(),
+        ));
     }
 
     let template = voice_templates::get_voice_template(paths, template_id)?;
@@ -210,10 +215,11 @@ INSERT INTO voice_cast_pack_role (
   prosody_preset,
   pronunciation_overrides,
   render_mode,
+  subtitle_prosody_mode,
   sort_order,
   created_at_ms,
   updated_at_ms
-) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)
+) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)
 "#,
             params![
                 pack_id,
@@ -225,6 +231,7 @@ INSERT INTO voice_cast_pack_role (
                 speaker.prosody_preset,
                 speaker.pronunciation_overrides,
                 speaker.render_mode,
+                speaker.subtitle_prosody_mode,
                 index as i64,
                 now,
                 now,
@@ -273,7 +280,10 @@ pub fn delete_voice_cast_pack(paths: &AppPaths, pack_id: &str) -> Result<()> {
     let mut conn = db::open(paths)?;
     db::migrate(&conn)?;
     let tx = conn.transaction()?;
-    tx.execute("DELETE FROM voice_cast_pack_role WHERE pack_id=?1", params![pack_id])?;
+    tx.execute(
+        "DELETE FROM voice_cast_pack_role WHERE pack_id=?1",
+        params![pack_id],
+    )?;
     tx.execute("DELETE FROM voice_cast_pack WHERE id=?1", params![pack_id])?;
     tx.commit()?;
     Ok(())
@@ -335,7 +345,59 @@ pub fn apply_voice_cast_pack_to_item(
         .first()
         .map(|role| role.template_id.clone())
         .ok_or_else(|| EngineError::InstallFailed("cast pack has no roles".to_string()))?;
-    voice_templates::apply_voice_template_to_item(paths, item_id, &template_id, &template_mapping)
+    let _ = voice_templates::apply_voice_template_to_item(
+        paths,
+        item_id,
+        &template_id,
+        &template_mapping,
+    )?;
+    let existing_by_key: HashMap<String, speakers::ItemSpeakerSetting> =
+        speakers::list_item_speaker_settings(paths, item_id)?
+            .into_iter()
+            .map(|setting| (setting.speaker_key.clone(), setting))
+            .collect();
+
+    for mapping in mappings {
+        let item_speaker_key = mapping.item_speaker_key.trim();
+        let pack_role_key = mapping.pack_role_key.trim();
+        let role = roles_by_key.get(pack_role_key).ok_or_else(|| {
+            EngineError::InstallFailed(format!("pack role not found: {pack_role_key}"))
+        })?;
+        let existing = existing_by_key.get(item_speaker_key);
+        speakers::upsert_item_speaker_setting(
+            paths,
+            item_id,
+            item_speaker_key,
+            role.display_name
+                .clone()
+                .or_else(|| existing.and_then(|value| value.display_name.clone())),
+            existing.and_then(|value| value.voice_profile_id.clone()),
+            existing.and_then(|value| value.tts_voice_id.clone()),
+            existing.and_then(|value| value.tts_voice_profile_path.clone()),
+            Some(
+                existing
+                    .map(|value| value.tts_voice_profile_paths.clone())
+                    .unwrap_or_default(),
+            ),
+            role.style_preset
+                .clone()
+                .or_else(|| existing.and_then(|value| value.style_preset.clone())),
+            role.prosody_preset
+                .clone()
+                .or_else(|| existing.and_then(|value| value.prosody_preset.clone())),
+            role.pronunciation_overrides
+                .clone()
+                .or_else(|| existing.and_then(|value| value.pronunciation_overrides.clone())),
+            role.render_mode
+                .clone()
+                .or_else(|| existing.and_then(|value| value.render_mode.clone())),
+            role.subtitle_prosody_mode
+                .clone()
+                .or_else(|| existing.and_then(|value| value.subtitle_prosody_mode.clone())),
+        )?;
+    }
+
+    speakers::list_item_speaker_settings(paths, item_id)
 }
 
 fn unique_role_key(used: &mut HashSet<String>, raw: &str) -> String {
@@ -453,6 +515,7 @@ INSERT INTO library_item (
             "item-1",
             "S1",
             Some("Host".to_string()),
+            None,
             Some("af_heart".to_string()),
             Some(reference_path.to_string_lossy().to_string()),
             Some(vec![reference_path.to_string_lossy().to_string()]),
@@ -460,18 +523,16 @@ INSERT INTO library_item (
             Some("natural".to_string()),
             Some("Seoul=>Soul".to_string()),
             Some("clone".to_string()),
+            None,
         )
         .expect("upsert speaker");
 
         let template =
             voice_templates::create_voice_template_from_item(&paths, "item-1", "Episode host")
                 .expect("template");
-        let pack = create_voice_cast_pack_from_template(
-            &paths,
-            &template.template.id,
-            "Game show pack",
-        )
-        .expect("cast pack");
+        let pack =
+            create_voice_cast_pack_from_template(&paths, &template.template.id, "Game show pack")
+                .expect("cast pack");
 
         assert_eq!(pack.pack.name, "Game show pack");
         assert_eq!(pack.roles.len(), 1);
@@ -502,6 +563,7 @@ INSERT INTO library_item (
             "template-item",
             "S1",
             Some("Panel Host".to_string()),
+            None,
             Some("af_heart".to_string()),
             Some(reference_path.to_string_lossy().to_string()),
             Some(vec![reference_path.to_string_lossy().to_string()]),
@@ -509,19 +571,23 @@ INSERT INTO library_item (
             Some("more_excited".to_string()),
             Some("Miyeon=>Mee-yeon".to_string()),
             Some("standard_tts".to_string()),
+            None,
         )
         .expect("template speaker");
         let template =
             voice_templates::create_voice_template_from_item(&paths, "template-item", "Panel")
                 .expect("template");
-        let pack = create_voice_cast_pack_from_template(&paths, &template.template.id, "Panel pack")
-            .expect("cast pack");
+        let pack =
+            create_voice_cast_pack_from_template(&paths, &template.template.id, "Panel pack")
+                .expect("cast pack");
 
         speakers::upsert_item_speaker_setting(
             &paths,
             "target-item",
             "S9",
             Some("Old name".to_string()),
+            None,
+            None,
             None,
             None,
             None,
@@ -556,13 +622,11 @@ INSERT INTO library_item (
         );
         assert_eq!(mapped.render_mode.as_deref(), Some("standard_tts"));
         assert_eq!(mapped.tts_voice_profile_paths.len(), 1);
-        assert!(
-            mapped
-                .tts_voice_profile_paths
-                .first()
-                .map(|path| Path::new(path).exists())
-                .unwrap_or(false)
-        );
+        assert!(mapped
+            .tts_voice_profile_paths
+            .first()
+            .map(|path| Path::new(path).exists())
+            .unwrap_or(false));
     }
 
     #[test]
@@ -581,6 +645,7 @@ INSERT INTO library_item (
             "item-1",
             "S1",
             Some("Host".to_string()),
+            None,
             Some("af_heart".to_string()),
             Some(reference_path.to_string_lossy().to_string()),
             Some(vec![reference_path.to_string_lossy().to_string()]),
@@ -588,20 +653,18 @@ INSERT INTO library_item (
             None,
             None,
             Some("clone".to_string()),
+            None,
         )
         .expect("upsert speaker");
         let template =
             voice_templates::create_voice_template_from_item(&paths, "item-1", "Episode host")
                 .expect("template");
-        let pack = create_voice_cast_pack_from_template(
-            &paths,
-            &template.template.id,
-            "Original pack",
-        )
-        .expect("cast pack");
+        let pack =
+            create_voice_cast_pack_from_template(&paths, &template.template.id, "Original pack")
+                .expect("cast pack");
 
-        let renamed = update_voice_cast_pack(&paths, &pack.pack.id, "Renamed pack")
-            .expect("rename pack");
+        let renamed =
+            update_voice_cast_pack(&paths, &pack.pack.id, "Renamed pack").expect("rename pack");
         assert_eq!(renamed.pack.name, "Renamed pack");
     }
 }

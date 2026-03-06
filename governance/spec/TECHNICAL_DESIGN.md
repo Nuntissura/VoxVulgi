@@ -116,10 +116,12 @@ Core tables (suggested):
     - `id`, `scope_kind`, `scope_id`, `term`, `spoken_override`, `notes`, `created_at_ms`, `updated_at_ms`
   - `voice_preview_variant`:
     - `id`, `item_id`, `speaker_key`, `label`, `settings_json`, `artifact_path`, `created_at_ms`
-  - `voice_memory_profile`:
-    - `id`, `series_key`, `speaker_identity_key`, `template_id`, `template_speaker_key`, `settings_json`, `created_at_ms`, `updated_at_ms`
-  - `character_voice`:
-    - `id`, `name`, `style_preset`, `prosody_preset`, `template_id`, `template_speaker_key`, `created_at_ms`, `updated_at_ms`
+  - `voice_library_profile`:
+    - `id`, `kind` (`memory` or `character`), `name`, `description`, `display_name`, `tts_voice_id`,
+      `tts_voice_profile_path`, `tts_voice_profile_paths_json`, `style_preset`, `prosody_preset`,
+      `pronunciation_overrides`, `render_mode`, `subtitle_prosody_mode`, `created_at_ms`, `updated_at_ms`
+  - `voice_library_reference`:
+    - `profile_id`, `reference_id`, `label`, `path`, `sort_order`, `created_at_ms`, `updated_at_ms`
 - `youtube_subscription`:
   - `id`, `title`, `source_url`, `folder_map`, `output_dir_override`, `active`
   - `refresh_interval_minutes` (integer, clamped range; user-editable in Library UI)
@@ -257,14 +259,13 @@ Voice-preserving approach (core feature):
   - reusable cast packs that group template speakers into recurring series roles,
   - multi-reference speaker profiles with 1..N reference clips and backward-compatible single-reference fallback,
   - advisory auto-match suggestions for diarized speakers (non-destructive, operator-reviewed),
-  - style/prosody presets, pronunciation locks, and hybrid clone-vs-standard-TTS routing passed through one unified speaker settings layer.
-- Remaining planned expansion layers:
-  - explicit subtitle-aware prosody controls and review surfaces,
+  - style/prosody presets, pronunciation locks, hybrid clone-vs-standard-TTS routing, and subtitle-aware prosody toggles passed through one unified speaker settings layer,
   - voice QC reports for both reference quality and output quality,
   - batch dubbing orchestration that applies cast/template settings to many items,
   - A/B preview variants stored as separate artifacts before final selection,
   - export modes for speech stem, background stem, final mix, and alternate versions,
-  - cross-episode voice memory plus character libraries as separate reusable asset classes.
+  - cross-episode voice memory plus character libraries as separate reusable asset classes,
+  - reference cleanup manifests and cleaned-reference reuse under per-item voice artifact folders.
 - Dubbing-control expansion remains operator-directed; the app should not add content-judgment or censorship workflows as part of these features.
 
 R&D plan: see `governance/spec/VOICE_PRESERVING_DUBBING_RD_PLAN.md`.

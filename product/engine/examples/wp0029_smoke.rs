@@ -281,12 +281,14 @@ fn main() -> Result<()> {
             speaker_key,
             None,
             None,
+            None,
             Some(ref_wav.to_string_lossy().to_string()),
             Some(vec![ref_wav.to_string_lossy().to_string()]),
             None,
             None,
             None,
             Some("clone".to_string()),
+            None,
         )?;
     }
     eprintln!(

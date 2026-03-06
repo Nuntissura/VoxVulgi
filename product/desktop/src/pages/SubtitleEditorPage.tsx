@@ -154,6 +154,7 @@ type ItemSpeakerSetting = {
   item_id: string;
   speaker_key: string;
   display_name: string | null;
+  voice_profile_id: string | null;
   tts_voice_id: string | null;
   tts_voice_profile_path: string | null;
   tts_voice_profile_paths: string[];
@@ -161,6 +162,7 @@ type ItemSpeakerSetting = {
   prosody_preset: string | null;
   pronunciation_overrides: string | null;
   render_mode: string | null;
+  subtitle_prosody_mode: string | null;
   created_at_ms: number;
   updated_at_ms: number;
 };
@@ -185,6 +187,7 @@ type VoiceTemplateSpeaker = {
   prosody_preset: string | null;
   pronunciation_overrides: string | null;
   render_mode: string | null;
+  subtitle_prosody_mode: string | null;
   created_at_ms: number;
   updated_at_ms: number;
 };
@@ -218,6 +221,7 @@ type VoiceTemplateSpeakerUpdate = {
   prosody_preset: string | null;
   pronunciation_overrides: string | null;
   render_mode: string | null;
+  subtitle_prosody_mode: string | null;
 };
 
 type VoiceCastPack = {
@@ -238,6 +242,7 @@ type VoiceCastPackRole = {
   prosody_preset: string | null;
   pronunciation_overrides: string | null;
   render_mode: string | null;
+  subtitle_prosody_mode: string | null;
   sort_order: number;
   created_at_ms: number;
   updated_at_ms: number;
@@ -251,6 +256,127 @@ type VoiceCastPackDetail = {
 type VoiceCastPackApplyMapping = {
   item_speaker_key: string;
   pack_role_key: string;
+};
+
+type VoiceLibraryProfile = {
+  id: string;
+  kind: "memory" | "character";
+  name: string;
+  description: string | null;
+  display_name: string | null;
+  tts_voice_id: string | null;
+  tts_voice_profile_path: string | null;
+  tts_voice_profile_paths: string[];
+  style_preset: string | null;
+  prosody_preset: string | null;
+  pronunciation_overrides: string | null;
+  render_mode: string | null;
+  subtitle_prosody_mode: string | null;
+  dir_path: string;
+  reference_count: number;
+  created_at_ms: number;
+  updated_at_ms: number;
+};
+
+type VoiceLibraryReference = {
+  profile_id: string;
+  reference_id: string;
+  label: string | null;
+  path: string;
+  sort_order: number;
+  created_at_ms: number;
+  updated_at_ms: number;
+};
+
+type VoiceLibraryProfileDetail = {
+  profile: VoiceLibraryProfile;
+  references: VoiceLibraryReference[];
+};
+
+type VoiceLibrarySuggestion = {
+  item_speaker_key: string;
+  current_display_name: string | null;
+  profile_id: string;
+  profile_kind: "memory" | "character";
+  profile_name: string;
+  profile_display_name: string | null;
+  score: number;
+  match_reason: string;
+};
+
+type VoiceReferenceCleanupOptions = {
+  denoise: boolean;
+  de_reverb: boolean;
+  speech_focus: boolean;
+  loudness_normalize: boolean;
+};
+
+type VoiceReferenceCleanupRecord = {
+  cleanup_id: string;
+  item_id: string;
+  speaker_key: string;
+  source_path: string;
+  cleaned_path: string;
+  manifest_path: string;
+  filter_chain: string;
+  options: VoiceReferenceCleanupOptions;
+  created_at_ms: number;
+};
+
+type SpeakerRenderOverride = {
+  speaker_key: string;
+  tts_voice_id: string | null;
+  tts_voice_profile_path: string | null;
+  tts_voice_profile_paths: string[];
+  style_preset: string | null;
+  prosody_preset: string | null;
+  pronunciation_overrides: string | null;
+  render_mode: string | null;
+  subtitle_prosody_mode: string | null;
+};
+
+type VoiceAbPreviewRequest = {
+  item_id: string;
+  source_track_id: string;
+  speaker_key: string;
+  separation_backend: string | null;
+  queue_qc: boolean;
+  queue_export_pack: boolean;
+  variant_a_label: string | null;
+  variant_b_label: string | null;
+  variant_a_override: SpeakerRenderOverride;
+  variant_b_override: SpeakerRenderOverride;
+};
+
+type VoiceAbPreviewQueueSummary = {
+  batch_id: string;
+  variant_a_label: string;
+  variant_b_label: string;
+  queued_jobs: JobRow[];
+};
+
+type LocalizationBatchRequest = {
+  item_ids: string[];
+  template_id: string | null;
+  cast_pack_id: string | null;
+  separation_backend: string | null;
+  queue_export_pack: boolean;
+  queue_qc: boolean;
+};
+
+type LocalizationBatchItemResult = {
+  item_id: string;
+  title: string;
+  track_id: string | null;
+  applied_mapping_count: number;
+  warnings: string[];
+  queued_jobs: JobRow[];
+};
+
+type LocalizationBatchQueueSummary = {
+  batch_id: string;
+  queued_jobs_total: number;
+  items: LocalizationBatchItemResult[];
 };
 
 const STYLE_PRESET_OPTIONS = [
@@ -276,6 +402,12 @@ const RENDER_MODE_OPTIONS = [
   { value: "", label: "Clone when references exist" },
   { value: "clone", label: "Always clone" },
   { value: "standard_tts", label: "Standard TTS fallback" },
+] as const;
+
+const SUBTITLE_PROSODY_OPTIONS = [
+  { value: "", label: "Subtitle-aware pacing" },
+  { value: "auto", label: "Force subtitle-aware pacing" },
+  { value: "off", label: "Disable subtitle-aware pacing" },
 ] as const;
 
 function formatTc(ms: number): string {
@@ -550,6 +682,66 @@ export function SubtitleEditorPage({ itemId }: { itemId: string }) {
   const [selectedVoiceCastPackDetail, setSelectedVoiceCastPackDetail] =
     useState<VoiceCastPackDetail | null>(null);
   const [voiceCastPackMappings, setVoiceCastPackMappings] = useState<Record<string, string>>({});
+  const [memoryProfiles, setMemoryProfiles] = useState<VoiceLibraryProfile[]>([]);
+  const [characterProfiles, setCharacterProfiles] = useState<VoiceLibraryProfile[]>([]);
+  const [voiceLibraryBusy, setVoiceLibraryBusy] = useState(false);
+  const [voiceLibraryActionBusy, setVoiceLibraryActionBusy] = useState(false);
+  const [selectedMemoryProfileId, setSelectedMemoryProfileId] = useState("");
+  const [selectedCharacterProfileId, setSelectedCharacterProfileId] = useState("");
+  const [selectedMemoryProfileDetail, setSelectedMemoryProfileDetail] =
+    useState<VoiceLibraryProfileDetail | null>(null);
+  const [selectedCharacterProfileDetail, setSelectedCharacterProfileDetail] =
+    useState<VoiceLibraryProfileDetail | null>(null);
+  const [memoryProfileName, setMemoryProfileName] = useState("");
+  const [characterProfileName, setCharacterProfileName] = useState("");
+  const [memorySuggestions, setMemorySuggestions] = useState<VoiceLibrarySuggestion[]>([]);
+  const [characterSuggestions, setCharacterSuggestions] = useState<VoiceLibrarySuggestion[]>([]);
+  const [speakerCleanupRecords, setSpeakerCleanupRecords] = useState<
+    Record<string, VoiceReferenceCleanupRecord[]>
+  >({});
+  const [speakerCleanupBusyKey, setSpeakerCleanupBusyKey] = useState<string | null>(null);
+  const [cleanupOptions, setCleanupOptions] = useState<VoiceReferenceCleanupOptions>({
+    denoise: true,
+    de_reverb: true,
+    speech_focus: true,
+    loudness_normalize: true,
+  });
+  const [libraryItems, setLibraryItems] = useState<LibraryItem[]>([]);
+  const [libraryItemsBusy, setLibraryItemsBusy] = useState(false);
+  const [batchSelectedItemIds, setBatchSelectedItemIds] = useState<string[]>([itemId]);
+  const [batchQueueBusy, setBatchQueueBusy] = useState(false);
+  const [batchQueueQc, setBatchQueueQc] = useState(true);
+  const [batchQueueExportPack, setBatchQueueExportPack] = useState(false);
+  const [batchQueueSummary, setBatchQueueSummary] = useState<LocalizationBatchQueueSummary | null>(
+    null,
+  );
+  const [abSpeakerKey, setAbSpeakerKey] = useState("");
+  const [abVariantALabel, setAbVariantALabel] = useState("variant_a");
+  const [abVariantBLabel, setAbVariantBLabel] = useState("variant_b");
+  const [abVariantA, setAbVariantA] = useState<SpeakerRenderOverride>({
+    speaker_key: "",
+    tts_voice_id: null,
+    tts_voice_profile_path: null,
+    tts_voice_profile_paths: [],
+    style_preset: null,
+    prosody_preset: null,
+    pronunciation_overrides: null,
+    render_mode: null,
+    subtitle_prosody_mode: null,
+  });
+  const [abVariantB, setAbVariantB] = useState<SpeakerRenderOverride>({
+    speaker_key: "",
+    tts_voice_id: null,
+    tts_voice_profile_path: null,
+    tts_voice_profile_paths: [],
+    style_preset: null,
+    prosody_preset: null,
+    pronunciation_overrides: null,
+    render_mode: null,
+    subtitle_prosody_mode: null,
+  });
+  const [abPreviewBusy, setAbPreviewBusy] = useState(false);
+  const [abPreviewSummary, setAbPreviewSummary] = useState<VoiceAbPreviewQueueSummary | null>(null);
   const [selectedSegments, setSelectedSegments] = useState<Set<number>>(() => new Set());
   const [bulkSpeakerKey, setBulkSpeakerKey] = useState("");
   const [bulkNewSpeakerKey, setBulkNewSpeakerKey] = useState("");
@@ -699,6 +891,58 @@ export function SubtitleEditorPage({ itemId }: { itemId: string }) {
     return next;
   }, []);
 
+  const refreshVoiceLibraryProfiles = useCallback(async () => {
+    setVoiceLibraryBusy(true);
+    try {
+      const [nextMemory, nextCharacter] = await Promise.all([
+        invoke<VoiceLibraryProfile[]>("voice_library_list", { kind: "memory" }),
+        invoke<VoiceLibraryProfile[]>("voice_library_list", { kind: "character" }),
+      ]);
+      setMemoryProfiles(nextMemory);
+      setCharacterProfiles(nextCharacter);
+      return { memory: nextMemory, character: nextCharacter };
+    } finally {
+      setVoiceLibraryBusy(false);
+    }
+  }, []);
+
+  const refreshMemorySuggestions = useCallback(async () => {
+    try {
+      const next = await invoke<VoiceLibrarySuggestion[]>("voice_library_suggest_for_item", {
+        itemId,
+        kind: "memory",
+      });
+      setMemorySuggestions(next);
+      return next;
+    } catch {
+      return [];
+    }
+  }, [itemId]);
+
+  const refreshCharacterSuggestions = useCallback(async () => {
+    try {
+      const next = await invoke<VoiceLibrarySuggestion[]>("voice_library_suggest_for_item", {
+        itemId,
+        kind: "character",
+      });
+      setCharacterSuggestions(next);
+      return next;
+    } catch {
+      return [];
+    }
+  }, [itemId]);
+
+  const refreshLibraryItems = useCallback(async () => {
+    setLibraryItemsBusy(true);
+    try {
+      const next = await invoke<LibraryItem[]>("library_list", { limit: 500, offset: 0 });
+      setLibraryItems(next);
+      return next;
+    } finally {
+      setLibraryItemsBusy(false);
+    }
+  }, []);
+
   const refreshOutputs = useCallback(async () => {
     const next = await invoke<ItemOutputs>("item_outputs", { itemId });
     setOutputs(next);
@@ -755,6 +999,10 @@ export function SubtitleEditorPage({ itemId }: { itemId: string }) {
       refreshSpeakerSettings(),
       refreshVoiceTemplates(),
       refreshVoiceCastPacks(),
+      refreshVoiceLibraryProfiles(),
+      refreshMemorySuggestions(),
+      refreshCharacterSuggestions(),
+      refreshLibraryItems(),
       refreshOutputs(),
       refreshArtifacts(),
       refreshItemJobs(),
@@ -779,6 +1027,10 @@ export function SubtitleEditorPage({ itemId }: { itemId: string }) {
     refreshSpeakerSettings,
     refreshVoiceTemplates,
     refreshVoiceCastPacks,
+    refreshVoiceLibraryProfiles,
+    refreshMemorySuggestions,
+    refreshCharacterSuggestions,
+    refreshLibraryItems,
     refreshOutputs,
     refreshArtifacts,
     refreshItemJobs,
@@ -869,6 +1121,38 @@ export function SubtitleEditorPage({ itemId }: { itemId: string }) {
   }, [speakerSettingsByKey, speakersInTrack]);
 
   useEffect(() => {
+    if (!speakersInTrack.length) {
+      setSpeakerCleanupRecords({});
+      return;
+    }
+    let cancelled = false;
+    Promise.all(
+      speakersInTrack.map(async (speakerKey) => {
+        try {
+          const rows = await invoke<VoiceReferenceCleanupRecord[]>(
+            "voice_cleanup_list_for_speaker",
+            {
+              itemId,
+              speakerKey,
+            },
+          );
+          return { speakerKey, rows };
+        } catch {
+          return { speakerKey, rows: [] as VoiceReferenceCleanupRecord[] };
+        }
+      }),
+    ).then((pairs) => {
+      if (cancelled) return;
+      const next: Record<string, VoiceReferenceCleanupRecord[]> = {};
+      for (const pair of pairs) next[pair.speakerKey] = pair.rows;
+      setSpeakerCleanupRecords(next);
+    });
+    return () => {
+      cancelled = true;
+    };
+  }, [itemId, speakersInTrack]);
+
+  useEffect(() => {
     if (!item) return;
     setVoiceTemplateName((prev) => {
       if (prev.trim()) return prev;
@@ -880,7 +1164,24 @@ export function SubtitleEditorPage({ itemId }: { itemId: string }) {
       const fallback = stemFromPath(item.media_path) || item.title || "Cast pack";
       return `${fallback} cast pack`;
     });
+    setMemoryProfileName((prev) => {
+      if (prev.trim()) return prev;
+      const fallback = stemFromPath(item.media_path) || item.title || "Voice memory";
+      return `${fallback} memory`;
+    });
+    setCharacterProfileName((prev) => {
+      if (prev.trim()) return prev;
+      const fallback = stemFromPath(item.media_path) || item.title || "Character voice";
+      return `${fallback} character`;
+    });
   }, [item]);
+
+  useEffect(() => {
+    setBatchSelectedItemIds((prev) => {
+      if (prev.includes(itemId)) return prev;
+      return [itemId, ...prev].slice(0, 500);
+    });
+  }, [itemId]);
 
   const latestItemJobByType = useMemo(() => {
     const map = new Map<string, JobRow>();
@@ -895,6 +1196,14 @@ export function SubtitleEditorPage({ itemId }: { itemId: string }) {
     }
     return map;
   }, [itemJobs]);
+
+  const batchLibraryItems = useMemo(() => {
+    return [...libraryItems].sort((a, b) => {
+      if (a.id === itemId) return -1;
+      if (b.id === itemId) return 1;
+      return (a.title ?? "").localeCompare(b.title ?? "");
+    });
+  }, [itemId, libraryItems]);
 
   useEffect(() => {
     if (audioPreviewPath.trim()) return;
@@ -1097,6 +1406,84 @@ export function SubtitleEditorPage({ itemId }: { itemId: string }) {
       return changed ? next : prev;
     });
   }, [selectedVoiceCastPackDetail, speakerNameDrafts, speakerSettingsByKey, speakersInTrack]);
+
+  useEffect(() => {
+    if (!selectedMemoryProfileId) {
+      setSelectedMemoryProfileDetail(null);
+      return;
+    }
+    let cancelled = false;
+    setVoiceLibraryBusy(true);
+    invoke<VoiceLibraryProfileDetail>("voice_library_get", { profileId: selectedMemoryProfileId })
+      .then((detail) => {
+        if (!cancelled) setSelectedMemoryProfileDetail(detail);
+      })
+      .catch((e) => {
+        if (!cancelled) setError(String(e));
+      })
+      .finally(() => {
+        if (!cancelled) setVoiceLibraryBusy(false);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [selectedMemoryProfileId]);
+
+  useEffect(() => {
+    if (!selectedCharacterProfileId) {
+      setSelectedCharacterProfileDetail(null);
+      return;
+    }
+    let cancelled = false;
+    setVoiceLibraryBusy(true);
+    invoke<VoiceLibraryProfileDetail>("voice_library_get", {
+      profileId: selectedCharacterProfileId,
+    })
+      .then((detail) => {
+        if (!cancelled) setSelectedCharacterProfileDetail(detail);
+      })
+      .catch((e) => {
+        if (!cancelled) setError(String(e));
+      })
+      .finally(() => {
+        if (!cancelled) setVoiceLibraryBusy(false);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [selectedCharacterProfileId]);
+
+  useEffect(() => {
+    if (!speakersInTrack.length) {
+      setAbSpeakerKey("");
+      return;
+    }
+    setAbSpeakerKey((prev) => (prev && speakersInTrack.includes(prev) ? prev : speakersInTrack[0] ?? ""));
+  }, [speakersInTrack]);
+
+  useEffect(() => {
+    const source = speakerSettingsByKey.get(abSpeakerKey) ?? null;
+    if (!abSpeakerKey) return;
+    const baseOverride: SpeakerRenderOverride = {
+      speaker_key: abSpeakerKey,
+      tts_voice_id: source?.tts_voice_id ?? null,
+      tts_voice_profile_path: source?.tts_voice_profile_path ?? null,
+      tts_voice_profile_paths: speakerProfilePaths(source),
+      style_preset: source?.style_preset ?? null,
+      prosody_preset: source?.prosody_preset ?? null,
+      pronunciation_overrides: source?.pronunciation_overrides ?? null,
+      render_mode: source?.render_mode ?? null,
+      subtitle_prosody_mode: source?.subtitle_prosody_mode ?? null,
+    };
+    setAbVariantA((prev) =>
+      prev.speaker_key === abSpeakerKey ? { ...prev, speaker_key: abSpeakerKey } : baseOverride,
+    );
+    setAbVariantB((prev) =>
+      prev.speaker_key === abSpeakerKey
+        ? { ...prev, speaker_key: abSpeakerKey }
+        : { ...baseOverride, prosody_preset: "tighter_timing" },
+    );
+  }, [abSpeakerKey, speakerSettingsByKey]);
 
   useEffect(() => {
     if (videoPreviewMode === "mux_mp4" && !outputs?.mux_dub_preview_v1_mp4_exists) {
@@ -1621,12 +2008,14 @@ export function SubtitleEditorPage({ itemId }: { itemId: string }) {
     speakerKey: string,
     patch: Partial<{
       display_name: string | null;
+      voice_profile_id: string | null;
       tts_voice_id: string | null;
       tts_voice_profile_paths: string[];
       style_preset: string | null;
       prosody_preset: string | null;
       pronunciation_overrides: string | null;
       render_mode: string | null;
+      subtitle_prosody_mode: string | null;
     }>,
   ) {
     setError(null);
@@ -1641,6 +2030,10 @@ export function SubtitleEditorPage({ itemId }: { itemId: string }) {
         speakerKey,
         displayName:
           patch.display_name !== undefined ? patch.display_name : existing?.display_name ?? null,
+        voiceProfileId:
+          patch.voice_profile_id !== undefined
+            ? patch.voice_profile_id
+            : existing?.voice_profile_id ?? null,
         ttsVoiceId:
           patch.tts_voice_id !== undefined ? patch.tts_voice_id : existing?.tts_voice_id ?? null,
         ttsVoiceProfilePath: ttsVoiceProfilePaths[0] ?? null,
@@ -1657,6 +2050,10 @@ export function SubtitleEditorPage({ itemId }: { itemId: string }) {
             : existing?.pronunciation_overrides ?? null,
         renderMode:
           patch.render_mode !== undefined ? patch.render_mode : existing?.render_mode ?? null,
+        subtitleProsodyMode:
+          patch.subtitle_prosody_mode !== undefined
+            ? patch.subtitle_prosody_mode
+            : existing?.subtitle_prosody_mode ?? null,
       });
       await refreshSpeakerSettings();
     } catch (e) {
@@ -1684,6 +2081,13 @@ export function SubtitleEditorPage({ itemId }: { itemId: string }) {
 
   async function setSpeakerRenderMode(speakerKey: string, renderMode: string | null) {
     await saveSpeakerSetting(speakerKey, { render_mode: renderMode });
+  }
+
+  async function setSpeakerSubtitleProsodyMode(
+    speakerKey: string,
+    subtitleProsodyMode: string | null,
+  ) {
+    await saveSpeakerSetting(speakerKey, { subtitle_prosody_mode: subtitleProsodyMode });
   }
 
   async function setSpeakerPronunciationOverrides(
@@ -1723,6 +2127,7 @@ export function SubtitleEditorPage({ itemId }: { itemId: string }) {
         itemId,
         speakerKey,
         displayName: existing?.display_name ?? null,
+        voiceProfileId: null,
         ttsVoiceId: existing?.tts_voice_id ?? null,
         ttsVoiceProfilePath: nextPaths[0] ?? null,
         ttsVoiceProfilePaths: nextPaths,
@@ -1730,6 +2135,7 @@ export function SubtitleEditorPage({ itemId }: { itemId: string }) {
         prosodyPreset: existing?.prosody_preset ?? null,
         pronunciationOverrides: existing?.pronunciation_overrides ?? null,
         renderMode: existing?.render_mode ?? null,
+        subtitleProsodyMode: existing?.subtitle_prosody_mode ?? null,
       });
       await refreshSpeakerSettings();
     } catch (e) {
@@ -1740,7 +2146,7 @@ export function SubtitleEditorPage({ itemId }: { itemId: string }) {
   }
 
   async function clearSpeakerVoiceProfiles(speakerKey: string) {
-    await saveSpeakerSetting(speakerKey, { tts_voice_profile_paths: [] });
+    await saveSpeakerSetting(speakerKey, { voice_profile_id: null, tts_voice_profile_paths: [] });
   }
 
   async function saveCurrentVoiceTemplate() {
@@ -1802,6 +2208,10 @@ export function SubtitleEditorPage({ itemId }: { itemId: string }) {
               : existing.pronunciation_overrides,
           render_mode:
             patch.render_mode !== undefined ? patch.render_mode : existing.render_mode,
+          subtitle_prosody_mode:
+            patch.subtitle_prosody_mode !== undefined
+              ? patch.subtitle_prosody_mode
+              : existing.subtitle_prosody_mode,
         },
       });
       setSelectedVoiceTemplateDetail(detail);
@@ -2075,6 +2485,364 @@ export function SubtitleEditorPage({ itemId }: { itemId: string }) {
     } finally {
       setVoiceCastPackActionBusy(false);
     }
+  }
+
+  async function refreshSpeakerCleanupRecords(speakerKey: string) {
+    try {
+      const rows = await invoke<VoiceReferenceCleanupRecord[]>("voice_cleanup_list_for_speaker", {
+        itemId,
+        speakerKey,
+      });
+      setSpeakerCleanupRecords((prev) => ({ ...prev, [speakerKey]: rows }));
+      return rows;
+    } catch (e) {
+      setError(String(e));
+      return [];
+    }
+  }
+
+  async function runSpeakerCleanup(speakerKey: string) {
+    const setting = speakerSettingsByKey.get(speakerKey) ?? null;
+    const sourcePath = speakerProfilePaths(setting)[0] ?? "";
+    if (!sourcePath) {
+      setError("Choose a speaker reference clip first.");
+      return;
+    }
+    setError(null);
+    setSpeakerCleanupBusyKey(speakerKey);
+    try {
+      await invoke<VoiceReferenceCleanupRecord>("voice_cleanup_run_for_speaker", {
+        itemId,
+        speakerKey,
+        sourcePath,
+        options: cleanupOptions,
+      });
+      await refreshSpeakerCleanupRecords(speakerKey);
+      setNotice(`Created cleaned reference for ${speakerKey}.`);
+    } catch (e) {
+      setError(String(e));
+    } finally {
+      setSpeakerCleanupBusyKey(null);
+    }
+  }
+
+  async function useLatestCleanupResult(speakerKey: string) {
+    const latest = speakerCleanupRecords[speakerKey]?.[0] ?? null;
+    if (!latest) {
+      setError("Run cleanup first.");
+      return;
+    }
+    await saveSpeakerSetting(speakerKey, {
+      voice_profile_id: null,
+      tts_voice_profile_paths: [latest.cleaned_path],
+    });
+    setNotice(`Applied cleaned reference for ${speakerKey}.`);
+  }
+
+  async function createVoiceLibraryFromSpeaker(kind: "memory" | "character", speakerKey: string) {
+    const name = (kind === "memory" ? memoryProfileName : characterProfileName).trim();
+    if (!name) {
+      setError(`${kind === "memory" ? "Memory" : "Character"} profile name is empty.`);
+      return;
+    }
+    setError(null);
+    setVoiceLibraryActionBusy(true);
+    try {
+      const detail = await invoke<VoiceLibraryProfileDetail>(
+        "voice_library_create_from_item_speaker",
+        {
+          itemId,
+          speakerKey,
+          kind,
+          name,
+          description: null,
+        },
+      );
+      await refreshVoiceLibraryProfiles();
+      if (kind === "memory") {
+        setSelectedMemoryProfileId(detail.profile.id);
+        setSelectedMemoryProfileDetail(detail);
+      } else {
+        setSelectedCharacterProfileId(detail.profile.id);
+        setSelectedCharacterProfileDetail(detail);
+      }
+      await Promise.all([refreshMemorySuggestions(), refreshCharacterSuggestions()]);
+      setNotice(`Saved ${kind} profile "${detail.profile.name}".`);
+    } catch (e) {
+      setError(String(e));
+    } finally {
+      setVoiceLibraryActionBusy(false);
+    }
+  }
+
+  async function addVoiceLibraryReferences(kind: "memory" | "character") {
+    const profileId =
+      kind === "memory" ? selectedMemoryProfileId.trim() : selectedCharacterProfileId.trim();
+    if (!profileId) {
+      setError("Choose a profile first.");
+      return;
+    }
+    const selection = await open({
+      multiple: true,
+      directory: false,
+      filters: [
+        { name: "Audio", extensions: ["wav", "mp3", "m4a", "flac", "ogg", "aac", "opus"] },
+        { name: "All files", extensions: ["*"] },
+      ],
+    });
+    const pickedPaths = Array.isArray(selection)
+      ? selection.filter((value): value is string => typeof value === "string")
+      : typeof selection === "string"
+        ? [selection]
+        : [];
+    if (!pickedPaths.length) return;
+
+    setError(null);
+    setVoiceLibraryActionBusy(true);
+    try {
+      let detail: VoiceLibraryProfileDetail | null =
+        kind === "memory" ? selectedMemoryProfileDetail : selectedCharacterProfileDetail;
+      for (const sourcePath of pickedPaths) {
+        detail = await invoke<VoiceLibraryProfileDetail>("voice_library_add_reference", {
+          profileId,
+          sourcePath,
+          label: stemFromPath(sourcePath) || null,
+        });
+      }
+      if (detail) {
+        if (kind === "memory") {
+          setSelectedMemoryProfileDetail(detail);
+        } else {
+          setSelectedCharacterProfileDetail(detail);
+        }
+      }
+      await refreshVoiceLibraryProfiles();
+      setNotice(`Added ${pickedPaths.length} reference file(s).`);
+    } catch (e) {
+      setError(String(e));
+    } finally {
+      setVoiceLibraryActionBusy(false);
+    }
+  }
+
+  async function applyVoiceLibraryProfile(
+    kind: "memory" | "character",
+    speakerKey: string,
+    profileId: string,
+  ) {
+    if (!profileId.trim()) {
+      setError("Choose a profile first.");
+      return;
+    }
+    setError(null);
+    setVoiceLibraryActionBusy(true);
+    try {
+      const next = await invoke<ItemSpeakerSetting>("voice_library_apply_to_item", {
+        itemId,
+        speakerKey,
+        profileId,
+      });
+      setSpeakerSettings((prev) => {
+        const filtered = prev.filter((value) => value.speaker_key !== next.speaker_key);
+        return [...filtered, next].sort((a, b) => a.speaker_key.localeCompare(b.speaker_key));
+      });
+      setSpeakerNameDrafts((prev) => ({ ...prev, [speakerKey]: next.display_name ?? "" }));
+      setSpeakerPronunciationDrafts((prev) => ({
+        ...prev,
+        [speakerKey]: next.pronunciation_overrides ?? "",
+      }));
+      await Promise.all([refreshMemorySuggestions(), refreshCharacterSuggestions()]);
+      setNotice(`Applied ${kind} profile to ${speakerKey}.`);
+    } catch (e) {
+      setError(String(e));
+    } finally {
+      setVoiceLibraryActionBusy(false);
+    }
+  }
+
+  async function forkVoiceLibraryProfile(kind: "memory" | "character") {
+    const detail = kind === "memory" ? selectedMemoryProfileDetail : selectedCharacterProfileDetail;
+    if (!detail) {
+      setError("Choose a profile first.");
+      return;
+    }
+    setError(null);
+    setVoiceLibraryActionBusy(true);
+    try {
+      const fork = await invoke<VoiceLibraryProfileDetail>("voice_library_fork", {
+        profileId: detail.profile.id,
+        name: `${detail.profile.name} copy`,
+      });
+      await refreshVoiceLibraryProfiles();
+      if (kind === "memory") {
+        setSelectedMemoryProfileId(fork.profile.id);
+        setSelectedMemoryProfileDetail(fork);
+      } else {
+        setSelectedCharacterProfileId(fork.profile.id);
+        setSelectedCharacterProfileDetail(fork);
+      }
+      setNotice(`Forked profile "${fork.profile.name}".`);
+    } catch (e) {
+      setError(String(e));
+    } finally {
+      setVoiceLibraryActionBusy(false);
+    }
+  }
+
+  async function deleteVoiceLibraryProfile(kind: "memory" | "character") {
+    const detail = kind === "memory" ? selectedMemoryProfileDetail : selectedCharacterProfileDetail;
+    if (!detail) return;
+    const ok = await confirm(`Delete ${kind} profile "${detail.profile.name}"?`, {
+      title: `Delete ${kind} profile`,
+      kind: "warning",
+    });
+    if (!ok) return;
+    setError(null);
+    setVoiceLibraryActionBusy(true);
+    try {
+      await invoke("voice_library_delete", { profileId: detail.profile.id });
+      await refreshVoiceLibraryProfiles();
+      if (kind === "memory") {
+        setSelectedMemoryProfileId("");
+        setSelectedMemoryProfileDetail(null);
+      } else {
+        setSelectedCharacterProfileId("");
+        setSelectedCharacterProfileDetail(null);
+      }
+      await Promise.all([refreshMemorySuggestions(), refreshCharacterSuggestions()]);
+      setNotice(`Deleted ${kind} profile.`);
+    } catch (e) {
+      setError(String(e));
+    } finally {
+      setVoiceLibraryActionBusy(false);
+    }
+  }
+
+  async function queueLocalizationBatch() {
+    const itemIds = Array.from(new Set(batchSelectedItemIds.map((value) => value.trim()).filter(Boolean)));
+    if (!itemIds.length) {
+      setError("Choose at least one item for batch dubbing.");
+      return;
+    }
+    setError(null);
+    setBatchQueueBusy(true);
+    try {
+      const summary = await invoke<LocalizationBatchQueueSummary>("jobs_enqueue_localization_batch_v1", {
+        request: {
+          item_ids: itemIds,
+          template_id: trimOrNull(selectedVoiceTemplateId),
+          cast_pack_id: trimOrNull(selectedVoiceCastPackId),
+          separation_backend: separationBackend,
+          queue_export_pack: batchQueueExportPack,
+          queue_qc: batchQueueQc,
+        } satisfies LocalizationBatchRequest,
+      });
+      setBatchQueueSummary(summary);
+      setNotice(`Queued ${summary.queued_jobs_total} job(s) across ${summary.items.length} item(s).`);
+      refreshItemJobs().catch(() => undefined);
+    } catch (e) {
+      setError(String(e));
+    } finally {
+      setBatchQueueBusy(false);
+    }
+  }
+
+  function toggleBatchItem(itemIdToToggle: string, checked: boolean) {
+    setBatchSelectedItemIds((prev) => {
+      const set = new Set(prev);
+      if (checked) {
+        set.add(itemIdToToggle);
+      } else {
+        set.delete(itemIdToToggle);
+      }
+      return Array.from(set);
+    });
+  }
+
+  function setAbVariantField(
+    variant: "a" | "b",
+    patch: Partial<SpeakerRenderOverride>,
+  ) {
+    const setter = variant === "a" ? setAbVariantA : setAbVariantB;
+    setter((prev) => ({
+      ...prev,
+      ...patch,
+      speaker_key: abSpeakerKey,
+      tts_voice_profile_paths:
+        patch.tts_voice_profile_paths !== undefined
+          ? uniquePaths(patch.tts_voice_profile_paths)
+          : prev.tts_voice_profile_paths,
+    }));
+  }
+
+  async function pickAbVariantReferences(variant: "a" | "b") {
+    const selection = await open({
+      multiple: true,
+      directory: false,
+      filters: [
+        { name: "Audio", extensions: ["wav", "mp3", "m4a", "flac", "ogg", "aac", "opus"] },
+        { name: "All files", extensions: ["*"] },
+      ],
+    });
+    const pickedPaths = Array.isArray(selection)
+      ? selection.filter((value): value is string => typeof value === "string")
+      : typeof selection === "string"
+        ? [selection]
+        : [];
+    if (!pickedPaths.length) return;
+    setAbVariantField(variant, { tts_voice_profile_paths: pickedPaths, tts_voice_profile_path: pickedPaths[0] ?? null });
+  }
+
+  async function queueAbPreview() {
+    if (!trackId || !abSpeakerKey.trim()) {
+      setError("Choose a subtitle track and speaker first.");
+      return;
+    }
+    setError(null);
+    setAbPreviewBusy(true);
+    try {
+      const summary = await invoke<VoiceAbPreviewQueueSummary>("jobs_enqueue_voice_ab_preview_v1", {
+        request: {
+          item_id: itemId,
+          source_track_id: trackId,
+          speaker_key: abSpeakerKey,
+          separation_backend: separationBackend,
+          queue_qc: true,
+          queue_export_pack: false,
+          variant_a_label: trimOrNull(abVariantALabel),
+          variant_b_label: trimOrNull(abVariantBLabel),
+          variant_a_override: { ...abVariantA, speaker_key: abSpeakerKey },
+          variant_b_override: { ...abVariantB, speaker_key: abSpeakerKey },
+        } satisfies VoiceAbPreviewRequest,
+      });
+      setAbPreviewSummary(summary);
+      setNotice(`Queued A/B preview variants "${summary.variant_a_label}" and "${summary.variant_b_label}".`);
+      refreshArtifacts().catch(() => undefined);
+      refreshItemJobs().catch(() => undefined);
+    } catch (e) {
+      setError(String(e));
+    } finally {
+      setAbPreviewBusy(false);
+    }
+  }
+
+  async function promoteAbVariant(variant: "a" | "b") {
+    if (!abSpeakerKey.trim()) {
+      setError("Choose a speaker first.");
+      return;
+    }
+    const selected = variant === "a" ? abVariantA : abVariantB;
+    await saveSpeakerSetting(abSpeakerKey, {
+      voice_profile_id: null,
+      tts_voice_id: selected.tts_voice_id,
+      tts_voice_profile_paths: selected.tts_voice_profile_paths,
+      style_preset: selected.style_preset,
+      prosody_preset: selected.prosody_preset,
+      pronunciation_overrides: selected.pronunciation_overrides,
+      render_mode: selected.render_mode,
+      subtitle_prosody_mode: selected.subtitle_prosody_mode,
+    });
+    setNotice(`Promoted variant ${variant.toUpperCase()} into the live speaker settings.`);
   }
 
   async function openSelectedVoiceTemplateFolder() {
@@ -2726,10 +3494,22 @@ export function SubtitleEditorPage({ itemId }: { itemId: string }) {
     if (artifactId === "cleanup_vocals") return "clean_vocals_v1";
     if (artifactId === "tts_pyttsx3_manifest") return "tts_preview_pyttsx3_v1";
     if (artifactId === "tts_neural_manifest") return "tts_neural_local_v1";
-    if (artifactId === "tts_voice_preserving_manifest") return "dub_voice_preserving_v1";
-    if (artifactId === "dub_mix") return "mix_dub_preview_v1";
+    if (
+      artifactId === "tts_voice_preserving_manifest" ||
+      artifactId.startsWith("tts_voice_preserving_manifest_variant_")
+    ) {
+      return "dub_voice_preserving_v1";
+    }
+    if (
+      artifactId === "dub_mix" ||
+      artifactId === "dub_speech_stem" ||
+      artifactId.startsWith("dub_mix_variant_") ||
+      artifactId.startsWith("dub_speech_stem_variant_")
+    ) {
+      return "mix_dub_preview_v1";
+    }
     if (artifactId.startsWith("dub_mux_")) return "mux_dub_preview_v1";
-    if (artifactId === "export_pack") return "export_pack_v1";
+    if (artifactId === "export_pack" || artifactId.startsWith("export_")) return "export_pack_v1";
     if (artifactId.startsWith("qc_")) return "qc_report_v1";
     return null;
   }
@@ -2763,7 +3543,6 @@ export function SubtitleEditorPage({ itemId }: { itemId: string }) {
       return;
     }
     if (isVideoPath(artifact.path)) {
-      setVideoPreviewMode("original");
       try {
         await openPathBestEffort(artifact.path);
       } catch {
@@ -2802,7 +3581,7 @@ export function SubtitleEditorPage({ itemId }: { itemId: string }) {
         await enqueueDubVoicePreservingV1();
         return;
       }
-      if (artifact.id === "dub_mix") {
+      if (artifact.id === "dub_mix" || artifact.id === "dub_speech_stem") {
         await enqueueMixDubPreview();
         return;
       }
@@ -3505,6 +4284,52 @@ export function SubtitleEditorPage({ itemId }: { itemId: string }) {
                   Pick a short reference clip per speaker (WAV recommended).
                 </div>
               </div>
+              <div className="row" style={{ marginTop: 8, alignItems: "center", gap: 10, flexWrap: "wrap" }}>
+                <div style={{ fontSize: 12, opacity: 0.75 }}>Reference cleanup defaults</div>
+                <label style={{ display: "flex", alignItems: "center", gap: 6 }}>
+                  <input
+                    type="checkbox"
+                    checked={cleanupOptions.denoise}
+                    onChange={(e) =>
+                      setCleanupOptions((prev) => ({ ...prev, denoise: e.currentTarget.checked }))
+                    }
+                  />
+                  <span>Denoise</span>
+                </label>
+                <label style={{ display: "flex", alignItems: "center", gap: 6 }}>
+                  <input
+                    type="checkbox"
+                    checked={cleanupOptions.de_reverb}
+                    onChange={(e) =>
+                      setCleanupOptions((prev) => ({ ...prev, de_reverb: e.currentTarget.checked }))
+                    }
+                  />
+                  <span>De-reverb</span>
+                </label>
+                <label style={{ display: "flex", alignItems: "center", gap: 6 }}>
+                  <input
+                    type="checkbox"
+                    checked={cleanupOptions.speech_focus}
+                    onChange={(e) =>
+                      setCleanupOptions((prev) => ({ ...prev, speech_focus: e.currentTarget.checked }))
+                    }
+                  />
+                  <span>Speech focus</span>
+                </label>
+                <label style={{ display: "flex", alignItems: "center", gap: 6 }}>
+                  <input
+                    type="checkbox"
+                    checked={cleanupOptions.loudness_normalize}
+                    onChange={(e) =>
+                      setCleanupOptions((prev) => ({
+                        ...prev,
+                        loudness_normalize: e.currentTarget.checked,
+                      }))
+                    }
+                  />
+                  <span>Normalize</span>
+                </label>
+              </div>
 
               {speakersInTrack.length ? (
                 <div style={{ marginTop: 8, display: "flex", flexDirection: "column", gap: 8 }}>
@@ -3533,6 +4358,11 @@ export function SubtitleEditorPage({ itemId }: { itemId: string }) {
                         <code style={{ opacity: 0.85 }} title={primaryProfilePath || ""}>
                           {profileLabel}
                         </code>
+                        {setting?.voice_profile_id ? (
+                          <div style={{ fontSize: 12, opacity: 0.65 }}>
+                            Applied library profile: <code>{setting.voice_profile_id}</code>
+                          </div>
+                        ) : null}
                         <button
                           type="button"
                           disabled={speakerSettingsBusy}
@@ -3551,9 +4381,51 @@ export function SubtitleEditorPage({ itemId }: { itemId: string }) {
                         >
                           Clear refs
                         </button>
+                        <button
+                          type="button"
+                          disabled={speakerCleanupBusyKey === speakerKey || !profilePaths.length}
+                          onClick={() => {
+                            runSpeakerCleanup(speakerKey).catch(() => undefined);
+                          }}
+                        >
+                          Clean ref
+                        </button>
+                        <button
+                          type="button"
+                          disabled={speakerCleanupBusyKey === speakerKey || !(speakerCleanupRecords[speakerKey]?.length ?? 0)}
+                          onClick={() => {
+                            useLatestCleanupResult(speakerKey).catch(() => undefined);
+                          }}
+                        >
+                          Use cleaned ref
+                        </button>
+                        <button
+                          type="button"
+                          disabled={voiceLibraryActionBusy || !profilePaths.length}
+                          onClick={() => {
+                            createVoiceLibraryFromSpeaker("memory", speakerKey).catch(() => undefined);
+                          }}
+                        >
+                          Save memory
+                        </button>
+                        <button
+                          type="button"
+                          disabled={voiceLibraryActionBusy || !profilePaths.length}
+                          onClick={() => {
+                            createVoiceLibraryFromSpeaker("character", speakerKey).catch(() => undefined);
+                          }}
+                        >
+                          Save character
+                        </button>
                         {profilePaths.length ? (
                           <div style={{ fontSize: 12, opacity: 0.75 }}>
                             {profilePaths.map((path) => fileNameFromPath(path)).join(" | ")}
+                          </div>
+                        ) : null}
+                        {(speakerCleanupRecords[speakerKey]?.length ?? 0) > 0 ? (
+                          <div style={{ fontSize: 12, opacity: 0.75 }}>
+                            Latest cleanup:{" "}
+                            {fileNameFromPath(speakerCleanupRecords[speakerKey]?.[0]?.cleaned_path ?? "")}
                           </div>
                         ) : null}
                         <div className="row" style={{ alignItems: "center", gap: 10, flexWrap: "wrap" }}>
@@ -3600,6 +4472,22 @@ export function SubtitleEditorPage({ itemId }: { itemId: string }) {
                             }}
                           >
                             {PROSODY_PRESET_OPTIONS.map((option) => (
+                              <option key={option.value} value={option.value}>
+                                {option.label}
+                              </option>
+                            ))}
+                          </select>
+                          <select
+                            value={setting?.subtitle_prosody_mode ?? ""}
+                            disabled={speakerSettingsBusy}
+                            onChange={(e) => {
+                              setSpeakerSubtitleProsodyMode(
+                                speakerKey,
+                                trimOrNull(e.currentTarget.value),
+                              ).catch(() => undefined);
+                            }}
+                          >
+                            {SUBTITLE_PROSODY_OPTIONS.map((option) => (
                               <option key={option.value} value={option.value}>
                                 {option.label}
                               </option>
@@ -3822,11 +4710,26 @@ export function SubtitleEditorPage({ itemId }: { itemId: string }) {
                             >
                               {PROSODY_PRESET_OPTIONS.map((option) => (
                                 <option key={option.value} value={option.value}>
-                                  {option.label}
-                                </option>
-                              ))}
-                            </select>
-                          </div>
+                                {option.label}
+                              </option>
+                            ))}
+                          </select>
+                          <select
+                            value={speaker.subtitle_prosody_mode ?? ""}
+                            disabled={voiceTemplateActionBusy}
+                            onChange={(e) => {
+                              updateSelectedVoiceTemplateSpeaker(speaker.speaker_key, {
+                                subtitle_prosody_mode: trimOrNull(e.currentTarget.value),
+                              }).catch(() => undefined);
+                            }}
+                          >
+                            {SUBTITLE_PROSODY_OPTIONS.map((option) => (
+                              <option key={option.value} value={option.value}>
+                                {option.label}
+                              </option>
+                            ))}
+                          </select>
+                        </div>
                           <input
                             value={templateSpeakerPronunciationDrafts[speaker.speaker_key] ?? ""}
                             disabled={voiceTemplateActionBusy}
@@ -4183,6 +5086,547 @@ export function SubtitleEditorPage({ itemId }: { itemId: string }) {
                 </div>
               )}
             </div>
+
+            <div style={{ marginTop: 16 }}>
+              <div className="row" style={{ alignItems: "center", gap: 10, flexWrap: "wrap" }}>
+                <div style={{ fontSize: 12, opacity: 0.85 }}>Cross-episode voice memory</div>
+                <button
+                  type="button"
+                  disabled={voiceLibraryBusy || voiceLibraryActionBusy}
+                  onClick={() => {
+                    Promise.all([refreshVoiceLibraryProfiles(), refreshMemorySuggestions()]).catch((e) =>
+                      setError(String(e)),
+                    );
+                  }}
+                >
+                  Reload memory profiles
+                </button>
+                <div style={{ fontSize: 12, opacity: 0.6 }}>
+                  Save recurring real speakers once and reuse them across episodes.
+                </div>
+              </div>
+              <div className="row" style={{ marginTop: 8, alignItems: "center", gap: 10, flexWrap: "wrap" }}>
+                <input
+                  value={memoryProfileName}
+                  disabled={voiceLibraryActionBusy}
+                  onChange={(e) => setMemoryProfileName(e.currentTarget.value)}
+                  placeholder="Memory profile name"
+                  style={{ minWidth: 280 }}
+                />
+                <select
+                  value={selectedMemoryProfileId}
+                  disabled={voiceLibraryBusy || voiceLibraryActionBusy || !memoryProfiles.length}
+                  onChange={(e) => setSelectedMemoryProfileId(e.currentTarget.value)}
+                  style={{ minWidth: 320 }}
+                >
+                  <option value="">Choose memory profile...</option>
+                  {memoryProfiles.map((profile) => (
+                    <option key={profile.id} value={profile.id}>
+                      {profile.name} ({profile.reference_count} ref{profile.reference_count === 1 ? "" : "s"})
+                    </option>
+                  ))}
+                </select>
+                <button
+                  type="button"
+                  disabled={voiceLibraryActionBusy || !selectedMemoryProfileDetail}
+                  onClick={() => {
+                    forkVoiceLibraryProfile("memory").catch(() => undefined);
+                  }}
+                >
+                  Fork
+                </button>
+                <button
+                  type="button"
+                  disabled={voiceLibraryActionBusy || !selectedMemoryProfileDetail}
+                  onClick={() => {
+                    addVoiceLibraryReferences("memory").catch(() => undefined);
+                  }}
+                >
+                  Add refs...
+                </button>
+                <button
+                  type="button"
+                  disabled={voiceLibraryActionBusy || !selectedMemoryProfileDetail}
+                  onClick={() => {
+                    deleteVoiceLibraryProfile("memory").catch(() => undefined);
+                  }}
+                >
+                  Delete
+                </button>
+              </div>
+              {selectedMemoryProfileDetail ? (
+                <>
+                  <div className="kv" style={{ marginTop: 10 }}>
+                    <div className="k">Selected memory profile</div>
+                    <div className="v">{selectedMemoryProfileDetail.profile.dir_path}</div>
+                  </div>
+                  <div className="row" style={{ marginTop: 8, flexWrap: "wrap" }}>
+                    <button
+                      type="button"
+                      disabled={voiceLibraryActionBusy}
+                      onClick={() =>
+                        openPathBestEffort(selectedMemoryProfileDetail.profile.dir_path).catch(() => undefined)
+                      }
+                    >
+                      Open profile folder
+                    </button>
+                  </div>
+                </>
+              ) : null}
+              <div style={{ marginTop: 10, display: "flex", flexDirection: "column", gap: 8 }}>
+                {speakersInTrack.map((speakerKey) => {
+                  const suggestions = memorySuggestions.filter(
+                    (suggestion) => suggestion.item_speaker_key === speakerKey,
+                  );
+                  return (
+                    <div
+                      key={`memory-${speakerKey}`}
+                      className="row"
+                      style={{ alignItems: "center", gap: 10, flexWrap: "wrap" }}
+                    >
+                      <code style={{ minWidth: 180 }}>
+                        {(speakerNameDrafts[speakerKey] ?? "").trim() || speakerKey}
+                      </code>
+                      <button
+                        type="button"
+                        disabled={voiceLibraryActionBusy}
+                        onClick={() => {
+                          createVoiceLibraryFromSpeaker("memory", speakerKey).catch(() => undefined);
+                        }}
+                      >
+                        Save memory
+                      </button>
+                      <button
+                        type="button"
+                        disabled={voiceLibraryActionBusy || !selectedMemoryProfileId}
+                        onClick={() => {
+                          applyVoiceLibraryProfile("memory", speakerKey, selectedMemoryProfileId).catch(
+                            () => undefined,
+                          );
+                        }}
+                      >
+                        Apply selected
+                      </button>
+                      {suggestions.slice(0, 3).map((suggestion) => (
+                        <button
+                          key={suggestion.profile_id}
+                          type="button"
+                          disabled={voiceLibraryActionBusy}
+                          onClick={() => {
+                            applyVoiceLibraryProfile("memory", speakerKey, suggestion.profile_id).catch(
+                              () => undefined,
+                            );
+                          }}
+                        >
+                          Use {suggestion.profile_name}
+                        </button>
+                      ))}
+                      <div style={{ fontSize: 12, opacity: 0.6 }}>
+                        {suggestions.length
+                          ? suggestions[0]?.match_reason
+                          : "No memory suggestion yet"}
+                      </div>
+                    </div>
+                  );
+                })}
+              </div>
+            </div>
+
+            <div style={{ marginTop: 16 }}>
+              <div className="row" style={{ alignItems: "center", gap: 10, flexWrap: "wrap" }}>
+                <div style={{ fontSize: 12, opacity: 0.85 }}>Character voice library</div>
+                <button
+                  type="button"
+                  disabled={voiceLibraryBusy || voiceLibraryActionBusy}
+                  onClick={() => {
+                    Promise.all([refreshVoiceLibraryProfiles(), refreshCharacterSuggestions()]).catch((e) =>
+                      setError(String(e)),
+                    );
+                  }}
+                >
+                  Reload character profiles
+                </button>
+                <div style={{ fontSize: 12, opacity: 0.6 }}>
+                  Save reusable narrator or teaching voices separately from real-speaker memory.
+                </div>
+              </div>
+              <div className="row" style={{ marginTop: 8, alignItems: "center", gap: 10, flexWrap: "wrap" }}>
+                <input
+                  value={characterProfileName}
+                  disabled={voiceLibraryActionBusy}
+                  onChange={(e) => setCharacterProfileName(e.currentTarget.value)}
+                  placeholder="Character profile name"
+                  style={{ minWidth: 280 }}
+                />
+                <select
+                  value={selectedCharacterProfileId}
+                  disabled={voiceLibraryBusy || voiceLibraryActionBusy || !characterProfiles.length}
+                  onChange={(e) => setSelectedCharacterProfileId(e.currentTarget.value)}
+                  style={{ minWidth: 320 }}
+                >
+                  <option value="">Choose character profile...</option>
+                  {characterProfiles.map((profile) => (
+                    <option key={profile.id} value={profile.id}>
+                      {profile.name} ({profile.reference_count} ref{profile.reference_count === 1 ? "" : "s"})
+                    </option>
+                  ))}
+                </select>
+                <button
+                  type="button"
+                  disabled={voiceLibraryActionBusy || !selectedCharacterProfileDetail}
+                  onClick={() => {
+                    forkVoiceLibraryProfile("character").catch(() => undefined);
+                  }}
+                >
+                  Fork
+                </button>
+                <button
+                  type="button"
+                  disabled={voiceLibraryActionBusy || !selectedCharacterProfileDetail}
+                  onClick={() => {
+                    addVoiceLibraryReferences("character").catch(() => undefined);
+                  }}
+                >
+                  Add refs...
+                </button>
+                <button
+                  type="button"
+                  disabled={voiceLibraryActionBusy || !selectedCharacterProfileDetail}
+                  onClick={() => {
+                    deleteVoiceLibraryProfile("character").catch(() => undefined);
+                  }}
+                >
+                  Delete
+                </button>
+              </div>
+              {selectedCharacterProfileDetail ? (
+                <>
+                  <div className="kv" style={{ marginTop: 10 }}>
+                    <div className="k">Selected character profile</div>
+                    <div className="v">{selectedCharacterProfileDetail.profile.dir_path}</div>
+                  </div>
+                  <div className="row" style={{ marginTop: 8, flexWrap: "wrap" }}>
+                    <button
+                      type="button"
+                      disabled={voiceLibraryActionBusy}
+                      onClick={() =>
+                        openPathBestEffort(selectedCharacterProfileDetail.profile.dir_path).catch(
+                          () => undefined,
+                        )
+                      }
+                    >
+                      Open profile folder
+                    </button>
+                  </div>
+                </>
+              ) : null}
+              <div style={{ marginTop: 10, display: "flex", flexDirection: "column", gap: 8 }}>
+                {speakersInTrack.map((speakerKey) => {
+                  const suggestions = characterSuggestions.filter(
+                    (suggestion) => suggestion.item_speaker_key === speakerKey,
+                  );
+                  return (
+                    <div
+                      key={`character-${speakerKey}`}
+                      className="row"
+                      style={{ alignItems: "center", gap: 10, flexWrap: "wrap" }}
+                    >
+                      <code style={{ minWidth: 180 }}>
+                        {(speakerNameDrafts[speakerKey] ?? "").trim() || speakerKey}
+                      </code>
+                      <button
+                        type="button"
+                        disabled={voiceLibraryActionBusy}
+                        onClick={() => {
+                          createVoiceLibraryFromSpeaker("character", speakerKey).catch(() => undefined);
+                        }}
+                      >
+                        Save character
+                      </button>
+                      <button
+                        type="button"
+                        disabled={voiceLibraryActionBusy || !selectedCharacterProfileId}
+                        onClick={() => {
+                          applyVoiceLibraryProfile(
+                            "character",
+                            speakerKey,
+                            selectedCharacterProfileId,
+                          ).catch(() => undefined);
+                        }}
+                      >
+                        Apply selected
+                      </button>
+                      {suggestions.slice(0, 3).map((suggestion) => (
+                        <button
+                          key={suggestion.profile_id}
+                          type="button"
+                          disabled={voiceLibraryActionBusy}
+                          onClick={() => {
+                            applyVoiceLibraryProfile("character", speakerKey, suggestion.profile_id).catch(
+                              () => undefined,
+                            );
+                          }}
+                        >
+                          Use {suggestion.profile_name}
+                        </button>
+                      ))}
+                      <div style={{ fontSize: 12, opacity: 0.6 }}>
+                        {suggestions.length
+                          ? suggestions[0]?.match_reason
+                          : "No character suggestion yet"}
+                      </div>
+                    </div>
+                  );
+                })}
+              </div>
+            </div>
+
+            <div style={{ marginTop: 16 }}>
+              <div className="row" style={{ alignItems: "center", gap: 10, flexWrap: "wrap" }}>
+                <div style={{ fontSize: 12, opacity: 0.85 }}>Batch dubbing</div>
+                <button
+                  type="button"
+                  disabled={libraryItemsBusy || batchQueueBusy}
+                  onClick={() => {
+                    refreshLibraryItems().catch((e) => setError(String(e)));
+                  }}
+                >
+                  Reload items
+                </button>
+                <button
+                  type="button"
+                  disabled={batchQueueBusy}
+                  onClick={() => setBatchSelectedItemIds([itemId])}
+                >
+                  Current item only
+                </button>
+                <button
+                  type="button"
+                  disabled={batchQueueBusy || !batchLibraryItems.length}
+                  onClick={() => setBatchSelectedItemIds(batchLibraryItems.map((value) => value.id))}
+                >
+                  Select all listed
+                </button>
+              </div>
+              <div className="row" style={{ marginTop: 8, alignItems: "center", gap: 10, flexWrap: "wrap" }}>
+                <label style={{ display: "flex", alignItems: "center", gap: 8 }}>
+                  <input
+                    type="checkbox"
+                    checked={batchQueueQc}
+                    onChange={(e) => setBatchQueueQc(e.currentTarget.checked)}
+                  />
+                  <span>Queue QC</span>
+                </label>
+                <label style={{ display: "flex", alignItems: "center", gap: 8 }}>
+                  <input
+                    type="checkbox"
+                    checked={batchQueueExportPack}
+                    onChange={(e) => setBatchQueueExportPack(e.currentTarget.checked)}
+                  />
+                  <span>Queue export packs</span>
+                </label>
+                <div style={{ fontSize: 12, opacity: 0.6 }}>
+                  Uses the currently selected template and cast pack if you set them above.
+                </div>
+                <button type="button" disabled={batchQueueBusy} onClick={queueLocalizationBatch}>
+                  Queue batch dubbing
+                </button>
+              </div>
+              <div
+                style={{
+                  marginTop: 10,
+                  maxHeight: 180,
+                  overflow: "auto",
+                  border: "1px solid #e5e7eb",
+                  borderRadius: 8,
+                  padding: 10,
+                }}
+              >
+                <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
+                  {batchLibraryItems.map((entry) => (
+                    <label
+                      key={`batch-${entry.id}`}
+                      style={{ display: "flex", alignItems: "center", gap: 8 }}
+                    >
+                      <input
+                        type="checkbox"
+                        checked={batchSelectedItemIds.includes(entry.id)}
+                        onChange={(e) => toggleBatchItem(entry.id, e.currentTarget.checked)}
+                      />
+                      <span>{entry.title || fileNameFromPath(entry.media_path) || entry.id}</span>
+                      {entry.id === itemId ? <code>current</code> : null}
+                    </label>
+                  ))}
+                </div>
+              </div>
+              {batchQueueSummary ? (
+                <div style={{ marginTop: 10, display: "flex", flexDirection: "column", gap: 6 }}>
+                  <div style={{ fontSize: 12, opacity: 0.75 }}>
+                    Batch <code>{batchQueueSummary.batch_id}</code> queued {batchQueueSummary.queued_jobs_total} job(s).
+                  </div>
+                  {batchQueueSummary.items.slice(0, 12).map((entry) => (
+                    <div key={`batch-summary-${entry.item_id}`} style={{ fontSize: 12, opacity: 0.8 }}>
+                      {entry.title}: {entry.queued_jobs.length} job(s)
+                      {entry.applied_mapping_count
+                        ? `, ${entry.applied_mapping_count} mapping(s)`
+                        : ""}
+                      {entry.warnings.length ? `, warning: ${entry.warnings[0]}` : ""}
+                    </div>
+                  ))}
+                </div>
+              ) : null}
+            </div>
+
+            <div style={{ marginTop: 16 }}>
+              <div className="row" style={{ alignItems: "center", gap: 10, flexWrap: "wrap" }}>
+                <div style={{ fontSize: 12, opacity: 0.85 }}>A/B voice preview</div>
+                <div style={{ fontSize: 12, opacity: 0.6 }}>
+                  Queue two alternate clone variants for one speaker, then compare them in Artifacts.
+                </div>
+              </div>
+              <div className="row" style={{ marginTop: 8, alignItems: "center", gap: 10, flexWrap: "wrap" }}>
+                <select
+                  value={abSpeakerKey}
+                  disabled={abPreviewBusy || !speakersInTrack.length}
+                  onChange={(e) => setAbSpeakerKey(e.currentTarget.value)}
+                >
+                  <option value="">Choose speaker...</option>
+                  {speakersInTrack.map((speakerKey) => (
+                    <option key={`ab-speaker-${speakerKey}`} value={speakerKey}>
+                      {(speakerNameDrafts[speakerKey] ?? "").trim() || speakerKey}
+                    </option>
+                  ))}
+                </select>
+                <input
+                  value={abVariantALabel}
+                  disabled={abPreviewBusy}
+                  onChange={(e) => setAbVariantALabel(e.currentTarget.value)}
+                  placeholder="variant_a"
+                  style={{ width: 140 }}
+                />
+                <input
+                  value={abVariantBLabel}
+                  disabled={abPreviewBusy}
+                  onChange={(e) => setAbVariantBLabel(e.currentTarget.value)}
+                  placeholder="variant_b"
+                  style={{ width: 140 }}
+                />
+                <button type="button" disabled={abPreviewBusy || !trackId || !abSpeakerKey} onClick={queueAbPreview}>
+                  Queue A/B preview
+                </button>
+                <button type="button" disabled={abPreviewBusy || !abSpeakerKey} onClick={() => promoteAbVariant("a").catch(() => undefined)}>
+                  Promote A
+                </button>
+                <button type="button" disabled={abPreviewBusy || !abSpeakerKey} onClick={() => promoteAbVariant("b").catch(() => undefined)}>
+                  Promote B
+                </button>
+              </div>
+              <div className="row" style={{ marginTop: 10, gap: 12, flexWrap: "wrap", alignItems: "stretch" }}>
+                {([
+                  ["A", abVariantA, "a"],
+                  ["B", abVariantB, "b"],
+                ] as const).map(([label, variant, key]) => (
+                  <div
+                    key={`ab-${key}`}
+                    style={{
+                      flex: "1 1 320px",
+                      display: "flex",
+                      flexDirection: "column",
+                      gap: 8,
+                      border: "1px solid #e5e7eb",
+                      borderRadius: 8,
+                      padding: 10,
+                    }}
+                  >
+                    <div style={{ fontWeight: 600 }}>Variant {label}</div>
+                    <div style={{ fontSize: 12, opacity: 0.75 }}>
+                      {variant.tts_voice_profile_paths.length
+                        ? variant.tts_voice_profile_paths.map((path) => fileNameFromPath(path)).join(" | ")
+                        : "Uses current speaker references"}
+                    </div>
+                    <button
+                      type="button"
+                      disabled={abPreviewBusy}
+                      onClick={() => {
+                        pickAbVariantReferences(key).catch(() => undefined);
+                      }}
+                    >
+                      Choose refs...
+                    </button>
+                    <select
+                      value={variant.render_mode ?? ""}
+                      disabled={abPreviewBusy}
+                      onChange={(e) =>
+                        setAbVariantField(key, { render_mode: trimOrNull(e.currentTarget.value) })
+                      }
+                    >
+                      {RENDER_MODE_OPTIONS.map((option) => (
+                        <option key={option.value} value={option.value}>
+                          {option.label}
+                        </option>
+                      ))}
+                    </select>
+                    <select
+                      value={variant.style_preset ?? ""}
+                      disabled={abPreviewBusy}
+                      onChange={(e) =>
+                        setAbVariantField(key, { style_preset: trimOrNull(e.currentTarget.value) })
+                      }
+                    >
+                      {STYLE_PRESET_OPTIONS.map((option) => (
+                        <option key={option.value} value={option.value}>
+                          {option.label}
+                        </option>
+                      ))}
+                    </select>
+                    <select
+                      value={variant.prosody_preset ?? ""}
+                      disabled={abPreviewBusy}
+                      onChange={(e) =>
+                        setAbVariantField(key, { prosody_preset: trimOrNull(e.currentTarget.value) })
+                      }
+                    >
+                      {PROSODY_PRESET_OPTIONS.map((option) => (
+                        <option key={option.value} value={option.value}>
+                          {option.label}
+                        </option>
+                      ))}
+                    </select>
+                    <select
+                      value={variant.subtitle_prosody_mode ?? ""}
+                      disabled={abPreviewBusy}
+                      onChange={(e) =>
+                        setAbVariantField(key, {
+                          subtitle_prosody_mode: trimOrNull(e.currentTarget.value),
+                        })
+                      }
+                    >
+                      {SUBTITLE_PROSODY_OPTIONS.map((option) => (
+                        <option key={option.value} value={option.value}>
+                          {option.label}
+                        </option>
+                      ))}
+                    </select>
+                    <input
+                      value={variant.pronunciation_overrides ?? ""}
+                      disabled={abPreviewBusy}
+                      onChange={(e) =>
+                        setAbVariantField(key, {
+                          pronunciation_overrides: trimOrNull(e.currentTarget.value),
+                        })
+                      }
+                      placeholder="Pronunciation locks"
+                    />
+                  </div>
+                ))}
+              </div>
+              {abPreviewSummary ? (
+                <div style={{ marginTop: 10, fontSize: 12, opacity: 0.8 }}>
+                  Batch <code>{abPreviewSummary.batch_id}</code> queued {abPreviewSummary.queued_jobs.length} job(s).
+                  Look for <code>{abPreviewSummary.variant_a_label}</code> and <code>{abPreviewSummary.variant_b_label}</code> in Artifacts.
+                </div>
+              ) : null}
+            </div>
           </div>
         ) : null}
       </div>
@@ -4190,7 +5634,8 @@ export function SubtitleEditorPage({ itemId }: { itemId: string }) {
       <div className="card">
         <h2>QC report</h2>
         <div style={{ color: "#4b5563" }}>
-          Flags subtitle/dub issues (CPS, long lines, overlaps, empty text, timing mismatches).
+          Flags subtitle and voice issues: CPS, long lines, overlaps, timing mismatches, silent clips,
+          noisy references, clipping, and weak clone similarity.
         </div>
         <div className="row" style={{ flexWrap: "wrap" }}>
           <button type="button" disabled={busy || !trackId} onClick={enqueueQcReport}>
@@ -4221,6 +5666,66 @@ export function SubtitleEditorPage({ itemId }: { itemId: string }) {
                   : "-"}
               </div>
             </div>
+            <div className="kv">
+              <div className="k">Voice references</div>
+              <div className="v">{Array.isArray(qcReport?.voice?.references) ? qcReport.voice.references.length : 0}</div>
+            </div>
+            <div className="kv">
+              <div className="k">Voice outputs</div>
+              <div className="v">{Array.isArray(qcReport?.voice?.outputs) ? qcReport.voice.outputs.length : 0}</div>
+            </div>
+
+            {Array.isArray(qcReport?.voice?.references) && qcReport.voice.references.length ? (
+              <div style={{ marginTop: 12 }}>
+                <div style={{ fontSize: 12, opacity: 0.85, marginBottom: 6 }}>Reference QC</div>
+                <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
+                  {qcReport.voice.references.slice(0, 24).map((entry: any, idx: number) => (
+                    <div
+                      key={`voice-ref-${entry?.speaker_key ?? "speaker"}-${idx}`}
+                      className="row"
+                      style={{ alignItems: "center", gap: 10, flexWrap: "wrap" }}
+                    >
+                      <code>{String(entry?.speaker_key ?? "-")}</code>
+                      <span>{fileNameFromPath(String(entry?.path ?? "")) || String(entry?.path ?? "-")}</span>
+                      <span style={{ fontSize: 12, opacity: 0.7 }}>
+                        {`dur ${Math.round(Number(entry?.stats?.duration_ms ?? 0))} ms | rms ${Number(entry?.stats?.rms ?? 0).toFixed(3)} | silence ${Math.round(Number(entry?.stats?.silence_ratio ?? 0) * 100)}%`}
+                      </span>
+                      {Array.isArray(entry?.warnings) && entry.warnings.length ? (
+                        <span style={{ fontSize: 12, color: "#92400e" }}>{entry.warnings[0]}</span>
+                      ) : (
+                        <span style={{ fontSize: 12, color: "#166534" }}>No warnings</span>
+                      )}
+                    </div>
+                  ))}
+                </div>
+              </div>
+            ) : null}
+
+            {Array.isArray(qcReport?.voice?.outputs) && qcReport.voice.outputs.length ? (
+              <div style={{ marginTop: 12 }}>
+                <div style={{ fontSize: 12, opacity: 0.85, marginBottom: 6 }}>Dub output QC</div>
+                <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
+                  {qcReport.voice.outputs.slice(0, 24).map((entry: any, idx: number) => (
+                    <div
+                      key={`voice-out-${entry?.segment_index ?? idx}-${idx}`}
+                      className="row"
+                      style={{ alignItems: "center", gap: 10, flexWrap: "wrap" }}
+                    >
+                      <code>Seg {Number(entry?.segment_index ?? 0) + 1}</code>
+                      <span>{String(entry?.speaker_key ?? "speaker?")}</span>
+                      <span style={{ fontSize: 12, opacity: 0.7 }}>
+                        {`pitch ${entry?.stats?.pitch_hz ? Number(entry.stats.pitch_hz).toFixed(1) : "-"} Hz | silence ${Math.round(Number(entry?.stats?.silence_ratio ?? 0) * 100)}%`}
+                      </span>
+                      {Array.isArray(entry?.warnings) && entry.warnings.length ? (
+                        <span style={{ fontSize: 12, color: "#92400e" }}>{entry.warnings[0]}</span>
+                      ) : (
+                        <span style={{ fontSize: 12, color: "#166534" }}>No warnings</span>
+                      )}
+                    </div>
+                  ))}
+                </div>
+              </div>
+            ) : null}
 
             <div className="table-wrap">
               <table>
@@ -4266,7 +5771,14 @@ export function SubtitleEditorPage({ itemId }: { itemId: string }) {
                           </td>
                           <td>{formatTc(Number(issue?.start_ms ?? 0))}</td>
                           <td>{formatTc(Number(issue?.end_ms ?? 0))}</td>
-                          <td style={{ maxWidth: 680 }}>{String(issue?.message ?? "-")}</td>
+                          <td style={{ maxWidth: 680 }}>
+                            {String(issue?.message ?? "-")}
+                            {issue?.speaker_key ? (
+                              <div style={{ fontSize: 12, opacity: 0.7 }}>
+                                Speaker: <code>{String(issue.speaker_key)}</code>
+                              </div>
+                            ) : null}
+                          </td>
                           <td>
                             <div className="row" style={{ marginTop: 0 }}>
                               <button
@@ -4275,6 +5787,17 @@ export function SubtitleEditorPage({ itemId }: { itemId: string }) {
                                 onClick={() => jumpToSegment(segIndex)}
                               >
                                 Jump
+                              </button>
+                              <button
+                                type="button"
+                                disabled={busy || !issue?.artifact_path}
+                                onClick={() =>
+                                  revealItemInDir(String(issue?.artifact_path ?? "")).catch((e) =>
+                                    setError(String(e)),
+                                  )
+                                }
+                              >
+                                Reveal
                               </button>
                             </div>
                           </td>

@@ -30,6 +30,19 @@ impl AppPaths {
         self.base_dir.join("voice_templates")
     }
 
+    pub fn voice_library_dir(&self) -> PathBuf {
+        self.base_dir.join("voice_library")
+    }
+
+    pub fn voice_library_profile_dir(&self, profile_id: &str) -> PathBuf {
+        self.voice_library_dir().join(profile_id)
+    }
+
+    pub fn voice_library_profile_refs_dir(&self, profile_id: &str) -> PathBuf {
+        self.voice_library_profile_dir(profile_id)
+            .join("references")
+    }
+
     pub fn voice_template_dir(&self, template_id: &str) -> PathBuf {
         self.voice_templates_dir().join(template_id)
     }
@@ -48,6 +61,10 @@ impl AppPaths {
 
     pub fn derived_item_dir(&self, item_id: &str) -> PathBuf {
         self.derived_items_dir().join(item_id)
+    }
+
+    pub fn derived_item_voice_dir(&self, item_id: &str) -> PathBuf {
+        self.derived_item_dir(item_id).join("voice")
     }
 
     pub fn job_artifacts_dir(&self, job_id: &str) -> PathBuf {
@@ -341,6 +358,7 @@ impl AppPaths {
         std::fs::create_dir_all(self.derived_items_dir())?;
         std::fs::create_dir_all(self.derived_jobs_dir())?;
         std::fs::create_dir_all(self.voice_templates_dir())?;
+        std::fs::create_dir_all(self.voice_library_dir())?;
         std::fs::create_dir_all(self.db_dir())?;
         std::fs::create_dir_all(self.logs_dir())?;
         std::fs::create_dir_all(self.job_logs_dir())?;

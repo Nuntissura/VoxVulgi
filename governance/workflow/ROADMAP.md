@@ -25,15 +25,15 @@ Date: 2026-02-19
 - WP-0080: Per-speaker style presets (neutral, documentary, game-show, soft, authoritative). DONE.
 - WP-0081: Pronunciation locks for names, places, and glossary terms. DONE.
 - WP-0082: Emotion/prosody controls and reusable delivery presets. DONE.
-- WP-0083: Voice QC for references and dubbed outputs. BACKLOG.
-- WP-0084: Batch dubbing across folders, playlists, seasons, or selected item sets. BACKLOG.
-- WP-0085: A/B voice previewing before committing to a final voice setup. BACKLOG.
-- WP-0086: Export stems and alternate dubbed versions. BACKLOG.
-- WP-0087: Cross-episode voice memory for recurring speakers. BACKLOG.
-- WP-0088: Reference cleanup before cloning (denoise, de-reverb, isolate, normalize). BACKLOG.
+- WP-0083: Voice QC for references and dubbed outputs. DONE.
+- WP-0084: Batch dubbing across folders, playlists, seasons, or selected item sets. DONE.
+- WP-0085: A/B voice previewing before committing to a final voice setup. DONE.
+- WP-0086: Export stems and alternate dubbed versions. DONE.
+- WP-0087: Cross-episode voice memory for recurring speakers. DONE.
+- WP-0088: Reference cleanup before cloning (denoise, de-reverb, isolate, normalize). DONE.
 - WP-0089: Hybrid mode combining cloned major speakers with standard TTS for minor speakers. DONE.
-- WP-0090: Subtitle-aware prosody driven by punctuation, line breaks, and timing structure. IN_PROGRESS.
-- WP-0091: Character libraries for reusable fictional narrator or teaching voices. BACKLOG.
+- WP-0090: Subtitle-aware prosody driven by punctuation, line breaks, and timing structure. DONE.
+- WP-0091: Character libraries for reusable fictional narrator or teaching voices. DONE.
 
 ## Phase 0 — Decisions (1–2 days)
 

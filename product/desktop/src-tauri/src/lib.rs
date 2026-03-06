@@ -8,7 +8,7 @@ use voxvulgi_engine::models::ModelStore;
 use voxvulgi_engine::paths::AppPaths;
 use voxvulgi_engine::{
     config, db, diagnostics, jobs, library, speakers, subscriptions, subtitle_tracks, subtitles,
-    tools, voice_cast_packs, voice_templates,
+    tools, voice_cast_packs, voice_cleanup, voice_library, voice_templates,
 };
 
 #[derive(Debug, Clone, serde::Deserialize)]
@@ -807,6 +807,8 @@ fn item_qc_report_v1_load(
     itemId: Option<String>,
     track_id: Option<String>,
     trackId: Option<String>,
+    variant_label: Option<String>,
+    variantLabel: Option<String>,
 ) -> Result<Option<serde_json::Value>, String> {
     let item_id = item_id
         .or(itemId)
@@ -819,11 +821,19 @@ fn item_qc_report_v1_load(
         .filter(|v| !v.is_empty())
         .ok_or_else(|| "missing required key trackId".to_string())?;
 
+    let variant_label = variant_label
+        .or(variantLabel)
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty());
+    let file_name = match variant_label.as_deref() {
+        Some(label) => format!("qc_report_v1_{track_id}_{label}.json"),
+        None => format!("qc_report_v1_{track_id}.json"),
+    };
     let path = state
         .paths
         .derived_item_dir(&item_id)
         .join("qc")
-        .join(format!("qc_report_v1_{track_id}.json"));
+        .join(file_name);
     if !path.exists() {
         return Ok(None);
     }
@@ -933,6 +943,27 @@ fn item_artifacts_list_v1(
             .join("dub_voice_preserving_v1")
             .join("manifest.json"),
     );
+    let voice_preserving_variants_dir = item_dir
+        .join("tts_preview")
+        .join("dub_voice_preserving_v1")
+        .join("variants");
+    if let Ok(entries) = std::fs::read_dir(&voice_preserving_variants_dir) {
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if !path.is_dir() {
+                continue;
+            }
+            let Some(label) = path.file_name().and_then(|value| value.to_str()) else {
+                continue;
+            };
+            push(
+                &format!("tts_voice_preserving_manifest_variant_{label}"),
+                &format!("TTS manifest (voice-preserving {label})"),
+                "TTS alternates",
+                path.join("manifest.json"),
+            );
+        }
+    }
 
     // Dub preview
     push(
@@ -940,6 +971,14 @@ fn item_artifacts_list_v1(
         "Mix dub preview (WAV)",
         "Dub preview",
         item_dir.join("dub_preview").join("mix_dub_preview_v1.wav"),
+    );
+    push(
+        "dub_speech_stem",
+        "Speech stem (WAV)",
+        "Dub preview",
+        item_dir
+            .join("dub_preview")
+            .join("speech_dub_preview_v1.wav"),
     );
     push(
         "dub_mux_mp4",
@@ -953,6 +992,42 @@ fn item_artifacts_list_v1(
         "Dub preview",
         item_dir.join("dub_preview").join("mux_dub_preview_v1.mkv"),
     );
+    let alternate_dir = item_dir.join("dub_preview").join("alternates");
+    if let Ok(entries) = std::fs::read_dir(&alternate_dir) {
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if !path.is_dir() {
+                continue;
+            }
+            let Some(label) = path.file_name().and_then(|value| value.to_str()) else {
+                continue;
+            };
+            push(
+                &format!("dub_mix_variant_{label}"),
+                &format!("Mix dub preview ({label})"),
+                "Dub alternates",
+                path.join("mix_dub_preview_v1.wav"),
+            );
+            push(
+                &format!("dub_speech_stem_variant_{label}"),
+                &format!("Speech stem ({label})"),
+                "Dub alternates",
+                path.join("speech_dub_preview_v1.wav"),
+            );
+            push(
+                &format!("dub_mux_mp4_variant_{label}"),
+                &format!("Mux dub preview MP4 ({label})"),
+                "Dub alternates",
+                path.join("mux_dub_preview_v1.mp4"),
+            );
+            push(
+                &format!("dub_mux_mkv_variant_{label}"),
+                &format!("Mux dub preview MKV ({label})"),
+                "Dub alternates",
+                path.join("mux_dub_preview_v1.mkv"),
+            );
+        }
+    }
 
     // Export
     push(
@@ -961,6 +1036,65 @@ fn item_artifacts_list_v1(
         "Export",
         item_dir.join("exports").join("export_pack_v1.zip"),
     );
+    let export_dir = item_dir.join("exports");
+    if let Ok(entries) = std::fs::read_dir(&export_dir) {
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if !path.is_file() {
+                continue;
+            }
+            let Some(name) = path.file_name().and_then(|value| value.to_str()) else {
+                continue;
+            };
+            if name == "export_pack_v1.zip" || !name.to_ascii_lowercase().ends_with(".zip") {
+                continue;
+            }
+            push(
+                &format!("export_{}", name.replace('.', "_")),
+                &format!("Export pack ({name})"),
+                "Export alternates",
+                path,
+            );
+        }
+    }
+
+    let voice_cleanup_dir = item_dir.join("voice").join("cleanup");
+    if let Ok(speaker_dirs) = std::fs::read_dir(&voice_cleanup_dir) {
+        for speaker_dir in speaker_dirs.flatten() {
+            let speaker_path = speaker_dir.path();
+            if !speaker_path.is_dir() {
+                continue;
+            }
+            let speaker_label = speaker_path
+                .file_name()
+                .and_then(|value| value.to_str())
+                .unwrap_or("speaker");
+            if let Ok(cleanups) = std::fs::read_dir(&speaker_path) {
+                for cleanup in cleanups.flatten() {
+                    let cleanup_path = cleanup.path();
+                    if !cleanup_path.is_dir() {
+                        continue;
+                    }
+                    let cleanup_id = cleanup_path
+                        .file_name()
+                        .and_then(|value| value.to_str())
+                        .unwrap_or("cleanup");
+                    push(
+                        &format!("voice_cleanup_{speaker_label}_{cleanup_id}"),
+                        &format!("Voice cleanup {speaker_label} ({cleanup_id})"),
+                        "Voice cleanup",
+                        cleanup_path.join("cleaned_ref.wav"),
+                    );
+                    push(
+                        &format!("voice_cleanup_manifest_{speaker_label}_{cleanup_id}"),
+                        &format!("Voice cleanup manifest {speaker_label} ({cleanup_id})"),
+                        "Voice cleanup",
+                        cleanup_path.join("manifest.json"),
+                    );
+                }
+            }
+        }
+    }
 
     // QC reports
     let qc_dir = item_dir.join("qc");
@@ -1761,6 +1895,7 @@ fn speakers_upsert(
     item_id: String,
     speaker_key: String,
     display_name: Option<String>,
+    voice_profile_id: Option<String>,
     tts_voice_id: Option<String>,
     tts_voice_profile_path: Option<String>,
     tts_voice_profile_paths: Option<Vec<String>>,
@@ -1768,12 +1903,14 @@ fn speakers_upsert(
     prosody_preset: Option<String>,
     pronunciation_overrides: Option<String>,
     render_mode: Option<String>,
+    subtitle_prosody_mode: Option<String>,
 ) -> Result<speakers::ItemSpeakerSetting, String> {
     speakers::upsert_item_speaker_setting(
         &state.paths,
         &item_id,
         &speaker_key,
         display_name,
+        voice_profile_id,
         tts_voice_id,
         tts_voice_profile_path,
         tts_voice_profile_paths,
@@ -1781,6 +1918,7 @@ fn speakers_upsert(
         prosody_preset,
         pronunciation_overrides,
         render_mode,
+        subtitle_prosody_mode,
     )
     .map_err(|e| e.to_string())
 }
@@ -1962,8 +2100,7 @@ async fn voice_cast_packs_update(
 ) -> Result<voice_cast_packs::VoiceCastPackDetail, String> {
     let paths = state.paths.clone();
     tauri::async_runtime::spawn_blocking(move || {
-        voice_cast_packs::update_voice_cast_pack(&paths, &pack_id, &name)
-            .map_err(|e| e.to_string())
+        voice_cast_packs::update_voice_cast_pack(&paths, &pack_id, &name).map_err(|e| e.to_string())
     })
     .await
     .map_err(|e| e.to_string())?
@@ -1992,6 +2129,222 @@ async fn voice_cast_packs_apply_to_item(
     let paths = state.paths.clone();
     tauri::async_runtime::spawn_blocking(move || {
         voice_cast_packs::apply_voice_cast_pack_to_item(&paths, &item_id, &pack_id, &mappings)
+            .map_err(|e| e.to_string())
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
+#[tauri::command]
+async fn voice_library_list(
+    state: State<'_, AppState>,
+    kind: Option<String>,
+) -> Result<Vec<voice_library::VoiceLibraryProfile>, String> {
+    let paths = state.paths.clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        voice_library::list_voice_library_profiles(&paths, kind.as_deref())
+            .map_err(|e| e.to_string())
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
+#[tauri::command]
+async fn voice_library_get(
+    state: State<'_, AppState>,
+    profile_id: String,
+) -> Result<voice_library::VoiceLibraryProfileDetail, String> {
+    let paths = state.paths.clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        voice_library::get_voice_library_profile(&paths, &profile_id).map_err(|e| e.to_string())
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
+#[tauri::command]
+async fn voice_library_create(
+    state: State<'_, AppState>,
+    kind: String,
+    name: String,
+    description: Option<String>,
+) -> Result<voice_library::VoiceLibraryProfileDetail, String> {
+    let paths = state.paths.clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        voice_library::create_voice_library_profile(&paths, &kind, &name, description)
+            .map_err(|e| e.to_string())
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
+#[tauri::command]
+async fn voice_library_create_from_item_speaker(
+    state: State<'_, AppState>,
+    item_id: String,
+    speaker_key: String,
+    kind: String,
+    name: String,
+    description: Option<String>,
+) -> Result<voice_library::VoiceLibraryProfileDetail, String> {
+    let paths = state.paths.clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        voice_library::create_voice_library_profile_from_item_speaker(
+            &paths,
+            &item_id,
+            &speaker_key,
+            &kind,
+            &name,
+            description,
+        )
+        .map_err(|e| e.to_string())
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
+#[tauri::command]
+async fn voice_library_update(
+    state: State<'_, AppState>,
+    profile_id: String,
+    update: voice_library::VoiceLibraryProfileUpdate,
+) -> Result<voice_library::VoiceLibraryProfileDetail, String> {
+    let paths = state.paths.clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        voice_library::update_voice_library_profile(&paths, &profile_id, update)
+            .map_err(|e| e.to_string())
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
+#[tauri::command]
+async fn voice_library_add_reference(
+    state: State<'_, AppState>,
+    profile_id: String,
+    source_path: String,
+    label: Option<String>,
+) -> Result<voice_library::VoiceLibraryProfileDetail, String> {
+    let paths = state.paths.clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        voice_library::add_voice_library_reference(&paths, &profile_id, &source_path, label)
+            .map_err(|e| e.to_string())
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
+#[tauri::command]
+async fn voice_library_remove_reference(
+    state: State<'_, AppState>,
+    profile_id: String,
+    reference_id: String,
+) -> Result<voice_library::VoiceLibraryProfileDetail, String> {
+    let paths = state.paths.clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        voice_library::remove_voice_library_reference(&paths, &profile_id, &reference_id)
+            .map_err(|e| e.to_string())
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
+#[tauri::command]
+async fn voice_library_apply_to_item(
+    state: State<'_, AppState>,
+    item_id: String,
+    speaker_key: String,
+    profile_id: String,
+) -> Result<speakers::ItemSpeakerSetting, String> {
+    let paths = state.paths.clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        voice_library::apply_voice_library_profile_to_item(
+            &paths,
+            &item_id,
+            &speaker_key,
+            &profile_id,
+        )
+        .map_err(|e| e.to_string())
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
+#[tauri::command]
+async fn voice_library_fork(
+    state: State<'_, AppState>,
+    profile_id: String,
+    name: String,
+) -> Result<voice_library::VoiceLibraryProfileDetail, String> {
+    let paths = state.paths.clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        voice_library::fork_voice_library_profile(&paths, &profile_id, &name)
+            .map_err(|e| e.to_string())
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
+#[tauri::command]
+async fn voice_library_delete(
+    state: State<'_, AppState>,
+    profile_id: String,
+) -> Result<(), String> {
+    let paths = state.paths.clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        voice_library::delete_voice_library_profile(&paths, &profile_id).map_err(|e| e.to_string())
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
+#[tauri::command]
+async fn voice_library_suggest_for_item(
+    state: State<'_, AppState>,
+    item_id: String,
+    kind: Option<String>,
+) -> Result<Vec<voice_library::VoiceLibrarySuggestion>, String> {
+    let paths = state.paths.clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        voice_library::suggest_voice_library_profiles_for_item(&paths, &item_id, kind.as_deref())
+            .map_err(|e| e.to_string())
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
+#[tauri::command]
+async fn voice_cleanup_run_for_speaker(
+    state: State<'_, AppState>,
+    item_id: String,
+    speaker_key: String,
+    source_path: String,
+    options: Option<voice_cleanup::VoiceReferenceCleanupOptions>,
+) -> Result<voice_cleanup::VoiceReferenceCleanupRecord, String> {
+    let paths = state.paths.clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        voice_cleanup::run_item_speaker_reference_cleanup(
+            &paths,
+            &item_id,
+            &speaker_key,
+            &source_path,
+            options.unwrap_or_default(),
+        )
+        .map_err(|e| e.to_string())
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
+#[tauri::command]
+async fn voice_cleanup_list_for_speaker(
+    state: State<'_, AppState>,
+    item_id: String,
+    speaker_key: String,
+) -> Result<Vec<voice_cleanup::VoiceReferenceCleanupRecord>, String> {
+    let paths = state.paths.clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        voice_cleanup::list_item_speaker_cleanups(&paths, &item_id, &speaker_key)
             .map_err(|e| e.to_string())
     })
     .await
@@ -2507,8 +2860,21 @@ fn jobs_enqueue_qc_report_v1(
     state: State<'_, AppState>,
     item_id: String,
     track_id: String,
+    variant_label: Option<String>,
+    variantLabel: Option<String>,
 ) -> Result<jobs::JobRow, String> {
-    jobs::enqueue_qc_report_v1(&state.paths, item_id, track_id).map_err(|e| e.to_string())
+    let variant_label = variant_label.or(variantLabel);
+    if variant_label
+        .as_deref()
+        .map(|value| value.trim())
+        .filter(|value| !value.is_empty())
+        .is_some()
+    {
+        jobs::enqueue_qc_report_v1_with_variant(&state.paths, item_id, track_id, variant_label)
+            .map_err(|e| e.to_string())
+    } else {
+        jobs::enqueue_qc_report_v1(&state.paths, item_id, track_id).map_err(|e| e.to_string())
+    }
 }
 
 #[tauri::command]
@@ -2517,6 +2883,22 @@ fn jobs_enqueue_export_pack_v1(
     item_id: String,
 ) -> Result<jobs::JobRow, String> {
     jobs::enqueue_export_pack_v1(&state.paths, item_id).map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+fn jobs_enqueue_localization_batch_v1(
+    state: State<'_, AppState>,
+    request: jobs::LocalizationBatchRequest,
+) -> Result<jobs::LocalizationBatchQueueSummary, String> {
+    jobs::enqueue_localization_batch_v1(&state.paths, request).map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+fn jobs_enqueue_voice_ab_preview_v1(
+    state: State<'_, AppState>,
+    request: jobs::VoiceAbPreviewRequest,
+) -> Result<jobs::VoiceAbPreviewQueueSummary, String> {
+    jobs::enqueue_voice_ab_preview_v1(&state.paths, request).map_err(|e| e.to_string())
 }
 
 #[tauri::command]
@@ -2726,6 +3108,8 @@ pub fn run() {
             jobs_enqueue_clean_vocals_v1,
             jobs_enqueue_qc_report_v1,
             jobs_enqueue_export_pack_v1,
+            jobs_enqueue_localization_batch_v1,
+            jobs_enqueue_voice_ab_preview_v1,
             jobs_enqueue_translate_local,
             jobs_flush_cache,
             jobs_list,
@@ -2741,6 +3125,19 @@ pub fn run() {
             models_install_demo,
             speakers_list,
             speakers_upsert,
+            voice_library_add_reference,
+            voice_library_apply_to_item,
+            voice_library_create,
+            voice_library_create_from_item_speaker,
+            voice_library_delete,
+            voice_library_fork,
+            voice_library_get,
+            voice_library_list,
+            voice_library_remove_reference,
+            voice_library_suggest_for_item,
+            voice_library_update,
+            voice_cleanup_list_for_speaker,
+            voice_cleanup_run_for_speaker,
             voice_templates_apply_to_item,
             voice_templates_add_reference,
             voice_templates_create_from_item,

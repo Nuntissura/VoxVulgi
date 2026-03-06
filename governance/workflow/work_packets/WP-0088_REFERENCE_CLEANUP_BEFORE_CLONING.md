@@ -3,7 +3,7 @@
 ## Metadata
 - ID: WP-0088
 - Owner: Codex
-- Status: BACKLOG
+- Status: DONE
 - Created: 2026-03-06
 - Target milestone: Phase 3 preprocessing improvements
 
@@ -40,3 +40,4 @@ Out of scope:
 ## Status updates
 
 - 2026-03-06: Created to reduce external prep work for real-world source material.
+- 2026-03-06: Completed. Added per-speaker cleanup runs (denoise, de-reverb, speech focus, normalize), stored manifests under item voice artifacts, and one-click reuse of cleaned references. Proof: `product/desktop/Build Target/tool_artifacts/wp_runs/WP-0088/20260306_204301/summary.md`.

@@ -115,9 +115,9 @@ Initial language focus: **Korean + Japanese → English**.
   - reusable cast packs for recurring show roles (`host`, `narrator`, `contestant`, `guest`, and custom roles via template labels),
   - multi-reference speaker cloning with backward-compatible single-reference fallback,
   - operator-reviewed auto-match suggestions from diarized speakers to saved template speakers or cast-pack roles,
-  - per-speaker render-mode routing so clone and standard-TTS speakers can coexist in one item.
-- Remaining planned expansion after the reusable-library tranche:
-  - cross-episode voice memory for recurring speakers.
+  - per-speaker render-mode routing so clone and standard-TTS speakers can coexist in one item,
+  - cross-episode voice memory profiles for recurring real speakers,
+  - separate character libraries for reusable narrator/teaching voices.
 
 ### 5.2 Background preservation
 
@@ -129,9 +129,8 @@ Initial language focus: **Korean + Japanese → English**.
   - per-speaker style presets,
   - pronunciation locks for names/places/glossary terms,
   - emotion/prosody controls with reusable presets,
-  - hybrid mode where major speakers use cloning and minor/background speakers use standard TTS.
-- Remaining planned quality controls:
-  - explicit subtitle-aware prosody toggles/review controls,
+  - hybrid mode where major speakers use cloning and minor/background speakers use standard TTS,
+  - explicit subtitle-aware prosody toggles on speaker/template/profile data,
   - optional reference cleanup before cloning,
   - voice QC for reference and output quality.
 
@@ -145,6 +144,11 @@ Initial language focus: **Korean + Japanese → English**.
   - A/B preview variants before committing to a final voice choice,
   - batch dubbing across item sets or seasons,
   - export stems (speech only, background only, final mix) and alternate dubbed versions.
+
+Current implementation status:
+
+- Localization Studio surfaces batch dubbing, A/B speaker previews, export stems/alternates visibility, voice memory, character libraries, and reference cleanup controls.
+- Export packs include speech stems and alternate dubbed variants when available.
 
 ## 6) Phase 3 (Power Features)
 
@@ -161,9 +165,9 @@ Initial language focus: **Korean + Japanese → English**.
   - subtitle review comments,
   - export reports.
 - Advanced dubbing library features:
-  - character libraries for reusable narrator/persona voices,
-  - cross-episode voice memory for recurring real speakers,
-  - reference cleanup and subtitle-aware prosody as reusable preprocessing/control layers.
+  - richer evaluation/QC heuristics,
+  - stronger subtitle-aware prosody controls and future expressive hinting,
+  - deeper reuse/reporting workflows on top of the now-implemented memory/character libraries.
 
 ## 7) UX Principles
 

@@ -43,6 +43,7 @@ pub struct VoiceTemplateSpeaker {
     pub prosody_preset: Option<String>,
     pub pronunciation_overrides: Option<String>,
     pub render_mode: Option<String>,
+    pub subtitle_prosody_mode: Option<String>,
     pub created_at_ms: i64,
     pub updated_at_ms: i64,
 }
@@ -68,6 +69,7 @@ pub struct VoiceTemplateSpeakerUpdate {
     pub prosody_preset: Option<String>,
     pub pronunciation_overrides: Option<String>,
     pub render_mode: Option<String>,
+    pub subtitle_prosody_mode: Option<String>,
 }
 
 pub fn list_voice_templates(paths: &AppPaths) -> Result<Vec<VoiceTemplate>> {
@@ -166,6 +168,7 @@ SELECT
   prosody_preset,
   pronunciation_overrides,
   render_mode,
+  subtitle_prosody_mode,
   created_at_ms,
   updated_at_ms
 FROM voice_template_speaker
@@ -179,12 +182,15 @@ ORDER BY speaker_key ASC
             let template_id: String = row.get(0)?;
             let speaker_key: String = row.get(1)?;
             let single_profile_path: Option<String> = row.get(4)?;
-            let mut profile_paths =
-                decode_profile_paths(row.get::<_, Option<String>>(5)?, single_profile_path.clone());
-            if let Some(reference_paths) = refs_by_speaker
-                .get(&speaker_key)
-                .map(|refs| refs.iter().map(|reference| reference.path.clone()).collect::<Vec<_>>())
-            {
+            let mut profile_paths = decode_profile_paths(
+                row.get::<_, Option<String>>(5)?,
+                single_profile_path.clone(),
+            );
+            if let Some(reference_paths) = refs_by_speaker.get(&speaker_key).map(|refs| {
+                refs.iter()
+                    .map(|reference| reference.path.clone())
+                    .collect::<Vec<_>>()
+            }) {
                 if !reference_paths.is_empty() {
                     profile_paths = reference_paths;
                 }
@@ -200,8 +206,9 @@ ORDER BY speaker_key ASC
                 prosody_preset: row.get(7)?,
                 pronunciation_overrides: row.get(8)?,
                 render_mode: row.get(9)?,
-                created_at_ms: row.get(10)?,
-                updated_at_ms: row.get(11)?,
+                subtitle_prosody_mode: row.get(10)?,
+                created_at_ms: row.get(11)?,
+                updated_at_ms: row.get(12)?,
             })
         })?
         .collect::<rusqlite::Result<Vec<_>>>()?;
@@ -255,8 +262,11 @@ INSERT INTO voice_template (
         )?;
 
         for speaker in &item_speakers {
-            let copied_references =
-                copy_template_references(&profiles_dir, &speaker.speaker_key, &speaker.tts_voice_profile_paths)?;
+            let copied_references = copy_template_references(
+                &profiles_dir,
+                &speaker.speaker_key,
+                &speaker.tts_voice_profile_paths,
+            )?;
             insert_template_speaker_row(&tx, &template_id, speaker, &copied_references, now)?;
         }
 
@@ -300,7 +310,8 @@ SET
   prosody_preset=?6,
   pronunciation_overrides=?7,
   render_mode=?8,
-  updated_at_ms=?9
+  subtitle_prosody_mode=?9,
+  updated_at_ms=?10
 WHERE template_id=?1 AND speaker_key=?2
 "#,
         params![
@@ -312,6 +323,7 @@ WHERE template_id=?1 AND speaker_key=?2
             normalize_optional_string(update.prosody_preset),
             normalize_optional_string(update.pronunciation_overrides),
             normalize_optional_string(update.render_mode),
+            normalize_optional_string(update.subtitle_prosody_mode),
             now,
         ],
     )?;
@@ -447,7 +459,10 @@ pub fn delete_voice_template(paths: &AppPaths, template_id: &str) -> Result<()> 
         "DELETE FROM voice_template_speaker WHERE template_id=?1",
         params![template_id],
     )?;
-    tx.execute("DELETE FROM voice_template WHERE id=?1", params![template_id])?;
+    tx.execute(
+        "DELETE FROM voice_template WHERE id=?1",
+        params![template_id],
+    )?;
     tx.commit()?;
 
     let template_dir = paths.voice_template_dir(template_id);
@@ -521,6 +536,7 @@ pub fn apply_voice_template_to_item(
                 .display_name
                 .clone()
                 .or_else(|| existing.and_then(|value| value.display_name.clone())),
+            existing.and_then(|value| value.voice_profile_id.clone()),
             template_speaker
                 .tts_voice_id
                 .clone()
@@ -552,6 +568,10 @@ pub fn apply_voice_template_to_item(
                 .render_mode
                 .clone()
                 .or_else(|| existing.and_then(|value| value.render_mode.clone())),
+            template_speaker
+                .subtitle_prosody_mode
+                .clone()
+                .or_else(|| existing.and_then(|value| value.subtitle_prosody_mode.clone())),
         )?;
     }
 
@@ -620,9 +640,10 @@ INSERT INTO voice_template_speaker (
   prosody_preset,
   pronunciation_overrides,
   render_mode,
+  subtitle_prosody_mode,
   created_at_ms,
   updated_at_ms
-) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)
+) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)
 "#,
         params![
             template_id,
@@ -635,6 +656,7 @@ INSERT INTO voice_template_speaker (
             speaker.prosody_preset,
             speaker.pronunciation_overrides,
             speaker.render_mode,
+            speaker.subtitle_prosody_mode,
             now,
             now,
         ],
@@ -930,6 +952,7 @@ INSERT INTO library_item (
             "item-1",
             "S1",
             Some("Host".to_string()),
+            None,
             Some("af_heart".to_string()),
             Some(source_profile.to_string_lossy().to_string()),
             Some(vec![source_profile.to_string_lossy().to_string()]),
@@ -937,6 +960,7 @@ INSERT INTO library_item (
             Some("warm".to_string()),
             Some("Seoul => Soul".to_string()),
             Some("clone".to_string()),
+            None,
         )
         .expect("upsert speaker");
 
@@ -947,7 +971,10 @@ INSERT INTO library_item (
         assert_eq!(detail.template.speaker_count, 1);
         assert_eq!(detail.speakers.len(), 1);
         assert_eq!(detail.references.len(), 1);
-        assert_eq!(detail.speakers[0].style_preset.as_deref(), Some("documentary"));
+        assert_eq!(
+            detail.speakers[0].style_preset.as_deref(),
+            Some("documentary")
+        );
         assert_eq!(detail.speakers[0].prosody_preset.as_deref(), Some("warm"));
         assert_eq!(
             detail.speakers[0].pronunciation_overrides.as_deref(),
@@ -971,7 +998,12 @@ INSERT INTO library_item (
         std::fs::write(&target_media_path, b"fake-media").expect("write target media");
         std::fs::create_dir_all(source_profile.parent().expect("parent")).expect("mkdirs");
         std::fs::write(&source_profile, b"fake-wav").expect("write source profile");
-        insert_test_item(&paths, "template-item", &template_media_path, "Template source");
+        insert_test_item(
+            &paths,
+            "template-item",
+            &template_media_path,
+            "Template source",
+        );
         insert_test_item(&paths, "target-item", &target_media_path, "Target source");
 
         speakers::upsert_item_speaker_setting(
@@ -979,6 +1011,7 @@ INSERT INTO library_item (
             "template-item",
             "S1",
             Some("Panel Host".to_string()),
+            None,
             Some("af_heart".to_string()),
             Some(source_profile.to_string_lossy().to_string()),
             Some(vec![source_profile.to_string_lossy().to_string()]),
@@ -986,6 +1019,7 @@ INSERT INTO library_item (
             Some("excited".to_string()),
             Some("Miyyeon => Miyeon".to_string()),
             Some("standard_tts".to_string()),
+            None,
         )
         .expect("template speaker");
         let template =
@@ -1003,6 +1037,8 @@ INSERT INTO library_item (
             None,
             None,
             None,
+            None,
+            None,
         )
         .expect("target speaker 1");
         speakers::upsert_item_speaker_setting(
@@ -1010,7 +1046,9 @@ INSERT INTO library_item (
             "target-item",
             "S10",
             Some("Leave Alone".to_string()),
+            None,
             Some("bf_alex".to_string()),
+            None,
             None,
             None,
             None,
@@ -1046,13 +1084,11 @@ INSERT INTO library_item (
         );
         assert_eq!(mapped.render_mode.as_deref(), Some("standard_tts"));
         assert_eq!(mapped.tts_voice_profile_paths.len(), 1);
-        assert!(
-            mapped
-                .tts_voice_profile_paths
-                .first()
-                .map(|path| Path::new(path).exists())
-                .unwrap_or(false)
-        );
+        assert!(mapped
+            .tts_voice_profile_paths
+            .first()
+            .map(|path| Path::new(path).exists())
+            .unwrap_or(false));
 
         let untouched = by_key.get("S10").expect("untouched speaker");
         assert_eq!(untouched.display_name.as_deref(), Some("Leave Alone"));
@@ -1077,6 +1113,7 @@ INSERT INTO library_item (
             "item-2",
             "S1",
             Some("Host".to_string()),
+            None,
             Some("af_heart".to_string()),
             Some(source_profile_a.to_string_lossy().to_string()),
             Some(vec![source_profile_a.to_string_lossy().to_string()]),
@@ -1084,6 +1121,7 @@ INSERT INTO library_item (
             None,
             None,
             Some("clone".to_string()),
+            None,
         )
         .expect("upsert speaker");
 

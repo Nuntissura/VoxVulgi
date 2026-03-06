@@ -3,7 +3,7 @@
 ## Metadata
 - ID: WP-0083
 - Owner: Codex
-- Status: BACKLOG
+- Status: DONE
 - Created: 2026-03-06
 - Target milestone: Phase 2 reliability hardening
 
@@ -40,3 +40,4 @@ Out of scope:
 ## Status updates
 
 - 2026-03-06: Created after repeated need for faster reference/output quality feedback.
+- 2026-03-06: Completed. QC reports now include voice-reference and dubbed-output analysis (silence, clipping, noise, and weak-similarity heuristics) plus Localization Studio rendering. Proof: `product/desktop/Build Target/tool_artifacts/wp_runs/WP-0083/20260306_204301/summary.md`.

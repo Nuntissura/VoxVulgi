@@ -3,7 +3,7 @@
 ## Metadata
 - ID: WP-0091
 - Owner: Codex
-- Status: BACKLOG
+- Status: DONE
 - Created: 2026-03-06
 - Target milestone: Phase 3 advanced reusable voice assets
 
@@ -40,3 +40,4 @@ Out of scope:
 ## Status updates
 
 - 2026-03-06: Created to support reusable fictional or teaching-specific narrator personas.
+- 2026-03-06: Completed. Added reusable `character` profiles in the app-managed voice library with copied refs, suggestions, apply/fork/delete flows, and Localization Studio controls. Proof: `product/desktop/Build Target/tool_artifacts/wp_runs/WP-0091/20260306_204301/summary.md`.

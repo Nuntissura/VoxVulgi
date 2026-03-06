@@ -3,7 +3,7 @@
 ## Metadata
 - ID: WP-0085
 - Owner: Codex
-- Status: BACKLOG
+- Status: DONE
 - Created: 2026-03-06
 - Target milestone: Phase 2 operator review tooling
 
@@ -40,3 +40,4 @@ Out of scope:
 ## Status updates
 
 - 2026-03-06: Created to make voice-choice review faster and more repeatable.
+- 2026-03-06: Completed. Operators can queue two labeled voice-preserving variants for a chosen speaker, inspect alternate artifacts, and promote either variant back into live speaker settings. Proof: `product/desktop/Build Target/tool_artifacts/wp_runs/WP-0085/20260306_204301/summary.md`.

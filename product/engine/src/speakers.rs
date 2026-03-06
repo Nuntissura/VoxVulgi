@@ -10,6 +10,7 @@ pub struct ItemSpeakerSetting {
     pub item_id: String,
     pub speaker_key: String,
     pub display_name: Option<String>,
+    pub voice_profile_id: Option<String>,
     pub tts_voice_id: Option<String>,
     pub tts_voice_profile_path: Option<String>,
     #[serde(default)]
@@ -18,6 +19,7 @@ pub struct ItemSpeakerSetting {
     pub prosody_preset: Option<String>,
     pub pronunciation_overrides: Option<String>,
     pub render_mode: Option<String>,
+    pub subtitle_prosody_mode: Option<String>,
     pub created_at_ms: i64,
     pub updated_at_ms: i64,
 }
@@ -35,6 +37,7 @@ SELECT
   item_id,
   speaker_key,
   display_name,
+  voice_profile_id,
   tts_voice_id,
   tts_voice_profile_path,
   tts_voice_profile_paths_json,
@@ -42,6 +45,7 @@ SELECT
   prosody_preset,
   pronunciation_overrides,
   render_mode,
+  subtitle_prosody_mode,
   created_at_ms,
   updated_at_ms
 FROM item_speaker
@@ -52,20 +56,25 @@ ORDER BY speaker_key ASC
 
     let rows = stmt
         .query_map(params![item_id], |row| {
-            let single_profile_path: Option<String> = row.get(4)?;
+            let single_profile_path: Option<String> = row.get(5)?;
             Ok(ItemSpeakerSetting {
                 item_id: row.get(0)?,
                 speaker_key: row.get(1)?,
                 display_name: row.get(2)?,
-                tts_voice_id: row.get(3)?,
+                voice_profile_id: row.get(3)?,
+                tts_voice_id: row.get(4)?,
                 tts_voice_profile_path: single_profile_path.clone(),
-                tts_voice_profile_paths: decode_profile_paths(row.get::<_, Option<String>>(5)?, single_profile_path),
-                style_preset: row.get(6)?,
-                prosody_preset: row.get(7)?,
-                pronunciation_overrides: row.get(8)?,
-                render_mode: row.get(9)?,
-                created_at_ms: row.get(10)?,
-                updated_at_ms: row.get(11)?,
+                tts_voice_profile_paths: decode_profile_paths(
+                    row.get::<_, Option<String>>(6)?,
+                    single_profile_path,
+                ),
+                style_preset: row.get(7)?,
+                prosody_preset: row.get(8)?,
+                pronunciation_overrides: row.get(9)?,
+                render_mode: row.get(10)?,
+                subtitle_prosody_mode: row.get(11)?,
+                created_at_ms: row.get(12)?,
+                updated_at_ms: row.get(13)?,
             })
         })?
         .collect::<rusqlite::Result<Vec<_>>>()?;
@@ -78,6 +87,7 @@ pub fn upsert_item_speaker_setting(
     item_id: &str,
     speaker_key: &str,
     display_name: Option<String>,
+    voice_profile_id: Option<String>,
     tts_voice_id: Option<String>,
     tts_voice_profile_path: Option<String>,
     tts_voice_profile_paths: Option<Vec<String>>,
@@ -85,6 +95,7 @@ pub fn upsert_item_speaker_setting(
     prosody_preset: Option<String>,
     pronunciation_overrides: Option<String>,
     render_mode: Option<String>,
+    subtitle_prosody_mode: Option<String>,
 ) -> Result<ItemSpeakerSetting> {
     let item_id = item_id.trim();
     if item_id.is_empty() {
@@ -105,6 +116,7 @@ pub fn upsert_item_speaker_setting(
             Some(t)
         }
     });
+    let voice_profile_id = normalize_optional_string(voice_profile_id);
     let tts_voice_id = tts_voice_id.and_then(|v| {
         let t = v.trim().to_string();
         if t.is_empty() {
@@ -121,11 +133,13 @@ pub fn upsert_item_speaker_setting(
             Some(t)
         }
     });
-    let tts_voice_profile_paths = normalize_profile_paths(tts_voice_profile_path.clone(), tts_voice_profile_paths);
+    let tts_voice_profile_paths =
+        normalize_profile_paths(tts_voice_profile_path.clone(), tts_voice_profile_paths);
     let style_preset = normalize_optional_string(style_preset);
     let prosody_preset = normalize_optional_string(prosody_preset);
     let pronunciation_overrides = normalize_optional_string(pronunciation_overrides);
     let render_mode = normalize_optional_string(render_mode);
+    let subtitle_prosody_mode = normalize_optional_string(subtitle_prosody_mode);
     let primary_profile_path = tts_voice_profile_paths
         .first()
         .cloned()
@@ -142,6 +156,7 @@ INSERT INTO item_speaker (
   item_id,
   speaker_key,
   display_name,
+  voice_profile_id,
   tts_voice_id,
   tts_voice_profile_path,
   tts_voice_profile_paths_json,
@@ -149,11 +164,13 @@ INSERT INTO item_speaker (
   prosody_preset,
   pronunciation_overrides,
   render_mode,
+  subtitle_prosody_mode,
   created_at_ms,
   updated_at_ms
-) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)
+) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14)
 ON CONFLICT(item_id, speaker_key) DO UPDATE SET
   display_name=excluded.display_name,
+  voice_profile_id=excluded.voice_profile_id,
   tts_voice_id=excluded.tts_voice_id,
   tts_voice_profile_path=excluded.tts_voice_profile_path,
   tts_voice_profile_paths_json=excluded.tts_voice_profile_paths_json,
@@ -161,12 +178,14 @@ ON CONFLICT(item_id, speaker_key) DO UPDATE SET
   prosody_preset=excluded.prosody_preset,
   pronunciation_overrides=excluded.pronunciation_overrides,
   render_mode=excluded.render_mode,
+  subtitle_prosody_mode=excluded.subtitle_prosody_mode,
   updated_at_ms=excluded.updated_at_ms
 "#,
         params![
             item_id,
             speaker_key,
             display_name,
+            voice_profile_id,
             tts_voice_id,
             primary_profile_path,
             tts_voice_profile_paths_json,
@@ -174,6 +193,7 @@ ON CONFLICT(item_id, speaker_key) DO UPDATE SET
             prosody_preset,
             pronunciation_overrides,
             render_mode,
+            subtitle_prosody_mode,
             now,
             now
         ],
@@ -185,6 +205,7 @@ SELECT
   item_id,
   speaker_key,
   display_name,
+  voice_profile_id,
   tts_voice_id,
   tts_voice_profile_path,
   tts_voice_profile_paths_json,
@@ -192,6 +213,7 @@ SELECT
   prosody_preset,
   pronunciation_overrides,
   render_mode,
+  subtitle_prosody_mode,
   created_at_ms,
   updated_at_ms
 FROM item_speaker
@@ -199,20 +221,25 @@ WHERE item_id=?1 AND speaker_key=?2
 "#,
         params![item_id, speaker_key],
         |row| {
-            let single_profile_path: Option<String> = row.get(4)?;
+            let single_profile_path: Option<String> = row.get(5)?;
             Ok(ItemSpeakerSetting {
                 item_id: row.get(0)?,
                 speaker_key: row.get(1)?,
                 display_name: row.get(2)?,
-                tts_voice_id: row.get(3)?,
+                voice_profile_id: row.get(3)?,
+                tts_voice_id: row.get(4)?,
                 tts_voice_profile_path: single_profile_path.clone(),
-                tts_voice_profile_paths: decode_profile_paths(row.get::<_, Option<String>>(5)?, single_profile_path),
-                style_preset: row.get(6)?,
-                prosody_preset: row.get(7)?,
-                pronunciation_overrides: row.get(8)?,
-                render_mode: row.get(9)?,
-                created_at_ms: row.get(10)?,
-                updated_at_ms: row.get(11)?,
+                tts_voice_profile_paths: decode_profile_paths(
+                    row.get::<_, Option<String>>(6)?,
+                    single_profile_path,
+                ),
+                style_preset: row.get(7)?,
+                prosody_preset: row.get(8)?,
+                pronunciation_overrides: row.get(9)?,
+                render_mode: row.get(10)?,
+                subtitle_prosody_mode: row.get(11)?,
+                created_at_ms: row.get(12)?,
+                updated_at_ms: row.get(13)?,
             })
         },
     )

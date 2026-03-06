@@ -3,7 +3,7 @@
 ## Metadata
 - ID: WP-0090
 - Owner: Codex
-- Status: IN_PROGRESS
+- Status: DONE
 - Created: 2026-03-06
 - Target milestone: Phase 3 naturalness improvements
 
@@ -41,3 +41,4 @@ Out of scope:
 
 - 2026-03-06: Created to improve naturalness using data already present in subtitle tracks.
 - 2026-03-06: Initial groundwork landed through line-break and punctuation shaping inside TTS text preparation, but explicit operator toggles/review remain open.
+- 2026-03-06: Completed. Subtitle-aware pacing is now operator-controlled through per-speaker, template, and profile settings and flows through preview plus voice-preserving jobs. Proof: `product/desktop/Build Target/tool_artifacts/wp_runs/WP-0090/20260306_204301/summary.md`.
