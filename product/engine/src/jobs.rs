@@ -192,6 +192,7 @@ pub struct JobRow {
     pub started_at_ms: Option<i64>,
     pub finished_at_ms: Option<i64>,
     pub logs_path: String,
+    pub params_json: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -1388,7 +1389,8 @@ SELECT
   created_at_ms,
   started_at_ms,
   finished_at_ms,
-  logs_path
+  logs_path,
+  params_json
 FROM job
 ORDER BY created_at_ms DESC
 LIMIT ?1 OFFSET ?2
@@ -1411,6 +1413,67 @@ LIMIT ?1 OFFSET ?2
                 started_at_ms: row.get(8)?,
                 finished_at_ms: row.get(9)?,
                 logs_path: row.get(10)?,
+                params_json: row.get(11)?,
+            })
+        })?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+
+    Ok(rows)
+}
+
+pub fn list_jobs_for_item(
+    paths: &AppPaths,
+    item_id: &str,
+    limit: usize,
+    offset: usize,
+) -> Result<Vec<JobRow>> {
+    let item_id = item_id.trim();
+    if item_id.is_empty() {
+        return Err(EngineError::InstallFailed("item_id is empty".to_string()));
+    }
+
+    let conn = db::open(paths)?;
+    db::migrate(&conn)?;
+
+    let mut stmt = conn.prepare(
+        r#"
+SELECT
+  id,
+  item_id,
+  batch_id,
+  type,
+  status,
+  progress,
+  error,
+  created_at_ms,
+  started_at_ms,
+  finished_at_ms,
+  logs_path,
+  params_json
+FROM job
+WHERE item_id=?1
+ORDER BY created_at_ms DESC
+LIMIT ?2 OFFSET ?3
+"#,
+    )?;
+
+    let rows = stmt
+        .query_map(params![item_id, limit as i64, offset as i64], |row| {
+            let status_str: String = row.get(4)?;
+            let status = JobStatus::from_str(&status_str).unwrap_or(JobStatus::Failed);
+            Ok(JobRow {
+                id: row.get(0)?,
+                item_id: row.get(1)?,
+                batch_id: row.get(2)?,
+                job_type: row.get(3)?,
+                status,
+                progress: row.get(5)?,
+                error: row.get(6)?,
+                created_at_ms: row.get(7)?,
+                started_at_ms: row.get(8)?,
+                finished_at_ms: row.get(9)?,
+                logs_path: row.get(10)?,
+                params_json: row.get(11)?,
             })
         })?
         .collect::<rusqlite::Result<Vec<_>>>()?;
@@ -1799,6 +1862,7 @@ INSERT INTO job (
         started_at_ms: None,
         finished_at_ms: None,
         logs_path,
+        params_json,
     })
 }
 

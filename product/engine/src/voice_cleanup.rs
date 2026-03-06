@@ -2,6 +2,7 @@ use crate::cmd;
 use crate::paths::AppPaths;
 use crate::{EngineError, Result};
 use serde::{Deserialize, Serialize};
+use std::collections::HashSet;
 use std::path::PathBuf;
 use std::time::{SystemTime, UNIX_EPOCH};
 use uuid::Uuid;
@@ -56,23 +57,33 @@ pub fn list_item_speaker_cleanups(
     }
     let dir = cleanup_root(paths, item_id, speaker_key);
     if !dir.exists() {
-        return Ok(Vec::new());
+        let legacy_dir = legacy_cleanup_root(paths, item_id, speaker_key);
+        if !legacy_dir.exists() {
+            return Ok(Vec::new());
+        }
     }
 
     let mut out: Vec<VoiceReferenceCleanupRecord> = Vec::new();
-    for entry in std::fs::read_dir(&dir)? {
-        let entry = entry?;
-        let path = entry.path();
-        if !path.is_dir() {
+    let mut seen_manifest_paths = HashSet::new();
+    for root in [dir, legacy_cleanup_root(paths, item_id, speaker_key)] {
+        if !root.exists() {
             continue;
         }
-        let manifest_path = path.join("manifest.json");
-        if !manifest_path.exists() {
-            continue;
+        for entry in std::fs::read_dir(&root)? {
+            let entry = entry?;
+            let path = entry.path();
+            if !path.is_dir() {
+                continue;
+            }
+            let manifest_path = path.join("manifest.json");
+            let manifest_key = manifest_path.to_string_lossy().to_string();
+            if !manifest_path.exists() || !seen_manifest_paths.insert(manifest_key) {
+                continue;
+            }
+            let bytes = std::fs::read(&manifest_path)?;
+            let record: VoiceReferenceCleanupRecord = serde_json::from_slice(&bytes)?;
+            out.push(record);
         }
-        let bytes = std::fs::read(&manifest_path)?;
-        let record: VoiceReferenceCleanupRecord = serde_json::from_slice(&bytes)?;
-        out.push(record);
     }
     out.sort_by(|a, b| b.created_at_ms.cmp(&a.created_at_ms));
     Ok(out)
@@ -150,6 +161,15 @@ pub fn run_item_speaker_reference_cleanup(
 }
 
 fn cleanup_root(paths: &AppPaths, item_id: &str, speaker_key: &str) -> PathBuf {
+    let slug = sanitize_segment(speaker_key);
+    let hash = stable_key_hash(speaker_key);
+    paths
+        .derived_item_voice_dir(item_id)
+        .join("cleanup")
+        .join(format!("{slug}__{hash}"))
+}
+
+fn legacy_cleanup_root(paths: &AppPaths, item_id: &str, speaker_key: &str) -> PathBuf {
     paths
         .derived_item_voice_dir(item_id)
         .join("cleanup")
@@ -183,6 +203,15 @@ fn sanitize_segment(raw: &str) -> String {
     }
 }
 
+fn stable_key_hash(raw: &str) -> String {
+    let mut hash: u64 = 0xcbf29ce484222325;
+    for byte in raw.trim().as_bytes() {
+        hash ^= u64::from(*byte);
+        hash = hash.wrapping_mul(0x100000001b3);
+    }
+    format!("{hash:016x}")
+}
+
 fn build_filter_chain(options: &VoiceReferenceCleanupOptions) -> String {
     let mut filters: Vec<String> = vec!["highpass=f=70".to_string(), "lowpass=f=12000".to_string()];
     if options.denoise {
@@ -205,4 +234,72 @@ fn now_ms() -> i64 {
         .duration_since(UNIX_EPOCH)
         .unwrap_or_default()
         .as_millis() as i64
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use tempfile::tempdir;
+
+    fn write_manifest(
+        paths: &AppPaths,
+        item_id: &str,
+        speaker_key: &str,
+        cleanup_id: &str,
+        created_at_ms: i64,
+        use_legacy_root: bool,
+    ) {
+        let root = if use_legacy_root {
+            legacy_cleanup_root(paths, item_id, speaker_key)
+        } else {
+            cleanup_root(paths, item_id, speaker_key)
+        };
+        let cleanup_dir = root.join(cleanup_id);
+        std::fs::create_dir_all(&cleanup_dir).expect("create cleanup dir");
+        let record = VoiceReferenceCleanupRecord {
+            cleanup_id: cleanup_id.to_string(),
+            item_id: item_id.to_string(),
+            speaker_key: speaker_key.to_string(),
+            source_path: "source.wav".to_string(),
+            cleaned_path: cleanup_dir
+                .join("cleaned_ref.wav")
+                .to_string_lossy()
+                .to_string(),
+            manifest_path: cleanup_dir
+                .join("manifest.json")
+                .to_string_lossy()
+                .to_string(),
+            filter_chain: "highpass=f=70".to_string(),
+            options: VoiceReferenceCleanupOptions::default(),
+            created_at_ms,
+        };
+        std::fs::write(
+            cleanup_dir.join("manifest.json"),
+            serde_json::to_string_pretty(&record).expect("serialize record"),
+        )
+        .expect("write manifest");
+    }
+
+    #[test]
+    fn cleanup_root_disambiguates_similar_speaker_keys() {
+        let dir = tempdir().expect("tempdir");
+        let paths = AppPaths::new(dir.path().to_path_buf());
+        let a = cleanup_root(&paths, "item-1", "Speaker A");
+        let b = cleanup_root(&paths, "item-1", "speaker-a");
+        assert_ne!(a, b);
+    }
+
+    #[test]
+    fn list_cleanups_reads_current_and_legacy_roots() {
+        let dir = tempdir().expect("tempdir");
+        let paths = AppPaths::new(dir.path().to_path_buf());
+        write_manifest(&paths, "item-1", "Speaker A", "legacy-1", 100, true);
+        write_manifest(&paths, "item-1", "Speaker A", "current-1", 200, false);
+
+        let rows =
+            list_item_speaker_cleanups(&paths, "item-1", "Speaker A").expect("list cleanups");
+        assert_eq!(rows.len(), 2);
+        assert_eq!(rows[0].cleanup_id, "current-1");
+        assert_eq!(rows[1].cleanup_id, "legacy-1");
+    }
 }

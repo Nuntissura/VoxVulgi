@@ -37,9 +37,9 @@ Date: 2026-02-19
 
 ## Voice Workflow Remediation Hardening (2026-03)
 
-- WP-0092: Variant-aware artifact actions, status, and logs for A/B previews, alternates, QC, and export packs. IN PROGRESS.
-- WP-0093: Cleanup integrity for multi-reference voices and collision-safe cleanup storage. IN PROGRESS.
-- WP-0094: Library-scale batch dubbing selection without hidden 500-item caps. IN PROGRESS.
+- WP-0092: Variant-aware artifact actions, status, and logs for A/B previews, alternates, QC, and export packs. DONE.
+- WP-0093: Cleanup integrity for multi-reference voices and collision-safe cleanup storage. DONE.
+- WP-0094: Library-scale batch dubbing selection without hidden 500-item caps. DONE.
 
 ## Phase 0 — Decisions (1–2 days)
 

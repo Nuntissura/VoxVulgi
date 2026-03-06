@@ -3,7 +3,7 @@
 ## Metadata
 - ID: WP-0094
 - Owner: Codex
-- Status: IN_PROGRESS
+- Status: DONE
 - Created: 2026-03-06
 - Target milestone: Phase 3 voice-workflow hardening
 
@@ -39,3 +39,4 @@ Out of scope:
 ## Status updates
 
 - 2026-03-06: Created from remediation review after confirming a hard 500-item picker cap and selection truncation.
+- 2026-03-06: Completed. Batch item loading now pages through the full library, and current-item auto-selection no longer truncates the batch selection state. Proof: `product/desktop/Build Target/tool_artifacts/wp_runs/WP-0094/20260306_213944/summary.md`.

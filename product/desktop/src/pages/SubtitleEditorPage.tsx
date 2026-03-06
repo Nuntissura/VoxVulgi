@@ -52,6 +52,7 @@ type JobRow = {
   started_at_ms?: number | null;
   finished_at_ms?: number | null;
   logs_path?: string;
+  params_json?: string;
 };
 
 type ItemOutputs = {
@@ -74,6 +75,14 @@ type ArtifactInfo = {
   path: string;
   exists: boolean;
   group: string;
+};
+
+type ArtifactIdentity = {
+  jobType: string | null;
+  variantLabel: string | null;
+  trackId: string | null;
+  muxContainer: "mp4" | "mkv" | null;
+  rerunSupported: boolean;
 };
 
 type ExportedFile = {
@@ -121,6 +130,79 @@ function stemFromPath(path: string): string {
 function trimOrNull(value: string | null | undefined): string | null {
   const next = (value ?? "").trim();
   return next ? next : null;
+}
+
+function normalizeVariantLabel(value: string | null | undefined): string | null {
+  const raw = (value ?? "").trim();
+  if (!raw) return null;
+  let out = "";
+  let prevUnderscore = false;
+  for (const ch of raw) {
+    const mapped = /[a-z0-9]/i.test(ch) ? ch.toLowerCase() : "_";
+    if (mapped === "_") {
+      if (prevUnderscore) continue;
+      prevUnderscore = true;
+    } else {
+      prevUnderscore = false;
+    }
+    out += mapped;
+  }
+  const normalized = out.replace(/^_+|_+$/g, "");
+  return normalized ? normalized : null;
+}
+
+function asRecord(value: unknown): Record<string, unknown> | null {
+  return value && typeof value === "object" && !Array.isArray(value)
+    ? (value as Record<string, unknown>)
+    : null;
+}
+
+function asString(value: unknown): string | null {
+  return typeof value === "string" ? trimOrNull(value) : null;
+}
+
+function parseJobParams(job: JobRow): Record<string, unknown> | null {
+  const raw = (job.params_json ?? "").trim();
+  if (!raw) return null;
+  try {
+    return asRecord(JSON.parse(raw));
+  } catch {
+    return null;
+  }
+}
+
+function artifactVariantLabel(artifact: ArtifactInfo): string | null {
+  const byId = [
+    "tts_voice_preserving_manifest_variant_",
+    "dub_mix_variant_",
+    "dub_speech_stem_variant_",
+    "dub_mux_mp4_variant_",
+    "dub_mux_mkv_variant_",
+  ].find((prefix) => artifact.id.startsWith(prefix));
+  if (byId) {
+    return normalizeVariantLabel(artifact.id.slice(byId.length));
+  }
+  const name = fileNameFromPath(artifact.path);
+  if (name === "export_pack_v1.zip") return null;
+  if (name.startsWith("export_pack_v1_") && name.endsWith(".zip")) {
+    return normalizeVariantLabel(name.slice("export_pack_v1_".length, -".zip".length));
+  }
+  const qcMatch = name.match(/^qc_report_v1_([0-9a-f-]{36})(?:_(.+))?\.json$/i);
+  if (qcMatch) {
+    return normalizeVariantLabel(qcMatch[2] ?? null);
+  }
+  return null;
+}
+
+function artifactTrackId(artifact: ArtifactInfo): string | null {
+  const qcMatch = fileNameFromPath(artifact.path).match(/^qc_report_v1_([0-9a-f-]{36})(?:_(.+))?\.json$/i);
+  return qcMatch ? trimOrNull(qcMatch[1]) : null;
+}
+
+function artifactMuxContainer(artifactId: string): "mp4" | "mkv" | null {
+  if (artifactId.startsWith("dub_mux_mp4")) return "mp4";
+  if (artifactId.startsWith("dub_mux_mkv")) return "mkv";
+  return null;
 }
 
 function uniquePaths(paths: Array<string | null | undefined>): string[] {
@@ -699,6 +781,7 @@ export function SubtitleEditorPage({ itemId }: { itemId: string }) {
   const [speakerCleanupRecords, setSpeakerCleanupRecords] = useState<
     Record<string, VoiceReferenceCleanupRecord[]>
   >({});
+  const [cleanupSourceBySpeaker, setCleanupSourceBySpeaker] = useState<Record<string, string>>({});
   const [speakerCleanupBusyKey, setSpeakerCleanupBusyKey] = useState<string | null>(null);
   const [cleanupOptions, setCleanupOptions] = useState<VoiceReferenceCleanupOptions>({
     denoise: true,
@@ -935,7 +1018,13 @@ export function SubtitleEditorPage({ itemId }: { itemId: string }) {
   const refreshLibraryItems = useCallback(async () => {
     setLibraryItemsBusy(true);
     try {
-      const next = await invoke<LibraryItem[]>("library_list", { limit: 500, offset: 0 });
+      const pageSize = 500;
+      const next: LibraryItem[] = [];
+      for (let offset = 0; ; offset += pageSize) {
+        const page = await invoke<LibraryItem[]>("library_list", { limit: pageSize, offset });
+        next.push(...page);
+        if (page.length < pageSize) break;
+      }
       setLibraryItems(next);
       return next;
     } finally {
@@ -966,10 +1055,9 @@ export function SubtitleEditorPage({ itemId }: { itemId: string }) {
 
   const refreshItemJobs = useCallback(async () => {
     try {
-      const rows = await invoke<JobRow[]>("jobs_list", { limit: 200, offset: 0 });
-      const filtered = rows.filter((j) => j.item_id === itemId);
-      setItemJobs(filtered);
-      return filtered;
+      const rows = await invoke<JobRow[]>("jobs_list_for_item", { itemId, limit: 1000, offset: 0 });
+      setItemJobs(rows);
+      return rows;
     } catch {
       return [];
     }
@@ -1123,6 +1211,7 @@ export function SubtitleEditorPage({ itemId }: { itemId: string }) {
   useEffect(() => {
     if (!speakersInTrack.length) {
       setSpeakerCleanupRecords({});
+      setCleanupSourceBySpeaker({});
       return;
     }
     let cancelled = false;
@@ -1153,6 +1242,35 @@ export function SubtitleEditorPage({ itemId }: { itemId: string }) {
   }, [itemId, speakersInTrack]);
 
   useEffect(() => {
+    setCleanupSourceBySpeaker((prev) => {
+      let changed = false;
+      const next: Record<string, string> = { ...prev };
+      for (const speakerKey of speakersInTrack) {
+        const profilePaths = speakerProfilePaths(speakerSettingsByKey.get(speakerKey) ?? null);
+        const existing = trimOrNull(next[speakerKey]);
+        if (!profilePaths.length) {
+          if (existing) {
+            delete next[speakerKey];
+            changed = true;
+          }
+          continue;
+        }
+        if (!existing || !profilePaths.includes(existing)) {
+          next[speakerKey] = profilePaths[0] ?? "";
+          changed = true;
+        }
+      }
+      for (const key of Object.keys(next)) {
+        if (!speakersInTrack.includes(key)) {
+          delete next[key];
+          changed = true;
+        }
+      }
+      return changed ? next : prev;
+    });
+  }, [speakerSettingsByKey, speakersInTrack]);
+
+  useEffect(() => {
     if (!item) return;
     setVoiceTemplateName((prev) => {
       if (prev.trim()) return prev;
@@ -1179,23 +1297,9 @@ export function SubtitleEditorPage({ itemId }: { itemId: string }) {
   useEffect(() => {
     setBatchSelectedItemIds((prev) => {
       if (prev.includes(itemId)) return prev;
-      return [itemId, ...prev].slice(0, 500);
+      return [itemId, ...prev];
     });
   }, [itemId]);
-
-  const latestItemJobByType = useMemo(() => {
-    const map = new Map<string, JobRow>();
-    for (const job of itemJobs) {
-      const key = job.job_type;
-      const prev = map.get(key) ?? null;
-      const prevTs = prev?.created_at_ms ?? 0;
-      const ts = job.created_at_ms ?? 0;
-      if (!prev || ts >= prevTs) {
-        map.set(key, job);
-      }
-    }
-    return map;
-  }, [itemJobs]);
 
   const batchLibraryItems = useMemo(() => {
     return [...libraryItems].sort((a, b) => {
@@ -1204,6 +1308,18 @@ export function SubtitleEditorPage({ itemId }: { itemId: string }) {
       return (a.title ?? "").localeCompare(b.title ?? "");
     });
   }, [itemId, libraryItems]);
+
+  const latestItemJobByArtifactId = useMemo(() => {
+    const map = new Map<string, JobRow>();
+    const sortedJobs = [...itemJobs].sort((a, b) => (b.created_at_ms ?? 0) - (a.created_at_ms ?? 0));
+    for (const artifact of artifacts) {
+      const match = sortedJobs.find((job) => jobMatchesArtifact(job, artifact)) ?? null;
+      if (match) {
+        map.set(artifact.id, match);
+      }
+    }
+    return map;
+  }, [artifacts, itemJobs]);
 
   useEffect(() => {
     if (audioPreviewPath.trim()) return;
@@ -2503,7 +2619,8 @@ export function SubtitleEditorPage({ itemId }: { itemId: string }) {
 
   async function runSpeakerCleanup(speakerKey: string) {
     const setting = speakerSettingsByKey.get(speakerKey) ?? null;
-    const sourcePath = speakerProfilePaths(setting)[0] ?? "";
+    const profilePaths = speakerProfilePaths(setting);
+    const sourcePath = trimOrNull(cleanupSourceBySpeaker[speakerKey]) ?? profilePaths[0] ?? "";
     if (!sourcePath) {
       setError("Choose a speaker reference clip first.");
       return;
@@ -2532,11 +2649,16 @@ export function SubtitleEditorPage({ itemId }: { itemId: string }) {
       setError("Run cleanup first.");
       return;
     }
+    const currentPaths = speakerProfilePaths(speakerSettingsByKey.get(speakerKey) ?? null);
+    const nextPaths = uniquePaths([latest.cleaned_path, ...currentPaths]);
     await saveSpeakerSetting(speakerKey, {
-      voice_profile_id: null,
-      tts_voice_profile_paths: [latest.cleaned_path],
+      tts_voice_profile_paths: nextPaths,
     });
-    setNotice(`Applied cleaned reference for ${speakerKey}.`);
+    setCleanupSourceBySpeaker((prev) => ({
+      ...prev,
+      [speakerKey]: latest.cleaned_path,
+    }));
+    setNotice(`Applied cleaned reference for ${speakerKey} and kept existing refs.`);
   }
 
   async function createVoiceLibraryFromSpeaker(kind: "memory" | "character", speakerKey: string) {
@@ -3514,6 +3636,76 @@ export function SubtitleEditorPage({ itemId }: { itemId: string }) {
     return null;
   }
 
+  function artifactIdentity(artifact: ArtifactInfo): ArtifactIdentity {
+    return {
+      jobType: artifactJobType(artifact.id),
+      variantLabel: artifactVariantLabel(artifact),
+      trackId: artifactTrackId(artifact),
+      muxContainer: artifactMuxContainer(artifact.id),
+      rerunSupported:
+        artifact.id.startsWith("sep_spleeter_") ||
+        artifact.id.startsWith("sep_demucs_") ||
+        artifact.id === "cleanup_vocals" ||
+        artifact.id === "tts_pyttsx3_manifest" ||
+        artifact.id === "tts_neural_manifest" ||
+        artifact.id === "tts_voice_preserving_manifest" ||
+        artifact.id === "dub_mix" ||
+        artifact.id === "dub_speech_stem" ||
+        artifact.id === "dub_mux_mp4" ||
+        artifact.id === "dub_mux_mkv" ||
+        artifact.id === "export_pack",
+    };
+  }
+
+  function jobIdentity(job: JobRow): ArtifactIdentity {
+    const params = parseJobParams(job);
+    const pipeline = asRecord(params?.pipeline);
+    const rawVariant =
+      asString(params?.variant_label) ?? asString(pipeline?.variant_label) ?? null;
+    const rawTrackId = asString(params?.track_id) ?? null;
+    const rawMuxContainer = asString(params?.output_container);
+    return {
+      jobType: job.job_type,
+      variantLabel: normalizeVariantLabel(rawVariant),
+      trackId: rawTrackId,
+      muxContainer:
+        job.job_type === "mux_dub_preview_v1"
+          ? rawMuxContainer === "mkv"
+            ? "mkv"
+            : "mp4"
+          : null,
+      rerunSupported: true,
+    };
+  }
+
+  function jobMatchesArtifact(job: JobRow, artifact: ArtifactInfo): boolean {
+    const artifactMeta = artifactIdentity(artifact);
+    if (!artifactMeta.jobType || job.job_type !== artifactMeta.jobType) {
+      return false;
+    }
+    const jobMeta = jobIdentity(job);
+    if (artifactMeta.jobType === "mux_dub_preview_v1") {
+      return (
+        jobMeta.variantLabel === artifactMeta.variantLabel &&
+        jobMeta.muxContainer === artifactMeta.muxContainer
+      );
+    }
+    if (artifactMeta.jobType === "qc_report_v1") {
+      return (
+        jobMeta.trackId === artifactMeta.trackId &&
+        jobMeta.variantLabel === artifactMeta.variantLabel
+      );
+    }
+    if (
+      artifactMeta.jobType === "dub_voice_preserving_v1" ||
+      artifactMeta.jobType === "mix_dub_preview_v1" ||
+      artifactMeta.jobType === "export_pack_v1"
+    ) {
+      return jobMeta.variantLabel === artifactMeta.variantLabel;
+    }
+    return true;
+  }
+
   function extLower(path: string): string {
     const p = (path ?? "").trim();
     const idx = p.lastIndexOf(".");
@@ -3555,6 +3747,12 @@ export function SubtitleEditorPage({ itemId }: { itemId: string }) {
     setError(null);
     setNotice(null);
     try {
+      const matchingJob = latestItemJobByArtifactId.get(artifact.id) ?? null;
+      if (matchingJob) {
+        await invoke<JobRow>("jobs_retry", { jobId: matchingJob.id });
+        setNotice(`Queued rerun for ${artifact.title}.`);
+        return;
+      }
       if (artifact.id.startsWith("sep_spleeter_")) {
         await invoke("jobs_enqueue_separate_audio_spleeter", { itemId });
         setNotice("Queued Spleeter separation.");
@@ -3599,10 +3797,7 @@ export function SubtitleEditorPage({ itemId }: { itemId: string }) {
         await enqueueExportPack();
         return;
       }
-      if (artifact.id.startsWith("qc_")) {
-        await enqueueQcReport();
-        return;
-      }
+      setError("Rerun is not available for this artifact.");
     } catch (e) {
       setError(String(e));
     } finally {
@@ -3613,9 +3808,7 @@ export function SubtitleEditorPage({ itemId }: { itemId: string }) {
   }
 
   async function revealArtifactLog(artifact: ArtifactInfo) {
-    const jobType = artifactJobType(artifact.id);
-    if (!jobType) return;
-    const job = latestItemJobByType.get(jobType) ?? null;
+    const job = latestItemJobByArtifactId.get(artifact.id) ?? null;
     const path = (job?.logs_path ?? "").trim();
     if (!path) return;
     try {
@@ -4337,8 +4530,10 @@ export function SubtitleEditorPage({ itemId }: { itemId: string }) {
                     const setting = speakerSettingsByKey.get(speakerKey) ?? null;
                     const profilePaths = speakerProfilePaths(setting);
                     const primaryProfilePath = profilePaths[0] ?? "";
+                    const cleanupSourcePath =
+                      trimOrNull(cleanupSourceBySpeaker[speakerKey]) ?? primaryProfilePath;
                     const profileLabel = profilePaths.length
-                      ? `${profilePaths.length} ref${profilePaths.length === 1 ? "" : "s"}: ${fileNameFromPath(primaryProfilePath)}`
+                      ? `${profilePaths.length} ref${profilePaths.length === 1 ? "" : "s"}`
                       : "None";
                     return (
                       <div
@@ -4358,10 +4553,35 @@ export function SubtitleEditorPage({ itemId }: { itemId: string }) {
                         <code style={{ opacity: 0.85 }} title={primaryProfilePath || ""}>
                           {profileLabel}
                         </code>
+                        {profilePaths.length ? (
+                          <div style={{ fontSize: 12, opacity: 0.8 }}>
+                            Active refs: {profilePaths.map((path) => fileNameFromPath(path)).join(" | ")}
+                          </div>
+                        ) : null}
                         {setting?.voice_profile_id ? (
                           <div style={{ fontSize: 12, opacity: 0.65 }}>
                             Applied library profile: <code>{setting.voice_profile_id}</code>
                           </div>
+                        ) : null}
+                        {profilePaths.length > 1 ? (
+                          <label style={{ display: "flex", flexDirection: "column", gap: 4 }}>
+                            <span style={{ fontSize: 12, opacity: 0.75 }}>Cleanup source ref</span>
+                            <select
+                              value={cleanupSourcePath}
+                              onChange={(e) =>
+                                setCleanupSourceBySpeaker((prev) => ({
+                                  ...prev,
+                                  [speakerKey]: e.currentTarget.value,
+                                }))
+                              }
+                            >
+                              {profilePaths.map((path) => (
+                                <option key={`${speakerKey}-${path}`} value={path}>
+                                  {fileNameFromPath(path)}
+                                </option>
+                              ))}
+                            </select>
+                          </label>
                         ) : null}
                         <button
                           type="button"
@@ -5893,10 +6113,15 @@ export function SubtitleEditorPage({ itemId }: { itemId: string }) {
             <tbody>
               {artifacts.length ? (
                 artifacts.map((a) => {
-                  const jobType = artifactJobType(a.id);
-                  const job = jobType ? latestItemJobByType.get(jobType) ?? null : null;
+                  const artifactMeta = artifactIdentity(a);
+                  const job = latestItemJobByArtifactId.get(a.id) ?? null;
                   const finished = formatTs(job?.finished_at_ms ?? null);
                   const canPlay = a.exists && (isAudioPath(a.path) || isVideoPath(a.path));
+                  const canRerun =
+                    artifactMeta.rerunSupported ||
+                    !!latestItemJobByArtifactId.get(a.id);
+                  const rerunBusy =
+                    job?.status === "queued" || job?.status === "running";
 
                   return (
                     <tr key={a.id}>
@@ -5931,7 +6156,7 @@ export function SubtitleEditorPage({ itemId }: { itemId: string }) {
                           </button>
                           <button
                             type="button"
-                            disabled={busy}
+                            disabled={busy || !canRerun || rerunBusy}
                             onClick={() => rerunArtifact(a).catch(() => undefined)}
                           >
                             Rerun

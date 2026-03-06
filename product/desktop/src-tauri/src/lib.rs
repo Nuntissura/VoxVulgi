@@ -1079,17 +1079,39 @@ fn item_artifacts_list_v1(
                         .file_name()
                         .and_then(|value| value.to_str())
                         .unwrap_or("cleanup");
+                    let manifest_path = cleanup_path.join("manifest.json");
+                    let speaker_title = if manifest_path.exists() {
+                        std::fs::read(&manifest_path)
+                            .ok()
+                            .and_then(|bytes| {
+                                serde_json::from_slice::<voice_cleanup::VoiceReferenceCleanupRecord>(
+                                    &bytes,
+                                )
+                                .ok()
+                            })
+                            .map(|manifest| {
+                                let label = manifest.speaker_key.trim();
+                                if label.is_empty() {
+                                    speaker_label.to_string()
+                                } else {
+                                    label.to_string()
+                                }
+                            })
+                            .unwrap_or_else(|| speaker_label.to_string())
+                    } else {
+                        speaker_label.to_string()
+                    };
                     push(
                         &format!("voice_cleanup_{speaker_label}_{cleanup_id}"),
-                        &format!("Voice cleanup {speaker_label} ({cleanup_id})"),
+                        &format!("Voice cleanup {speaker_title} ({cleanup_id})"),
                         "Voice cleanup",
                         cleanup_path.join("cleaned_ref.wav"),
                     );
                     push(
                         &format!("voice_cleanup_manifest_{speaker_label}_{cleanup_id}"),
-                        &format!("Voice cleanup manifest {speaker_label} ({cleanup_id})"),
+                        &format!("Voice cleanup manifest {speaker_title} ({cleanup_id})"),
                         "Voice cleanup",
-                        cleanup_path.join("manifest.json"),
+                        manifest_path,
                     );
                 }
             }
@@ -2609,6 +2631,27 @@ async fn jobs_list(
 }
 
 #[tauri::command]
+async fn jobs_list_for_item(
+    state: State<'_, AppState>,
+    item_id: Option<String>,
+    itemId: Option<String>,
+    limit: usize,
+    offset: usize,
+) -> Result<Vec<jobs::JobRow>, String> {
+    let item_id = item_id
+        .or(itemId)
+        .map(|v| v.trim().to_string())
+        .filter(|v| !v.is_empty())
+        .ok_or_else(|| "missing required key itemId".to_string())?;
+    let paths = state.paths.clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        jobs::list_jobs_for_item(&paths, &item_id, limit, offset).map_err(|e| e.to_string())
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
+#[tauri::command]
 fn jobs_enqueue_import_local(
     state: State<'_, AppState>,
     path: String,
@@ -3113,6 +3156,7 @@ pub fn run() {
             jobs_enqueue_translate_local,
             jobs_flush_cache,
             jobs_list,
+            jobs_list_for_item,
             jobs_queue_control_get,
             jobs_queue_control_set,
             jobs_log_retention_policy,
