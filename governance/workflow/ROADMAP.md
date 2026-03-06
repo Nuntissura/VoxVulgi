@@ -13,6 +13,7 @@ Date: 2026-02-19
 - WP-0071: Clarify installer maintenance modes (Update/Repair vs Full reinstall vs Uninstall).
 - WP-0072: Add pre-maintenance explainer page before NSIS maintenance action selection.
 - WP-0073: Add governance-level policy pointers for installer maintenance mode wording.
+- WP-0074: Clarify localization output locations, prefer MP4 defaults, repair thumbnail recovery, and remove remaining first-open freezes.
 
 ## Phase 0 — Decisions (1–2 days)
 

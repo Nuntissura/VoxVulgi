@@ -26,16 +26,16 @@ fn run() -> Result<()> {
         match args[i].as_str() {
             "--stage-base-dir" | "--base-dir" => {
                 i += 1;
-                let v = args
-                    .get(i)
-                    .ok_or_else(|| EngineError::InstallFailed("--stage-base-dir requires a value".to_string()))?;
+                let v = args.get(i).ok_or_else(|| {
+                    EngineError::InstallFailed("--stage-base-dir requires a value".to_string())
+                })?;
                 stage_base_dir = Some(PathBuf::from(v));
             }
             "--out-dir" => {
                 i += 1;
-                let v = args
-                    .get(i)
-                    .ok_or_else(|| EngineError::InstallFailed("--out-dir requires a value".to_string()))?;
+                let v = args.get(i).ok_or_else(|| {
+                    EngineError::InstallFailed("--out-dir requires a value".to_string())
+                })?;
                 out_dir = Some(PathBuf::from(v));
             }
             "--force" => force = true,
@@ -51,7 +51,8 @@ fn run() -> Result<()> {
     let stage_base_dir = stage_base_dir.ok_or_else(|| {
         EngineError::InstallFailed("missing required --stage-base-dir".to_string())
     })?;
-    let out_dir = out_dir.ok_or_else(|| EngineError::InstallFailed("missing required --out-dir".to_string()))?;
+    let out_dir = out_dir
+        .ok_or_else(|| EngineError::InstallFailed("missing required --out-dir".to_string()))?;
 
     let paths = AppPaths::new(stage_base_dir.clone());
     paths.ensure_dirs()?;
@@ -181,7 +182,10 @@ fn run() -> Result<()> {
     {
         let store = ModelStore::new(paths.clone());
         let inv = store.inventory()?;
-        let installed = inv.models.iter().any(|m| m.id == "whispercpp-tiny" && m.installed);
+        let installed = inv
+            .models
+            .iter()
+            .any(|m| m.id == "whispercpp-tiny" && m.installed);
         if !installed {
             store.install_model("whispercpp-tiny")?;
         } else {
@@ -225,7 +229,11 @@ fn predownload_demucs_weights(paths: &AppPaths) -> Result<()> {
     command.env("PYTHONNOUSERSITE", "1");
     command.env(
         "XDG_CACHE_HOME",
-        paths.cache_dir().join("python").to_string_lossy().to_string(),
+        paths
+            .cache_dir()
+            .join("python")
+            .to_string_lossy()
+            .to_string(),
     );
     command.env("TORCH_HOME", torch_home.to_string_lossy().to_string());
 
@@ -285,9 +293,10 @@ fn export_offline_payload(paths: &AppPaths, out_dir: &Path) -> Result<()> {
     zip.add_directory("cache/", dir_options).map_err(|e| {
         EngineError::InstallFailed(format!("failed to write payload zip directory entry: {e}"))
     })?;
-    zip.add_directory("cache/huggingface/", dir_options).map_err(|e| {
-        EngineError::InstallFailed(format!("failed to write payload zip directory entry: {e}"))
-    })?;
+    zip.add_directory("cache/huggingface/", dir_options)
+        .map_err(|e| {
+            EngineError::InstallFailed(format!("failed to write payload zip directory entry: {e}"))
+        })?;
 
     zip_add_tree(&mut zip, &tools_src, "tools", file_options, dir_options)?;
     zip_add_tree(&mut zip, &models_src, "models", file_options, dir_options)?;
@@ -299,16 +308,14 @@ fn export_offline_payload(paths: &AppPaths, out_dir: &Path) -> Result<()> {
         dir_options,
     )?;
 
-    zip.finish().map_err(|e| {
-        EngineError::InstallFailed(format!("failed to finalize payload zip: {e}"))
-    })?;
+    zip.finish()
+        .map_err(|e| EngineError::InstallFailed(format!("failed to finalize payload zip: {e}")))?;
 
-    let payload_bytes = std::fs::metadata(&payload_path).map(|m| m.len()).unwrap_or(0);
+    let payload_bytes = std::fs::metadata(&payload_path)
+        .map(|m| m.len())
+        .unwrap_or(0);
 
-    let bundle_id = format!(
-        "offline_full_win64_{}",
-        chrono_yyyymmdd_hhmmss()
-    );
+    let bundle_id = format!("offline_full_win64_{}", chrono_yyyymmdd_hhmmss());
     let manifest = serde_json::json!({
         "schema_version": 1,
         "bundle_id": bundle_id,
@@ -316,7 +323,13 @@ fn export_offline_payload(paths: &AppPaths, out_dir: &Path) -> Result<()> {
         "payload_zip": "payload.zip",
         "payload_bytes": payload_bytes,
     });
-    std::fs::write(out_dir.join("manifest.json"), format!("{}\n", serde_json::to_string_pretty(&manifest).unwrap_or_else(|_| "{}".to_string())))?;
+    std::fs::write(
+        out_dir.join("manifest.json"),
+        format!(
+            "{}\n",
+            serde_json::to_string_pretty(&manifest).unwrap_or_else(|_| "{}".to_string())
+        ),
+    )?;
 
     Ok(())
 }
@@ -357,7 +370,9 @@ fn zip_add_tree<W: std::io::Write + std::io::Seek>(
 
             if file_type.is_dir() {
                 zip.add_directory(zip_path, dir_options).map_err(|e| {
-                    EngineError::InstallFailed(format!("failed to write payload zip directory entry: {e}"))
+                    EngineError::InstallFailed(format!(
+                        "failed to write payload zip directory entry: {e}"
+                    ))
                 })?;
                 stack.push(path);
                 continue;
@@ -416,8 +431,7 @@ fn write_test_wav_44k_mono_16bit(path: &Path) -> Result<()> {
     let amp: f64 = 0.08;
     for n in 0..total_samples {
         let t = (n as f64) / (sample_rate as f64);
-        let v = (amp * (2.0 * std::f64::consts::PI * freq_hz * t).sin())
-            .clamp(-1.0, 1.0);
+        let v = (amp * (2.0 * std::f64::consts::PI * freq_hz * t).sin()).clamp(-1.0, 1.0);
         let sample = (v * (i16::MAX as f64)) as i16;
         out.extend_from_slice(&sample.to_le_bytes());
     }

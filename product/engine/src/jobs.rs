@@ -1,9 +1,7 @@
 use crate::paths::AppPaths;
 use crate::{
-    asr, cmd, config, db, ffmpeg, image_batch, library, subtitle_tracks, subtitles, tools,
-    translate,
-    speakers, EngineError, Result,
-    subscriptions,
+    asr, cmd, config, db, ffmpeg, image_batch, library, speakers, subscriptions, subtitle_tracks,
+    subtitles, tools, translate, EngineError, Result,
 };
 use regex::Regex;
 use rusqlite::params;
@@ -33,6 +31,7 @@ const DOWNLOAD_RIGHTS_NOTE_UNSPECIFIED: &str = "not_collected";
 const DEFAULT_VIDEO_OUTPUT_SUBDIR: &str = "video";
 const DEFAULT_INSTAGRAM_OUTPUT_SUBDIR: &str = "instagram";
 const DEFAULT_IMAGES_OUTPUT_SUBDIR: &str = "images";
+const DEFAULT_LOCALIZATION_OUTPUT_SUBDIR: &str = "localization";
 const EMBED_CRAWL_MAX_PAGES: usize = 8;
 const EMBED_CRAWL_MAX_CANDIDATES: usize = 40;
 const EMBED_FETCH_MAX_BODY_BYTES: u64 = 2 * 1024 * 1024;
@@ -551,12 +550,7 @@ pub fn enqueue_tts_neural_local_v1(
         source_track_id,
         batch_on_import: false,
     })?;
-    enqueue_with_type_and_item_id(
-        paths,
-        JobType::TtsNeuralLocalV1,
-        params_json,
-        Some(item_id),
-    )
+    enqueue_with_type_and_item_id(paths, JobType::TtsNeuralLocalV1, params_json, Some(item_id))
 }
 
 pub fn enqueue_dub_voice_preserving_v1(
@@ -578,16 +572,15 @@ pub fn enqueue_dub_voice_preserving_v1(
 }
 
 pub fn enqueue_mix_dub_preview_v1(paths: &AppPaths, item_id: String) -> Result<JobRow> {
-    let params_json =
-        serde_json::to_string(&MixDubPreviewV1Params {
-            item_id: item_id.clone(),
-            ducking_strength: None,
-            loudness_target_lufs: None,
-            timing_fit_enabled: None,
-            timing_fit_min_factor: None,
-            timing_fit_max_factor: None,
-            batch_on_import: false,
-        })?;
+    let params_json = serde_json::to_string(&MixDubPreviewV1Params {
+        item_id: item_id.clone(),
+        ducking_strength: None,
+        loudness_target_lufs: None,
+        timing_fit_enabled: None,
+        timing_fit_min_factor: None,
+        timing_fit_max_factor: None,
+        batch_on_import: false,
+    })?;
     enqueue_with_type_and_item_id(paths, JobType::MixDubPreviewV1, params_json, Some(item_id))
 }
 
@@ -613,15 +606,14 @@ pub fn enqueue_mix_dub_preview_v1_with_options(
 }
 
 pub fn enqueue_mux_dub_preview_v1(paths: &AppPaths, item_id: String) -> Result<JobRow> {
-    let params_json =
-        serde_json::to_string(&MuxDubPreviewV1Params {
-            item_id: item_id.clone(),
-            output_container: None,
-            keep_original_audio: None,
-            dubbed_audio_lang: None,
-            original_audio_lang: None,
-            batch_on_import: false,
-        })?;
+    let params_json = serde_json::to_string(&MuxDubPreviewV1Params {
+        item_id: item_id.clone(),
+        output_container: None,
+        keep_original_audio: None,
+        dubbed_audio_lang: None,
+        original_audio_lang: None,
+        batch_on_import: false,
+    })?;
     enqueue_with_type_and_item_id(paths, JobType::MuxDubPreviewV1, params_json, Some(item_id))
 }
 
@@ -645,11 +637,10 @@ pub fn enqueue_mux_dub_preview_v1_with_options(
 }
 
 pub fn enqueue_separate_audio_spleeter(paths: &AppPaths, item_id: String) -> Result<JobRow> {
-    let params_json =
-        serde_json::to_string(&SeparateAudioSpleeterParams {
-            item_id: item_id.clone(),
-            batch_on_import: false,
-        })?;
+    let params_json = serde_json::to_string(&SeparateAudioSpleeterParams {
+        item_id: item_id.clone(),
+        batch_on_import: false,
+    })?;
     enqueue_with_type_and_item_id(
         paths,
         JobType::SeparateAudioSpleeter,
@@ -678,11 +669,7 @@ pub fn enqueue_clean_vocals_v1(paths: &AppPaths, item_id: String) -> Result<JobR
     enqueue_with_type_and_item_id(paths, JobType::CleanVocalsV1, params_json, Some(item_id))
 }
 
-pub fn enqueue_qc_report_v1(
-    paths: &AppPaths,
-    item_id: String,
-    track_id: String,
-) -> Result<JobRow> {
+pub fn enqueue_qc_report_v1(paths: &AppPaths, item_id: String, track_id: String) -> Result<JobRow> {
     let params_json = serde_json::to_string(&QcReportV1Params {
         item_id: item_id.clone(),
         track_id,
@@ -1149,7 +1136,11 @@ pub fn flush_jobs_cache(paths: &AppPaths) -> Result<JobFlushSummary> {
                     let subdir = params.output_subdir.trim();
                     if !subdir.is_empty() {
                         // Current layout stores image jobs under downloads/images/<subdir>.
-                        output_dirs.insert(download_root.join(DEFAULT_IMAGES_OUTPUT_SUBDIR).join(subdir));
+                        output_dirs.insert(
+                            download_root
+                                .join(DEFAULT_IMAGES_OUTPUT_SUBDIR)
+                                .join(subdir),
+                        );
                         // Backward compatibility for older jobs written at downloads/<subdir>.
                         output_dirs.insert(download_root.join(subdir));
                     }
@@ -1199,27 +1190,35 @@ pub fn retry_job(paths: &AppPaths, job_id: &str) -> Result<JobRow> {
         JobType::DiarizeLocalV1 => serde_json::from_str::<DiarizeLocalV1Params>(&params_json)
             .ok()
             .map(|p| p.item_id),
-        JobType::TtsPreviewPyttsx3V1 => serde_json::from_str::<TtsPreviewPyttsx3V1Params>(&params_json)
-            .ok()
-            .map(|p| p.item_id),
+        JobType::TtsPreviewPyttsx3V1 => {
+            serde_json::from_str::<TtsPreviewPyttsx3V1Params>(&params_json)
+                .ok()
+                .map(|p| p.item_id)
+        }
         JobType::TtsNeuralLocalV1 => serde_json::from_str::<TtsNeuralLocalV1Params>(&params_json)
             .ok()
             .map(|p| p.item_id),
-        JobType::DubVoicePreservingV1 => serde_json::from_str::<DubVoicePreservingV1Params>(&params_json)
-            .ok()
-            .map(|p| p.item_id),
+        JobType::DubVoicePreservingV1 => {
+            serde_json::from_str::<DubVoicePreservingV1Params>(&params_json)
+                .ok()
+                .map(|p| p.item_id)
+        }
         JobType::MixDubPreviewV1 => serde_json::from_str::<MixDubPreviewV1Params>(&params_json)
             .ok()
             .map(|p| p.item_id),
         JobType::MuxDubPreviewV1 => serde_json::from_str::<MuxDubPreviewV1Params>(&params_json)
             .ok()
             .map(|p| p.item_id),
-        JobType::SeparateAudioSpleeter => serde_json::from_str::<SeparateAudioSpleeterParams>(&params_json)
-            .ok()
-            .map(|p| p.item_id),
-        JobType::SeparateAudioDemucsV1 => serde_json::from_str::<SeparateAudioDemucsV1Params>(&params_json)
-            .ok()
-            .map(|p| p.item_id),
+        JobType::SeparateAudioSpleeter => {
+            serde_json::from_str::<SeparateAudioSpleeterParams>(&params_json)
+                .ok()
+                .map(|p| p.item_id)
+        }
+        JobType::SeparateAudioDemucsV1 => {
+            serde_json::from_str::<SeparateAudioDemucsV1Params>(&params_json)
+                .ok()
+                .map(|p| p.item_id)
+        }
         JobType::CleanVocalsV1 => serde_json::from_str::<CleanVocalsV1Params>(&params_json)
             .ok()
             .map(|p| p.item_id),
@@ -1374,7 +1373,11 @@ fn job_batch_id(paths: &AppPaths, job_id: &str) -> Result<Option<String>> {
     )?;
     Ok(batch_id.and_then(|v| {
         let t = v.trim().to_string();
-        if t.is_empty() { None } else { Some(t) }
+        if t.is_empty() {
+            None
+        } else {
+            Some(t)
+        }
     }))
 }
 
@@ -1468,7 +1471,8 @@ fn tts_manifest_exists(paths: &AppPaths, item_id: &str) -> bool {
 }
 
 fn mix_output_exists(paths: &AppPaths, item_id: &str) -> bool {
-    paths.derived_item_dir(item_id)
+    paths
+        .derived_item_dir(item_id)
         .join("dub_preview")
         .join("mix_dub_preview_v1.wav")
         .exists()
@@ -1656,8 +1660,10 @@ fn execute_job(paths: &AppPaths, job_id: &str, type_str: &str, params_json: &str
                     }),
                 )?;
 
-                let needs_asr =
-                    rules.auto_asr || rules.auto_translate || rules.auto_diarize || rules.auto_dub_preview;
+                let needs_asr = rules.auto_asr
+                    || rules.auto_translate
+                    || rules.auto_diarize
+                    || rules.auto_dub_preview;
                 let needs_separate = rules.auto_separate || rules.auto_dub_preview;
 
                 if needs_separate {
@@ -1697,13 +1703,16 @@ fn execute_job(paths: &AppPaths, job_id: &str, type_str: &str, params_json: &str
             let subscription_id = p.subscription_id.clone();
             let url = normalize_direct_url(&p.url)?;
             let provider = effective_download_provider(&p.provider, &url);
-            let auth_cookie = read_job_cookie_secret(paths, job_id).or_else(|| normalize_auth_cookie(p.auth_cookie));
+            let auth_cookie = read_job_cookie_secret(paths, job_id)
+                .or_else(|| normalize_auth_cookie(p.auth_cookie));
             remove_job_cookie_secret(paths, job_id);
             let mut output_dir = normalize_output_dir(p.output_dir);
             let output_subdir = normalize_output_subdir(p.output_subdir);
             let use_browser_cookies = p.use_browser_cookies;
             if output_dir.is_none() && output_subdir.is_none() {
-                output_dir = Some(default_direct_job_output_dir(paths, provider, &url, job_id)?);
+                output_dir = Some(default_direct_job_output_dir(
+                    paths, provider, &url, job_id,
+                )?);
             }
 
             if is_canceled(paths, job_id)? {
@@ -1722,22 +1731,21 @@ fn execute_job(paths: &AppPaths, job_id: &str, type_str: &str, params_json: &str
                 }),
             )?;
 
-            let downloaded_path =
-                download_url_to_library(
-                    paths,
-                    &url,
-                    job_id,
-                    provider,
-                    auth_cookie.as_deref(),
-                    output_dir.as_deref(),
-                    output_subdir.as_deref(),
-                    use_browser_cookies,
-                    p.output_path_template.as_deref(),
-                    p.filename_template.as_deref(),
-                    p.format_preference.as_deref(),
-                    p.quality_preference.as_deref(),
-                    p.subtitle_mode.as_deref(),
-                )?;
+            let downloaded_path = download_url_to_library(
+                paths,
+                &url,
+                job_id,
+                provider,
+                auth_cookie.as_deref(),
+                output_dir.as_deref(),
+                output_subdir.as_deref(),
+                use_browser_cookies,
+                p.output_path_template.as_deref(),
+                p.filename_template.as_deref(),
+                p.format_preference.as_deref(),
+                p.quality_preference.as_deref(),
+                p.subtitle_mode.as_deref(),
+            )?;
             set_progress(paths, job_id, 0.70)?;
 
             if is_canceled(paths, job_id)? {
@@ -1799,7 +1807,12 @@ fn execute_job(paths: &AppPaths, job_id: &str, type_str: &str, params_json: &str
 
             let refresh_result: Result<()> = (|| {
                 let sub = subscriptions::get_youtube_subscription_by_id(paths, &p.subscription_id)?
-                    .ok_or_else(|| EngineError::InstallFailed(format!("subscription not found: {}", p.subscription_id)))?;
+                    .ok_or_else(|| {
+                        EngineError::InstallFailed(format!(
+                            "subscription not found: {}",
+                            p.subscription_id
+                        ))
+                    })?;
 
                 let max_items = p.max_items.unwrap_or(200).clamp(1, MAX_DOWNLOAD_BATCH_URLS);
                 let output_dir = subscriptions::youtube_subscription_output_dir(paths, &sub)?;
@@ -1837,7 +1850,9 @@ fn execute_job(paths: &AppPaths, job_id: &str, type_str: &str, params_json: &str
                 let mut new_urls: Vec<String> = Vec::new();
                 let mut skipped_archived = 0_usize;
                 for candidate in expanded {
-                    let Some(video_id) = subscriptions::youtube_video_id_from_url(candidate.as_str()) else {
+                    let Some(video_id) =
+                        subscriptions::youtube_video_id_from_url(candidate.as_str())
+                    else {
                         continue;
                     };
                     if archived.contains(video_id.as_str()) {
@@ -1891,10 +1906,16 @@ fn execute_job(paths: &AppPaths, job_id: &str, type_str: &str, params_json: &str
 
             match refresh_result {
                 Ok(()) => {
-                    let _ = subscriptions::record_subscription_refresh_success(paths, &p.subscription_id);
+                    let _ = subscriptions::record_subscription_refresh_success(
+                        paths,
+                        &p.subscription_id,
+                    );
                 }
                 Err(err) => {
-                    let _ = subscriptions::record_subscription_refresh_failure(paths, &p.subscription_id);
+                    let _ = subscriptions::record_subscription_refresh_failure(
+                        paths,
+                        &p.subscription_id,
+                    );
                     return Err(err);
                 }
             }
@@ -2033,7 +2054,9 @@ fn execute_job(paths: &AppPaths, job_id: &str, type_str: &str, params_json: &str
                 "asr_extract_audio_begin",
                 serde_json::json!({ "path": &item.media_path, "audio_path": &audio_path }),
             )?;
-            if audio_path.exists() && std::fs::metadata(&audio_path).map(|m| m.len()).unwrap_or(0) > 0 {
+            if audio_path.exists()
+                && std::fs::metadata(&audio_path).map(|m| m.len()).unwrap_or(0) > 0
+            {
                 log_line(
                     paths,
                     job_id,
@@ -2202,7 +2225,9 @@ INSERT INTO subtitle_track (
                 "translate_extract_audio_begin",
                 serde_json::json!({ "path": &item.media_path, "audio_path": &audio_path }),
             )?;
-            if audio_path.exists() && std::fs::metadata(&audio_path).map(|m| m.len()).unwrap_or(0) > 0 {
+            if audio_path.exists()
+                && std::fs::metadata(&audio_path).map(|m| m.len()).unwrap_or(0) > 0
+            {
                 log_line(
                     paths,
                     job_id,
@@ -2331,7 +2356,8 @@ INSERT INTO subtitle_track (
                         JobType::TtsPreviewPyttsx3V1
                     };
 
-                    if !item_has_active_job(paths, &item.id, tts_job_type.as_str()).unwrap_or(false) {
+                    if !item_has_active_job(paths, &item.id, tts_job_type.as_str()).unwrap_or(false)
+                    {
                         let params_json = if prefer_neural {
                             serde_json::to_string(&TtsNeuralLocalV1Params {
                                 item_id: item.id.clone(),
@@ -2384,7 +2410,8 @@ INSERT INTO subtitle_track (
                 .map(|v| v.trim().to_lowercase())
                 .filter(|v| !v.is_empty())
                 .unwrap_or_else(|| "baseline".to_string());
-            let use_pyannote = requested_backend == "pyannote_byo_v1" || requested_backend == "pyannote";
+            let use_pyannote =
+                requested_backend == "pyannote_byo_v1" || requested_backend == "pyannote";
             let backend_for_log = if use_pyannote {
                 "pyannote_byo_v1"
             } else {
@@ -2432,7 +2459,9 @@ INSERT INTO subtitle_track (
                 "diarize_extract_audio_begin",
                 serde_json::json!({ "path": &item.media_path, "audio_path": &audio_path }),
             )?;
-            if audio_path.exists() && std::fs::metadata(&audio_path).map(|m| m.len()).unwrap_or(0) > 0 {
+            if audio_path.exists()
+                && std::fs::metadata(&audio_path).map(|m| m.len()).unwrap_or(0) > 0
+            {
                 log_line(
                     paths,
                     job_id,
@@ -2462,7 +2491,10 @@ INSERT INTO subtitle_track (
             };
 
             if diarization_json_path.exists()
-                && std::fs::metadata(&diarization_json_path).map(|m| m.len()).unwrap_or(0) > 0
+                && std::fs::metadata(&diarization_json_path)
+                    .map(|m| m.len())
+                    .unwrap_or(0)
+                    > 0
             {
                 log_line(
                     paths,
@@ -2607,11 +2639,19 @@ if __name__ == "__main__":
                 py_cmd.env("PYTHONNOUSERSITE", "1");
                 py_cmd.env(
                     "XDG_CACHE_HOME",
-                    paths.cache_dir().join("python").to_string_lossy().to_string(),
+                    paths
+                        .cache_dir()
+                        .join("python")
+                        .to_string_lossy()
+                        .to_string(),
                 );
                 py_cmd.env(
                     "HF_HOME",
-                    paths.python_models_dir().join("hf").to_string_lossy().to_string(),
+                    paths
+                        .python_models_dir()
+                        .join("hf")
+                        .to_string_lossy()
+                        .to_string(),
                 );
                 py_cmd.env("HF_HUB_DISABLE_TELEMETRY", "1");
                 if let Some(token) = token.as_deref() {
@@ -2621,7 +2661,9 @@ if __name__ == "__main__":
                 }
 
                 let output = py_cmd.output().map_err(|e| {
-                    EngineError::InstallFailed(format!("failed to run pyannote diarization script: {e}"))
+                    EngineError::InstallFailed(format!(
+                        "failed to run pyannote diarization script: {e}"
+                    ))
                 })?;
                 if !output.status.success() {
                     let stderr = String::from_utf8_lossy(&output.stderr);
@@ -2779,7 +2821,11 @@ if __name__ == "__main__":
                 py_cmd.env("PYTHONNOUSERSITE", "1");
                 py_cmd.env(
                     "XDG_CACHE_HOME",
-                    paths.cache_dir().join("python").to_string_lossy().to_string(),
+                    paths
+                        .cache_dir()
+                        .join("python")
+                        .to_string_lossy()
+                        .to_string(),
                 );
                 let output = py_cmd.output().map_err(|e| {
                     EngineError::InstallFailed(format!("failed to run diarize script: {e}"))
@@ -3134,7 +3180,11 @@ if __name__ == "__main__":
             py_cmd.env("PYTHONNOUSERSITE", "1");
             py_cmd.env(
                 "XDG_CACHE_HOME",
-                paths.cache_dir().join("python").to_string_lossy().to_string(),
+                paths
+                    .cache_dir()
+                    .join("python")
+                    .to_string_lossy()
+                    .to_string(),
             );
             let output = py_cmd.output().map_err(|e| {
                 EngineError::InstallFailed(format!("failed to run pyttsx3 script: {e}"))
@@ -3418,6 +3468,30 @@ except Exception as e:
 
 
 def chunks_from_output(output: Any) -> Iterable[Tuple[np.ndarray, Optional[int]]]:
+    def first_non_none(*values: Any) -> Any:
+        for value in values:
+            if value is not None:
+                return value
+        return None
+
+    def as_audio_array(value: Any) -> Optional[np.ndarray]:
+        if value is None:
+            return None
+        if isinstance(value, np.ndarray):
+            return value.astype(np.float32)
+        if hasattr(value, "detach"):
+            try:
+                return value.detach().cpu().numpy().astype(np.float32)
+            except Exception:
+                pass
+        try:
+            arr = np.asarray(value, dtype=np.float32)
+        except Exception:
+            return None
+        if arr.size == 0:
+            return None
+        return arr
+
     if output is None:
         return []
 
@@ -3435,25 +3509,45 @@ def chunks_from_output(output: Any) -> Iterable[Tuple[np.ndarray, Optional[int]]
         if chunk is None:
             continue
         if isinstance(chunk, dict):
-            audio = chunk.get("audio") or chunk.get("waveform")
+            audio = as_audio_array(first_non_none(chunk.get("audio"), chunk.get("waveform")))
             sr = chunk.get("sample_rate") or chunk.get("sample_rate_hz") or chunk.get("sr")
             if audio is not None:
-                yield np.asarray(audio, dtype=np.float32), int(sr) if sr is not None else None
+                yield audio, int(sr) if sr is not None else None
+            continue
+
+        audio = as_audio_array(
+            first_non_none(getattr(chunk, "audio", None), getattr(chunk, "waveform", None))
+        )
+        sr = getattr(chunk, "sample_rate", None) or getattr(chunk, "sample_rate_hz", None) or getattr(chunk, "sr", None)
+        nested = getattr(chunk, "output", None)
+        if audio is None and nested is not None:
+            audio = as_audio_array(
+                first_non_none(getattr(nested, "audio", None), getattr(nested, "waveform", None))
+            )
+            if sr is None:
+                sr = getattr(nested, "sample_rate", None) or getattr(nested, "sample_rate_hz", None) or getattr(nested, "sr", None)
+        if audio is not None:
+            yield audio, int(sr) if sr is not None else None
             continue
 
         if isinstance(chunk, tuple) or isinstance(chunk, list):
             if len(chunk) == 2 and isinstance(chunk[1], (int, float, np.integer)):
-                yield np.asarray(chunk[0], dtype=np.float32), int(chunk[1])
+                audio = as_audio_array(chunk[0])
+                if audio is not None:
+                    yield audio, int(chunk[1])
                 continue
             if len(chunk) >= 3:
-                audio = chunk[1]
+                audio = as_audio_array(chunk[1])
                 sr = chunk[2]
                 if isinstance(sr, (int, float, np.integer)) and audio is not None:
-                    yield np.asarray(audio, dtype=np.float32), int(sr)
+                    yield audio, int(sr)
                 continue
 
         if isinstance(chunk, np.ndarray):
             yield chunk.astype(np.float32), None
+
+
+DEFAULT_KOKORO_VOICE = "af_heart"
 
 
 def synthesize(
@@ -3462,13 +3556,8 @@ def synthesize(
     out_path: str,
     voice_id: str,
 ) -> None:
-    args = {}
-    if voice_id:
-        args["voice"] = voice_id
-    tries = [dict(args), dict(args)]
-    if "voice" in args:
-        tries.append({"speaker": voice_id})
-    tries.append({})
+    selected_voice = (voice_id or "").strip() or DEFAULT_KOKORO_VOICE
+    tries = [{"voice": selected_voice}]
 
     out_dir = os.path.dirname(out_path)
     if out_dir:
@@ -3545,15 +3634,24 @@ if __name__ == "__main__":
             py_cmd.env("PYTHONNOUSERSITE", "1");
             py_cmd.env(
                 "XDG_CACHE_HOME",
-                paths.cache_dir().join("python").to_string_lossy().to_string(),
+                paths
+                    .cache_dir()
+                    .join("python")
+                    .to_string_lossy()
+                    .to_string(),
             );
             py_cmd.env(
                 "HF_HOME",
-                paths.cache_dir().join("huggingface").to_string_lossy().to_string(),
+                paths
+                    .cache_dir()
+                    .join("huggingface")
+                    .to_string_lossy()
+                    .to_string(),
             );
             py_cmd.env(
                 "HUGGINGFACE_HUB_CACHE",
-                paths.cache_dir()
+                paths
+                    .cache_dir()
                     .join("huggingface")
                     .join("hub")
                     .to_string_lossy()
@@ -3734,8 +3832,12 @@ if __name__ == "__main__":
             let item = library::get_item_by_id(paths, &p.item_id)?;
 
             let mut tts_voice_profile_path_by_speaker: HashMap<String, String> = HashMap::new();
+            let mut tts_voice_id_by_speaker: HashMap<String, String> = HashMap::new();
             let speaker_settings = speakers::list_item_speaker_settings(paths, &item.id)?;
             for s in speaker_settings {
+                if let Some(voice_id) = s.tts_voice_id {
+                    tts_voice_id_by_speaker.insert(s.speaker_key.clone(), voice_id);
+                }
                 if let Some(voice_profile_path) = s.tts_voice_profile_path {
                     tts_voice_profile_path_by_speaker.insert(s.speaker_key, voice_profile_path);
                 }
@@ -3756,6 +3858,8 @@ if __name__ == "__main__":
                 #[serde(default)]
                 speaker: Option<String>,
                 #[serde(default)]
+                voice_id: Option<String>,
+                #[serde(default)]
                 tts_voice_profile_path: Option<String>,
                 start_ms: i64,
                 end_ms: i64,
@@ -3775,6 +3879,9 @@ if __name__ == "__main__":
                     .as_ref()
                     .map(|s| s.trim().to_string())
                     .filter(|s| !s.is_empty());
+                let voice_id = speaker
+                    .as_ref()
+                    .and_then(|k| tts_voice_id_by_speaker.get(k).cloned());
                 let tts_voice_profile_path = speaker
                     .as_ref()
                     .and_then(|k| tts_voice_profile_path_by_speaker.get(k).cloned());
@@ -3783,6 +3890,7 @@ if __name__ == "__main__":
                 request.push(TtsRequestSegment {
                     index: seg.index,
                     speaker,
+                    voice_id,
                     tts_voice_profile_path,
                     start_ms: seg.start_ms,
                     end_ms: seg.end_ms,
@@ -3881,6 +3989,30 @@ def run_ffmpeg_convert(ffmpeg_cmd: str, in_path: str, out_path: str) -> str:
 
 
 def chunks_from_output(output: Any) -> Iterable[Tuple[np.ndarray, Optional[int]]]:
+    def first_non_none(*values: Any) -> Any:
+        for value in values:
+            if value is not None:
+                return value
+        return None
+
+    def as_audio_array(value: Any) -> Optional[np.ndarray]:
+        if value is None:
+            return None
+        if isinstance(value, np.ndarray):
+            return value.astype(np.float32)
+        if hasattr(value, "detach"):
+            try:
+                return value.detach().cpu().numpy().astype(np.float32)
+            except Exception:
+                pass
+        try:
+            arr = np.asarray(value, dtype=np.float32)
+        except Exception:
+            return None
+        if arr.size == 0:
+            return None
+        return arr
+
     if output is None:
         return []
 
@@ -3898,25 +4030,45 @@ def chunks_from_output(output: Any) -> Iterable[Tuple[np.ndarray, Optional[int]]
         if chunk is None:
             continue
         if isinstance(chunk, dict):
-            audio = chunk.get("audio") or chunk.get("waveform")
+            audio = as_audio_array(first_non_none(chunk.get("audio"), chunk.get("waveform")))
             sr = chunk.get("sample_rate") or chunk.get("sample_rate_hz") or chunk.get("sr")
             if audio is not None:
-                yield np.asarray(audio, dtype=np.float32), int(sr) if sr is not None else None
+                yield audio, int(sr) if sr is not None else None
+            continue
+
+        audio = as_audio_array(
+            first_non_none(getattr(chunk, "audio", None), getattr(chunk, "waveform", None))
+        )
+        sr = getattr(chunk, "sample_rate", None) or getattr(chunk, "sample_rate_hz", None) or getattr(chunk, "sr", None)
+        nested = getattr(chunk, "output", None)
+        if audio is None and nested is not None:
+            audio = as_audio_array(
+                first_non_none(getattr(nested, "audio", None), getattr(nested, "waveform", None))
+            )
+            if sr is None:
+                sr = getattr(nested, "sample_rate", None) or getattr(nested, "sample_rate_hz", None) or getattr(nested, "sr", None)
+        if audio is not None:
+            yield audio, int(sr) if sr is not None else None
             continue
 
         if isinstance(chunk, tuple) or isinstance(chunk, list):
             if len(chunk) == 2 and isinstance(chunk[1], (int, float, np.integer)):
-                yield np.asarray(chunk[0], dtype=np.float32), int(chunk[1])
+                audio = as_audio_array(chunk[0])
+                if audio is not None:
+                    yield audio, int(chunk[1])
                 continue
             if len(chunk) >= 3:
-                audio = chunk[1]
+                audio = as_audio_array(chunk[1])
                 sr = chunk[2]
                 if isinstance(sr, (int, float, np.integer)) and audio is not None:
-                    yield np.asarray(audio, dtype=np.float32), int(sr)
+                    yield audio, int(sr)
                 continue
 
         if isinstance(chunk, np.ndarray):
             yield chunk.astype(np.float32), None
+
+
+DEFAULT_KOKORO_VOICE = "af_heart"
 
 
 def kokoro_synthesize(pipeline: Any, text: str, out_path: str, voice_id: str = "") -> None:
@@ -3924,13 +4076,8 @@ def kokoro_synthesize(pipeline: Any, text: str, out_path: str, voice_id: str = "
     if out_dir:
         os.makedirs(out_dir, exist_ok=True)
 
-    args: dict[str, Any] = {}
-    if voice_id:
-        args["voice"] = voice_id
-    tries = [dict(args), dict(args)]
-    if "voice" in args:
-        tries.append({"speaker": voice_id})
-    tries.append({})
+    selected_voice = (voice_id or "").strip() or DEFAULT_KOKORO_VOICE
+    tries = [{"voice": selected_voice}]
 
     last_error: Optional[BaseException] = None
     for call_kwargs in tries:
@@ -4042,6 +4189,7 @@ def main() -> None:
         text = (item.get("text") or "").strip()
         out_path = (item.get("out_path") or "").strip()
         base_out_path = (item.get("base_out_path") or "").strip()
+        voice_id = (item.get("voice_id") or "").strip()
         if not text or not out_path or not base_out_path:
             continue
 
@@ -4056,7 +4204,7 @@ def main() -> None:
         }
 
         try:
-            kokoro_synthesize(pipeline, text, base_out_path, voice_id="")
+            kokoro_synthesize(pipeline, text, base_out_path, voice_id=voice_id)
             base_ok += 1
 
             tgt_se = speaker_se.get(speaker)
@@ -4083,9 +4231,6 @@ def main() -> None:
                 shutil.copyfile(base_out_path, out_path)
         except Exception as e:
             seg_rec["error"] = seg_rec["error"] or f"segment_failed: {e}"
-            if base_out_path and not file_exists(base_out_path):
-                os.makedirs(os.path.dirname(base_out_path), exist_ok=True)
-                sf.write(base_out_path, np.zeros((24000 // 5,), dtype=np.float32), 24000)
             if (
                 out_path
                 and not file_exists(out_path)
@@ -4095,6 +4240,8 @@ def main() -> None:
                 os.makedirs(os.path.dirname(out_path), exist_ok=True)
                 shutil.copyfile(base_out_path, out_path)
 
+        seg_rec["base_exists"] = file_exists(base_out_path)
+        seg_rec["out_exists"] = file_exists(out_path)
         segments.append(seg_rec)
 
     report = {
@@ -4133,21 +4280,29 @@ if __name__ == "__main__":
                 .arg("--models-dir")
                 .arg(paths.python_models_dir().join("openvoice_v2"));
             py_cmd.arg("--ffmpeg").arg(paths.ffmpeg_cmd());
-            py_cmd
-                .arg("--report")
-                .arg(artifacts_dir.join("tts_voice_preserving_report.json"));
+            let report_path = artifacts_dir.join("tts_voice_preserving_report.json");
+            py_cmd.arg("--report").arg(&report_path);
             py_cmd.env("PYTHONNOUSERSITE", "1");
             py_cmd.env(
                 "XDG_CACHE_HOME",
-                paths.cache_dir().join("python").to_string_lossy().to_string(),
+                paths
+                    .cache_dir()
+                    .join("python")
+                    .to_string_lossy()
+                    .to_string(),
             );
             py_cmd.env(
                 "HF_HOME",
-                paths.cache_dir().join("huggingface").to_string_lossy().to_string(),
+                paths
+                    .cache_dir()
+                    .join("huggingface")
+                    .to_string_lossy()
+                    .to_string(),
             );
             py_cmd.env(
                 "HUGGINGFACE_HUB_CACHE",
-                paths.cache_dir()
+                paths
+                    .cache_dir()
                     .join("huggingface")
                     .join("hub")
                     .to_string_lossy()
@@ -4156,7 +4311,9 @@ if __name__ == "__main__":
             py_cmd.env("HF_HUB_OFFLINE", "1");
             py_cmd.env("TRANSFORMERS_OFFLINE", "1");
             let output = py_cmd.output().map_err(|e| {
-                EngineError::InstallFailed(format!("failed to run voice-preserving TTS script: {e}"))
+                EngineError::InstallFailed(format!(
+                    "failed to run voice-preserving TTS script: {e}"
+                ))
             })?;
             if !output.status.success() {
                 let stderr = String::from_utf8_lossy(&output.stderr);
@@ -4167,6 +4324,64 @@ if __name__ == "__main__":
                 )));
             }
             set_progress(paths, job_id, 0.80)?;
+
+            let report_json = std::fs::read_to_string(&report_path)?;
+            let report_value: serde_json::Value = serde_json::from_str(&report_json)?;
+            let segments_base_ok = report_value
+                .get("segments_base_ok")
+                .and_then(|v| v.as_u64())
+                .unwrap_or(0);
+            let segments_converted_ok = report_value
+                .get("segments_converted_ok")
+                .and_then(|v| v.as_u64())
+                .unwrap_or(0);
+            let output_segments = request
+                .iter()
+                .filter(|seg| Path::new(&seg.out_path).is_file())
+                .count();
+
+            log_line(
+                paths,
+                job_id,
+                "info",
+                "tts_preview_voice_preserving_python_done",
+                serde_json::json!({
+                    "report_path": &report_path,
+                    "segments_requested": request.len(),
+                    "segments_base_ok": segments_base_ok,
+                    "segments_converted_ok": segments_converted_ok,
+                    "output_segments": output_segments,
+                }),
+            )?;
+
+            if output_segments == 0 {
+                let sample_errors = report_value
+                    .get("segments")
+                    .and_then(|v| v.as_array())
+                    .map(|segments| {
+                        segments
+                            .iter()
+                            .filter_map(|segment| {
+                                segment
+                                    .get("error")
+                                    .and_then(|v| v.as_str())
+                                    .map(str::trim)
+                                    .filter(|msg| !msg.is_empty())
+                                    .map(|msg| msg.to_string())
+                            })
+                            .take(3)
+                            .collect::<Vec<_>>()
+                    })
+                    .unwrap_or_default();
+                let detail = if sample_errors.is_empty() {
+                    "no segment-level error details were captured".to_string()
+                } else {
+                    sample_errors.join(" | ")
+                };
+                return Err(EngineError::InstallFailed(format!(
+                    "voice-preserving dub produced no usable audio segments ({detail})"
+                )));
+            }
 
             #[derive(Serialize)]
             struct TtsManifestSegment {
@@ -4264,8 +4479,8 @@ if __name__ == "__main__":
             let item = library::get_item_by_id(paths, &p.item_id)?;
             let item_dir = paths.derived_item_dir(&item.id);
 
-            let background_path =
-                separation_background_path_best_effort(paths, &item.id).ok_or_else(|| {
+            let background_path = separation_background_path_best_effort(paths, &item.id)
+                .ok_or_else(|| {
                     EngineError::InstallFailed(
                         "background stem not found; run Separate first (Spleeter or Demucs)"
                             .to_string(),
@@ -4296,7 +4511,8 @@ if __name__ == "__main__":
             };
             if !manifest_path.exists() {
                 return Err(EngineError::InstallFailed(
-                    "TTS manifest not found; run TTS preview or voice-preserving dub first".to_string(),
+                    "TTS manifest not found; run TTS preview or voice-preserving dub first"
+                        .to_string(),
                 ));
             }
 
@@ -4349,10 +4565,7 @@ if __name__ == "__main__":
             }
 
             let ducking_strength = p.ducking_strength.unwrap_or(0.6).clamp(0.0, 1.0);
-            let loudness_target_lufs = p
-                .loudness_target_lufs
-                .unwrap_or(-16.0)
-                .clamp(-40.0, -5.0);
+            let loudness_target_lufs = p.loudness_target_lufs.unwrap_or(-16.0).clamp(-40.0, -5.0);
             let timing_fit_enabled = p.timing_fit_enabled.unwrap_or(false);
             let timing_fit_min_factor = p.timing_fit_min_factor.unwrap_or(0.85).clamp(0.5, 1.0);
             let timing_fit_max_factor = p.timing_fit_max_factor.unwrap_or(1.25).clamp(1.0, 3.0);
@@ -4454,17 +4667,23 @@ if __name__ == "__main__":
                         if let Some(dur) = duration_ms {
                             if dur > window_ms {
                                 let required = (dur as f32) / (window_ms as f32);
-                                let clamped = required.clamp(timing_fit_min_factor, timing_fit_max_factor);
+                                let clamped =
+                                    required.clamp(timing_fit_min_factor, timing_fit_max_factor);
                                 applied_factor = Some(clamped);
                                 if required > timing_fit_max_factor {
-                                    note = Some("required factor exceeded max; clamped + trimmed".to_string());
+                                    note = Some(
+                                        "required factor exceeded max; clamped + trimmed"
+                                            .to_string(),
+                                    );
                                 }
                             }
                         }
                     }
 
                     if timing_fit_enabled {
-                        if let Some(entry) = timing_fit_entries.iter_mut().find(|e| e.index == seg.index) {
+                        if let Some(entry) =
+                            timing_fit_entries.iter_mut().find(|e| e.index == seg.index)
+                        {
                             entry.applied_factor = applied_factor;
                             entry.stretched = applied_factor.unwrap_or(1.0) > 1.001;
                             if entry.note.is_none() {
@@ -4489,9 +4708,7 @@ if __name__ == "__main__":
                         filter.push(',');
                         filter.push_str(&format!("atrim=end={window_s:.3}"));
                     }
-                    filter.push_str(&format!(
-                        ",adelay={delay_ms}|{delay_ms}[s{i}];"
-                    ));
+                    filter.push_str(&format!(",adelay={delay_ms}|{delay_ms}[s{i}];"));
                 }
 
                 // Speech bus
@@ -4751,9 +4968,7 @@ if __name__ == "__main__":
             }
 
             let item_dir = paths.derived_item_dir(&item.id);
-            let dub_audio_path = item_dir
-                .join("dub_preview")
-                .join("mix_dub_preview_v1.wav");
+            let dub_audio_path = item_dir.join("dub_preview").join("mix_dub_preview_v1.wav");
             if !dub_audio_path.exists() {
                 return Err(EngineError::InstallFailed(
                     "dub preview audio not found; run Mix dub first".to_string(),
@@ -4878,7 +5093,10 @@ if __name__ == "__main__":
             if vocals_dst.exists()
                 && background_dst.exists()
                 && std::fs::metadata(&vocals_dst).map(|m| m.len()).unwrap_or(0) > 0
-                && std::fs::metadata(&background_dst).map(|m| m.len()).unwrap_or(0) > 0
+                && std::fs::metadata(&background_dst)
+                    .map(|m| m.len())
+                    .unwrap_or(0)
+                    > 0
             {
                 set_progress(paths, job_id, 1.0)?;
                 log_line(
@@ -4928,7 +5146,9 @@ if __name__ == "__main__":
                 "separate_extract_audio_begin",
                 serde_json::json!({ "path": &item.media_path, "audio_path": &audio_path }),
             )?;
-            if audio_path.exists() && std::fs::metadata(&audio_path).map(|m| m.len()).unwrap_or(0) > 0 {
+            if audio_path.exists()
+                && std::fs::metadata(&audio_path).map(|m| m.len()).unwrap_or(0) > 0
+            {
                 log_line(
                     paths,
                     job_id,
@@ -5011,7 +5231,11 @@ if __name__ == "__main__":
                 cmd.env("PYTHONNOUSERSITE", "1");
                 cmd.env(
                     "XDG_CACHE_HOME",
-                    paths.cache_dir().join("python").to_string_lossy().to_string(),
+                    paths
+                        .cache_dir()
+                        .join("python")
+                        .to_string_lossy()
+                        .to_string(),
                 );
                 cmd.env(
                     "MODEL_PATH",
@@ -5065,7 +5289,12 @@ if __name__ == "__main__":
 
             let mut candidate_dirs: Vec<PathBuf> = vec![
                 stems_dir.clone(),
-                raw_dir.join(audio_path.file_name().and_then(|s| s.to_str()).unwrap_or("audio.wav")),
+                raw_dir.join(
+                    audio_path
+                        .file_name()
+                        .and_then(|s| s.to_str())
+                        .unwrap_or("audio.wav"),
+                ),
             ];
             if let Some(file_name) = audio_path.file_name().and_then(|n| n.to_str()) {
                 let dir = raw_dir.join(file_name);
@@ -5100,7 +5329,8 @@ if __name__ == "__main__":
                 let mut scan_queue: VecDeque<(PathBuf, usize)> = VecDeque::new();
                 scan_queue.push_back((raw_dir.clone(), 0));
                 let max_scan_depth = 4usize;
-                let mut pairs: HashMap<PathBuf, (Option<PathBuf>, Option<PathBuf>)> = HashMap::new();
+                let mut pairs: HashMap<PathBuf, (Option<PathBuf>, Option<PathBuf>)> =
+                    HashMap::new();
 
                 while let Some((dir, depth)) = scan_queue.pop_front() {
                     if !dir.exists() {
@@ -5288,7 +5518,10 @@ if __name__ == "__main__":
             if vocals_dst.exists()
                 && background_dst.exists()
                 && std::fs::metadata(&vocals_dst).map(|m| m.len()).unwrap_or(0) > 0
-                && std::fs::metadata(&background_dst).map(|m| m.len()).unwrap_or(0) > 0
+                && std::fs::metadata(&background_dst)
+                    .map(|m| m.len())
+                    .unwrap_or(0)
+                    > 0
             {
                 set_progress(paths, job_id, 1.0)?;
                 log_line(
@@ -5338,7 +5571,9 @@ if __name__ == "__main__":
                 "separate_extract_audio_begin",
                 serde_json::json!({ "path": &item.media_path, "audio_path": &audio_path }),
             )?;
-            if audio_path.exists() && std::fs::metadata(&audio_path).map(|m| m.len()).unwrap_or(0) > 0 {
+            if audio_path.exists()
+                && std::fs::metadata(&audio_path).map(|m| m.len()).unwrap_or(0) > 0
+            {
                 log_line(
                     paths,
                     job_id,
@@ -5386,7 +5621,11 @@ if __name__ == "__main__":
                 cmd.env("PYTHONNOUSERSITE", "1");
                 cmd.env(
                     "XDG_CACHE_HOME",
-                    paths.cache_dir().join("python").to_string_lossy().to_string(),
+                    paths
+                        .cache_dir()
+                        .join("python")
+                        .to_string_lossy()
+                        .to_string(),
                 );
                 cmd.env("TORCH_HOME", torch_home.to_string_lossy().to_string());
                 cmd.output()
@@ -5416,7 +5655,11 @@ if __name__ == "__main__":
                         stack.push(path);
                         continue;
                     }
-                    let name = path.file_name().and_then(|n| n.to_str()).unwrap_or("").to_lowercase();
+                    let name = path
+                        .file_name()
+                        .and_then(|n| n.to_str())
+                        .unwrap_or("")
+                        .to_lowercase();
                     if name == "vocals.wav" {
                         vocals_src = Some(path);
                     } else if name == "no_vocals.wav" || name == "accompaniment.wav" {
@@ -5506,11 +5749,13 @@ if __name__ == "__main__":
             )?;
 
             let item = library::get_item_by_id(paths, &p.item_id)?;
-            let vocals_src = separation_vocals_path_best_effort(paths, &item.id).ok_or_else(|| {
-                EngineError::InstallFailed(
-                    "vocals stem not found; run Separate first (Spleeter or Demucs)".to_string(),
-                )
-            })?;
+            let vocals_src =
+                separation_vocals_path_best_effort(paths, &item.id).ok_or_else(|| {
+                    EngineError::InstallFailed(
+                        "vocals stem not found; run Separate first (Spleeter or Demucs)"
+                            .to_string(),
+                    )
+                })?;
 
             let out_dir = paths.derived_item_dir(&item.id).join("cleanup");
             std::fs::create_dir_all(&out_dir)?;
@@ -5779,7 +6024,10 @@ if __name__ == "__main__":
                             segment_index: seg.index,
                             start_ms: seg.start_ms,
                             end_ms: seg.end_ms,
-                            message: format!("Line exceeds {} chars (got {}).", thresholds.line_chars_fail, len),
+                            message: format!(
+                                "Line exceeds {} chars (got {}).",
+                                thresholds.line_chars_fail, len
+                            ),
                             value: Some(len as f64),
                         });
                     } else if len >= thresholds.line_chars_warn {
@@ -5789,7 +6037,10 @@ if __name__ == "__main__":
                             segment_index: seg.index,
                             start_ms: seg.start_ms,
                             end_ms: seg.end_ms,
-                            message: format!("Line exceeds {} chars (got {}).", thresholds.line_chars_warn, len),
+                            message: format!(
+                                "Line exceeds {} chars (got {}).",
+                                thresholds.line_chars_warn, len
+                            ),
                             value: Some(len as f64),
                         });
                     }
@@ -5869,7 +6120,8 @@ if __name__ == "__main__":
                 }
             }
 
-            let mut by_kind: std::collections::BTreeMap<String, usize> = std::collections::BTreeMap::new();
+            let mut by_kind: std::collections::BTreeMap<String, usize> =
+                std::collections::BTreeMap::new();
             for issue in &issues {
                 *by_kind.entry(issue.kind.clone()).or_insert(0) += 1;
             }
@@ -5983,7 +6235,8 @@ if __name__ == "__main__":
 
             // Include latest subtitle tracks (best-effort).
             let tracks = subtitle_tracks::list_tracks(paths, &item.id)?;
-            let mut latest: HashMap<(String, String, String), subtitle_tracks::SubtitleTrackRow> = HashMap::new();
+            let mut latest: HashMap<(String, String, String), subtitle_tracks::SubtitleTrackRow> =
+                HashMap::new();
             for t in tracks {
                 let key = (t.kind.clone(), t.lang.clone(), t.format.clone());
                 let replace = match latest.get(&key) {
@@ -6050,7 +6303,10 @@ if __name__ == "__main__":
                 .job_artifacts_dir(job_id)
                 .join("timing_fit_report.json");
             if timing_fit_report.exists() {
-                files.push((timing_fit_report, "dub_preview/timing_fit_report.json".to_string()));
+                files.push((
+                    timing_fit_report,
+                    "dub_preview/timing_fit_report.json".to_string(),
+                ));
             }
 
             // Collect relevant job rows for provenance (best-effort).
@@ -6126,13 +6382,17 @@ ORDER BY created_at_ms ASC
                 jobs: jobs_json,
             };
             let prov_json = serde_json::to_string_pretty(&provenance)?;
-            zip.start_file("provenance/manifest.json", options).map_err(|e| {
-                EngineError::InstallFailed(format!("zip start file failed (provenance/manifest.json): {e}"))
-            })?;
+            zip.start_file("provenance/manifest.json", options)
+                .map_err(|e| {
+                    EngineError::InstallFailed(format!(
+                        "zip start file failed (provenance/manifest.json): {e}"
+                    ))
+                })?;
             zip.write_all(prov_json.as_bytes())?;
             zip.write_all(b"\n")?;
 
-            zip.finish().map_err(|e| EngineError::InstallFailed(format!("zip finish failed: {e}")))?;
+            zip.finish()
+                .map_err(|e| EngineError::InstallFailed(format!("zip finish failed: {e}")))?;
 
             if out_path.exists() {
                 let _ = std::fs::remove_file(&out_path);
@@ -6169,16 +6429,10 @@ ORDER BY created_at_ms ASC
                 serde_json::json!({}),
             )?;
 
-            let install_root = paths
-                .install_logs_dir()
-                .join("phase2")
-                .join(job_id);
+            let install_root = paths.install_logs_dir().join("phase2").join(job_id);
             std::fs::create_dir_all(&install_root)?;
             let state_path = install_root.join("state.json");
-            let latest_path = paths
-                .install_logs_dir()
-                .join("phase2")
-                .join("latest.json");
+            let latest_path = paths.install_logs_dir().join("phase2").join("latest.json");
             if let Some(parent) = latest_path.parent() {
                 std::fs::create_dir_all(parent)?;
             }
@@ -6254,7 +6508,12 @@ ORDER BY created_at_ms ASC
             };
             write_state(&state_path, &latest_path, &state)?;
 
-            let total_steps = state.steps.iter().filter(|s| s.status != "skipped").count().max(1);
+            let total_steps = state
+                .steps
+                .iter()
+                .filter(|s| s.status != "skipped")
+                .count()
+                .max(1);
             let mut completed_steps = 0_usize;
 
             for step_index in 0..state.steps.len() {
@@ -6283,9 +6542,9 @@ ORDER BY created_at_ms ASC
                     &format!("begin step={step_id} title={step_title}"),
                 );
 
-                let before =
-                    crate::diagnostics::directory_size_bytes_best_effort(&paths.python_toolchain_dir())
-                        as i64;
+                let before = crate::diagnostics::directory_size_bytes_best_effort(
+                    &paths.python_toolchain_dir(),
+                ) as i64;
                 let result: Result<()> = match step_id.as_str() {
                     "portable_python_win64" => {
                         let status = tools::python_toolchain_status(paths);
@@ -6333,9 +6592,9 @@ ORDER BY created_at_ms ASC
                     ))),
                 };
 
-                let after =
-                    crate::diagnostics::directory_size_bytes_best_effort(&paths.python_toolchain_dir())
-                        as i64;
+                let after = crate::diagnostics::directory_size_bytes_best_effort(
+                    &paths.python_toolchain_dir(),
+                ) as i64;
                 let delta_bytes = after.saturating_sub(before);
                 let finished_at_ms = now_ms();
 
@@ -6696,29 +6955,26 @@ fn normalize_and_expand_download_targets(
                 )));
             }
 
-            let expanded = match expand_instagram_profile_media_targets(
-                &url,
-                remaining + 1,
-                auth_cookie,
-            ) {
-                Ok(values) if !values.is_empty() => values,
-                Ok(_) | Err(_) => {
-                    let fallback_urls = expand_yt_dlp_urls(
-                        paths,
-                        &url,
-                        remaining + 1,
-                        auth_cookie,
-                        use_browser_cookies_for_url(&url, use_browser_cookies),
-                    )?;
-                    fallback_urls
-                        .into_iter()
-                        .map(|value| DownloadTarget {
-                            url: value,
-                            provider: DOWNLOAD_PROVIDER_YOUTUBE_YT_DLP,
-                        })
-                        .collect()
-                }
-            };
+            let expanded =
+                match expand_instagram_profile_media_targets(&url, remaining + 1, auth_cookie) {
+                    Ok(values) if !values.is_empty() => values,
+                    Ok(_) | Err(_) => {
+                        let fallback_urls = expand_yt_dlp_urls(
+                            paths,
+                            &url,
+                            remaining + 1,
+                            auth_cookie,
+                            use_browser_cookies_for_url(&url, use_browser_cookies),
+                        )?;
+                        fallback_urls
+                            .into_iter()
+                            .map(|value| DownloadTarget {
+                                url: value,
+                                provider: DOWNLOAD_PROVIDER_YOUTUBE_YT_DLP,
+                            })
+                            .collect()
+                    }
+                };
 
             if expanded.is_empty() {
                 return Err(EngineError::InstallFailed(format!(
@@ -6827,10 +7083,7 @@ fn normalize_and_expand_download_targets(
             // Most non-direct page URLs require extractor logic (embed/manifest handling).
             DOWNLOAD_PROVIDER_YOUTUBE_YT_DLP
         };
-        targets.push(DownloadTarget {
-            url,
-            provider,
-        });
+        targets.push(DownloadTarget { url, provider });
         if targets.len() > MAX_DOWNLOAD_BATCH_URLS {
             return Err(EngineError::InstallFailed(format!(
                 "batch limit exceeded: max {MAX_DOWNLOAD_BATCH_URLS} URLs per submission"
@@ -6929,8 +7182,12 @@ fn parse_cookie_header_pairs(cookie_header: &str) -> Vec<(String, String)> {
 }
 
 fn cookie_file_domain_for_url(url: &str) -> Result<String> {
-    let parsed = Url::parse(url)
-        .map_err(|_| EngineError::InstallFailed(format!("invalid URL for cookies: {}", redact_url_for_log(url))))?;
+    let parsed = Url::parse(url).map_err(|_| {
+        EngineError::InstallFailed(format!(
+            "invalid URL for cookies: {}",
+            redact_url_for_log(url)
+        ))
+    })?;
     let host = parsed
         .host_str()
         .ok_or_else(|| EngineError::InstallFailed("cookie URL missing host".to_string()))?
@@ -7194,7 +7451,11 @@ fn read_ytdlp_archive_ids(path: &Path) -> std::io::Result<HashSet<String>> {
     Ok(out)
 }
 
-fn append_youtube_archive_on_success(paths: &AppPaths, subscription_id: &str, url: &str) -> Result<()> {
+fn append_youtube_archive_on_success(
+    paths: &AppPaths,
+    subscription_id: &str,
+    url: &str,
+) -> Result<()> {
     let Some(video_id) = subscriptions::youtube_video_id_from_url(url) else {
         return Ok(());
     };
@@ -7279,8 +7540,8 @@ fn instagram_username_from_url(url: &str) -> Option<String> {
 
     let first = segments[0].to_ascii_lowercase();
     let reserved = [
-        "p", "reel", "reels", "tv", "stories", "explore", "accounts", "direct", "api",
-        "graphql", "about",
+        "p", "reel", "reels", "tv", "stories", "explore", "accounts", "direct", "api", "graphql",
+        "about",
     ];
     if reserved.iter().any(|value| *value == first) {
         return None;
@@ -7452,14 +7713,12 @@ fn run_command_output_with_control(
 
     let mut child = cmd.spawn().map_err(CommandRunError::Spawn)?;
 
-    let mut stdout = child
-        .stdout
-        .take()
-        .ok_or_else(|| CommandRunError::Wait(std::io::Error::new(ErrorKind::Other, "stdout pipe missing")))?;
-    let mut stderr = child
-        .stderr
-        .take()
-        .ok_or_else(|| CommandRunError::Wait(std::io::Error::new(ErrorKind::Other, "stderr pipe missing")))?;
+    let mut stdout = child.stdout.take().ok_or_else(|| {
+        CommandRunError::Wait(std::io::Error::new(ErrorKind::Other, "stdout pipe missing"))
+    })?;
+    let mut stderr = child.stderr.take().ok_or_else(|| {
+        CommandRunError::Wait(std::io::Error::new(ErrorKind::Other, "stderr pipe missing"))
+    })?;
 
     let stdout_handle = thread::spawn(move || {
         let mut buf = Vec::new();
@@ -7484,7 +7743,10 @@ fn run_command_output_with_control(
                 }
             }
         }
-        if abort_reason.is_none() && timeout_secs > 0 && started.elapsed() >= Duration::from_secs(timeout_secs) {
+        if abort_reason.is_none()
+            && timeout_secs > 0
+            && started.elapsed() >= Duration::from_secs(timeout_secs)
+        {
             kill_child_process_tree(&mut child);
             abort_reason = Some(CommandRunError::TimedOut(timeout_secs));
         }
@@ -7714,15 +7976,11 @@ fn expand_instagram_profile_media_targets(
         ))
     })?;
     let profile_page_url = format!("https://www.instagram.com/{username}/");
-    let profile_info_url = format!(
-        "https://i.instagram.com/api/v1/users/web_profile_info/?username={username}"
-    );
+    let profile_info_url =
+        format!("https://i.instagram.com/api/v1/users/web_profile_info/?username={username}");
 
-    let profile_info = download_instagram_json(
-        &profile_info_url,
-        auth_cookie,
-        Some(&profile_page_url),
-    )?;
+    let profile_info =
+        download_instagram_json(&profile_info_url, auth_cookie, Some(&profile_page_url))?;
     let user_id = profile_info
         .get("data")
         .and_then(|v| v.get("user"))
@@ -7900,7 +8158,10 @@ fn extract_best_instagram_candidate_url(
 
 fn instagram_candidate_score(candidate: &serde_json::Value) -> i64 {
     let width = candidate.get("width").and_then(|v| v.as_i64()).unwrap_or(0);
-    let height = candidate.get("height").and_then(|v| v.as_i64()).unwrap_or(0);
+    let height = candidate
+        .get("height")
+        .and_then(|v| v.as_i64())
+        .unwrap_or(0);
     let width = width.max(0);
     let height = height.max(0);
     width.saturating_mul(height)
@@ -8105,6 +8366,7 @@ fn ensure_default_download_subdirs(base_dir: &Path) -> Result<()> {
         DEFAULT_VIDEO_OUTPUT_SUBDIR,
         DEFAULT_INSTAGRAM_OUTPUT_SUBDIR,
         DEFAULT_IMAGES_OUTPUT_SUBDIR,
+        DEFAULT_LOCALIZATION_OUTPUT_SUBDIR,
     ] {
         std::fs::create_dir_all(base_dir.join(subdir))?;
     }
@@ -8142,7 +8404,9 @@ fn replace_template_var(template: &str, var: &str, replacement: &str) -> String 
 fn sanitize_template_literal(value: &str) -> String {
     let mut out = String::with_capacity(value.len());
     for ch in value.chars() {
-        if ch.is_ascii_alphanumeric() || matches!(ch, '-' | '_' | '.' | '/' | '\\' | '%' | '(' | ')') {
+        if ch.is_ascii_alphanumeric()
+            || matches!(ch, '-' | '_' | '.' | '/' | '\\' | '%' | '(' | ')')
+        {
             out.push(ch);
         } else {
             out.push('_');
@@ -8230,7 +8494,9 @@ fn default_direct_job_output_dir(
         )));
     }
     ensure_default_download_subdirs(&base_dir)?;
-    let out = base_dir.join(category).join(default_job_folder_name(job_id));
+    let out = base_dir
+        .join(category)
+        .join(default_job_folder_name(job_id));
     Ok(out.to_string_lossy().to_string())
 }
 
@@ -8247,8 +8513,14 @@ fn download_direct_http_url_to_library(
     quality_preference: Option<&str>,
     subtitle_mode: Option<&str>,
 ) -> Result<PathBuf> {
-    let mut last_err =
-        match download_direct_media_asset(paths, url, job_id, auth_cookie, output_dir, output_subdir) {
+    let mut last_err = match download_direct_media_asset(
+        paths,
+        url,
+        job_id,
+        auth_cookie,
+        output_dir,
+        output_subdir,
+    ) {
         Ok(path) => return Ok(path),
         Err(err) => Some(err.to_string()),
     };
@@ -8267,7 +8539,14 @@ fn download_direct_http_url_to_library(
             return Err(EngineError::InstallFailed("job canceled".to_string()));
         }
 
-        match download_direct_media_asset(paths, &candidate, job_id, auth_cookie, output_dir, output_subdir) {
+        match download_direct_media_asset(
+            paths,
+            &candidate,
+            job_id,
+            auth_cookie,
+            output_dir,
+            output_subdir,
+        ) {
             Ok(path) => return Ok(path),
             Err(e) => last_err = Some(e.to_string()),
         }
@@ -8878,6 +9157,11 @@ fn download_yt_dlp_url_to_library(
         url.to_string(),
     ];
 
+    args.push("--merge-output-format".to_string());
+    args.push("mp4".to_string());
+    args.push("--remux-video".to_string());
+    args.push("mp4".to_string());
+
     if let Some(format_value) = normalize_non_empty(format_preference) {
         args.push("-f".to_string());
         args.push(format_value);
@@ -8938,7 +9222,12 @@ fn download_yt_dlp_url_to_library(
                 if !strip_browser_cookie_args(&mut retry_args) {
                     Err(first_err)
                 } else {
-                    match run_yt_dlp(paths, &retry_args, Some(job_id), YT_DLP_DOWNLOAD_TIMEOUT_SECS) {
+                    match run_yt_dlp(
+                        paths,
+                        &retry_args,
+                        Some(job_id),
+                        YT_DLP_DOWNLOAD_TIMEOUT_SECS,
+                    ) {
                         Ok(output) => Ok(output),
                         Err(second_err) => Err(EngineError::InstallFailed(format!(
                             "{first_err}; retry without browser cookies failed: {second_err}"
@@ -9543,9 +9832,11 @@ mod tests {
         let conn = db::open(&paths).expect("open");
         db::migrate(&conn).expect("migrate");
         let params_json: String = conn
-            .query_row("SELECT params_json FROM job WHERE id=?1", [job.id.as_str()], |row| {
-                row.get(0)
-            })
+            .query_row(
+                "SELECT params_json FROM job WHERE id=?1",
+                [job.id.as_str()],
+                |row| row.get(0),
+            )
             .expect("params");
         let params: DownloadImageBatchParams =
             serde_json::from_str(&params_json).expect("parse params");
@@ -9581,9 +9872,11 @@ mod tests {
         let conn = db::open(&paths).expect("open");
         db::migrate(&conn).expect("migrate");
         let params_json: String = conn
-            .query_row("SELECT params_json FROM job WHERE id=?1", [jobs[0].id.clone()], |row| {
-                row.get(0)
-            })
+            .query_row(
+                "SELECT params_json FROM job WHERE id=?1",
+                [jobs[0].id.clone()],
+                |row| row.get(0),
+            )
             .expect("params");
         let params: DownloadDirectUrlParams =
             serde_json::from_str(&params_json).expect("parse params");
@@ -9744,9 +10037,10 @@ mod tests {
 
     #[test]
     fn instagram_shortcode_from_url_extracts_post_codes() {
-        let code =
-            instagram_shortcode_from_url("https://www.instagram.com/p/Cx4Qd9vIBTh/?utm_source=test")
-                .expect("code");
+        let code = instagram_shortcode_from_url(
+            "https://www.instagram.com/p/Cx4Qd9vIBTh/?utm_source=test",
+        )
+        .expect("code");
         assert_eq!(code, "Cx4Qd9vIBTh");
     }
 }

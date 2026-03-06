@@ -1,7 +1,7 @@
-import { type UIEvent, useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { convertFileSrc, invoke } from "@tauri-apps/api/core";
-import { confirm, message, open, save } from "@tauri-apps/plugin-dialog";
-import { copyPathToClipboard, openPathBestEffort } from "../lib/pathOpener";
+import { type UIEvent, useCallback, useEffect, useMemo, useState } from "react";
+import { invoke } from "@tauri-apps/api/core";
+import { confirm, open, save } from "@tauri-apps/plugin-dialog";
+import { copyPathToClipboard, openPathBestEffort, revealPath } from "../lib/pathOpener";
 import { safeLocalStorageGet, safeLocalStorageSet } from "../lib/persist";
 
 type LibraryItem = {
@@ -20,64 +20,80 @@ type LibraryItem = {
   thumbnail_path: string | null;
 };
 
-function buildThumbnailCandidates(path: string): string[] {
-  const trimmed = path.trim();
-  if (!trimmed) return [];
-
-  const normalized = trimmed.replace(/\\/g, "/");
-  const candidates: string[] = [];
-  const seen = new Set<string>();
-  const push = (value: string | null) => {
-    if (!value) return;
-    if (seen.has(value)) return;
-    seen.add(value);
-    candidates.push(value);
-  };
-
-  const tryConvert = (value: string) => {
-    try {
-      push(convertFileSrc(value));
-    } catch {
-      // Ignore and continue with fallback paths.
-    }
-  };
-
-  tryConvert(trimmed);
-  if (normalized !== trimmed) {
-    tryConvert(normalized);
-  }
-
-  const encodedOriginal = encodeURIComponent(trimmed);
-  const encodedNormalized = encodeURIComponent(normalized);
-  push(`http://asset.localhost/${encodedOriginal}`);
-  push(`http://asset.localhost/${encodedNormalized}`);
-  push(`asset://localhost/${encodedOriginal}`);
-  push(`asset://localhost/${encodedNormalized}`);
-
-  return candidates;
+function joinPath(base: string, ...segments: string[]): string {
+  const trimmedBase = (base ?? "").trim();
+  if (!trimmedBase) return "";
+  const cleaned = segments.map((segment) => segment.replace(/^[\\/]+|[\\/]+$/g, "")).filter(Boolean);
+  const sep = trimmedBase.includes("\\") ? "\\" : "/";
+  if (!cleaned.length) return trimmedBase;
+  return `${trimmedBase.replace(/[\\/]+$/, "")}${sep}${cleaned.join(sep)}`;
 }
 
-function ThumbnailPreview({ path }: { path: string }) {
-  const candidates = useMemo(() => buildThumbnailCandidates(path), [path]);
-  const [index, setIndex] = useState(0);
+const thumbnailDataUrlCache = new Map<string, string>();
+
+function ThumbnailPreview({ itemId, path }: { itemId: string; path: string | null }) {
+  const cacheKey = `${itemId}|${path ?? ""}`;
+  const [src, setSrc] = useState<string>(() => thumbnailDataUrlCache.get(cacheKey) ?? "");
+  const [loading, setLoading] = useState(() => !thumbnailDataUrlCache.has(cacheKey));
 
   useEffect(() => {
-    setIndex(0);
-  }, [path]);
+    let alive = true;
+    const cached = thumbnailDataUrlCache.get(cacheKey);
+    if (cached) {
+      setSrc(cached);
+      setLoading(false);
+      return () => {
+        alive = false;
+      };
+    }
 
-  if (!candidates.length) return <>-</>;
+    setSrc("");
+    setLoading(true);
+    invoke<string | null>("library_thumbnail_data_url", { itemId })
+      .then((next) => {
+        if (!alive) return;
+        const normalized = (next ?? "").trim();
+        if (normalized) {
+          thumbnailDataUrlCache.set(cacheKey, normalized);
+          setSrc(normalized);
+        } else {
+          setSrc("");
+        }
+      })
+      .catch(() => {
+        if (!alive) return;
+        setSrc("");
+      })
+      .finally(() => {
+        if (!alive) return;
+        setLoading(false);
+      });
 
-  return (
-    <img
-      alt="thumb"
-      src={candidates[Math.min(index, candidates.length - 1)]}
-      loading="lazy"
-      onError={() => {
-        setIndex((current) => (current + 1 < candidates.length ? current + 1 : current));
-      }}
-      style={{ width: 84, borderRadius: 8 }}
-    />
-  );
+    return () => {
+      alive = false;
+    };
+  }, [cacheKey, itemId]);
+
+  if (src) {
+    return (
+      <img
+        alt="thumb"
+        src={src}
+        loading="lazy"
+        style={{ width: 84, height: 48, objectFit: "cover", borderRadius: 8, background: "#dbe4f2" }}
+      />
+    );
+  }
+  if (loading) {
+    return (
+      <div
+        aria-hidden="true"
+        style={{ width: 84, height: 48, borderRadius: 8, background: "#dbe4f2" }}
+      />
+    );
+  }
+
+  return <>-</>;
 }
 
 function formatDuration(ms: number | null): string {
@@ -357,10 +373,11 @@ export function LibraryPage({ onOpenEditor, mode = "all" }: LibraryPageProps) {
   const [presetTitle, setPresetTitle] = useState("");
   const [presetPathTemplate, setPresetPathTemplate] = useState("{provider}/{channel}");
   const [presetFilenameTemplate, setPresetFilenameTemplate] = useState("{title}_{id}");
-  const [presetFormatPreference, setPresetFormatPreference] = useState("bestvideo+bestaudio/best");
+  const [presetFormatPreference, setPresetFormatPreference] = useState(
+    "bv*[ext=mp4]+ba[ext=m4a]/b[ext=mp4]/bv*+ba/b",
+  );
   const [presetQualityPreference, setPresetQualityPreference] = useState("best");
   const [presetSubtitleMode, setPresetSubtitleMode] = useState("auto");
-  const missingFolderPrompted = useRef(false);
   const parsedUrlCount = useMemo(
     () =>
       urlBatchText
@@ -401,6 +418,31 @@ export function LibraryPage({ onOpenEditor, mode = "all" }: LibraryPageProps) {
   const activeSubscriptionCount = useMemo(
     () => visibleSubscriptions.filter((sub) => sub.active).length,
     [visibleSubscriptions],
+  );
+  const effectiveDownloadRoot = useMemo(() => {
+    const current = downloadDir?.current_dir?.trim() ?? "";
+    if (current) return current;
+    return downloadDir?.default_dir?.trim() ?? "";
+  }, [downloadDir]);
+  const defaultVideoDownloadsDir = useMemo(
+    () => joinPath(effectiveDownloadRoot, "video"),
+    [effectiveDownloadRoot],
+  );
+  const defaultSubscriptionDownloadsDir = useMemo(
+    () => joinPath(effectiveDownloadRoot, "video", "subscriptions"),
+    [effectiveDownloadRoot],
+  );
+  const defaultInstagramDownloadsDir = useMemo(
+    () => joinPath(effectiveDownloadRoot, "instagram"),
+    [effectiveDownloadRoot],
+  );
+  const defaultImageDownloadsDir = useMemo(
+    () => joinPath(effectiveDownloadRoot, "images"),
+    [effectiveDownloadRoot],
+  );
+  const defaultLocalizationExportsDir = useMemo(
+    () => joinPath(effectiveDownloadRoot, "localization", "en"),
+    [effectiveDownloadRoot],
   );
 
   const refresh = useCallback(async () => {
@@ -715,34 +757,6 @@ export function LibraryPage({ onOpenEditor, mode = "all" }: LibraryPageProps) {
     );
   }, [subscriptionRefreshIntervalMinutes]);
 
-  useEffect(() => {
-    if (!downloadDir || downloadDir.exists || missingFolderPrompted.current) return;
-    missingFolderPrompted.current = true;
-
-    (async () => {
-      await message(
-        `Download folder not found:\n${downloadDir.current_dir}\n\nChoose the correct folder or create a new default folder:\n${downloadDir.default_dir}`,
-        { title: "Download folder missing", kind: "warning" },
-      );
-
-      const createDefault = await confirm(
-        `Create and use this default download folder?\n${downloadDir.default_dir}`,
-        {
-          title: "Download folder missing",
-          kind: "warning",
-          okLabel: "Create default",
-          cancelLabel: "Choose existing",
-        },
-      );
-
-      if (createDefault) {
-        await useDefaultDownloadDir();
-      } else {
-        await chooseDownloadDir();
-      }
-    })().catch((e) => setError(String(e)));
-  }, [chooseDownloadDir, downloadDir, useDefaultDownloadDir]);
-
   async function importFile() {
     setBusy(true);
     setError(null);
@@ -833,10 +847,46 @@ export function LibraryPage({ onOpenEditor, mode = "all" }: LibraryPageProps) {
     setError(null);
     setNotice(null);
     try {
-      await invoke("jobs_enqueue_mux_dub_preview_v1", { itemId });
-      setNotice("Queued dub preview mux job.");
+      await invoke("jobs_enqueue_mux_dub_preview_v1", { itemId, outputContainer: "mp4" });
+      setNotice("Queued dub preview mux job (MP4).");
     } catch (e) {
       setError(String(e));
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function openMediaFile(item: LibraryItem) {
+    setBusy(true);
+    setError(null);
+    setNotice(null);
+    try {
+      const opened = await openPathBestEffort(item.media_path);
+      setNotice(
+        opened.method === "open_path"
+          ? `Opened media file: ${opened.path}`
+          : `Revealed media file in file explorer: ${opened.path}`,
+      );
+    } catch (e) {
+      const copied = await copyPathToClipboard(item.media_path);
+      const suffix = copied ? " Media path copied to clipboard." : "";
+      setError(`Open media file failed: ${String(e)}.${suffix}`);
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function revealMediaFile(item: LibraryItem) {
+    setBusy(true);
+    setError(null);
+    setNotice(null);
+    try {
+      const revealed = await revealPath(item.media_path);
+      setNotice(`Media file revealed in file explorer: ${revealed}`);
+    } catch (e) {
+      const copied = await copyPathToClipboard(item.media_path);
+      const suffix = copied ? " Media path copied to clipboard." : "";
+      setError(`Reveal media file failed: ${String(e)}.${suffix}`);
     } finally {
       setBusy(false);
     }
@@ -853,13 +903,13 @@ export function LibraryPage({ onOpenEditor, mode = "all" }: LibraryPageProps) {
       const opened = await openPathBestEffort(targetPath);
       setNotice(
         opened.method === "open_path"
-          ? `Outputs folder: ${opened.path}`
-          : `Outputs folder revealed in file explorer: ${opened.path}`,
+          ? `Working files folder: ${opened.path}`
+          : `Working files folder revealed in file explorer: ${opened.path}`,
       );
     } catch (e) {
       const copied = await copyPathToClipboard(targetPath);
       const suffix = copied ? " Output path copied to clipboard." : "";
-      setError(`Open outputs failed: ${String(e)}.${suffix}`);
+      setError(`Open working files failed: ${String(e)}.${suffix}`);
     } finally {
       setBusy(false);
     }
@@ -1273,7 +1323,7 @@ export function LibraryPage({ onOpenEditor, mode = "all" }: LibraryPageProps) {
     setPresetTitle("");
     setPresetPathTemplate("{provider}/{channel}");
     setPresetFilenameTemplate("{title}_{id}");
-    setPresetFormatPreference("bestvideo+bestaudio/best");
+    setPresetFormatPreference("bv*[ext=mp4]+ba[ext=m4a]/b[ext=mp4]/bv*+ba/b");
     setPresetQualityPreference("best");
     setPresetSubtitleMode("auto");
   }
@@ -1561,6 +1611,32 @@ export function LibraryPage({ onOpenEditor, mode = "all" }: LibraryPageProps) {
             Refresh folder status
           </button>
         </div>
+        <div style={{ color: "#4b5563", marginTop: 10 }}>
+          Default app-managed export map under this root:
+        </div>
+        <div className="kv">
+          <div className="k">Video / playlists</div>
+          <div className="v">{defaultVideoDownloadsDir || "-"}</div>
+        </div>
+        <div className="kv">
+          <div className="k">Subscriptions</div>
+          <div className="v">{defaultSubscriptionDownloadsDir || "-"}</div>
+        </div>
+        <div className="kv">
+          <div className="k">Instagram archive</div>
+          <div className="v">{defaultInstagramDownloadsDir || "-"}</div>
+        </div>
+        <div className="kv">
+          <div className="k">Forum / image archive</div>
+          <div className="v">{defaultImageDownloadsDir || "-"}</div>
+        </div>
+        <div className="kv">
+          <div className="k">Localization exports</div>
+          <div className="v">{defaultLocalizationExportsDir || "-"}</div>
+        </div>
+        <div style={{ color: "#4b5563", marginTop: 8 }}>
+          Video presets still add provider/channel or playlist subfolders inside the video root.
+        </div>
         </div>
       ) : null}
 
@@ -1570,7 +1646,8 @@ export function LibraryPage({ onOpenEditor, mode = "all" }: LibraryPageProps) {
         <div style={{ color: "#4b5563", marginBottom: 8 }}>
           Paste many links at once (direct media URLs or YouTube video/playlist/channel links).
           Maximum {maxBatchUrls} videos per submission. If output folder is empty, each job is
-          saved to a new folder under `video` in the main download folder.
+          saved under <code>{defaultVideoDownloadsDir || "video"}</code>. The default preset now
+          prefers MP4 when yt-dlp can merge/remux cleanly.
         </div>
         <textarea
           value={urlBatchText}
@@ -1589,7 +1666,7 @@ export function LibraryPage({ onOpenEditor, mode = "all" }: LibraryPageProps) {
               value={urlBatchOutputDir}
               disabled={busy}
               onChange={(e) => setUrlBatchOutputDir(e.currentTarget.value)}
-              placeholder="Optional absolute folder path"
+              placeholder="Optional absolute folder path (overrides the video root)"
               style={{ width: "100%" }}
             />
           </label>
@@ -1690,7 +1767,7 @@ export function LibraryPage({ onOpenEditor, mode = "all" }: LibraryPageProps) {
               value={presetFormatPreference}
               disabled={busy}
               onChange={(e) => setPresetFormatPreference(e.currentTarget.value)}
-              placeholder="bestvideo+bestaudio/best"
+              placeholder="bv*[ext=mp4]+ba[ext=m4a]/b[ext=mp4]/bv*+ba/b"
             />
           </label>
           <label style={{ display: "flex", alignItems: "center", gap: 8 }}>
@@ -2340,9 +2417,9 @@ export function LibraryPage({ onOpenEditor, mode = "all" }: LibraryPageProps) {
                     <tr key={item.id} style={{ height: libraryVirtualRowHeight }}>
                       <td>
                         {item.thumbnail_path ? (
-                          <ThumbnailPreview path={item.thumbnail_path} />
+                          <ThumbnailPreview itemId={item.id} path={item.thumbnail_path} />
                         ) : (
-                          "-"
+                          <ThumbnailPreview itemId={item.id} path={item.thumbnail_path} />
                         )}
                       </td>
                       <td>{item.title}</td>
@@ -2365,7 +2442,7 @@ export function LibraryPage({ onOpenEditor, mode = "all" }: LibraryPageProps) {
                             Mix dub
                           </button>
                           <button type="button" disabled={busy} onClick={() => runMuxDubPreview(item.id)}>
-                            Mux
+                            Mux MP4
                           </button>
                           <button
                             type="button"
@@ -2374,8 +2451,14 @@ export function LibraryPage({ onOpenEditor, mode = "all" }: LibraryPageProps) {
                           >
                             Edit subs
                           </button>
+                          <button type="button" disabled={busy} onClick={() => openMediaFile(item)}>
+                            Open file
+                          </button>
+                          <button type="button" disabled={busy} onClick={() => revealMediaFile(item)}>
+                            Reveal file
+                          </button>
                           <button type="button" disabled={busy} onClick={() => openItemOutputs(item.id)}>
-                            Outputs
+                            Working files
                           </button>
                         </div>
                       </td>

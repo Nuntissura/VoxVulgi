@@ -123,9 +123,9 @@ pub fn install_ytdlp_tools(paths: &AppPaths) -> Result<YtDlpToolsStatus> {
 
         let tmp_path = destination.with_extension("download");
 
-        let resp = ureq::get(YT_DLP_WINDOWS_DOWNLOAD_URL).call().map_err(|e| {
-            EngineError::InstallFailed(format!("yt-dlp download failed: {e}"))
-        })?;
+        let resp = ureq::get(YT_DLP_WINDOWS_DOWNLOAD_URL)
+            .call()
+            .map_err(|e| EngineError::InstallFailed(format!("yt-dlp download failed: {e}")))?;
         let status = resp.status();
         if status.as_u16() >= 400 {
             return Err(EngineError::InstallFailed(format!(
@@ -534,7 +534,9 @@ pub fn install_portable_python(paths: &AppPaths) -> Result<PortablePythonStatus>
         }
         std::fs::create_dir_all(&install_dir)?;
 
-        let download_tmp = install_dir.join(format!("python-nuget-{PYTHON_NUGET_VERSION}.nupkg.download"));
+        let download_tmp = install_dir.join(format!(
+            "python-nuget-{PYTHON_NUGET_VERSION}.nupkg.download"
+        ));
         let download_final = install_dir.join(format!("python-nuget-{PYTHON_NUGET_VERSION}.nupkg"));
 
         let resp = ureq::get(PYTHON_NUGET_URL).call().map_err(|e| {
@@ -740,7 +742,9 @@ fn now_ms() -> i64 {
 }
 
 fn pack_integrity_manifest_path(paths: &AppPaths) -> std::path::PathBuf {
-    paths.python_toolchain_dir().join("pack_integrity_manifest.json")
+    paths
+        .python_toolchain_dir()
+        .join("pack_integrity_manifest.json")
 }
 
 fn read_json_value_best_effort(path: &std::path::Path) -> Option<serde_json::Value> {
@@ -780,10 +784,14 @@ fn extract_zip_strip_prefix(
 
         // Prevent directory traversal.
         let rel_path = std::path::Path::new(rel);
-        if rel_path
-            .components()
-            .any(|c| matches!(c, std::path::Component::ParentDir | std::path::Component::RootDir | std::path::Component::Prefix(_)))
-        {
+        if rel_path.components().any(|c| {
+            matches!(
+                c,
+                std::path::Component::ParentDir
+                    | std::path::Component::RootDir
+                    | std::path::Component::Prefix(_)
+            )
+        }) {
             return Err(EngineError::InstallFailed(format!(
                 "unsafe zip path: {name}"
             )));
@@ -1065,7 +1073,7 @@ print("spleeter_model_download_ok")
             }
             if let Err(err) = err {
                 let context = err.to_string();
-            let guidance = explain_spleeter_install_failure(&context, spec, &py_version);
+                let guidance = explain_spleeter_install_failure(&context, spec, &py_version);
                 let prior = last_error.get_or_insert_with(String::new);
                 if !prior.is_empty() {
                     prior.push('\n');
@@ -1103,7 +1111,14 @@ print("spleeter_model_download_ok")
                 "--no-build-isolation",
                 spec,
             ],
-            vec!["-m", "pip", "install", "--no-deps", "--no-build-isolation", spec],
+            vec![
+                "-m",
+                "pip",
+                "install",
+                "--no-deps",
+                "--no-build-isolation",
+                spec,
+            ],
             vec!["-m", "pip", "install", "--no-deps", spec],
         ];
 
@@ -1235,7 +1250,8 @@ print("spleeter_model_download_ok")
                     return Ok(status);
                 }
                 last_error = Some(
-                    "spleeter installed with fallback strategy, but module detection failed".to_string(),
+                    "spleeter installed with fallback strategy, but module detection failed"
+                        .to_string(),
                 );
                 continue;
             }
@@ -1256,9 +1272,9 @@ print("spleeter_model_download_ok")
     }
 
     Err(EngineError::InstallFailed(match last_error {
-        Some(last_error) => format!(
-            "spleeter install failed for python {py_version}: {last_error}"
-        ),
+        Some(last_error) => {
+            format!("spleeter install failed for python {py_version}: {last_error}")
+        }
         None => "spleeter install failed without a captured reason".to_string(),
     }))
 }
@@ -1295,14 +1311,16 @@ fn explain_spleeter_install_failure(raw_error: &str, spec: &str, py_version: &st
     }
 
     if text.contains("no matching distribution found for tensorflow==2.12.1")
-        || text.contains("could not find a version that satisfies the requirement tensorflow==2.12.1")
+        || text
+            .contains("could not find a version that satisfies the requirement tensorflow==2.12.1")
     {
         return format!(
             "TensorFlow pinned by {spec} cannot be resolved on Python {py_version}. Install Python 3.9/3.10, set it in config/python_exe.txt, and run install again."
         );
     }
 
-    if text.contains("building wheel") || text.contains("error: command '") || text.contains("msvc") {
+    if text.contains("building wheel") || text.contains("error: command '") || text.contains("msvc")
+    {
         return "Build path failed during native extension compile. Install Microsoft C++ Build Tools (or choose an interpreter where Spleeter wheels are available).".to_string();
     }
 
@@ -1310,8 +1328,7 @@ fn explain_spleeter_install_failure(raw_error: &str, spec: &str, py_version: &st
         return "Installer write access failed. Ensure a writable app data/cache directory or run with a writable filesystem path.".to_string();
     }
 
-    if text.contains("invalid requirement") || text.contains("invalid specifier")
-    {
+    if text.contains("invalid requirement") || text.contains("invalid specifier") {
         return "Pip metadata resolution failed. We already auto-upgraded pip/setuptools/wheel; retry the install after a clean retry.".to_string();
     }
 
@@ -1402,9 +1419,9 @@ fn install_python_dependency_pin(
         return Ok(());
     }
 
-    Err(EngineError::InstallFailed(
-        last_error.unwrap_or_else(|| format!("dependency install {pin} failed")),
-    ))
+    Err(EngineError::InstallFailed(last_error.unwrap_or_else(
+        || format!("dependency install {pin} failed"),
+    )))
 }
 
 fn spleeter_install_candidates(py_version: &str) -> Vec<&'static str> {
@@ -1547,14 +1564,7 @@ pub fn install_diarization_pack(paths: &AppPaths) -> Result<DiarizationPackStatu
         paths,
         &venv_python,
         &[
-            "-m",
-            "pip",
-            "install",
-            pinned[0],
-            pinned[1],
-            pinned[2],
-            pinned[3],
-            pinned[4],
+            "-m", "pip", "install", pinned[0], pinned[1], pinned[2], pinned[3], pinned[4],
         ],
         "pip install diarization dependencies failed (pinned)",
     );
@@ -1583,7 +1593,10 @@ pub fn install_diarization_pack(paths: &AppPaths) -> Result<DiarizationPackStatu
     let _ = run_python_checked(
         paths,
         &venv_python,
-        &["-c", "from resemblyzer import VoiceEncoder; VoiceEncoder(); print('ok')"],
+        &[
+            "-c",
+            "from resemblyzer import VoiceEncoder; VoiceEncoder(); print('ok')",
+        ],
         "diarization warmup failed",
     );
 
@@ -1600,7 +1613,12 @@ fn patch_webrtcvad_pkg_resources_import(python: &std::path::Path) -> Result<()> 
 
     let mut candidates: Vec<std::path::PathBuf> = Vec::new();
     if cfg!(windows) {
-        candidates.push(venv_dir.join("Lib").join("site-packages").join("webrtcvad.py"));
+        candidates.push(
+            venv_dir
+                .join("Lib")
+                .join("site-packages")
+                .join("webrtcvad.py"),
+        );
     } else {
         let lib_dir = venv_dir.join("lib");
         if let Ok(entries) = std::fs::read_dir(&lib_dir) {
@@ -1622,9 +1640,8 @@ fn patch_webrtcvad_pkg_resources_import(python: &std::path::Path) -> Result<()> 
         .into_iter()
         .find(|p| p.is_file())
         .ok_or_else(|| EngineError::InstallFailed("webrtcvad.py not found".to_string()))?;
-    let bytes = std::fs::read(&file_path).map_err(|e| {
-        EngineError::InstallFailed(format!("failed to read webrtcvad.py: {e}"))
-    })?;
+    let bytes = std::fs::read(&file_path)
+        .map_err(|e| EngineError::InstallFailed(format!("failed to read webrtcvad.py: {e}")))?;
     let mut text = String::from_utf8_lossy(&bytes).to_string();
 
     if text.contains("try:") && text.contains("import pkg_resources") {
@@ -1644,9 +1661,8 @@ fn patch_webrtcvad_pkg_resources_import(python: &std::path::Path) -> Result<()> 
         "__version__ = (pkg_resources.get_distribution('webrtcvad').version if pkg_resources else 'installed')",
     );
 
-    std::fs::write(&file_path, text).map_err(|e| {
-        EngineError::InstallFailed(format!("failed to patch webrtcvad.py: {e}"))
-    })?;
+    std::fs::write(&file_path, text)
+        .map_err(|e| EngineError::InstallFailed(format!("failed to patch webrtcvad.py: {e}")))?;
     Ok(())
 }
 
@@ -1711,6 +1727,10 @@ pub struct TtsNeuralLocalV1PackStatus {
     pub package_version: Option<String>,
 }
 
+fn kokoro_warmup_probe_path(paths: &AppPaths) -> std::path::PathBuf {
+    paths.python_models_dir().join("kokoro").join(".warmup_ok")
+}
+
 pub fn tts_neural_local_v1_pack_status(paths: &AppPaths) -> TtsNeuralLocalV1PackStatus {
     let venv_dir = paths.python_venv_dir();
     let venv_python = venv_python_path(&venv_dir);
@@ -1722,8 +1742,9 @@ pub fn tts_neural_local_v1_pack_status(paths: &AppPaths) -> TtsNeuralLocalV1Pack
     }
 
     let package_version = python_module_version(&venv_python, "kokoro");
+    let warmup_ready = kokoro_warmup_probe_path(paths).exists();
     TtsNeuralLocalV1PackStatus {
-        installed: package_version.is_some(),
+        installed: package_version.is_some() && warmup_ready,
         package_version,
     }
 }
@@ -1756,31 +1777,61 @@ pub fn install_tts_neural_local_v1_pack(paths: &AppPaths) -> Result<TtsNeuralLoc
         "pip upgrade click/typer compatibility for neural TTS failed",
     );
 
-    let pinned = ["kokoro==0.9.4", "numpy==1.26.4", "soundfile==0.13.1", "torch==2.10.0"];
+    let pinned = [
+        "kokoro==0.9.4",
+        "numpy==1.26.4",
+        "soundfile==0.13.1",
+        "torch==2.10.0",
+    ];
     let install_err = run_python_checked(
         paths,
         &venv_python,
-        &["-m", "pip", "install", pinned[0], pinned[1], pinned[2], pinned[3]],
+        &[
+            "-m", "pip", "install", pinned[0], pinned[1], pinned[2], pinned[3],
+        ],
         "pip install neural TTS dependencies failed (pinned)",
     );
     if let Err(err) = install_err {
         run_python_checked(
             paths,
             &venv_python,
-            &["-m", "pip", "install", "kokoro", "numpy", "soundfile", "torch"],
+            &[
+                "-m",
+                "pip",
+                "install",
+                "kokoro",
+                "numpy",
+                "soundfile",
+                "torch",
+            ],
             &format!("pip install neural TTS dependencies failed (unpinned fallback): {err}"),
         )?;
     }
 
-    let _ = run_python_checked(
+    run_python_checked(
         paths,
         &venv_python,
         &[
             "-c",
-            "from kokoro import KPipeline\n_ = KPipeline(lang_code='a')\nprint('ok')",
+            concat!(
+                "from kokoro import KPipeline; ",
+                "pipeline = KPipeline(lang_code='a'); ",
+                "result = next(iter(pipeline('warmup', voice='af_heart'))); ",
+                "audio = getattr(result, 'audio', None); ",
+                "nested = getattr(result, 'output', None) if audio is None else None; ",
+                "audio = getattr(nested, 'audio', None) if audio is None and nested is not None else audio; ",
+                "assert audio is not None, 'kokoro warmup produced no audio'; ",
+                "print('ok')",
+            ),
         ],
         "neural TTS warmup failed",
-    );
+    )?;
+
+    let warmup_probe = kokoro_warmup_probe_path(paths);
+    if let Some(parent) = warmup_probe.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    std::fs::write(&warmup_probe, "ok\n")?;
 
     let status = tts_neural_local_v1_pack_status(paths);
     let _ = generate_pack_integrity_manifest(paths);
@@ -1824,17 +1875,15 @@ pub fn tts_voice_preserving_local_v1_pack_status(
     let kokoro_version = python_module_version(&venv_python, "kokoro");
     let openvoice_version = python_module_version(&venv_python, "openvoice");
     let cosyvoice_version = python_module_version(&venv_python, "cosyvoice");
-    let openvoice_patch_applied =
-        openvoice_api_patch_applied(&venv_python).unwrap_or(false);
+    let openvoice_patch_applied = openvoice_api_patch_applied(&venv_python).unwrap_or(false);
+    let kokoro_warmup_ready = kokoro_warmup_probe_path(paths).exists();
     let models_dir = std::path::PathBuf::from(&openvoice_models_dir);
     let openvoice_models_installed = models_dir.join("converter").join("config.json").exists()
-        && models_dir
-            .join("converter")
-            .join("checkpoint.pth")
-            .exists();
+        && models_dir.join("converter").join("checkpoint.pth").exists();
 
     TtsVoicePreservingLocalV1PackStatus {
         installed: kokoro_version.is_some()
+            && kokoro_warmup_ready
             && openvoice_version.is_some()
             && openvoice_models_installed
             && openvoice_patch_applied,
@@ -1867,7 +1916,8 @@ pub fn install_tts_voice_preserving_local_v1_pack(
     let mut status_error: Option<String> = None;
     let mut openvoice_installed = false;
     // Pin OpenVoice to a known-good commit for determinism.
-    const OPENVOICE_GIT_PIN: &str = "git+https://github.com/myshell-ai/OpenVoice.git@74a1d147b17a8c3092dd5430504bd83ef6c7eb23";
+    const OPENVOICE_GIT_PIN: &str =
+        "git+https://github.com/myshell-ai/OpenVoice.git@74a1d147b17a8c3092dd5430504bd83ef6c7eb23";
     let attempts = vec![vec![
         "-m",
         "pip",
@@ -1877,12 +1927,7 @@ pub fn install_tts_voice_preserving_local_v1_pack(
         OPENVOICE_GIT_PIN,
     ]];
     for args in attempts {
-        match run_python_checked(
-            paths,
-            &venv_python,
-            &args,
-            "pip install OpenVoice failed",
-        ) {
+        match run_python_checked(paths, &venv_python, &args, "pip install OpenVoice failed") {
             Ok(()) => {
                 openvoice_installed = true;
                 status_error = None;
@@ -1893,11 +1938,9 @@ pub fn install_tts_voice_preserving_local_v1_pack(
     }
 
     if !openvoice_installed {
-        return Err(EngineError::InstallFailed(
-            status_error.unwrap_or_else(|| {
-                "OpenVoice install failed without a captured error".to_string()
-            }),
-        ));
+        return Err(EngineError::InstallFailed(status_error.unwrap_or_else(
+            || "OpenVoice install failed without a captured error".to_string(),
+        )));
     }
 
     let pinned = [
@@ -2138,11 +2181,9 @@ print("openvoice_converter_warmup_ok")
 
     let status = tts_voice_preserving_local_v1_pack_status(paths);
     if !status.installed {
-        return Err(EngineError::InstallFailed(
-            status_error.unwrap_or_else(|| {
-                "voice-preserving pack installation completed but status check failed".to_string()
-            }),
-        ));
+        return Err(EngineError::InstallFailed(status_error.unwrap_or_else(
+            || "voice-preserving pack installation completed but status check failed".to_string(),
+        )));
     }
 
     let _ = generate_pack_integrity_manifest(paths);
@@ -2195,7 +2236,11 @@ print(json.dumps(voices, ensure_ascii=False))
     cmd.env("PYTHONNOUSERSITE", "1");
     cmd.env(
         "XDG_CACHE_HOME",
-        paths.cache_dir().join("python").to_string_lossy().to_string(),
+        paths
+            .cache_dir()
+            .join("python")
+            .to_string_lossy()
+            .to_string(),
     );
 
     let output = cmd
@@ -2231,7 +2276,10 @@ fn python_module_version(python: &std::path::Path, module: &str) -> Option<Strin
     let code = format!(
         "import importlib\nm=importlib.import_module({module:?})\nprint(getattr(m,'__version__', 'installed') or 'installed')\n"
     );
-    let output = crate::cmd::command(python).args(["-c", &code]).output().ok()?;
+    let output = crate::cmd::command(python)
+        .args(["-c", &code])
+        .output()
+        .ok()?;
     if !output.status.success() {
         return None;
     }
@@ -2272,11 +2320,7 @@ fn openvoice_api_patch_applied(python: &std::path::Path) -> Option<bool> {
                 if !name.starts_with("python") {
                     continue;
                 }
-                candidates.push(
-                    path.join("site-packages")
-                        .join("openvoice")
-                        .join("api.py"),
-                );
+                candidates.push(path.join("site-packages").join("openvoice").join("api.py"));
             }
         }
     }
@@ -2315,15 +2359,24 @@ fn run_python_checked(
     );
     cmd.env(
         "XDG_CACHE_HOME",
-        paths.cache_dir().join("python").to_string_lossy().to_string(),
+        paths
+            .cache_dir()
+            .join("python")
+            .to_string_lossy()
+            .to_string(),
     );
     cmd.env(
         "HF_HOME",
-        paths.cache_dir().join("huggingface").to_string_lossy().to_string(),
+        paths
+            .cache_dir()
+            .join("huggingface")
+            .to_string_lossy()
+            .to_string(),
     );
     cmd.env(
         "HUGGINGFACE_HUB_CACHE",
-        paths.cache_dir()
+        paths
+            .cache_dir()
             .join("huggingface")
             .join("hub")
             .to_string_lossy()

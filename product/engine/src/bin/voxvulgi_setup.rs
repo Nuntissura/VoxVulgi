@@ -108,8 +108,7 @@ fn main() -> Result<(), String> {
 }
 
 fn default_base_dir() -> Option<PathBuf> {
-    let env_dir =
-        std::env::var("VOXVULGI_BASE_DIR").or_else(|_| std::env::var("YTFETCH_BASE_DIR"));
+    let env_dir = std::env::var("VOXVULGI_BASE_DIR").or_else(|_| std::env::var("YTFETCH_BASE_DIR"));
     if let Ok(v) = env_dir {
         let t = v.trim();
         if !t.is_empty() {

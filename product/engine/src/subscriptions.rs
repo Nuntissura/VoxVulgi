@@ -265,7 +265,9 @@ ON CONFLICT(source_url) DO UPDATE SET
     }
 
     let mut row = subscription_by_source_url_conn(&conn, normalized.source_url.as_str())?
-        .ok_or_else(|| EngineError::InstallFailed("failed to load saved subscription".to_string()))?;
+        .ok_or_else(|| {
+            EngineError::InstallFailed("failed to load saved subscription".to_string())
+        })?;
     set_subscription_group_memberships_conn(&conn, &row.id, &normalized.group_ids)?;
     row.group_ids = normalized.group_ids;
     Ok(row)
@@ -278,7 +280,10 @@ pub fn delete_youtube_subscription(paths: &AppPaths, id: &str) -> Result<()> {
     Ok(())
 }
 
-pub fn get_youtube_subscription_by_id(paths: &AppPaths, id: &str) -> Result<Option<YoutubeSubscriptionRow>> {
+pub fn get_youtube_subscription_by_id(
+    paths: &AppPaths,
+    id: &str,
+) -> Result<Option<YoutubeSubscriptionRow>> {
     let conn = db::open(paths)?;
     db::migrate(&conn)?;
     let row = subscription_by_id_conn(&conn, id)?;
@@ -365,7 +370,9 @@ fn is_subscription_backoff_ready(sub: &YoutubeSubscriptionRow, now_ms_value: i64
     }
 }
 
-pub fn list_youtube_subscription_groups(paths: &AppPaths) -> Result<Vec<YoutubeSubscriptionGroupRow>> {
+pub fn list_youtube_subscription_groups(
+    paths: &AppPaths,
+) -> Result<Vec<YoutubeSubscriptionGroupRow>> {
     let conn = db::open(paths)?;
     db::migrate(&conn)?;
     list_groups_conn(&conn)
@@ -424,7 +431,10 @@ ON CONFLICT(id) DO UPDATE SET
 pub fn delete_youtube_subscription_group(paths: &AppPaths, group_id: &str) -> Result<()> {
     let conn = db::open(paths)?;
     db::migrate(&conn)?;
-    conn.execute("DELETE FROM youtube_subscription_group WHERE id = ?1", params![group_id])?;
+    conn.execute(
+        "DELETE FROM youtube_subscription_group WHERE id = ?1",
+        params![group_id],
+    )?;
     Ok(())
 }
 
@@ -509,10 +519,7 @@ WHERE id = ?2
     Ok(())
 }
 
-pub fn record_subscription_refresh_failure(
-    paths: &AppPaths,
-    subscription_id: &str,
-) -> Result<()> {
+pub fn record_subscription_refresh_failure(paths: &AppPaths, subscription_id: &str) -> Result<()> {
     let conn = db::open(paths)?;
     db::migrate(&conn)?;
     let now = now_ms();
@@ -526,7 +533,8 @@ pub fn record_subscription_refresh_failure(
         .unwrap_or(0);
 
     let next_failures = current_failures.saturating_add(1);
-    let delay_minutes = 5_i64.saturating_mul(1_i64 << (next_failures.saturating_sub(1).min(6) as u32));
+    let delay_minutes =
+        5_i64.saturating_mul(1_i64 << (next_failures.saturating_sub(1).min(6) as u32));
     let delay_ms = delay_minutes
         .saturating_mul(60)
         .saturating_mul(1000)
@@ -542,7 +550,12 @@ SET
   updated_at_ms = ?2
 WHERE id = ?4
 "#,
-        params![next_failures, now, now.saturating_add(delay_ms), subscription_id],
+        params![
+            next_failures,
+            now,
+            now.saturating_add(delay_ms),
+            subscription_id
+        ],
     )?;
     Ok(())
 }
@@ -552,7 +565,9 @@ pub fn seed_archive_from_scan(
     scan_dir: &Path,
     subscription_id: Option<String>,
 ) -> Result<YoutubeSubscriptionArchiveSeedSummary> {
-    let scan_dir = scan_dir.canonicalize().unwrap_or_else(|_| scan_dir.to_path_buf());
+    let scan_dir = scan_dir
+        .canonicalize()
+        .unwrap_or_else(|_| scan_dir.to_path_buf());
     if !scan_dir.exists() || !scan_dir.is_dir() {
         return Err(EngineError::InstallFailed(format!(
             "scan folder not found: {}",
@@ -571,7 +586,8 @@ pub fn seed_archive_from_scan(
         });
     }
 
-    let target_subscriptions = resolve_seed_target_subscriptions(paths, &scan_dir, subscription_id)?;
+    let target_subscriptions =
+        resolve_seed_target_subscriptions(paths, &scan_dir, subscription_id)?;
     let mut archive_files_updated = 0_usize;
     let mut appended_ids = 0_usize;
     let mut skipped_existing_ids = 0_usize;
@@ -601,7 +617,9 @@ pub fn import_existing_downloads_index_only(
     paths: &AppPaths,
     scan_dir: &Path,
 ) -> Result<ExistingDownloadsImportSummary> {
-    let scan_dir = scan_dir.canonicalize().unwrap_or_else(|_| scan_dir.to_path_buf());
+    let scan_dir = scan_dir
+        .canonicalize()
+        .unwrap_or_else(|_| scan_dir.to_path_buf());
     if !scan_dir.exists() || !scan_dir.is_dir() {
         return Err(EngineError::InstallFailed(format!(
             "scan folder not found: {}",
@@ -674,7 +692,10 @@ pub fn export_youtube_subscriptions_json(
     if let Some(parent) = out_path.parent() {
         std::fs::create_dir_all(parent)?;
     }
-    std::fs::write(out_path, format!("{}\n", serde_json::to_string_pretty(&payload)?))?;
+    std::fs::write(
+        out_path,
+        format!("{}\n", serde_json::to_string_pretty(&payload)?),
+    )?;
 
     Ok(YoutubeSubscriptionsExportSummary {
         out_path: out_path.to_string_lossy().to_string(),
@@ -715,7 +736,8 @@ pub fn import_youtube_subscriptions_json(
             refresh_interval_minutes: raw.refresh_interval_minutes,
         })?;
 
-        let existed = subscription_by_source_url_conn(&conn, normalized.source_url.as_str())?.is_some();
+        let existed =
+            subscription_by_source_url_conn(&conn, normalized.source_url.as_str())?.is_some();
         conn.execute(
             r#"
 INSERT INTO youtube_subscription (
@@ -758,7 +780,8 @@ ON CONFLICT(source_url) DO UPDATE SET
                 now,
             ],
         )?;
-        if let Some(saved) = subscription_by_source_url_conn(&conn, normalized.source_url.as_str())? {
+        if let Some(saved) = subscription_by_source_url_conn(&conn, normalized.source_url.as_str())?
+        {
             set_subscription_group_memberships_conn(&conn, &saved.id, &normalized.group_ids)?;
         }
 
@@ -847,7 +870,8 @@ pub fn import_youtube_subscriptions_4kvdp_dir(
         let title = fourkvd_title(raw);
         let source_url = normalize_youtube_url(url.to_string())?;
         let folder_map = default_folder_map(&title, &source_url);
-        let output_dir_override = normalize_output_dir(Some(fourkvd_normalize_dirname(&raw.dirname)));
+        let output_dir_override =
+            normalize_output_dir(Some(fourkvd_normalize_dirname(&raw.dirname)));
         let active = raw.state.unwrap_or(1) != 0;
 
         let normalized = normalize_upsert(YoutubeSubscriptionUpsert {
@@ -863,7 +887,8 @@ pub fn import_youtube_subscriptions_4kvdp_dir(
             refresh_interval_minutes: Some(DEFAULT_REFRESH_INTERVAL_MINUTES),
         })?;
 
-        let existed = subscription_by_source_url_conn(&conn, normalized.source_url.as_str())?.is_some();
+        let existed =
+            subscription_by_source_url_conn(&conn, normalized.source_url.as_str())?.is_some();
         conn.execute(
             r#"
 INSERT INTO youtube_subscription (
@@ -972,7 +997,8 @@ fn seed_archives_from_4kvdp_entries(
             skipped_entries += 1;
             continue;
         }
-        let Some(source_url) = fourk_id_to_source_url.get(&row.downloader_subscription_info_id) else {
+        let Some(source_url) = fourk_id_to_source_url.get(&row.downloader_subscription_info_id)
+        else {
             skipped_entries += 1;
             continue;
         };
@@ -1053,7 +1079,10 @@ fn merge_archive_file(path: &Path, video_ids: &HashSet<String>) -> std::io::Resu
     Ok((appended, skipped_existing))
 }
 
-pub fn youtube_subscription_output_dir(paths: &AppPaths, sub: &YoutubeSubscriptionRow) -> Result<PathBuf> {
+pub fn youtube_subscription_output_dir(
+    paths: &AppPaths,
+    sub: &YoutubeSubscriptionRow,
+) -> Result<PathBuf> {
     if let Some(override_dir) = normalize_output_dir(sub.output_dir_override.clone()) {
         let mut p = PathBuf::from(override_dir);
         if !p.is_absolute() {
@@ -1069,7 +1098,10 @@ pub fn youtube_subscription_output_dir(paths: &AppPaths, sub: &YoutubeSubscripti
         .join(sanitize_folder_map(&sub.folder_map)))
 }
 
-pub fn youtube_subscription_archive_path(paths: &AppPaths, sub: &YoutubeSubscriptionRow) -> Result<PathBuf> {
+pub fn youtube_subscription_archive_path(
+    paths: &AppPaths,
+    sub: &YoutubeSubscriptionRow,
+) -> Result<PathBuf> {
     Ok(youtube_subscription_output_dir(paths, sub)?.join(YT_DLP_ARCHIVE_FILENAME))
 }
 
@@ -1131,10 +1163,7 @@ pub(crate) fn youtube_video_id_from_url(url: &str) -> Option<String> {
             .map(|v| v.trim().to_string())
             .filter(|v| !v.is_empty());
     }
-    if host == "youtube.com"
-        || host == "www.youtube.com"
-        || host.ends_with(".youtube.com")
-    {
+    if host == "youtube.com" || host == "www.youtube.com" || host.ends_with(".youtube.com") {
         let path = parsed.path();
         if path.starts_with("/watch") {
             for (k, v) in parsed.query_pairs() {
@@ -1310,7 +1339,9 @@ fn resolve_seed_target_subscriptions(
         return Ok(Vec::new());
     }
 
-    let scan_dir = scan_dir.canonicalize().unwrap_or_else(|_| scan_dir.to_path_buf());
+    let scan_dir = scan_dir
+        .canonicalize()
+        .unwrap_or_else(|_| scan_dir.to_path_buf());
     let mut matched: Vec<YoutubeSubscriptionRow> = Vec::new();
     for sub in subs.iter() {
         let output_dir = youtube_subscription_output_dir(paths, sub)?
@@ -1328,8 +1359,9 @@ fn resolve_seed_target_subscriptions(
 
 fn infer_youtube_ids_from_dir(scan_dir: &Path) -> HashSet<String> {
     static YT_ID_RE: OnceLock<Regex> = OnceLock::new();
-    let regex = YT_ID_RE
-        .get_or_init(|| Regex::new(r"(?i)(?:^|[^A-Za-z0-9_-])([A-Za-z0-9_-]{11})(?:$|[^A-Za-z0-9_-])").unwrap());
+    let regex = YT_ID_RE.get_or_init(|| {
+        Regex::new(r"(?i)(?:^|[^A-Za-z0-9_-])([A-Za-z0-9_-]{11})(?:$|[^A-Za-z0-9_-])").unwrap()
+    });
     let mut ids: HashSet<String> = HashSet::new();
     let mut stack = vec![scan_dir.to_path_buf()];
     let max_depth = 6_usize;
@@ -1434,7 +1466,10 @@ fn is_media_file_ext(path: &Path) -> bool {
     )
 }
 
-fn subscription_by_id_conn(conn: &rusqlite::Connection, id: &str) -> Result<Option<YoutubeSubscriptionRow>> {
+fn subscription_by_id_conn(
+    conn: &rusqlite::Connection,
+    id: &str,
+) -> Result<Option<YoutubeSubscriptionRow>> {
     let mut stmt = conn.prepare(
         r#"
 SELECT
@@ -1458,9 +1493,7 @@ WHERE id = ?1
 "#,
     )?;
 
-    let row = stmt
-        .query_row([id], row_to_subscription)
-        .optional()?;
+    let row = stmt.query_row([id], row_to_subscription).optional()?;
     Ok(row)
 }
 
@@ -1565,22 +1598,16 @@ fn normalize_youtube_url(raw: String) -> Result<String> {
             "subscription URL cannot be empty".to_string(),
         ));
     }
-    let mut parsed = Url::parse(trimmed).map_err(|_| {
-        EngineError::InstallFailed(format!("invalid URL: {trimmed}"))
-    })?;
+    let mut parsed = Url::parse(trimmed)
+        .map_err(|_| EngineError::InstallFailed(format!("invalid URL: {trimmed}")))?;
     if parsed.scheme() != "http" && parsed.scheme() != "https" {
         return Err(EngineError::InstallFailed(
             "subscription URL must use http/https".to_string(),
         ));
     }
 
-    let host = parsed
-        .host_str()
-        .unwrap_or_default()
-        .to_ascii_lowercase();
-    let is_youtube = host == "youtu.be"
-        || host == "youtube.com"
-        || host.ends_with(".youtube.com");
+    let host = parsed.host_str().unwrap_or_default().to_ascii_lowercase();
+    let is_youtube = host == "youtu.be" || host == "youtube.com" || host.ends_with(".youtube.com");
     if !is_youtube {
         return Err(EngineError::InstallFailed(
             "subscription URL must be a YouTube URL".to_string(),
@@ -1761,7 +1788,10 @@ mod tests {
         });
         std::fs::write(
             &import_path,
-            format!("{}\n", serde_json::to_string_pretty(&payload).expect("json")),
+            format!(
+                "{}\n",
+                serde_json::to_string_pretty(&payload).expect("json")
+            ),
         )
         .expect("write import");
 
@@ -1827,7 +1857,9 @@ mod tests {
             .unwrap_or_default()
             .to_ascii_lowercase();
         assert!(
-            output_dir.contains("video") && output_dir.contains("subscriptions") && output_dir.contains("mapped_channel"),
+            output_dir.contains("video")
+                && output_dir.contains("subscriptions")
+                && output_dir.contains("mapped_channel"),
             "expected mapped subscription folder in output_dir, got {output_dir}"
         );
     }
@@ -2006,8 +2038,14 @@ downloader_subscription_info_id,entry_id,reference,status\n\
         let rows = list_youtube_subscriptions(&paths).expect("list");
         assert_eq!(rows.len(), 2);
 
-        let sub_a = rows.iter().find(|s| s.source_url.contains("channel/UCi_")).unwrap();
-        let sub_b = rows.iter().find(|s| s.source_url.contains("playlist?list=PLFt9")).unwrap();
+        let sub_a = rows
+            .iter()
+            .find(|s| s.source_url.contains("channel/UCi_"))
+            .unwrap();
+        let sub_b = rows
+            .iter()
+            .find(|s| s.source_url.contains("playlist?list=PLFt9"))
+            .unwrap();
 
         let arch_a = youtube_subscription_archive_path(&paths, sub_a).expect("arch a");
         let arch_b = youtube_subscription_archive_path(&paths, sub_b).expect("arch b");
@@ -2026,8 +2064,7 @@ downloader_subscription_info_id,entry_id,reference,status\n\
         std::fs::create_dir_all(&nested).expect("mkdir");
 
         std::fs::write(root.join("ChannelName - dQw4w9WgXcQ.mp4"), b"x").expect("seed root file");
-        std::fs::write(nested.join("download_[5NV6Rdv1a3I].mkv"), b"x")
-            .expect("seed nested file");
+        std::fs::write(nested.join("download_[5NV6Rdv1a3I].mkv"), b"x").expect("seed nested file");
         std::fs::write(nested.join("ignore_text_only.mp4"), b"x").expect("seed text file");
 
         let ids = infer_youtube_ids_from_dir(root);
@@ -2061,7 +2098,10 @@ downloader_subscription_info_id,entry_id,reference,status\n\
 
         record_subscription_refresh_failure(&paths, &sub.id).expect("record failure");
         let blocked = queue_all_active_youtube_subscriptions(&paths).expect("queue blocked");
-        assert!(blocked.is_empty(), "subscription should be blocked by backoff");
+        assert!(
+            blocked.is_empty(),
+            "subscription should be blocked by backoff"
+        );
 
         let conn = crate::db::open(&paths).expect("open");
         crate::db::migrate(&conn).expect("migrate");

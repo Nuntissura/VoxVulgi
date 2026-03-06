@@ -1,12 +1,14 @@
-use tauri::{Manager, State};
+use base64::Engine as _;
 use std::sync::{
     atomic::{AtomicBool, Ordering},
     Arc, Mutex,
 };
+use tauri::{Manager, State};
 use voxvulgi_engine::models::ModelStore;
 use voxvulgi_engine::paths::AppPaths;
 use voxvulgi_engine::{
-    config, db, diagnostics, jobs, library, speakers, subtitle_tracks, subtitles, subscriptions, tools,
+    config, db, diagnostics, jobs, library, speakers, subscriptions, subtitle_tracks, subtitles,
+    tools,
 };
 
 #[derive(Debug, Clone, serde::Deserialize)]
@@ -167,11 +169,18 @@ fn is_safe_relative_path(path: &std::path::Path) -> bool {
     })
 }
 
-fn extract_payload_zip_best_effort(zip_path: &std::path::Path, paths: &AppPaths) -> Result<ZipExtractSummary, String> {
+fn extract_payload_zip_best_effort(
+    zip_path: &std::path::Path,
+    paths: &AppPaths,
+) -> Result<ZipExtractSummary, String> {
     use zip::result::ZipError;
 
-    let file = std::fs::File::open(zip_path)
-        .map_err(|e| format!("failed to open payload zip {}: {e}", zip_path.to_string_lossy()))?;
+    let file = std::fs::File::open(zip_path).map_err(|e| {
+        format!(
+            "failed to open payload zip {}: {e}",
+            zip_path.to_string_lossy()
+        )
+    })?;
     let mut archive = zip::ZipArchive::new(file).map_err(|e| {
         format!(
             "failed to read payload zip {}: {e}",
@@ -211,9 +220,8 @@ fn extract_payload_zip_best_effort(zip_path: &std::path::Path, paths: &AppPaths)
 
         let out_path = dst_root.join(rel_path);
         if entry.is_dir() {
-            std::fs::create_dir_all(&out_path).map_err(|e| {
-                format!("failed to create dir {}: {e}", out_path.to_string_lossy())
-            })?;
+            std::fs::create_dir_all(&out_path)
+                .map_err(|e| format!("failed to create dir {}: {e}", out_path.to_string_lossy()))?;
             continue;
         }
 
@@ -226,21 +234,18 @@ fn extract_payload_zip_best_effort(zip_path: &std::path::Path, paths: &AppPaths)
         }
 
         if let Some(parent) = out_path.parent() {
-            std::fs::create_dir_all(parent).map_err(|e| {
-                format!("failed to create dir {}: {e}", parent.to_string_lossy())
-            })?;
+            std::fs::create_dir_all(parent)
+                .map_err(|e| format!("failed to create dir {}: {e}", parent.to_string_lossy()))?;
         }
 
         let tmp = out_path.with_extension("extracting");
         let _ = std::fs::remove_file(&tmp);
 
         {
-            let mut out_file = std::fs::File::create(&tmp).map_err(|e| {
-                format!("failed to create file {}: {e}", tmp.to_string_lossy())
-            })?;
-            std::io::copy(&mut entry, &mut out_file).map_err(|e| {
-                format!("failed to extract {}: {e}", name)
-            })?;
+            let mut out_file = std::fs::File::create(&tmp)
+                .map_err(|e| format!("failed to create file {}: {e}", tmp.to_string_lossy()))?;
+            std::io::copy(&mut entry, &mut out_file)
+                .map_err(|e| format!("failed to extract {}: {e}", name))?;
         }
 
         if out_path.exists() {
@@ -282,7 +287,9 @@ fn find_offline_bundle_root(resource_dir: &std::path::Path) -> Option<std::path:
     None
 }
 
-fn read_offline_bundle_manifest(bundle_root: &std::path::Path) -> Result<OfflineBundleManifest, String> {
+fn read_offline_bundle_manifest(
+    bundle_root: &std::path::Path,
+) -> Result<OfflineBundleManifest, String> {
     let manifest_path = bundle_root.join("manifest.json");
     let bytes = std::fs::read(&manifest_path).map_err(|e| {
         format!(
@@ -299,15 +306,10 @@ fn read_offline_bundle_manifest(bundle_root: &std::path::Path) -> Result<Offline
 }
 
 fn offline_bundle_marker_path(paths: &AppPaths) -> std::path::PathBuf {
-    paths
-        .config_dir()
-        .join("offline_bundle_applied_v1.json")
+    paths.config_dir().join("offline_bundle_applied_v1.json")
 }
 
-fn offline_bundle_already_applied(
-    paths: &AppPaths,
-    bundle_id: &str,
-) -> bool {
+fn offline_bundle_already_applied(paths: &AppPaths, bundle_id: &str) -> bool {
     let marker = offline_bundle_marker_path(paths);
     let Ok(bytes) = std::fs::read(marker) else {
         return false;
@@ -321,7 +323,11 @@ fn offline_bundle_already_applied(
         .unwrap_or(false)
 }
 
-fn write_offline_bundle_marker(paths: &AppPaths, bundle_root: &std::path::Path, bundle_id: &str) -> Result<(), String> {
+fn write_offline_bundle_marker(
+    paths: &AppPaths,
+    bundle_root: &std::path::Path,
+    bundle_id: &str,
+) -> Result<(), String> {
     let marker = offline_bundle_marker_path(paths);
     if let Some(parent) = marker.parent() {
         std::fs::create_dir_all(parent).map_err(|e| e.to_string())?;
@@ -337,12 +343,26 @@ fn write_offline_bundle_marker(paths: &AppPaths, bundle_root: &std::path::Path, 
             .as_millis() as i64,
     });
 
-    std::fs::write(&marker, format!("{}\n", serde_json::to_string_pretty(&record).unwrap_or_else(|_| "{}".to_string())))
-        .map_err(|e| format!("failed to write offline bundle marker {}: {e}", marker.to_string_lossy()))?;
+    std::fs::write(
+        &marker,
+        format!(
+            "{}\n",
+            serde_json::to_string_pretty(&record).unwrap_or_else(|_| "{}".to_string())
+        ),
+    )
+    .map_err(|e| {
+        format!(
+            "failed to write offline bundle marker {}: {e}",
+            marker.to_string_lossy()
+        )
+    })?;
     Ok(())
 }
 
-fn copy_tree_best_effort(src_root: &std::path::Path, dst_root: &std::path::Path) -> Result<CopySummary, String> {
+fn copy_tree_best_effort(
+    src_root: &std::path::Path,
+    dst_root: &std::path::Path,
+) -> Result<CopySummary, String> {
     if !src_root.exists() {
         return Ok(CopySummary::default());
     }
@@ -351,9 +371,8 @@ fn copy_tree_best_effort(src_root: &std::path::Path, dst_root: &std::path::Path)
     let mut stack: Vec<std::path::PathBuf> = vec![src_root.to_path_buf()];
 
     while let Some(dir) = stack.pop() {
-        let entries = std::fs::read_dir(&dir).map_err(|e| {
-            format!("failed to read dir {}: {e}", dir.to_string_lossy())
-        })?;
+        let entries = std::fs::read_dir(&dir)
+            .map_err(|e| format!("failed to read dir {}: {e}", dir.to_string_lossy()))?;
 
         for entry in entries.flatten() {
             let path = entry.path();
@@ -369,9 +388,8 @@ fn copy_tree_best_effort(src_root: &std::path::Path, dst_root: &std::path::Path)
             let dst = dst_root.join(rel);
 
             if file_type.is_dir() {
-                std::fs::create_dir_all(&dst).map_err(|e| {
-                    format!("failed to create dir {}: {e}", dst.to_string_lossy())
-                })?;
+                std::fs::create_dir_all(&dst)
+                    .map_err(|e| format!("failed to create dir {}: {e}", dst.to_string_lossy()))?;
                 stack.push(path);
                 continue;
             }
@@ -460,7 +478,10 @@ fn patch_venv_pyvenv_cfg_best_effort(paths: &AppPaths) -> Result<(), String> {
             continue;
         }
         if trimmed.starts_with("executable =") {
-            out.push(format!("executable = {}", portable_python.to_string_lossy()));
+            out.push(format!(
+                "executable = {}",
+                portable_python.to_string_lossy()
+            ));
             wrote_executable = true;
             continue;
         }
@@ -480,7 +501,10 @@ fn patch_venv_pyvenv_cfg_best_effort(paths: &AppPaths) -> Result<(), String> {
         out.push(format!("home = {}", portable_dir.to_string_lossy()));
     }
     if !wrote_executable {
-        out.push(format!("executable = {}", portable_python.to_string_lossy()));
+        out.push(format!(
+            "executable = {}",
+            portable_python.to_string_lossy()
+        ));
     }
     if !wrote_command {
         out.push(format!(
@@ -495,7 +519,10 @@ fn patch_venv_pyvenv_cfg_best_effort(paths: &AppPaths) -> Result<(), String> {
     Ok(())
 }
 
-fn apply_offline_bundle_if_present(paths: &AppPaths, resource_dir: &std::path::Path) -> Result<(), String> {
+fn apply_offline_bundle_if_present(
+    paths: &AppPaths,
+    resource_dir: &std::path::Path,
+) -> Result<(), String> {
     let Some(bundle_root) = find_offline_bundle_root(resource_dir) else {
         return Ok(());
     };
@@ -533,10 +560,7 @@ fn apply_offline_bundle_if_present(paths: &AppPaths, resource_dir: &std::path::P
 
         eprintln!(
             "offline bundle: extracted payload zip {} (files={} bytes={} skipped={})",
-            payload_zip_name,
-            sum.extracted_files,
-            sum.extracted_bytes,
-            sum.skipped_files,
+            payload_zip_name, sum.extracted_files, sum.extracted_bytes, sum.skipped_files,
         );
 
         return Ok(());
@@ -579,10 +603,24 @@ fn apply_offline_bundle_if_present(paths: &AppPaths, resource_dir: &std::path::P
 
 fn ensure_media_output_layout(root: &std::path::Path) -> Result<(), String> {
     std::fs::create_dir_all(root).map_err(|e| e.to_string())?;
-    for sub in ["video", "instagram", "images"] {
+    for sub in ["video", "instagram", "images", "localization"] {
         std::fs::create_dir_all(root.join(sub)).map_err(|e| e.to_string())?;
     }
     Ok(())
+}
+
+fn mime_from_path(path: &std::path::Path) -> &'static str {
+    match path
+        .extension()
+        .and_then(|value| value.to_str())
+        .unwrap_or("")
+        .to_ascii_lowercase()
+        .as_str()
+    {
+        "png" => "image/png",
+        "webp" => "image/webp",
+        _ => "image/jpeg",
+    }
 }
 
 fn build_download_dir_status(paths: &AppPaths) -> Result<DownloadDirStatus, String> {
@@ -599,7 +637,9 @@ fn build_download_dir_status(paths: &AppPaths) -> Result<DownloadDirStatus, Stri
     })
 }
 
-fn build_diagnostics_trace_dir_status(paths: &AppPaths) -> Result<DiagnosticsTraceDirStatus, String> {
+fn build_diagnostics_trace_dir_status(
+    paths: &AppPaths,
+) -> Result<DiagnosticsTraceDirStatus, String> {
     let default_dir = paths.default_diagnostics_trace_dir();
     let override_dir = paths
         .diagnostics_trace_dir_override()
@@ -650,7 +690,9 @@ fn path_size_bytes_best_effort(path: &std::path::Path) -> u64 {
     total
 }
 
-fn clear_dir_entries_with_bytes(dir: &std::path::Path) -> Result<DiagnosticsTraceClearSummary, String> {
+fn clear_dir_entries_with_bytes(
+    dir: &std::path::Path,
+) -> Result<DiagnosticsTraceClearSummary, String> {
     std::fs::create_dir_all(dir).map_err(|e| e.to_string())?;
     let entries = std::fs::read_dir(dir).map_err(|e| e.to_string())?;
 
@@ -730,6 +772,34 @@ fn item_outputs(
 }
 
 #[tauri::command]
+async fn library_thumbnail_data_url(
+    state: State<'_, AppState>,
+    item_id: Option<String>,
+    itemId: Option<String>,
+) -> Result<Option<String>, String> {
+    let paths = state.paths.clone();
+    let item_id = item_id
+        .or(itemId)
+        .map(|v| v.trim().to_string())
+        .filter(|v| !v.is_empty())
+        .ok_or_else(|| "missing required key itemId".to_string())?;
+
+    tauri::async_runtime::spawn_blocking(move || {
+        let Some(path) =
+            library::ensure_thumbnail_path(&paths, &item_id).map_err(|e| e.to_string())?
+        else {
+            return Ok(None);
+        };
+        let bytes = std::fs::read(&path).map_err(|e| e.to_string())?;
+        let mime = mime_from_path(&path);
+        let encoded = base64::engine::general_purpose::STANDARD.encode(bytes);
+        Ok(Some(format!("data:{mime};base64,{encoded}")))
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
+#[tauri::command]
 #[allow(non_snake_case)]
 fn item_qc_report_v1_load(
     state: State<'_, AppState>,
@@ -794,7 +864,10 @@ fn item_artifacts_list_v1(
         "sep_spleeter_vocals",
         "Vocals (Spleeter)",
         "Separation",
-        item_dir.join("separation").join("spleeter_2stems").join("vocals.wav"),
+        item_dir
+            .join("separation")
+            .join("spleeter_2stems")
+            .join("vocals.wav"),
     );
     push(
         "sep_spleeter_background",
@@ -809,7 +882,10 @@ fn item_artifacts_list_v1(
         "sep_demucs_vocals",
         "Vocals (Demucs)",
         "Separation",
-        item_dir.join("separation").join("demucs_two_stems_v1").join("vocals.wav"),
+        item_dir
+            .join("separation")
+            .join("demucs_two_stems_v1")
+            .join("vocals.wav"),
     );
     push(
         "sep_demucs_background",
@@ -834,7 +910,10 @@ fn item_artifacts_list_v1(
         "tts_pyttsx3_manifest",
         "TTS manifest (pyttsx3)",
         "TTS",
-        item_dir.join("tts_preview").join("pyttsx3_v1").join("manifest.json"),
+        item_dir
+            .join("tts_preview")
+            .join("pyttsx3_v1")
+            .join("manifest.json"),
     );
     push(
         "tts_neural_manifest",
@@ -950,7 +1029,9 @@ async fn item_export_mux_preview_mp4(
                 if src_mp4.exists() {
                     src_mp4
                 } else if src_mkv.exists() {
-                    return Err("muxed preview exists only as MKV; choose a .mkv export path".to_string());
+                    return Err(
+                        "muxed preview exists only as MKV; choose a .mkv export path".to_string(),
+                    );
                 } else {
                     return Err("muxed preview not found".to_string());
                 }
@@ -959,7 +1040,9 @@ async fn item_export_mux_preview_mp4(
                 if src_mkv.exists() {
                     src_mkv
                 } else if src_mp4.exists() {
-                    return Err("muxed preview exists only as MP4; choose a .mp4 export path".to_string());
+                    return Err(
+                        "muxed preview exists only as MP4; choose a .mp4 export path".to_string(),
+                    );
                 } else {
                     return Err("muxed preview not found".to_string());
                 }
@@ -1053,7 +1136,12 @@ async fn diagnostics_export_bundle(
     let paths = state.paths.clone();
 
     tauri::async_runtime::spawn_blocking(move || {
-        diagnostics::export_diagnostics_bundle(&paths, std::path::PathBuf::from(out_path), &app_name, &app_version)
+        diagnostics::export_diagnostics_bundle(
+            &paths,
+            std::path::PathBuf::from(out_path),
+            &app_name,
+            &app_version,
+        )
     })
     .await
     .map_err(|e| e.to_string())?
@@ -1296,18 +1384,22 @@ fn diagnostics_trace_dir_use_default(
 }
 
 #[tauri::command]
-fn diagnostics_trace_clear(
+async fn diagnostics_trace_clear(
     state: State<'_, AppState>,
 ) -> Result<DiagnosticsTraceClearSummary, String> {
-    let dir = state
-        .paths
-        .effective_diagnostics_trace_dir()
-        .map_err(|e| e.to_string())?;
-    clear_dir_entries_with_bytes(&dir)
+    let paths = state.paths.clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        let dir = paths
+            .effective_diagnostics_trace_dir()
+            .map_err(|e| e.to_string())?;
+        clear_dir_entries_with_bytes(&dir)
+    })
+    .await
+    .map_err(|e| e.to_string())?
 }
 
 #[tauri::command]
-fn diagnostics_trace_write_event(
+async fn diagnostics_trace_write_event(
     state: State<'_, AppState>,
     event: String,
     details: Option<serde_json::Value>,
@@ -1318,37 +1410,43 @@ fn diagnostics_trace_write_event(
         return Err("event is empty".to_string());
     }
 
-    let dir = state
-        .paths
-        .effective_diagnostics_trace_dir()
-        .map_err(|e| e.to_string())?;
-    std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
+    let paths = state.paths.clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        let dir = paths
+            .effective_diagnostics_trace_dir()
+            .map_err(|e| e.to_string())?;
+        std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
 
-    let path = dir.join("diagnostics_trace.jsonl");
-    let mut file = std::fs::OpenOptions::new()
-        .create(true)
-        .append(true)
-        .open(&path)
-        .map_err(|e| e.to_string())?;
+        let path = dir.join("diagnostics_trace.jsonl");
+        let mut file = std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(&path)
+            .map_err(|e| e.to_string())?;
 
-    let ts_ms = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_millis() as i64)
-        .unwrap_or(0);
-    let row = serde_json::json!({
-        "ts_ms": ts_ms,
-        "event": event,
-        "level": level.unwrap_or_else(|| "info".to_string()),
-        "details": details.unwrap_or(serde_json::Value::Null),
-    });
+        let ts_ms = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_millis() as i64)
+            .unwrap_or(0);
+        let row = serde_json::json!({
+            "ts_ms": ts_ms,
+            "event": event,
+            "level": level.unwrap_or_else(|| "info".to_string()),
+            "details": details.unwrap_or(serde_json::Value::Null),
+        });
 
-    use std::io::Write as _;
-    writeln!(file, "{}", row).map_err(|e| e.to_string())?;
-    Ok(path.to_string_lossy().to_string())
+        use std::io::Write as _;
+        writeln!(file, "{}", row).map_err(|e| e.to_string())?;
+        Ok(path.to_string_lossy().to_string())
+    })
+    .await
+    .map_err(|e| e.to_string())?
 }
 
 #[tauri::command]
-fn config_batch_on_import_get(state: State<'_, AppState>) -> Result<config::BatchOnImportRules, String> {
+fn config_batch_on_import_get(
+    state: State<'_, AppState>,
+) -> Result<config::BatchOnImportRules, String> {
     config::load_batch_on_import_rules(&state.paths).map_err(|e| e.to_string())
 }
 
@@ -1374,12 +1472,8 @@ fn config_diarization_optional_set(
     config_value: config::OptionalDiarizationBackendConfig,
     token: Option<String>,
 ) -> Result<config::OptionalDiarizationBackendStatus, String> {
-    config::save_optional_diarization_backend_config(
-        &state.paths,
-        &config_value,
-        token.as_deref(),
-    )
-    .map_err(|e| e.to_string())?;
+    config::save_optional_diarization_backend_config(&state.paths, &config_value, token.as_deref())
+        .map_err(|e| e.to_string())?;
     config::load_optional_diarization_backend_status(&state.paths).map_err(|e| e.to_string())
 }
 
@@ -1392,11 +1486,16 @@ fn config_diarization_optional_clear_token(
 }
 
 #[tauri::command]
-fn models_inventory(
+async fn models_inventory(
     state: State<'_, AppState>,
 ) -> Result<voxvulgi_engine::models::ModelInventory, String> {
-    let store = ModelStore::new(state.paths.clone());
-    store.inventory().map_err(|e| e.to_string())
+    let paths = state.paths.clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        let store = ModelStore::new(paths);
+        store.inventory().map_err(|e| e.to_string())
+    })
+    .await
+    .map_err(|e| e.to_string())?
 }
 
 #[tauri::command]
@@ -1414,8 +1513,13 @@ fn models_install(state: State<'_, AppState>, model_id: String) -> Result<(), St
 }
 
 #[tauri::command]
-fn tools_ffmpeg_status(state: State<'_, AppState>) -> tools::FfmpegToolsStatus {
-    tools::ffmpeg_tools_status(&state.paths)
+async fn tools_ffmpeg_status(
+    state: State<'_, AppState>,
+) -> Result<tools::FfmpegToolsStatus, String> {
+    let paths = state.paths.clone();
+    tauri::async_runtime::spawn_blocking(move || Ok(tools::ffmpeg_tools_status(&paths)))
+        .await
+        .map_err(|e| e.to_string())?
 }
 
 #[tauri::command]
@@ -1424,8 +1528,11 @@ fn tools_ffmpeg_install(state: State<'_, AppState>) -> Result<tools::FfmpegTools
 }
 
 #[tauri::command]
-fn tools_ytdlp_status(state: State<'_, AppState>) -> tools::YtDlpToolsStatus {
-    tools::ytdlp_tools_status(&state.paths)
+async fn tools_ytdlp_status(state: State<'_, AppState>) -> Result<tools::YtDlpToolsStatus, String> {
+    let paths = state.paths.clone();
+    tauri::async_runtime::spawn_blocking(move || Ok(tools::ytdlp_tools_status(&paths)))
+        .await
+        .map_err(|e| e.to_string())?
 }
 
 #[tauri::command]
@@ -1434,8 +1541,13 @@ fn tools_ytdlp_install(state: State<'_, AppState>) -> Result<tools::YtDlpToolsSt
 }
 
 #[tauri::command]
-fn tools_python_status(state: State<'_, AppState>) -> tools::PythonToolchainStatus {
-    tools::python_toolchain_status(&state.paths)
+async fn tools_python_status(
+    state: State<'_, AppState>,
+) -> Result<tools::PythonToolchainStatus, String> {
+    let paths = state.paths.clone();
+    tauri::async_runtime::spawn_blocking(move || Ok(tools::python_toolchain_status(&paths)))
+        .await
+        .map_err(|e| e.to_string())?
 }
 
 #[tauri::command]
@@ -1446,8 +1558,13 @@ fn tools_python_install(
 }
 
 #[tauri::command]
-fn tools_python_portable_status(state: State<'_, AppState>) -> tools::PortablePythonStatus {
-    tools::portable_python_status(&state.paths)
+async fn tools_python_portable_status(
+    state: State<'_, AppState>,
+) -> Result<tools::PortablePythonStatus, String> {
+    let paths = state.paths.clone();
+    tauri::async_runtime::spawn_blocking(move || Ok(tools::portable_python_status(&paths)))
+        .await
+        .map_err(|e| e.to_string())?
 }
 
 #[tauri::command]
@@ -1463,35 +1580,42 @@ fn tools_phase2_packs_install_plan() -> Vec<tools::Phase2PackPlanItem> {
 }
 
 #[tauri::command]
-fn tools_phase2_packs_install_latest_state(
+async fn tools_phase2_packs_install_latest_state(
     state: State<'_, AppState>,
 ) -> Result<Phase2InstallLatestState, String> {
-    let path = state
-        .paths
-        .install_logs_dir()
-        .join("phase2")
-        .join("latest.json");
+    let paths = state.paths.clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        let path = paths.install_logs_dir().join("phase2").join("latest.json");
 
-    if !path.exists() {
-        return Ok(Phase2InstallLatestState {
-            exists: false,
+        if !path.exists() {
+            return Ok(Phase2InstallLatestState {
+                exists: false,
+                path: path.to_string_lossy().to_string(),
+                state: None,
+            });
+        }
+
+        let bytes = std::fs::read(&path).map_err(|e| e.to_string())?;
+        let parsed: serde_json::Value =
+            serde_json::from_slice(&bytes).map_err(|e| e.to_string())?;
+        Ok(Phase2InstallLatestState {
+            exists: true,
             path: path.to_string_lossy().to_string(),
-            state: None,
-        });
-    }
-
-    let bytes = std::fs::read(&path).map_err(|e| e.to_string())?;
-    let parsed: serde_json::Value = serde_json::from_slice(&bytes).map_err(|e| e.to_string())?;
-    Ok(Phase2InstallLatestState {
-        exists: true,
-        path: path.to_string_lossy().to_string(),
-        state: Some(parsed),
+            state: Some(parsed),
+        })
     })
+    .await
+    .map_err(|e| e.to_string())?
 }
 
 #[tauri::command]
-fn tools_pack_integrity_manifest_status(state: State<'_, AppState>) -> tools::PackIntegrityManifestStatus {
-    tools::pack_integrity_manifest_status(&state.paths)
+async fn tools_pack_integrity_manifest_status(
+    state: State<'_, AppState>,
+) -> Result<tools::PackIntegrityManifestStatus, String> {
+    let paths = state.paths.clone();
+    tauri::async_runtime::spawn_blocking(move || Ok(tools::pack_integrity_manifest_status(&paths)))
+        .await
+        .map_err(|e| e.to_string())?
 }
 
 #[tauri::command]
@@ -1502,13 +1626,23 @@ fn tools_pack_integrity_manifest_generate(
 }
 
 #[tauri::command]
-fn tools_performance_tier_status(state: State<'_, AppState>) -> tools::PerformanceTierStatus {
-    tools::performance_tier_status(&state.paths)
+async fn tools_performance_tier_status(
+    state: State<'_, AppState>,
+) -> Result<tools::PerformanceTierStatus, String> {
+    let paths = state.paths.clone();
+    tauri::async_runtime::spawn_blocking(move || Ok(tools::performance_tier_status(&paths)))
+        .await
+        .map_err(|e| e.to_string())?
 }
 
 #[tauri::command]
-fn tools_spleeter_status(state: State<'_, AppState>) -> tools::SpleeterPackStatus {
-    tools::spleeter_pack_status(&state.paths)
+async fn tools_spleeter_status(
+    state: State<'_, AppState>,
+) -> Result<tools::SpleeterPackStatus, String> {
+    let paths = state.paths.clone();
+    tauri::async_runtime::spawn_blocking(move || Ok(tools::spleeter_pack_status(&paths)))
+        .await
+        .map_err(|e| e.to_string())?
 }
 
 #[tauri::command]
@@ -1517,8 +1651,13 @@ fn tools_spleeter_install(state: State<'_, AppState>) -> Result<tools::SpleeterP
 }
 
 #[tauri::command]
-fn tools_demucs_status(state: State<'_, AppState>) -> tools::DemucsPackStatus {
-    tools::demucs_pack_status(&state.paths)
+async fn tools_demucs_status(
+    state: State<'_, AppState>,
+) -> Result<tools::DemucsPackStatus, String> {
+    let paths = state.paths.clone();
+    tauri::async_runtime::spawn_blocking(move || Ok(tools::demucs_pack_status(&paths)))
+        .await
+        .map_err(|e| e.to_string())?
 }
 
 #[tauri::command]
@@ -1527,8 +1666,13 @@ fn tools_demucs_install(state: State<'_, AppState>) -> Result<tools::DemucsPackS
 }
 
 #[tauri::command]
-fn tools_diarization_status(state: State<'_, AppState>) -> tools::DiarizationPackStatus {
-    tools::diarization_pack_status(&state.paths)
+async fn tools_diarization_status(
+    state: State<'_, AppState>,
+) -> Result<tools::DiarizationPackStatus, String> {
+    let paths = state.paths.clone();
+    tauri::async_runtime::spawn_blocking(move || Ok(tools::diarization_pack_status(&paths)))
+        .await
+        .map_err(|e| e.to_string())?
 }
 
 #[tauri::command]
@@ -1539,8 +1683,13 @@ fn tools_diarization_install(
 }
 
 #[tauri::command]
-fn tools_tts_preview_status(state: State<'_, AppState>) -> tools::TtsPreviewPackStatus {
-    tools::tts_preview_pack_status(&state.paths)
+async fn tools_tts_preview_status(
+    state: State<'_, AppState>,
+) -> Result<tools::TtsPreviewPackStatus, String> {
+    let paths = state.paths.clone();
+    tauri::async_runtime::spawn_blocking(move || Ok(tools::tts_preview_pack_status(&paths)))
+        .await
+        .map_err(|e| e.to_string())?
 }
 
 #[tauri::command]
@@ -1551,8 +1700,13 @@ fn tools_tts_preview_install(
 }
 
 #[tauri::command]
-fn tools_tts_neural_local_v1_status(state: State<'_, AppState>) -> tools::TtsNeuralLocalV1PackStatus {
-    tools::tts_neural_local_v1_pack_status(&state.paths)
+async fn tools_tts_neural_local_v1_status(
+    state: State<'_, AppState>,
+) -> Result<tools::TtsNeuralLocalV1PackStatus, String> {
+    let paths = state.paths.clone();
+    tauri::async_runtime::spawn_blocking(move || Ok(tools::tts_neural_local_v1_pack_status(&paths)))
+        .await
+        .map_err(|e| e.to_string())?
 }
 
 #[tauri::command]
@@ -1563,10 +1717,15 @@ fn tools_tts_neural_local_v1_install(
 }
 
 #[tauri::command]
-fn tools_tts_voice_preserving_local_v1_status(
+async fn tools_tts_voice_preserving_local_v1_status(
     state: State<'_, AppState>,
-) -> tools::TtsVoicePreservingLocalV1PackStatus {
-    tools::tts_voice_preserving_local_v1_pack_status(&state.paths)
+) -> Result<tools::TtsVoicePreservingLocalV1PackStatus, String> {
+    let paths = state.paths.clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        Ok(tools::tts_voice_preserving_local_v1_pack_status(&paths))
+    })
+    .await
+    .map_err(|e| e.to_string())?
 }
 
 #[tauri::command]
@@ -1577,8 +1736,15 @@ fn tools_tts_voice_preserving_local_v1_install(
 }
 
 #[tauri::command]
-fn tools_tts_preview_pyttsx3_voices(state: State<'_, AppState>) -> Result<Vec<tools::Pyttsx3Voice>, String> {
-    tools::tts_preview_pyttsx3_list_voices(&state.paths).map_err(|e| e.to_string())
+async fn tools_tts_preview_pyttsx3_voices(
+    state: State<'_, AppState>,
+) -> Result<Vec<tools::Pyttsx3Voice>, String> {
+    let paths = state.paths.clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        tools::tts_preview_pyttsx3_list_voices(&paths).map_err(|e| e.to_string())
+    })
+    .await
+    .map_err(|e| e.to_string())?
 }
 
 #[tauri::command]
@@ -1638,14 +1804,12 @@ fn youtube_subscriptions_upsert(
     state: State<'_, AppState>,
     subscription: subscriptions::YoutubeSubscriptionUpsert,
 ) -> Result<subscriptions::YoutubeSubscriptionRow, String> {
-    subscriptions::upsert_youtube_subscription(&state.paths, subscription).map_err(|e| e.to_string())
+    subscriptions::upsert_youtube_subscription(&state.paths, subscription)
+        .map_err(|e| e.to_string())
 }
 
 #[tauri::command]
-fn youtube_subscriptions_delete(
-    state: State<'_, AppState>,
-    id: String,
-) -> Result<(), String> {
+fn youtube_subscriptions_delete(state: State<'_, AppState>, id: String) -> Result<(), String> {
     subscriptions::delete_youtube_subscription(&state.paths, &id).map_err(|e| e.to_string())
 }
 
@@ -1669,8 +1833,11 @@ fn youtube_subscriptions_export_json(
     state: State<'_, AppState>,
     out_path: String,
 ) -> Result<subscriptions::YoutubeSubscriptionsExportSummary, String> {
-    subscriptions::export_youtube_subscriptions_json(&state.paths, &std::path::PathBuf::from(out_path))
-        .map_err(|e| e.to_string())
+    subscriptions::export_youtube_subscriptions_json(
+        &state.paths,
+        &std::path::PathBuf::from(out_path),
+    )
+    .map_err(|e| e.to_string())
 }
 
 #[tauri::command]
@@ -1678,8 +1845,11 @@ fn youtube_subscriptions_import_json(
     state: State<'_, AppState>,
     in_path: String,
 ) -> Result<subscriptions::YoutubeSubscriptionsImportSummary, String> {
-    subscriptions::import_youtube_subscriptions_json(&state.paths, &std::path::PathBuf::from(in_path))
-        .map_err(|e| e.to_string())
+    subscriptions::import_youtube_subscriptions_json(
+        &state.paths,
+        &std::path::PathBuf::from(in_path),
+    )
+    .map_err(|e| e.to_string())
 }
 
 #[tauri::command]
@@ -1732,7 +1902,8 @@ fn youtube_subscriptions_queue_group(
     state: State<'_, AppState>,
     group_id: String,
 ) -> Result<Vec<jobs::JobRow>, String> {
-    subscriptions::queue_youtube_subscription_group(&state.paths, &group_id).map_err(|e| e.to_string())
+    subscriptions::queue_youtube_subscription_group(&state.paths, &group_id)
+        .map_err(|e| e.to_string())
 }
 
 #[tauri::command]
@@ -1782,7 +1953,8 @@ fn download_presets_export_json(
     state: State<'_, AppState>,
     out_path: String,
 ) -> Result<(), String> {
-    let config_value = config::load_download_presets_config(&state.paths).map_err(|e| e.to_string())?;
+    let config_value =
+        config::load_download_presets_config(&state.paths).map_err(|e| e.to_string())?;
     let out_path = std::path::PathBuf::from(out_path);
     if let Some(parent) = out_path.parent() {
         std::fs::create_dir_all(parent).map_err(|e| e.to_string())?;
@@ -1847,12 +2019,17 @@ fn subtitles_export_doc_vtt(
 }
 
 #[tauri::command]
-fn jobs_list(
+async fn jobs_list(
     state: State<'_, AppState>,
     limit: usize,
     offset: usize,
 ) -> Result<Vec<jobs::JobRow>, String> {
-    jobs::list_jobs(&state.paths, limit, offset).map_err(|e| e.to_string())
+    let paths = state.paths.clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        jobs::list_jobs(&paths, limit, offset).map_err(|e| e.to_string())
+    })
+    .await
+    .map_err(|e| e.to_string())?
 }
 
 #[tauri::command]
@@ -1864,7 +2041,9 @@ fn jobs_enqueue_import_local(
 }
 
 #[tauri::command]
-fn jobs_enqueue_install_phase2_packs_v1(state: State<'_, AppState>) -> Result<jobs::JobRow, String> {
+fn jobs_enqueue_install_phase2_packs_v1(
+    state: State<'_, AppState>,
+) -> Result<jobs::JobRow, String> {
     jobs::enqueue_install_phase2_packs_v1(&state.paths).map_err(|e| e.to_string())
 }
 
@@ -1903,7 +2082,7 @@ fn jobs_enqueue_instagram_batch(
         output_dir,
         use_browser_cookies,
     )
-        .map_err(|e| e.to_string())
+    .map_err(|e| e.to_string())
 }
 
 #[tauri::command]
@@ -1997,7 +2176,8 @@ fn jobs_enqueue_tts_neural_local_v1(
     item_id: String,
     source_track_id: String,
 ) -> Result<jobs::JobRow, String> {
-    jobs::enqueue_tts_neural_local_v1(&state.paths, item_id, source_track_id).map_err(|e| e.to_string())
+    jobs::enqueue_tts_neural_local_v1(&state.paths, item_id, source_track_id)
+        .map_err(|e| e.to_string())
 }
 
 #[tauri::command]
@@ -2253,58 +2433,59 @@ pub fn run() {
         })
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_opener::init())
-         .invoke_handler(tauri::generate_handler![
-             diagnostics_info,
-             diagnostics_clear_cache,
-             diagnostics_thumbnail_cache_clear,
-             diagnostics_thumbnail_cache_status,
-             diagnostics_export_bundle,
-             diagnostics_generate_licensing_report,
-             diagnostics_storage_breakdown,
-             item_outputs,
-             item_artifacts_list_v1,
-             item_export_mux_preview_mp4,
-             item_qc_report_v1_load,
-             diagnostics_trace_clear,
-             diagnostics_trace_dir_set,
-             diagnostics_trace_dir_status,
-             diagnostics_trace_dir_use_default,
-             diagnostics_trace_write_event,
-             safe_mode_set,
-             safe_mode_status,
-             startup_status,
-             downloads_dir_set,
-             downloads_dir_status,
-             downloads_dir_use_default,
-             config_batch_on_import_get,
-             config_batch_on_import_set,
-             config_diarization_optional_clear_token,
-             config_diarization_optional_set,
-             config_diarization_optional_status,
-             download_presets_export_json,
-             download_presets_get,
-             download_presets_import_json,
-             download_presets_set,
-             library_get,
-             library_list,
-             youtube_subscription_groups_delete,
-             youtube_subscription_groups_list,
-             youtube_subscription_groups_set_for_subscription,
-             youtube_subscription_groups_upsert,
-             youtube_subscriptions_list,
-              youtube_subscriptions_upsert,
-             youtube_subscriptions_delete,
-             youtube_subscriptions_import_existing_downloads,
-             youtube_subscriptions_queue_one,
-             youtube_subscriptions_queue_all_active,
-             youtube_subscriptions_queue_group,
-             youtube_subscriptions_export_json,
-             youtube_subscriptions_import_json,
-             youtube_subscriptions_import_4kvdp_dir,
-             youtube_subscriptions_seed_archive_scan,
-             jobs_cancel,
-             jobs_cancel_all,
-             jobs_enqueue_dummy,
+        .invoke_handler(tauri::generate_handler![
+            diagnostics_info,
+            diagnostics_clear_cache,
+            diagnostics_thumbnail_cache_clear,
+            diagnostics_thumbnail_cache_status,
+            diagnostics_export_bundle,
+            diagnostics_generate_licensing_report,
+            diagnostics_storage_breakdown,
+            item_outputs,
+            library_thumbnail_data_url,
+            item_artifacts_list_v1,
+            item_export_mux_preview_mp4,
+            item_qc_report_v1_load,
+            diagnostics_trace_clear,
+            diagnostics_trace_dir_set,
+            diagnostics_trace_dir_status,
+            diagnostics_trace_dir_use_default,
+            diagnostics_trace_write_event,
+            safe_mode_set,
+            safe_mode_status,
+            startup_status,
+            downloads_dir_set,
+            downloads_dir_status,
+            downloads_dir_use_default,
+            config_batch_on_import_get,
+            config_batch_on_import_set,
+            config_diarization_optional_clear_token,
+            config_diarization_optional_set,
+            config_diarization_optional_status,
+            download_presets_export_json,
+            download_presets_get,
+            download_presets_import_json,
+            download_presets_set,
+            library_get,
+            library_list,
+            youtube_subscription_groups_delete,
+            youtube_subscription_groups_list,
+            youtube_subscription_groups_set_for_subscription,
+            youtube_subscription_groups_upsert,
+            youtube_subscriptions_list,
+            youtube_subscriptions_upsert,
+            youtube_subscriptions_delete,
+            youtube_subscriptions_import_existing_downloads,
+            youtube_subscriptions_queue_one,
+            youtube_subscriptions_queue_all_active,
+            youtube_subscriptions_queue_group,
+            youtube_subscriptions_export_json,
+            youtube_subscriptions_import_json,
+            youtube_subscriptions_import_4kvdp_dir,
+            youtube_subscriptions_seed_archive_scan,
+            jobs_cancel,
+            jobs_cancel_all,
+            jobs_enqueue_dummy,
             jobs_enqueue_asr_local,
             jobs_enqueue_download_batch,
             jobs_enqueue_instagram_batch,
@@ -2342,24 +2523,24 @@ pub fn run() {
             subtitles_list_tracks,
             subtitles_load_track,
             subtitles_save_new_version,
-             tools_ffmpeg_install,
-             tools_ffmpeg_status,
-             tools_python_install,
-             tools_python_status,
-             tools_python_portable_install,
-             tools_python_portable_status,
-             tools_phase2_packs_install_plan,
-             tools_phase2_packs_install_latest_state,
-             tools_pack_integrity_manifest_generate,
-             tools_pack_integrity_manifest_status,
-             tools_performance_tier_status,
-             tools_diarization_install,
-             tools_diarization_status,
-             tools_spleeter_install,
-             tools_spleeter_status,
-             tools_demucs_install,
-             tools_demucs_status,
-             tools_tts_preview_install,
+            tools_ffmpeg_install,
+            tools_ffmpeg_status,
+            tools_python_install,
+            tools_python_status,
+            tools_python_portable_install,
+            tools_python_portable_status,
+            tools_phase2_packs_install_plan,
+            tools_phase2_packs_install_latest_state,
+            tools_pack_integrity_manifest_generate,
+            tools_pack_integrity_manifest_status,
+            tools_performance_tier_status,
+            tools_diarization_install,
+            tools_diarization_status,
+            tools_spleeter_install,
+            tools_spleeter_status,
+            tools_demucs_install,
+            tools_demucs_status,
+            tools_tts_preview_install,
             tools_tts_preview_status,
             tools_tts_preview_pyttsx3_voices,
             tools_tts_neural_local_v1_install,
@@ -2376,4 +2557,3 @@ pub fn run() {
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
 }
-

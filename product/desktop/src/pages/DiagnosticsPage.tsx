@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { startTransition, useCallback, useEffect, useMemo, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { revealItemInDir } from "@tauri-apps/plugin-opener";
 import { confirm, open, save } from "@tauri-apps/plugin-dialog";
@@ -376,33 +376,35 @@ export function DiagnosticsPage() {
         invoke<DiagnosticsTraceDirStatus>("diagnostics_trace_dir_status"),
         invoke<JobRow[]>("jobs_list", { limit: 200, offset: 0 }),
       ]);
-      setInfo(nextInfo);
-      setInventory(nextInventory);
-      setFfmpeg(nextFfmpeg);
-      setYtdlp(nextYtdlp);
-      setPython(nextPython);
-      setPortablePython(nextPortablePython);
-      setPhase2Plan(nextPhase2Plan);
-      setPhase2Latest(nextPhase2Latest);
-      setSpleeter(nextSpleeter);
-      setDemucs(nextDemucs);
-      setDiarization(nextDiarization);
-      setTtsPreview(nextTtsPreview);
-      setTtsNeuralLocalV1(nextTtsNeuralLocalV1);
-      setTtsVoicePreservingLocalV1(nextTtsVoicePreservingLocalV1);
-      setIntegrity(nextIntegrity);
-      setPerfTier(nextPerfTier);
-      setBatchRules(nextBatchRules);
-      setDiarizationOptional(nextDiarizationOptional);
-      setDiarizationOptionalDraft((prev) => prev ?? nextDiarizationOptional.config);
-      setStorage(nextStorage);
-      setThumbnailCache(nextThumbnailCache);
-      setPolicy(nextPolicy);
-      setDiagnosticsTraceDir(nextDiagnosticsTraceDir);
-      setJobs(nextJobs);
-      (["build", "tools", "phase2", "storage", "jobs", "trace"] as DiagnosticsSectionKey[]).forEach(
-        (key) => updateSectionStatus(key, "ready"),
-      );
+      startTransition(() => {
+        setInfo(nextInfo);
+        setInventory(nextInventory);
+        setFfmpeg(nextFfmpeg);
+        setYtdlp(nextYtdlp);
+        setPython(nextPython);
+        setPortablePython(nextPortablePython);
+        setPhase2Plan(nextPhase2Plan);
+        setPhase2Latest(nextPhase2Latest);
+        setSpleeter(nextSpleeter);
+        setDemucs(nextDemucs);
+        setDiarization(nextDiarization);
+        setTtsPreview(nextTtsPreview);
+        setTtsNeuralLocalV1(nextTtsNeuralLocalV1);
+        setTtsVoicePreservingLocalV1(nextTtsVoicePreservingLocalV1);
+        setIntegrity(nextIntegrity);
+        setPerfTier(nextPerfTier);
+        setBatchRules(nextBatchRules);
+        setDiarizationOptional(nextDiarizationOptional);
+        setDiarizationOptionalDraft((prev) => prev ?? nextDiarizationOptional.config);
+        setStorage(nextStorage);
+        setThumbnailCache(nextThumbnailCache);
+        setPolicy(nextPolicy);
+        setDiagnosticsTraceDir(nextDiagnosticsTraceDir);
+        setJobs(nextJobs);
+        (["build", "tools", "phase2", "storage", "jobs", "trace"] as DiagnosticsSectionKey[]).forEach(
+          (key) => updateSectionStatus(key, "ready"),
+        );
+      });
     } catch (e) {
       (["build", "tools", "phase2", "storage", "jobs", "trace"] as DiagnosticsSectionKey[]).forEach(
         (key) => updateSectionStatus(key, "failed", String(e)),
@@ -422,13 +424,15 @@ export function DiagnosticsPage() {
           invoke<OptionalDiarizationBackendStatus>("config_diarization_optional_status"),
           invoke<JobLogRetentionPolicy>("jobs_log_retention_policy"),
         ]);
-      setInfo(nextInfo);
-      setInventory(nextInventory);
-      setBatchRules(nextBatchRules);
-      setDiarizationOptional(nextDiarizationOptional);
-      setDiarizationOptionalDraft((prev) => prev ?? nextDiarizationOptional.config);
-      setPolicy(nextPolicy);
-      updateSectionStatus("build", "ready");
+      startTransition(() => {
+        setInfo(nextInfo);
+        setInventory(nextInventory);
+        setBatchRules(nextBatchRules);
+        setDiarizationOptional(nextDiarizationOptional);
+        setDiarizationOptionalDraft((prev) => prev ?? nextDiarizationOptional.config);
+        setPolicy(nextPolicy);
+        updateSectionStatus("build", "ready");
+      });
     } catch (e) {
       updateSectionStatus("build", "failed", String(e));
       setError((prev) => prev ?? String(e));
@@ -465,19 +469,21 @@ export function DiagnosticsPage() {
         invoke<PackIntegrityManifestStatus>("tools_pack_integrity_manifest_status"),
         invoke<PerformanceTierStatus>("tools_performance_tier_status"),
       ]);
-      setFfmpeg(nextFfmpeg);
-      setYtdlp(nextYtdlp);
-      setPython(nextPython);
-      setPortablePython(nextPortablePython);
-      setSpleeter(nextSpleeter);
-      setDemucs(nextDemucs);
-      setDiarization(nextDiarization);
-      setTtsPreview(nextTtsPreview);
-      setTtsNeuralLocalV1(nextTtsNeuralLocalV1);
-      setTtsVoicePreservingLocalV1(nextTtsVoicePreservingLocalV1);
-      setIntegrity(nextIntegrity);
-      setPerfTier(nextPerfTier);
-      updateSectionStatus("tools", "ready");
+      startTransition(() => {
+        setFfmpeg(nextFfmpeg);
+        setYtdlp(nextYtdlp);
+        setPython(nextPython);
+        setPortablePython(nextPortablePython);
+        setSpleeter(nextSpleeter);
+        setDemucs(nextDemucs);
+        setDiarization(nextDiarization);
+        setTtsPreview(nextTtsPreview);
+        setTtsNeuralLocalV1(nextTtsNeuralLocalV1);
+        setTtsVoicePreservingLocalV1(nextTtsVoicePreservingLocalV1);
+        setIntegrity(nextIntegrity);
+        setPerfTier(nextPerfTier);
+        updateSectionStatus("tools", "ready");
+      });
     } catch (e) {
       updateSectionStatus("tools", "failed", String(e));
       setError((prev) => prev ?? String(e));
@@ -491,9 +497,11 @@ export function DiagnosticsPage() {
         invoke<Phase2PackPlanItem[]>("tools_phase2_packs_install_plan"),
         invoke<Phase2InstallLatestState>("tools_phase2_packs_install_latest_state"),
       ]);
-      setPhase2Plan(nextPhase2Plan);
-      setPhase2Latest(nextPhase2Latest);
-      updateSectionStatus("phase2", "ready");
+      startTransition(() => {
+        setPhase2Plan(nextPhase2Plan);
+        setPhase2Latest(nextPhase2Latest);
+        updateSectionStatus("phase2", "ready");
+      });
     } catch (e) {
       updateSectionStatus("phase2", "failed", String(e));
       setError((prev) => prev ?? String(e));
@@ -507,9 +515,11 @@ export function DiagnosticsPage() {
         invoke<StorageBreakdown>("diagnostics_storage_breakdown"),
         invoke<ThumbnailCacheStatus>("diagnostics_thumbnail_cache_status"),
       ]);
-      setStorage(nextStorage);
-      setThumbnailCache(nextThumbnailCache);
-      updateSectionStatus("storage", "ready");
+      startTransition(() => {
+        setStorage(nextStorage);
+        setThumbnailCache(nextThumbnailCache);
+        updateSectionStatus("storage", "ready");
+      });
     } catch (e) {
       updateSectionStatus("storage", "failed", String(e));
       setError((prev) => prev ?? String(e));
@@ -522,8 +532,10 @@ export function DiagnosticsPage() {
       const nextDiagnosticsTraceDir = await invoke<DiagnosticsTraceDirStatus>(
         "diagnostics_trace_dir_status",
       );
-      setDiagnosticsTraceDir(nextDiagnosticsTraceDir);
-      updateSectionStatus("trace", "ready");
+      startTransition(() => {
+        setDiagnosticsTraceDir(nextDiagnosticsTraceDir);
+        updateSectionStatus("trace", "ready");
+      });
     } catch (e) {
       updateSectionStatus("trace", "failed", String(e));
       setError((prev) => prev ?? String(e));
@@ -534,8 +546,10 @@ export function DiagnosticsPage() {
     updateSectionStatus("jobs", "loading");
     try {
       const nextJobs = await invoke<JobRow[]>("jobs_list", { limit: 200, offset: 0 });
-      setJobs(nextJobs);
-      updateSectionStatus("jobs", "ready");
+      startTransition(() => {
+        setJobs(nextJobs);
+        updateSectionStatus("jobs", "ready");
+      });
     } catch (e) {
       updateSectionStatus("jobs", "failed", String(e));
       setError((prev) => prev ?? String(e));
@@ -545,13 +559,14 @@ export function DiagnosticsPage() {
   useEffect(() => {
     setError(null);
     const timers: number[] = [];
-    void loadBuildSection();
+    const buildRaf = window.requestAnimationFrame(() => void loadBuildSection());
     timers.push(window.setTimeout(() => void loadToolsSection(), 0));
     timers.push(window.setTimeout(() => void loadPhase2Section(), 40));
     timers.push(window.setTimeout(() => void loadStorageSection(), 80));
     timers.push(window.setTimeout(() => void loadTraceSection(), 120));
     timers.push(window.setTimeout(() => void loadJobsSection(), 160));
     return () => {
+      window.cancelAnimationFrame(buildRaf);
       timers.forEach((id) => window.clearTimeout(id));
     };
   }, [loadBuildSection, loadJobsSection, loadPhase2Section, loadStorageSection, loadToolsSection, loadTraceSection]);

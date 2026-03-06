@@ -38,7 +38,21 @@ The app installs runtime tools/models into its app-data folder (local-first; exp
 
 - Default download folder: `downloads/` next to the running app executable.
 - You can switch to any folder from **Library -> Download folder -> Choose folder**.
-- If the configured folder is missing, the app prompts you to choose an existing folder or create the default one.
+- If the configured folder is missing, the app shows the status inline so you can choose an existing folder or recreate the default folder without a modal interrupt.
+- Default app-managed export roots under that folder are:
+  - `video/` for general video downloads and playlist/channel output trees
+  - `video/subscriptions/` for YouTube subscription folder maps
+  - `instagram/` for Instagram archive downloads
+  - `images/` for forum/blog image archive downloads
+  - `localization/en/<media-stem>/` for exported SRT/VTT and dubbed preview MP4 files from Localization Studio
+
+## Localization Studio output behavior
+
+- Working artifacts stay in app-data under `derived/items/<item_id>/...` so jobs stay reproducible and easy to inspect.
+- The mixed dubbed audio track is `derived/items/<item_id>/dub_preview/mix_dub_preview_v1.wav`.
+- The muxed preview video defaults to `derived/items/<item_id>/dub_preview/mux_dub_preview_v1.mp4`.
+- Exporting from Localization Studio copies user-facing deliverables into the app-managed localization export folder by default instead of writing next to the source media file.
+- The default yt-dlp preset now prefers MP4-compatible formats and requests MP4 merge/remux when the toolchain can do that without re-encoding.
 
 ## In-app image archive batch
 

@@ -420,9 +420,7 @@ CREATE TABLE IF NOT EXISTS job (
         let conn = open(&paths).expect("open migrated");
         migrate(&conn).expect("migrate");
 
-        let mut stmt = conn
-            .prepare("PRAGMA table_info(job)")
-            .expect("table_info");
+        let mut stmt = conn.prepare("PRAGMA table_info(job)").expect("table_info");
         let mut rows = stmt.query([]).expect("query table_info");
         let mut has_batch_id = false;
         while let Some(row) = rows.next().expect("next row") {
@@ -443,7 +441,9 @@ CREATE TABLE IF NOT EXISTS job (
         migrate(&conn).expect("migrate");
 
         let mut stmt = conn
-            .prepare("SELECT name FROM sqlite_master WHERE type='table' AND name='youtube_subscription'")
+            .prepare(
+                "SELECT name FROM sqlite_master WHERE type='table' AND name='youtube_subscription'",
+            )
             .expect("prepare");
         let found: Option<String> = stmt
             .query_row([], |row| row.get(0))

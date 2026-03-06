@@ -1,6 +1,6 @@
 # VoxVulgi — Task Board
 
-Last updated: 2026-03-03
+Last updated: 2026-03-06
 
 This is the single source of truth for work status.
 
@@ -87,3 +87,5 @@ This is the single source of truth for work status.
 | WP-0071 | Installer mode clarity + uninstall transparency | DONE | Codex | Added custom NSIS language strings so setup clearly communicates Update/Repair, Full reinstall, and Uninstall; made app-data deletion text explicit (`%APPDATA%`). |
 | WP-0072 | NSIS pre-maintenance explainer page | DONE | Codex | Added custom NSIS template page shown before maintenance choice, with one-line explanations for Update/Repair, Full reinstall, and Uninstall (including app-data behavior). |
 | WP-0073 | Governance installer mode policy pointers | DONE | Codex | Added concise root-doc policy references so PROJECT_CODEX/AGENTS/MODEL_BEHAVIOR point to canonical installer mode terms and spec source of truth. |
+| WP-0074 | Localization output clarity, MP4 defaults, thumbnails, and responsiveness | DONE | Codex | Localization exports now default under `localization/en/<media-stem>/`, yt-dlp defaults prefer MP4, thumbnails self-heal via data URLs, repeated missing-folder prompts were removed, and Diagnostics status work no longer blocks first-open rendering. |
+| WP-0075 | Voice-preserving dub audio regression | DONE | Codex | Fixed Kokoro/OpenVoice runtime regressions (current result parsing, mandatory offline-cache warmup, no silent placeholder success) and re-verified on the Queen sample with proof artifacts under `product/desktop/Build Target/tool_artifacts/wp_runs/WP-0075/manual_smoke_queen/`. |

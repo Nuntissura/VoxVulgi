@@ -3,7 +3,7 @@ import { convertFileSrc, invoke } from "@tauri-apps/api/core";
 import { confirm, open, save } from "@tauri-apps/plugin-dialog";
 import { revealItemInDir } from "@tauri-apps/plugin-opener";
 import { diagnosticsTrace } from "../lib/diagnosticsTrace";
-import { copyPathToClipboard, openPathBestEffort } from "../lib/pathOpener";
+import { copyPathToClipboard, openPathBestEffort, revealPath } from "../lib/pathOpener";
 import { safeLocalStorageGet, safeLocalStorageSet } from "../lib/persist";
 
 type LibraryItem = {
@@ -81,23 +81,25 @@ type ExportedFile = {
   file_bytes: number;
 };
 
+type DownloadDirStatus = {
+  current_dir: string;
+  default_dir: string;
+  exists: boolean;
+  using_default: boolean;
+};
+
 function sanitizeFilename(raw: string): string {
   const cleaned = raw.replace(/[<>:"/\\|?*]/g, "").trim();
   return cleaned || "voxvulgi-output";
 }
 
-function parentDir(path: string): string | null {
-  const normalized = path.trim();
-  if (!normalized) return null;
-  const idx = Math.max(normalized.lastIndexOf("\\"), normalized.lastIndexOf("/"));
-  if (idx <= 0) return null;
-  return normalized.slice(0, idx);
-}
-
-function joinPath(dir: string, file: string): string {
-  const d = dir.replace(/[\\/]+$/, "");
-  const sep = d.includes("\\") ? "\\" : "/";
-  return `${d}${sep}${file}`;
+function joinPath(base: string, ...segments: string[]): string {
+  const trimmedBase = (base ?? "").trim();
+  if (!trimmedBase) return "";
+  const cleaned = segments.map((segment) => segment.replace(/^[\\/]+|[\\/]+$/g, "")).filter(Boolean);
+  const sep = trimmedBase.includes("\\") ? "\\" : "/";
+  if (!cleaned.length) return trimmedBase;
+  return `${trimmedBase.replace(/[\\/]+$/, "")}${sep}${cleaned.join(sep)}`;
 }
 
 function fileNameFromPath(path: string): string {
@@ -260,6 +262,7 @@ export function SubtitleEditorPage({ itemId }: { itemId: string }) {
   const [artifacts, setArtifacts] = useState<ArtifactInfo[]>([]);
   const [artifactsBusy, setArtifactsBusy] = useState(false);
   const [itemJobs, setItemJobs] = useState<JobRow[]>([]);
+  const [downloadDir, setDownloadDir] = useState<DownloadDirStatus | null>(null);
   const [asrLang, setAsrLang] = useState<"auto" | "ja" | "ko">(() => {
     const raw = safeLocalStorageGet("voxvulgi.v1.settings.asr_lang");
     if (raw === "ja" || raw === "ko") return raw;
@@ -375,7 +378,7 @@ export function SubtitleEditorPage({ itemId }: { itemId: string }) {
   const [exportDubContainer, setExportDubContainer] = useState<"auto" | "mp4" | "mkv">(() => {
     const raw = safeLocalStorageGet("voxvulgi.v1.editor.export_dub_container");
     if (raw === "mp4" || raw === "mkv") return raw;
-    return "auto";
+    return "mp4";
   });
   const [qcJobId, setQcJobId] = useState<string | null>(null);
   const [qcJobStatus, setQcJobStatus] = useState<JobStatus | null>(null);
@@ -565,14 +568,18 @@ export function SubtitleEditorPage({ itemId }: { itemId: string }) {
     setBusy(true);
     Promise.all([
       invoke<LibraryItem>("library_get", { itemId }),
+      invoke<DownloadDirStatus>("downloads_dir_status").catch(() => null),
       refreshTracks(),
       refreshSpeakerSettings(),
       refreshOutputs(),
       refreshArtifacts(),
       refreshItemJobs(),
     ])
-      .then(([nextItem, nextTracks]) => {
+      .then(([nextItem, nextDownloadDir, nextTracks]) => {
         setItem(nextItem);
+        if (nextDownloadDir) {
+          setDownloadDir(nextDownloadDir);
+        }
         if (nextTracks.length) {
           const preferred =
             nextTracks.find((t) => t.kind === "source" && t.format === "ytfetch_subtitle_json_v1") ??
@@ -792,16 +799,21 @@ export function SubtitleEditorPage({ itemId }: { itemId: string }) {
     }
   }
 
-  const sourceParentDir = useMemo(
-    () => (item?.media_path ? parentDir(item.media_path) : null),
-    [item?.media_path],
-  );
-
   const sourceBaseStem = useMemo(() => {
     const fromPath = stemFromPath(item?.media_path ?? "");
     if (fromPath.trim()) return fromPath.trim();
     return sanitizeFilename(item?.title ?? "voxvulgi-output");
   }, [item?.media_path, item?.title]);
+  const exportFolderStem = useMemo(() => sanitizeFilename(sourceBaseStem), [sourceBaseStem]);
+  const effectiveDownloadRoot = useMemo(() => {
+    const current = downloadDir?.current_dir?.trim() ?? "";
+    if (current) return current;
+    return downloadDir?.default_dir?.trim() ?? "";
+  }, [downloadDir]);
+  const defaultLocalizationExportDir = useMemo(() => {
+    if (!effectiveDownloadRoot) return "";
+    return joinPath(effectiveDownloadRoot, "localization", "en", exportFolderStem);
+  }, [effectiveDownloadRoot, exportFolderStem]);
 
   function getPreferredMuxExportExt(): "mp4" | "mkv" {
     if (exportDubContainer === "mp4" || exportDubContainer === "mkv") {
@@ -816,15 +828,16 @@ export function SubtitleEditorPage({ itemId }: { itemId: string }) {
     if (exportUseCustomDir) {
       const custom = exportCustomDir.trim();
       if (!custom) {
-        throw new Error("Choose an export folder or switch to 'Next to source file'.");
+        throw new Error("Choose a custom export folder or switch back to the app export folder.");
       }
       return custom;
     }
-    const sourceDir = sourceParentDir?.trim() ?? "";
-    if (!sourceDir) {
-      throw new Error("Source folder is unavailable. Choose a custom export folder.");
+    if (!defaultLocalizationExportDir) {
+      throw new Error(
+        "Main download folder is unavailable. Choose a custom export folder or set the download folder first.",
+      );
     }
-    return sourceDir;
+    return defaultLocalizationExportDir;
   }
 
   const effectiveExportDirPreview = useMemo(() => {
@@ -833,7 +846,7 @@ export function SubtitleEditorPage({ itemId }: { itemId: string }) {
     } catch {
       return "";
     }
-  }, [exportUseCustomDir, exportCustomDir, sourceParentDir]);
+  }, [defaultLocalizationExportDir, exportUseCustomDir, exportCustomDir]);
 
   const exportSrtPreviewPath = useMemo(() => {
     if (!effectiveExportDirPreview) return "";
@@ -1719,6 +1732,56 @@ export function SubtitleEditorPage({ itemId }: { itemId: string }) {
     }
   }
 
+  async function openSourceFile() {
+    const mediaPath = item?.media_path?.trim() ?? "";
+    if (!mediaPath) return;
+    setError(null);
+    setNotice(null);
+    try {
+      const opened = await openPathBestEffort(mediaPath);
+      setNotice(
+        opened.method === "open_path"
+          ? `Opened source media: ${opened.path}`
+          : `Revealed source media in file explorer: ${opened.path}`,
+      );
+    } catch (e) {
+      const copied = await copyPathToClipboard(mediaPath);
+      const suffix = copied ? " Source path copied to clipboard." : "";
+      setError(`Open source media failed: ${String(e)}.${suffix}`);
+    }
+  }
+
+  async function revealSourceFile() {
+    const mediaPath = item?.media_path?.trim() ?? "";
+    if (!mediaPath) return;
+    setError(null);
+    setNotice(null);
+    try {
+      const revealed = await revealPath(mediaPath);
+      setNotice(`Source media revealed in file explorer: ${revealed}`);
+    } catch (e) {
+      const copied = await copyPathToClipboard(mediaPath);
+      const suffix = copied ? " Source path copied to clipboard." : "";
+      setError(`Reveal source media failed: ${String(e)}.${suffix}`);
+    }
+  }
+
+  async function openExportFolder() {
+    setError(null);
+    setNotice(null);
+    try {
+      const target = resolveExportDir();
+      const opened = await openPathBestEffort(target);
+      setNotice(
+        opened.method === "open_path"
+          ? `Export folder: ${opened.path}`
+          : `Export folder revealed in file explorer: ${opened.path}`,
+      );
+    } catch (e) {
+      setError(String(e));
+    }
+  }
+
   async function openOutputsFolder() {
     setError(null);
     if (!outputs?.derived_item_dir) return;
@@ -1726,13 +1789,32 @@ export function SubtitleEditorPage({ itemId }: { itemId: string }) {
       const opened = await openPathBestEffort(outputs.derived_item_dir);
       setNotice(
         opened.method === "open_path"
-          ? `Outputs folder: ${opened.path}`
-          : `Outputs folder revealed in file explorer: ${opened.path}`,
+          ? `Working files folder: ${opened.path}`
+          : `Working files folder revealed in file explorer: ${opened.path}`,
       );
     } catch (e) {
       const copied = await copyPathToClipboard(outputs.derived_item_dir);
       const suffix = copied ? " Output path copied to clipboard." : "";
-      setError(`Open outputs folder failed: ${String(e)}.${suffix}`);
+      setError(`Open working files folder failed: ${String(e)}.${suffix}`);
+    }
+  }
+
+  async function openWorkingDubAudio() {
+    setError(null);
+    setNotice(null);
+    try {
+      const next = outputs ?? (await refreshOutputs());
+      if (!next.mix_dub_preview_v1_wav_exists) {
+        throw new Error("Dub audio preview not found yet. Run 'Mix dub' first.");
+      }
+      const opened = await openPathBestEffort(next.mix_dub_preview_v1_wav_path);
+      setNotice(
+        opened.method === "open_path"
+          ? `Opened dub audio preview: ${opened.path}`
+          : `Dub audio preview revealed in file explorer: ${opened.path}`,
+      );
+    } catch (e) {
+      setError(String(e));
     }
   }
 
@@ -1749,6 +1831,30 @@ export function SubtitleEditorPage({ itemId }: { itemId: string }) {
         throw new Error("Muxed preview not found yet. Run 'Mux preview' first.");
       }
       await revealItemInDir(path);
+    } catch (e) {
+      setError(String(e));
+    }
+  }
+
+  async function openMuxPreview() {
+    setError(null);
+    setNotice(null);
+    try {
+      const next = outputs ?? (await refreshOutputs());
+      const path = next.mux_dub_preview_v1_mp4_exists
+        ? next.mux_dub_preview_v1_mp4_path
+        : next.mux_dub_preview_v1_mkv_exists
+          ? next.mux_dub_preview_v1_mkv_path
+          : "";
+      if (!path) {
+        throw new Error("Muxed preview not found yet. Run 'Mux preview' first.");
+      }
+      const opened = await openPathBestEffort(path);
+      setNotice(
+        opened.method === "open_path"
+          ? `Opened preview video: ${opened.path}`
+          : `Preview video revealed in file explorer: ${opened.path}`,
+      );
     } catch (e) {
       setError(String(e));
     }
@@ -1943,12 +2049,37 @@ export function SubtitleEditorPage({ itemId }: { itemId: string }) {
           <div className="k">Path</div>
           <div className="v">{item?.media_path ?? "-"}</div>
         </div>
+        <div className="row" style={{ marginTop: 10, flexWrap: "wrap" }}>
+          <button type="button" disabled={busy || !item?.media_path} onClick={openSourceFile}>
+            Open source file
+          </button>
+          <button type="button" disabled={busy || !item?.media_path} onClick={revealSourceFile}>
+            Reveal source file
+          </button>
+        </div>
+      </div>
+
+      <div className="card">
+        <h2>First Dub Guide</h2>
+        <div style={{ color: "#4b5563" }}>
+          Recommended order for a first Japanese/Korean to English dubbed preview:
+        </div>
+        <ol style={{ marginTop: 10, paddingLeft: 18, lineHeight: 1.5 }}>
+          <li>Run <strong>ASR (local)</strong> to create the source subtitles.</li>
+          <li>Run <strong>Translate -&gt; EN (local)</strong> to produce the English subtitle track.</li>
+          <li>Run <strong>Diarize speakers (local)</strong> if you want speaker-aware dubbing.</li>
+          <li>Open <strong>Diagnostics</strong> and verify FFmpeg plus the Phase 2 dubbing packs are installed.</li>
+          <li>Run <strong>Dub voice-preserving (local)</strong> for the English voice-cloned dub, or use one of the TTS preview jobs first.</li>
+          <li>Run <strong>Separate</strong>, then <strong>Mix dub</strong>, then <strong>Mux preview</strong>.</li>
+          <li>Use the Outputs card below to export the final SRT/VTT and MP4 into the app export folder.</li>
+        </ol>
       </div>
 
       <div className="card">
         <h2>Outputs</h2>
         <div style={{ color: "#4b5563" }}>
-          Configure where exports go. Default is next to the source media file for VLC-friendly naming.
+          Working files stay in app-data for reproducible jobs. User-facing deliverables export to a
+          predictable folder under the main download root by default.
         </div>
         <div className="row" style={{ marginTop: 10, flexWrap: "wrap", alignItems: "center" }}>
           <label style={{ display: "flex", alignItems: "center", gap: 8 }}>
@@ -1958,7 +2089,7 @@ export function SubtitleEditorPage({ itemId }: { itemId: string }) {
               disabled={busy}
               onChange={() => setExportUseCustomDir(false)}
             />
-            <span>Next to source file (default)</span>
+            <span>App export folder (default)</span>
           </label>
           <label style={{ display: "flex", alignItems: "center", gap: 8 }}>
             <input
@@ -1983,6 +2114,10 @@ export function SubtitleEditorPage({ itemId }: { itemId: string }) {
           >
             Choose folder...
           </button>
+        </div>
+        <div className="kv">
+          <div className="k">Main download folder</div>
+          <div className="v">{effectiveDownloadRoot || "-"}</div>
         </div>
         <div className="kv">
           <div className="k">Resolved export folder</div>
@@ -2054,24 +2189,28 @@ export function SubtitleEditorPage({ itemId }: { itemId: string }) {
           </div>
         </div>
         <div className="kv">
-          <div className="k">Outputs folder</div>
+          <div className="k">Working files folder</div>
           <div className="v">{outputs?.derived_item_dir ?? "-"}</div>
         </div>
         <div className="kv">
-          <div className="k">Mix dub preview (WAV)</div>
+          <div className="k">Working dub audio (WAV)</div>
           <div className="v">{outputs?.mix_dub_preview_v1_wav_path ?? "-"}</div>
         </div>
         <div className="kv">
-          <div className="k">Mux preview (MP4)</div>
+          <div className="k">Working preview video (MP4)</div>
           <div className="v">{outputs?.mux_dub_preview_v1_mp4_path ?? "-"}</div>
         </div>
         <div className="kv">
-          <div className="k">Mux preview (MKV)</div>
+          <div className="k">Working preview video (MKV)</div>
           <div className="v">{outputs?.mux_dub_preview_v1_mkv_path ?? "-"}</div>
         </div>
         <div className="kv">
           <div className="k">Export pack (zip)</div>
           <div className="v">{outputs?.export_pack_v1_zip_path ?? "-"}</div>
+        </div>
+        <div style={{ fontSize: 12, opacity: 0.8, marginTop: 8 }}>
+          The WAV is the separate dubbed audio track. The MP4 preview embeds that dubbed audio into
+          the video.
         </div>
         <div className="row" style={{ marginTop: 0, flexWrap: "wrap" }}>
           <button
@@ -2079,7 +2218,33 @@ export function SubtitleEditorPage({ itemId }: { itemId: string }) {
             disabled={busy || !outputs?.derived_item_dir}
             onClick={openOutputsFolder}
           >
-            Open outputs folder
+            Open working files
+          </button>
+          <button
+            type="button"
+            disabled={busy || !effectiveExportDirPreview}
+            onClick={openExportFolder}
+          >
+            Open export folder
+          </button>
+          <button
+            type="button"
+            disabled={busy || !outputs?.mix_dub_preview_v1_wav_exists}
+            onClick={openWorkingDubAudio}
+          >
+            Open dub audio
+          </button>
+          <button
+            type="button"
+            disabled={
+              busy ||
+              !(
+                outputs?.mux_dub_preview_v1_mp4_exists || outputs?.mux_dub_preview_v1_mkv_exists
+              )
+            }
+            onClick={openMuxPreview}
+          >
+            Open preview
           </button>
           <button
             type="button"
@@ -2697,7 +2862,7 @@ export function SubtitleEditorPage({ itemId }: { itemId: string }) {
             Refresh artifacts
           </button>
           <button type="button" disabled={busy || !outputs?.derived_item_dir} onClick={openOutputsFolder}>
-            Open outputs folder
+            Open working files
           </button>
         </div>
 

@@ -61,7 +61,8 @@ const THUMB_HINTS: &[&str] = &[
 const THUMB_ATTR_MARKERS: &[&str] = &["thumb", "thumbnail", "preview", "mini", "small"];
 
 const NEXT_TEXT_MARKERS: &[&str] = &[
-    "next", "older", "more", "weiter", "suivant", "volgende", "nast", "\u{203A}", "\u{00BB}", ">>", ">",
+    "next", "older", "more", "weiter", "suivant", "volgende", "nast", "\u{203A}", "\u{00BB}", ">>",
+    ">",
 ];
 
 const IMAGE_ATTRS: &[&str] = &[

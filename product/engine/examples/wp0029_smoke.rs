@@ -3,6 +3,8 @@ use std::path::{Path, PathBuf};
 use std::thread;
 use std::time::{Duration, Instant};
 
+use hound::{SampleFormat, WavReader};
+use serde_json::Value;
 use voxvulgi_engine::models::ModelStore;
 use voxvulgi_engine::paths::AppPaths;
 use voxvulgi_engine::{db, jobs, library, speakers, subtitle_tracks, tools, EngineError, Result};
@@ -34,7 +36,9 @@ fn wait_for_job(paths: &AppPaths, job_id: &str, timeout: Duration) -> Result<job
                 jobs::JobStatus::Failed => {
                     return Err(EngineError::InstallFailed(format!(
                         "job {job_id} failed: {}",
-                        job.error.clone().unwrap_or_else(|| "(no error)".to_string())
+                        job.error
+                            .clone()
+                            .unwrap_or_else(|| "(no error)".to_string())
                     )))
                 }
                 jobs::JobStatus::Canceled => {
@@ -71,6 +75,48 @@ fn ensure_model_installed(store: &ModelStore, model_id: &str) -> Result<()> {
     Ok(())
 }
 
+fn wav_peak_is_non_silent(path: &Path) -> Result<bool> {
+    let mut reader = WavReader::open(path).map_err(|e| {
+        EngineError::InstallFailed(format!("open wav failed ({}): {e}", path.display()))
+    })?;
+    let spec = reader.spec();
+    let is_non_silent = match spec.sample_format {
+        SampleFormat::Int => {
+            let mut max_peak = 0i64;
+            for sample in reader.samples::<i32>() {
+                let value = sample.map_err(|e| {
+                    EngineError::InstallFailed(format!(
+                        "read wav sample failed ({}): {e}",
+                        path.display()
+                    ))
+                })?;
+                max_peak = max_peak.max((value as i64).abs());
+                if max_peak > 0 {
+                    return Ok(true);
+                }
+            }
+            false
+        }
+        SampleFormat::Float => {
+            let mut max_peak = 0.0f32;
+            for sample in reader.samples::<f32>() {
+                let value = sample.map_err(|e| {
+                    EngineError::InstallFailed(format!(
+                        "read wav sample failed ({}): {e}",
+                        path.display()
+                    ))
+                })?;
+                max_peak = max_peak.max(value.abs());
+                if max_peak > 0.000_001 {
+                    return Ok(true);
+                }
+            }
+            false
+        }
+    };
+    Ok(is_non_silent)
+}
+
 fn main() -> Result<()> {
     let engine_dir = std::env::current_dir()?;
     let repo_root = repo_root_from_engine_dir(&engine_dir);
@@ -80,9 +126,9 @@ fn main() -> Result<()> {
     let media_path = std::env::var("VOXVULGI_SMOKE_MEDIA")
         .map(PathBuf::from)
         .unwrap_or_else(|_| {
-            repo_root.join("Test material").join(
-                "[4K] Queen is here 😍 Miyeon so cute 💕 (ENG SUB).mp4",
-            )
+            repo_root
+                .join("Test material")
+                .join("[4K] Queen is here 😍 Miyeon so cute 💕 (ENG SUB).mp4")
         });
 
     eprintln!("base_dir: {}", base_dir.to_string_lossy());
@@ -149,7 +195,9 @@ fn main() -> Result<()> {
     let item = library::list_items(&paths, 50, 0)?
         .into_iter()
         .find(|it| it.media_path == canonical_media_str)
-        .ok_or_else(|| EngineError::InstallFailed("imported item not found in library".to_string()))?;
+        .ok_or_else(|| {
+            EngineError::InstallFailed("imported item not found in library".to_string())
+        })?;
     eprintln!("imported item_id={}", item.id);
 
     // 2) ASR (KO/JA auto works; KO is the common case for our sample).
@@ -171,7 +219,9 @@ fn main() -> Result<()> {
     let translated_track = tracks
         .iter()
         .find(|t| t.kind == "translated" && t.lang == "en")
-        .ok_or_else(|| EngineError::InstallFailed("translated EN subtitle track not found".to_string()))?;
+        .ok_or_else(|| {
+            EngineError::InstallFailed("translated EN subtitle track not found".to_string())
+        })?;
     let diarize_job =
         jobs::enqueue_diarize_local_v1(&paths, item.id.clone(), translated_track.id.clone())?;
     wait_for_job(&paths, &diarize_job.id, Duration::from_secs(45 * 60))?;
@@ -234,12 +284,45 @@ fn main() -> Result<()> {
             Some(ref_wav.to_string_lossy().to_string()),
         )?;
     }
-    eprintln!("mapped {} speakers to {}", speakers_set.len(), ref_wav.display());
+    eprintln!(
+        "mapped {} speakers to {}",
+        speakers_set.len(),
+        ref_wav.display()
+    );
 
     // 5) Voice-preserving dub (segments + manifest).
-    let dub_job =
-        jobs::enqueue_dub_voice_preserving_v1(&paths, item.id.clone(), diarized_en_track.id.clone())?;
+    let dub_job = jobs::enqueue_dub_voice_preserving_v1(
+        &paths,
+        item.id.clone(),
+        diarized_en_track.id.clone(),
+    )?;
     wait_for_job(&paths, &dub_job.id, Duration::from_secs(60 * 60))?;
+
+    let vp_report = paths
+        .job_artifacts_dir(&dub_job.id)
+        .join("tts_voice_preserving_report.json");
+
+    let report_json = std::fs::read_to_string(&vp_report).map_err(|e| {
+        EngineError::InstallFailed(format!(
+            "voice-preserving report missing ({}): {e}",
+            vp_report.display()
+        ))
+    })?;
+    let report_value: Value = serde_json::from_str(&report_json)?;
+    let segments_base_ok = report_value
+        .get("segments_base_ok")
+        .and_then(|v| v.as_u64())
+        .unwrap_or(0);
+    let segments_converted_ok = report_value
+        .get("segments_converted_ok")
+        .and_then(|v| v.as_u64())
+        .unwrap_or(0);
+    if segments_base_ok == 0 {
+        return Err(EngineError::InstallFailed(format!(
+            "voice-preserving smoke failed: no base speech segments were synthesized (report={})",
+            vp_report.display()
+        )));
+    }
 
     // 6) Separation -> mix -> mux.
     let sep_job = jobs::enqueue_separate_audio_spleeter(&paths, item.id.clone())?;
@@ -256,8 +339,38 @@ fn main() -> Result<()> {
         .join("tts_preview")
         .join("dub_voice_preserving_v1")
         .join("manifest.json");
+    let voice_segments_dir = item_dir
+        .join("tts_preview")
+        .join("dub_voice_preserving_v1")
+        .join("segments");
     let mix_out = item_dir.join("dub_preview").join("mix_dub_preview_v1.wav");
     let mux_out = item_dir.join("dub_preview").join("mux_dub_preview_v1.mp4");
+    let first_segment = std::fs::read_dir(&voice_segments_dir)?
+        .filter_map(|entry| entry.ok().map(|e| e.path()))
+        .find(|path| {
+            path.extension()
+                .and_then(|ext| ext.to_str())
+                .map(|ext| ext.eq_ignore_ascii_case("wav"))
+                .unwrap_or(false)
+        })
+        .ok_or_else(|| {
+            EngineError::InstallFailed(format!(
+                "voice-preserving smoke failed: no segment WAVs found in {}",
+                voice_segments_dir.display()
+            ))
+        })?;
+    if !wav_peak_is_non_silent(&first_segment)? {
+        return Err(EngineError::InstallFailed(format!(
+            "voice-preserving smoke failed: first segment is silent ({})",
+            first_segment.display()
+        )));
+    }
+    eprintln!(
+        "voice-preserving report: {} (base_ok={}, converted_ok={})",
+        vp_report.display(),
+        segments_base_ok,
+        segments_converted_ok
+    );
     eprintln!("voice manifest: {}", voice_manifest.display());
     eprintln!("mixed dub wav: {}", mix_out.display());
     eprintln!("muxed preview mp4: {}", mux_out.display());

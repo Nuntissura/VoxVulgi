@@ -110,7 +110,7 @@ impl Default for DownloadPresetsConfig {
             title: "Default".to_string(),
             path_template: "{provider}/{channel}".to_string(),
             filename_template: "{title}_{id}".to_string(),
-            format_preference: Some("bestvideo+bestaudio/best".to_string()),
+            format_preference: Some("bv*[ext=mp4]+ba[ext=m4a]/b[ext=mp4]/bv*+ba/b".to_string()),
             quality_preference: Some("best".to_string()),
             subtitle_mode: Some("auto".to_string()),
         };
@@ -136,7 +136,10 @@ pub fn load_download_presets_config(paths: &AppPaths) -> Result<DownloadPresetsC
     normalize_download_presets_config(parsed)
 }
 
-pub fn save_download_presets_config(paths: &AppPaths, config: &DownloadPresetsConfig) -> Result<()> {
+pub fn save_download_presets_config(
+    paths: &AppPaths,
+    config: &DownloadPresetsConfig,
+) -> Result<()> {
     let normalized = normalize_download_presets_config(config.clone())?;
     let path = paths.download_presets_config_path();
     if let Some(parent) = path.parent() {
@@ -147,7 +150,9 @@ pub fn save_download_presets_config(paths: &AppPaths, config: &DownloadPresetsCo
     Ok(())
 }
 
-fn normalize_download_presets_config(mut config: DownloadPresetsConfig) -> Result<DownloadPresetsConfig> {
+fn normalize_download_presets_config(
+    mut config: DownloadPresetsConfig,
+) -> Result<DownloadPresetsConfig> {
     let mut cleaned: Vec<DownloadPreset> = Vec::new();
     for preset in config.presets.into_iter() {
         let id = preset.id.trim();
@@ -234,7 +239,9 @@ pub struct OptionalDiarizationBackendStatus {
     pub config_path: String,
 }
 
-pub fn load_optional_diarization_backend_status(paths: &AppPaths) -> Result<OptionalDiarizationBackendStatus> {
+pub fn load_optional_diarization_backend_status(
+    paths: &AppPaths,
+) -> Result<OptionalDiarizationBackendStatus> {
     let config_path = paths.diarization_optional_backend_config_path();
     let token_path = paths.diarization_optional_backend_token_path();
 

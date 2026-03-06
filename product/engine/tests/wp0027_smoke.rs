@@ -1,4 +1,4 @@
-﻿use std::path::PathBuf;
+use std::path::PathBuf;
 use std::thread::sleep;
 use std::time::{Duration, Instant};
 
@@ -70,7 +70,10 @@ fn wait_for_job_done(
             if matches!(job.status, jobs::JobStatus::Succeeded) {
                 return Ok(job);
             }
-            if matches!(job.status, jobs::JobStatus::Failed | jobs::JobStatus::Canceled) {
+            if matches!(
+                job.status,
+                jobs::JobStatus::Failed | jobs::JobStatus::Canceled
+            ) {
                 return Err(Box::new(SmokeFailure {
                     message: format!(
                         "job {job_id} failed (status={:?}, error={:?})",
@@ -114,7 +117,9 @@ fn wp_0027_phase2_smoke_chain_on_sample() -> SmokeResult<()> {
     std::fs::create_dir_all(&base_dir)?;
 
     let paths = AppPaths::new(base_dir.clone());
-    paths.ensure_dirs().map_err(|e| format!("ensure_dirs failed: {e}"))?;
+    paths
+        .ensure_dirs()
+        .map_err(|e| format!("ensure_dirs failed: {e}"))?;
 
     let ffmpeg = tools::install_ffmpeg_tools(&paths)
         .map_err(|e| format!("install ffmpeg tools failed: {e}"))?;
@@ -140,7 +145,10 @@ fn wp_0027_phase2_smoke_chain_on_sample() -> SmokeResult<()> {
 
     let diar_status = tools::install_diarization_pack(&paths)
         .map_err(|e| format!("install diarization failed: {e}"))?;
-    assert!(diar_status.installed, "diarization pack should be installed");
+    assert!(
+        diar_status.installed,
+        "diarization pack should be installed"
+    );
 
     let tts_status = tools::install_tts_preview_pack(&paths)
         .map_err(|e| format!("install tts preview failed: {e}"))?;
@@ -148,8 +156,12 @@ fn wp_0027_phase2_smoke_chain_on_sample() -> SmokeResult<()> {
 
     let asr_job = jobs::enqueue_asr_local(&paths, item.id.clone(), Some("ja".to_string()))
         .map_err(|e| format!("enqueue asr failed: {e}"))?;
-    let _ = wait_for_job_done(&paths, &asr_job.id, Duration::from_secs(ASR_JOB_TIMEOUT_SECS))
-        .map_err(|e| format!("ASR job failed: {e}"))?;
+    let _ = wait_for_job_done(
+        &paths,
+        &asr_job.id,
+        Duration::from_secs(ASR_JOB_TIMEOUT_SECS),
+    )
+    .map_err(|e| format!("ASR job failed: {e}"))?;
 
     let source_track_id = {
         let tracks = subtitle_tracks::list_tracks(&paths, &item.id)
@@ -160,8 +172,12 @@ fn wp_0027_phase2_smoke_chain_on_sample() -> SmokeResult<()> {
 
     let separate_job = jobs::enqueue_separate_audio_spleeter(&paths, item.id.clone())
         .map_err(|e| format!("enqueue separate failed: {e}"))?;
-    let _ = wait_for_job_done(&paths, &separate_job.id, Duration::from_secs(JOB_TIMEOUT_SECS))
-        .map_err(|e| format!("Separate job failed: {e}"))?;
+    let _ = wait_for_job_done(
+        &paths,
+        &separate_job.id,
+        Duration::from_secs(JOB_TIMEOUT_SECS),
+    )
+    .map_err(|e| format!("Separate job failed: {e}"))?;
 
     let sep_vocals = paths
         .derived_item_dir(&item.id)
@@ -173,21 +189,26 @@ fn wp_0027_phase2_smoke_chain_on_sample() -> SmokeResult<()> {
         .join("separation")
         .join("spleeter_2stems")
         .join("background.wav");
-    assert!(sep_vocals.exists(), "vocals.wav expected: {}", sep_vocals.display());
+    assert!(
+        sep_vocals.exists(),
+        "vocals.wav expected: {}",
+        sep_vocals.display()
+    );
     assert!(
         sep_background.exists(),
         "background.wav expected: {}",
         sep_background.display()
     );
 
-    let diarize_job = jobs::enqueue_diarize_local_v1(
+    let diarize_job =
+        jobs::enqueue_diarize_local_v1(&paths, item.id.clone(), source_track_id.clone())
+            .map_err(|e| format!("enqueue diarize failed: {e}"))?;
+    let _ = wait_for_job_done(
         &paths,
-        item.id.clone(),
-        source_track_id.clone(),
+        &diarize_job.id,
+        Duration::from_secs(JOB_TIMEOUT_SECS),
     )
-    .map_err(|e| format!("enqueue diarize failed: {e}"))?;
-    let _ = wait_for_job_done(&paths, &diarize_job.id, Duration::from_secs(JOB_TIMEOUT_SECS))
-        .map_err(|e| format!("Diarize job failed: {e}"))?;
+    .map_err(|e| format!("Diarize job failed: {e}"))?;
 
     let diar_track_id = {
         let tracks = subtitle_tracks::list_tracks(&paths, &item.id)
@@ -204,14 +225,15 @@ fn wp_0027_phase2_smoke_chain_on_sample() -> SmokeResult<()> {
         .derived_item_dir(&item.id)
         .join("diarize")
         .join("diarization.json");
-    assert!(diar_json.exists(), "diarization.json expected: {}", diar_json.display());
+    assert!(
+        diar_json.exists(),
+        "diarization.json expected: {}",
+        diar_json.display()
+    );
 
-    let tts_job = jobs::enqueue_tts_preview_pyttsx3_v1(
-        &paths,
-        item.id.clone(),
-        diar_track_id.clone(),
-    )
-    .map_err(|e| format!("enqueue tts preview failed: {e}"))?;
+    let tts_job =
+        jobs::enqueue_tts_preview_pyttsx3_v1(&paths, item.id.clone(), diar_track_id.clone())
+            .map_err(|e| format!("enqueue tts preview failed: {e}"))?;
     let _ = wait_for_job_done(&paths, &tts_job.id, Duration::from_secs(JOB_TIMEOUT_SECS))
         .map_err(|e| format!("TTS preview job failed: {e}"))?;
 
@@ -220,7 +242,11 @@ fn wp_0027_phase2_smoke_chain_on_sample() -> SmokeResult<()> {
         .join("tts_preview")
         .join("pyttsx3_v1")
         .join("manifest.json");
-    assert!(tts_manifest.exists(), "tts manifest expected: {}", tts_manifest.display());
+    assert!(
+        tts_manifest.exists(),
+        "tts manifest expected: {}",
+        tts_manifest.display()
+    );
 
     let mix_job = jobs::enqueue_mix_dub_preview_v1(&paths, item.id.clone())
         .map_err(|e| format!("enqueue mix failed: {e}"))?;
@@ -231,7 +257,11 @@ fn wp_0027_phase2_smoke_chain_on_sample() -> SmokeResult<()> {
         .derived_item_dir(&item.id)
         .join("dub_preview")
         .join("mix_dub_preview_v1.wav");
-    assert!(mixed.exists(), "mixed preview expected: {}", mixed.display());
+    assert!(
+        mixed.exists(),
+        "mixed preview expected: {}",
+        mixed.display()
+    );
 
     let mux_job = jobs::enqueue_mux_dub_preview_v1(&paths, item.id.clone())
         .map_err(|e| format!("enqueue mux failed: {e}"))?;
@@ -242,9 +272,12 @@ fn wp_0027_phase2_smoke_chain_on_sample() -> SmokeResult<()> {
         .derived_item_dir(&item.id)
         .join("dub_preview")
         .join("mux_dub_preview_v1.mp4");
-    assert!(muxed.exists(), "muxed preview expected: {}", muxed.display());
+    assert!(
+        muxed.exists(),
+        "muxed preview expected: {}",
+        muxed.display()
+    );
 
     runner.stop();
     Ok(())
 }
-

@@ -158,7 +158,11 @@ pub fn extract_audio_wav_16k_mono(paths: &AppPaths, input: &Path, output_wav: &P
     Ok(())
 }
 
-pub fn extract_audio_wav_44k_stereo(paths: &AppPaths, input: &Path, output_wav: &Path) -> Result<()> {
+pub fn extract_audio_wav_44k_stereo(
+    paths: &AppPaths,
+    input: &Path,
+    output_wav: &Path,
+) -> Result<()> {
     if let Some(parent) = output_wav.parent() {
         std::fs::create_dir_all(parent)?;
     }

@@ -183,6 +183,8 @@ Initial language focus: **Korean + Japanese → English**.
 - Navigation must be split into clear top-level windows for ingest/archive/localization work.
 - Window switching, Diagnostics entry, and startup must stay responsive (no visible freezing).
 - Jobs "Open outputs" actions must reliably open paths without ACL errors.
+- Localization exports must be easy to find, with a predictable default folder map and direct open/reveal actions for both source files and generated deliverables.
+- Default preview/download video outputs should be MP4 wherever the local toolchain can merge/remux cleanly.
 - UX must be fast enough for daily production use before any commercial release.
 
 ### 8.1.2 Required top-level window model

@@ -44,6 +44,7 @@ Design goals:
 
 - Always allow "show in Explorer".
 - Do not write derived outputs next to the source media path by default; exporting is explicit and user-directed.
+- Default user-facing exports should land under the configured download root in predictable app-managed folders (for example `localization/en/<media-stem>/` for Localization Studio deliverables).
 - Allow "clear cache" without touching library media.
 - Avoid storing large thumbnail blobs inside SQLite; store thumbnails on disk and keep the DB as metadata-only.
 - Keep derived outputs per item (reproducible and debuggable).
@@ -219,6 +220,10 @@ Phase 2 preview implementation notes (current):
 - TTS preview: `tts_preview_pyttsx3_v1` renders per-segment wavs + a manifest (system TTS; quality varies by OS).
 - Mix preview: `mix_dub_preview_v1` overlays TTS segments onto the separation background stem into a single wav.
 - Mux preview: `mux_dub_preview_v1` muxes the preview dub audio onto the original media into an MP4.
+- User-facing exports are separated from working artifacts:
+  - working artifacts remain under `derived/items/<item_id>/...`
+  - exported deliverables default to `<download_root>/localization/en/<media-stem>/`
+  - the separate dubbed audio track remains the working `mix_dub_preview_v1.wav`; the exported/muxed MP4 embeds that dubbed audio into video
 
 Voice-preserving approach (core feature):
 
@@ -256,6 +261,7 @@ Phase 1 implementation status (2026-02-22):
   - `direct_http_v1` for direct media asset URLs (strict http/https),
   - `youtube_yt_dlp_v1` for YouTube and other webpage video links (yt-dlp expand + download).
 - yt-dlp is bundled in Windows full installers; Diagnostics can install it if missing (network egress is user-initiated; jobs do not auto-download tools during execution).
+- Default download presets should prefer MP4-compatible format selection, and yt-dlp execution should request MP4 merge/remux where supported so final containers are predictable by default.
 - Instagram batch ingest expands instagram.com URLs (posts/reels/stories/profiles) into direct media asset URLs where possible, then downloads via `direct_http_v1` into `downloads/instagram/` by default (optional session cookie header for private content).
 - Downloaded media is imported into `library_item`, provenance is persisted in `ingest_provenance`, and downloads are grouped via `job.batch_id` for UI batching.
   - Privacy hardening: cookie headers are not persisted in `job.params_json` and browser-cookie usage is opt-in via explicit Library toggles.

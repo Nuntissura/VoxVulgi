@@ -273,7 +273,8 @@ impl AppPaths {
     }
 
     pub fn diarization_optional_backend_token_path(&self) -> PathBuf {
-        self.secrets_dir().join("diarization_optional_backend_token.txt")
+        self.secrets_dir()
+            .join("diarization_optional_backend_token.txt")
     }
 
     pub fn install_logs_dir(&self) -> PathBuf {
@@ -344,4 +345,3 @@ impl AppPaths {
         base_dir.to_path_buf()
     }
 }
-

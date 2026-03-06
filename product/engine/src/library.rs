@@ -42,6 +42,97 @@ pub struct ThumbnailCacheClearSummary {
     pub removed_bytes: u64,
 }
 
+fn thumbnail_cache_path(paths: &AppPaths, item_id: &str) -> PathBuf {
+    paths
+        .thumbnail_cache_dir()
+        .join(thumbnail_cache_file_name(item_id))
+}
+
+fn thumbnail_timestamp_seconds(duration_ms: Option<i64>) -> f64 {
+    match duration_ms {
+        Some(ms) if ms > 0 => {
+            let dur_s = (ms as f64) / 1000.0;
+            (dur_s * 0.10).min(5.0).max(0.0)
+        }
+        _ => 0.0,
+    }
+}
+
+fn set_item_thumbnail_path(
+    paths: &AppPaths,
+    item_id: &str,
+    thumbnail_path: Option<&Path>,
+) -> Result<()> {
+    let conn = db::open(paths)?;
+    db::migrate(&conn)?;
+    let stored = thumbnail_path.map(|value| value.to_string_lossy().to_string());
+    conn.execute(
+        "UPDATE library_item SET thumbnail_path=?1 WHERE id=?2",
+        params![stored, item_id],
+    )?;
+    Ok(())
+}
+
+pub fn ensure_thumbnail_path(paths: &AppPaths, item_id: &str) -> Result<Option<PathBuf>> {
+    paths.ensure_dirs()?;
+    let item = get_item_by_id(paths, item_id)?;
+
+    if let Some(existing) = item
+        .thumbnail_path
+        .as_deref()
+        .map(PathBuf::from)
+        .filter(|path| path.is_file())
+    {
+        return Ok(Some(existing));
+    }
+
+    let thumbnail_path = thumbnail_cache_path(paths, item_id);
+    if thumbnail_path.is_file() {
+        set_item_thumbnail_path(paths, item_id, Some(&thumbnail_path))?;
+        return Ok(Some(thumbnail_path));
+    }
+
+    let media_path = PathBuf::from(item.media_path.trim());
+    if !media_path.is_file() {
+        if item.thumbnail_path.is_some() {
+            set_item_thumbnail_path(paths, item_id, None)?;
+        }
+        return Ok(None);
+    }
+
+    match ffmpeg::generate_thumbnail(
+        paths,
+        &media_path,
+        &thumbnail_path,
+        thumbnail_timestamp_seconds(item.duration_ms),
+    ) {
+        Ok(()) => {
+            set_item_thumbnail_path(paths, item_id, Some(&thumbnail_path))?;
+            prune_thumbnail_cache(paths, THUMB_CACHE_MAX_BYTES, THUMB_CACHE_MAX_AGE_DAYS);
+            Ok(Some(thumbnail_path))
+        }
+        Err(crate::EngineError::ExternalToolMissing { .. })
+        | Err(crate::EngineError::ExternalToolFailed { .. }) => {
+            if thumbnail_path.exists() {
+                let _ = std::fs::remove_file(&thumbnail_path);
+            }
+            if item.thumbnail_path.is_some() {
+                set_item_thumbnail_path(paths, item_id, None)?;
+            }
+            Ok(None)
+        }
+        Err(_) => {
+            if thumbnail_path.exists() {
+                let _ = std::fs::remove_file(&thumbnail_path);
+            }
+            if item.thumbnail_path.is_some() {
+                set_item_thumbnail_path(paths, item_id, None)?;
+            }
+            Ok(None)
+        }
+    }
+}
+
 pub fn list_items(paths: &AppPaths, limit: usize, offset: usize) -> Result<Vec<LibraryItem>> {
     let conn = db::open(paths)?;
     db::migrate(&conn)?;
@@ -243,23 +334,16 @@ fn import_media_file(
         Err(e) => return Err(e),
     };
 
-    let thumbnail_path = paths
-        .thumbnail_cache_dir()
-        .join(thumbnail_cache_file_name(&id));
-    let timestamp_seconds = match probe.duration_ms {
-        Some(ms) if ms > 0 => {
-            let dur_s = (ms as f64) / 1000.0;
-            (dur_s * 0.10).min(5.0).max(0.0)
-        }
-        _ => 0.0,
-    };
+    let thumbnail_path = thumbnail_cache_path(paths, &id);
+    let timestamp_seconds = thumbnail_timestamp_seconds(probe.duration_ms);
 
-    let thumbnail_path_str = match ffmpeg::generate_thumbnail(paths, media_path, &thumbnail_path, timestamp_seconds) {
-        Ok(()) => Some(thumbnail_path.to_string_lossy().to_string()),
-        Err(crate::EngineError::ExternalToolMissing { .. }) => None,
-        Err(crate::EngineError::ExternalToolFailed { .. }) => None,
-        Err(_) => None,
-    };
+    let thumbnail_path_str =
+        match ffmpeg::generate_thumbnail(paths, media_path, &thumbnail_path, timestamp_seconds) {
+            Ok(()) => Some(thumbnail_path.to_string_lossy().to_string()),
+            Err(crate::EngineError::ExternalToolMissing { .. }) => None,
+            Err(crate::EngineError::ExternalToolFailed { .. }) => None,
+            Err(_) => None,
+        };
     prune_thumbnail_cache(paths, THUMB_CACHE_MAX_BYTES, THUMB_CACHE_MAX_AGE_DAYS);
 
     conn.execute(
@@ -482,6 +566,7 @@ fn prune_thumbnail_cache(paths: &AppPaths, max_bytes: u64, max_age_days: i64) {
 mod tests {
     use super::*;
     use filetime::{set_file_mtime, FileTime};
+    use rusqlite::params;
 
     #[test]
     fn thumbnail_cache_file_name_is_sanitized() {
@@ -537,5 +622,107 @@ mod tests {
         );
         assert!(mid.exists(), "newer file should remain");
         assert!(fresh.exists(), "newest file should remain");
+    }
+
+    #[test]
+    fn ensure_thumbnail_path_reuses_cached_file_and_updates_db() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let paths = AppPaths::new(dir.path().to_path_buf());
+        paths.ensure_dirs().expect("dirs");
+        db::ensure_schema(&paths).expect("schema");
+
+        let item_id = "item-thumb-cache";
+        let media_path = dir.path().join("sample.mp4");
+        std::fs::write(&media_path, b"not-a-real-video").expect("media");
+        let cached_thumb = thumbnail_cache_path(&paths, item_id);
+        std::fs::write(&cached_thumb, b"jpeg").expect("thumb");
+
+        let conn = db::open(&paths).expect("db");
+        db::migrate(&conn).expect("migrate");
+        conn.execute(
+            r#"
+INSERT INTO library_item (
+  id, created_at_ms, source_type, source_uri, title, media_path,
+  duration_ms, width, height, container, video_codec, audio_codec, thumbnail_path
+) VALUES (?1, ?2, ?3, ?4, ?5, ?6, NULL, NULL, NULL, NULL, NULL, NULL, NULL)
+"#,
+            params![
+                item_id,
+                1_i64,
+                "local_file",
+                media_path.to_string_lossy().to_string(),
+                "Sample",
+                media_path.to_string_lossy().to_string(),
+            ],
+        )
+        .expect("insert");
+
+        let resolved = ensure_thumbnail_path(&paths, item_id)
+            .expect("resolve")
+            .expect("thumbnail");
+        assert_eq!(resolved, cached_thumb);
+
+        let stored: Option<String> = conn
+            .query_row(
+                "SELECT thumbnail_path FROM library_item WHERE id=?1",
+                [item_id],
+                |row| row.get(0),
+            )
+            .expect("stored path");
+        assert_eq!(
+            stored.as_deref(),
+            Some(cached_thumb.to_string_lossy().as_ref())
+        );
+    }
+
+    #[test]
+    fn ensure_thumbnail_path_clears_stale_reference_when_media_missing() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let paths = AppPaths::new(dir.path().to_path_buf());
+        paths.ensure_dirs().expect("dirs");
+        db::ensure_schema(&paths).expect("schema");
+
+        let item_id = "item-thumb-missing";
+        let missing_media = dir.path().join("missing.mp4");
+        let stale_thumb = dir.path().join("stale.jpg");
+
+        let conn = db::open(&paths).expect("db");
+        db::migrate(&conn).expect("migrate");
+        conn.execute(
+            r#"
+INSERT INTO library_item (
+  id, created_at_ms, source_type, source_uri, title, media_path,
+  duration_ms, width, height, container, video_codec, audio_codec, thumbnail_path
+) VALUES (?1, ?2, ?3, ?4, ?5, ?6, NULL, NULL, NULL, NULL, NULL, NULL, ?7)
+"#,
+            params![
+                item_id,
+                1_i64,
+                "local_file",
+                missing_media.to_string_lossy().to_string(),
+                "Missing",
+                missing_media.to_string_lossy().to_string(),
+                stale_thumb.to_string_lossy().to_string(),
+            ],
+        )
+        .expect("insert");
+
+        let resolved = ensure_thumbnail_path(&paths, item_id).expect("resolve");
+        assert!(
+            resolved.is_none(),
+            "missing media should not yield a thumbnail"
+        );
+
+        let stored: Option<String> = conn
+            .query_row(
+                "SELECT thumbnail_path FROM library_item WHERE id=?1",
+                [item_id],
+                |row| row.get(0),
+            )
+            .expect("stored path");
+        assert!(
+            stored.is_none(),
+            "stale thumbnail reference should be cleared"
+        );
     }
 }

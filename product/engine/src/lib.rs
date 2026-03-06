@@ -11,9 +11,9 @@ pub mod library;
 pub mod models;
 pub mod paths;
 pub mod speakers;
+pub mod subscriptions;
 pub mod subtitle_tracks;
 pub mod subtitles;
-pub mod subscriptions;
 pub mod tools;
 pub mod translate;
 

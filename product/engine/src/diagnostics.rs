@@ -220,20 +220,9 @@ pub fn export_diagnostics_bundle(
     write_pretty_json_to_zip(&mut zip, "manifest.json", &manifest, options)?;
     write_pretty_json_to_zip(&mut zip, "storage.json", &storage, options)?;
 
-    write_pretty_json_to_zip(
-        &mut zip,
-        "jobs_failed.json",
-        &recent_failed_jobs,
-        options,
-    )?;
+    write_pretty_json_to_zip(&mut zip, "jobs_failed.json", &recent_failed_jobs, options)?;
 
-    add_redacted_failed_job_logs(
-        &mut zip,
-        paths,
-        &retention,
-        &recent_failed_jobs,
-        options,
-    )?;
+    add_redacted_failed_job_logs(&mut zip, paths, &retention, &recent_failed_jobs, options)?;
 
     zip.finish().map_err(zip_err_to_io)?;
 
@@ -251,11 +240,13 @@ pub fn generate_licensing_report(paths: &AppPaths) -> Result<LicensingReportResu
     std::fs::create_dir_all(&out_dir)?;
     let out_path = out_dir.join("licensing_report.md");
 
-    let models_inventory = ModelStore::new(paths.clone()).inventory().unwrap_or(ModelInventory {
-        models_dir: String::new(),
-        total_installed_bytes: 0,
-        models: Vec::new(),
-    });
+    let models_inventory = ModelStore::new(paths.clone())
+        .inventory()
+        .unwrap_or(ModelInventory {
+            models_dir: String::new(),
+            total_installed_bytes: 0,
+            models: Vec::new(),
+        });
 
     let python_packages = list_python_packages_best_effort(paths);
     let openvoice_manifest = read_json_best_effort(
@@ -275,11 +266,11 @@ pub fn generate_licensing_report(paths: &AppPaths) -> Result<LicensingReportResu
     let mut md = String::new();
     md.push_str("# VoxVulgi licensing / attribution report (best-effort)\n\n");
     md.push_str("> Not legal advice. This is an automated best-effort inventory of locally installed packs/models.\n\n");
+    md.push_str(&format!("- Generated at (ms since epoch): {}\n", now_ms()));
     md.push_str(&format!(
-        "- Generated at (ms since epoch): {}\n",
-        now_ms()
+        "- App data dir: `{}`\n",
+        paths.base_dir.to_string_lossy()
     ));
-    md.push_str(&format!("- App data dir: `{}`\n", paths.base_dir.to_string_lossy()));
     md.push_str("\n");
 
     md.push_str("## Engine models (managed)\n\n");
@@ -410,7 +401,10 @@ fn export_models_inventory(inventory: ModelInventory) -> BundleModelsInfo {
     }
 }
 
-fn export_db_and_jobs(paths: &AppPaths, jobs_limit: usize) -> Result<(BundleDbInfo, Vec<BundleJobRow>)> {
+fn export_db_and_jobs(
+    paths: &AppPaths,
+    jobs_limit: usize,
+) -> Result<(BundleDbInfo, Vec<BundleJobRow>)> {
     let conn = db::open(paths)?;
     db::migrate(&conn)?;
 
@@ -430,7 +424,10 @@ fn export_db_and_jobs(paths: &AppPaths, jobs_limit: usize) -> Result<(BundleDbIn
         ("library_item", "SELECT COUNT(*) FROM library_item"),
         ("subtitle_track", "SELECT COUNT(*) FROM subtitle_track"),
         ("job", "SELECT COUNT(*) FROM job"),
-        ("ingest_provenance", "SELECT COUNT(*) FROM ingest_provenance"),
+        (
+            "ingest_provenance",
+            "SELECT COUNT(*) FROM ingest_provenance",
+        ),
     ] {
         let count: u64 = conn.query_row(sql, [], |row| row.get::<_, i64>(0))? as u64;
         counts.insert(name.to_string(), count);
@@ -474,18 +471,21 @@ fn job_status_as_str(status: &jobs::JobStatus) -> &'static str {
 
 fn export_config_summary(paths: &AppPaths) -> BundleConfigInfo {
     let glossary_path = paths.glossary_path();
-    let (glossary_present, glossary_bytes, glossary_entries) = match std::fs::metadata(&glossary_path)
-    {
-        Ok(m) if m.is_file() => {
-            let bytes = m.len();
-            let entries = std::fs::read_to_string(&glossary_path)
-                .ok()
-                .and_then(|raw| serde_json::from_str::<serde_json::Map<String, serde_json::Value>>(&raw).ok())
-                .map(|map| map.len() as u64);
-            (true, bytes, entries)
-        }
-        _ => (false, 0, None),
-    };
+    let (glossary_present, glossary_bytes, glossary_entries) =
+        match std::fs::metadata(&glossary_path) {
+            Ok(m) if m.is_file() => {
+                let bytes = m.len();
+                let entries = std::fs::read_to_string(&glossary_path)
+                    .ok()
+                    .and_then(|raw| {
+                        serde_json::from_str::<serde_json::Map<String, serde_json::Value>>(&raw)
+                            .ok()
+                    })
+                    .map(|map| map.len() as u64);
+                (true, bytes, entries)
+            }
+            _ => (false, 0, None),
+        };
 
     let download_dir_override_present = paths
         .download_dir_override()
@@ -534,7 +534,13 @@ fn add_redacted_failed_job_logs<W: Write + std::io::Seek>(
                 _ => continue,
             };
             let zip_path = format!("logs/jobs/{file_name}");
-            write_redacted_jsonl_file_to_zip(zip, &zip_path, &path, MAX_LOG_BYTES_PER_FILE, options)?;
+            write_redacted_jsonl_file_to_zip(
+                zip,
+                &zip_path,
+                &path,
+                MAX_LOG_BYTES_PER_FILE,
+                options,
+            )?;
         }
     }
 
@@ -617,9 +623,8 @@ fn redact_jsonl_line(line: &str) -> String {
     match serde_json::from_str::<serde_json::Value>(line) {
         Ok(mut value) => {
             redact_value_in_place(&mut value);
-            serde_json::to_string(&value).unwrap_or_else(|_| {
-                serde_json::json!({"event": "redaction_failed"}).to_string()
-            })
+            serde_json::to_string(&value)
+                .unwrap_or_else(|_| serde_json::json!({"event": "redaction_failed"}).to_string())
         }
         Err(_) => serde_json::json!({
             "event": "raw_line",
@@ -705,20 +710,17 @@ fn redact_free_text(value: &str) -> String {
         })
         .to_string();
 
-    let win_re = WIN_ABS_PATH_RE
-        .get_or_init(|| Regex::new(r#"(?i)[a-z]:\\[^\s"']+"#).unwrap());
+    let win_re = WIN_ABS_PATH_RE.get_or_init(|| Regex::new(r#"(?i)[a-z]:\\[^\s"']+"#).unwrap());
     out = win_re.replace_all(&out, "<redacted_path>").to_string();
 
-    let unc_re = UNC_PATH_RE
-        .get_or_init(|| Regex::new(r#"\\\\[^\s"']+"#).unwrap());
+    let unc_re = UNC_PATH_RE.get_or_init(|| Regex::new(r#"\\\\[^\s"']+"#).unwrap());
     out = unc_re.replace_all(&out, "<redacted_path>").to_string();
 
     let unix_re =
         UNIX_HOME_PATH_RE.get_or_init(|| Regex::new(r#"/(Users|home)/[^\s"']+"#).unwrap());
     out = unix_re.replace_all(&out, "<redacted_path>").to_string();
 
-    let bearer_re = BEARER_RE
-        .get_or_init(|| Regex::new(r"(?i)\bbearer\s+[a-z0-9._-]+").unwrap());
+    let bearer_re = BEARER_RE.get_or_init(|| Regex::new(r"(?i)\bbearer\s+[a-z0-9._-]+").unwrap());
     out = bearer_re.replace_all(&out, "Bearer <redacted>").to_string();
 
     let kv_re = SENSITIVE_KV_RE.get_or_init(|| {
@@ -936,7 +938,10 @@ INSERT INTO job(
 
         for content in [&manifest, &jobs_failed, &redacted_log] {
             assert!(!content.contains("verysecret"), "cookie should be redacted");
-            assert!(!content.contains("abcdef"), "bearer token should be redacted");
+            assert!(
+                !content.contains("abcdef"),
+                "bearer token should be redacted"
+            );
             assert!(
                 !content.contains("private?id=123"),
                 "URL path/query should be redacted"

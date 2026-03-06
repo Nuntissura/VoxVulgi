@@ -15,7 +15,10 @@ pub struct ItemSpeakerSetting {
     pub updated_at_ms: i64,
 }
 
-pub fn list_item_speaker_settings(paths: &AppPaths, item_id: &str) -> Result<Vec<ItemSpeakerSetting>> {
+pub fn list_item_speaker_settings(
+    paths: &AppPaths,
+    item_id: &str,
+) -> Result<Vec<ItemSpeakerSetting>> {
     let conn = db::open(paths)?;
     db::migrate(&conn)?;
 
@@ -66,20 +69,34 @@ pub fn upsert_item_speaker_setting(
     }
     let speaker_key = speaker_key.trim();
     if speaker_key.is_empty() {
-        return Err(EngineError::InstallFailed("speaker_key is empty".to_string()));
+        return Err(EngineError::InstallFailed(
+            "speaker_key is empty".to_string(),
+        ));
     }
 
     let display_name = display_name.and_then(|v| {
         let t = v.trim().to_string();
-        if t.is_empty() { None } else { Some(t) }
+        if t.is_empty() {
+            None
+        } else {
+            Some(t)
+        }
     });
     let tts_voice_id = tts_voice_id.and_then(|v| {
         let t = v.trim().to_string();
-        if t.is_empty() { None } else { Some(t) }
+        if t.is_empty() {
+            None
+        } else {
+            Some(t)
+        }
     });
     let tts_voice_profile_path = tts_voice_profile_path.and_then(|v| {
         let t = v.trim().to_string();
-        if t.is_empty() { None } else { Some(t) }
+        if t.is_empty() {
+            None
+        } else {
+            Some(t)
+        }
     });
 
     let conn = db::open(paths)?;
