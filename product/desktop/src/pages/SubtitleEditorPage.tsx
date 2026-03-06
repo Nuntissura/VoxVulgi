@@ -133,6 +133,35 @@ type ItemSpeakerSetting = {
   updated_at_ms: number;
 };
 
+type VoiceTemplate = {
+  id: string;
+  name: string;
+  speaker_count: number;
+  dir_path: string;
+  created_at_ms: number;
+  updated_at_ms: number;
+};
+
+type VoiceTemplateSpeaker = {
+  template_id: string;
+  speaker_key: string;
+  display_name: string | null;
+  tts_voice_id: string | null;
+  tts_voice_profile_path: string | null;
+  created_at_ms: number;
+  updated_at_ms: number;
+};
+
+type VoiceTemplateDetail = {
+  template: VoiceTemplate;
+  speakers: VoiceTemplateSpeaker[];
+};
+
+type VoiceTemplateApplyMapping = {
+  item_speaker_key: string;
+  template_speaker_key: string;
+};
+
 function formatTc(ms: number): string {
   const clamped = Math.max(0, Math.floor(ms));
   const h = Math.floor(clamped / 3_600_000);
@@ -389,6 +418,14 @@ export function SubtitleEditorPage({ itemId }: { itemId: string }) {
   const [pyttsx3VoicesBusy, setPyttsx3VoicesBusy] = useState(false);
   const [speakerSettings, setSpeakerSettings] = useState<ItemSpeakerSetting[]>([]);
   const [speakerSettingsBusy, setSpeakerSettingsBusy] = useState(false);
+  const [voiceTemplates, setVoiceTemplates] = useState<VoiceTemplate[]>([]);
+  const [voiceTemplatesBusy, setVoiceTemplatesBusy] = useState(false);
+  const [voiceTemplateActionBusy, setVoiceTemplateActionBusy] = useState(false);
+  const [voiceTemplateName, setVoiceTemplateName] = useState("");
+  const [selectedVoiceTemplateId, setSelectedVoiceTemplateId] = useState("");
+  const [selectedVoiceTemplateDetail, setSelectedVoiceTemplateDetail] =
+    useState<VoiceTemplateDetail | null>(null);
+  const [voiceTemplateMappings, setVoiceTemplateMappings] = useState<Record<string, string>>({});
   const [selectedSegments, setSelectedSegments] = useState<Set<number>>(() => new Set());
   const [bulkSpeakerKey, setBulkSpeakerKey] = useState("");
   const [bulkNewSpeakerKey, setBulkNewSpeakerKey] = useState("");
@@ -517,6 +554,12 @@ export function SubtitleEditorPage({ itemId }: { itemId: string }) {
     return next;
   }, [itemId]);
 
+  const refreshVoiceTemplates = useCallback(async () => {
+    const next = await invoke<VoiceTemplate[]>("voice_templates_list");
+    setVoiceTemplates(next);
+    return next;
+  }, []);
+
   const refreshOutputs = useCallback(async () => {
     const next = await invoke<ItemOutputs>("item_outputs", { itemId });
     setOutputs(next);
@@ -571,6 +614,7 @@ export function SubtitleEditorPage({ itemId }: { itemId: string }) {
       invoke<DownloadDirStatus>("downloads_dir_status").catch(() => null),
       refreshTracks(),
       refreshSpeakerSettings(),
+      refreshVoiceTemplates(),
       refreshOutputs(),
       refreshArtifacts(),
       refreshItemJobs(),
@@ -593,6 +637,7 @@ export function SubtitleEditorPage({ itemId }: { itemId: string }) {
     itemId,
     refreshTracks,
     refreshSpeakerSettings,
+    refreshVoiceTemplates,
     refreshOutputs,
     refreshArtifacts,
     refreshItemJobs,
@@ -651,6 +696,15 @@ export function SubtitleEditorPage({ itemId }: { itemId: string }) {
     });
   }, [speakerSettingsByKey, speakersInTrack]);
 
+  useEffect(() => {
+    if (!item) return;
+    setVoiceTemplateName((prev) => {
+      if (prev.trim()) return prev;
+      const fallback = stemFromPath(item.media_path) || item.title || "Voice template";
+      return `${fallback} voice template`;
+    });
+  }, [item]);
+
   const latestItemJobByType = useMemo(() => {
     const map = new Map<string, JobRow>();
     for (const job of itemJobs) {
@@ -674,6 +728,78 @@ export function SubtitleEditorPage({ itemId }: { itemId: string }) {
       "";
     if (preferred) setAudioPreviewPath(preferred);
   }, [artifacts, audioPreviewPath]);
+
+  useEffect(() => {
+    if (!selectedVoiceTemplateId) {
+      setSelectedVoiceTemplateDetail(null);
+      setVoiceTemplateMappings({});
+      return;
+    }
+
+    let cancelled = false;
+    setVoiceTemplatesBusy(true);
+    invoke<VoiceTemplateDetail>("voice_templates_get", {
+      templateId: selectedVoiceTemplateId,
+    })
+      .then((detail) => {
+        if (cancelled) return;
+        setSelectedVoiceTemplateDetail(detail);
+      })
+      .catch((e) => {
+        if (cancelled) return;
+        setError(String(e));
+      })
+      .finally(() => {
+        if (!cancelled) setVoiceTemplatesBusy(false);
+      });
+
+    return () => {
+      cancelled = true;
+    };
+  }, [selectedVoiceTemplateId]);
+
+  useEffect(() => {
+    setVoiceTemplateMappings((prev) => {
+      if (!selectedVoiceTemplateDetail) return {};
+      const next: Record<string, string> = { ...prev };
+      let changed = false;
+      const speakersByDisplay = new Map<string, string>();
+      for (const speaker of selectedVoiceTemplateDetail.speakers) {
+        const display = (speaker.display_name ?? "").trim().toLowerCase();
+        if (display && !speakersByDisplay.has(display)) {
+          speakersByDisplay.set(display, speaker.speaker_key);
+        }
+      }
+      for (const speakerKey of speakersInTrack) {
+        const currentValue = next[speakerKey];
+        if (
+          currentValue &&
+          selectedVoiceTemplateDetail.speakers.some((speaker) => speaker.speaker_key === currentValue)
+        ) {
+          continue;
+        }
+        const currentName =
+          (speakerNameDrafts[speakerKey] ?? speakerSettingsByKey.get(speakerKey)?.display_name ?? "")
+            .trim()
+            .toLowerCase();
+        const matched =
+          (currentName ? speakersByDisplay.get(currentName) : undefined) ??
+          selectedVoiceTemplateDetail.speakers.find(
+            (speaker) => speaker.speaker_key === speakerKey,
+          )?.speaker_key ??
+          "";
+        next[speakerKey] = matched;
+        changed = true;
+      }
+      for (const key of Object.keys(next)) {
+        if (!speakersInTrack.includes(key)) {
+          delete next[key];
+          changed = true;
+        }
+      }
+      return changed ? next : prev;
+    });
+  }, [selectedVoiceTemplateDetail, speakerNameDrafts, speakerSettingsByKey, speakersInTrack]);
 
   useEffect(() => {
     if (videoPreviewMode === "mux_mp4" && !outputs?.mux_dub_preview_v1_mp4_exists) {
@@ -1282,6 +1408,123 @@ export function SubtitleEditorPage({ itemId }: { itemId: string }) {
       setError(String(e));
     } finally {
       setSpeakerSettingsBusy(false);
+    }
+  }
+
+  async function saveCurrentVoiceTemplate() {
+    const name = voiceTemplateName.trim();
+    if (!name) {
+      setError("Template name is empty.");
+      return;
+    }
+    setError(null);
+    setVoiceTemplateActionBusy(true);
+    try {
+      const detail = await invoke<VoiceTemplateDetail>("voice_templates_create_from_item", {
+        itemId,
+        name,
+      });
+      setSelectedVoiceTemplateId(detail.template.id);
+      setSelectedVoiceTemplateDetail(detail);
+      await refreshVoiceTemplates();
+      setNotice(`Saved voice template "${detail.template.name}".`);
+    } catch (e) {
+      setError(String(e));
+    } finally {
+      setVoiceTemplateActionBusy(false);
+    }
+  }
+
+  async function applySelectedVoiceTemplate() {
+    if (!selectedVoiceTemplateId) {
+      setError("Choose a voice template first.");
+      return;
+    }
+    const mappings: VoiceTemplateApplyMapping[] = speakersInTrack
+      .map((speakerKey) => ({
+        item_speaker_key: speakerKey,
+        template_speaker_key: (voiceTemplateMappings[speakerKey] ?? "").trim(),
+      }))
+      .filter((mapping) => mapping.template_speaker_key);
+    if (!mappings.length) {
+      setError("Map at least one current speaker to a template speaker.");
+      return;
+    }
+
+    const ok = await confirm(
+      `Apply template mappings to ${mappings.length} speaker(s) on this item?`,
+      { title: "Apply voice template", kind: "warning" },
+    );
+    if (!ok) return;
+
+    setError(null);
+    setVoiceTemplateActionBusy(true);
+    try {
+      const next = await invoke<ItemSpeakerSetting[]>("voice_templates_apply_to_item", {
+        itemId,
+        templateId: selectedVoiceTemplateId,
+        mappings,
+      });
+      setSpeakerSettings(next);
+      const nextDrafts: Record<string, string> = {};
+      for (const speakerKey of speakersInTrack) {
+        const setting = next.find((value) => value.speaker_key === speakerKey) ?? null;
+        nextDrafts[speakerKey] = setting?.display_name ?? "";
+      }
+      setSpeakerNameDrafts((prev) => ({ ...prev, ...nextDrafts }));
+      setNotice(`Applied voice template to ${mappings.length} speaker(s).`);
+    } catch (e) {
+      setError(String(e));
+    } finally {
+      setVoiceTemplateActionBusy(false);
+    }
+  }
+
+  async function deleteSelectedVoiceTemplate() {
+    if (!selectedVoiceTemplateId || !selectedVoiceTemplateDetail) return;
+    const ok = await confirm(
+      `Delete voice template "${selectedVoiceTemplateDetail.template.name}"?`,
+      { title: "Delete voice template", kind: "warning" },
+    );
+    if (!ok) return;
+
+    setError(null);
+    setVoiceTemplateActionBusy(true);
+    try {
+      await invoke("voice_templates_delete", { templateId: selectedVoiceTemplateId });
+      setSelectedVoiceTemplateId("");
+      setSelectedVoiceTemplateDetail(null);
+      setVoiceTemplateMappings({});
+      await refreshVoiceTemplates();
+      setNotice("Deleted voice template.");
+    } catch (e) {
+      setError(String(e));
+    } finally {
+      setVoiceTemplateActionBusy(false);
+    }
+  }
+
+  async function openSelectedVoiceTemplateFolder() {
+    const dirPath = selectedVoiceTemplateDetail?.template.dir_path?.trim() ?? "";
+    if (!dirPath) {
+      setError("Template folder path is empty.");
+      return;
+    }
+    setError(null);
+    try {
+      const opened = await openPathBestEffort(dirPath);
+      setNotice(
+        opened.method === "open_path"
+          ? `Opened template folder: ${opened.path}`
+          : `Revealed template folder in file explorer: ${opened.path}`,
+      );
+    } catch (e) {
+      const copied = await copyPathToClipboard(dirPath);
+      setError(
+        `Open template folder failed: ${String(e)}${
+          copied ? " Path copied to clipboard." : ` Path: ${dirPath}`
+        }`,
+      );
     }
   }
 
@@ -2069,6 +2312,7 @@ export function SubtitleEditorPage({ itemId }: { itemId: string }) {
           <li>Run <strong>Translate -&gt; EN (local)</strong> to produce the English subtitle track.</li>
           <li>Run <strong>Diarize speakers (local)</strong> if you want speaker-aware dubbing.</li>
           <li>Open <strong>Diagnostics</strong> and verify FFmpeg plus the Phase 2 dubbing packs are installed.</li>
+          <li>Assign a short clean reference clip per speaker, then save it as a <strong>Reusable voice template</strong> if you want to reuse the same cast on later episodes.</li>
           <li>Run <strong>Dub voice-preserving (local)</strong> for the English voice-cloned dub, or use one of the TTS preview jobs first.</li>
           <li>Run <strong>Separate</strong>, then <strong>Mix dub</strong>, then <strong>Mux preview</strong>.</li>
           <li>Use the Outputs card below to export the final SRT/VTT and MP4 into the app export folder.</li>
@@ -2732,6 +2976,197 @@ export function SubtitleEditorPage({ itemId }: { itemId: string }) {
                   })}
                 </div>
               ) : null}
+            </div>
+
+            <div style={{ marginTop: 16 }}>
+              <div className="row" style={{ alignItems: "center", gap: 10, flexWrap: "wrap" }}>
+                <div style={{ fontSize: 12, opacity: 0.85 }}>Reusable voice templates</div>
+                <button
+                  type="button"
+                  disabled={voiceTemplateActionBusy || speakerSettingsBusy || !speakersInTrack.length}
+                  onClick={() => {
+                    saveCurrentVoiceTemplate().catch(() => undefined);
+                  }}
+                >
+                  Save current item as template
+                </button>
+                <button
+                  type="button"
+                  disabled={voiceTemplatesBusy || voiceTemplateActionBusy}
+                  onClick={() => {
+                    refreshVoiceTemplates().catch((e) => setError(String(e)));
+                  }}
+                >
+                  Reload templates
+                </button>
+                <div style={{ fontSize: 12, opacity: 0.6 }}>
+                  Saves speaker names, pyttsx3 voices, and copied reference clips for reuse.
+                </div>
+              </div>
+
+              <div
+                className="row"
+                style={{ marginTop: 8, alignItems: "center", gap: 10, flexWrap: "wrap" }}
+              >
+                <input
+                  value={voiceTemplateName}
+                  disabled={voiceTemplateActionBusy || !speakersInTrack.length}
+                  onChange={(e) => setVoiceTemplateName(e.currentTarget.value)}
+                  placeholder="Template name"
+                  style={{ minWidth: 280 }}
+                />
+                <div style={{ fontSize: 12, opacity: 0.6 }}>
+                  {voiceTemplates.length
+                    ? `${voiceTemplates.length} saved template(s)`
+                    : "No saved templates yet"}
+                </div>
+              </div>
+
+              <div
+                className="row"
+                style={{ marginTop: 8, alignItems: "center", gap: 10, flexWrap: "wrap" }}
+              >
+                <select
+                  value={selectedVoiceTemplateId}
+                  disabled={voiceTemplatesBusy || voiceTemplateActionBusy || !voiceTemplates.length}
+                  onChange={(e) => setSelectedVoiceTemplateId(e.currentTarget.value)}
+                  style={{ minWidth: 320 }}
+                >
+                  <option value="">Choose template...</option>
+                  {voiceTemplates.map((template) => (
+                    <option key={template.id} value={template.id}>
+                      {template.name} ({template.speaker_count} speaker
+                      {template.speaker_count === 1 ? "" : "s"})
+                    </option>
+                  ))}
+                </select>
+                <button
+                  type="button"
+                  disabled={voiceTemplateActionBusy || !selectedVoiceTemplateDetail}
+                  onClick={() => {
+                    openSelectedVoiceTemplateFolder().catch(() => undefined);
+                  }}
+                >
+                  Open template folder
+                </button>
+                <button
+                  type="button"
+                  disabled={voiceTemplateActionBusy || !selectedVoiceTemplateDetail}
+                  onClick={() => {
+                    deleteSelectedVoiceTemplate().catch(() => undefined);
+                  }}
+                >
+                  Delete template
+                </button>
+              </div>
+
+              {selectedVoiceTemplateDetail ? (
+                <>
+                  <div className="kv" style={{ marginTop: 10 }}>
+                    <div className="k">Template folder</div>
+                    <div className="v">{selectedVoiceTemplateDetail.template.dir_path}</div>
+                  </div>
+                  <div className="kv">
+                    <div className="k">Saved speakers</div>
+                    <div className="v">
+                      {selectedVoiceTemplateDetail.speakers.length} speaker
+                      {selectedVoiceTemplateDetail.speakers.length === 1 ? "" : "s"}
+                    </div>
+                  </div>
+                  <div style={{ marginTop: 10, display: "flex", flexDirection: "column", gap: 8 }}>
+                    {speakersInTrack.length ? (
+                      speakersInTrack.map((speakerKey) => {
+                        const currentSetting = speakerSettingsByKey.get(speakerKey) ?? null;
+                        const currentLabel =
+                          (speakerNameDrafts[speakerKey] ?? currentSetting?.display_name ?? "").trim() ||
+                          speakerKey;
+                        const mappedTemplateKey = voiceTemplateMappings[speakerKey] ?? "";
+                        const mappedTemplate =
+                          selectedVoiceTemplateDetail.speakers.find(
+                            (speaker) => speaker.speaker_key === mappedTemplateKey,
+                          ) ?? null;
+                        return (
+                          <div
+                            key={`template-map-${speakerKey}`}
+                            className="row"
+                            style={{ alignItems: "center", gap: 10, flexWrap: "wrap" }}
+                          >
+                            <code style={{ minWidth: 180 }} title={speakerKey}>
+                              {currentLabel}
+                            </code>
+                            <span style={{ opacity: 0.7 }}>uses</span>
+                            <select
+                              value={mappedTemplateKey}
+                              disabled={voiceTemplateActionBusy || voiceTemplatesBusy}
+                              onChange={(e) =>
+                                setVoiceTemplateMappings((prev) => ({
+                                  ...prev,
+                                  [speakerKey]: e.currentTarget.value,
+                                }))
+                              }
+                              style={{ minWidth: 260 }}
+                            >
+                              <option value="">Skip this speaker</option>
+                              {selectedVoiceTemplateDetail.speakers.map((speaker) => {
+                                const label =
+                                  (speaker.display_name ?? "").trim() || speaker.speaker_key;
+                                return (
+                                  <option key={speaker.speaker_key} value={speaker.speaker_key}>
+                                    {label}
+                                  </option>
+                                );
+                              })}
+                            </select>
+                            <div style={{ fontSize: 12, opacity: 0.6 }}>
+                              {mappedTemplate
+                                ? [
+                                    mappedTemplate.tts_voice_id
+                                      ? `pyttsx3 ${mappedTemplate.tts_voice_id}`
+                                      : "no pyttsx3 override",
+                                    mappedTemplate.tts_voice_profile_path
+                                      ? `profile ${fileNameFromPath(mappedTemplate.tts_voice_profile_path)}`
+                                      : "no reference clip",
+                                  ].join(" | ")
+                                : "No template speaker selected"}
+                            </div>
+                          </div>
+                        );
+                      })
+                    ) : (
+                      <div style={{ fontSize: 12, opacity: 0.6 }}>
+                        No speakers found in the current subtitle track yet.
+                      </div>
+                    )}
+                  </div>
+
+                  <div
+                    className="row"
+                    style={{ marginTop: 10, alignItems: "center", gap: 10, flexWrap: "wrap" }}
+                  >
+                    <button
+                      type="button"
+                      disabled={
+                        voiceTemplateActionBusy ||
+                        !speakersInTrack.length ||
+                        !Object.values(voiceTemplateMappings).some((value) => value.trim())
+                      }
+                      onClick={() => {
+                        applySelectedVoiceTemplate().catch(() => undefined);
+                      }}
+                    >
+                      Apply template to current item
+                    </button>
+                    <div style={{ fontSize: 12, opacity: 0.6 }}>
+                      Applies only the mapped speakers and keeps unmapped speakers unchanged.
+                    </div>
+                  </div>
+                </>
+              ) : (
+                <div style={{ marginTop: 10, fontSize: 12, opacity: 0.6 }}>
+                  Choose a saved template to map this item&apos;s speakers to the stored voice
+                  references.
+                </div>
+              )}
             </div>
           </div>
         ) : null}

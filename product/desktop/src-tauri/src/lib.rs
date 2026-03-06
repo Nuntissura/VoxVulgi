@@ -8,7 +8,7 @@ use voxvulgi_engine::models::ModelStore;
 use voxvulgi_engine::paths::AppPaths;
 use voxvulgi_engine::{
     config, db, diagnostics, jobs, library, speakers, subscriptions, subtitle_tracks, subtitles,
-    tools,
+    tools, voice_templates,
 };
 
 #[derive(Debug, Clone, serde::Deserialize)]
@@ -1776,6 +1776,75 @@ fn speakers_upsert(
 }
 
 #[tauri::command]
+async fn voice_templates_list(
+    state: State<'_, AppState>,
+) -> Result<Vec<voice_templates::VoiceTemplate>, String> {
+    let paths = state.paths.clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        voice_templates::list_voice_templates(&paths).map_err(|e| e.to_string())
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
+#[tauri::command]
+async fn voice_templates_get(
+    state: State<'_, AppState>,
+    template_id: String,
+) -> Result<voice_templates::VoiceTemplateDetail, String> {
+    let paths = state.paths.clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        voice_templates::get_voice_template(&paths, &template_id).map_err(|e| e.to_string())
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
+#[tauri::command]
+async fn voice_templates_create_from_item(
+    state: State<'_, AppState>,
+    item_id: String,
+    name: String,
+) -> Result<voice_templates::VoiceTemplateDetail, String> {
+    let paths = state.paths.clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        voice_templates::create_voice_template_from_item(&paths, &item_id, &name)
+            .map_err(|e| e.to_string())
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
+#[tauri::command]
+async fn voice_templates_delete(
+    state: State<'_, AppState>,
+    template_id: String,
+) -> Result<(), String> {
+    let paths = state.paths.clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        voice_templates::delete_voice_template(&paths, &template_id).map_err(|e| e.to_string())
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
+#[tauri::command]
+async fn voice_templates_apply_to_item(
+    state: State<'_, AppState>,
+    item_id: String,
+    template_id: String,
+    mappings: Vec<voice_templates::VoiceTemplateApplyMapping>,
+) -> Result<Vec<speakers::ItemSpeakerSetting>, String> {
+    let paths = state.paths.clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        voice_templates::apply_voice_template_to_item(&paths, &item_id, &template_id, &mappings)
+            .map_err(|e| e.to_string())
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
+#[tauri::command]
 fn library_list(
     state: State<'_, AppState>,
     limit: usize,
@@ -2518,6 +2587,11 @@ pub fn run() {
             models_install_demo,
             speakers_list,
             speakers_upsert,
+            voice_templates_apply_to_item,
+            voice_templates_create_from_item,
+            voice_templates_delete,
+            voice_templates_get,
+            voice_templates_list,
             subtitles_export_doc_srt,
             subtitles_export_doc_vtt,
             subtitles_list_tracks,

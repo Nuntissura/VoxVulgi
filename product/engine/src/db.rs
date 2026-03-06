@@ -108,6 +108,29 @@ CREATE TABLE IF NOT EXISTS item_speaker (
 
 CREATE INDEX IF NOT EXISTS idx_item_speaker_item ON item_speaker(item_id);
 
+CREATE TABLE IF NOT EXISTS voice_template (
+  id TEXT PRIMARY KEY,
+  name TEXT NOT NULL,
+  created_at_ms INTEGER NOT NULL,
+  updated_at_ms INTEGER NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS voice_template_speaker (
+  template_id TEXT NOT NULL,
+  speaker_key TEXT NOT NULL,
+  display_name TEXT,
+  tts_voice_id TEXT,
+  tts_voice_profile_path TEXT,
+  created_at_ms INTEGER NOT NULL,
+  updated_at_ms INTEGER NOT NULL,
+  PRIMARY KEY (template_id, speaker_key),
+  FOREIGN KEY (template_id) REFERENCES voice_template(id) ON DELETE CASCADE
+);
+
+CREATE INDEX IF NOT EXISTS idx_voice_template_updated ON voice_template(updated_at_ms DESC);
+CREATE INDEX IF NOT EXISTS idx_voice_template_speaker_template
+  ON voice_template_speaker(template_id, speaker_key);
+
 CREATE TABLE IF NOT EXISTS youtube_subscription (
   id TEXT PRIMARY KEY,
   title TEXT NOT NULL,
@@ -466,6 +489,34 @@ CREATE TABLE IF NOT EXISTS job (
         assert!(
             has_refresh_interval,
             "refresh_interval_minutes column should exist after migrate"
+        );
+    }
+
+    #[test]
+    fn migrate_creates_voice_template_tables() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let paths = AppPaths::new(dir.path().to_path_buf());
+        let conn = open(&paths).expect("open");
+        migrate(&conn).expect("migrate");
+
+        let mut stmt = conn
+            .prepare(
+                "SELECT name FROM sqlite_master WHERE type='table' AND name IN ('voice_template', 'voice_template_speaker') ORDER BY name",
+            )
+            .expect("prepare");
+        let rows = stmt
+            .query_map([], |row| row.get::<_, String>(0))
+            .expect("query");
+        let names = rows
+            .collect::<rusqlite::Result<Vec<_>>>()
+            .expect("collect rows");
+
+        assert_eq!(
+            names,
+            vec![
+                "voice_template".to_string(),
+                "voice_template_speaker".to_string()
+            ]
         );
     }
 }
