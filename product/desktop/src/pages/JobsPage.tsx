@@ -1,8 +1,7 @@
 import { Fragment, useCallback, useEffect, useMemo, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
-import { revealItemInDir } from "@tauri-apps/plugin-opener";
 import { confirm, save } from "@tauri-apps/plugin-dialog";
-import { copyPathToClipboard, openPathBestEffort, requireOpenablePath } from "../lib/pathOpener";
+import { copyPathToClipboard, openPathBestEffort, requireOpenablePath, revealPath } from "../lib/pathOpener";
 
 type JobStatus = "queued" | "running" | "succeeded" | "failed" | "canceled";
 
@@ -327,11 +326,16 @@ export function JobsPage() {
     }
   }
 
-  async function revealLogs(path: string) {
+  async function openLogFile(path: string) {
     setError(null);
     try {
       const target = requireOpenablePath(path, "Log path");
-      await revealItemInDir(target);
+      const opened = await openPathBestEffort(target);
+      setNotice(
+        opened.method === "shell_open_path"
+          ? `Opened log file: ${opened.path}`
+          : `Opened log parent folder: ${opened.path}`,
+      );
     } catch (e) {
       setError(String(e));
     }
@@ -347,7 +351,7 @@ export function JobsPage() {
     try {
       const opened = await openPathBestEffort(artifactsDir);
       setNotice(
-        opened.method === "open_path"
+        opened.method === "shell_open_path"
           ? `Artifacts folder: ${opened.path}`
           : `Artifacts folder revealed in file explorer: ${opened.path}`,
       );
@@ -366,7 +370,7 @@ export function JobsPage() {
     try {
       const opened = await openPathBestEffort(outputsDir);
       setNotice(
-        opened.method === "open_path"
+        opened.method === "shell_open_path"
           ? `Outputs folder: ${opened.path}`
           : `Outputs folder revealed in file explorer: ${opened.path}`,
       );
@@ -375,7 +379,7 @@ export function JobsPage() {
     }
   }
 
-  async function revealMuxedPreview(itemId: string) {
+  async function openMuxedPreview(itemId: string) {
     setError(null);
     try {
       const outputs = await invoke<ItemOutputs>("item_outputs", { itemId });
@@ -389,7 +393,12 @@ export function JobsPage() {
           "Muxed preview not found yet. Run the 'mux_dub_preview_v1' job first.",
         );
       }
-      await revealItemInDir(path);
+      const opened = await openPathBestEffort(path);
+      setNotice(
+        opened.method === "shell_open_path"
+          ? `Opened preview: ${opened.path}`
+          : `Opened preview folder: ${opened.path}`,
+      );
     } catch (e) {
       setError(String(e));
     }
@@ -425,7 +434,7 @@ export function JobsPage() {
       });
       setNotice(`Exported preview: ${result.out_path}`);
       try {
-        await revealItemInDir(result.out_path);
+        await revealPath(result.out_path);
       } catch {
         // ignore
       }
@@ -595,9 +604,9 @@ export function JobsPage() {
               <button
                 type="button"
                 disabled={busy}
-                onClick={() => revealMuxedPreview(job.item_id ?? "")}
+                onClick={() => openMuxedPreview(job.item_id ?? "")}
               >
-                Reveal preview
+                Open preview
               </button>
             ) : null}
             {canRevealMuxedPreview ? (
@@ -617,9 +626,9 @@ export function JobsPage() {
             <button
               type="button"
               disabled={!job.logs_path}
-              onClick={() => revealLogs(job.logs_path)}
+              onClick={() => openLogFile(job.logs_path)}
             >
-              Reveal log
+              Open log
             </button>
             {canOpenOutputs ? (
               <button
@@ -801,7 +810,7 @@ export function JobsPage() {
                             <button
                               type="button"
                               disabled={!groupLogPath}
-                              onClick={() => revealLogs(groupLogPath)}
+                              onClick={() => openLogFile(groupLogPath)}
                             >
                               Reveal log
                             </button>

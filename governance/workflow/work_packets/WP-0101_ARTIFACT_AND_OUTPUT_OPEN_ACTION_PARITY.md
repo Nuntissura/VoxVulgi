@@ -3,7 +3,7 @@
 ## Metadata
 - ID: WP-0101
 - Owner: Codex
-- Status: BACKLOG
+- Status: DONE
 - Created: 2026-03-07
 - Target milestone: Workflow and archive UX hardening
 
@@ -39,3 +39,4 @@ Out of scope:
 ## Status updates
 
 - 2026-03-07: Created from operator feedback requesting uniform open-file and open-folder actions for all produced artifacts and outputs.
+- 2026-03-07: Implemented shared backend shell open/reveal commands and routed major output surfaces through them, including Library, Jobs, Diagnostics, and Localization Studio. Verified with `npm run build`, `cargo test -q` in `product/desktop/src-tauri`, and `cargo test -q` in `product/engine`. Proof: `product/desktop/Build Target/tool_artifacts/wp_runs/WP-0101/20260307_033244/summary.md`.

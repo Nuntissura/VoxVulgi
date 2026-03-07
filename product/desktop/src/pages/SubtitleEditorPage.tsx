@@ -1,10 +1,10 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { convertFileSrc, invoke } from "@tauri-apps/api/core";
 import { confirm, open, save } from "@tauri-apps/plugin-dialog";
-import { revealItemInDir } from "@tauri-apps/plugin-opener";
 import { diagnosticsTrace } from "../lib/diagnosticsTrace";
 import { copyPathToClipboard, openPathBestEffort, revealPath } from "../lib/pathOpener";
 import { safeLocalStorageGet, safeLocalStorageSet } from "../lib/persist";
+import { useSharedDownloadDirStatus } from "../lib/sharedDownloadDir";
 
 type LibraryItem = {
   id: string;
@@ -88,13 +88,6 @@ type ArtifactIdentity = {
 type ExportedFile = {
   out_path: string;
   file_bytes: number;
-};
-
-type DownloadDirStatus = {
-  current_dir: string;
-  default_dir: string;
-  exists: boolean;
-  using_default: boolean;
 };
 
 function sanitizeFilename(raw: string): string {
@@ -621,7 +614,7 @@ export function SubtitleEditorPage({ itemId }: { itemId: string }) {
   const [artifacts, setArtifacts] = useState<ArtifactInfo[]>([]);
   const [artifactsBusy, setArtifactsBusy] = useState(false);
   const [itemJobs, setItemJobs] = useState<JobRow[]>([]);
-  const [downloadDir, setDownloadDir] = useState<DownloadDirStatus | null>(null);
+  const { status: downloadDir } = useSharedDownloadDirStatus();
   const [asrLang, setAsrLang] = useState<"auto" | "ja" | "ko">(() => {
     const raw = safeLocalStorageGet("voxvulgi.v1.settings.asr_lang");
     if (raw === "ja" || raw === "ko") return raw;
@@ -1082,7 +1075,6 @@ export function SubtitleEditorPage({ itemId }: { itemId: string }) {
     setBusy(true);
     Promise.all([
       invoke<LibraryItem>("library_get", { itemId }),
-      invoke<DownloadDirStatus>("downloads_dir_status").catch(() => null),
       refreshTracks(),
       refreshSpeakerSettings(),
       refreshVoiceTemplates(),
@@ -1095,11 +1087,8 @@ export function SubtitleEditorPage({ itemId }: { itemId: string }) {
       refreshArtifacts(),
       refreshItemJobs(),
     ])
-      .then(([nextItem, nextDownloadDir, nextTracks]) => {
+      .then(([nextItem, nextTracks]) => {
         setItem(nextItem);
-        if (nextDownloadDir) {
-          setDownloadDir(nextDownloadDir);
-        }
         if (nextTracks.length) {
           const preferred =
             nextTracks.find((t) => t.kind === "source" && t.format === "ytfetch_subtitle_json_v1") ??
@@ -1816,7 +1805,18 @@ export function SubtitleEditorPage({ itemId }: { itemId: string }) {
     const t = tracks.find((x) => x.id === trackId);
     if (!t) return;
     try {
-      await revealItemInDir(t.path);
+      await revealPath(t.path);
+    } catch (e) {
+      setError(String(e));
+    }
+  }
+
+  async function openSelectedTrack() {
+    setError(null);
+    const t = tracks.find((x) => x.id === trackId);
+    if (!t) return;
+    try {
+      await openPathBestEffort(t.path);
     } catch (e) {
       setError(String(e));
     }
@@ -2977,7 +2977,7 @@ export function SubtitleEditorPage({ itemId }: { itemId: string }) {
     try {
       const opened = await openPathBestEffort(dirPath);
       setNotice(
-        opened.method === "open_path"
+        opened.method === "shell_open_path"
           ? `Opened template folder: ${opened.path}`
           : `Revealed template folder in file explorer: ${opened.path}`,
       );
@@ -3389,7 +3389,7 @@ export function SubtitleEditorPage({ itemId }: { itemId: string }) {
       setNotice(`Exported ${count} file${count === 1 ? "" : "s"} to ${outDir}`);
       if (created.length) {
         try {
-          await revealItemInDir(created[0]);
+          await revealPath(created[0]);
         } catch {
           // ignore reveal failures
         }
@@ -3446,7 +3446,7 @@ export function SubtitleEditorPage({ itemId }: { itemId: string }) {
     try {
       const opened = await openPathBestEffort(mediaPath);
       setNotice(
-        opened.method === "open_path"
+        opened.method === "shell_open_path"
           ? `Opened source media: ${opened.path}`
           : `Revealed source media in file explorer: ${opened.path}`,
       );
@@ -3479,7 +3479,7 @@ export function SubtitleEditorPage({ itemId }: { itemId: string }) {
       const target = resolveExportDir();
       const opened = await openPathBestEffort(target);
       setNotice(
-        opened.method === "open_path"
+        opened.method === "shell_open_path"
           ? `Export folder: ${opened.path}`
           : `Export folder revealed in file explorer: ${opened.path}`,
       );
@@ -3494,7 +3494,7 @@ export function SubtitleEditorPage({ itemId }: { itemId: string }) {
     try {
       const opened = await openPathBestEffort(outputs.derived_item_dir);
       setNotice(
-        opened.method === "open_path"
+        opened.method === "shell_open_path"
           ? `Working files folder: ${opened.path}`
           : `Working files folder revealed in file explorer: ${opened.path}`,
       );
@@ -3515,7 +3515,7 @@ export function SubtitleEditorPage({ itemId }: { itemId: string }) {
       }
       const opened = await openPathBestEffort(next.mix_dub_preview_v1_wav_path);
       setNotice(
-        opened.method === "open_path"
+        opened.method === "shell_open_path"
           ? `Opened dub audio preview: ${opened.path}`
           : `Dub audio preview revealed in file explorer: ${opened.path}`,
       );
@@ -3536,7 +3536,7 @@ export function SubtitleEditorPage({ itemId }: { itemId: string }) {
       if (!path) {
         throw new Error("Muxed preview not found yet. Run 'Mux preview' first.");
       }
-      await revealItemInDir(path);
+      await revealPath(path);
     } catch (e) {
       setError(String(e));
     }
@@ -3557,7 +3557,7 @@ export function SubtitleEditorPage({ itemId }: { itemId: string }) {
       }
       const opened = await openPathBestEffort(path);
       setNotice(
-        opened.method === "open_path"
+        opened.method === "shell_open_path"
           ? `Opened preview video: ${opened.path}`
           : `Preview video revealed in file explorer: ${opened.path}`,
       );
@@ -3599,7 +3599,7 @@ export function SubtitleEditorPage({ itemId }: { itemId: string }) {
       });
       setNotice(`Exported preview: ${result.out_path}`);
       try {
-        await revealItemInDir(result.out_path);
+        await revealPath(result.out_path);
       } catch {
         // ignore
       }
@@ -3812,7 +3812,7 @@ export function SubtitleEditorPage({ itemId }: { itemId: string }) {
     const path = (job?.logs_path ?? "").trim();
     if (!path) return;
     try {
-      await revealItemInDir(path);
+      await revealPath(path);
     } catch (e) {
       setError(String(e));
     }
@@ -4065,7 +4065,7 @@ export function SubtitleEditorPage({ itemId }: { itemId: string }) {
           <button
             type="button"
             disabled={busy || !outputs?.export_pack_v1_zip_exists}
-            onClick={() => revealItemInDir(outputs?.export_pack_v1_zip_path ?? "")}
+            onClick={() => revealPath(outputs?.export_pack_v1_zip_path ?? "").catch((e) => setError(String(e)))}
           >
             Reveal zip
           </button>
@@ -4110,8 +4110,11 @@ export function SubtitleEditorPage({ itemId }: { itemId: string }) {
           >
             Refresh tracks
           </button>
+          <button type="button" disabled={!trackId} onClick={openSelectedTrack}>
+            Open file
+          </button>
           <button type="button" disabled={!trackId} onClick={revealSelectedTrack}>
-            Reveal file
+            Open folder
           </button>
           <button
             type="button"
@@ -6012,7 +6015,7 @@ export function SubtitleEditorPage({ itemId }: { itemId: string }) {
                                 type="button"
                                 disabled={busy || !issue?.artifact_path}
                                 onClick={() =>
-                                  revealItemInDir(String(issue?.artifact_path ?? "")).catch((e) =>
+                                  revealPath(String(issue?.artifact_path ?? "")).catch((e) =>
                                     setError(String(e)),
                                   )
                                 }
@@ -6143,7 +6146,7 @@ export function SubtitleEditorPage({ itemId }: { itemId: string }) {
                           <button
                             type="button"
                             disabled={busy || !a.path}
-                            onClick={() => revealItemInDir(a.path).catch((e) => setError(String(e)))}
+                            onClick={() => revealPath(a.path).catch((e) => setError(String(e)))}
                           >
                             Reveal
                           </button>

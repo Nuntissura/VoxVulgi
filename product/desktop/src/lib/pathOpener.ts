@@ -1,14 +1,9 @@
-import { openPath, revealItemInDir } from "@tauri-apps/plugin-opener";
+import { invoke } from "@tauri-apps/api/core";
 
-type RevealMethod = "open_path" | "reveal_item_in_dir";
+type RevealMethod = "shell_open_path" | "shell_reveal_path" | "shell_open_parent_dir";
 
 function normalizePath(path: string): string {
   return (path ?? "").trim();
-}
-
-function isAclOpenPathError(error: unknown): boolean {
-  const raw = String(error ?? "").toLowerCase();
-  return raw.includes("not allowed by acl") || raw.includes("plugin:opener|open_path");
 }
 
 export function requireOpenablePath(path: string, label = "Path"): string {
@@ -24,22 +19,24 @@ export function requireOpenablePath(path: string, label = "Path"): string {
 
 export async function openPathBestEffort(path: string): Promise<{ path: string; method: RevealMethod }> {
   const normalized = requireOpenablePath(path);
-  try {
-    await openPath(normalized);
-    return { path: normalized, method: "open_path" };
-  } catch (error) {
-    if (!isAclOpenPathError(error)) {
-      throw error;
-    }
-    await revealItemInDir(normalized);
-    return { path: normalized, method: "reveal_item_in_dir" };
-  }
+  return invoke<{ path: string; method: RevealMethod }>("shell_open_path", { path: normalized });
 }
 
 export async function revealPath(path: string): Promise<string> {
   const normalized = requireOpenablePath(path);
-  await revealItemInDir(normalized);
-  return normalized;
+  const result = await invoke<{ path: string; method: RevealMethod }>("shell_reveal_path", {
+    path: normalized,
+  });
+  return result.path;
+}
+
+export async function openParentDirBestEffort(
+  path: string,
+): Promise<{ path: string; method: RevealMethod }> {
+  const normalized = requireOpenablePath(path);
+  return invoke<{ path: string; method: RevealMethod }>("shell_open_parent_dir", {
+    path: normalized,
+  });
 }
 
 export async function copyPathToClipboard(path: string): Promise<boolean> {

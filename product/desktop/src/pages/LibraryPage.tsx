@@ -3,6 +3,11 @@ import { invoke } from "@tauri-apps/api/core";
 import { confirm, open, save } from "@tauri-apps/plugin-dialog";
 import { copyPathToClipboard, openPathBestEffort, revealPath } from "../lib/pathOpener";
 import { safeLocalStorageGet, safeLocalStorageSet } from "../lib/persist";
+import {
+  refreshSharedDownloadDirStatus,
+  useSharedDownloadDirStatus,
+} from "../lib/sharedDownloadDir";
+import { fileName, joinPath, parentPath } from "../lib/pathUtils";
 
 type LibraryItem = {
   id: string;
@@ -19,15 +24,6 @@ type LibraryItem = {
   audio_codec: string | null;
   thumbnail_path: string | null;
 };
-
-function joinPath(base: string, ...segments: string[]): string {
-  const trimmedBase = (base ?? "").trim();
-  if (!trimmedBase) return "";
-  const cleaned = segments.map((segment) => segment.replace(/^[\\/]+|[\\/]+$/g, "")).filter(Boolean);
-  const sep = trimmedBase.includes("\\") ? "\\" : "/";
-  if (!cleaned.length) return trimmedBase;
-  return `${trimmedBase.replace(/[\\/]+$/, "")}${sep}${cleaned.join(sep)}`;
-}
 
 const thumbnailDataUrlCache = new Map<string, string>();
 
@@ -106,9 +102,41 @@ function formatDuration(ms: number | null): string {
   return hours > 0 ? parts.join(":") : parts.slice(1).join(":");
 }
 
+function inferMediaKind(item: LibraryItem): "video" | "image" | "audio" | "other" {
+  const path = (item.media_path ?? "").trim().toLowerCase();
+  const imageExts = [".jpg", ".jpeg", ".png", ".webp", ".gif", ".bmp"];
+  const audioExts = [".mp3", ".wav", ".flac", ".aac", ".m4a", ".ogg"];
+  if (imageExts.some((ext) => path.endsWith(ext))) return "image";
+  if (audioExts.some((ext) => path.endsWith(ext))) return "audio";
+  if (item.width || item.height || item.video_codec) return "video";
+  if (item.audio_codec) return "audio";
+  return "other";
+}
+
+function deriveContainerLabel(item: LibraryItem, downloadRoot: string): string {
+  const sourceParent = parentPath(item.media_path);
+  if (!sourceParent) {
+    return fileName(item.media_path) || "Uncategorized";
+  }
+  const normalizedRoot = (downloadRoot ?? "").trim().toLowerCase().replace(/[\\/]+$/, "");
+  const normalizedParent = sourceParent.toLowerCase();
+  if (normalizedRoot && normalizedParent.startsWith(normalizedRoot)) {
+    const relative = sourceParent
+      .slice(downloadRoot.trim().replace(/[\\/]+$/, "").length)
+      .replace(/^[\\/]+/, "");
+    const relativeParts = relative.split(/[\\/]+/).filter(Boolean);
+    if (relativeParts.length) {
+      return relativeParts.slice(0, Math.min(3, relativeParts.length)).join(" / ");
+    }
+  }
+  const parentParts = sourceParent.split(/[\\/]+/).filter(Boolean);
+  return parentParts.slice(Math.max(0, parentParts.length - 2)).join(" / ");
+}
+
 type LibraryPageProps = {
   onOpenEditor?: (itemId: string) => void;
   mode?: LibraryPageMode;
+  onOpenOptions?: () => void;
 };
 
 export type LibraryPageMode =
@@ -121,13 +149,6 @@ export type LibraryPageMode =
 type ItemOutputs = {
   item_id: string;
   derived_item_dir: string;
-};
-
-type DownloadDirStatus = {
-  current_dir: string;
-  default_dir: string;
-  exists: boolean;
-  using_default: boolean;
 };
 
 type FfmpegToolsStatus = {
@@ -244,14 +265,13 @@ type YoutubeSubscriptionsImport4kvdpSummary = {
   archive_seed_failures: number;
 };
 
-export function LibraryPage({ onOpenEditor, mode = "all" }: LibraryPageProps) {
+export function LibraryPage({ onOpenEditor, mode = "all", onOpenOptions }: LibraryPageProps) {
   const maxBatchUrls = 1500;
   const maxInstagramBatchUrls = 1500;
   const maxImageBatchUrls = 1500;
   const libraryPageSize = 200;
-  const libraryVirtualRowHeight = 132;
-  const libraryVirtualViewportHeight = 560;
-  const libraryVirtualOverscan = 5;
+  const libraryViewportHeight = 560;
+  const libraryLoadMoreThresholdPx = 240;
   const minSubscriptionRefreshIntervalMinutes = 5;
   const maxSubscriptionRefreshIntervalMinutes = 10080;
   const showVideoIngest = mode === "all" || mode === "video_ingest";
@@ -259,7 +279,6 @@ export function LibraryPage({ onOpenEditor, mode = "all" }: LibraryPageProps) {
   const showImageArchive = mode === "all" || mode === "image_archive";
   const showMediaLibrary = mode === "all" || mode === "media_library";
   const showImportControls = showVideoIngest || showMediaLibrary;
-  const showDownloadFolder = showVideoIngest || showInstagramArchive || showImageArchive;
   const title =
     mode === "video_ingest"
       ? "Video Ingest"
@@ -274,7 +293,6 @@ export function LibraryPage({ onOpenEditor, mode = "all" }: LibraryPageProps) {
   const [itemsOffset, setItemsOffset] = useState(0);
   const [itemsHasMore, setItemsHasMore] = useState(true);
   const [itemsLoadingMore, setItemsLoadingMore] = useState(false);
-  const [itemsScrollTop, setItemsScrollTop] = useState(0);
   const [subscriptions, setSubscriptions] = useState<YoutubeSubscriptionRow[]>([]);
   const [subscriptionGroups, setSubscriptionGroups] = useState<YoutubeSubscriptionGroupRow[]>([]);
   const [downloadPresets, setDownloadPresets] = useState<DownloadPresetsConfig | null>(null);
@@ -331,7 +349,6 @@ export function LibraryPage({ onOpenEditor, mode = "all" }: LibraryPageProps) {
     return safeLocalStorageGet("voxvulgi.v1.library.image_batch_output_dir") ?? "";
   });
   const [imageBatchAuthCookie, setImageBatchAuthCookie] = useState("");
-  const [downloadDir, setDownloadDir] = useState<DownloadDirStatus | null>(null);
   const [subscriptionEditId, setSubscriptionEditId] = useState<string | null>(null);
   const [subscriptionTitle, setSubscriptionTitle] = useState("");
   const [subscriptionUrl, setSubscriptionUrl] = useState("");
@@ -378,6 +395,22 @@ export function LibraryPage({ onOpenEditor, mode = "all" }: LibraryPageProps) {
   );
   const [presetQualityPreference, setPresetQualityPreference] = useState("best");
   const [presetSubtitleMode, setPresetSubtitleMode] = useState("auto");
+  const [mediaLibrarySearch, setMediaLibrarySearch] = useState(() => {
+    return safeLocalStorageGet("voxvulgi.v1.library.media_search") ?? "";
+  });
+  const [mediaLibraryTypeFilter, setMediaLibraryTypeFilter] = useState<
+    "all" | "video" | "image" | "audio" | "other"
+  >(() => {
+    const raw = safeLocalStorageGet("voxvulgi.v1.library.media_type_filter");
+    if (raw === "video" || raw === "image" || raw === "audio" || raw === "other") return raw;
+    return "all";
+  });
+  const [mediaLibraryGroupMode, setMediaLibraryGroupMode] = useState<"flat" | "folder">(() => {
+    const raw = safeLocalStorageGet("voxvulgi.v1.library.media_group_mode");
+    return raw === "flat" ? raw : "folder";
+  });
+  const { status: downloadDir, loading: downloadDirLoading, hydrated: downloadDirHydrated } =
+    useSharedDownloadDirStatus();
   const parsedUrlCount = useMemo(
     () =>
       urlBatchText
@@ -444,6 +477,55 @@ export function LibraryPage({ onOpenEditor, mode = "all" }: LibraryPageProps) {
     () => joinPath(effectiveDownloadRoot, "localization", "en"),
     [effectiveDownloadRoot],
   );
+  const filteredMediaItems = useMemo(() => {
+    const needle = mediaLibrarySearch.trim().toLowerCase();
+    return items.filter((item) => {
+      const mediaKind = inferMediaKind(item);
+      if (mediaLibraryTypeFilter !== "all" && mediaKind !== mediaLibraryTypeFilter) {
+        return false;
+      }
+      if (!needle) return true;
+      const haystack = [
+        item.title,
+        item.media_path,
+        item.source_uri,
+        item.video_codec,
+        item.audio_codec,
+      ]
+        .filter(Boolean)
+        .join(" ")
+        .toLowerCase();
+      return haystack.includes(needle);
+    });
+  }, [items, mediaLibrarySearch, mediaLibraryTypeFilter]);
+  const groupedMediaItems = useMemo(() => {
+    if (mediaLibraryGroupMode === "flat") {
+      return [
+        {
+          key: "all_media",
+          label: "All loaded media",
+          items: filteredMediaItems,
+        },
+      ];
+    }
+    const groups = new Map<string, LibraryItem[]>();
+    for (const item of filteredMediaItems) {
+      const label = deriveContainerLabel(item, effectiveDownloadRoot) || "Uncategorized";
+      const existing = groups.get(label);
+      if (existing) {
+        existing.push(item);
+      } else {
+        groups.set(label, [item]);
+      }
+    }
+    return Array.from(groups.entries())
+      .sort((a, b) => a[0].localeCompare(b[0]))
+      .map(([label, groupItems]) => ({
+        key: label,
+        label,
+        items: groupItems,
+      }));
+  }, [effectiveDownloadRoot, filteredMediaItems, mediaLibraryGroupMode]);
 
   const refresh = useCallback(async () => {
     setError(null);
@@ -470,7 +552,6 @@ export function LibraryPage({ onOpenEditor, mode = "all" }: LibraryPageProps) {
     setItems(nextItems);
     setItemsOffset(nextItems.length);
     setItemsHasMore(nextItems.length >= libraryPageSize);
-    setItemsScrollTop(0);
     setItemsLoadingMore(false);
     if (nextRules) setBatchRules(nextRules);
     setSubscriptions(nextSubscriptions);
@@ -503,93 +584,13 @@ export function LibraryPage({ onOpenEditor, mode = "all" }: LibraryPageProps) {
   const handleItemsScroll = useCallback(
     (event: UIEvent<HTMLDivElement>) => {
       const target = event.currentTarget;
-      setItemsScrollTop(target.scrollTop);
       const remaining = target.scrollHeight - (target.scrollTop + target.clientHeight);
-      if (remaining <= libraryVirtualRowHeight * 4 && itemsHasMore && !itemsLoadingMore) {
+      if (remaining <= libraryLoadMoreThresholdPx && itemsHasMore && !itemsLoadingMore) {
         void loadMoreItems();
       }
     },
-    [itemsHasMore, itemsLoadingMore, libraryVirtualRowHeight, loadMoreItems],
+    [itemsHasMore, itemsLoadingMore, libraryLoadMoreThresholdPx, loadMoreItems],
   );
-
-  const libraryVirtualWindow = useMemo(() => {
-    const visibleCount = Math.max(
-      1,
-      Math.ceil(libraryVirtualViewportHeight / libraryVirtualRowHeight),
-    );
-    const startIndex = Math.max(
-      0,
-      Math.floor(itemsScrollTop / libraryVirtualRowHeight) - libraryVirtualOverscan,
-    );
-    const endIndex = Math.min(
-      items.length,
-      startIndex + visibleCount + libraryVirtualOverscan * 2,
-    );
-    return {
-      startIndex,
-      endIndex,
-      topSpacerHeight: startIndex * libraryVirtualRowHeight,
-      bottomSpacerHeight: Math.max(
-        0,
-        (items.length - endIndex) * libraryVirtualRowHeight,
-      ),
-      visibleItems: items.slice(startIndex, endIndex),
-    };
-  }, [
-    items,
-    itemsScrollTop,
-    libraryVirtualOverscan,
-    libraryVirtualRowHeight,
-    libraryVirtualViewportHeight,
-  ]);
-
-  const refreshDownloadDir = useCallback(async () => {
-    const status = await invoke<DownloadDirStatus>("downloads_dir_status");
-    setDownloadDir(status);
-    return status;
-  }, []);
-
-  const chooseDownloadDir = useCallback(async () => {
-    setBusy(true);
-    setError(null);
-    setNotice(null);
-    try {
-      const selected = await open({
-        multiple: false,
-        directory: true,
-        title: "Select download folder",
-      });
-      if (!selected || typeof selected !== "string") return;
-
-      const status = await invoke<DownloadDirStatus>("downloads_dir_set", {
-        path: selected,
-        createIfMissing: true,
-      });
-      setDownloadDir(status);
-      setNotice(`Download folder set to ${status.current_dir}`);
-    } catch (e) {
-      setError(String(e));
-    } finally {
-      setBusy(false);
-    }
-  }, []);
-
-  const useDefaultDownloadDir = useCallback(async () => {
-    setBusy(true);
-    setError(null);
-    setNotice(null);
-    try {
-      const status = await invoke<DownloadDirStatus>("downloads_dir_use_default", {
-        createIfMissing: true,
-      });
-      setDownloadDir(status);
-      setNotice(`Using default download folder: ${status.current_dir}`);
-    } catch (e) {
-      setError(String(e));
-    } finally {
-      setBusy(false);
-    }
-  }, []);
 
   const chooseInstagramOutputDir = useCallback(async () => {
     setError(null);
@@ -656,8 +657,9 @@ export function LibraryPage({ onOpenEditor, mode = "all" }: LibraryPageProps) {
   }, []);
 
   useEffect(() => {
-    Promise.all([refresh(), refreshDownloadDir()]).catch((e) => setError(String(e)));
-  }, [refresh, refreshDownloadDir]);
+    refresh().catch((e) => setError(String(e)));
+    void refreshSharedDownloadDirStatus();
+  }, [refresh]);
 
   useEffect(() => {
     safeLocalStorageSet("voxvulgi.v1.settings.asr_lang", asrLang);
@@ -756,6 +758,18 @@ export function LibraryPage({ onOpenEditor, mode = "all" }: LibraryPageProps) {
       String(subscriptionRefreshIntervalMinutes),
     );
   }, [subscriptionRefreshIntervalMinutes]);
+
+  useEffect(() => {
+    safeLocalStorageSet("voxvulgi.v1.library.media_search", mediaLibrarySearch);
+  }, [mediaLibrarySearch]);
+
+  useEffect(() => {
+    safeLocalStorageSet("voxvulgi.v1.library.media_type_filter", mediaLibraryTypeFilter);
+  }, [mediaLibraryTypeFilter]);
+
+  useEffect(() => {
+    safeLocalStorageSet("voxvulgi.v1.library.media_group_mode", mediaLibraryGroupMode);
+  }, [mediaLibraryGroupMode]);
 
   async function importFile() {
     setBusy(true);
@@ -863,7 +877,7 @@ export function LibraryPage({ onOpenEditor, mode = "all" }: LibraryPageProps) {
     try {
       const opened = await openPathBestEffort(item.media_path);
       setNotice(
-        opened.method === "open_path"
+        opened.method === "shell_open_path"
           ? `Opened media file: ${opened.path}`
           : `Revealed media file in file explorer: ${opened.path}`,
       );
@@ -902,7 +916,7 @@ export function LibraryPage({ onOpenEditor, mode = "all" }: LibraryPageProps) {
       targetPath = outputs.derived_item_dir ?? "";
       const opened = await openPathBestEffort(targetPath);
       setNotice(
-        opened.method === "open_path"
+        opened.method === "shell_open_path"
           ? `Working files folder: ${opened.path}`
           : `Working files folder revealed in file explorer: ${opened.path}`,
       );
@@ -930,9 +944,10 @@ export function LibraryPage({ onOpenEditor, mode = "all" }: LibraryPageProps) {
       if (urls.length > maxBatchUrls) {
         throw new Error(`Too many URLs. Maximum ${maxBatchUrls}.`);
       }
-      if (!downloadDir?.exists && !urlBatchOutputDir.trim()) {
+      const effectiveStatus = downloadDir ?? (await refreshSharedDownloadDirStatus());
+      if (!effectiveStatus?.exists && !urlBatchOutputDir.trim()) {
         throw new Error(
-          "Download folder is missing. Choose an existing folder, create the default folder, or set a video output folder.",
+          "Shared download root is missing. Open Options to choose an existing folder, use the default folder, or set a video output folder here.",
         );
       }
 
@@ -967,9 +982,10 @@ export function LibraryPage({ onOpenEditor, mode = "all" }: LibraryPageProps) {
       if (urls.length > maxInstagramBatchUrls) {
         throw new Error(`Too many Instagram URLs. Maximum ${maxInstagramBatchUrls}.`);
       }
-      if (!downloadDir?.exists && !instagramBatchOutputDir.trim()) {
+      const effectiveStatus = downloadDir ?? (await refreshSharedDownloadDirStatus());
+      if (!effectiveStatus?.exists && !instagramBatchOutputDir.trim()) {
         throw new Error(
-          "Download folder is missing. Choose an existing folder or select an Instagram output folder.",
+          "Shared download root is missing. Open Options to choose an existing folder or select an Instagram output folder here.",
         );
       }
 
@@ -995,9 +1011,10 @@ export function LibraryPage({ onOpenEditor, mode = "all" }: LibraryPageProps) {
     setError(null);
     setNotice(null);
     try {
-      if (!downloadDir?.exists && !imageBatchOutputDir.trim()) {
+      const effectiveStatus = downloadDir ?? (await refreshSharedDownloadDirStatus());
+      if (!effectiveStatus?.exists && !imageBatchOutputDir.trim()) {
         throw new Error(
-          "Download folder is missing. Choose an existing folder, create the default folder, or set an image output folder.",
+          "Shared download root is missing. Open Options to choose an existing folder, use the default folder, or set an image output folder here.",
         );
       }
 
@@ -1577,66 +1594,71 @@ export function LibraryPage({ onOpenEditor, mode = "all" }: LibraryPageProps) {
         </div>
       ) : null}
 
-      {showDownloadFolder ? (
+      {(showVideoIngest || showInstagramArchive || showImageArchive) ? (
         <div className="card">
-        <h2>Download folder</h2>
-        <div className="kv">
-          <div className="k">Current</div>
-          <div className="v">{downloadDir?.current_dir ?? "-"}</div>
-        </div>
-        <div className="kv">
-          <div className="k">Default</div>
-          <div className="v">{downloadDir?.default_dir ?? "-"}</div>
-        </div>
-        <div className="kv">
-          <div className="k">Status</div>
-          <div className="v">
-            {downloadDir ? (downloadDir.exists ? "ready" : "missing") : "-"}
-            {downloadDir ? (downloadDir.using_default ? " (default)" : " (custom)") : ""}
+          <h2>Shared storage root</h2>
+          <div style={{ color: "#4b5563", marginTop: 6 }}>
+            The shared download and export root now lives in <strong>Options</strong> so archive
+            windows and Localization Studio all use the same folder without resetting on pane
+            switches.
           </div>
-        </div>
-        {!downloadDir?.exists ? (
-          <div className="error">
-            Download folder is missing. Select the correct folder or create a new default folder.
+          <div className="kv">
+            <div className="k">Current root</div>
+            <div className="v">{effectiveDownloadRoot || "-"}</div>
           </div>
-        ) : null}
-        <div className="row">
-          <button type="button" disabled={busy} onClick={chooseDownloadDir}>
-            Choose folder
-          </button>
-          <button type="button" disabled={busy} onClick={useDefaultDownloadDir}>
-            Use default folder
-          </button>
-          <button type="button" disabled={busy} onClick={() => refreshDownloadDir()}>
-            Refresh folder status
-          </button>
-        </div>
-        <div style={{ color: "#4b5563", marginTop: 10 }}>
-          Default app-managed export map under this root:
-        </div>
-        <div className="kv">
-          <div className="k">Video / playlists</div>
-          <div className="v">{defaultVideoDownloadsDir || "-"}</div>
-        </div>
-        <div className="kv">
-          <div className="k">Subscriptions</div>
-          <div className="v">{defaultSubscriptionDownloadsDir || "-"}</div>
-        </div>
-        <div className="kv">
-          <div className="k">Instagram archive</div>
-          <div className="v">{defaultInstagramDownloadsDir || "-"}</div>
-        </div>
-        <div className="kv">
-          <div className="k">Forum / image archive</div>
-          <div className="v">{defaultImageDownloadsDir || "-"}</div>
-        </div>
-        <div className="kv">
-          <div className="k">Localization exports</div>
-          <div className="v">{defaultLocalizationExportsDir || "-"}</div>
-        </div>
-        <div style={{ color: "#4b5563", marginTop: 8 }}>
-          Video presets still add provider/channel or playlist subfolders inside the video root.
-        </div>
+          <div className="kv">
+            <div className="k">Status</div>
+            <div className="v">
+              {!downloadDirHydrated || downloadDirLoading
+                ? "checking..."
+                : downloadDir?.exists
+                  ? "ready"
+                  : "missing"}
+              {downloadDir ? (downloadDir.using_default ? " (default)" : " (custom)") : ""}
+            </div>
+          </div>
+          {!downloadDirLoading && downloadDirHydrated && downloadDir && !downloadDir.exists ? (
+            <div className="error">
+              Shared download root is unavailable. Open Options to choose a valid folder.
+            </div>
+          ) : null}
+          <div className="row">
+            <button
+              type="button"
+              disabled={busy || !effectiveDownloadRoot}
+              onClick={() => openPathBestEffort(effectiveDownloadRoot).catch((e) => setError(String(e)))}
+            >
+              Open root
+            </button>
+            {onOpenOptions ? (
+              <button type="button" disabled={busy} onClick={onOpenOptions}>
+                Open Options
+              </button>
+            ) : null}
+          </div>
+          <div style={{ color: "#4b5563", marginTop: 10 }}>
+            Default app-managed export map under this root:
+          </div>
+          <div className="kv">
+            <div className="k">Video / playlists</div>
+            <div className="v">{defaultVideoDownloadsDir || "-"}</div>
+          </div>
+          <div className="kv">
+            <div className="k">Subscriptions</div>
+            <div className="v">{defaultSubscriptionDownloadsDir || "-"}</div>
+          </div>
+          <div className="kv">
+            <div className="k">Instagram archive</div>
+            <div className="v">{defaultInstagramDownloadsDir || "-"}</div>
+          </div>
+          <div className="kv">
+            <div className="k">Forum / image archive</div>
+            <div className="v">{defaultImageDownloadsDir || "-"}</div>
+          </div>
+          <div className="kv">
+            <div className="k">Localization exports</div>
+            <div className="v">{defaultLocalizationExportsDir || "-"}</div>
+          </div>
         </div>
       ) : null}
 
@@ -2388,49 +2410,114 @@ export function LibraryPage({ onOpenEditor, mode = "all" }: LibraryPageProps) {
           stored under the app-data folder (open Diagnostics -&gt; App data dir, or use the Outputs
           button).
         </div>
+        <div className="row">
+          <label style={{ display: "flex", alignItems: "center", gap: 8, flex: 1, minWidth: 260 }}>
+            <span>Filter</span>
+            <input
+              value={mediaLibrarySearch}
+              disabled={busy}
+              onChange={(e) => setMediaLibrarySearch(e.currentTarget.value)}
+              placeholder="Search title, path, codec, source..."
+              style={{ width: "100%" }}
+            />
+          </label>
+          <label style={{ display: "flex", alignItems: "center", gap: 8 }}>
+            <span>Type</span>
+            <select
+              value={mediaLibraryTypeFilter}
+              disabled={busy}
+              onChange={(e) =>
+                setMediaLibraryTypeFilter(
+                  e.currentTarget.value as typeof mediaLibraryTypeFilter,
+                )
+              }
+            >
+              <option value="all">All</option>
+              <option value="video">Video</option>
+              <option value="image">Image</option>
+              <option value="audio">Audio</option>
+              <option value="other">Other</option>
+            </select>
+          </label>
+          <label style={{ display: "flex", alignItems: "center", gap: 8 }}>
+            <span>Group by</span>
+            <select
+              value={mediaLibraryGroupMode}
+              disabled={busy}
+              onChange={(e) =>
+                setMediaLibraryGroupMode(e.currentTarget.value as typeof mediaLibraryGroupMode)
+              }
+            >
+              <option value="folder">Folder / source path</option>
+              <option value="flat">Flat list</option>
+            </select>
+          </label>
+        </div>
         <div
           className="table-wrap"
-          style={{ maxHeight: libraryVirtualViewportHeight, overflowY: "auto" }}
+          style={{ maxHeight: libraryViewportHeight, overflowY: "auto", padding: 14 }}
           onScroll={handleItemsScroll}
         >
-          <table>
-            <thead>
-              <tr>
-                <th>Preview</th>
-                <th>Title</th>
-                <th>Duration</th>
-                <th>Video</th>
-                <th>Audio</th>
-                <th>Path</th>
-                <th>Actions</th>
-              </tr>
-            </thead>
-            <tbody>
-              {items.length ? (
-                <>
-                  {libraryVirtualWindow.topSpacerHeight > 0 ? (
-                    <tr aria-hidden="true">
-                      <td colSpan={7} style={{ height: libraryVirtualWindow.topSpacerHeight, padding: 0, border: "none" }} />
-                    </tr>
-                  ) : null}
-                  {libraryVirtualWindow.visibleItems.map((item) => (
-                    <tr key={item.id} style={{ height: libraryVirtualRowHeight }}>
-                      <td>
-                        {item.thumbnail_path ? (
+          {filteredMediaItems.length ? (
+            <div style={{ display: "grid", gap: 18 }}>
+              {groupedMediaItems.map((group) => (
+                <section key={group.key} style={{ display: "grid", gap: 10 }}>
+                  <div
+                    style={{
+                      display: "flex",
+                      justifyContent: "space-between",
+                      gap: 12,
+                      alignItems: "baseline",
+                    }}
+                  >
+                    <h3 style={{ margin: 0, fontSize: "0.96rem", letterSpacing: "0.04em" }}>{group.label}</h3>
+                    <div style={{ color: "#4b5563", fontSize: 12 }}>
+                      {group.items.length} item{group.items.length === 1 ? "" : "s"}
+                    </div>
+                  </div>
+                  <div
+                    style={{
+                      display: "grid",
+                      gap: 12,
+                      gridTemplateColumns: "repeat(auto-fill, minmax(270px, 1fr))",
+                    }}
+                  >
+                    {group.items.map((item) => (
+                      <article
+                        key={item.id}
+                        style={{
+                          display: "grid",
+                          gap: 10,
+                          padding: 12,
+                          borderRadius: 8,
+                          border: "1px solid rgba(126, 145, 167, 0.3)",
+                          background: "linear-gradient(154deg, #edf2f7 0%, #dce3eb 54%, #c9d2dc 100%)",
+                        }}
+                      >
+                        <div style={{ display: "flex", gap: 12, alignItems: "flex-start" }}>
                           <ThumbnailPreview itemId={item.id} path={item.thumbnail_path} />
-                        ) : (
-                          <ThumbnailPreview itemId={item.id} path={item.thumbnail_path} />
-                        )}
-                      </td>
-                      <td>{item.title}</td>
-                      <td>{formatDuration(item.duration_ms)}</td>
-                      <td>
-                        {item.width && item.height ? `${item.width}x${item.height}` : "-"}
-                        {item.video_codec ? ` (${item.video_codec})` : ""}
-                      </td>
-                      <td>{item.audio_codec ?? "-"}</td>
-                      <td style={{ maxWidth: 420 }}>{item.media_path}</td>
-                      <td>
+                          <div style={{ minWidth: 0, display: "grid", gap: 4 }}>
+                            <strong style={{ lineHeight: 1.2 }}>{item.title}</strong>
+                            <div style={{ color: "#4b5563", fontSize: 12 }}>
+                              {inferMediaKind(item).toUpperCase()} · {formatDuration(item.duration_ms)}
+                            </div>
+                            <div style={{ color: "#4b5563", fontSize: 12 }}>
+                              {item.width && item.height ? `${item.width}x${item.height}` : "-"}
+                              {item.video_codec ? ` · ${item.video_codec}` : ""}
+                              {item.audio_codec ? ` · ${item.audio_codec}` : ""}
+                            </div>
+                          </div>
+                        </div>
+                        <div
+                          style={{
+                            fontSize: 12,
+                            color: "#334155",
+                            lineHeight: 1.35,
+                            wordBreak: "break-word",
+                          }}
+                        >
+                          {item.media_path}
+                        </div>
                         <div className="row" style={{ marginTop: 0 }}>
                           <button type="button" disabled={busy} onClick={() => runAsr(item.id)}>
                             ASR
@@ -2455,32 +2542,26 @@ export function LibraryPage({ onOpenEditor, mode = "all" }: LibraryPageProps) {
                             Open file
                           </button>
                           <button type="button" disabled={busy} onClick={() => revealMediaFile(item)}>
-                            Reveal file
+                            Open folder
                           </button>
                           <button type="button" disabled={busy} onClick={() => openItemOutputs(item.id)}>
                             Working files
                           </button>
                         </div>
-                      </td>
-                    </tr>
-                  ))}
-                  {libraryVirtualWindow.bottomSpacerHeight > 0 ? (
-                    <tr aria-hidden="true">
-                      <td colSpan={7} style={{ height: libraryVirtualWindow.bottomSpacerHeight, padding: 0, border: "none" }} />
-                    </tr>
-                  ) : null}
-                </>
-              ) : (
-                <tr>
-                  <td colSpan={7}>No items yet.</td>
-                </tr>
-              )}
-            </tbody>
-          </table>
+                      </article>
+                    ))}
+                  </div>
+                </section>
+              ))}
+            </div>
+          ) : (
+            <div style={{ color: "#4b5563" }}>No items matched the current filter.</div>
+          )}
         </div>
         <div className="row">
           <div style={{ color: "#4b5563" }}>
-            Loaded {items.length} item{items.length === 1 ? "" : "s"}
+            Loaded {items.length} item{items.length === 1 ? "" : "s"}.
+            Showing {filteredMediaItems.length} after filters.
             {itemsHasMore ? " (more available)" : ""}.
           </div>
           <button type="button" disabled={busy || itemsLoadingMore || !itemsHasMore} onClick={loadMoreItems}>

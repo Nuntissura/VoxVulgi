@@ -1,6 +1,5 @@
 import { startTransition, useCallback, useEffect, useMemo, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
-import { revealItemInDir } from "@tauri-apps/plugin-opener";
 import { confirm, open, save } from "@tauri-apps/plugin-dialog";
 import { copyPathToClipboard, openPathBestEffort, revealPath as revealFilesystemPath } from "../lib/pathOpener";
 
@@ -803,7 +802,7 @@ export function DiagnosticsPage() {
       );
       await refresh();
       try {
-        await revealItemInDir(result.out_path);
+        await revealFilesystemPath(result.out_path);
       } catch {
         // ignore
       }
@@ -908,7 +907,7 @@ export function DiagnosticsPage() {
       );
       await refresh();
       try {
-        await revealItemInDir(result.out_path);
+        await revealFilesystemPath(result.out_path);
       } catch {
         // ignore
       }
@@ -925,7 +924,7 @@ export function DiagnosticsPage() {
     try {
       const opened = await openPathBestEffort(info.app_data_dir);
       setNotice(
-        opened.method === "open_path"
+        opened.method === "shell_open_path"
           ? `App data folder: ${opened.path}`
           : `App data folder revealed in file explorer: ${opened.path}`,
       );
@@ -940,7 +939,7 @@ export function DiagnosticsPage() {
     setError(null);
     if (!info?.db_path) return;
     try {
-      await revealItemInDir(info.db_path);
+      await revealFilesystemPath(info.db_path);
     } catch (e) {
       setError(String(e));
     }
@@ -953,7 +952,7 @@ export function DiagnosticsPage() {
     try {
       const opened = await openPathBestEffort(path);
       setNotice(
-        opened.method === "open_path"
+        opened.method === "shell_open_path"
           ? `Diagnostics trace folder: ${opened.path}`
           : `Diagnostics trace folder revealed in file explorer: ${opened.path}`,
       );
@@ -1163,7 +1162,7 @@ export function DiagnosticsPage() {
       setNotice(`Exported diagnostics bundle (${formatBytes(result.file_bytes)}): ${result.out_path}`);
       await refresh();
       try {
-        await revealItemInDir(result.out_path);
+        await revealFilesystemPath(result.out_path);
       } catch {
         // Ignore reveal errors.
       }
@@ -1188,7 +1187,7 @@ export function DiagnosticsPage() {
     setError(null);
     if (!job.logs_path) return;
     try {
-      await revealItemInDir(job.logs_path);
+      await revealFilesystemPath(job.logs_path);
     } catch (e) {
       setError(String(e));
     }

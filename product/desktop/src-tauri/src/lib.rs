@@ -95,6 +95,12 @@ struct DownloadDirStatus {
 }
 
 #[derive(Debug, Clone, serde::Serialize)]
+struct ShellPathResult {
+    path: String,
+    method: String,
+}
+
+#[derive(Debug, Clone, serde::Serialize)]
 struct SafeModeStatus {
     enabled: bool,
     persisted_enabled: bool,
@@ -627,6 +633,9 @@ fn build_download_dir_status(paths: &AppPaths) -> Result<DownloadDirStatus, Stri
     let default_dir = paths.default_download_dir();
     let override_dir = paths.download_dir_override().map_err(|e| e.to_string())?;
     let current_dir = override_dir.clone().unwrap_or_else(|| default_dir.clone());
+    if current_dir.exists() && current_dir.is_dir() {
+        ensure_media_output_layout(&current_dir)?;
+    }
     let exists = current_dir.exists() && current_dir.is_dir();
 
     Ok(DownloadDirStatus {
@@ -634,6 +643,134 @@ fn build_download_dir_status(paths: &AppPaths) -> Result<DownloadDirStatus, Stri
         default_dir: default_dir.to_string_lossy().to_string(),
         exists,
         using_default: override_dir.is_none(),
+    })
+}
+
+fn normalize_existing_shell_path(path: String, label: &str) -> Result<std::path::PathBuf, String> {
+    let trimmed = path.trim();
+    if trimmed.is_empty() {
+        return Err(format!("{label} is empty"));
+    }
+    if trimmed.contains('\0') {
+        return Err(format!("{label} contains invalid characters"));
+    }
+    let mut target = std::path::PathBuf::from(trimmed);
+    if !target.is_absolute() {
+        target = std::env::current_dir()
+            .map_err(|e| e.to_string())?
+            .join(target);
+    }
+    let normalized = target.canonicalize().unwrap_or(target);
+    if !normalized.exists() {
+        return Err(format!("{label} does not exist: {}", normalized.to_string_lossy()));
+    }
+    Ok(normalized)
+}
+
+fn run_shell_command(command: &mut std::process::Command, action: &str) -> Result<(), String> {
+    let status = command.status().map_err(|e| format!("{action}: {e}"))?;
+    if !status.success() {
+        return Err(format!("{action} failed with exit code {:?}", status.code()));
+    }
+    Ok(())
+}
+
+fn shell_open_target(path: &std::path::Path) -> Result<(), String> {
+    #[cfg(target_os = "windows")]
+    {
+        let mut command = std::process::Command::new("cmd");
+        command.arg("/C").arg("start").arg("").arg(path.as_os_str());
+        return run_shell_command(&mut command, "open path");
+    }
+
+    #[cfg(target_os = "macos")]
+    {
+        let mut command = std::process::Command::new("open");
+        command.arg(path.as_os_str());
+        return run_shell_command(&mut command, "open path");
+    }
+
+    #[cfg(all(unix, not(target_os = "macos")))]
+    {
+        let mut command = std::process::Command::new("xdg-open");
+        command.arg(path.as_os_str());
+        return run_shell_command(&mut command, "open path");
+    }
+}
+
+fn shell_reveal_target(path: &std::path::Path) -> Result<(), String> {
+    #[cfg(target_os = "windows")]
+    {
+        let mut command = std::process::Command::new("explorer");
+        if path.is_dir() {
+            command.arg(path.as_os_str());
+        } else {
+            command.arg("/select,").arg(path.as_os_str());
+        }
+        return run_shell_command(&mut command, "reveal path");
+    }
+
+    #[cfg(target_os = "macos")]
+    {
+        let mut command = std::process::Command::new("open");
+        if path.is_dir() {
+            command.arg(path.as_os_str());
+        } else {
+            command.arg("-R").arg(path.as_os_str());
+        }
+        return run_shell_command(&mut command, "reveal path");
+    }
+
+    #[cfg(all(unix, not(target_os = "macos")))]
+    {
+        let parent = if path.is_dir() {
+            path.to_path_buf()
+        } else {
+            path.parent()
+                .ok_or_else(|| format!("path has no parent: {}", path.to_string_lossy()))?
+                .to_path_buf()
+        };
+        let mut command = std::process::Command::new("xdg-open");
+        command.arg(parent.as_os_str());
+        return run_shell_command(&mut command, "reveal path");
+    }
+}
+
+#[tauri::command]
+fn shell_open_path(path: String) -> Result<ShellPathResult, String> {
+    let normalized = normalize_existing_shell_path(path, "Path")?;
+    shell_open_target(&normalized)?;
+    Ok(ShellPathResult {
+        path: normalized.to_string_lossy().to_string(),
+        method: "shell_open_path".to_string(),
+    })
+}
+
+#[tauri::command]
+fn shell_reveal_path(path: String) -> Result<ShellPathResult, String> {
+    let normalized = normalize_existing_shell_path(path, "Path")?;
+    shell_reveal_target(&normalized)?;
+    Ok(ShellPathResult {
+        path: normalized.to_string_lossy().to_string(),
+        method: "shell_reveal_path".to_string(),
+    })
+}
+
+#[tauri::command]
+fn shell_open_parent_dir(path: String) -> Result<ShellPathResult, String> {
+    let normalized = normalize_existing_shell_path(path, "Path")?;
+    let target = if normalized.is_dir() {
+        normalized
+    } else {
+        normalized
+            .parent()
+            .ok_or_else(|| "Path has no parent directory".to_string())?
+            .to_path_buf()
+    };
+    shell_open_target(&target)?;
+    Ok(ShellPathResult {
+        path: target.to_string_lossy().to_string(),
+        method: "shell_open_parent_dir".to_string(),
     })
 }
 
@@ -3201,6 +3338,9 @@ pub fn run() {
             subtitles_list_tracks,
             subtitles_load_track,
             subtitles_save_new_version,
+            shell_open_parent_dir,
+            shell_open_path,
+            shell_reveal_path,
             tools_ffmpeg_install,
             tools_ffmpeg_status,
             tools_python_install,
