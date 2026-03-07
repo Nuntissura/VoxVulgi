@@ -1,6 +1,6 @@
 # VoxVulgi - Technical Design (Rebuild; Cross-Platform; Local-First)
 
-Date: 2026-02-19  
+Date: 2026-03-07  
 Status: Draft (implementation-oriented; adjusts as we pick stack).
 
 ## 1) Proposed Architecture (Recommended)
@@ -46,6 +46,8 @@ Design goals:
 - Always allow "show in Explorer".
 - Do not write derived outputs next to the source media path by default; exporting is explicit and user-directed.
 - Default user-facing exports should land under the configured download root in predictable app-managed folders (for example `localization/en/<media-stem>/` for Localization Studio deliverables).
+- The shared download/export root should be configured once from a global Options surface, not duplicated as pane-local state.
+- Selecting an existing valid root should hydrate expected app-managed folders and index known existing archive folders instead of briefly treating the root as missing.
 - Allow "clear cache" without touching library media.
 - Avoid storing large thumbnail blobs inside SQLite; store thumbnails on disk and keep the DB as metadata-only.
 - Keep derived outputs per item (reproducible and debuggable).
@@ -127,6 +129,15 @@ Core tables (suggested):
   - `refresh_interval_minutes` (integer, clamped range; user-editable in Library UI)
   - `use_browser_cookies`, `last_queued_at_ms`, `created_at_ms`, `updated_at_ms`
   - `source_url` is unique (merge key for import/upsert)
+- Planned archive-expansion tables:
+  - `instagram_subscription`:
+    - `id`, `title`, `source_url`, `folder_map`, `output_dir_override`, `active`,
+      `refresh_interval_minutes`, `last_queued_at_ms`, `created_at_ms`, `updated_at_ms`
+  - `library_container`:
+    - `id`, `kind` (`playlist`, `subscription`, `folder`, `channel`, or similar),
+      `source_key`, `display_name`, `created_at_ms`, `updated_at_ms`
+  - `library_item_container`:
+    - `item_id`, `container_id`
 
 Additional tables (planned; large-subscription UX hardening):
 
@@ -145,6 +156,7 @@ Requirements:
 - Non-blocking: UI subscribes to job updates.
 - Inspectable: each job has logs and artifacts.
 - Recovery: support a **Safe Mode** startup path that disables auto-refresh and heavy background work so users can always export/manage their data.
+- Shared window data should be retained and reused where safe so pane switches do not refetch or recompute unchanged state.
 
 Implementation sketch:
 
@@ -303,7 +315,11 @@ Phase 1 implementation status (2026-02-22):
   - `youtube_yt_dlp_v1` for YouTube and other webpage video links (yt-dlp expand + download).
 - yt-dlp is bundled in Windows full installers; Diagnostics can install it if missing (network egress is user-initiated; jobs do not auto-download tools during execution).
 - Default download presets should prefer MP4-compatible format selection, and yt-dlp execution should request MP4 merge/remux where supported so final containers are predictable by default.
+- Image/archive providers should prefer JPEG defaults when multiple equivalent encodings are available and JPEG is the practical archive target; avoid surprising WebM-first or similarly unsuitable defaults.
 - Instagram batch ingest expands instagram.com URLs (posts/reels/stories/profiles) into direct media asset URLs where possible, then downloads via `direct_http_v1` into `downloads/instagram/` by default (optional session cookie header for private content).
+- Planned archive additions:
+  - Pinterest board/folder crawl support should plug into the existing crawler-style image archive flow.
+  - Instagram recurring archive targets should reuse the subscription/interval model already established for YouTube where practical.
 - Downloaded media is imported into `library_item`, provenance is persisted in `ingest_provenance`, and downloads are grouped via `job.batch_id` for UI batching.
   - Privacy hardening: cookie headers are not persisted in `job.params_json` and browser-cookie usage is opt-in via explicit Library toggles.
 
@@ -383,6 +399,26 @@ Subscription export JSON shape (v1):
   - TLS only,
   - no IP logging,
   - publish a clear "what we send" list.
+
+### 6.4 Startup and performance traces
+
+- Capture local-first trace sessions for:
+  - startup phase timings,
+  - pane activation latency,
+  - heavyweight background tasks,
+  - major resource snapshots and failures.
+- Traces should be readable from Diagnostics and exportable in a deterministic form for support/debug use.
+- Tool state should be represented explicitly in operator-facing UI and traces, distinguishing:
+  - bundled,
+  - hydrated into app data,
+  - installed,
+  - loaded,
+  - ready.
+
+### 6.5 Desktop shell interaction rules
+
+- Drag-region behavior should be restricted to the intended chrome/background layer and must not swallow normal content interaction.
+- Corner-resize affordances should have a clear reachable hitbox inside the practical app bounds.
 
 ## 7) Testing Strategy
 

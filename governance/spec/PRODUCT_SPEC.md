@@ -1,6 +1,6 @@
 # VoxVulgi — Product Spec (Rebuild; Cross-Platform; Local-First)
 
-Date: 2026-02-20  
+Date: 2026-03-07  
 Status: Draft (assumptions noted; intended as the starting point for implementation planning).
 
 ## 1) Framing / Constraints
@@ -48,24 +48,44 @@ Initial language focus: **Korean + Japanese → English**.
   - set a per-subscription refresh interval (minutes) that can be edited in the Library UI,
   - queue refresh for one subscription or all active subscriptions,
   - keep loaded subscriptions stable across pane switches and window focus changes.
+- Shared storage-root behavior:
+  - the operator configures one shared download/export root from a global Options surface,
+  - the chosen root must persist across startup, updates, and window switches,
+  - selecting a valid root should create expected app-managed folders when absent and index or hydrate existing folders when already present.
 - Add subscription export/import:
   - export all subscriptions to JSON (portable backup/migration file),
   - import from JSON with merge-by-URL behavior (upsert existing, add missing),
   - no subscription deletion on import unless explicitly requested by the user.
+- Video workflow split:
+  - Localization Studio should include a lightweight video-ingest block for local import/refresh and ASR language selection (`auto` plus explicit language choices),
+  - the separate archive window should focus on URL ingest, presets/templates, subscription groups, and subscriptions.
+- Instagram archive additions:
+  - support saved recurring Instagram archive targets with an interval-based refresh model,
+  - show the last 10 archived pictures/stories/reels with uncropped thumbnail framing.
 - Add an in-app **image archive batch** mode for blogs/forums:
   - accepts multiple start URLs in one submission,
   - crawls pagination + post/thread links,
   - skips likely profile/avatar images,
   - prefers full-size image URLs over thumbnail variants,
   - writes a manifest for audit/review.
+- Planned image-archive expansion:
+  - add Pinterest board/folder crawl support with batch URL intake.
 - Auto-extract metadata (duration, codecs, resolution) + generate thumbnails.
+- Existing-library reconciliation:
+  - allow non-destructive indexing of large existing downloader-managed or NAS-backed archive roots,
+  - preserve playlist/channel/subscription folder structure where possible instead of flattening existing trees.
 - Performance stance (large libraries):
   - thumbnails should be stored on disk (cache) and lazy-loaded (no giant DB BLOB storage),
   - Library list/grid should be virtualized to stay responsive with very large libraries.
 - Library list with:
   - search (title/tags/text),
   - filters (language, status, date, source),
-  - collections/playlists.
+  - collections/playlists,
+  - grouped browsing by source container such as playlist/subscription/folder,
+  - media-type filters such as video and image.
+- Default archive/output media policy:
+  - video workflows should prefer MP4 by default wherever the local toolchain can merge or remux cleanly,
+  - image workflows should prefer JPEG defaults where the provider/toolchain offers multiple encodings without destructive tradeoffs.
 - “Smart tags” v1:
   - language detected,
   - speaker count (rough),
@@ -92,13 +112,17 @@ Initial language focus: **Korean + Japanese → English**.
 
 ### 4.4 Diagnostics (must-have)
 
-- “Diagnostics” page:
+- "Diagnostics" page:
   - versions of major components (app, ffmpeg, models),
-  - model inventory (what’s installed, where it’s stored, and how much space it uses),
+  - model inventory (what's installed, where it's stored, and how much space it uses),
   - storage usage breakdown (library, cache, logs),
   - last job errors with copy/export.
+- Startup and performance diagnostics:
+  - show a meaningful startup progress bar or phase list while heavyweight background initialization is in flight,
+  - capture deterministic local traces for startup phases, pane activation, resource usage, and major failures,
+  - explain tool state in operator terms such as bundled, hydrated, installed, loaded, and ready.
 - Log rotation and retention (cap by size + age).
-- “Export diagnostics bundle” (logs + job metadata + redacted config).
+- "Export diagnostics bundle" (logs + job metadata + redacted config).
 - Recovery UX:
   - a **Safe Mode** startup path to open the app without auto-refresh or heavy background work (so users can export/manage data even when providers regress).
 
@@ -214,24 +238,37 @@ Current implementation status:
 - **Jobs/Queue**: execution state + retry/cancel + logs and output reveal.
 - **Diagnostics**: non-blocking, section-by-section loading with explicit readiness states.
 
+### 8.0.2 Planned top-level window refinements (next hardening tranche)
+
+- **Localization Studio** should add a lightweight ingest block for local import/refresh plus ASR-language selection because this is the primary operator workflow.
+- **Video Ingest** should be renamed to **Video Archiver** and remain the dedicated home for URL ingest, presets/templates, subscription groups, and YouTube subscriptions.
+- **Instagram Archive** should be renamed to **Instagram Archiver**.
+- **Options** should become the discoverable home for shared storage-root configuration and related global path behavior.
+
 ## 8.1) Stabilization priorities for commercial readiness (2026-03-03)
 
 ### 8.1.1 Operator goals and needs
 
 - Localization Studio (Dub/CC) must be the primary, first-visible workspace.
+- Localization Studio should include the first ingest step needed to move directly into ASR and dubbing work.
 - Navigation must be split into clear top-level windows for ingest/archive/localization work.
 - Window switching, Diagnostics entry, and startup must stay responsive (no visible freezing).
 - Jobs "Open outputs" actions must reliably open paths without ACL errors.
+- Shared download/export roots must persist without temporary "missing folder" states.
+- Operators should be able to reveal files or parent folders anywhere the app creates an output or artifact.
 - Localization exports must be easy to find, with a predictable default folder map and direct open/reveal actions for both source files and generated deliverables.
 - Default preview/download video outputs should be MP4 wherever the local toolchain can merge/remux cleanly.
+- Default archive image outputs should prefer JPEG where practical.
 - UX must be fast enough for daily production use before any commercial release.
 
 ### 8.1.2 Required top-level window model
 
 - Localization Studio (Dub/CC) - default first-run window and main feature surface.
-- Video Ingest - local ingest + YouTube ingest + playlist/subscription/folder-map flows.
-- Instagram Archive - dedicated archive workflow.
+- Localization Studio ingest block - local import/refresh + ASR language selection in-context.
+- Video Archiver - local ingest + URL ingest + presets/templates + playlist/subscription/folder-map flows.
+- Instagram Archiver - dedicated archive workflow with recurring archive targets.
 - Image Archive - dedicated archive workflow.
+- Options - shared storage roots and global path behavior.
 - Jobs/Queue - execution visibility + controls.
 - Diagnostics - health/recovery tooling with non-blocking load.
 - "Items" must be either clearly defined and renamed or merged into a clearer workspace label.
@@ -240,15 +277,26 @@ Current implementation status:
 
 - Startup: app shell becomes interactable before heavyweight background initialization completes.
 - Startup instrumentation: boot timeline markers must identify slow phases in logs/diagnostics.
+- Startup UX: show visible loading progress instead of opaque background work.
 - Window switching: no multi-second freezes during normal navigation.
 - Diagnostics entry: render shell immediately and load sections incrementally with explicit readiness states.
 
-### 8.1.4 Reliability requirement: output path opening
+### 8.1.4 Reliability requirement: shared storage roots
+
+- Global download/export root selection must be stable across startup, updates, and pane switches.
+- Choosing a valid existing root must hydrate or index expected folder structure instead of flashing a missing-folder error.
+
+### 8.1.5 Reliability requirement: output path opening
 
 - Queue/Library/Diagnostics open-path actions must work for valid output/artifact paths.
 - Blocked/invalid paths must return actionable errors with copy-path fallback.
 
-### 8.1.5 Installer and uninstall clarity requirement
+### 8.1.6 Desktop shell ergonomics requirement
+
+- Corner resizing must have an obvious reachable hitbox.
+- Dragging the app should be limited to background chrome so text selection and scrollbars still work inside content areas.
+
+### 8.1.7 Installer and uninstall clarity requirement
 
 - Setup/maintenance UI must clearly present:
   - Update/Repair in place,

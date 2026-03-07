@@ -45,6 +45,20 @@ Date: 2026-03-07
 
 - WP-0095: Run a real Localization Studio app smoke for `WP-0092` to `WP-0094`, capture operator-facing proof, and queue any remaining defects as explicit follow-up packets.
 
+## Workflow and Archive UX Hardening (2026-03)
+
+- WP-0096: Refresh the top-level IA so Localization Studio owns first-step ingest while `Video Archiver` and `Instagram Archiver` are named and scoped clearly.
+- WP-0097: Move the shared download/export root into global Options and make path hydration deterministic across startup, updates, and window switches.
+- WP-0098: Reconcile large existing downloader/NAS archive roots, playlists, and subscriptions without flattening or destructive moves.
+- WP-0099: Harden Video Archiver and Instagram Archiver workflows with subscription folder reveal, recurring Instagram archive refresh, and uncropped recent thumbnail viewing.
+- WP-0100: Improve Media Library with reliable open-file behavior on secondary drives, tighter card actions, grouped browsing, and media-type filters.
+- WP-0101: Standardize `Open file` and `Open parent folder` actions across all output/artifact surfaces.
+- WP-0102: Add startup progress and deterministic performance/resource tracing, including clearer bundled-versus-loaded tool-state visibility.
+- WP-0103: Retain pane state and reduce content reload/freeze behavior when switching windows.
+- WP-0104: Refine drag and resize ergonomics so the shell does not block text selection, scrolling, or diagonal resize.
+- WP-0105: Make MP4 the default video target and JPEG the default image target wherever the local toolchain can comply sensibly.
+- WP-0106: Add Pinterest board/folder crawling to Image Archive with batch URL intake.
+
 ## Phase 0 — Decisions (1–2 days)
 
 - Pick stack: Tauri/Rust + Python workers (recommended) vs Qt vs Electron.
