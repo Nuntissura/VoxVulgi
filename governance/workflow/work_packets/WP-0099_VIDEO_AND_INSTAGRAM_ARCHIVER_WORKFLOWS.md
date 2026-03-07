@@ -3,7 +3,7 @@
 ## Metadata
 - ID: WP-0099
 - Owner: Codex
-- Status: BACKLOG
+- Status: DONE
 - Created: 2026-03-07
 - Target milestone: Workflow and archive UX hardening
 
@@ -39,3 +39,4 @@ Out of scope:
 ## Status updates
 
 - 2026-03-07: Created from operator feedback on archive workflow gaps in the current YouTube and Instagram surfaces.
+- 2026-03-07: Implemented and verified. Video Archiver now exposes saved-subscription folder opening, while Instagram Archiver adds recurring subscriptions, due-run queueing from an app heartbeat, and uncropped recent-media previews.

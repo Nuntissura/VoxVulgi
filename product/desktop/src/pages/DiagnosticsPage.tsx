@@ -231,6 +231,48 @@ type DiagnosticsTraceClearSummary = {
   removed_bytes: number;
 };
 
+type DiagnosticsProcessSnapshot = {
+  pid: number | null;
+  cpu_percent: number | null;
+  rss_bytes: number | null;
+  virtual_bytes: number | null;
+  system_used_bytes: number | null;
+  system_total_bytes: number | null;
+};
+
+type DiagnosticsTraceEntry = {
+  ts_ms: number;
+  event: string;
+  level: string;
+  details: unknown;
+  process: DiagnosticsProcessSnapshot | null;
+};
+
+type StartupPhase = {
+  id: string;
+  label: string;
+  state: "pending" | "running" | "ready" | "skipped" | "error";
+  started_at_ms: number | null;
+  finished_at_ms: number | null;
+  error: string | null;
+};
+
+type StartupStatus = {
+  offline_bundle_state:
+    | "not_started"
+    | "pending"
+    | "running"
+    | "ready"
+    | "skipped_safe_mode"
+    | "error";
+  offline_bundle_started_at_ms: number | null;
+  offline_bundle_finished_at_ms: number | null;
+  offline_bundle_error: string | null;
+  progress_pct: number;
+  active_phase_id: string | null;
+  phases: StartupPhase[];
+};
+
 type DiagnosticsSectionKey = "build" | "tools" | "phase2" | "storage" | "jobs" | "trace";
 type DiagnosticsSectionState = "idle" | "loading" | "ready" | "failed";
 type DiagnosticsSectionStatus = {
@@ -264,8 +306,24 @@ function shortId(value: string): string {
   return value.length > 10 ? value.slice(0, 10) : value;
 }
 
+function formatCpuPercent(value: number | null): string {
+  if (value === null || !Number.isFinite(value)) return "-";
+  return `${value.toFixed(1)}%`;
+}
+
+function formatTraceDetails(value: unknown): string {
+  if (value === null || value === undefined) return "-";
+  try {
+    const out = JSON.stringify(value);
+    return out.length > 180 ? `${out.slice(0, 177)}...` : out;
+  } catch {
+    return String(value);
+  }
+}
+
 export function DiagnosticsPage() {
   const [info, setInfo] = useState<DiagnosticsInfo | null>(null);
+  const [startup, setStartup] = useState<StartupStatus | null>(null);
   const [inventory, setInventory] = useState<ModelInventory | null>(null);
   const [ffmpeg, setFfmpeg] = useState<FfmpegToolsStatus | null>(null);
   const [ytdlp, setYtdlp] = useState<YtDlpToolsStatus | null>(null);
@@ -294,6 +352,7 @@ export function DiagnosticsPage() {
   const [policy, setPolicy] = useState<JobLogRetentionPolicy | null>(null);
   const [diagnosticsTraceDir, setDiagnosticsTraceDir] =
     useState<DiagnosticsTraceDirStatus | null>(null);
+  const [recentTrace, setRecentTrace] = useState<DiagnosticsTraceEntry[]>([]);
   const [jobs, setJobs] = useState<JobRow[]>([]);
   const [error, setError] = useState<string | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
@@ -328,6 +387,7 @@ export function DiagnosticsPage() {
     try {
       const [
         nextInfo,
+        nextStartup,
         nextInventory,
         nextFfmpeg,
         nextYtdlp,
@@ -349,9 +409,11 @@ export function DiagnosticsPage() {
         nextThumbnailCache,
         nextPolicy,
         nextDiagnosticsTraceDir,
+        nextRecentTrace,
         nextJobs,
       ] = await Promise.all([
         invoke<DiagnosticsInfo>("diagnostics_info"),
+        invoke<StartupStatus>("startup_status"),
         invoke<ModelInventory>("models_inventory"),
         invoke<FfmpegToolsStatus>("tools_ffmpeg_status"),
         invoke<YtDlpToolsStatus>("tools_ytdlp_status"),
@@ -373,10 +435,12 @@ export function DiagnosticsPage() {
         invoke<ThumbnailCacheStatus>("diagnostics_thumbnail_cache_status"),
         invoke<JobLogRetentionPolicy>("jobs_log_retention_policy"),
         invoke<DiagnosticsTraceDirStatus>("diagnostics_trace_dir_status"),
+        invoke<DiagnosticsTraceEntry[]>("diagnostics_trace_recent", { limit: 120 }),
         invoke<JobRow[]>("jobs_list", { limit: 200, offset: 0 }),
       ]);
       startTransition(() => {
         setInfo(nextInfo);
+        setStartup(nextStartup);
         setInventory(nextInventory);
         setFfmpeg(nextFfmpeg);
         setYtdlp(nextYtdlp);
@@ -399,6 +463,7 @@ export function DiagnosticsPage() {
         setThumbnailCache(nextThumbnailCache);
         setPolicy(nextPolicy);
         setDiagnosticsTraceDir(nextDiagnosticsTraceDir);
+        setRecentTrace(nextRecentTrace);
         setJobs(nextJobs);
         (["build", "tools", "phase2", "storage", "jobs", "trace"] as DiagnosticsSectionKey[]).forEach(
           (key) => updateSectionStatus(key, "ready"),
@@ -415,9 +480,10 @@ export function DiagnosticsPage() {
   const loadBuildSection = useCallback(async () => {
     updateSectionStatus("build", "loading");
     try {
-      const [nextInfo, nextInventory, nextBatchRules, nextDiarizationOptional, nextPolicy] =
+      const [nextInfo, nextStartup, nextInventory, nextBatchRules, nextDiarizationOptional, nextPolicy] =
         await Promise.all([
           invoke<DiagnosticsInfo>("diagnostics_info"),
+          invoke<StartupStatus>("startup_status"),
           invoke<ModelInventory>("models_inventory"),
           invoke<BatchOnImportRules>("config_batch_on_import_get"),
           invoke<OptionalDiarizationBackendStatus>("config_diarization_optional_status"),
@@ -425,6 +491,7 @@ export function DiagnosticsPage() {
         ]);
       startTransition(() => {
         setInfo(nextInfo);
+        setStartup(nextStartup);
         setInventory(nextInventory);
         setBatchRules(nextBatchRules);
         setDiarizationOptional(nextDiarizationOptional);
@@ -528,11 +595,13 @@ export function DiagnosticsPage() {
   const loadTraceSection = useCallback(async () => {
     updateSectionStatus("trace", "loading");
     try {
-      const nextDiagnosticsTraceDir = await invoke<DiagnosticsTraceDirStatus>(
-        "diagnostics_trace_dir_status",
-      );
+      const [nextDiagnosticsTraceDir, nextRecentTrace] = await Promise.all([
+        invoke<DiagnosticsTraceDirStatus>("diagnostics_trace_dir_status"),
+        invoke<DiagnosticsTraceEntry[]>("diagnostics_trace_recent", { limit: 120 }),
+      ]);
       startTransition(() => {
         setDiagnosticsTraceDir(nextDiagnosticsTraceDir);
+        setRecentTrace(nextRecentTrace);
         updateSectionStatus("trace", "ready");
       });
     } catch (e) {
@@ -573,6 +642,48 @@ export function DiagnosticsPage() {
   const demoModel = useMemo(
     () => inventory?.models.find((m) => m.id === "demo-ja-asr") ?? null,
     [inventory],
+  );
+
+  const activeStartupPhase =
+    startup?.phases.find((phase) => phase.id === startup.active_phase_id) ??
+    startup?.phases.find((phase) => phase.state === "running" || phase.state === "pending") ??
+    null;
+
+  const toolLifecycleRows = useMemo(
+    () => [
+      {
+        name: "Installer hydration",
+        state:
+          startup?.offline_bundle_state === "ready"
+            ? "bundled resources hydrated into app data"
+            : startup?.offline_bundle_state === "skipped_safe_mode"
+              ? "skipped because Safe Mode is enabled"
+              : startup?.offline_bundle_state === "error"
+                ? "hydration failed"
+                : startup?.offline_bundle_state ?? "not started",
+      },
+      {
+        name: "yt-dlp",
+        state: ytdlp?.available
+          ? ytdlp.bundled_installed
+            ? "bundled and available now"
+            : "available from local runtime path"
+          : "not available",
+      },
+      {
+        name: "Portable Python",
+        state: portablePython?.installed ? "hydrated locally" : "not hydrated",
+      },
+      {
+        name: "Python venv",
+        state: python?.venv_exists ? "prepared and reusable" : "not prepared",
+      },
+      {
+        name: "Voice-preserving pack",
+        state: ttsVoicePreservingLocalV1?.installed ? "installed and ready" : "optional / not installed",
+      },
+    ],
+    [portablePython?.installed, python?.venv_exists, startup?.offline_bundle_state, ttsVoicePreservingLocalV1?.installed, ytdlp?.available, ytdlp?.bundled_installed],
   );
 
   const recentFailures = useMemo(() => {
@@ -1247,6 +1358,71 @@ export function DiagnosticsPage() {
           <div className="k">Engine</div>
           <div className="v">{info?.engine_version ?? "-"}</div>
         </div>
+        <div className="kv">
+          <div className="k">Startup hydration</div>
+          <div className="v">{startup?.offline_bundle_state ?? "-"}</div>
+        </div>
+        <div className="kv">
+          <div className="k">Startup progress</div>
+          <div className="v">
+            {startup ? `${Math.round((startup.progress_pct ?? 0) * 100)}%` : "-"}
+          </div>
+        </div>
+        <div className="kv">
+          <div className="k">Active startup phase</div>
+          <div className="v">{activeStartupPhase?.label ?? "-"}</div>
+        </div>
+        {(startup?.phases ?? []).length ? (
+          <div className="table-wrap" style={{ marginTop: 10 }}>
+            <table>
+              <thead>
+                <tr>
+                  <th>Startup phase</th>
+                  <th>Status</th>
+                  <th>Started</th>
+                  <th>Finished</th>
+                </tr>
+              </thead>
+              <tbody>
+                {(startup?.phases ?? []).map((phase) => (
+                  <tr key={phase.id}>
+                    <td>{phase.label}</td>
+                    <td>{phase.state}</td>
+                    <td>{formatTs(phase.started_at_ms)}</td>
+                    <td>{formatTs(phase.finished_at_ms)}</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        ) : null}
+      </div>
+
+      <div className="card">
+        <h2>Tool lifecycle model</h2>
+        <div style={{ color: "#4b5563", marginBottom: 8 }}>
+          Bundled means shipped inside the installer. Hydrated means copied/extracted into app data.
+          Available means jobs can use it now. Optional means the pack is not required for the
+          base workflow.
+        </div>
+        <div className="table-wrap">
+          <table>
+            <thead>
+              <tr>
+                <th>Component</th>
+                <th>Current state</th>
+              </tr>
+            </thead>
+            <tbody>
+              {toolLifecycleRows.map((row) => (
+                <tr key={row.name}>
+                  <td>{row.name}</td>
+                  <td>{row.state}</td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
       </div>
 
       <div className="card">
@@ -1276,7 +1452,8 @@ export function DiagnosticsPage() {
         <h2>Diagnostics trace</h2>
         <div style={{ color: "#4b5563" }}>
           Internal diagnostics trace events are written here. Default is under app data; you can move
-          it.
+          it. Rows below include recent local process snapshots so startup and heavy panes are easier
+          to diagnose.
         </div>
         <div className="kv">
           <div className="k">Current folder</div>
@@ -1314,6 +1491,40 @@ export function DiagnosticsPage() {
           <button type="button" disabled={busy} onClick={writeDiagnosticsTraceMarker}>
             Write marker
           </button>
+        </div>
+        <div className="table-wrap" style={{ marginTop: 10 }}>
+          <table>
+            <thead>
+              <tr>
+                <th>Time</th>
+                <th>Event</th>
+                <th>Level</th>
+                <th>RSS</th>
+                <th>CPU</th>
+                <th>Details</th>
+              </tr>
+            </thead>
+            <tbody>
+              {recentTrace.length ? (
+                [...recentTrace].reverse().map((entry, index) => (
+                  <tr key={`${entry.ts_ms}-${entry.event}-${index}`}>
+                    <td>{formatTs(entry.ts_ms)}</td>
+                    <td>{entry.event}</td>
+                    <td>{entry.level}</td>
+                    <td>{formatBytes(entry.process?.rss_bytes ?? NaN)}</td>
+                    <td>{formatCpuPercent(entry.process?.cpu_percent ?? null)}</td>
+                    <td style={{ maxWidth: 520, wordBreak: "break-word" }}>
+                      {formatTraceDetails(entry.details)}
+                    </td>
+                  </tr>
+                ))
+              ) : (
+                <tr>
+                  <td colSpan={6}>No trace rows yet.</td>
+                </tr>
+              )}
+            </tbody>
+          </table>
         </div>
       </div>
 

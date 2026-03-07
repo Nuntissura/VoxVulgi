@@ -47,17 +47,17 @@ Date: 2026-03-07
 
 ## Workflow and Archive UX Hardening (2026-03)
 
-- WP-0096: Refresh the top-level IA so Localization Studio owns first-step ingest while `Video Archiver` and `Instagram Archiver` are named and scoped clearly.
+- WP-0096: Refresh the top-level IA so Localization Studio owns first-step ingest while `Video Archiver` and `Instagram Archiver` are named and scoped clearly. DONE.
 - WP-0097: Move the shared download/export root into global Options and make path hydration deterministic across startup, updates, and window switches. DONE.
-- WP-0098: Reconcile large existing downloader/NAS archive roots, playlists, and subscriptions without flattening or destructive moves.
-- WP-0099: Harden Video Archiver and Instagram Archiver workflows with subscription folder reveal, recurring Instagram archive refresh, and uncropped recent thumbnail viewing.
+- WP-0098: Reconcile large existing downloader/NAS archive roots, playlists, and subscriptions without flattening or destructive moves. DONE.
+- WP-0099: Harden Video Archiver and Instagram Archiver workflows with subscription folder reveal, recurring Instagram archive refresh, and uncropped recent thumbnail viewing. DONE.
 - WP-0100: Improve Media Library with reliable open-file behavior on secondary drives, tighter card actions, grouped browsing, and media-type filters. DONE.
 - WP-0101: Standardize `Open file` and `Open parent folder` actions across all output/artifact surfaces. DONE.
-- WP-0102: Add startup progress and deterministic performance/resource tracing, including clearer bundled-versus-loaded tool-state visibility.
+- WP-0102: Add startup progress and deterministic performance/resource tracing, including clearer bundled-versus-loaded tool-state visibility. DONE.
 - WP-0103: Retain pane state and reduce content reload/freeze behavior when switching windows. DONE.
 - WP-0104: Refine drag and resize ergonomics so the shell does not block text selection, scrolling, or diagonal resize. DONE.
-- WP-0105: Make MP4 the default video target and JPEG the default image target wherever the local toolchain can comply sensibly.
-- WP-0106: Add Pinterest board/folder crawling to Image Archive with batch URL intake.
+- WP-0105: Make MP4 the default video target and JPEG the default image target wherever the local toolchain can comply sensibly. DONE.
+- WP-0106: Add Pinterest board/folder crawling to Image Archive with batch URL intake. DONE.
 
 ## Phase 0 — Decisions (1–2 days)
 

@@ -3,7 +3,7 @@
 ## Metadata
 - ID: WP-0105
 - Owner: Codex
-- Status: BACKLOG
+- Status: DONE
 - Created: 2026-03-07
 - Target milestone: Workflow and archive UX hardening
 
@@ -39,3 +39,4 @@ Out of scope:
 ## Status updates
 
 - 2026-03-07: Created from operator feedback requesting MP4 and JPEG as the standard default output formats.
+- 2026-03-07: Implemented and verified. Existing MP4-first archive/export defaults remain in place, and the crawler now prefers practical JPEG/original candidates over less useful alternate encodings when those alternates are exposed cleanly.

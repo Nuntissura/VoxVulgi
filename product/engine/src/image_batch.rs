@@ -734,6 +734,58 @@ fn guess_fullsize_variants(url: &str) -> Vec<String> {
         variants.push(updated.to_string());
     }
 
+    if is_pinterest_asset_url(url) {
+        let segments = parsed
+            .path_segments()
+            .map(|segments| segments.collect::<Vec<_>>())
+            .unwrap_or_default();
+        if let Some(first) = segments.first() {
+            let looks_like_sized_bucket = !first.eq_ignore_ascii_case("originals")
+                && first
+                    .chars()
+                    .all(|ch| ch.is_ascii_digit() || ch == 'x' || ch == 'X');
+            if looks_like_sized_bucket && segments.len() > 1 {
+                let mut updated = parsed.clone();
+                updated.set_path(&format!("/originals/{}", segments[1..].join("/")));
+                variants.push(updated.to_string());
+            }
+        }
+
+        let original_path = parsed.path().to_string();
+        if original_path.to_ascii_lowercase().ends_with(".webp") {
+            for ext in [".jpg", ".jpeg"] {
+                let next_path = format!(
+                    "{}{}",
+                    original_path[..original_path.len() - 5].to_string(),
+                    ext
+                );
+                let mut updated = parsed.clone();
+                updated.set_path(&next_path);
+                variants.push(updated.to_string());
+            }
+        }
+
+        let query_pairs: Vec<(String, String)> = parsed.query_pairs().into_owned().collect();
+        if query_pairs.iter().any(|(key, value)| {
+            key.eq_ignore_ascii_case("format") && value.eq_ignore_ascii_case("webp")
+        }) {
+            for format in ["jpg", "jpeg"] {
+                let mut updated = parsed.clone();
+                let mut serializer = url::form_urlencoded::Serializer::new(String::new());
+                for (key, value) in &query_pairs {
+                    if key.eq_ignore_ascii_case("format") {
+                        serializer.append_pair(key, format);
+                    } else {
+                        serializer.append_pair(key, value);
+                    }
+                }
+                let query = serializer.finish();
+                updated.set_query(Some(&query));
+                variants.push(updated.to_string());
+            }
+        }
+    }
+
     dedupe_urls(variants)
 }
 
@@ -896,6 +948,33 @@ fn is_strong_full_candidate(url: &str) -> bool {
         && !looks_like_resized_variant(url)
 }
 
+fn is_pinterest_asset_url(url: &str) -> bool {
+    host_of(url)
+        .map(|host| host.ends_with("pinimg.com") || host.ends_with("pinterest.com"))
+        .unwrap_or(false)
+}
+
+fn preferred_image_format_score(url: &str, content_type: &str) -> i32 {
+    let path = Url::parse(url)
+        .ok()
+        .map(|parsed| parsed.path().to_ascii_lowercase())
+        .unwrap_or_default();
+    let content_type = content_type.to_ascii_lowercase();
+    if path.ends_with(".jpg") || path.ends_with(".jpeg") || content_type.contains("jpeg") {
+        16
+    } else if path.ends_with(".png") || content_type.contains("png") {
+        8
+    } else if path.ends_with(".webp") || content_type.contains("webp") {
+        -6
+    } else if path.ends_with(".avif") || content_type.contains("avif") {
+        -8
+    } else if path.ends_with(".heic") || content_type.contains("heic") {
+        -8
+    } else {
+        0
+    }
+}
+
 fn candidate_url_score(url: &str) -> i32 {
     let mut score = 0_i32;
     if is_strong_full_candidate(url) {
@@ -913,6 +992,10 @@ fn candidate_url_score(url: &str) -> i32 {
     if looks_like_noise_image_url(url) {
         score -= 120;
     }
+    if is_pinterest_asset_url(url) && url.to_ascii_lowercase().contains("/originals/") {
+        score += 32;
+    }
+    score += preferred_image_format_score(url, "");
     score
 }
 
@@ -1400,9 +1483,14 @@ fn download_candidate_image(
 
         let replace = match &best {
             None => true,
-            Some(current) => {
-                prefer_downloaded_variant(&url, data.len(), &current.url, current.data.len())
-            }
+            Some(current) => prefer_downloaded_variant(
+                &url,
+                &content_type,
+                data.len(),
+                &current.url,
+                &current.content_type,
+                current.data.len(),
+            ),
         };
         if replace {
             best = Some(DownloadedVariant {
@@ -1465,8 +1553,10 @@ fn download_candidate_image(
 
 fn prefer_downloaded_variant(
     new_url: &str,
+    new_content_type: &str,
     new_bytes: usize,
     current_url: &str,
+    current_content_type: &str,
     current_bytes: usize,
 ) -> bool {
     let new_thumb_like = is_thumbnail_like_url(new_url);
@@ -1475,14 +1565,25 @@ fn prefer_downloaded_variant(
         return !new_thumb_like;
     }
 
-    if new_bytes != current_bytes {
-        return new_bytes > current_bytes;
-    }
-
     let new_score = candidate_url_score(new_url);
     let current_score = candidate_url_score(current_url);
     if new_score != current_score {
         return new_score > current_score;
+    }
+
+    let new_format_score = preferred_image_format_score(new_url, new_content_type);
+    let current_format_score = preferred_image_format_score(current_url, current_content_type);
+    let size_gap_is_small = {
+        let smaller = new_bytes.min(current_bytes);
+        let larger = new_bytes.max(current_bytes);
+        larger == 0 || (smaller as f64 / larger as f64) >= 0.85
+    };
+    if size_gap_is_small && new_format_score != current_format_score {
+        return new_format_score > current_format_score;
+    }
+
+    if new_bytes != current_bytes {
+        return new_bytes > current_bytes;
     }
 
     new_url.len() < current_url.len()
@@ -1785,6 +1886,37 @@ mod tests {
         let doc = Html::parse_document(html);
         let out = extract_image_candidates(&doc, "https://example.com/forum");
         assert!(out.is_empty(), "candidates={out:?}");
+    }
+
+    #[test]
+    fn guess_fullsize_variants_promotes_pinterest_originals_and_jpeg() {
+        let variants = guess_fullsize_variants(
+            "https://i.pinimg.com/564x/aa/bb/cc/example.webp?format=webp&foo=1",
+        );
+        assert!(
+            variants
+                .iter()
+                .any(|value| value.contains("/originals/aa/bb/cc/example.webp")),
+            "variants={variants:?}"
+        );
+        assert!(
+            variants
+                .iter()
+                .any(|value| value.contains("example.jpg") || value.contains("format=jpg")),
+            "variants={variants:?}"
+        );
+    }
+
+    #[test]
+    fn prefer_downloaded_variant_prefers_jpeg_when_sizes_are_close() {
+        assert!(prefer_downloaded_variant(
+            "https://i.pinimg.com/originals/aa/bb/cc/example.jpg",
+            "image/jpeg",
+            100_000,
+            "https://i.pinimg.com/originals/aa/bb/cc/example.webp",
+            "image/webp",
+            104_000,
+        ));
     }
 
     #[test]

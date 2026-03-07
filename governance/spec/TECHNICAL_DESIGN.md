@@ -129,15 +129,17 @@ Core tables (suggested):
   - `refresh_interval_minutes` (integer, clamped range; user-editable in Library UI)
   - `use_browser_cookies`, `last_queued_at_ms`, `created_at_ms`, `updated_at_ms`
   - `source_url` is unique (merge key for import/upsert)
+- `instagram_subscription`:
+  - `id`, `title`, `source_url`, `folder_map`, `output_dir_override`, `active`,
+    `refresh_interval_minutes`, `last_queued_at_ms`, `created_at_ms`, `updated_at_ms`
 - Planned archive-expansion tables:
-  - `instagram_subscription`:
-    - `id`, `title`, `source_url`, `folder_map`, `output_dir_override`, `active`,
-      `refresh_interval_minutes`, `last_queued_at_ms`, `created_at_ms`, `updated_at_ms`
   - `library_container`:
     - `id`, `kind` (`playlist`, `subscription`, `folder`, `channel`, or similar),
       `source_key`, `display_name`, `created_at_ms`, `updated_at_ms`
   - `library_item_container`:
     - `item_id`, `container_id`
+
+- Legacy reconciliation reports are written as local JSON artifacts under the app-managed derived tree so large/NAS-backed archive analysis remains read-only and inspectable.
 
 Additional tables (planned; large-subscription UX hardening):
 

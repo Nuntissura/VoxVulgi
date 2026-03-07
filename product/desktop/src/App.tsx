@@ -1,6 +1,7 @@
 import { Suspense, lazy, type ReactNode, useEffect, useMemo, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { getCurrentWindow } from "@tauri-apps/api/window";
+import { open } from "@tauri-apps/plugin-dialog";
 import "./App.css";
 import { diagnosticsTrace } from "./lib/diagnosticsTrace";
 import { safeLocalStorageGet, safeLocalStorageSet } from "./lib/persist";
@@ -43,6 +44,17 @@ type SafeModeStatus = {
   queue_paused: boolean;
 };
 
+type AsrLang = "auto" | "ja" | "ko";
+
+type StartupPhase = {
+  id: string;
+  label: string;
+  state: "pending" | "running" | "ready" | "skipped" | "error";
+  started_at_ms: number | null;
+  finished_at_ms: number | null;
+  error: string | null;
+};
+
 type StartupStatus = {
   offline_bundle_state:
     | "not_started"
@@ -54,6 +66,9 @@ type StartupStatus = {
   offline_bundle_started_at_ms: number | null;
   offline_bundle_finished_at_ms: number | null;
   offline_bundle_error: string | null;
+  progress_pct: number;
+  active_phase_id: string | null;
+  phases: StartupPhase[];
 };
 
 type ResizeDirection = "East" | "North" | "NorthEast" | "NorthWest" | "South" | "SouthEast" | "SouthWest" | "West";
@@ -82,6 +97,98 @@ function isDragExemptTarget(target: EventTarget | null): boolean {
     target.closest(
       "button,input,select,textarea,option,label,a,video,[contenteditable='true'],[data-no-drag]",
     ),
+  );
+}
+
+function LocalizationStudioHome({
+  onOpenVideoArchiver,
+  onOpenMediaLibrary,
+  compact = false,
+}: {
+  onOpenVideoArchiver: () => void;
+  onOpenMediaLibrary: () => void;
+  compact?: boolean;
+}) {
+  const [busy, setBusy] = useState(false);
+  const [notice, setNotice] = useState<string | null>(null);
+  const [error, setError] = useState<string | null>(null);
+  const [asrLang, setAsrLang] = useState<AsrLang>(() => {
+    const raw = safeLocalStorageGet("voxvulgi.v1.settings.asr_lang");
+    if (raw === "ja" || raw === "ko") return raw;
+    return "auto";
+  });
+
+  useEffect(() => {
+    safeLocalStorageSet("voxvulgi.v1.settings.asr_lang", asrLang);
+  }, [asrLang]);
+
+  async function importLocalMedia() {
+    setBusy(true);
+    setError(null);
+    setNotice(null);
+    try {
+      const selected = await open({
+        multiple: false,
+        directory: false,
+        title: "Select local media for Localization Studio",
+      });
+      if (!selected || typeof selected !== "string") return;
+      await invoke("jobs_enqueue_import_local", { path: selected });
+      setNotice(
+        "Queued local import. Open Media Library or Jobs after import completes, then use Edit subs to bring the item into Localization Studio.",
+      );
+      void diagnosticsTrace("localization_home_import_queued", {
+        path: selected,
+        asr_lang: asrLang,
+      });
+    } catch (e) {
+      setError(String(e));
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  return (
+    <>
+      {error ? <div className="error">{error}</div> : null}
+      {notice ? <div className="card">{notice}</div> : null}
+      {!compact ? (
+        <div className="card">
+          <strong>Localization Studio is ready.</strong> Start here when the goal is subtitles,
+          translation, or voice-preserving dubbing rather than long-term archiving.
+        </div>
+      ) : null}
+      <div className="card">
+        <h2 style={{ marginTop: 0 }}>Video ingest</h2>
+        <div style={{ color: "#4b5563", marginTop: 6 }}>
+          Import or refresh the source media for subtitle and dubbing work. The ASR language choice
+          here is stored and reused by quick ASR actions elsewhere in the app.
+        </div>
+        <div className="row">
+          <button type="button" disabled={busy} onClick={() => importLocalMedia().catch(() => undefined)}>
+            Import local media
+          </button>
+          <button type="button" disabled={busy} onClick={onOpenVideoArchiver}>
+            Open Video Archiver
+          </button>
+          <button type="button" disabled={busy} onClick={onOpenMediaLibrary}>
+            Open Media Library
+          </button>
+          <label style={{ display: "flex", alignItems: "center", gap: 8 }}>
+            <span>ASR lang</span>
+            <select
+              value={asrLang}
+              disabled={busy}
+              onChange={(e) => setAsrLang(e.currentTarget.value as AsrLang)}
+            >
+              <option value="auto">auto</option>
+              <option value="ja">ja</option>
+              <option value="ko">ko</option>
+            </select>
+          </label>
+        </div>
+      </div>
+    </>
   );
 }
 
@@ -133,6 +240,45 @@ function App() {
       }
     };
   }, []);
+
+  useEffect(() => {
+    if (safeMode?.enabled) return;
+    let alive = true;
+    let firstTimer: number | null = null;
+    let intervalTimer: number | null = null;
+
+    const queueDueInstagramSubscriptions = () => {
+      invoke<Array<{ id: string }>>("instagram_subscriptions_queue_all_active")
+        .then((queued) => {
+          if (!alive || !queued.length) return;
+          void diagnosticsTrace("instagram_subscription_heartbeat_queued", {
+            queued_jobs: queued.length,
+          });
+        })
+        .catch((error) => {
+          if (!alive) return;
+          void diagnosticsTrace(
+            "instagram_subscription_heartbeat_failed",
+            {
+              error: String(error),
+            },
+            "warn",
+          );
+        });
+    };
+
+    firstTimer = window.setTimeout(queueDueInstagramSubscriptions, 12_000);
+    intervalTimer = window.setInterval(queueDueInstagramSubscriptions, 60_000);
+    return () => {
+      alive = false;
+      if (firstTimer !== null) {
+        window.clearTimeout(firstTimer);
+      }
+      if (intervalTimer !== null) {
+        window.clearInterval(intervalTimer);
+      }
+    };
+  }, [safeMode?.enabled]);
 
   async function startWindowDrag() {
     try {
@@ -195,20 +341,19 @@ function App() {
   const contentByPage = useMemo<Record<AppPage, ReactNode>>(
     () => ({
       localization: editorItemId ? (
-        <SubtitleEditorPage key={editorItemId} itemId={editorItemId} />
+        <>
+          <LocalizationStudioHome
+            compact
+            onOpenVideoArchiver={() => switchPage("video_ingest")}
+            onOpenMediaLibrary={() => switchPage("media_library")}
+          />
+          <SubtitleEditorPage key={editorItemId} itemId={editorItemId} />
+        </>
       ) : (
-        <div className="card">
-          <strong>Localization Studio is ready.</strong> Open media from Video Ingest or Media
-          Library, then use <code>Edit subs</code> to load an item here.
-          <div className="row">
-            <button type="button" onClick={() => switchPage("video_ingest")}>
-              Open Video Ingest
-            </button>
-            <button type="button" onClick={() => switchPage("media_library")}>
-              Open Media Library
-            </button>
-          </div>
-        </div>
+        <LocalizationStudioHome
+          onOpenVideoArchiver={() => switchPage("video_ingest")}
+          onOpenMediaLibrary={() => switchPage("media_library")}
+        />
       ),
       video_ingest: (
         <LibraryPage
@@ -246,9 +391,14 @@ function App() {
     [visitedPages],
   );
 
-  const startupBusy =
-    startup?.offline_bundle_state === "pending" || startup?.offline_bundle_state === "running";
+  const startupBusy = startup
+    ? startup.phases.some((phase) => phase.state === "pending" || phase.state === "running")
+    : false;
   const startupFailed = startup?.offline_bundle_state === "error";
+  const startupActivePhase =
+    startup?.phases.find((phase) => phase.id === startup.active_phase_id) ??
+    startup?.phases.find((phase) => phase.state === "running" || phase.state === "pending") ??
+    null;
 
   return (
     <div className="app-shell">
@@ -280,14 +430,14 @@ function App() {
                 onClick={() => switchPage("video_ingest")}
                 type="button"
               >
-                Video Ingest
+                Video Archiver
               </button>
               <button
                 className={page === "instagram_archive" ? "active" : ""}
                 onClick={() => switchPage("instagram_archive")}
                 type="button"
               >
-                Instagram Archive
+                Instagram Archiver
               </button>
               <button
                 className={page === "image_archive" ? "active" : ""}
@@ -367,8 +517,53 @@ function App() {
         )}
         {startupBusy ? (
           <div className="card">
-            <strong>Startup tasks in progress.</strong> Offline dependency hydration is running in
-            the background. The app remains usable while initialization finishes.
+            <strong>Startup tasks in progress.</strong> The app stays usable while background
+            initialization finishes.
+            <div style={{ marginTop: 10 }}>
+              <div
+                aria-hidden="true"
+                style={{
+                  height: 10,
+                  width: "100%",
+                  borderRadius: 999,
+                  background: "rgba(82, 94, 112, 0.18)",
+                  overflow: "hidden",
+                }}
+              >
+                <div
+                  style={{
+                    height: "100%",
+                    width: `${Math.max(8, Math.round((startup?.progress_pct ?? 0) * 100))}%`,
+                    borderRadius: 999,
+                    background:
+                      "linear-gradient(90deg, rgba(78,114,148,0.92), rgba(59,81,105,0.94))",
+                  }}
+                />
+              </div>
+            </div>
+            <div style={{ marginTop: 8, color: "#4b5563" }}>
+              {startupActivePhase
+                ? `Current phase: ${startupActivePhase.label}`
+                : "Finalizing startup state."}
+            </div>
+            <div className="table-wrap" style={{ marginTop: 10 }}>
+              <table>
+                <thead>
+                  <tr>
+                    <th>Phase</th>
+                    <th>Status</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {(startup?.phases ?? []).map((phase) => (
+                    <tr key={phase.id}>
+                      <td>{phase.label}</td>
+                      <td>{phase.state}</td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
           </div>
         ) : null}
         {startupFailed ? (

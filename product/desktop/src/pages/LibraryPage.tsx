@@ -27,7 +27,19 @@ type LibraryItem = {
 
 const thumbnailDataUrlCache = new Map<string, string>();
 
-function ThumbnailPreview({ itemId, path }: { itemId: string; path: string | null }) {
+function ThumbnailPreview({
+  itemId,
+  path,
+  fit = "cover",
+  width = 84,
+  height = 48,
+}: {
+  itemId: string;
+  path: string | null;
+  fit?: "cover" | "contain";
+  width?: number;
+  height?: number;
+}) {
   const cacheKey = `${itemId}|${path ?? ""}`;
   const [src, setSrc] = useState<string>(() => thumbnailDataUrlCache.get(cacheKey) ?? "");
   const [loading, setLoading] = useState(() => !thumbnailDataUrlCache.has(cacheKey));
@@ -76,7 +88,7 @@ function ThumbnailPreview({ itemId, path }: { itemId: string; path: string | nul
         alt="thumb"
         src={src}
         loading="lazy"
-        style={{ width: 84, height: 48, objectFit: "cover", borderRadius: 8, background: "#dbe4f2" }}
+        style={{ width, height, objectFit: fit, borderRadius: 8, background: "#dbe4f2" }}
       />
     );
   }
@@ -84,7 +96,7 @@ function ThumbnailPreview({ itemId, path }: { itemId: string; path: string | nul
     return (
       <div
         aria-hidden="true"
-        style={{ width: 84, height: 48, borderRadius: 8, background: "#dbe4f2" }}
+        style={{ width, height, borderRadius: 8, background: "#dbe4f2" }}
       />
     );
   }
@@ -111,6 +123,13 @@ function inferMediaKind(item: LibraryItem): "video" | "image" | "audio" | "other
   if (item.width || item.height || item.video_codec) return "video";
   if (item.audio_codec) return "audio";
   return "other";
+}
+
+function isInstagramLibraryItem(item: LibraryItem): boolean {
+  const haystack = `${item.source_type} ${item.source_uri} ${item.media_path} ${item.title}`
+    .toLowerCase()
+    .trim();
+  return haystack.includes("instagram") || haystack.includes("cdninstagram");
 }
 
 function deriveContainerLabel(item: LibraryItem, downloadRoot: string): string {
@@ -227,6 +246,54 @@ type ExistingDownloadsImportSummary = {
   failures: number;
 };
 
+type InstagramSubscriptionRow = {
+  id: string;
+  title: string;
+  source_url: string;
+  folder_map: string;
+  output_dir_override: string | null;
+  use_browser_cookies: boolean;
+  active: boolean;
+  refresh_interval_minutes: number;
+  last_queued_at_ms: number | null;
+  created_at_ms: number;
+  updated_at_ms: number;
+};
+
+type InstagramSubscriptionUpsert = {
+  id: string | null;
+  title: string;
+  source_url: string;
+  folder_map: string | null;
+  output_dir_override: string | null;
+  use_browser_cookies: boolean;
+  active: boolean;
+  refresh_interval_minutes: number | null;
+};
+
+type LegacyArchiveContainerHint = {
+  relative_path: string;
+  media_file_count: number;
+};
+
+type LegacyArchiveAnalysisSummary = {
+  root_path: string;
+  install_path: string | null;
+  install_path_exists: boolean;
+  media_file_count: number;
+  detected_4kvdp_install: boolean;
+  detected_4kvdp_subscriptions_json: boolean;
+  detected_4kvdp_subscription_entries_csv: boolean;
+  detected_channel_dirs: number;
+  detected_playlist_dirs: number;
+  scan_max_depth: number;
+  scan_max_files: number;
+  local_report_path: string;
+  warnings: string[];
+  container_hints: LegacyArchiveContainerHint[];
+  sample_media_paths: string[];
+};
+
 type DownloadPreset = {
   id: string;
   title: string;
@@ -281,9 +348,9 @@ export function LibraryPage({ onOpenEditor, mode = "all", onOpenOptions }: Libra
   const showImportControls = showVideoIngest || showMediaLibrary;
   const title =
     mode === "video_ingest"
-      ? "Video Ingest"
+      ? "Video Archiver"
       : mode === "instagram_archive"
-        ? "Instagram Archive"
+        ? "Instagram Archiver"
         : mode === "image_archive"
           ? "Image Archive"
           : mode === "media_library"
@@ -294,6 +361,9 @@ export function LibraryPage({ onOpenEditor, mode = "all", onOpenOptions }: Libra
   const [itemsHasMore, setItemsHasMore] = useState(true);
   const [itemsLoadingMore, setItemsLoadingMore] = useState(false);
   const [subscriptions, setSubscriptions] = useState<YoutubeSubscriptionRow[]>([]);
+  const [instagramSubscriptions, setInstagramSubscriptions] = useState<InstagramSubscriptionRow[]>(
+    [],
+  );
   const [subscriptionGroups, setSubscriptionGroups] = useState<YoutubeSubscriptionGroupRow[]>([]);
   const [downloadPresets, setDownloadPresets] = useState<DownloadPresetsConfig | null>(null);
   const [batchRules, setBatchRules] = useState<BatchOnImportRules | null>(null);
@@ -320,6 +390,48 @@ export function LibraryPage({ onOpenEditor, mode = "all", onOpenOptions }: Libra
   const [instagramBatchUseBrowserCookies, setInstagramBatchUseBrowserCookies] = useState(() => {
     return safeLocalStorageGet("voxvulgi.v1.library.instagram_batch_use_browser_cookies") === "1";
   });
+  const [instagramSubscriptionEditId, setInstagramSubscriptionEditId] = useState<string | null>(
+    null,
+  );
+  const [instagramSubscriptionTitle, setInstagramSubscriptionTitle] = useState("");
+  const [instagramSubscriptionUrl, setInstagramSubscriptionUrl] = useState("");
+  const [instagramSubscriptionFolderMap, setInstagramSubscriptionFolderMap] = useState(() => {
+    return safeLocalStorageGet("voxvulgi.v1.library.instagram_subscription_folder_map") ?? "";
+  });
+  const [instagramSubscriptionOutputDirOverride, setInstagramSubscriptionOutputDirOverride] =
+    useState(() => {
+      return (
+        safeLocalStorageGet(
+          "voxvulgi.v1.library.instagram_subscription_output_dir_override",
+        ) ?? ""
+      );
+    });
+  const [instagramSubscriptionUseBrowserCookies, setInstagramSubscriptionUseBrowserCookies] =
+    useState(() => {
+      return (
+        safeLocalStorageGet(
+          "voxvulgi.v1.library.instagram_subscription_use_browser_cookies",
+        ) === "1"
+      );
+    });
+  const [instagramSubscriptionActive, setInstagramSubscriptionActive] = useState(() => {
+    const raw = safeLocalStorageGet("voxvulgi.v1.library.instagram_subscription_active");
+    return raw === null ? true : raw === "1";
+  });
+  const [instagramSubscriptionRefreshIntervalMinutes, setInstagramSubscriptionRefreshIntervalMinutes] =
+    useState(() => {
+      const raw = safeLocalStorageGet(
+        "voxvulgi.v1.library.instagram_subscription_refresh_interval_minutes",
+      );
+      const parsed = raw ? Number(raw) : NaN;
+      if (Number.isFinite(parsed)) {
+        return Math.max(
+          minSubscriptionRefreshIntervalMinutes,
+          Math.min(maxSubscriptionRefreshIntervalMinutes, Math.round(parsed)),
+        );
+      }
+      return 180;
+    });
   const [imageBatchUrlsText, setImageBatchUrlsText] = useState("");
   const [imageBatchMaxPages, setImageBatchMaxPages] = useState(() => {
     const raw = safeLocalStorageGet("voxvulgi.v1.library.image_batch_max_pages");
@@ -395,8 +507,37 @@ export function LibraryPage({ onOpenEditor, mode = "all", onOpenOptions }: Libra
   );
   const [presetQualityPreference, setPresetQualityPreference] = useState("best");
   const [presetSubtitleMode, setPresetSubtitleMode] = useState("auto");
+  const [legacyArchiveRoot, setLegacyArchiveRoot] = useState(() => {
+    return safeLocalStorageGet("voxvulgi.v1.library.legacy_archive_root") ?? "";
+  });
+  const [legacyArchiveInstallPath, setLegacyArchiveInstallPath] = useState(() => {
+    return (
+      safeLocalStorageGet("voxvulgi.v1.library.legacy_archive_install_path") ??
+      "C:\\Program Files\\4KDownload\\4kvideodownloaderplus"
+    );
+  });
+  const [legacyArchiveMaxDepth, setLegacyArchiveMaxDepth] = useState(() => {
+    const raw = safeLocalStorageGet("voxvulgi.v1.library.legacy_archive_max_depth");
+    const parsed = raw ? Number(raw) : NaN;
+    if (Number.isFinite(parsed) && parsed >= 1) return Math.round(parsed);
+    return 4;
+  });
+  const [legacyArchiveMaxFiles, setLegacyArchiveMaxFiles] = useState(() => {
+    const raw = safeLocalStorageGet("voxvulgi.v1.library.legacy_archive_max_files");
+    const parsed = raw ? Number(raw) : NaN;
+    if (Number.isFinite(parsed) && parsed >= 1) return Math.round(parsed);
+    return 2500;
+  });
+  const [legacyArchiveAnalysis, setLegacyArchiveAnalysis] =
+    useState<LegacyArchiveAnalysisSummary | null>(null);
   const [mediaLibrarySearch, setMediaLibrarySearch] = useState(() => {
     return safeLocalStorageGet("voxvulgi.v1.library.media_search") ?? "";
+  });
+  const [pinterestBatchText, setPinterestBatchText] = useState(() => {
+    return safeLocalStorageGet("voxvulgi.v1.library.pinterest_batch_text") ?? "";
+  });
+  const [pinterestBatchOutputDir, setPinterestBatchOutputDir] = useState(() => {
+    return safeLocalStorageGet("voxvulgi.v1.library.pinterest_batch_output_dir") ?? "";
   });
   const [mediaLibraryTypeFilter, setMediaLibraryTypeFilter] = useState<
     "all" | "video" | "image" | "audio" | "other"
@@ -435,6 +576,14 @@ export function LibraryPage({ onOpenEditor, mode = "all", onOpenOptions }: Libra
         .filter(Boolean).length,
     [imageBatchUrlsText],
   );
+  const parsedPinterestUrlCount = useMemo(
+    () =>
+      pinterestBatchText
+        .split(/[\s,;]+/)
+        .map((value) => value.trim())
+        .filter(Boolean).length,
+    [pinterestBatchText],
+  );
   const groupNameById = useMemo(() => {
     const map = new Map<string, string>();
     for (const group of subscriptionGroups) {
@@ -452,6 +601,10 @@ export function LibraryPage({ onOpenEditor, mode = "all", onOpenOptions }: Libra
     () => visibleSubscriptions.filter((sub) => sub.active).length,
     [visibleSubscriptions],
   );
+  const activeInstagramSubscriptionCount = useMemo(
+    () => instagramSubscriptions.filter((sub) => sub.active).length,
+    [instagramSubscriptions],
+  );
   const effectiveDownloadRoot = useMemo(() => {
     const current = downloadDir?.current_dir?.trim() ?? "";
     if (current) return current;
@@ -467,6 +620,10 @@ export function LibraryPage({ onOpenEditor, mode = "all", onOpenOptions }: Libra
   );
   const defaultInstagramDownloadsDir = useMemo(
     () => joinPath(effectiveDownloadRoot, "instagram"),
+    [effectiveDownloadRoot],
+  );
+  const defaultInstagramSubscriptionDownloadsDir = useMemo(
+    () => joinPath(effectiveDownloadRoot, "instagram", "subscriptions"),
     [effectiveDownloadRoot],
   );
   const defaultImageDownloadsDir = useMemo(
@@ -526,15 +683,30 @@ export function LibraryPage({ onOpenEditor, mode = "all", onOpenOptions }: Libra
         items: groupItems,
       }));
   }, [effectiveDownloadRoot, filteredMediaItems, mediaLibraryGroupMode]);
+  const recentInstagramItems = useMemo(
+    () => items.filter((item) => isInstagramLibraryItem(item)).slice(0, 10),
+    [items],
+  );
 
   const refresh = useCallback(async () => {
     setError(null);
-    const wantsItems = showMediaLibrary;
+    const wantsItems = showMediaLibrary || showInstagramArchive;
     const wantsVideo = showVideoIngest;
+    const wantsInstagram = showInstagramArchive;
     const wantsBatchRules = showImportControls;
-    const [nextItems, nextRules, nextSubscriptions, nextGroups, nextPresets] = await Promise.all([
+    const [
+      nextItems,
+      nextRules,
+      nextSubscriptions,
+      nextGroups,
+      nextPresets,
+      nextInstagramSubscriptions,
+    ] = await Promise.all([
       wantsItems
-        ? invoke<LibraryItem[]>("library_list", { limit: libraryPageSize, offset: 0 })
+        ? invoke<LibraryItem[]>("library_list", {
+            limit: wantsInstagram && !showMediaLibrary ? 160 : libraryPageSize,
+            offset: 0,
+          })
         : Promise.resolve([] as LibraryItem[]),
       wantsBatchRules
         ? invoke<BatchOnImportRules>("config_batch_on_import_get").catch(() => null)
@@ -548,19 +720,29 @@ export function LibraryPage({ onOpenEditor, mode = "all", onOpenOptions }: Libra
       wantsVideo
         ? invoke<DownloadPresetsConfig>("download_presets_get").catch(() => null)
         : Promise.resolve(null),
+      wantsInstagram
+        ? invoke<InstagramSubscriptionRow[]>("instagram_subscriptions_list").catch(() => [])
+        : Promise.resolve([] as InstagramSubscriptionRow[]),
     ]);
     setItems(nextItems);
     setItemsOffset(nextItems.length);
-    setItemsHasMore(nextItems.length >= libraryPageSize);
+    setItemsHasMore(!wantsInstagram && nextItems.length >= libraryPageSize);
     setItemsLoadingMore(false);
     if (nextRules) setBatchRules(nextRules);
     setSubscriptions(nextSubscriptions);
     setSubscriptionGroups(nextGroups);
+    setInstagramSubscriptions(nextInstagramSubscriptions);
     if (nextPresets) {
       setDownloadPresets(nextPresets);
       setUrlBatchPresetId((current) => current || nextPresets.default_preset_id || "");
     }
-  }, [libraryPageSize, showImportControls, showMediaLibrary, showVideoIngest]);
+  }, [
+    libraryPageSize,
+    showImportControls,
+    showInstagramArchive,
+    showMediaLibrary,
+    showVideoIngest,
+  ]);
 
   const loadMoreItems = useCallback(async () => {
     if (itemsLoadingMore || !itemsHasMore) return;
@@ -656,6 +838,55 @@ export function LibraryPage({ onOpenEditor, mode = "all", onOpenOptions }: Libra
     }
   }, []);
 
+  const chooseInstagramSubscriptionOutputDir = useCallback(async () => {
+    setError(null);
+    setNotice(null);
+    try {
+      const selected = await open({
+        multiple: false,
+        directory: true,
+        title: "Select Instagram subscription output folder",
+      });
+      if (!selected || typeof selected !== "string") return;
+      setInstagramSubscriptionOutputDirOverride(selected);
+    } catch (e) {
+      setError(String(e));
+    }
+  }, []);
+
+  const choosePinterestOutputDir = useCallback(async () => {
+    setError(null);
+    setNotice(null);
+    try {
+      const selected = await open({
+        multiple: false,
+        directory: true,
+        title: "Select Pinterest output folder",
+      });
+      if (!selected || typeof selected !== "string") return;
+      setPinterestBatchOutputDir(selected);
+    } catch (e) {
+      setError(String(e));
+    }
+  }, []);
+
+  const chooseLegacyArchiveRoot = useCallback(async () => {
+    setError(null);
+    setNotice(null);
+    try {
+      const selected = await open({
+        multiple: false,
+        directory: true,
+        title: "Select legacy archive root",
+      });
+      if (!selected || typeof selected !== "string") return;
+      setLegacyArchiveRoot(selected);
+      setLegacyArchiveAnalysis(null);
+    } catch (e) {
+      setError(String(e));
+    }
+  }, []);
+
   useEffect(() => {
     refresh().catch((e) => setError(String(e)));
     void refreshSharedDownloadDirStatus();
@@ -692,6 +923,41 @@ export function LibraryPage({ onOpenEditor, mode = "all", onOpenOptions }: Libra
   }, [instagramBatchUseBrowserCookies]);
 
   useEffect(() => {
+    safeLocalStorageSet(
+      "voxvulgi.v1.library.instagram_subscription_folder_map",
+      instagramSubscriptionFolderMap,
+    );
+  }, [instagramSubscriptionFolderMap]);
+
+  useEffect(() => {
+    safeLocalStorageSet(
+      "voxvulgi.v1.library.instagram_subscription_output_dir_override",
+      instagramSubscriptionOutputDirOverride,
+    );
+  }, [instagramSubscriptionOutputDirOverride]);
+
+  useEffect(() => {
+    safeLocalStorageSet(
+      "voxvulgi.v1.library.instagram_subscription_use_browser_cookies",
+      instagramSubscriptionUseBrowserCookies ? "1" : "0",
+    );
+  }, [instagramSubscriptionUseBrowserCookies]);
+
+  useEffect(() => {
+    safeLocalStorageSet(
+      "voxvulgi.v1.library.instagram_subscription_active",
+      instagramSubscriptionActive ? "1" : "0",
+    );
+  }, [instagramSubscriptionActive]);
+
+  useEffect(() => {
+    safeLocalStorageSet(
+      "voxvulgi.v1.library.instagram_subscription_refresh_interval_minutes",
+      String(instagramSubscriptionRefreshIntervalMinutes),
+    );
+  }, [instagramSubscriptionRefreshIntervalMinutes]);
+
+  useEffect(() => {
     safeLocalStorageSet("voxvulgi.v1.library.image_batch_max_pages", String(imageBatchMaxPages));
   }, [imageBatchMaxPages]);
 
@@ -723,6 +989,17 @@ export function LibraryPage({ onOpenEditor, mode = "all", onOpenOptions }: Libra
   useEffect(() => {
     safeLocalStorageSet("voxvulgi.v1.library.image_batch_output_dir", imageBatchOutputDir);
   }, [imageBatchOutputDir]);
+
+  useEffect(() => {
+    safeLocalStorageSet("voxvulgi.v1.library.pinterest_batch_text", pinterestBatchText);
+  }, [pinterestBatchText]);
+
+  useEffect(() => {
+    safeLocalStorageSet(
+      "voxvulgi.v1.library.pinterest_batch_output_dir",
+      pinterestBatchOutputDir,
+    );
+  }, [pinterestBatchOutputDir]);
 
   useEffect(() => {
     safeLocalStorageSet(
@@ -762,6 +1039,31 @@ export function LibraryPage({ onOpenEditor, mode = "all", onOpenOptions }: Libra
   useEffect(() => {
     safeLocalStorageSet("voxvulgi.v1.library.media_search", mediaLibrarySearch);
   }, [mediaLibrarySearch]);
+
+  useEffect(() => {
+    safeLocalStorageSet("voxvulgi.v1.library.legacy_archive_root", legacyArchiveRoot);
+  }, [legacyArchiveRoot]);
+
+  useEffect(() => {
+    safeLocalStorageSet(
+      "voxvulgi.v1.library.legacy_archive_install_path",
+      legacyArchiveInstallPath,
+    );
+  }, [legacyArchiveInstallPath]);
+
+  useEffect(() => {
+    safeLocalStorageSet(
+      "voxvulgi.v1.library.legacy_archive_max_depth",
+      String(legacyArchiveMaxDepth),
+    );
+  }, [legacyArchiveMaxDepth]);
+
+  useEffect(() => {
+    safeLocalStorageSet(
+      "voxvulgi.v1.library.legacy_archive_max_files",
+      String(legacyArchiveMaxFiles),
+    );
+  }, [legacyArchiveMaxFiles]);
 
   useEffect(() => {
     safeLocalStorageSet("voxvulgi.v1.library.media_type_filter", mediaLibraryTypeFilter);
@@ -1063,6 +1365,55 @@ export function LibraryPage({ onOpenEditor, mode = "all", onOpenOptions }: Libra
     }
   }
 
+  async function enqueuePinterestBatch() {
+    setBusy(true);
+    setError(null);
+    setNotice(null);
+    try {
+      const effectiveStatus = downloadDir ?? (await refreshSharedDownloadDirStatus());
+      if (!effectiveStatus?.exists && !pinterestBatchOutputDir.trim()) {
+        throw new Error(
+          "Shared download root is missing. Open Options to choose an existing folder, use the default folder, or set a Pinterest output folder here.",
+        );
+      }
+
+      const startUrls = pinterestBatchText
+        .split(/[\s,;]+/)
+        .map((value) => value.trim())
+        .filter(Boolean);
+      if (!startUrls.length) {
+        throw new Error("Enter at least one Pinterest board or folder URL.");
+      }
+      if (startUrls.length > maxImageBatchUrls) {
+        throw new Error(`Too many Pinterest URLs. Maximum ${maxImageBatchUrls}.`);
+      }
+
+      const queued = await invoke<{ id: string }>("jobs_enqueue_image_batch", {
+        startUrls,
+        maxPages: imageBatchMaxPages,
+        delayMs: Math.max(0, Math.round(imageBatchDelaySeconds * 1000)),
+        allowCrossDomain: true,
+        followContentLinks: true,
+        skipUrlKeywords: imageBatchSkipKeywords
+          .split(/[\s,;]+/)
+          .map((value) => value.trim())
+          .filter(Boolean),
+        outputSubdir: "pinterest_archive",
+        outputDir: pinterestBatchOutputDir.trim() || null,
+        authCookie: imageBatchAuthCookie.trim() || null,
+      });
+
+      setPinterestBatchText("");
+      setNotice(
+        `Queued Pinterest crawl job ${queued.id.slice(0, 8)}. Open Jobs to monitor progress and logs.`,
+      );
+    } catch (e) {
+      setError(String(e));
+    } finally {
+      setBusy(false);
+    }
+  }
+
   function resetSubscriptionEditor() {
     setSubscriptionEditId(null);
     setSubscriptionTitle("");
@@ -1175,6 +1526,159 @@ export function LibraryPage({ onOpenEditor, mode = "all", onOpenOptions }: Libra
         `Queued ${queued.length} due job${queued.length === 1 ? "" : "s"} from active subscriptions.`,
       );
       await refresh();
+    } catch (e) {
+      setError(String(e));
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function openYoutubeSubscriptionFolder(id: string) {
+    setBusy(true);
+    setError(null);
+    setNotice(null);
+    try {
+      const path = await invoke<string>("youtube_subscriptions_output_dir", { id });
+      const opened = await openPathBestEffort(path);
+      setNotice(
+        opened.method === "shell_open_path"
+          ? `Subscription folder: ${opened.path}`
+          : `Subscription folder revealed in file explorer: ${opened.path}`,
+      );
+    } catch (e) {
+      setError(String(e));
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  function resetInstagramSubscriptionEditor() {
+    setInstagramSubscriptionEditId(null);
+    setInstagramSubscriptionTitle("");
+    setInstagramSubscriptionUrl("");
+    setInstagramSubscriptionFolderMap("");
+    setInstagramSubscriptionOutputDirOverride("");
+    setInstagramSubscriptionUseBrowserCookies(false);
+    setInstagramSubscriptionActive(true);
+    setInstagramSubscriptionRefreshIntervalMinutes(180);
+  }
+
+  function editInstagramSubscription(sub: InstagramSubscriptionRow) {
+    setInstagramSubscriptionEditId(sub.id);
+    setInstagramSubscriptionTitle(sub.title);
+    setInstagramSubscriptionUrl(sub.source_url);
+    setInstagramSubscriptionFolderMap(sub.folder_map);
+    setInstagramSubscriptionOutputDirOverride(sub.output_dir_override ?? "");
+    setInstagramSubscriptionUseBrowserCookies(sub.use_browser_cookies);
+    setInstagramSubscriptionActive(sub.active);
+    setInstagramSubscriptionRefreshIntervalMinutes(sub.refresh_interval_minutes);
+  }
+
+  async function saveInstagramSubscription() {
+    setBusy(true);
+    setError(null);
+    setNotice(null);
+    try {
+      const payload: InstagramSubscriptionUpsert = {
+        id: instagramSubscriptionEditId,
+        title: instagramSubscriptionTitle.trim(),
+        source_url: instagramSubscriptionUrl.trim(),
+        folder_map: instagramSubscriptionFolderMap.trim() || null,
+        output_dir_override: instagramSubscriptionOutputDirOverride.trim() || null,
+        use_browser_cookies: instagramSubscriptionUseBrowserCookies,
+        active: instagramSubscriptionActive,
+        refresh_interval_minutes: Math.max(
+          minSubscriptionRefreshIntervalMinutes,
+          Math.min(
+            maxSubscriptionRefreshIntervalMinutes,
+            Math.round(instagramSubscriptionRefreshIntervalMinutes),
+          ),
+        ),
+      };
+      if (!payload.title) throw new Error("Instagram subscription title is required.");
+      if (!payload.source_url) throw new Error("Instagram subscription URL is required.");
+
+      const saved = await invoke<InstagramSubscriptionRow>("instagram_subscriptions_upsert", {
+        subscription: payload,
+      });
+      setNotice(`Saved Instagram subscription: ${saved.title}`);
+      resetInstagramSubscriptionEditor();
+      await refresh();
+    } catch (e) {
+      setError(String(e));
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function deleteInstagramSubscription(id: string) {
+    setBusy(true);
+    setError(null);
+    setNotice(null);
+    try {
+      await invoke("instagram_subscriptions_delete", { id });
+      if (instagramSubscriptionEditId === id) {
+        resetInstagramSubscriptionEditor();
+      }
+      setNotice("Instagram subscription deleted.");
+      await refresh();
+    } catch (e) {
+      setError(String(e));
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function queueInstagramSubscription(id: string) {
+    setBusy(true);
+    setError(null);
+    setNotice(null);
+    try {
+      const queued = await invoke<Array<{ id: string }>>("instagram_subscriptions_queue_one", {
+        id,
+      });
+      setNotice(
+        `Queued ${queued.length} Instagram job${queued.length === 1 ? "" : "s"} from subscription.`,
+      );
+      await refresh();
+    } catch (e) {
+      setError(String(e));
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function queueAllActiveInstagramSubscriptions() {
+    setBusy(true);
+    setError(null);
+    setNotice(null);
+    try {
+      const queued = await invoke<Array<{ id: string }>>(
+        "instagram_subscriptions_queue_all_active",
+      );
+      setNotice(
+        `Queued ${queued.length} due Instagram job${queued.length === 1 ? "" : "s"} from saved archive targets.`,
+      );
+      await refresh();
+    } catch (e) {
+      setError(String(e));
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function openInstagramSubscriptionFolder(id: string) {
+    setBusy(true);
+    setError(null);
+    setNotice(null);
+    try {
+      const path = await invoke<string>("instagram_subscriptions_output_dir", { id });
+      const opened = await openPathBestEffort(path);
+      setNotice(
+        opened.method === "shell_open_path"
+          ? `Instagram subscription folder: ${opened.path}`
+          : `Instagram subscription folder revealed in file explorer: ${opened.path}`,
+      );
     } catch (e) {
       setError(String(e));
     } finally {
@@ -1550,6 +2054,70 @@ export function LibraryPage({ onOpenEditor, mode = "all", onOpenOptions }: Libra
     }
   }
 
+  async function analyzeLegacyArchiveRoot() {
+    setBusy(true);
+    setError(null);
+    setNotice(null);
+    try {
+      const root = legacyArchiveRoot.trim();
+      if (!root) {
+        throw new Error("Choose or enter a legacy archive root first.");
+      }
+      const summary = await invoke<LegacyArchiveAnalysisSummary>("legacy_archive_analyze", {
+        rootPath: root,
+        installPath: legacyArchiveInstallPath.trim() || null,
+        maxDepth: Math.max(1, Math.min(16, Math.round(legacyArchiveMaxDepth))),
+        maxFiles: Math.max(1, Math.min(100000, Math.round(legacyArchiveMaxFiles))),
+      });
+      setLegacyArchiveAnalysis(summary);
+      setNotice(
+        `Analyzed legacy root: ${summary.media_file_count} sampled media file(s), ${summary.container_hints.length} visible containers. Local report: ${summary.local_report_path || "not written"}.`,
+      );
+    } catch (e) {
+      setError(String(e));
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function importExistingDownloadsFromLegacyRoot() {
+    if (legacyArchiveRoot.trim()) {
+      setBusy(true);
+      setError(null);
+      setNotice(null);
+      try {
+        const summary = await invoke<ExistingDownloadsImportSummary>(
+          "youtube_subscriptions_import_existing_downloads",
+          {
+            scanDir: legacyArchiveRoot.trim(),
+            maxDepth: Math.max(1, Math.min(16, Math.round(legacyArchiveMaxDepth))),
+            maxFiles: Math.max(1, Math.min(100000, Math.round(legacyArchiveMaxFiles))),
+          },
+        );
+        setNotice(
+          `Scanned ${summary.discovered_media_files} file(s); imported ${summary.imported_items}, skipped ${summary.skipped_existing_items}, failures ${summary.failures}.`,
+        );
+        await refresh();
+      } catch (e) {
+        setError(String(e));
+      } finally {
+        setBusy(false);
+      }
+      return;
+    }
+    await importExistingDownloads();
+  }
+
+  async function openLegacyAnalysisReport() {
+    setError(null);
+    if (!legacyArchiveAnalysis?.local_report_path) return;
+    try {
+      await openPathBestEffort(legacyArchiveAnalysis.local_report_path);
+    } catch (e) {
+      setError(String(e));
+    }
+  }
+
   return (
     <section>
       <h1>{title}</h1>
@@ -1652,6 +2220,10 @@ export function LibraryPage({ onOpenEditor, mode = "all", onOpenOptions }: Libra
             <div className="v">{defaultInstagramDownloadsDir || "-"}</div>
           </div>
           <div className="kv">
+            <div className="k">Instagram subscriptions</div>
+            <div className="v">{defaultInstagramSubscriptionDownloadsDir || "-"}</div>
+          </div>
+          <div className="kv">
             <div className="k">Forum / image archive</div>
             <div className="v">{defaultImageDownloadsDir || "-"}</div>
           </div>
@@ -1664,12 +2236,196 @@ export function LibraryPage({ onOpenEditor, mode = "all", onOpenOptions }: Libra
 
       {showVideoIngest ? (
         <div className="card">
-        <h2>Video URL ingest (batch)</h2>
+        <h2>Legacy archive reconciliation (read-only)</h2>
+        <div style={{ color: "#4b5563", marginBottom: 8 }}>
+          Use this when you already have a large downloader-managed archive on local disk or NAS.
+          VoxVulgi only analyzes and indexes it here. It does not move, delete, or rewrite legacy
+          media. Start with a shallow analysis first, then run index-only import when you are ready.
+        </div>
+        <div className="row">
+          <label style={{ display: "flex", alignItems: "center", gap: 8, flex: 1 }}>
+            <span>Archive root</span>
+            <input
+              value={legacyArchiveRoot}
+              disabled={busy}
+              onChange={(e) => {
+                setLegacyArchiveRoot(e.currentTarget.value);
+                setLegacyArchiveAnalysis(null);
+              }}
+              placeholder="Absolute local or NAS folder path"
+              style={{ width: "100%" }}
+            />
+          </label>
+          <button type="button" disabled={busy} onClick={chooseLegacyArchiveRoot}>
+            Choose folder
+          </button>
+        </div>
+        <div className="row">
+          <label style={{ display: "flex", alignItems: "center", gap: 8, flex: 1 }}>
+            <span>Old 4KVDP install</span>
+            <input
+              value={legacyArchiveInstallPath}
+              disabled={busy}
+              onChange={(e) => setLegacyArchiveInstallPath(e.currentTarget.value)}
+              placeholder="Optional old app install path"
+              style={{ width: "100%" }}
+            />
+          </label>
+        </div>
+        <div className="row">
+          <label style={{ display: "flex", alignItems: "center", gap: 8 }}>
+            <span>Max depth</span>
+            <input
+              type="number"
+              min={1}
+              max={16}
+              value={legacyArchiveMaxDepth}
+              disabled={busy}
+              onChange={(e) =>
+                setLegacyArchiveMaxDepth(
+                  Math.max(1, Math.min(16, Number(e.currentTarget.value) || 1)),
+                )
+              }
+              style={{ width: 110 }}
+            />
+          </label>
+          <label style={{ display: "flex", alignItems: "center", gap: 8 }}>
+            <span>Max files</span>
+            <input
+              type="number"
+              min={1}
+              max={100000}
+              value={legacyArchiveMaxFiles}
+              disabled={busy}
+              onChange={(e) =>
+                setLegacyArchiveMaxFiles(
+                  Math.max(1, Math.min(100000, Number(e.currentTarget.value) || 1)),
+                )
+              }
+              style={{ width: 130 }}
+            />
+          </label>
+          <div style={{ color: "#4b5563" }}>
+            These bounds keep NAS reads deliberate and write a local analysis report only.
+          </div>
+        </div>
+        <div className="row">
+          <button
+            type="button"
+            disabled={busy || !legacyArchiveRoot.trim()}
+            onClick={analyzeLegacyArchiveRoot}
+          >
+            Analyze root
+          </button>
+          <button
+            type="button"
+            disabled={busy || !legacyArchiveRoot.trim()}
+            onClick={importExistingDownloadsFromLegacyRoot}
+          >
+            Index downloads
+          </button>
+          <button type="button" disabled={busy} onClick={import4kvdpSubscriptionsDir}>
+            Import 4KVDP exports
+          </button>
+        </div>
+        {legacyArchiveAnalysis ? (
+          <>
+            <div className="kv">
+              <div className="k">Media files</div>
+              <div className="v">{legacyArchiveAnalysis.media_file_count}</div>
+            </div>
+            <div className="kv">
+              <div className="k">Install path</div>
+              <div className="v">{legacyArchiveAnalysis.install_path ?? "-"}</div>
+            </div>
+            <div className="kv">
+              <div className="k">Install path exists</div>
+              <div className="v">{legacyArchiveAnalysis.install_path_exists ? "yes" : "no"}</div>
+            </div>
+            <div className="kv">
+              <div className="k">4KVDP install hints</div>
+              <div className="v">
+                {legacyArchiveAnalysis.detected_4kvdp_install ? "detected" : "not detected"}
+              </div>
+            </div>
+            <div className="kv">
+              <div className="k">4KVDP subscriptions.json</div>
+              <div className="v">
+                {legacyArchiveAnalysis.detected_4kvdp_subscriptions_json ? "detected" : "not detected"}
+              </div>
+            </div>
+            <div className="kv">
+              <div className="k">4KVDP subscription_entries.csv</div>
+              <div className="v">
+                {legacyArchiveAnalysis.detected_4kvdp_subscription_entries_csv ? "detected" : "not detected"}
+              </div>
+            </div>
+            <div className="kv">
+              <div className="k">Channel-like folders</div>
+              <div className="v">{legacyArchiveAnalysis.detected_channel_dirs}</div>
+            </div>
+            <div className="kv">
+              <div className="k">Playlist-like folders</div>
+              <div className="v">{legacyArchiveAnalysis.detected_playlist_dirs}</div>
+            </div>
+            <div className="kv">
+              <div className="k">Analysis bounds</div>
+              <div className="v">
+                depth {legacyArchiveAnalysis.scan_max_depth}, max files{" "}
+                {legacyArchiveAnalysis.scan_max_files}
+              </div>
+            </div>
+            <div className="kv">
+              <div className="k">Local report</div>
+              <div className="v">{legacyArchiveAnalysis.local_report_path || "-"}</div>
+            </div>
+            <div className="row">
+              <button
+                type="button"
+                disabled={busy || !legacyArchiveAnalysis.local_report_path}
+                onClick={openLegacyAnalysisReport}
+              >
+                Open report
+              </button>
+            </div>
+            {legacyArchiveAnalysis.warnings.length ? (
+              <div style={{ color: "#6b4f1d", marginTop: 8 }}>
+                {legacyArchiveAnalysis.warnings.join(" ")}
+              </div>
+            ) : null}
+            {legacyArchiveAnalysis.container_hints.length ? (
+              <div className="table-wrap">
+                <table>
+                  <thead>
+                    <tr>
+                      <th>Container</th>
+                      <th>Media files</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {legacyArchiveAnalysis.container_hints.map((hint) => (
+                      <tr key={hint.relative_path}>
+                        <td>{hint.relative_path}</td>
+                        <td>{hint.media_file_count}</td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            ) : null}
+          </>
+        ) : null}
+        </div>
+      ) : null}
+
+      {showVideoIngest ? (
+        <div className="card">
+        <h2>Video URL archiver (batch)</h2>
         <div style={{ color: "#4b5563", marginBottom: 8 }}>
           Paste many links at once (direct media URLs or YouTube video/playlist/channel links).
           Maximum {maxBatchUrls} videos per submission. If output folder is empty, each job is
-          saved under <code>{defaultVideoDownloadsDir || "video"}</code>. The default preset now
-          prefers MP4 when yt-dlp can merge/remux cleanly.
+          saved under <code>{defaultVideoDownloadsDir || "video"}</code>. VoxVulgi now treats MP4
+          as the default archive target when yt-dlp can merge/remux cleanly.
         </div>
         <textarea
           value={urlBatchText}
@@ -2122,7 +2878,7 @@ export function LibraryPage({ onOpenEditor, mode = "all", onOpenOptions }: Libra
           <button type="button" disabled={busy} onClick={() => scanFolderSeedArchive()}>
             Scan folder + seed archive
           </button>
-          <button type="button" disabled={busy} onClick={importExistingDownloads}>
+          <button type="button" disabled={busy} onClick={importExistingDownloadsFromLegacyRoot}>
             Import existing downloads
           </button>
           <button type="button" disabled={busy} onClick={() => refresh()}>
@@ -2189,6 +2945,13 @@ export function LibraryPage({ onOpenEditor, mode = "all", onOpenOptions }: Libra
                         <button type="button" disabled={busy} onClick={() => queueSubscription(sub.id)}>
                           Queue
                         </button>
+                        <button
+                          type="button"
+                          disabled={busy}
+                          onClick={() => openYoutubeSubscriptionFolder(sub.id)}
+                        >
+                          Open folder
+                        </button>
                         <button type="button" disabled={busy} onClick={() => deleteSubscription(sub.id)}>
                           Delete
                         </button>
@@ -2216,7 +2979,250 @@ export function LibraryPage({ onOpenEditor, mode = "all", onOpenOptions }: Libra
 
       {showInstagramArchive ? (
         <div className="card">
-        <h2>Instagram archive (batch)</h2>
+        <h2>Recent Instagram media</h2>
+        <div style={{ color: "#4b5563", marginBottom: 8 }}>
+          Latest 10 Instagram items already indexed in the library. Thumbnails are shown without
+          crop framing so posts, stories, and reels are easier to inspect quickly.
+        </div>
+        {recentInstagramItems.length ? (
+          <div
+            style={{
+              display: "grid",
+              gap: 12,
+              gridTemplateColumns: "repeat(auto-fill, minmax(170px, 1fr))",
+            }}
+          >
+            {recentInstagramItems.map((item) => (
+              <article
+                key={item.id}
+                style={{
+                  display: "grid",
+                  gap: 10,
+                  padding: 12,
+                  borderRadius: 10,
+                  border: "1px solid rgba(126, 145, 167, 0.3)",
+                  background: "linear-gradient(154deg, #edf2f7 0%, #dce3eb 54%, #c9d2dc 100%)",
+                }}
+              >
+                <ThumbnailPreview
+                  itemId={item.id}
+                  path={item.thumbnail_path}
+                  fit="contain"
+                  width={146}
+                  height={146}
+                />
+                <strong style={{ lineHeight: 1.2 }}>{item.title}</strong>
+                <div style={{ color: "#4b5563", fontSize: 12, wordBreak: "break-word" }}>
+                  {item.media_path}
+                </div>
+                <div className="row" style={{ marginTop: 0 }}>
+                  <button type="button" disabled={busy} onClick={() => openMediaFile(item)}>
+                    Open file
+                  </button>
+                  <button type="button" disabled={busy} onClick={() => revealMediaFile(item)}>
+                    Open folder
+                  </button>
+                </div>
+              </article>
+            ))}
+          </div>
+        ) : (
+          <div style={{ color: "#4b5563" }}>
+            No Instagram items are indexed yet. Queue a batch or a saved subscription first.
+          </div>
+        )}
+        </div>
+      ) : null}
+
+      {showInstagramArchive ? (
+        <div className="card">
+        <h2>Instagram subscriptions</h2>
+        <div style={{ color: "#4b5563", marginBottom: 8 }}>
+          Save recurring Instagram archive targets with their own folder map and refresh interval.
+          Queue due active runs uses the saved interval against the last queued time.
+        </div>
+        <div className="row">
+          <label style={{ display: "flex", alignItems: "center", gap: 8, flex: 1 }}>
+            <span>Title</span>
+            <input
+              value={instagramSubscriptionTitle}
+              disabled={busy}
+              onChange={(e) => setInstagramSubscriptionTitle(e.currentTarget.value)}
+              placeholder="Main profile archive"
+              style={{ width: "100%" }}
+            />
+          </label>
+          <label style={{ display: "flex", alignItems: "center", gap: 8, flex: 1 }}>
+            <span>Instagram URL</span>
+            <input
+              value={instagramSubscriptionUrl}
+              disabled={busy}
+              onChange={(e) => setInstagramSubscriptionUrl(e.currentTarget.value)}
+              placeholder="https://www.instagram.com/example/"
+              style={{ width: "100%" }}
+            />
+          </label>
+        </div>
+        <div className="row">
+          <label style={{ display: "flex", alignItems: "center", gap: 8, flex: 1 }}>
+            <span>Folder map</span>
+            <input
+              value={instagramSubscriptionFolderMap}
+              disabled={busy}
+              onChange={(e) => setInstagramSubscriptionFolderMap(e.currentTarget.value)}
+              placeholder="example_profile"
+              style={{ width: "100%" }}
+            />
+          </label>
+          <label style={{ display: "flex", alignItems: "center", gap: 8, flex: 1 }}>
+            <span>Output override</span>
+            <input
+              value={instagramSubscriptionOutputDirOverride}
+              disabled={busy}
+              onChange={(e) => setInstagramSubscriptionOutputDirOverride(e.currentTarget.value)}
+              placeholder="Optional absolute folder path"
+              style={{ width: "100%" }}
+            />
+          </label>
+          <button type="button" disabled={busy} onClick={chooseInstagramSubscriptionOutputDir}>
+            Choose folder
+          </button>
+        </div>
+        <div className="row">
+          <label style={{ display: "flex", alignItems: "center", gap: 8 }}>
+            <input
+              type="checkbox"
+              checked={instagramSubscriptionUseBrowserCookies}
+              disabled={busy}
+              onChange={(e) =>
+                setInstagramSubscriptionUseBrowserCookies(e.currentTarget.checked)
+              }
+            />
+            <span>Use browser cookies (Chrome)</span>
+          </label>
+          <label style={{ display: "flex", alignItems: "center", gap: 8 }}>
+            <input
+              type="checkbox"
+              checked={instagramSubscriptionActive}
+              disabled={busy}
+              onChange={(e) => setInstagramSubscriptionActive(e.currentTarget.checked)}
+            />
+            <span>Active</span>
+          </label>
+          <label style={{ display: "flex", alignItems: "center", gap: 8 }}>
+            <span>Refresh every (min)</span>
+            <input
+              type="number"
+              min={minSubscriptionRefreshIntervalMinutes}
+              max={maxSubscriptionRefreshIntervalMinutes}
+              value={instagramSubscriptionRefreshIntervalMinutes}
+              disabled={busy}
+              onChange={(e) =>
+                setInstagramSubscriptionRefreshIntervalMinutes(
+                  Math.max(
+                    minSubscriptionRefreshIntervalMinutes,
+                    Math.min(
+                      maxSubscriptionRefreshIntervalMinutes,
+                      Number(e.currentTarget.value) || minSubscriptionRefreshIntervalMinutes,
+                    ),
+                  ),
+                )
+              }
+              style={{ width: 110 }}
+            />
+          </label>
+        </div>
+        <div className="row">
+          <button type="button" disabled={busy} onClick={saveInstagramSubscription}>
+            {instagramSubscriptionEditId ? "Update subscription" : "Save subscription"}
+          </button>
+          <button type="button" disabled={busy} onClick={resetInstagramSubscriptionEditor}>
+            Clear editor
+          </button>
+          <button
+            type="button"
+            disabled={busy || activeInstagramSubscriptionCount === 0}
+            onClick={queueAllActiveInstagramSubscriptions}
+          >
+            Queue due active ({activeInstagramSubscriptionCount})
+          </button>
+        </div>
+        <div style={{ color: "#4b5563", marginTop: 8 }}>
+          Saved Instagram subscriptions: {instagramSubscriptions.length}. Default folder root:
+          {" "}
+          <code>{defaultInstagramSubscriptionDownloadsDir || "instagram/subscriptions"}</code>
+        </div>
+        <div className="table-wrap">
+          <table>
+            <thead>
+              <tr>
+                <th>Title</th>
+                <th>URL</th>
+                <th>Folder map</th>
+                <th>Active</th>
+                <th>Interval (min)</th>
+                <th>Last queued</th>
+                <th>Actions</th>
+              </tr>
+            </thead>
+            <tbody>
+              {instagramSubscriptions.length ? (
+                instagramSubscriptions.map((sub) => (
+                  <tr key={sub.id}>
+                    <td>{sub.title}</td>
+                    <td style={{ maxWidth: 360 }}>{sub.source_url}</td>
+                    <td>{sub.folder_map}</td>
+                    <td>{sub.active ? "yes" : "no"}</td>
+                    <td>{sub.refresh_interval_minutes}</td>
+                    <td>{sub.last_queued_at_ms ? new Date(sub.last_queued_at_ms).toLocaleString() : "-"}</td>
+                    <td>
+                      <div className="row" style={{ marginTop: 0 }}>
+                        <button
+                          type="button"
+                          disabled={busy}
+                          onClick={() => editInstagramSubscription(sub)}
+                        >
+                          Edit
+                        </button>
+                        <button
+                          type="button"
+                          disabled={busy}
+                          onClick={() => queueInstagramSubscription(sub.id)}
+                        >
+                          Queue
+                        </button>
+                        <button
+                          type="button"
+                          disabled={busy}
+                          onClick={() => openInstagramSubscriptionFolder(sub.id)}
+                        >
+                          Open folder
+                        </button>
+                        <button
+                          type="button"
+                          disabled={busy}
+                          onClick={() => deleteInstagramSubscription(sub.id)}
+                        >
+                          Delete
+                        </button>
+                      </div>
+                    </td>
+                  </tr>
+                ))
+              ) : (
+                <tr>
+                  <td colSpan={7}>No Instagram subscriptions yet.</td>
+                </tr>
+              )}
+            </tbody>
+          </table>
+        </div>
+        </div>
+      ) : null}
+
+      {showInstagramArchive ? (
+        <div className="card">
+        <h2>Instagram Archiver batch</h2>
         <div style={{ color: "#4b5563", marginBottom: 8 }}>
           Paste Instagram post/reel/profile links. Use your session cookie for private content.
           Output folder is optional; if left empty, each job is saved to a new folder under
@@ -2288,13 +3294,60 @@ export function LibraryPage({ onOpenEditor, mode = "all", onOpenOptions }: Libra
 
       {showImageArchive ? (
         <div className="card">
+        <h2>Pinterest archive crawler</h2>
+        <div style={{ color: "#4b5563", marginBottom: 8 }}>
+          Paste Pinterest board/folder URLs in bulk. VoxVulgi routes them through the crawler with
+          content-link traversal enabled so large collections can be archived without one-by-one
+          submission.
+        </div>
+        <textarea
+          value={pinterestBatchText}
+          onChange={(e) => setPinterestBatchText(e.currentTarget.value)}
+          disabled={busy}
+          placeholder={"https://www.pinterest.com/example/board-name/\nhttps://www.pinterest.com/example/another-board/"}
+          rows={4}
+          style={{ width: "100%", boxSizing: "border-box", resize: "vertical" }}
+        />
+        <div className="row">
+          <label style={{ display: "flex", alignItems: "center", gap: 8, flex: 1 }}>
+            <span>Output folder</span>
+            <input
+              value={pinterestBatchOutputDir}
+              disabled={busy}
+              onChange={(e) => setPinterestBatchOutputDir(e.currentTarget.value)}
+              placeholder="Optional absolute folder path"
+              style={{ width: "100%" }}
+            />
+          </label>
+          <button type="button" disabled={busy} onClick={choosePinterestOutputDir}>
+            Choose folder
+          </button>
+        </div>
+        <div style={{ color: "#4b5563", marginTop: 8 }}>
+          Parsed Pinterest URLs: {parsedPinterestUrlCount}
+        </div>
+        <div className="row">
+          <button
+            type="button"
+            disabled={busy || parsedPinterestUrlCount === 0}
+            onClick={enqueuePinterestBatch}
+          >
+            Queue Pinterest crawl ({parsedPinterestUrlCount})
+          </button>
+        </div>
+        </div>
+      ) : null}
+
+      {showImageArchive ? (
+        <div className="card">
         <h2>Image archive (batch)</h2>
         <div style={{ color: "#4b5563", marginBottom: 8 }}>
           Crawl blog/forum pages, follow next pages, skip likely profile photos, and download
           full-size image candidates into your download folder. Post/thread link traversal is
           optional (off by default) to avoid drifting outside the selected topic. Use Jobs to
           monitor progress. If the site requires login, paste your browser session cookie below.
-          If output folder is empty, each job is saved to a new folder under `images`.
+          If output folder is empty, each job is saved to a new folder under `images`. JPEG is
+          preferred where alternate encodings are available without forcing destructive transcoding.
         </div>
         <textarea
           value={imageBatchUrlsText}

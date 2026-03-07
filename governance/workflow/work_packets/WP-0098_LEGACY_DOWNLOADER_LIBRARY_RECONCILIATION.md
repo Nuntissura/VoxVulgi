@@ -3,7 +3,7 @@
 ## Metadata
 - ID: WP-0098
 - Owner: Codex
-- Status: BACKLOG
+- Status: DONE
 - Created: 2026-03-07
 - Target milestone: Workflow and archive UX hardening
 
@@ -45,3 +45,4 @@ Out of scope:
 ## Status updates
 
 - 2026-03-07: Created from operator feedback on NAS-backed archive reuse and preserving old downloader playlist/subscription folder intent.
+- 2026-03-07: Implemented a read-only, bounded reconciliation path with operator-supplied legacy root/install inputs, local JSON analysis reports, and offloaded import/analysis commands so large NAS roots do not block the UI thread.

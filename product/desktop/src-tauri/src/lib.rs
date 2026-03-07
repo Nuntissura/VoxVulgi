@@ -3,12 +3,15 @@ use std::sync::{
     atomic::{AtomicBool, Ordering},
     Arc, Mutex,
 };
+use std::time::Duration;
+use sysinfo::{ProcessesToUpdate, System};
 use tauri::{Manager, State};
 use voxvulgi_engine::models::ModelStore;
 use voxvulgi_engine::paths::AppPaths;
 use voxvulgi_engine::{
-    config, db, diagnostics, jobs, library, speakers, subscriptions, subtitle_tracks, subtitles,
-    tools, voice_cast_packs, voice_cleanup, voice_library, voice_templates,
+    config, db, diagnostics, instagram_subscriptions, jobs, library, speakers, subscriptions,
+    subtitle_tracks, subtitles, tools, voice_cast_packs, voice_cleanup, voice_library,
+    voice_templates,
 };
 
 #[derive(Debug, Clone, serde::Deserialize)]
@@ -65,6 +68,9 @@ struct StartupTracker {
     offline_bundle_started_at_ms: Option<i64>,
     offline_bundle_finished_at_ms: Option<i64>,
     offline_bundle_error: Option<String>,
+    progress_pct: f32,
+    active_phase_id: Option<String>,
+    phases: Vec<StartupPhase>,
 }
 
 impl StartupTracker {
@@ -74,6 +80,95 @@ impl StartupTracker {
             offline_bundle_started_at_ms: None,
             offline_bundle_finished_at_ms: None,
             offline_bundle_error: None,
+            progress_pct: 0.0,
+            active_phase_id: None,
+            phases: vec![
+                StartupPhase::new("app_dirs", "App data + output layout"),
+                StartupPhase::new("db_schema", "Database schema"),
+                StartupPhase::new("job_runner", "Job runner"),
+                StartupPhase::new("offline_bundle", "Offline bundle hydration"),
+            ],
+        }
+    }
+
+    fn set_phase_state(&mut self, phase_id: &str, state: &str, error: Option<String>) {
+        let now = now_epoch_ms_i64();
+        if let Some(phase) = self.phases.iter_mut().find(|phase| phase.id == phase_id) {
+            phase.state = state.to_string();
+            if matches!(state, "pending" | "running") {
+                phase.started_at_ms = phase.started_at_ms.or(Some(now));
+                phase.finished_at_ms = None;
+                phase.error = None;
+            } else {
+                phase.started_at_ms = phase.started_at_ms.or(Some(now));
+                phase.finished_at_ms = Some(now);
+                phase.error = error.clone();
+            }
+        }
+
+        if phase_id == "offline_bundle" {
+            self.offline_bundle_state = if state == "skipped" {
+                "skipped_safe_mode".to_string()
+            } else {
+                state.to_string()
+            };
+            match state {
+                "pending" | "running" => {
+                    self.offline_bundle_started_at_ms =
+                        self.offline_bundle_started_at_ms.or(Some(now));
+                    self.offline_bundle_finished_at_ms = None;
+                    self.offline_bundle_error = None;
+                }
+                "ready" | "skipped" => {
+                    self.offline_bundle_started_at_ms =
+                        self.offline_bundle_started_at_ms.or(Some(now));
+                    self.offline_bundle_finished_at_ms = Some(now);
+                    self.offline_bundle_error = None;
+                }
+                "error" => {
+                    self.offline_bundle_started_at_ms =
+                        self.offline_bundle_started_at_ms.or(Some(now));
+                    self.offline_bundle_finished_at_ms = Some(now);
+                    self.offline_bundle_error = error;
+                }
+                _ => {}
+            }
+        }
+
+        let total = self.phases.len().max(1) as f32;
+        let completed = self
+            .phases
+            .iter()
+            .filter(|phase| matches!(phase.state.as_str(), "ready" | "skipped" | "error"))
+            .count() as f32;
+        self.progress_pct = (completed / total).clamp(0.0, 1.0);
+        self.active_phase_id = self
+            .phases
+            .iter()
+            .find(|phase| matches!(phase.state.as_str(), "running" | "pending"))
+            .map(|phase| phase.id.clone());
+    }
+}
+
+#[derive(Debug, Clone, serde::Serialize)]
+struct StartupPhase {
+    id: String,
+    label: String,
+    state: String,
+    started_at_ms: Option<i64>,
+    finished_at_ms: Option<i64>,
+    error: Option<String>,
+}
+
+impl StartupPhase {
+    fn new(id: &str, label: &str) -> Self {
+        Self {
+            id: id.to_string(),
+            label: label.to_string(),
+            state: "pending".to_string(),
+            started_at_ms: None,
+            finished_at_ms: None,
+            error: None,
         }
     }
 }
@@ -84,6 +179,9 @@ struct StartupStatus {
     offline_bundle_started_at_ms: Option<i64>,
     offline_bundle_finished_at_ms: Option<i64>,
     offline_bundle_error: Option<String>,
+    progress_pct: f32,
+    active_phase_id: Option<String>,
+    phases: Vec<StartupPhase>,
 }
 
 #[derive(Debug, Clone, serde::Serialize)]
@@ -120,6 +218,25 @@ struct DiagnosticsTraceDirStatus {
 struct DiagnosticsTraceClearSummary {
     removed_entries: usize,
     removed_bytes: u64,
+}
+
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+struct DiagnosticsProcessSnapshot {
+    pid: Option<u32>,
+    cpu_percent: Option<f32>,
+    rss_bytes: Option<u64>,
+    virtual_bytes: Option<u64>,
+    system_used_bytes: Option<u64>,
+    system_total_bytes: Option<u64>,
+}
+
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+struct DiagnosticsTraceEntry {
+    ts_ms: i64,
+    event: String,
+    level: String,
+    details: serde_json::Value,
+    process: Option<DiagnosticsProcessSnapshot>,
 }
 
 #[derive(Debug, Clone, serde::Serialize)]
@@ -162,6 +279,130 @@ fn now_epoch_ms_i64() -> i64 {
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap_or_default()
         .as_millis() as i64
+}
+
+fn startup_phase_label(phase_id: &str) -> &'static str {
+    match phase_id {
+        "app_dirs" => "App data + output layout",
+        "db_schema" => "Database schema",
+        "job_runner" => "Job runner",
+        "offline_bundle" => "Offline bundle hydration",
+        _ => "Startup task",
+    }
+}
+
+fn diagnostics_trace_file_path(paths: &AppPaths) -> Result<std::path::PathBuf, String> {
+    let dir = paths
+        .effective_diagnostics_trace_dir()
+        .map_err(|e| e.to_string())?;
+    std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
+    Ok(dir.join("diagnostics_trace.jsonl"))
+}
+
+fn capture_process_snapshot() -> Option<DiagnosticsProcessSnapshot> {
+    let pid = sysinfo::get_current_pid().ok()?;
+    let mut system = System::new();
+    system.refresh_memory();
+    system.refresh_processes(ProcessesToUpdate::Some(&[pid]), true);
+    let process = system.process(pid)?;
+    Some(DiagnosticsProcessSnapshot {
+        pid: Some(pid.as_u32()),
+        cpu_percent: Some(process.cpu_usage()),
+        rss_bytes: Some(process.memory()),
+        virtual_bytes: Some(process.virtual_memory()),
+        system_used_bytes: Some(system.used_memory()),
+        system_total_bytes: Some(system.total_memory()),
+    })
+}
+
+fn append_diagnostics_trace_row(
+    paths: &AppPaths,
+    event: String,
+    details: serde_json::Value,
+    level: String,
+) -> Result<String, String> {
+    let path = diagnostics_trace_file_path(paths)?;
+    let mut file = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(&path)
+        .map_err(|e| e.to_string())?;
+
+    let row = DiagnosticsTraceEntry {
+        ts_ms: now_epoch_ms_i64(),
+        event,
+        level,
+        details,
+        process: capture_process_snapshot(),
+    };
+
+    use std::io::Write as _;
+    writeln!(
+        file,
+        "{}",
+        serde_json::to_string(&row).map_err(|e| e.to_string())?
+    )
+    .map_err(|e| e.to_string())?;
+
+    Ok(path.to_string_lossy().to_string())
+}
+
+fn append_diagnostics_trace_row_best_effort(
+    paths: &AppPaths,
+    event: &str,
+    details: serde_json::Value,
+    level: &str,
+) {
+    let _ = append_diagnostics_trace_row(paths, event.to_string(), details, level.to_string());
+}
+
+fn read_recent_diagnostics_trace_entries(
+    paths: &AppPaths,
+    limit: usize,
+) -> Result<Vec<DiagnosticsTraceEntry>, String> {
+    let path = diagnostics_trace_file_path(paths)?;
+    if !path.exists() {
+        return Ok(Vec::new());
+    }
+
+    let file = std::fs::File::open(&path).map_err(|e| e.to_string())?;
+    let reader = std::io::BufReader::new(file);
+    use std::io::BufRead as _;
+    let mut entries: Vec<DiagnosticsTraceEntry> = reader
+        .lines()
+        .map_while(|line| line.ok())
+        .filter_map(|line| serde_json::from_str::<DiagnosticsTraceEntry>(&line).ok())
+        .collect();
+
+    if entries.len() > limit {
+        let drain_until = entries.len().saturating_sub(limit);
+        entries.drain(0..drain_until);
+    }
+
+    Ok(entries)
+}
+
+fn set_startup_phase(
+    startup: &Arc<Mutex<StartupTracker>>,
+    paths: &AppPaths,
+    phase_id: &str,
+    state: &str,
+    error: Option<String>,
+) {
+    if let Ok(mut tracker) = startup.lock() {
+        tracker.set_phase_state(phase_id, state, error.clone());
+    }
+    append_diagnostics_trace_row_best_effort(
+        paths,
+        "startup_phase",
+        serde_json::json!({
+            "phase_id": phase_id,
+            "label": startup_phase_label(phase_id),
+            "state": state,
+            "error": error,
+        }),
+        if state == "error" { "error" } else { "info" },
+    );
 }
 
 fn is_safe_relative_path(path: &std::path::Path) -> bool {
@@ -662,7 +903,10 @@ fn normalize_existing_shell_path(path: String, label: &str) -> Result<std::path:
     }
     let normalized = target.canonicalize().unwrap_or(target);
     if !normalized.exists() {
-        return Err(format!("{label} does not exist: {}", normalized.to_string_lossy()));
+        return Err(format!(
+            "{label} does not exist: {}",
+            normalized.to_string_lossy()
+        ));
     }
     Ok(normalized)
 }
@@ -670,7 +914,10 @@ fn normalize_existing_shell_path(path: String, label: &str) -> Result<std::path:
 fn run_shell_command(command: &mut std::process::Command, action: &str) -> Result<(), String> {
     let status = command.status().map_err(|e| format!("{action}: {e}"))?;
     if !status.success() {
-        return Err(format!("{action} failed with exit code {:?}", status.code()));
+        return Err(format!(
+            "{action} failed with exit code {:?}",
+            status.code()
+        ));
     }
     Ok(())
 }
@@ -1523,6 +1770,9 @@ fn startup_status(state: State<'_, AppState>) -> Result<StartupStatus, String> {
         offline_bundle_started_at_ms: startup.offline_bundle_started_at_ms,
         offline_bundle_finished_at_ms: startup.offline_bundle_finished_at_ms,
         offline_bundle_error: startup.offline_bundle_error.clone(),
+        progress_pct: startup.progress_pct,
+        active_phase_id: startup.active_phase_id.clone(),
+        phases: startup.phases.clone(),
     })
 }
 
@@ -1705,32 +1955,25 @@ async fn diagnostics_trace_write_event(
 
     let paths = state.paths.clone();
     tauri::async_runtime::spawn_blocking(move || {
-        let dir = paths
-            .effective_diagnostics_trace_dir()
-            .map_err(|e| e.to_string())?;
-        std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
+        append_diagnostics_trace_row(
+            &paths,
+            event,
+            details.unwrap_or(serde_json::Value::Null),
+            level.unwrap_or_else(|| "info".to_string()),
+        )
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
 
-        let path = dir.join("diagnostics_trace.jsonl");
-        let mut file = std::fs::OpenOptions::new()
-            .create(true)
-            .append(true)
-            .open(&path)
-            .map_err(|e| e.to_string())?;
-
-        let ts_ms = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map(|d| d.as_millis() as i64)
-            .unwrap_or(0);
-        let row = serde_json::json!({
-            "ts_ms": ts_ms,
-            "event": event,
-            "level": level.unwrap_or_else(|| "info".to_string()),
-            "details": details.unwrap_or(serde_json::Value::Null),
-        });
-
-        use std::io::Write as _;
-        writeln!(file, "{}", row).map_err(|e| e.to_string())?;
-        Ok(path.to_string_lossy().to_string())
+#[tauri::command]
+async fn diagnostics_trace_recent(
+    state: State<'_, AppState>,
+    limit: Option<usize>,
+) -> Result<Vec<DiagnosticsTraceEntry>, String> {
+    let paths = state.paths.clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        read_recent_diagnostics_trace_entries(&paths, limit.unwrap_or(120).clamp(1, 1000))
     })
     .await
     .map_err(|e| e.to_string())?
@@ -2535,6 +2778,19 @@ fn youtube_subscriptions_list(
 }
 
 #[tauri::command]
+fn youtube_subscriptions_output_dir(
+    state: State<'_, AppState>,
+    id: String,
+) -> Result<String, String> {
+    let sub = subscriptions::get_youtube_subscription_by_id(&state.paths, &id)
+        .map_err(|e| e.to_string())?
+        .ok_or_else(|| format!("subscription not found: {id}"))?;
+    subscriptions::youtube_subscription_output_dir(&state.paths, &sub)
+        .map(|path| path.to_string_lossy().to_string())
+        .map_err(|e| e.to_string())
+}
+
+#[tauri::command]
 fn youtube_subscriptions_upsert(
     state: State<'_, AppState>,
     subscription: subscriptions::YoutubeSubscriptionUpsert,
@@ -2656,15 +2912,109 @@ fn youtube_subscriptions_seed_archive_scan(
 }
 
 #[tauri::command]
-fn youtube_subscriptions_import_existing_downloads(
+async fn youtube_subscriptions_import_existing_downloads(
     state: State<'_, AppState>,
     scan_dir: String,
+    max_depth: Option<usize>,
+    max_files: Option<usize>,
 ) -> Result<subscriptions::ExistingDownloadsImportSummary, String> {
-    subscriptions::import_existing_downloads_index_only(
-        &state.paths,
-        &std::path::PathBuf::from(scan_dir),
-    )
-    .map_err(|e| e.to_string())
+    let paths = state.paths.clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        subscriptions::import_existing_downloads_index_only_with_limits(
+            &paths,
+            &std::path::PathBuf::from(scan_dir),
+            max_depth,
+            max_files,
+        )
+        .map_err(|e| e.to_string())
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
+#[tauri::command]
+async fn legacy_archive_analyze(
+    state: State<'_, AppState>,
+    root_path: String,
+    install_path: Option<String>,
+    max_depth: Option<usize>,
+    max_files: Option<usize>,
+) -> Result<subscriptions::LegacyArchiveAnalysisSummary, String> {
+    let paths = state.paths.clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        let install_path = install_path
+            .as_deref()
+            .map(std::path::PathBuf::from)
+            .unwrap_or_default();
+        subscriptions::analyze_legacy_archive_root(
+            &paths,
+            &std::path::PathBuf::from(root_path),
+            if install_path.as_os_str().is_empty() {
+                None
+            } else {
+                Some(install_path.as_path())
+            },
+            max_depth,
+            max_files,
+        )
+        .map_err(|e| e.to_string())
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
+#[tauri::command]
+fn instagram_subscriptions_list(
+    state: State<'_, AppState>,
+) -> Result<Vec<instagram_subscriptions::InstagramSubscriptionRow>, String> {
+    instagram_subscriptions::list_instagram_subscriptions(&state.paths).map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+fn instagram_subscriptions_upsert(
+    state: State<'_, AppState>,
+    subscription: instagram_subscriptions::InstagramSubscriptionUpsert,
+) -> Result<instagram_subscriptions::InstagramSubscriptionRow, String> {
+    instagram_subscriptions::upsert_instagram_subscription(&state.paths, subscription)
+        .map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+fn instagram_subscriptions_delete(state: State<'_, AppState>, id: String) -> Result<(), String> {
+    instagram_subscriptions::delete_instagram_subscription(&state.paths, &id)
+        .map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+fn instagram_subscriptions_queue_one(
+    state: State<'_, AppState>,
+    id: String,
+) -> Result<Vec<jobs::JobRow>, String> {
+    instagram_subscriptions::queue_instagram_subscription(&state.paths, &id)
+        .map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+fn instagram_subscriptions_queue_all_active(
+    state: State<'_, AppState>,
+) -> Result<Vec<jobs::JobRow>, String> {
+    instagram_subscriptions::queue_all_active_instagram_subscriptions(&state.paths)
+        .map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+fn instagram_subscriptions_output_dir(
+    state: State<'_, AppState>,
+    id: String,
+) -> Result<String, String> {
+    let row = instagram_subscriptions::list_instagram_subscriptions(&state.paths)
+        .map_err(|e| e.to_string())?
+        .into_iter()
+        .find(|sub| sub.id == id)
+        .ok_or_else(|| format!("instagram subscription not found: {id}"))?;
+    instagram_subscriptions::instagram_subscription_output_dir(&state.paths, &row)
+        .map(|path| path.to_string_lossy().to_string())
+        .map_err(|e| e.to_string())
 }
 
 #[tauri::command]
@@ -3157,56 +3507,81 @@ pub fn run() {
         .setup(|app| {
             let base_dir = app.path().app_data_dir()?;
             let paths = AppPaths::new(AppPaths::normalize_base_dir(&base_dir));
+            let startup = Arc::new(Mutex::new(StartupTracker::new()));
+            set_startup_phase(&startup, &paths, "app_dirs", "running", None);
             paths.ensure_dirs()?;
+            set_startup_phase(&startup, &paths, "app_dirs", "ready", None);
             let cli_safe_mode = std::env::args().any(|value| value.trim() == "--safe-mode");
             let persisted_safe_mode = config::load_safe_mode_config(&paths)
                 .map(|value| value.enabled)
                 .unwrap_or(false);
             let safe_mode_enabled = cli_safe_mode || persisted_safe_mode;
-            let startup = Arc::new(Mutex::new(StartupTracker::new()));
             if safe_mode_enabled {
-                if let Ok(mut status) = startup.lock() {
-                    status.offline_bundle_state = "skipped_safe_mode".to_string();
-                    status.offline_bundle_finished_at_ms = Some(now_epoch_ms_i64());
-                }
+                set_startup_phase(&startup, &paths, "offline_bundle", "skipped", None);
             } else if let Ok(resource_dir) = app.path().resource_dir() {
-                if let Ok(mut status) = startup.lock() {
-                    status.offline_bundle_state = "pending".to_string();
-                }
+                set_startup_phase(&startup, &paths, "offline_bundle", "pending", None);
                 let startup_for_thread = Arc::clone(&startup);
                 let paths_for_bundle = paths.clone();
                 std::thread::spawn(move || {
-                    if let Ok(mut status) = startup_for_thread.lock() {
-                        status.offline_bundle_state = "running".to_string();
-                        status.offline_bundle_started_at_ms = Some(now_epoch_ms_i64());
-                        status.offline_bundle_error = None;
-                    }
-
+                    set_startup_phase(
+                        &startup_for_thread,
+                        &paths_for_bundle,
+                        "offline_bundle",
+                        "running",
+                        None,
+                    );
                     let result = apply_offline_bundle_if_present(&paths_for_bundle, &resource_dir);
-                    if let Ok(mut status) = startup_for_thread.lock() {
-                        status.offline_bundle_finished_at_ms = Some(now_epoch_ms_i64());
-                        match result {
-                            Ok(()) => {
-                                status.offline_bundle_state = "ready".to_string();
-                                status.offline_bundle_error = None;
-                            }
-                            Err(e) => {
-                                status.offline_bundle_state = "error".to_string();
-                                status.offline_bundle_error = Some(e);
-                            }
+                    match result {
+                        Ok(()) => {
+                            set_startup_phase(
+                                &startup_for_thread,
+                                &paths_for_bundle,
+                                "offline_bundle",
+                                "ready",
+                                None,
+                            );
+                        }
+                        Err(error) => {
+                            set_startup_phase(
+                                &startup_for_thread,
+                                &paths_for_bundle,
+                                "offline_bundle",
+                                "error",
+                                Some(error),
+                            );
                         }
                     }
                 });
-            } else if let Ok(mut status) = startup.lock() {
-                status.offline_bundle_state = "error".to_string();
-                status.offline_bundle_finished_at_ms = Some(now_epoch_ms_i64());
-                status.offline_bundle_error = Some("resource directory unavailable".to_string());
+            } else {
+                set_startup_phase(
+                    &startup,
+                    &paths,
+                    "offline_bundle",
+                    "error",
+                    Some("resource directory unavailable".to_string()),
+                );
             }
+            set_startup_phase(&startup, &paths, "db_schema", "running", None);
             db::ensure_schema(&paths)?;
+            set_startup_phase(&startup, &paths, "db_schema", "ready", None);
             if safe_mode_enabled {
                 let _ = jobs::set_queue_paused(&paths, true);
             }
+            set_startup_phase(&startup, &paths, "job_runner", "running", None);
             let runner = jobs::start_runner(paths.clone())?;
+            set_startup_phase(&startup, &paths, "job_runner", "ready", None);
+            let trace_paths = paths.clone();
+            std::thread::spawn(move || loop {
+                std::thread::sleep(Duration::from_secs(30));
+                append_diagnostics_trace_row_best_effort(
+                    &trace_paths,
+                    "runtime_sample",
+                    serde_json::json!({
+                        "source": "background_sampler",
+                    }),
+                    "info",
+                );
+            });
             app.manage(AppState {
                 paths,
                 runner,
@@ -3235,6 +3610,7 @@ pub fn run() {
             diagnostics_trace_dir_set,
             diagnostics_trace_dir_status,
             diagnostics_trace_dir_use_default,
+            diagnostics_trace_recent,
             diagnostics_trace_write_event,
             safe_mode_set,
             safe_mode_status,
@@ -3258,9 +3634,11 @@ pub fn run() {
             youtube_subscription_groups_set_for_subscription,
             youtube_subscription_groups_upsert,
             youtube_subscriptions_list,
+            youtube_subscriptions_output_dir,
             youtube_subscriptions_upsert,
             youtube_subscriptions_delete,
             youtube_subscriptions_import_existing_downloads,
+            legacy_archive_analyze,
             youtube_subscriptions_queue_one,
             youtube_subscriptions_queue_all_active,
             youtube_subscriptions_queue_group,
@@ -3268,6 +3646,12 @@ pub fn run() {
             youtube_subscriptions_import_json,
             youtube_subscriptions_import_4kvdp_dir,
             youtube_subscriptions_seed_archive_scan,
+            instagram_subscriptions_list,
+            instagram_subscriptions_upsert,
+            instagram_subscriptions_delete,
+            instagram_subscriptions_queue_one,
+            instagram_subscriptions_queue_all_active,
+            instagram_subscriptions_output_dir,
             jobs_cancel,
             jobs_cancel_all,
             jobs_enqueue_dummy,

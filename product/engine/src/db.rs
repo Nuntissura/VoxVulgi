@@ -268,6 +268,23 @@ CREATE TABLE IF NOT EXISTS youtube_subscription_group_member (
 CREATE INDEX IF NOT EXISTS idx_youtube_subscription_group_member_group
   ON youtube_subscription_group_member(group_id, subscription_id);
 
+CREATE TABLE IF NOT EXISTS instagram_subscription (
+  id TEXT PRIMARY KEY,
+  title TEXT NOT NULL,
+  source_url TEXT NOT NULL UNIQUE,
+  folder_map TEXT NOT NULL,
+  output_dir_override TEXT,
+  use_browser_cookies INTEGER NOT NULL DEFAULT 0,
+  active INTEGER NOT NULL DEFAULT 1,
+  refresh_interval_minutes INTEGER NOT NULL DEFAULT 60,
+  last_queued_at_ms INTEGER,
+  created_at_ms INTEGER NOT NULL,
+  updated_at_ms INTEGER NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_instagram_subscription_active_updated
+  ON instagram_subscription(active, updated_at_ms);
+
 CREATE TABLE IF NOT EXISTS job (
   id TEXT PRIMARY KEY,
   item_id TEXT,
@@ -493,8 +510,18 @@ CREATE INDEX IF NOT EXISTS idx_ingest_provenance_created ON ingest_provenance(cr
         "CREATE INDEX IF NOT EXISTS idx_youtube_subscription_next_allowed ON youtube_subscription(active, next_allowed_refresh_at_ms)",
         [],
     )?;
+    ensure_column(
+        conn,
+        "instagram_subscription",
+        "refresh_interval_minutes",
+        "INTEGER NOT NULL DEFAULT 60",
+    )?;
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_instagram_subscription_active_updated ON instagram_subscription(active, updated_at_ms)",
+        [],
+    )?;
 
-    let current_schema_version = 8;
+    let current_schema_version = 9;
     let existing: Option<String> = conn
         .query_row(
             "SELECT value FROM meta WHERE key='schema_version'",

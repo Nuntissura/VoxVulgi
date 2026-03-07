@@ -3,7 +3,7 @@
 ## Metadata
 - ID: WP-0096
 - Owner: Codex
-- Status: BACKLOG
+- Status: DONE
 - Created: 2026-03-07
 - Target milestone: Workflow and archive UX hardening
 
@@ -41,3 +41,4 @@ Out of scope:
 ## Status updates
 
 - 2026-03-07: Created from operator feedback on workspace naming, window responsibilities, and the need for Localization Studio to own the first ingest step for dubbing workflows.
+- 2026-03-07: Implemented and verified via desktop build, engine tests, and Tauri tests. Localization Studio now exposes the ingest block in-context and archive windows/operators use `Video Archiver` and `Instagram Archiver` naming consistently.

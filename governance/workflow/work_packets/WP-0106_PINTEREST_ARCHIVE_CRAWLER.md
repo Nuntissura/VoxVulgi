@@ -3,7 +3,7 @@
 ## Metadata
 - ID: WP-0106
 - Owner: Codex
-- Status: BACKLOG
+- Status: DONE
 - Created: 2026-03-07
 - Target milestone: Workflow and archive UX hardening
 
@@ -39,3 +39,4 @@ Out of scope:
 ## Status updates
 
 - 2026-03-07: Created from operator feedback requesting Pinterest folder/board crawl support in Image Archive.
+- 2026-03-07: Implemented and verified. Image Archive now accepts Pinterest board/folder batches and the crawler adds Pinterest-specific full-size/original candidate heuristics for better archive results.

@@ -231,19 +231,20 @@ Current implementation status:
 ### 8.0.1 Current top-level windows (implemented 2026-03-03)
 
 - **Localization Studio**: first/default window, focused on subtitles + dubbing workflow.
-- **Video Ingest**: local import + URL batch ingest + presets/templates + YouTube subscriptions/groups.
-- **Instagram Archive**: dedicated Instagram batch ingest workflow.
+- **Localization Studio** also keeps a lightweight ingest block in-context for local import and ASR language selection, even when the editor is already open.
+- **Video Archiver**: local import + URL batch ingest + presets/templates + YouTube subscriptions/groups + legacy archive reconciliation.
+- **Instagram Archiver**: dedicated Instagram batch ingest workflow plus recurring archive targets.
 - **Image Archive**: dedicated crawler-based image archive ingest workflow.
 - **Media Library**: renamed from ambiguous â€œItemsâ€; browse imported media and hand off to Localization Studio.
 - **Jobs/Queue**: execution state + retry/cancel + logs and output reveal.
-- **Diagnostics**: non-blocking, section-by-section loading with explicit readiness states.
+- **Diagnostics**: non-blocking, section-by-section loading with explicit readiness states, recent local trace rows, and startup/tool-lifecycle visibility.
 
-### 8.0.2 Planned top-level window refinements (next hardening tranche)
+### 8.0.2 Workspace hardening state (implemented 2026-03-07)
 
-- **Localization Studio** should add a lightweight ingest block for local import/refresh plus ASR-language selection because this is the primary operator workflow.
-- **Video Ingest** should be renamed to **Video Archiver** and remain the dedicated home for URL ingest, presets/templates, subscription groups, and YouTube subscriptions.
-- **Instagram Archive** should be renamed to **Instagram Archiver**.
-- **Options** should become the discoverable home for shared storage-root configuration and related global path behavior.
+- **Localization Studio** now includes the lightweight ingest block for local import/refresh plus ASR-language selection because this is the primary operator workflow.
+- **Video Archiver** is the dedicated home for URL ingest, presets/templates, subscription groups, YouTube subscriptions, and legacy archive reconciliation.
+- **Instagram Archiver** is the dedicated home for direct Instagram archive runs plus recurring archive targets.
+- **Options** is the discoverable home for shared storage-root configuration and related global path behavior.
 
 ## 8.1) Stabilization priorities for commercial readiness (2026-03-03)
 

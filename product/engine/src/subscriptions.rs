@@ -20,6 +20,12 @@ const MAX_REFRESH_INTERVAL_MINUTES: i64 = 10080;
 const FOURKVDP_SUBSCRIPTIONS_JSON_FILENAME: &str = "subscriptions.json";
 const FOURKVDP_SUBSCRIPTION_ENTRIES_CSV_FILENAME: &str = "subscription_entries.csv";
 const YT_DLP_ARCHIVE_FILENAME: &str = "voxvulgi_youtube_archive.txt";
+const DEFAULT_LEGACY_ANALYSIS_MAX_DEPTH: usize = 4;
+const DEFAULT_LEGACY_ANALYSIS_MAX_FILES: usize = 2500;
+const DEFAULT_LEGACY_IMPORT_MAX_DEPTH: usize = 8;
+const DEFAULT_LEGACY_IMPORT_MAX_FILES: usize = 25000;
+const MAX_LEGACY_ANALYSIS_MAX_DEPTH: usize = 16;
+const MAX_LEGACY_ANALYSIS_MAX_FILES: usize = 100000;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct YoutubeSubscriptionRow {
@@ -87,6 +93,31 @@ pub struct ExistingDownloadsImportSummary {
     pub imported_items: usize,
     pub skipped_existing_items: usize,
     pub failures: usize,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct LegacyArchiveContainerHint {
+    pub relative_path: String,
+    pub media_file_count: usize,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct LegacyArchiveAnalysisSummary {
+    pub root_path: String,
+    pub install_path: Option<String>,
+    pub install_path_exists: bool,
+    pub media_file_count: usize,
+    pub detected_4kvdp_install: bool,
+    pub detected_4kvdp_subscriptions_json: bool,
+    pub detected_4kvdp_subscription_entries_csv: bool,
+    pub detected_channel_dirs: usize,
+    pub detected_playlist_dirs: usize,
+    pub scan_max_depth: usize,
+    pub scan_max_files: usize,
+    pub local_report_path: String,
+    pub warnings: Vec<String>,
+    pub container_hints: Vec<LegacyArchiveContainerHint>,
+    pub sample_media_paths: Vec<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -617,6 +648,15 @@ pub fn import_existing_downloads_index_only(
     paths: &AppPaths,
     scan_dir: &Path,
 ) -> Result<ExistingDownloadsImportSummary> {
+    import_existing_downloads_index_only_with_limits(paths, scan_dir, None, None)
+}
+
+pub fn import_existing_downloads_index_only_with_limits(
+    paths: &AppPaths,
+    scan_dir: &Path,
+    max_depth: Option<usize>,
+    max_files: Option<usize>,
+) -> Result<ExistingDownloadsImportSummary> {
     let scan_dir = scan_dir
         .canonicalize()
         .unwrap_or_else(|_| scan_dir.to_path_buf());
@@ -627,7 +667,17 @@ pub fn import_existing_downloads_index_only(
         )));
     }
 
-    let media_files = collect_media_files(&scan_dir, 6, 10000);
+    let max_depth = normalize_legacy_scan_limit(
+        max_depth,
+        DEFAULT_LEGACY_IMPORT_MAX_DEPTH,
+        MAX_LEGACY_ANALYSIS_MAX_DEPTH,
+    );
+    let max_files = normalize_legacy_scan_limit(
+        max_files,
+        DEFAULT_LEGACY_IMPORT_MAX_FILES,
+        MAX_LEGACY_ANALYSIS_MAX_FILES,
+    );
+    let media_files = collect_media_files(&scan_dir, max_depth, max_files);
     let mut imported_items = 0_usize;
     let mut skipped_existing_items = 0_usize;
     let mut failures = 0_usize;
@@ -662,6 +712,196 @@ pub fn import_existing_downloads_index_only(
         skipped_existing_items,
         failures,
     })
+}
+
+pub fn analyze_legacy_archive_root(
+    paths: &AppPaths,
+    scan_dir: &Path,
+    install_path: Option<&Path>,
+    max_depth: Option<usize>,
+    max_files: Option<usize>,
+) -> Result<LegacyArchiveAnalysisSummary> {
+    let scan_dir = scan_dir
+        .canonicalize()
+        .unwrap_or_else(|_| scan_dir.to_path_buf());
+    if !scan_dir.exists() || !scan_dir.is_dir() {
+        return Err(EngineError::InstallFailed(format!(
+            "scan folder not found: {}",
+            scan_dir.to_string_lossy()
+        )));
+    }
+
+    let scan_max_depth = normalize_legacy_scan_limit(
+        max_depth,
+        DEFAULT_LEGACY_ANALYSIS_MAX_DEPTH,
+        MAX_LEGACY_ANALYSIS_MAX_DEPTH,
+    );
+    let scan_max_files = normalize_legacy_scan_limit(
+        max_files,
+        DEFAULT_LEGACY_ANALYSIS_MAX_FILES,
+        MAX_LEGACY_ANALYSIS_MAX_FILES,
+    );
+    let media_files = collect_media_files(&scan_dir, scan_max_depth, scan_max_files);
+    let sample_media_paths = media_files
+        .iter()
+        .take(8)
+        .map(|path| path.to_string_lossy().to_string())
+        .collect::<Vec<_>>();
+
+    let mut container_counts: Vec<LegacyArchiveContainerHint> = Vec::new();
+    let mut detected_channel_dirs = 0_usize;
+    let mut detected_playlist_dirs = 0_usize;
+    let mut detected_4kvdp_install = false;
+    let mut warnings: Vec<String> = Vec::new();
+    let normalized_install_path = normalize_optional_existing_path(install_path);
+    let install_path_exists = normalized_install_path
+        .as_ref()
+        .map(|path| path.exists())
+        .unwrap_or(false);
+
+    let entries = std::fs::read_dir(&scan_dir)?;
+    for entry in entries.flatten() {
+        let path = entry.path();
+        let Ok(file_type) = entry.file_type() else {
+            continue;
+        };
+        if !file_type.is_dir() {
+            continue;
+        }
+        let name = path
+            .file_name()
+            .and_then(|value| value.to_str())
+            .unwrap_or_default()
+            .to_string();
+        let lowered = name.to_ascii_lowercase();
+        if lowered.contains("4k") && lowered.contains("video") {
+            detected_4kvdp_install = true;
+        }
+        if lowered.contains("playlist")
+            || lowered.starts_with("pl")
+            || lowered.contains(" watch later")
+        {
+            detected_playlist_dirs = detected_playlist_dirs.saturating_add(1);
+        }
+        if lowered.contains("channel")
+            || lowered.starts_with('@')
+            || lowered.starts_with("uc")
+            || lowered.contains("subscription")
+        {
+            detected_channel_dirs = detected_channel_dirs.saturating_add(1);
+        }
+        let count = collect_media_files(&path, 2, 500).len();
+        if count > 0 {
+            let relative_path = path
+                .strip_prefix(&scan_dir)
+                .ok()
+                .map(|value| value.to_string_lossy().to_string())
+                .unwrap_or_else(|| path.to_string_lossy().to_string());
+            container_counts.push(LegacyArchiveContainerHint {
+                relative_path,
+                media_file_count: count,
+            });
+        }
+    }
+
+    container_counts.sort_by(|a, b| {
+        b.media_file_count
+            .cmp(&a.media_file_count)
+            .then_with(|| a.relative_path.cmp(&b.relative_path))
+    });
+    container_counts.truncate(24);
+
+    let detected_4kvdp_subscriptions_json = scan_dir
+        .join(FOURKVDP_SUBSCRIPTIONS_JSON_FILENAME)
+        .is_file();
+    let detected_4kvdp_subscription_entries_csv = scan_dir
+        .join(FOURKVDP_SUBSCRIPTION_ENTRIES_CSV_FILENAME)
+        .is_file();
+    if detected_4kvdp_subscriptions_json || detected_4kvdp_subscription_entries_csv {
+        detected_4kvdp_install = true;
+    }
+    if install_path_exists {
+        detected_4kvdp_install = true;
+    }
+    if scan_dir.to_string_lossy().starts_with("\\\\") {
+        warnings.push(
+            "UNC/NAS path detected. VoxVulgi stays read-only here; start with bounded analysis and index incrementally if the share is slow."
+                .to_string(),
+        );
+    }
+    if media_files.len() >= scan_max_files {
+        warnings.push(format!(
+            "Sample limit reached at {scan_max_files} media files. This report is intentionally bounded; increase the limit or index per container/subfolder for large archives."
+        ));
+    }
+    if !install_path_exists && install_path.is_some() {
+        warnings.push(
+            "The supplied 4K Video Downloader install path does not exist on disk. Metadata detection therefore relied on the archive root only."
+                .to_string(),
+        );
+    }
+
+    let mut summary = LegacyArchiveAnalysisSummary {
+        root_path: scan_dir.to_string_lossy().to_string(),
+        install_path: normalized_install_path
+            .as_ref()
+            .map(|path| path.to_string_lossy().to_string()),
+        install_path_exists,
+        media_file_count: media_files.len(),
+        detected_4kvdp_install,
+        detected_4kvdp_subscriptions_json,
+        detected_4kvdp_subscription_entries_csv,
+        detected_channel_dirs,
+        detected_playlist_dirs,
+        scan_max_depth,
+        scan_max_files,
+        local_report_path: String::new(),
+        warnings,
+        container_hints: container_counts,
+        sample_media_paths,
+    };
+    summary.local_report_path =
+        write_legacy_archive_report(paths, &summary).unwrap_or_else(|_| String::new());
+
+    Ok(summary)
+}
+
+fn normalize_legacy_scan_limit(
+    value: Option<usize>,
+    default_value: usize,
+    hard_max: usize,
+) -> usize {
+    value.unwrap_or(default_value).clamp(1, hard_max)
+}
+
+fn normalize_optional_existing_path(path: Option<&Path>) -> Option<PathBuf> {
+    let raw = path?;
+    let trimmed = raw.as_os_str().to_string_lossy().trim().to_string();
+    if trimmed.is_empty() {
+        return None;
+    }
+    let candidate = PathBuf::from(trimmed);
+    Some(candidate.canonicalize().unwrap_or(candidate))
+}
+
+fn legacy_archive_report_dir(paths: &AppPaths) -> Result<PathBuf> {
+    let dir = paths
+        .derived_dir()
+        .join("reconciliation")
+        .join("legacy_archive");
+    std::fs::create_dir_all(&dir)?;
+    Ok(dir)
+}
+
+fn write_legacy_archive_report(
+    paths: &AppPaths,
+    summary: &LegacyArchiveAnalysisSummary,
+) -> Result<String> {
+    let dir = legacy_archive_report_dir(paths)?;
+    let out_path = dir.join(format!("legacy_archive_analysis_{}.json", now_ms()));
+    let payload = serde_json::to_string_pretty(summary)?;
+    std::fs::write(&out_path, format!("{payload}\n"))?;
+    Ok(out_path.to_string_lossy().to_string())
 }
 
 pub fn export_youtube_subscriptions_json(

@@ -3,7 +3,7 @@
 ## Metadata
 - ID: WP-0102
 - Owner: Codex
-- Status: BACKLOG
+- Status: DONE
 - Created: 2026-03-07
 - Target milestone: Workflow and archive UX hardening
 
@@ -42,3 +42,4 @@ Out of scope:
 ## Status updates
 
 - 2026-03-07: Created from operator feedback on startup opacity, resource intensity, and confusion around bundled versus loaded tools.
+- 2026-03-07: Implemented and verified. Startup now reports named phases with progress, Diagnostics shows recent local trace rows with process snapshots, and tool lifecycle state is explained in the UI.

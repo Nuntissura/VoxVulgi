@@ -6,6 +6,7 @@ pub mod diagnostics;
 mod error;
 pub mod ffmpeg;
 pub mod image_batch;
+pub mod instagram_subscriptions;
 pub mod jobs;
 pub mod library;
 pub mod models;
