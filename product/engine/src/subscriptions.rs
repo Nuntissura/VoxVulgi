@@ -2,7 +2,7 @@ use crate::paths::AppPaths;
 use crate::{db, jobs, library, EngineError, Result};
 use csv::ReaderBuilder;
 use regex::Regex;
-use rusqlite::params;
+use rusqlite::{params, OpenFlags};
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
 use std::io::{BufRead, BufReader, Write};
@@ -26,6 +26,11 @@ const DEFAULT_LEGACY_IMPORT_MAX_DEPTH: usize = 8;
 const DEFAULT_LEGACY_IMPORT_MAX_FILES: usize = 25000;
 const MAX_LEGACY_ANALYSIS_MAX_DEPTH: usize = 16;
 const MAX_LEGACY_ANALYSIS_MAX_FILES: usize = 100000;
+const LEGACY_CONTAINER_HINT_SCAN_DIR_LIMIT: usize = 120;
+const LEGACY_SAMPLE_NAME_LIMIT: usize = 24;
+const LEGACY_4KVDP_GROUP_ALL: &str = "Legacy 4KVDP";
+const LEGACY_4KVDP_GROUP_SUBSCRIPTIONS: &str = "Legacy 4KVDP Subscriptions";
+const LEGACY_4KVDP_GROUP_PLAYLISTS: &str = "Legacy 4KVDP Playlists";
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct YoutubeSubscriptionRow {
@@ -102,22 +107,44 @@ pub struct LegacyArchiveContainerHint {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct LegacyArchiveManagedContainerHint {
+    pub container_kind: String,
+    pub relative_path: String,
+    pub title: String,
+    pub source_url: String,
+    pub matched_root_path: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct LegacyArchiveAnalysisSummary {
     pub root_path: String,
     pub install_path: Option<String>,
     pub install_path_exists: bool,
+    pub legacy_state_db_path: Option<String>,
+    pub legacy_state_db_exists: bool,
     pub media_file_count: usize,
     pub detected_4kvdp_install: bool,
     pub detected_4kvdp_subscriptions_json: bool,
     pub detected_4kvdp_subscription_entries_csv: bool,
     pub detected_channel_dirs: usize,
     pub detected_playlist_dirs: usize,
+    pub top_level_dir_count: usize,
+    pub top_level_file_count: usize,
+    pub managed_container_count: usize,
+    pub managed_subscription_count: usize,
+    pub managed_playlist_count: usize,
+    pub matched_managed_dirs: usize,
+    pub unmatched_top_level_dirs: usize,
     pub scan_max_depth: usize,
     pub scan_max_files: usize,
     pub local_report_path: String,
     pub warnings: Vec<String>,
     pub container_hints: Vec<LegacyArchiveContainerHint>,
+    pub managed_container_hints: Vec<LegacyArchiveManagedContainerHint>,
+    pub sample_unmatched_dirs: Vec<String>,
+    pub sample_top_level_files: Vec<String>,
     pub sample_media_paths: Vec<String>,
+    pub recommendations: Vec<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -144,6 +171,26 @@ pub struct YoutubeSubscriptionsImport4kvdpSummary {
     pub archive_seeded_entries: usize,
     pub archive_skipped_entries: usize,
     pub archive_seed_failures: usize,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct YoutubeSubscriptionsImport4kvdpStateSummary {
+    pub sqlite_path: String,
+    pub total_in_legacy_state: usize,
+    pub imported_sources: usize,
+    pub imported_subscription_sources: usize,
+    pub imported_playlist_sources: usize,
+    pub inserted: usize,
+    pub updated: usize,
+    pub skipped_non_youtube: usize,
+    pub mapped_to_selected_root: usize,
+    pub retained_existing_legacy_dir: usize,
+    pub missing_target_dirs: usize,
+    pub archive_seeded_subscriptions: usize,
+    pub archive_seeded_entries: usize,
+    pub archive_skipped_entries: usize,
+    pub archive_seed_failures: usize,
+    pub group_names: Vec<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -749,6 +796,7 @@ pub fn analyze_legacy_archive_root(
         .collect::<Vec<_>>();
 
     let mut container_counts: Vec<LegacyArchiveContainerHint> = Vec::new();
+    let mut managed_container_hints: Vec<LegacyArchiveManagedContainerHint> = Vec::new();
     let mut detected_channel_dirs = 0_usize;
     let mut detected_playlist_dirs = 0_usize;
     let mut detected_4kvdp_install = false;
@@ -758,6 +806,31 @@ pub fn analyze_legacy_archive_root(
         .as_ref()
         .map(|path| path.exists())
         .unwrap_or(false);
+    let legacy_state_db_path = detect_legacy_4kvdp_state_db_path();
+    let legacy_state_db_exists = legacy_state_db_path
+        .as_ref()
+        .map(|path| path.is_file())
+        .unwrap_or(false);
+    let mut legacy_state_rows: Vec<Legacy4kvdpStateRow> = Vec::new();
+    if let Some(path) = legacy_state_db_path.as_ref() {
+        match open_legacy_4kvdp_state_db(path).and_then(|conn| read_legacy_4kvdp_state_rows(&conn))
+        {
+            Ok(rows) => {
+                legacy_state_rows = rows;
+                if !legacy_state_rows.is_empty() {
+                    detected_4kvdp_install = true;
+                }
+            }
+            Err(err) => warnings.push(format!(
+                "Detected a 4KVDP app-state database but could not read it cleanly: {err}"
+            )),
+        }
+    }
+
+    let mut top_level_dirs: Vec<(String, PathBuf)> = Vec::new();
+    let mut top_level_dir_name_map: HashMap<String, PathBuf> = HashMap::new();
+    let mut sample_top_level_files: Vec<String> = Vec::new();
+    let mut top_level_file_count = 0_usize;
 
     let entries = std::fs::read_dir(&scan_dir)?;
     for entry in entries.flatten() {
@@ -765,6 +838,18 @@ pub fn analyze_legacy_archive_root(
         let Ok(file_type) = entry.file_type() else {
             continue;
         };
+        if file_type.is_file() {
+            top_level_file_count = top_level_file_count.saturating_add(1);
+            if sample_top_level_files.len() < LEGACY_SAMPLE_NAME_LIMIT {
+                sample_top_level_files.push(
+                    path.file_name()
+                        .and_then(|value| value.to_str())
+                        .unwrap_or_default()
+                        .to_string(),
+                );
+            }
+            continue;
+        }
         if !file_type.is_dir() {
             continue;
         }
@@ -790,18 +875,89 @@ pub fn analyze_legacy_archive_root(
         {
             detected_channel_dirs = detected_channel_dirs.saturating_add(1);
         }
-        let count = collect_media_files(&path, 2, 500).len();
-        if count > 0 {
-            let relative_path = path
-                .strip_prefix(&scan_dir)
-                .ok()
-                .map(|value| value.to_string_lossy().to_string())
-                .unwrap_or_else(|| path.to_string_lossy().to_string());
-            container_counts.push(LegacyArchiveContainerHint {
-                relative_path,
-                media_file_count: count,
+        let key = legacy_name_key(&name);
+        top_level_dir_name_map
+            .entry(key)
+            .or_insert_with(|| path.clone());
+        top_level_dirs.push((name, path));
+    }
+
+    let mut managed_container_count = 0_usize;
+    let mut managed_subscription_count = 0_usize;
+    let mut managed_playlist_count = 0_usize;
+    let mut matched_managed_dirs = 0_usize;
+    let mut managed_name_keys: HashSet<String> = HashSet::new();
+    let mut matched_name_keys: HashSet<String> = HashSet::new();
+    for row in legacy_state_rows.iter() {
+        let service = row.service_name.trim().to_ascii_lowercase();
+        let url = row.source_url.trim();
+        if service != "youtube" || url.is_empty() {
+            continue;
+        }
+        managed_container_count = managed_container_count.saturating_add(1);
+        let kind = classify_legacy_4kvdp_kind(row.container_type, url);
+        match kind {
+            Legacy4kvdpContainerKind::Subscription => {
+                managed_subscription_count = managed_subscription_count.saturating_add(1)
+            }
+            Legacy4kvdpContainerKind::Playlist => {
+                managed_playlist_count = managed_playlist_count.saturating_add(1)
+            }
+        }
+
+        let Some(base_name) = fourkvd_basename(&row.dirname) else {
+            continue;
+        };
+        let key = legacy_name_key(&base_name);
+        managed_name_keys.insert(key.clone());
+        let matched_root_path = top_level_dir_name_map.get(&key).cloned();
+        if matched_root_path.is_some() && matched_name_keys.insert(key) {
+            matched_managed_dirs = matched_managed_dirs.saturating_add(1);
+        }
+        if managed_container_hints.len() < LEGACY_SAMPLE_NAME_LIMIT {
+            managed_container_hints.push(LegacyArchiveManagedContainerHint {
+                container_kind: kind.as_str().to_string(),
+                relative_path: base_name.clone(),
+                title: if row.title.trim().is_empty() {
+                    base_name
+                } else {
+                    row.title.trim().to_string()
+                },
+                source_url: url.to_string(),
+                matched_root_path: matched_root_path
+                    .map(|value| value.to_string_lossy().to_string()),
             });
         }
+    }
+
+    let top_level_dir_count = top_level_dirs.len();
+    let unmatched_top_level_dirs = top_level_dirs
+        .iter()
+        .filter(|(name, _)| !managed_name_keys.contains(&legacy_name_key(name)))
+        .count();
+    let sample_unmatched_dirs = top_level_dirs
+        .iter()
+        .filter(|(name, _)| !managed_name_keys.contains(&legacy_name_key(name)))
+        .take(LEGACY_SAMPLE_NAME_LIMIT)
+        .map(|(name, _)| name.clone())
+        .collect::<Vec<_>>();
+
+    let container_hint_targets =
+        bounded_container_hint_targets(&top_level_dirs, &managed_name_keys);
+    for (_, path) in container_hint_targets {
+        let count = collect_media_files(path.as_path(), 2, 500).len();
+        if count == 0 {
+            continue;
+        }
+        let relative_path = path
+            .strip_prefix(&scan_dir)
+            .ok()
+            .map(|value| value.to_string_lossy().to_string())
+            .unwrap_or_else(|| path.to_string_lossy().to_string());
+        container_counts.push(LegacyArchiveContainerHint {
+            relative_path,
+            media_file_count: count,
+        });
     }
 
     container_counts.sort_by(|a, b| {
@@ -840,6 +996,22 @@ pub fn analyze_legacy_archive_root(
                 .to_string(),
         );
     }
+    if !legacy_state_db_exists {
+        warnings.push(
+            "No 4KVDP app-state SQLite database was auto-detected in Local AppData. JSON/CSV export import remains available, but managed container mapping will be weaker."
+                .to_string(),
+        );
+    }
+    if top_level_file_count > 0 {
+        warnings.push(format!(
+            "The selected legacy root has {top_level_file_count} loose top-level media file(s). Treat these as manual single-item archives and index them in smaller batches after the managed folders are mapped."
+        ));
+    }
+    if top_level_dir_count > LEGACY_CONTAINER_HINT_SCAN_DIR_LIMIT {
+        warnings.push(format!(
+            "Container hint scanning is intentionally capped to {LEGACY_CONTAINER_HINT_SCAN_DIR_LIMIT} top-level folders per analysis run so large NAS archives stay responsive."
+        ));
+    }
 
     let mut summary = LegacyArchiveAnalysisSummary {
         root_path: scan_dir.to_string_lossy().to_string(),
@@ -847,23 +1019,128 @@ pub fn analyze_legacy_archive_root(
             .as_ref()
             .map(|path| path.to_string_lossy().to_string()),
         install_path_exists,
+        legacy_state_db_path: legacy_state_db_path
+            .as_ref()
+            .map(|path| path.to_string_lossy().to_string()),
+        legacy_state_db_exists,
         media_file_count: media_files.len(),
         detected_4kvdp_install,
         detected_4kvdp_subscriptions_json,
         detected_4kvdp_subscription_entries_csv,
         detected_channel_dirs,
         detected_playlist_dirs,
+        top_level_dir_count,
+        top_level_file_count,
+        managed_container_count,
+        managed_subscription_count,
+        managed_playlist_count,
+        matched_managed_dirs,
+        unmatched_top_level_dirs,
         scan_max_depth,
         scan_max_files,
         local_report_path: String::new(),
         warnings,
         container_hints: container_counts,
+        managed_container_hints,
+        sample_unmatched_dirs,
+        sample_top_level_files,
         sample_media_paths,
+        recommendations: build_legacy_archive_recommendations(
+            legacy_state_db_exists,
+            managed_container_count,
+            managed_subscription_count,
+            managed_playlist_count,
+            matched_managed_dirs,
+            unmatched_top_level_dirs,
+            top_level_file_count,
+            scan_max_files,
+        ),
     };
     summary.local_report_path =
         write_legacy_archive_report(paths, &summary).unwrap_or_else(|_| String::new());
 
     Ok(summary)
+}
+
+fn legacy_name_key(value: &str) -> String {
+    value.trim().to_lowercase()
+}
+
+fn bounded_container_hint_targets(
+    top_level_dirs: &[(String, PathBuf)],
+    managed_name_keys: &HashSet<String>,
+) -> Vec<(String, PathBuf)> {
+    let mut selected: Vec<(String, PathBuf)> = Vec::new();
+    let mut seen: HashSet<String> = HashSet::new();
+
+    for (name, path) in top_level_dirs.iter() {
+        let key = legacy_name_key(name);
+        if !managed_name_keys.contains(&key) || !seen.insert(key) {
+            continue;
+        }
+        selected.push((name.clone(), path.clone()));
+        if selected.len() >= LEGACY_CONTAINER_HINT_SCAN_DIR_LIMIT {
+            return selected;
+        }
+    }
+
+    for (name, path) in top_level_dirs.iter() {
+        let key = legacy_name_key(name);
+        if !seen.insert(key) {
+            continue;
+        }
+        selected.push((name.clone(), path.clone()));
+        if selected.len() >= LEGACY_CONTAINER_HINT_SCAN_DIR_LIMIT {
+            break;
+        }
+    }
+
+    selected
+}
+
+fn build_legacy_archive_recommendations(
+    legacy_state_db_exists: bool,
+    managed_container_count: usize,
+    managed_subscription_count: usize,
+    managed_playlist_count: usize,
+    matched_managed_dirs: usize,
+    unmatched_top_level_dirs: usize,
+    top_level_file_count: usize,
+    scan_max_files: usize,
+) -> Vec<String> {
+    let mut out = Vec::new();
+    if legacy_state_db_exists && managed_container_count > 0 {
+        out.push(format!(
+            "Import the detected 4KVDP app-state first: {managed_container_count} managed containers were found ({managed_subscription_count} subscription/channel sources and {managed_playlist_count} playlist sources). VoxVulgi can preserve their source URLs, folder mapping, and refresh state from that database."
+        ));
+        out.push(format!(
+            "Map managed containers against the selected root before broad indexing: {matched_managed_dirs} top-level folders already match 4KVDP-managed output directories."
+        ));
+        out.push(
+            "Use the SQLite-based import before any refresh jobs so VoxVulgi can seed yt-dlp archive files from legacy subscription entries and avoid re-downloading known videos."
+                .to_string(),
+        );
+    } else {
+        out.push(
+            "If the old 4KVDP app-state database is available, import it before indexing the NAS root so VoxVulgi can preserve managed subscription/playlist intent instead of inferring everything from filenames."
+                .to_string(),
+        );
+    }
+
+    if unmatched_top_level_dirs > 0 {
+        out.push(format!(
+            "Treat the remaining {unmatched_top_level_dirs} top-level folders as manual legacy containers. Index them incrementally by folder/theme/date bucket instead of one giant root pass."
+        ));
+    }
+    if top_level_file_count > 0 {
+        out.push(format!(
+            "Handle the {top_level_file_count} loose top-level files last. They are best treated as single-item legacy archives rather than subscription or playlist folders."
+        ));
+    }
+    out.push(format!(
+        "Keep the analysis bounded on this archive: the current run sampled at most {scan_max_files} media files and the container-hint scan is capped so NAS reads stay deliberate."
+    ));
+    out
 }
 
 fn normalize_legacy_scan_limit(
@@ -1071,6 +1348,39 @@ struct FourkvdSubscriptionEntryRow {
     status: i64,
 }
 
+#[derive(Debug, Clone)]
+struct Legacy4kvdpStateRow {
+    id: i64,
+    container_type: i64,
+    dirname: String,
+    title: String,
+    service_name: String,
+    source_url: String,
+    active: bool,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Legacy4kvdpContainerKind {
+    Subscription,
+    Playlist,
+}
+
+impl Legacy4kvdpContainerKind {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::Subscription => "subscription",
+            Self::Playlist => "playlist",
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
+struct LegacyResolvedOutputDir {
+    path: PathBuf,
+    matched_root_dir: bool,
+    retained_legacy_dir: bool,
+}
+
 pub fn import_youtube_subscriptions_4kvdp_dir(
     paths: &AppPaths,
     dir: &Path,
@@ -1208,6 +1518,209 @@ ON CONFLICT(source_url) DO UPDATE SET
     })
 }
 
+pub fn import_youtube_subscriptions_4kvdp_state(
+    paths: &AppPaths,
+    root_dir: &Path,
+    sqlite_path: Option<&Path>,
+) -> Result<YoutubeSubscriptionsImport4kvdpStateSummary> {
+    let root_dir = root_dir
+        .canonicalize()
+        .unwrap_or_else(|_| root_dir.to_path_buf());
+    if !root_dir.exists() || !root_dir.is_dir() {
+        return Err(EngineError::InstallFailed(format!(
+            "legacy root not found: {}",
+            root_dir.to_string_lossy()
+        )));
+    }
+
+    let sqlite_path = resolve_legacy_4kvdp_state_db_path(sqlite_path).ok_or_else(|| {
+        EngineError::InstallFailed(
+            "4KVDP app-state database not found. Analyze the legacy root first or provide a valid SQLite path."
+                .to_string(),
+        )
+    })?;
+    let legacy_conn = open_legacy_4kvdp_state_db(&sqlite_path)?;
+    let rows = read_legacy_4kvdp_state_rows(&legacy_conn)?;
+
+    let conn = db::open(paths)?;
+    db::migrate(&conn)?;
+    let now = now_ms();
+
+    let group_all_id = ensure_subscription_group_by_name_conn(&conn, LEGACY_4KVDP_GROUP_ALL)?;
+    let group_subscription_id =
+        ensure_subscription_group_by_name_conn(&conn, LEGACY_4KVDP_GROUP_SUBSCRIPTIONS)?;
+    let group_playlist_id =
+        ensure_subscription_group_by_name_conn(&conn, LEGACY_4KVDP_GROUP_PLAYLISTS)?;
+
+    let mut inserted = 0_usize;
+    let mut updated = 0_usize;
+    let mut skipped_non_youtube = 0_usize;
+    let mut imported_sources = 0_usize;
+    let mut imported_subscription_sources = 0_usize;
+    let mut imported_playlist_sources = 0_usize;
+    let mut mapped_to_selected_root = 0_usize;
+    let mut retained_existing_legacy_dir = 0_usize;
+    let mut missing_target_dirs = 0_usize;
+    let mut fourk_id_to_source_url: HashMap<i64, String> = HashMap::new();
+
+    for raw in &rows {
+        let service = raw.service_name.trim().to_ascii_lowercase();
+        let url = raw.source_url.trim();
+        if service != "youtube" || url.is_empty() {
+            skipped_non_youtube += 1;
+            continue;
+        }
+
+        let source_url = match normalize_youtube_url(url.to_string()) {
+            Ok(v) => v,
+            Err(_) => {
+                skipped_non_youtube += 1;
+                continue;
+            }
+        };
+        let kind = classify_legacy_4kvdp_kind(raw.container_type, &source_url);
+        let title = raw
+            .title
+            .trim()
+            .to_string()
+            .chars()
+            .take(160)
+            .collect::<String>();
+        let title = if title.is_empty() {
+            fourkvd_basename(&raw.dirname).unwrap_or_else(|| "Imported subscription".to_string())
+        } else {
+            title
+        };
+        let resolved_dir = resolve_legacy_output_dir(&root_dir, &raw.dirname);
+        if resolved_dir.matched_root_dir {
+            mapped_to_selected_root += 1;
+        } else if resolved_dir.retained_legacy_dir {
+            retained_existing_legacy_dir += 1;
+        } else {
+            missing_target_dirs += 1;
+        }
+
+        let normalized = normalize_upsert(YoutubeSubscriptionUpsert {
+            id: None,
+            title,
+            source_url: source_url.clone(),
+            folder_map: Some(default_folder_map(raw.title.as_str(), &source_url)),
+            output_dir_override: Some(resolved_dir.path.to_string_lossy().to_string()),
+            use_browser_cookies: false,
+            active: raw.active,
+            preset_id: None,
+            group_ids: Vec::new(),
+            refresh_interval_minutes: Some(DEFAULT_REFRESH_INTERVAL_MINUTES),
+        })?;
+
+        let existed =
+            subscription_by_source_url_conn(&conn, normalized.source_url.as_str())?.is_some();
+        conn.execute(
+            r#"
+INSERT INTO youtube_subscription (
+  id,
+  title,
+  source_url,
+  folder_map,
+  output_dir_override,
+  use_browser_cookies,
+  active,
+  preset_id,
+  refresh_interval_minutes,
+  last_queued_at_ms,
+  last_error_at_ms,
+  consecutive_failures,
+  next_allowed_refresh_at_ms,
+  created_at_ms,
+  updated_at_ms
+) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, NULL, NULL, 0, NULL, ?10, ?10)
+ON CONFLICT(source_url) DO UPDATE SET
+  title = excluded.title,
+  folder_map = excluded.folder_map,
+  output_dir_override = excluded.output_dir_override,
+  use_browser_cookies = excluded.use_browser_cookies,
+  active = excluded.active,
+  preset_id = excluded.preset_id,
+  refresh_interval_minutes = excluded.refresh_interval_minutes,
+  updated_at_ms = excluded.updated_at_ms
+"#,
+            params![
+                Uuid::new_v4().to_string(),
+                normalized.title,
+                normalized.source_url,
+                normalized.folder_map,
+                normalized.output_dir_override,
+                bool_to_i64(normalized.use_browser_cookies),
+                bool_to_i64(normalized.active),
+                normalized.preset_id,
+                normalized.refresh_interval_minutes,
+                now,
+            ],
+        )?;
+
+        let sub =
+            subscription_by_source_url_conn(&conn, source_url.as_str())?.ok_or_else(|| {
+                EngineError::InstallFailed(
+                    "failed to reload imported legacy subscription".to_string(),
+                )
+            })?;
+        let group_ids = match kind {
+            Legacy4kvdpContainerKind::Subscription => {
+                imported_subscription_sources += 1;
+                vec![group_all_id.clone(), group_subscription_id.clone()]
+            }
+            Legacy4kvdpContainerKind::Playlist => {
+                imported_playlist_sources += 1;
+                vec![group_all_id.clone(), group_playlist_id.clone()]
+            }
+        };
+        set_subscription_group_memberships_conn(&conn, &sub.id, &group_ids)?;
+
+        imported_sources += 1;
+        if existed {
+            updated += 1;
+        } else {
+            inserted += 1;
+        }
+        fourk_id_to_source_url.insert(raw.id, source_url);
+    }
+
+    let (
+        archive_seeded_subscriptions,
+        archive_seeded_entries,
+        archive_skipped_entries,
+        archive_seed_failures,
+    ) = seed_archives_from_4kvdp_state_entries(
+        paths,
+        &conn,
+        &legacy_conn,
+        &fourk_id_to_source_url,
+    )?;
+
+    Ok(YoutubeSubscriptionsImport4kvdpStateSummary {
+        sqlite_path: sqlite_path.to_string_lossy().to_string(),
+        total_in_legacy_state: rows.len(),
+        imported_sources,
+        imported_subscription_sources,
+        imported_playlist_sources,
+        inserted,
+        updated,
+        skipped_non_youtube,
+        mapped_to_selected_root,
+        retained_existing_legacy_dir,
+        missing_target_dirs,
+        archive_seeded_subscriptions,
+        archive_seeded_entries,
+        archive_skipped_entries,
+        archive_seed_failures,
+        group_names: vec![
+            LEGACY_4KVDP_GROUP_ALL.to_string(),
+            LEGACY_4KVDP_GROUP_SUBSCRIPTIONS.to_string(),
+            LEGACY_4KVDP_GROUP_PLAYLISTS.to_string(),
+        ],
+    })
+}
+
 fn seed_archives_from_4kvdp_entries(
     paths: &AppPaths,
     conn: &rusqlite::Connection,
@@ -1276,6 +1789,241 @@ fn seed_archives_from_4kvdp_entries(
     }
 
     Ok((seeded_subs, seeded_entries, skipped_entries, failures))
+}
+
+fn seed_archives_from_4kvdp_state_entries(
+    paths: &AppPaths,
+    conn: &rusqlite::Connection,
+    legacy_conn: &rusqlite::Connection,
+    fourk_id_to_source_url: &HashMap<i64, String>,
+) -> Result<(usize, usize, usize, usize)> {
+    let mut stmt = legacy_conn.prepare(
+        r#"
+SELECT downloader_subscription_info_id, reference, status
+FROM subscription_entries
+ORDER BY downloader_subscription_info_id ASC, id ASC
+"#,
+    )?;
+
+    let mut by_source_url: HashMap<String, HashSet<String>> = HashMap::new();
+    let mut seeded_entries = 0_usize;
+    let mut skipped_entries = 0_usize;
+    let mut rows = stmt.query([])?;
+    while let Some(row) = rows.next()? {
+        let subscription_id: i64 = row.get(0)?;
+        let reference: String = row.get(1)?;
+        let status: i64 = row.get(2)?;
+        if status != 1 {
+            skipped_entries += 1;
+            continue;
+        }
+        let Some(source_url) = fourk_id_to_source_url.get(&subscription_id) else {
+            skipped_entries += 1;
+            continue;
+        };
+        let Some(video_id) = youtube_video_id_from_url(reference.as_str()) else {
+            skipped_entries += 1;
+            continue;
+        };
+        by_source_url
+            .entry(source_url.clone())
+            .or_default()
+            .insert(video_id);
+        seeded_entries += 1;
+    }
+
+    let mut seeded_subs = 0_usize;
+    let mut failures = 0_usize;
+    for (source_url, ids) in by_source_url {
+        let Some(sub) = subscription_by_source_url_conn(conn, source_url.as_str())? else {
+            continue;
+        };
+
+        let archive_path = youtube_subscription_archive_path(paths, &sub)?;
+        if let Some(parent) = archive_path.parent() {
+            if let Err(_) = std::fs::create_dir_all(parent) {
+                failures += 1;
+                continue;
+            }
+        }
+
+        if merge_archive_file(&archive_path, &ids).is_err() {
+            failures += 1;
+            continue;
+        }
+        seeded_subs += 1;
+    }
+
+    Ok((seeded_subs, seeded_entries, skipped_entries, failures))
+}
+
+fn ensure_subscription_group_by_name_conn(
+    conn: &rusqlite::Connection,
+    name: &str,
+) -> Result<String> {
+    if let Some(id) = conn
+        .query_row(
+            "SELECT id FROM youtube_subscription_group WHERE lower(name) = lower(?1) LIMIT 1",
+            params![name],
+            |row| row.get::<_, String>(0),
+        )
+        .optional()?
+    {
+        return Ok(id);
+    }
+
+    let id = Uuid::new_v4().to_string();
+    let now = now_ms();
+    conn.execute(
+        "INSERT INTO youtube_subscription_group (id, name, created_at_ms, updated_at_ms) VALUES (?1, ?2, ?3, ?3)",
+        params![&id, name, now],
+    )?;
+    Ok(id)
+}
+
+fn detect_legacy_4kvdp_state_db_path() -> Option<PathBuf> {
+    let base = std::env::var_os("LOCALAPPDATA")
+        .map(PathBuf::from)?
+        .join("4kdownload.com")
+        .join("4K Video Downloader+")
+        .join("4K Video Downloader+");
+    if !base.is_dir() {
+        return None;
+    }
+
+    let mut candidates = std::fs::read_dir(&base)
+        .ok()?
+        .flatten()
+        .filter_map(|entry| {
+            let path = entry.path();
+            let is_sqlite = path
+                .extension()
+                .and_then(|ext| ext.to_str())
+                .map(|ext| ext.eq_ignore_ascii_case("sqlite"))
+                .unwrap_or(false);
+            if !is_sqlite {
+                return None;
+            }
+            let len = entry.metadata().ok()?.len();
+            Some((len, path))
+        })
+        .collect::<Vec<_>>();
+    candidates.sort_by(|a, b| b.0.cmp(&a.0).then_with(|| a.1.cmp(&b.1)));
+    candidates.into_iter().map(|(_, path)| path).next()
+}
+
+fn resolve_legacy_4kvdp_state_db_path(explicit: Option<&Path>) -> Option<PathBuf> {
+    if let Some(path) = normalize_optional_existing_path(explicit) {
+        if path.is_file() {
+            return Some(path);
+        }
+    }
+    detect_legacy_4kvdp_state_db_path()
+}
+
+fn open_legacy_4kvdp_state_db(path: &Path) -> Result<rusqlite::Connection> {
+    rusqlite::Connection::open_with_flags(
+        path,
+        OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NO_MUTEX,
+    )
+    .map_err(Into::into)
+}
+
+fn read_legacy_4kvdp_state_rows(conn: &rusqlite::Connection) -> Result<Vec<Legacy4kvdpStateRow>> {
+    let mut stmt = conn.prepare(
+        r#"
+SELECT
+  s.id,
+  s.type,
+  COALESCE(s.dirname, ''),
+  COALESCE(MAX(CASE WHEN m.type = 1 THEN m.value END), ''),
+  COALESCE(u.service_name, ''),
+  COALESCE(u.url, ''),
+  COALESCE(st.state, 1)
+FROM downloader_subscription_info s
+LEFT JOIN subscription_url_description u ON u.downloader_subscription_info_id = s.id
+LEFT JOIN subscription_state st ON st.downloader_subscription_info_id = s.id
+LEFT JOIN subscription_metadata m ON m.downloader_subscription_info_id = s.id
+GROUP BY s.id, s.type, s.dirname, u.service_name, u.url, st.state
+ORDER BY s.id ASC
+"#,
+    )?;
+
+    let rows = stmt
+        .query_map([], |row| {
+            Ok(Legacy4kvdpStateRow {
+                id: row.get(0)?,
+                container_type: row.get(1)?,
+                dirname: row.get(2)?,
+                title: row.get(3)?,
+                service_name: row.get(4)?,
+                source_url: row.get(5)?,
+                active: row.get::<_, i64>(6)? != 0,
+            })
+        })?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+    Ok(rows)
+}
+
+fn classify_legacy_4kvdp_kind(container_type: i64, source_url: &str) -> Legacy4kvdpContainerKind {
+    if container_type == 3 || is_youtube_playlist_reference(source_url) {
+        Legacy4kvdpContainerKind::Playlist
+    } else {
+        Legacy4kvdpContainerKind::Subscription
+    }
+}
+
+fn is_youtube_playlist_reference(source_url: &str) -> bool {
+    let Ok(parsed) = Url::parse(source_url) else {
+        return false;
+    };
+    let Some(host) = parsed.host_str().map(|value| value.to_ascii_lowercase()) else {
+        return false;
+    };
+    if host != "youtube.com" && host != "www.youtube.com" && !host.ends_with(".youtube.com") {
+        return false;
+    }
+    parsed.query_pairs().any(|(key, _)| key == "list") || parsed.path().starts_with("/playlist")
+}
+
+fn resolve_legacy_output_dir(root_dir: &Path, legacy_dirname: &str) -> LegacyResolvedOutputDir {
+    let normalized_dir = PathBuf::from(fourkvd_normalize_dirname(legacy_dirname));
+    if let Some(base_name) = fourkvd_basename(legacy_dirname) {
+        let root_candidate = root_dir.join(base_name);
+        if root_candidate.is_dir() {
+            return LegacyResolvedOutputDir {
+                path: root_candidate,
+                matched_root_dir: true,
+                retained_legacy_dir: false,
+            };
+        }
+        if normalized_dir.is_dir() {
+            return LegacyResolvedOutputDir {
+                path: normalized_dir,
+                matched_root_dir: false,
+                retained_legacy_dir: true,
+            };
+        }
+        return LegacyResolvedOutputDir {
+            path: root_candidate,
+            matched_root_dir: false,
+            retained_legacy_dir: false,
+        };
+    }
+
+    if normalized_dir.is_dir() {
+        return LegacyResolvedOutputDir {
+            path: normalized_dir,
+            matched_root_dir: false,
+            retained_legacy_dir: true,
+        };
+    }
+
+    LegacyResolvedOutputDir {
+        path: root_dir.to_path_buf(),
+        matched_root_dir: false,
+        retained_legacy_dir: false,
+    }
 }
 
 fn merge_archive_file(path: &Path, video_ids: &HashSet<String>) -> std::io::Result<(usize, usize)> {
@@ -2294,6 +3042,221 @@ downloader_subscription_info_id,entry_id,reference,status\n\
         assert!(a_text.contains("youtube AAAA1111"));
         assert!(!a_text.contains("BBBB2222")); // status=0 should not seed
         assert!(b_text.contains("youtube CCCC3333"));
+    }
+
+    fn with_localappdata_override<T>(path: &Path, f: impl FnOnce() -> T) -> T {
+        static LOCK: OnceLock<std::sync::Mutex<()>> = OnceLock::new();
+        let _guard = LOCK
+            .get_or_init(|| std::sync::Mutex::new(()))
+            .lock()
+            .expect("lock");
+        let previous = std::env::var_os("LOCALAPPDATA");
+        std::env::set_var("LOCALAPPDATA", path);
+        let result = f();
+        match previous {
+            Some(value) => std::env::set_var("LOCALAPPDATA", value),
+            None => std::env::remove_var("LOCALAPPDATA"),
+        }
+        result
+    }
+
+    fn seed_legacy_4kvdp_state_db(sqlite_path: &Path, root_dir: &Path) -> rusqlite::Result<()> {
+        if let Some(parent) = sqlite_path.parent() {
+            std::fs::create_dir_all(parent).expect("mkdir sqlite parent");
+        }
+        let conn = rusqlite::Connection::open(sqlite_path)?;
+        conn.execute_batch(
+            r#"
+CREATE TABLE downloader_subscription_info (
+  id INTEGER PRIMARY KEY,
+  type INTEGER NOT NULL,
+  dirname TEXT,
+  parent_id INTEGER,
+  uuid TEXT
+);
+CREATE TABLE subscription_url_description (
+  downloader_subscription_info_id INTEGER,
+  id INTEGER PRIMARY KEY,
+  type INTEGER,
+  service_name TEXT,
+  url TEXT,
+  handler_name TEXT
+);
+CREATE TABLE subscription_state (
+  downloader_subscription_info_id INTEGER,
+  id INTEGER PRIMARY KEY,
+  state INTEGER
+);
+CREATE TABLE subscription_metadata (
+  downloader_subscription_info_id INTEGER,
+  id INTEGER PRIMARY KEY,
+  type INTEGER,
+  value TEXT
+);
+CREATE TABLE subscription_entries (
+  downloader_subscription_info_id INTEGER,
+  id INTEGER PRIMARY KEY,
+  reference TEXT,
+  status INTEGER
+);
+"#,
+        )?;
+
+        let sub_dir = root_dir.join("Creator Videos");
+        let playlist_dir = root_dir.join("Playlist Folder");
+        conn.execute(
+            "INSERT INTO downloader_subscription_info (id, type, dirname, parent_id, uuid) VALUES (1, 1, ?1, NULL, 'uuid-sub')",
+            params![sub_dir.to_string_lossy().replace('\\', "/")],
+        )?;
+        conn.execute(
+            "INSERT INTO downloader_subscription_info (id, type, dirname, parent_id, uuid) VALUES (2, 3, ?1, NULL, 'uuid-playlist')",
+            params![playlist_dir.to_string_lossy().replace('\\', "/")],
+        )?;
+        conn.execute(
+            "INSERT INTO subscription_url_description (downloader_subscription_info_id, id, type, service_name, url, handler_name) VALUES (1, 1, 2, 'youtube', 'https://www.youtube.com/@creator/videos', 'youtube')",
+            [],
+        )?;
+        conn.execute(
+            "INSERT INTO subscription_url_description (downloader_subscription_info_id, id, type, service_name, url, handler_name) VALUES (2, 2, 1, 'youtube', 'https://www.youtube.com/playlist?list=PLTEST1234567890', 'youtube')",
+            [],
+        )?;
+        conn.execute(
+            "INSERT INTO subscription_state (downloader_subscription_info_id, id, state) VALUES (1, 1, 1)",
+            [],
+        )?;
+        conn.execute(
+            "INSERT INTO subscription_state (downloader_subscription_info_id, id, state) VALUES (2, 2, 1)",
+            [],
+        )?;
+        conn.execute(
+            "INSERT INTO subscription_metadata (downloader_subscription_info_id, id, type, value) VALUES (1, 1, 1, 'Creator Videos')",
+            [],
+        )?;
+        conn.execute(
+            "INSERT INTO subscription_metadata (downloader_subscription_info_id, id, type, value) VALUES (2, 2, 1, 'Playlist Folder')",
+            [],
+        )?;
+        conn.execute(
+            "INSERT INTO subscription_entries (downloader_subscription_info_id, id, reference, status) VALUES (1, 1, 'https://www.youtube.com/watch?v=AAAA1111AAA', 1)",
+            [],
+        )?;
+        conn.execute(
+            "INSERT INTO subscription_entries (downloader_subscription_info_id, id, reference, status) VALUES (2, 2, 'https://youtu.be/BBBB2222BBB', 1)",
+            [],
+        )?;
+        Ok(())
+    }
+
+    #[test]
+    fn analyze_legacy_archive_root_correlates_4kvdp_state_and_root_shape() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let paths = AppPaths::new(dir.path().to_path_buf());
+        crate::db::ensure_schema(&paths).expect("schema");
+
+        let root = dir.path().join("legacy_root");
+        std::fs::create_dir_all(root.join("Creator Videos")).expect("mkdir sub");
+        std::fs::create_dir_all(root.join("Playlist Folder")).expect("mkdir playlist");
+        std::fs::create_dir_all(root.join("Manual Folder")).expect("mkdir manual");
+        std::fs::write(root.join("loose_file.mp4"), b"x").expect("seed loose");
+        std::fs::write(root.join("Creator Videos").join("one.mp4"), b"x").expect("seed media");
+
+        let localapp = dir.path().join("LocalAppData");
+        let sqlite_path = localapp
+            .join("4kdownload.com")
+            .join("4K Video Downloader+")
+            .join("4K Video Downloader+")
+            .join("legacy.sqlite");
+        seed_legacy_4kvdp_state_db(&sqlite_path, &root).expect("seed sqlite");
+
+        let summary = with_localappdata_override(&localapp, || {
+            analyze_legacy_archive_root(&paths, &root, None, Some(3), Some(100)).expect("analyze")
+        });
+
+        assert!(summary.legacy_state_db_exists);
+        assert_eq!(summary.managed_container_count, 2);
+        assert_eq!(summary.managed_subscription_count, 1);
+        assert_eq!(summary.managed_playlist_count, 1);
+        assert_eq!(summary.matched_managed_dirs, 2);
+        assert_eq!(summary.unmatched_top_level_dirs, 1);
+        assert_eq!(summary.top_level_file_count, 1);
+        assert!(summary
+            .sample_unmatched_dirs
+            .iter()
+            .any(|value| value == "Manual Folder"));
+        assert!(summary
+            .recommendations
+            .iter()
+            .any(|line| line.contains("Import the detected 4KVDP app-state first")));
+    }
+
+    #[test]
+    fn import_4kvdp_state_maps_to_root_and_seeds_archives() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let paths = AppPaths::new(dir.path().to_path_buf());
+        crate::db::ensure_schema(&paths).expect("schema");
+
+        let root = dir.path().join("legacy_root");
+        std::fs::create_dir_all(root.join("Creator Videos")).expect("mkdir sub");
+        std::fs::create_dir_all(root.join("Playlist Folder")).expect("mkdir playlist");
+
+        let sqlite_path = dir.path().join("legacy.sqlite");
+        seed_legacy_4kvdp_state_db(&sqlite_path, &root).expect("seed sqlite");
+
+        let summary = import_youtube_subscriptions_4kvdp_state(&paths, &root, Some(&sqlite_path))
+            .expect("import state");
+        assert_eq!(summary.imported_sources, 2);
+        assert_eq!(summary.imported_subscription_sources, 1);
+        assert_eq!(summary.imported_playlist_sources, 1);
+        assert_eq!(summary.mapped_to_selected_root, 2);
+        assert_eq!(summary.archive_seeded_subscriptions, 2);
+
+        let rows = list_youtube_subscriptions(&paths).expect("list");
+        assert_eq!(rows.len(), 2);
+        let creator = rows
+            .iter()
+            .find(|row| row.source_url.contains("@creator/videos"))
+            .expect("creator row");
+        let playlist = rows
+            .iter()
+            .find(|row| row.source_url.contains("playlist?list=PLTEST1234567890"))
+            .expect("playlist row");
+        let creator_output_dir = PathBuf::from(
+            creator
+                .output_dir_override
+                .clone()
+                .expect("creator output dir"),
+        );
+        let playlist_output_dir = PathBuf::from(
+            playlist
+                .output_dir_override
+                .clone()
+                .expect("playlist output dir"),
+        );
+        assert_eq!(
+            creator_output_dir
+                .file_name()
+                .and_then(|value| value.to_str()),
+            Some("Creator Videos")
+        );
+        assert_eq!(
+            playlist_output_dir
+                .file_name()
+                .and_then(|value| value.to_str()),
+            Some("Playlist Folder")
+        );
+        assert_eq!(creator.group_ids.len(), 2);
+        assert!(creator.group_ids != playlist.group_ids);
+
+        let creator_archive =
+            youtube_subscription_archive_path(&paths, creator).expect("creator archive");
+        let playlist_archive =
+            youtube_subscription_archive_path(&paths, playlist).expect("playlist archive");
+        assert!(std::fs::read_to_string(creator_archive)
+            .expect("read creator archive")
+            .contains("youtube AAAA1111AAA"));
+        assert!(std::fs::read_to_string(playlist_archive)
+            .expect("read playlist archive")
+            .contains("youtube BBBB2222BBB"));
     }
 
     #[test]

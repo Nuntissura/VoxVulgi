@@ -337,6 +337,12 @@ Phase 1 extension status (2026-02-25):
   - export path is user selected in desktop UI,
   - import uses URL-keyed upsert (`source_url`) and keeps existing rows not present in the import file.
 - Subscriptions are loaded from DB whenever the Library page mounts, so pane/window switches do not clear loaded subscription state.
+- Legacy reconciliation now also supports the old 4KVDP app-state SQLite:
+  - auto-detect the largest Local AppData 4KVDP SQLite store when available,
+  - correlate stored `dirname` basenames against the selected legacy root,
+  - classify managed subscription/channel rows vs playlist rows, then separate those from unmatched manual folders and loose root files,
+  - import managed rows directly into `youtube_subscription` plus `youtube_subscription_group` memberships,
+  - seed VoxVulgi archive files from legacy `subscription_entries` so refresh jobs inherit dedupe state without touching the NAS.
 
 Responsiveness hardening:
 

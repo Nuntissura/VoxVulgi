@@ -276,22 +276,43 @@ type LegacyArchiveContainerHint = {
   media_file_count: number;
 };
 
+type LegacyArchiveManagedContainerHint = {
+  container_kind: string;
+  relative_path: string;
+  title: string;
+  source_url: string;
+  matched_root_path: string | null;
+};
+
 type LegacyArchiveAnalysisSummary = {
   root_path: string;
   install_path: string | null;
   install_path_exists: boolean;
+  legacy_state_db_path: string | null;
+  legacy_state_db_exists: boolean;
   media_file_count: number;
   detected_4kvdp_install: boolean;
   detected_4kvdp_subscriptions_json: boolean;
   detected_4kvdp_subscription_entries_csv: boolean;
   detected_channel_dirs: number;
   detected_playlist_dirs: number;
+  top_level_dir_count: number;
+  top_level_file_count: number;
+  managed_container_count: number;
+  managed_subscription_count: number;
+  managed_playlist_count: number;
+  matched_managed_dirs: number;
+  unmatched_top_level_dirs: number;
   scan_max_depth: number;
   scan_max_files: number;
   local_report_path: string;
   warnings: string[];
   container_hints: LegacyArchiveContainerHint[];
+  managed_container_hints: LegacyArchiveManagedContainerHint[];
+  sample_unmatched_dirs: string[];
+  sample_top_level_files: string[];
   sample_media_paths: string[];
+  recommendations: string[];
 };
 
 type DownloadPreset = {
@@ -330,6 +351,25 @@ type YoutubeSubscriptionsImport4kvdpSummary = {
   archive_seeded_entries: number;
   archive_skipped_entries: number;
   archive_seed_failures: number;
+};
+
+type YoutubeSubscriptionsImport4kvdpStateSummary = {
+  sqlite_path: string;
+  total_in_legacy_state: number;
+  imported_sources: number;
+  imported_subscription_sources: number;
+  imported_playlist_sources: number;
+  inserted: number;
+  updated: number;
+  skipped_non_youtube: number;
+  mapped_to_selected_root: number;
+  retained_existing_legacy_dir: number;
+  missing_target_dirs: number;
+  archive_seeded_subscriptions: number;
+  archive_seeded_entries: number;
+  archive_skipped_entries: number;
+  archive_seed_failures: number;
+  group_names: string[];
 };
 
 export function LibraryPage({ onOpenEditor, mode = "all", onOpenOptions }: LibraryPageProps) {
@@ -1768,6 +1808,34 @@ export function LibraryPage({ onOpenEditor, mode = "all", onOpenOptions }: Libra
     }
   }
 
+  async function import4kvdpAppState() {
+    setBusy(true);
+    setError(null);
+    setNotice(null);
+    try {
+      const root = legacyArchiveRoot.trim();
+      if (!root) {
+        throw new Error("Choose or enter a legacy archive root first.");
+      }
+
+      const summary = await invoke<YoutubeSubscriptionsImport4kvdpStateSummary>(
+        "youtube_subscriptions_import_4kvdp_state",
+        {
+          rootPath: root,
+          sqlitePath: legacyArchiveAnalysis?.legacy_state_db_path ?? null,
+        },
+      );
+      setNotice(
+        `Imported ${summary.imported_sources} legacy 4KVDP source(s) (${summary.imported_subscription_sources} subscription/channel, ${summary.imported_playlist_sources} playlist). Inserted ${summary.inserted}, updated ${summary.updated}, seeded ${summary.archive_seeded_subscriptions} archive file(s).`,
+      );
+      await refresh();
+    } catch (e) {
+      setError(String(e));
+    } finally {
+      setBusy(false);
+    }
+  }
+
   function toggleSubscriptionGroup(groupId: string) {
     setSubscriptionGroupIds((prev) => {
       if (prev.includes(groupId)) {
@@ -2071,7 +2139,7 @@ export function LibraryPage({ onOpenEditor, mode = "all", onOpenOptions }: Libra
       });
       setLegacyArchiveAnalysis(summary);
       setNotice(
-        `Analyzed legacy root: ${summary.media_file_count} sampled media file(s), ${summary.container_hints.length} visible containers. Local report: ${summary.local_report_path || "not written"}.`,
+        `Analyzed legacy root: ${summary.media_file_count} sampled media file(s), ${summary.managed_container_count} managed 4KVDP container(s), ${summary.unmatched_top_level_dirs} unmatched top-level folder(s), and ${summary.top_level_file_count} loose root file(s). Local report: ${summary.local_report_path || "not written"}.`,
       );
     } catch (e) {
       setError(String(e));
@@ -2240,7 +2308,8 @@ export function LibraryPage({ onOpenEditor, mode = "all", onOpenOptions }: Libra
         <div style={{ color: "#4b5563", marginBottom: 8 }}>
           Use this when you already have a large downloader-managed archive on local disk or NAS.
           VoxVulgi only analyzes and indexes it here. It does not move, delete, or rewrite legacy
-          media. Start with a shallow analysis first, then run index-only import when you are ready.
+          media. Start with a shallow analysis first, import any managed 4KVDP state, then index
+          the unmatched/manual containers incrementally.
         </div>
         <div className="row">
           <label style={{ display: "flex", alignItems: "center", gap: 8, flex: 1 }}>
@@ -2271,6 +2340,11 @@ export function LibraryPage({ onOpenEditor, mode = "all", onOpenOptions }: Libra
               style={{ width: "100%" }}
             />
           </label>
+        </div>
+        <div style={{ color: "#4b5563", marginBottom: 8 }}>
+          The install path is only a hint. VoxVulgi will also auto-detect the old 4KVDP app-state
+          SQLite in Local AppData and use that to preserve managed subscription and playlist
+          mapping when available.
         </div>
         <div className="row">
           <label style={{ display: "flex", alignItems: "center", gap: 8 }}>
@@ -2324,6 +2398,13 @@ export function LibraryPage({ onOpenEditor, mode = "all", onOpenOptions }: Libra
           >
             Index downloads
           </button>
+          <button
+            type="button"
+            disabled={busy || !legacyArchiveRoot.trim()}
+            onClick={import4kvdpAppState}
+          >
+            Import 4KVDP app state
+          </button>
           <button type="button" disabled={busy} onClick={import4kvdpSubscriptionsDir}>
             Import 4KVDP exports
           </button>
@@ -2341,6 +2422,16 @@ export function LibraryPage({ onOpenEditor, mode = "all", onOpenOptions }: Libra
             <div className="kv">
               <div className="k">Install path exists</div>
               <div className="v">{legacyArchiveAnalysis.install_path_exists ? "yes" : "no"}</div>
+            </div>
+            <div className="kv">
+              <div className="k">4KVDP state DB</div>
+              <div className="v">{legacyArchiveAnalysis.legacy_state_db_path ?? "-"}</div>
+            </div>
+            <div className="kv">
+              <div className="k">4KVDP state DB exists</div>
+              <div className="v">
+                {legacyArchiveAnalysis.legacy_state_db_exists ? "yes" : "no"}
+              </div>
             </div>
             <div className="kv">
               <div className="k">4KVDP install hints</div>
@@ -2369,6 +2460,30 @@ export function LibraryPage({ onOpenEditor, mode = "all", onOpenOptions }: Libra
               <div className="v">{legacyArchiveAnalysis.detected_playlist_dirs}</div>
             </div>
             <div className="kv">
+              <div className="k">Top-level folders</div>
+              <div className="v">{legacyArchiveAnalysis.top_level_dir_count}</div>
+            </div>
+            <div className="kv">
+              <div className="k">Loose root files</div>
+              <div className="v">{legacyArchiveAnalysis.top_level_file_count}</div>
+            </div>
+            <div className="kv">
+              <div className="k">Managed 4KVDP containers</div>
+              <div className="v">
+                {legacyArchiveAnalysis.managed_container_count} total (
+                {legacyArchiveAnalysis.managed_subscription_count} subscription/channel,{" "}
+                {legacyArchiveAnalysis.managed_playlist_count} playlist)
+              </div>
+            </div>
+            <div className="kv">
+              <div className="k">Managed folders matched on disk</div>
+              <div className="v">{legacyArchiveAnalysis.matched_managed_dirs}</div>
+            </div>
+            <div className="kv">
+              <div className="k">Unmatched top-level folders</div>
+              <div className="v">{legacyArchiveAnalysis.unmatched_top_level_dirs}</div>
+            </div>
+            <div className="kv">
               <div className="k">Analysis bounds</div>
               <div className="v">
                 depth {legacyArchiveAnalysis.scan_max_depth}, max files{" "}
@@ -2393,13 +2508,61 @@ export function LibraryPage({ onOpenEditor, mode = "all", onOpenOptions }: Libra
                 {legacyArchiveAnalysis.warnings.join(" ")}
               </div>
             ) : null}
-            {legacyArchiveAnalysis.container_hints.length ? (
-              <div className="table-wrap">
+            {legacyArchiveAnalysis.recommendations.length ? (
+              <div style={{ marginTop: 12 }}>
+                <div style={{ fontWeight: 600, marginBottom: 6 }}>Recommended reconciliation order</div>
+                <ul style={{ margin: 0, paddingLeft: 18 }}>
+                  {legacyArchiveAnalysis.recommendations.map((line) => (
+                    <li key={line}>{line}</li>
+                  ))}
+                </ul>
+              </div>
+            ) : null}
+            {legacyArchiveAnalysis.managed_container_hints.length ? (
+              <div className="table-wrap" style={{ marginTop: 12 }}>
                 <table>
                   <thead>
                     <tr>
-                      <th>Container</th>
-                      <th>Media files</th>
+                      <th>Managed kind</th>
+                      <th>Folder</th>
+                      <th>Matched root path</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {legacyArchiveAnalysis.managed_container_hints.map((hint) => (
+                      <tr key={`${hint.container_kind}:${hint.relative_path}:${hint.source_url}`}>
+                        <td>{hint.container_kind}</td>
+                        <td>{hint.relative_path}</td>
+                        <td>{hint.matched_root_path ?? "-"}</td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            ) : null}
+            {legacyArchiveAnalysis.sample_unmatched_dirs.length ? (
+              <div style={{ marginTop: 12 }}>
+                <div style={{ fontWeight: 600, marginBottom: 6 }}>Sample unmatched folders</div>
+                <div style={{ color: "#4b5563" }}>
+                  {legacyArchiveAnalysis.sample_unmatched_dirs.join(" | ")}
+                </div>
+              </div>
+            ) : null}
+            {legacyArchiveAnalysis.sample_top_level_files.length ? (
+              <div style={{ marginTop: 12 }}>
+                <div style={{ fontWeight: 600, marginBottom: 6 }}>Sample loose root files</div>
+                <div style={{ color: "#4b5563" }}>
+                  {legacyArchiveAnalysis.sample_top_level_files.join(" | ")}
+                </div>
+              </div>
+            ) : null}
+            {legacyArchiveAnalysis.container_hints.length ? (
+              <div className="table-wrap" style={{ marginTop: 12 }}>
+                <table>
+                  <thead>
+                    <tr>
+                      <th>Sampled container</th>
+                      <th>Media files (sampled)</th>
                     </tr>
                   </thead>
                   <tbody>

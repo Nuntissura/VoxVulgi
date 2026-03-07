@@ -46,3 +46,4 @@ Out of scope:
 
 - 2026-03-07: Created from operator feedback on NAS-backed archive reuse and preserving old downloader playlist/subscription folder intent.
 - 2026-03-07: Implemented a read-only, bounded reconciliation path with operator-supplied legacy root/install inputs, local JSON analysis reports, and offloaded import/analysis commands so large NAS roots do not block the UI thread.
+- 2026-03-07: Deepened the reconciliation model against the operator's real 4KVDP/NAS inputs: VoxVulgi now auto-detects the old 4KVDP app-state SQLite, correlates managed subscription/playlist directories with the selected root, distinguishes unmatched manual folders and loose root files, and offers direct SQLite-based import with seeded yt-dlp archive history while remaining read-only toward the NAS.

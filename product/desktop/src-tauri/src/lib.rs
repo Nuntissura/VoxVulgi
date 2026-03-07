@@ -2856,6 +2856,33 @@ fn youtube_subscriptions_import_4kvdp_dir(
 }
 
 #[tauri::command]
+async fn youtube_subscriptions_import_4kvdp_state(
+    state: State<'_, AppState>,
+    root_path: String,
+    sqlite_path: Option<String>,
+) -> Result<subscriptions::YoutubeSubscriptionsImport4kvdpStateSummary, String> {
+    let paths = state.paths.clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        let sqlite_path = sqlite_path
+            .as_deref()
+            .map(std::path::PathBuf::from)
+            .unwrap_or_default();
+        subscriptions::import_youtube_subscriptions_4kvdp_state(
+            &paths,
+            &std::path::PathBuf::from(root_path),
+            if sqlite_path.as_os_str().is_empty() {
+                None
+            } else {
+                Some(sqlite_path.as_path())
+            },
+        )
+        .map_err(|e| e.to_string())
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
+#[tauri::command]
 fn youtube_subscription_groups_list(
     state: State<'_, AppState>,
 ) -> Result<Vec<subscriptions::YoutubeSubscriptionGroupRow>, String> {
@@ -3645,6 +3672,7 @@ pub fn run() {
             youtube_subscriptions_export_json,
             youtube_subscriptions_import_json,
             youtube_subscriptions_import_4kvdp_dir,
+            youtube_subscriptions_import_4kvdp_state,
             youtube_subscriptions_seed_archive_scan,
             instagram_subscriptions_list,
             instagram_subscriptions_upsert,

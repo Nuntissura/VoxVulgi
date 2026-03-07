@@ -49,7 +49,7 @@ Date: 2026-03-07
 
 - WP-0096: Refresh the top-level IA so Localization Studio owns first-step ingest while `Video Archiver` and `Instagram Archiver` are named and scoped clearly. DONE.
 - WP-0097: Move the shared download/export root into global Options and make path hydration deterministic across startup, updates, and window switches. DONE.
-- WP-0098: Reconcile large existing downloader/NAS archive roots, playlists, and subscriptions without flattening or destructive moves. DONE.
+- WP-0098: Reconcile large existing downloader/NAS archive roots, playlists, and subscriptions without flattening or destructive moves, now including 4KVDP SQLite/app-state correlation and import. DONE.
 - WP-0099: Harden Video Archiver and Instagram Archiver workflows with subscription folder reveal, recurring Instagram archive refresh, and uncropped recent thumbnail viewing. DONE.
 - WP-0100: Improve Media Library with reliable open-file behavior on secondary drives, tighter card actions, grouped browsing, and media-type filters. DONE.
 - WP-0101: Standardize `Open file` and `Open parent folder` actions across all output/artifact surfaces. DONE.

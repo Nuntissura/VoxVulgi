@@ -243,6 +243,7 @@ Current implementation status:
 
 - **Localization Studio** now includes the lightweight ingest block for local import/refresh plus ASR-language selection because this is the primary operator workflow.
 - **Video Archiver** is the dedicated home for URL ingest, presets/templates, subscription groups, YouTube subscriptions, and legacy archive reconciliation.
+- **Legacy archive reconciliation** now distinguishes 4KVDP-managed subscription/playlist containers from unmatched manual folders and loose root files, using the old 4KVDP app-state SQLite when available to preserve folder mapping and resume/dedupe state without touching the legacy archive.
 - **Instagram Archiver** is the dedicated home for direct Instagram archive runs plus recurring archive targets.
 - **Options** is the discoverable home for shared storage-root configuration and related global path behavior.
 
