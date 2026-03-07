@@ -1,6 +1,6 @@
 # VoxVulgi — Task Board
 
-Last updated: 2026-03-06
+Last updated: 2026-03-07
 
 This is the single source of truth for work status.
 
@@ -108,3 +108,4 @@ This is the single source of truth for work status.
 | WP-0092 | Variant-aware artifact actions and logs | DONE | Codex | Remediation tranche complete: artifact rerun/status/log handling now honors variant/track/container identity for A/B previews, alternates, QC, and export packs; proof in `product/desktop/Build Target/tool_artifacts/wp_runs/WP-0092/20260306_213944/`. |
 | WP-0093 | Reference cleanup integrity for multi-reference voices | DONE | Codex | Remediation tranche complete: cleanup is now multi-reference aware, non-destructive by default, and collision-safe per speaker; proof in `product/desktop/Build Target/tool_artifacts/wp_runs/WP-0093/20260306_213944/`. |
 | WP-0094 | Batch dubbing library-scale selection | DONE | Codex | Remediation tranche complete: batch picker now pages through the full library and no longer truncates selection on item switches; proof in `product/desktop/Build Target/tool_artifacts/wp_runs/WP-0094/20260306_213944/`. |
+| WP-0095 | Localization Studio manual app smoke | BACKLOG | Codex | Planned manual UI/operator smoke for `WP-0092` to `WP-0094`, with proof captured under `product/desktop/Build Target/tool_artifacts/wp_runs/WP-0095/`. |

@@ -1,6 +1,6 @@
 # VoxVulgi — Roadmap / Backlog (Draft)
 
-Date: 2026-02-19
+Date: 2026-03-07
 
 ## Immediate Track - Stabilization + IA Refresh (2026-03)
 
@@ -40,6 +40,10 @@ Date: 2026-02-19
 - WP-0092: Variant-aware artifact actions, status, and logs for A/B previews, alternates, QC, and export packs. DONE.
 - WP-0093: Cleanup integrity for multi-reference voices and collision-safe cleanup storage. DONE.
 - WP-0094: Library-scale batch dubbing selection without hidden 500-item caps. DONE.
+
+## Manual App Validation Follow-up (2026-03)
+
+- WP-0095: Run a real Localization Studio app smoke for `WP-0092` to `WP-0094`, capture operator-facing proof, and queue any remaining defects as explicit follow-up packets.
 
 ## Phase 0 — Decisions (1–2 days)
 
