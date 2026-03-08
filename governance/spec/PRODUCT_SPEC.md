@@ -1,6 +1,6 @@
 # VoxVulgi — Product Spec (Rebuild; Cross-Platform; Local-First)
 
-Date: 2026-03-07  
+Date: 2026-03-08  
 Status: Draft (assumptions noted; intended as the starting point for implementation planning).
 
 ## 1) Framing / Constraints
@@ -142,6 +142,11 @@ Initial language focus: **Korean + Japanese → English**.
   - per-speaker render-mode routing so clone and standard-TTS speakers can coexist in one item,
   - cross-episode voice memory profiles for recurring real speakers,
   - separate character libraries for reusable narrator/teaching voices.
+- Voice backend strategy should now be a first-class operator-visible layer:
+  - the shipped default remains the managed OpenVoice V2 + Kokoro path until benchmark evidence supports a change,
+  - Diagnostics and Localization Studio should expose a research-backed backend catalog covering managed and experimental candidates,
+  - the app should distinguish backend families such as two-stage TTS + VC, direct zero-shot TTS, and conversion-only pipelines,
+  - the app should support explicit local BYO backend adapters for stronger experimental OSS candidates without silently installing them.
 
 ### 5.2 Background preservation
 
@@ -172,6 +177,10 @@ Initial language focus: **Korean + Japanese → English**.
   - A/B preview variants before committing to a final voice choice,
   - batch dubbing across item sets or seasons,
   - export stems (speech only, background only, final mix) and alternate dubbed versions.
+- Backend-comparison additions:
+  - Localization Studio should include a benchmark lab that ranks current outputs and variants for an item,
+  - benchmark reports should explain timing fit, coverage, reference health, silence/clipping/noise issues, and similarity proxies,
+  - backend selection changes should be evidence-driven through durable report artifacts instead of implicit replacement of the shipped default.
 
 Current implementation status:
 
@@ -199,7 +208,10 @@ Current implementation status:
 - Advanced dubbing library features:
   - richer evaluation/QC heuristics,
   - stronger subtitle-aware prosody controls and future expressive hinting,
-  - deeper reuse/reporting workflows on top of the now-implemented memory/character libraries.
+  - deeper reuse/reporting workflows on top of the now-implemented memory/character libraries,
+  - a backend-catalog and recommendation system for voice cloning and dubbing,
+  - explicit BYO adapter support for experimental local backends,
+  - benchmark-driven promotion of future managed backends.
 
 ## 7) UX Principles
 
@@ -227,6 +239,7 @@ Current implementation status:
   - QC warnings (too fast, too long).
 - **Jobs/Queue**: running/failed/completed, retry, logs link.
 - **Diagnostics**: storage usage, logs export, version info, privacy settings.
+- **Diagnostics** should also surface a voice-backend catalog, backend readiness, and recommendation reasoning instead of only package versions.
 
 ### 8.0.1 Current top-level windows (implemented 2026-03-03)
 

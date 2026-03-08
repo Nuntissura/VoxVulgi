@@ -1,6 +1,6 @@
 # VoxVulgi - Technical Design (Rebuild; Cross-Platform; Local-First)
 
-Date: 2026-03-07  
+Date: 2026-03-08  
 Status: Draft (implementation-oriented; adjusts as we pick stack).
 
 ## 1) Proposed Architecture (Recommended)
@@ -286,10 +286,59 @@ Voice-preserving approach (core feature):
   - reference cleanup storage must use collision-safe speaker keys and stay backward-compatible with previously written cleanup manifests,
   - applying cleaned references must support non-destructive multi-reference reuse,
   - batch dubbing item selection must page through the full library and keep selections stable without hidden caps.
+- Voice-backend modernization strategy:
+  - keep the current OpenVoice V2 + Kokoro path as the managed default until benchmark evidence supports a change,
+  - add a built-in backend catalog with descriptors for managed and experimental candidates,
+  - add recommendation logic keyed by source language, target language, performance tier, reference availability, and operator goal,
+  - add explicit BYO adapter configs for experimental backends that the app should not auto-install,
+  - add a benchmark lab that evaluates existing voice artifacts and variants before backend promotion decisions.
 - Dubbing-control expansion remains operator-directed; the app should not add content-judgment or censorship workflows as part of these features.
 
 R&D plan: see `governance/spec/VOICE_PRESERVING_DUBBING_RD_PLAN.md`.
 Tooling landscape research: see `governance/spec/VOICE_DUBBING_TOOLING_LANDSCAPE_2026.md`.
+Research refresh corpus: see `governance/research/voice_cloning_20260308/`.
+
+Voice-backend catalog design:
+
+- Add a new engine module to expose a typed catalog of backends, including:
+  - `id`, `display_name`, `family`, `mode`, `install_mode`
+  - code-license and weights-license posture
+  - supported language directions
+  - GPU recommendation and reference expectations
+  - strengths, risks, and recommendation notes
+- The catalog should include:
+  - managed backends already shipped by VoxVulgi,
+  - experimental built-in research candidates,
+  - operator-registered BYO adapters.
+- Diagnostics should render this catalog together with current readiness state.
+- Localization Studio should render a recommendation summary and make the currently preferred backend family explicit.
+
+Voice benchmark lab design:
+
+- Add a new engine module that can:
+  - discover current-item voice output artifacts and variants,
+  - compute a stable benchmark report with local metrics,
+  - emit both JSON and Markdown reports under item artifact directories.
+- Candidate metrics:
+  - rendered segment coverage,
+  - converted segment ratio where available,
+  - duration fit against subtitle timing windows,
+  - silence/clipping/noise warnings,
+  - reference coverage and reference duration,
+  - similarity proxies derived from local embeddings or existing QC metrics,
+  - a transparent weighted ranking score.
+- The benchmark lab should work on already-rendered artifacts first; it should not require a second backend to be installed in order to be useful.
+
+Experimental BYO adapter design:
+
+- Store adapter configs in app-managed local config/state, not governance folders.
+- Each adapter config should be explicit and operator-supplied:
+  - executable or interpreter path,
+  - working directory,
+  - probe arguments,
+  - environment overrides if needed,
+  - capability metadata and operator notes.
+- The app may probe adapters and surface readiness/errors, but must not silently install or update them.
 
 ## 5.6 Downloader (Phase 2)
 

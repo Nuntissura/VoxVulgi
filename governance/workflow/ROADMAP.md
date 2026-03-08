@@ -1,6 +1,6 @@
 # VoxVulgi — Roadmap / Backlog (Draft)
 
-Date: 2026-03-07
+Date: 2026-03-08
 
 ## Immediate Track - Stabilization + IA Refresh (2026-03)
 
@@ -58,6 +58,13 @@ Date: 2026-03-07
 - WP-0104: Refine drag and resize ergonomics so the shell does not block text selection, scrolling, or diagonal resize. DONE.
 - WP-0105: Make MP4 the default video target and JPEG the default image target wherever the local toolchain can comply sensibly. DONE.
 - WP-0106: Add Pinterest board/folder crawling to Image Archive with batch URL intake. DONE.
+
+## Voice Backend Modernization (2026-03)
+
+- WP-0107: Refresh the voice-cloning research base, transfer it into spec/governance, and pin the next backend strategy. DONE.
+- WP-0108: Add a first-class backend catalog and recommendation surface so operators can see which backend family fits their dubbing goal.
+- WP-0109: Add a benchmark lab that compares current voice outputs and variants using ranked local metrics.
+- WP-0110: Add explicit BYO backend adapters for strong OSS candidates that should not be shipped or auto-installed by default.
 
 ## Phase 0 — Decisions (1–2 days)
 

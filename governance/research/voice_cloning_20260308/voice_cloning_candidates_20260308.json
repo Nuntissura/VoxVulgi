@@ -1,0 +1,232 @@
+{
+  "schema_version": 1,
+  "captured_at": "2026-03-08",
+  "app": "VoxVulgi",
+  "candidates": [
+    {
+      "id": "openvoice_v2",
+      "name": "OpenVoice V2",
+      "kind": "oss_backend",
+      "family": "tts_plus_voice_conversion",
+      "packaging": "managed_default",
+      "code_license": "MIT",
+      "weights_license": "MIT",
+      "status_for_voxvulgi": "shipped_default",
+      "strengths": [
+        "fits current TTS plus conversion architecture",
+        "explicit text control",
+        "good near-term identity preservation"
+      ],
+      "risks": [
+        "weaker expressivity than newer direct TTS systems",
+        "prosody still depends heavily on base TTS"
+      ],
+      "sources": [
+        "https://github.com/myshell-ai/OpenVoice",
+        "https://huggingface.co/myshell-ai/OpenVoiceV2"
+      ]
+    },
+    {
+      "id": "cosyvoice",
+      "name": "CosyVoice",
+      "kind": "oss_backend",
+      "family": "direct_zero_shot_tts",
+      "packaging": "experimental_byo",
+      "code_license": "Apache-2.0",
+      "weights_license": "Apache-2.0",
+      "status_for_voxvulgi": "high_priority_candidate",
+      "strengths": [
+        "multilingual zero-shot TTS",
+        "promptable and instructed speech generation",
+        "strong match for vendor-like controls"
+      ],
+      "risks": [
+        "heavier runtime and packaging cost",
+        "desktop install path still needs evaluation"
+      ],
+      "sources": [
+        "https://github.com/FunAudioLLM/CosyVoice",
+        "https://arxiv.org/abs/2407.05407"
+      ]
+    },
+    {
+      "id": "seed_vc",
+      "name": "Seed-VC",
+      "kind": "oss_backend",
+      "family": "voice_conversion_only",
+      "packaging": "experimental_byo",
+      "code_license": "Apache-2.0",
+      "weights_license": "check_release",
+      "status_for_voxvulgi": "high_priority_candidate",
+      "strengths": [
+        "strong timbre transfer direction",
+        "fits alternative conversion-stage experiments",
+        "real-time oriented implementation"
+      ],
+      "risks": [
+        "needs an upstream English speech generator for dubbing",
+        "weight and packaging details still need concrete repo-specific validation"
+      ],
+      "sources": [
+        "https://github.com/Plachtaa/seed-vc",
+        "https://arxiv.org/abs/2411.09943"
+      ]
+    },
+    {
+      "id": "indextts2",
+      "name": "IndexTTS2",
+      "kind": "oss_backend",
+      "family": "direct_zero_shot_tts",
+      "packaging": "experimental_byo",
+      "code_license": "MIT",
+      "weights_license": "check_release",
+      "status_for_voxvulgi": "high_priority_candidate",
+      "strengths": [
+        "strong similarity claims",
+        "duration and emotion control emphasis",
+        "good fit for dubbing benchmarks"
+      ],
+      "risks": [
+        "still too new to promote blindly",
+        "desktop runtime path needs proof"
+      ],
+      "sources": [
+        "https://github.com/index-tts/index-tts",
+        "https://arxiv.org/abs/2502.05512"
+      ]
+    },
+    {
+      "id": "fish_speech",
+      "name": "Fish-Speech",
+      "kind": "oss_backend",
+      "family": "direct_zero_shot_tts",
+      "packaging": "experimental_byo",
+      "code_license": "Apache-2.0",
+      "weights_license": "check_release",
+      "status_for_voxvulgi": "medium_priority_candidate",
+      "strengths": [
+        "long-form and expressive generation direction",
+        "multilingual support"
+      ],
+      "risks": [
+        "heavier stack",
+        "more research than packaging maturity for VoxVulgi today"
+      ],
+      "sources": [
+        "https://github.com/fishaudio/fish-speech",
+        "https://arxiv.org/abs/2411.01156"
+      ]
+    },
+    {
+      "id": "xtts_v2",
+      "name": "XTTS v2",
+      "kind": "oss_backend",
+      "family": "direct_zero_shot_tts",
+      "packaging": "experimental_byo",
+      "code_license": "MPL-2.0",
+      "weights_license": "check_release",
+      "status_for_voxvulgi": "medium_priority_candidate",
+      "strengths": [
+        "mature OSS surface",
+        "useful practical benchmark baseline"
+      ],
+      "risks": [
+        "licensing and weight packaging need repo-specific review",
+        "not obviously better than newer candidates without benchmarking"
+      ],
+      "sources": [
+        "https://github.com/coqui-ai/TTS"
+      ]
+    },
+    {
+      "id": "f5_tts",
+      "name": "F5-TTS",
+      "kind": "oss_backend",
+      "family": "direct_zero_shot_tts",
+      "packaging": "research_or_byo_only",
+      "code_license": "MIT",
+      "weights_license": "CC-BY-NC-4.0",
+      "status_for_voxvulgi": "research_only",
+      "strengths": [
+        "strong technical direction",
+        "good feature reference for future expressive controls"
+      ],
+      "risks": [
+        "non-commercial weight license"
+      ],
+      "sources": [
+        "https://github.com/SWivid/F5-TTS",
+        "https://arxiv.org/abs/2410.06885"
+      ]
+    },
+    {
+      "id": "e2_tts",
+      "name": "E2-TTS",
+      "kind": "oss_backend",
+      "family": "direct_zero_shot_tts",
+      "packaging": "research_or_byo_only",
+      "code_license": "MIT",
+      "weights_license": "check_release",
+      "status_for_voxvulgi": "research_only",
+      "strengths": [
+        "important flow-matching reference implementation"
+      ],
+      "risks": [
+        "not yet a clear managed desktop choice"
+      ],
+      "sources": [
+        "https://github.com/SWivid/E2-TTS",
+        "https://arxiv.org/abs/2408.10139"
+      ]
+    },
+    {
+      "id": "azure_custom_neural_voice",
+      "name": "Azure Custom Neural Voice",
+      "kind": "vendor_surface",
+      "family": "vendor_custom_voice",
+      "packaging": "service",
+      "status_for_voxvulgi": "feature_reference_only",
+      "strengths": [
+        "studio-grade voice asset workflow",
+        "pronunciation and SSML control"
+      ],
+      "sources": [
+        "https://learn.microsoft.com/en-us/azure/ai-services/speech-service/custom-neural-voice"
+      ]
+    },
+    {
+      "id": "google_custom_voice",
+      "name": "Google Cloud Custom Voice / Chirp 3 Instant Custom Voice",
+      "kind": "vendor_surface",
+      "family": "vendor_custom_voice",
+      "packaging": "service",
+      "status_for_voxvulgi": "feature_reference_only",
+      "strengths": [
+        "clear layered offering",
+        "pronunciation and voice controls"
+      ],
+      "sources": [
+        "https://docs.cloud.google.com/text-to-speech/docs/custom-voice",
+        "https://docs.cloud.google.com/text-to-speech/docs/chirp3-instant-custom-voice",
+        "https://docs.cloud.google.com/text-to-speech/docs/custom-pronunciations"
+      ]
+    },
+    {
+      "id": "elevenlabs_voice_cloning",
+      "name": "ElevenLabs Voice Cloning",
+      "kind": "vendor_surface",
+      "family": "vendor_voice_library",
+      "packaging": "service",
+      "status_for_voxvulgi": "feature_reference_only",
+      "strengths": [
+        "clear voice-library UX",
+        "rapid voice iteration and tuning"
+      ],
+      "sources": [
+        "https://elevenlabs.io/docs/capabilities/voice-cloning",
+        "https://elevenlabs.io/docs/cookbooks/text-to-speech/voice-settings",
+        "https://elevenlabs.io/docs/dubbing"
+      ]
+    }
+  ]
+}

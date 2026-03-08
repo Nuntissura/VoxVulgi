@@ -1,6 +1,6 @@
 # VoxVulgi — Task Board
 
-Last updated: 2026-03-07
+Last updated: 2026-03-08
 
 This is the single source of truth for work status.
 
@@ -120,3 +120,7 @@ This is the single source of truth for work status.
 | WP-0104 | Desktop shell drag and resize ergonomics | DONE | Codex | Dragging is limited to the chrome region and a larger in-surface corner resize handle was added; proof in `product/desktop/Build Target/tool_artifacts/wp_runs/WP-0104/20260307_033244/`. |
 | WP-0105 | Default media format policy (MP4/JPEG) | DONE | Codex | MP4-first video defaults remain in place and image crawling now prefers practical JPEG/original candidates over less useful alternate encodings where the provider exposes them cleanly; proof in `product/desktop/Build Target/tool_artifacts/wp_runs/WP-0105/20260307_042415/`. |
 | WP-0106 | Pinterest archive crawler | DONE | Codex | Image Archive now supports Pinterest board/folder batch intake and adds Pinterest-specific full-size/original candidate heuristics in the crawler path; proof in `product/desktop/Build Target/tool_artifacts/wp_runs/WP-0106/20260307_042415/`. |
+| WP-0107 | Voice cloning research refresh and transfer | DONE | Codex | Added a tracked research corpus under `governance/research/voice_cloning_20260308/` plus spec/roadmap/taskboard sync for the new backend strategy. |
+| WP-0108 | Voice backend catalog and recommendation surface | BACKLOG | Codex | Add a research-backed catalog of managed and experimental voice backends plus recommendation logic in Diagnostics and Localization Studio. |
+| WP-0109 | Voice benchmark lab and comparison reports | BACKLOG | Codex | Add item-scoped benchmark/ranking reports for existing voice outputs and variants. |
+| WP-0110 | Experimental BYO voice backend adapters | BACKLOG | Codex | Add explicit local adapter registration and probe/test support for non-shipped experimental voice backends. |
