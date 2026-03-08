@@ -10,8 +10,8 @@ use voxvulgi_engine::models::ModelStore;
 use voxvulgi_engine::paths::AppPaths;
 use voxvulgi_engine::{
     config, db, diagnostics, instagram_subscriptions, jobs, library, speakers, subscriptions,
-    subtitle_tracks, subtitles, tools, voice_cast_packs, voice_cleanup, voice_library,
-    voice_templates,
+    subtitle_tracks, subtitles, tools, voice_backends, voice_cast_packs, voice_cleanup,
+    voice_library, voice_templates,
 };
 
 #[derive(Debug, Clone, serde::Deserialize)]
@@ -2272,6 +2272,30 @@ fn tools_tts_voice_preserving_local_v1_install(
 }
 
 #[tauri::command]
+async fn voice_backends_catalog(
+    state: State<'_, AppState>,
+) -> Result<voice_backends::VoiceBackendCatalog, String> {
+    let paths = state.paths.clone();
+    tauri::async_runtime::spawn_blocking(move || Ok(voice_backends::backend_catalog(&paths)))
+        .await
+        .map_err(|e| e.to_string())?
+}
+
+#[tauri::command]
+async fn voice_backends_recommend(
+    state: State<'_, AppState>,
+    request: Option<voice_backends::VoiceBackendRecommendationRequest>,
+) -> Result<voice_backends::VoiceBackendRecommendation, String> {
+    let paths = state.paths.clone();
+    let request = request.unwrap_or_default();
+    tauri::async_runtime::spawn_blocking(move || {
+        Ok(voice_backends::recommend_backend(&paths, request))
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
+#[tauri::command]
 async fn tools_tts_preview_pyttsx3_voices(
     state: State<'_, AppState>,
 ) -> Result<Vec<tools::Pyttsx3Voice>, String> {
@@ -3729,6 +3753,8 @@ pub fn run() {
             voice_library_remove_reference,
             voice_library_suggest_for_item,
             voice_library_update,
+            voice_backends_catalog,
+            voice_backends_recommend,
             voice_cleanup_list_for_speaker,
             voice_cleanup_run_for_speaker,
             voice_templates_apply_to_item,

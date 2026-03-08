@@ -92,6 +92,43 @@ type TtsVoicePreservingLocalV1PackStatus = {
   cosyvoice_version: string | null;
 };
 
+type VoiceBackendCatalogEntry = {
+  id: string;
+  display_name: string;
+  family: string;
+  mode: string;
+  install_mode: string;
+  status: string;
+  status_detail: string;
+  managed_default: boolean;
+  language_scope: string;
+  reference_expectation: string;
+  gpu_recommended: boolean;
+  code_license: string;
+  weights_license: string;
+  strengths: string[];
+  risks: string[];
+  primary_source: string;
+};
+
+type VoiceBackendCatalog = {
+  default_backend_id: string;
+  performance_tier: string;
+  backends: VoiceBackendCatalogEntry[];
+};
+
+type VoiceBackendRecommendation = {
+  goal: string;
+  source_lang: string;
+  target_lang: string;
+  reference_count: number;
+  performance_tier: string;
+  preferred_backend_id: string;
+  fallback_backend_id: string | null;
+  rationale: string[];
+  warnings: string[];
+};
+
 type ModelInventoryItem = {
   id: string;
   name: string;
@@ -338,6 +375,9 @@ export function DiagnosticsPage() {
   const [ttsNeuralLocalV1, setTtsNeuralLocalV1] = useState<TtsNeuralLocalV1PackStatus | null>(null);
   const [ttsVoicePreservingLocalV1, setTtsVoicePreservingLocalV1] =
     useState<TtsVoicePreservingLocalV1PackStatus | null>(null);
+  const [voiceBackendCatalog, setVoiceBackendCatalog] = useState<VoiceBackendCatalog | null>(null);
+  const [voiceBackendRecommendation, setVoiceBackendRecommendation] =
+    useState<VoiceBackendRecommendation | null>(null);
   const [integrity, setIntegrity] = useState<PackIntegrityManifestStatus | null>(null);
   const [perfTier, setPerfTier] = useState<PerformanceTierStatus | null>(null);
   const [batchRules, setBatchRules] = useState<BatchOnImportRules | null>(null);
@@ -401,6 +441,8 @@ export function DiagnosticsPage() {
         nextTtsPreview,
         nextTtsNeuralLocalV1,
         nextTtsVoicePreservingLocalV1,
+        nextVoiceBackendCatalog,
+        nextVoiceBackendRecommendation,
         nextIntegrity,
         nextPerfTier,
         nextBatchRules,
@@ -427,6 +469,8 @@ export function DiagnosticsPage() {
         invoke<TtsPreviewPackStatus>("tools_tts_preview_status"),
         invoke<TtsNeuralLocalV1PackStatus>("tools_tts_neural_local_v1_status"),
         invoke<TtsVoicePreservingLocalV1PackStatus>("tools_tts_voice_preserving_local_v1_status"),
+        invoke<VoiceBackendCatalog>("voice_backends_catalog"),
+        invoke<VoiceBackendRecommendation>("voice_backends_recommend"),
         invoke<PackIntegrityManifestStatus>("tools_pack_integrity_manifest_status"),
         invoke<PerformanceTierStatus>("tools_performance_tier_status"),
         invoke<BatchOnImportRules>("config_batch_on_import_get"),
@@ -454,6 +498,8 @@ export function DiagnosticsPage() {
         setTtsPreview(nextTtsPreview);
         setTtsNeuralLocalV1(nextTtsNeuralLocalV1);
         setTtsVoicePreservingLocalV1(nextTtsVoicePreservingLocalV1);
+        setVoiceBackendCatalog(nextVoiceBackendCatalog);
+        setVoiceBackendRecommendation(nextVoiceBackendRecommendation);
         setIntegrity(nextIntegrity);
         setPerfTier(nextPerfTier);
         setBatchRules(nextBatchRules);
@@ -519,6 +565,8 @@ export function DiagnosticsPage() {
         nextTtsPreview,
         nextTtsNeuralLocalV1,
         nextTtsVoicePreservingLocalV1,
+        nextVoiceBackendCatalog,
+        nextVoiceBackendRecommendation,
         nextIntegrity,
         nextPerfTier,
       ] = await Promise.all([
@@ -532,6 +580,8 @@ export function DiagnosticsPage() {
         invoke<TtsPreviewPackStatus>("tools_tts_preview_status"),
         invoke<TtsNeuralLocalV1PackStatus>("tools_tts_neural_local_v1_status"),
         invoke<TtsVoicePreservingLocalV1PackStatus>("tools_tts_voice_preserving_local_v1_status"),
+        invoke<VoiceBackendCatalog>("voice_backends_catalog"),
+        invoke<VoiceBackendRecommendation>("voice_backends_recommend"),
         invoke<PackIntegrityManifestStatus>("tools_pack_integrity_manifest_status"),
         invoke<PerformanceTierStatus>("tools_performance_tier_status"),
       ]);
@@ -546,6 +596,8 @@ export function DiagnosticsPage() {
         setTtsPreview(nextTtsPreview);
         setTtsNeuralLocalV1(nextTtsNeuralLocalV1);
         setTtsVoicePreservingLocalV1(nextTtsVoicePreservingLocalV1);
+        setVoiceBackendCatalog(nextVoiceBackendCatalog);
+        setVoiceBackendRecommendation(nextVoiceBackendRecommendation);
         setIntegrity(nextIntegrity);
         setPerfTier(nextPerfTier);
         updateSectionStatus("tools", "ready");
@@ -1702,6 +1754,81 @@ export function DiagnosticsPage() {
           <div className="k">CosyVoice</div>
           <div className="v">{ttsVoicePreservingLocalV1?.cosyvoice_version ?? "-"}</div>
         </div>
+        <div className="kv">
+          <div className="k">Voice backend recommendation</div>
+          <div className="v">
+            {voiceBackendRecommendation
+              ? `${voiceBackendRecommendation.preferred_backend_id} (${voiceBackendRecommendation.goal})`
+              : "-"}
+          </div>
+        </div>
+        {voiceBackendRecommendation?.fallback_backend_id ? (
+          <div className="kv">
+            <div className="k">Safe fallback</div>
+            <div className="v">{voiceBackendRecommendation.fallback_backend_id}</div>
+          </div>
+        ) : null}
+        {voiceBackendCatalog?.backends?.length ? (
+          <div style={{ marginTop: 12, display: "flex", flexDirection: "column", gap: 10 }}>
+            <div style={{ fontSize: 12, opacity: 0.75 }}>
+              Backend catalog maps the shipped OpenVoice path against stronger experimental OSS
+              candidates. Managed default remains OpenVoice until benchmark evidence supports a
+              change.
+            </div>
+            {voiceBackendCatalog.backends.map((backend) => (
+              <div
+                key={backend.id}
+                style={{
+                  border: "1px solid #e5e7eb",
+                  borderRadius: 8,
+                  padding: 10,
+                  display: "flex",
+                  flexDirection: "column",
+                  gap: 6,
+                }}
+              >
+                <div className="row" style={{ justifyContent: "space-between", alignItems: "center" }}>
+                  <div style={{ fontWeight: 600 }}>
+                    {backend.display_name}
+                    {backend.managed_default ? " (managed default)" : ""}
+                  </div>
+                  <code>{backend.status}</code>
+                </div>
+                <div style={{ fontSize: 12, opacity: 0.75 }}>{backend.status_detail}</div>
+                <div className="kv">
+                  <div className="k">Family</div>
+                  <div className="v">
+                    {backend.family} / {backend.mode}
+                  </div>
+                </div>
+                <div className="kv">
+                  <div className="k">Install mode</div>
+                  <div className="v">
+                    {backend.install_mode}; GPU recommended: {backend.gpu_recommended ? "yes" : "no"}
+                  </div>
+                </div>
+                <div className="kv">
+                  <div className="k">Language scope</div>
+                  <div className="v">{backend.language_scope}</div>
+                </div>
+                <div className="kv">
+                  <div className="k">References</div>
+                  <div className="v">{backend.reference_expectation}</div>
+                </div>
+                <div className="kv">
+                  <div className="k">Licenses</div>
+                  <div className="v">
+                    code {backend.code_license}; weights {backend.weights_license}
+                  </div>
+                </div>
+                <div style={{ fontSize: 12, opacity: 0.75 }}>
+                  Strengths: {backend.strengths.join(" | ")}
+                </div>
+                <div style={{ fontSize: 12, opacity: 0.75 }}>Risks: {backend.risks.join(" | ")}</div>
+              </div>
+            ))}
+          </div>
+        ) : null}
 
         <div className="row">
           <button

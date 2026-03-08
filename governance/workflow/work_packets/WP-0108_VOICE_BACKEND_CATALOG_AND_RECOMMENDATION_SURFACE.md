@@ -3,7 +3,7 @@
 ## Metadata
 - ID: WP-0108
 - Owner: Codex
-- Status: BACKLOG
+- Status: DONE
 - Created: 2026-03-08
 - Target milestone: Voice backend modernization
 
@@ -41,3 +41,4 @@ Out of scope:
 ## Status updates
 
 - 2026-03-08: Created from the research transfer packet.
+- 2026-03-08: Implemented and verified. Added engine-side backend descriptors and recommendation logic, plus Diagnostics and Localization Studio surfaces for the resulting catalog/recommendation.

@@ -430,6 +430,43 @@ type VoiceAbPreviewQueueSummary = {
   queued_jobs: JobRow[];
 };
 
+type VoiceBackendCatalogEntry = {
+  id: string;
+  display_name: string;
+  family: string;
+  mode: string;
+  install_mode: string;
+  status: string;
+  status_detail: string;
+  managed_default: boolean;
+  language_scope: string;
+  reference_expectation: string;
+  gpu_recommended: boolean;
+  code_license: string;
+  weights_license: string;
+  strengths: string[];
+  risks: string[];
+  primary_source: string;
+};
+
+type VoiceBackendCatalog = {
+  default_backend_id: string;
+  performance_tier: string;
+  backends: VoiceBackendCatalogEntry[];
+};
+
+type VoiceBackendRecommendation = {
+  goal: string;
+  source_lang: string;
+  target_lang: string;
+  reference_count: number;
+  performance_tier: string;
+  preferred_backend_id: string;
+  fallback_backend_id: string | null;
+  rationale: string[];
+  warnings: string[];
+};
+
 type LocalizationBatchRequest = {
   item_ids: string[];
   template_id: string | null;
@@ -483,6 +520,14 @@ const SUBTITLE_PROSODY_OPTIONS = [
   { value: "", label: "Subtitle-aware pacing" },
   { value: "auto", label: "Force subtitle-aware pacing" },
   { value: "off", label: "Disable subtitle-aware pacing" },
+] as const;
+
+const VOICE_BACKEND_GOAL_OPTIONS = [
+  { value: "balanced", label: "Balanced production" },
+  { value: "identity", label: "Best identity" },
+  { value: "expressive", label: "Best expressivity" },
+  { value: "timing", label: "Strict timing fit" },
+  { value: "speed", label: "Fastest local turnaround" },
 ] as const;
 
 function formatTc(ms: number): string {
@@ -782,6 +827,18 @@ export function SubtitleEditorPage({ itemId }: { itemId: string }) {
     speech_focus: true,
     loudness_normalize: true,
   });
+  const [voiceBackendCatalog, setVoiceBackendCatalog] = useState<VoiceBackendCatalog | null>(null);
+  const [voiceBackendRecommendation, setVoiceBackendRecommendation] =
+    useState<VoiceBackendRecommendation | null>(null);
+  const [voiceBackendGoal, setVoiceBackendGoal] = useState<
+    "balanced" | "identity" | "expressive" | "timing" | "speed"
+  >(() => {
+    const raw = safeLocalStorageGet("voxvulgi.v1.editor.voice_backend_goal");
+    if (raw === "identity" || raw === "expressive" || raw === "timing" || raw === "speed") {
+      return raw;
+    }
+    return "balanced";
+  });
   const [libraryItems, setLibraryItems] = useState<LibraryItem[]>([]);
   const [libraryItemsBusy, setLibraryItemsBusy] = useState(false);
   const [batchSelectedItemIds, setBatchSelectedItemIds] = useState<string[]>([itemId]);
@@ -941,6 +998,10 @@ export function SubtitleEditorPage({ itemId }: { itemId: string }) {
     safeLocalStorageSet("voxvulgi.v1.editor.export_dub_container", exportDubContainer);
   }, [exportDubContainer]);
 
+  useEffect(() => {
+    safeLocalStorageSet("voxvulgi.v1.editor.voice_backend_goal", voiceBackendGoal);
+  }, [voiceBackendGoal]);
+
   const refreshTracks = useCallback(async () => {
     const next = await invoke<SubtitleTrackRow[]>("subtitles_list_tracks", {
       itemId,
@@ -1046,6 +1107,35 @@ export function SubtitleEditorPage({ itemId }: { itemId: string }) {
     }
   }, [itemId]);
 
+  const refreshVoiceBackendStrategy = useCallback(async () => {
+    try {
+      const trackLang =
+        trimOrNull(doc?.lang) ??
+        trimOrNull(tracks.find((value) => value.id === trackId)?.lang) ??
+        (asrLang === "auto" ? null : asrLang);
+      const referenceCount = speakerSettings.reduce(
+        (max, setting) => Math.max(max, speakerProfilePaths(setting).length),
+        0,
+      );
+      const [nextCatalog, nextRecommendation] = await Promise.all([
+        invoke<VoiceBackendCatalog>("voice_backends_catalog"),
+        invoke<VoiceBackendRecommendation>("voice_backends_recommend", {
+          request: {
+            source_lang: trackLang,
+            target_lang: "en",
+            reference_count: referenceCount,
+            goal: voiceBackendGoal,
+          },
+        }),
+      ]);
+      setVoiceBackendCatalog(nextCatalog);
+      setVoiceBackendRecommendation(nextRecommendation);
+      return { nextCatalog, nextRecommendation };
+    } catch {
+      return null;
+    }
+  }, [asrLang, doc?.lang, itemId, speakerSettings, trackId, tracks, voiceBackendGoal]);
+
   const refreshItemJobs = useCallback(async () => {
     try {
       const rows = await invoke<JobRow[]>("jobs_list_for_item", { itemId, limit: 1000, offset: 0 });
@@ -1082,6 +1172,7 @@ export function SubtitleEditorPage({ itemId }: { itemId: string }) {
       refreshVoiceLibraryProfiles(),
       refreshMemorySuggestions(),
       refreshCharacterSuggestions(),
+      refreshVoiceBackendStrategy(),
       refreshLibraryItems(),
       refreshOutputs(),
       refreshArtifacts(),
@@ -1107,6 +1198,7 @@ export function SubtitleEditorPage({ itemId }: { itemId: string }) {
     refreshVoiceLibraryProfiles,
     refreshMemorySuggestions,
     refreshCharacterSuggestions,
+    refreshVoiceBackendStrategy,
     refreshLibraryItems,
     refreshOutputs,
     refreshArtifacts,
@@ -1117,6 +1209,10 @@ export function SubtitleEditorPage({ itemId }: { itemId: string }) {
   useEffect(() => {
     setSelectedSegments(new Set());
   }, [trackId]);
+
+  useEffect(() => {
+    refreshVoiceBackendStrategy().catch(() => undefined);
+  }, [refreshVoiceBackendStrategy]);
 
   const trackOptions = useMemo(() => {
     return tracks.map((t) => ({
@@ -5602,6 +5698,124 @@ export function SubtitleEditorPage({ itemId }: { itemId: string }) {
                   );
                 })}
               </div>
+            </div>
+
+            <div style={{ marginTop: 16 }}>
+              <div className="row" style={{ alignItems: "center", gap: 10, flexWrap: "wrap" }}>
+                <div style={{ fontSize: 12, opacity: 0.85 }}>Voice backend strategy</div>
+                <select
+                  value={voiceBackendGoal}
+                  disabled={busy}
+                  onChange={(e) =>
+                    setVoiceBackendGoal(
+                      (e.currentTarget.value as
+                        | "balanced"
+                        | "identity"
+                        | "expressive"
+                        | "timing"
+                        | "speed") ?? "balanced",
+                    )
+                  }
+                >
+                  {VOICE_BACKEND_GOAL_OPTIONS.map((option) => (
+                    <option key={option.value} value={option.value}>
+                      {option.label}
+                    </option>
+                  ))}
+                </select>
+                <button
+                  type="button"
+                  disabled={busy}
+                  onClick={() => {
+                    refreshVoiceBackendStrategy().catch(() => undefined);
+                  }}
+                >
+                  Refresh strategy
+                </button>
+              </div>
+              <div style={{ marginTop: 8, fontSize: 12, opacity: 0.7 }}>
+                Managed default remains OpenVoice until benchmark evidence supports a change.
+              </div>
+              {voiceBackendRecommendation ? (
+                <div
+                  style={{
+                    marginTop: 10,
+                    border: "1px solid #e5e7eb",
+                    borderRadius: 8,
+                    padding: 10,
+                    display: "flex",
+                    flexDirection: "column",
+                    gap: 8,
+                  }}
+                >
+                  <div className="kv">
+                    <div className="k">Recommended backend</div>
+                    <div className="v">{voiceBackendRecommendation.preferred_backend_id}</div>
+                  </div>
+                  {voiceBackendRecommendation.fallback_backend_id ? (
+                    <div className="kv">
+                      <div className="k">Fallback</div>
+                      <div className="v">{voiceBackendRecommendation.fallback_backend_id}</div>
+                    </div>
+                  ) : null}
+                  <div className="kv">
+                    <div className="k">Context</div>
+                    <div className="v">
+                      {voiceBackendRecommendation.source_lang} -&gt;{" "}
+                      {voiceBackendRecommendation.target_lang};{" "}
+                      {voiceBackendRecommendation.performance_tier};{" "}
+                      {voiceBackendRecommendation.reference_count} ref(s)
+                    </div>
+                  </div>
+                  <div style={{ fontSize: 12, opacity: 0.75 }}>
+                    {voiceBackendRecommendation.rationale.join(" ")}
+                  </div>
+                  {voiceBackendRecommendation.warnings.length ? (
+                    <div style={{ fontSize: 12, opacity: 0.75 }}>
+                      Warnings: {voiceBackendRecommendation.warnings.join(" | ")}
+                    </div>
+                  ) : null}
+                  <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
+                    {(voiceBackendCatalog?.backends ?? [])
+                      .filter(
+                        (backend) =>
+                          backend.id === voiceBackendRecommendation.preferred_backend_id ||
+                          backend.id === voiceBackendRecommendation.fallback_backend_id ||
+                          backend.managed_default,
+                      )
+                      .slice(0, 3)
+                      .map((backend) => (
+                        <div
+                          key={`voice-backend-${backend.id}`}
+                          style={{
+                            border: "1px solid #e5e7eb",
+                            borderRadius: 8,
+                            padding: 8,
+                            display: "flex",
+                            flexDirection: "column",
+                            gap: 4,
+                          }}
+                        >
+                          <div className="row" style={{ justifyContent: "space-between", gap: 8 }}>
+                            <div style={{ fontWeight: 600 }}>
+                              {backend.display_name}
+                              {backend.managed_default ? " (managed default)" : ""}
+                            </div>
+                            <code>{backend.status}</code>
+                          </div>
+                          <div style={{ fontSize: 12, opacity: 0.75 }}>{backend.status_detail}</div>
+                          <div style={{ fontSize: 12, opacity: 0.75 }}>
+                            {backend.family} / {backend.install_mode}; GPU recommended:{" "}
+                            {backend.gpu_recommended ? "yes" : "no"}
+                          </div>
+                          <div style={{ fontSize: 12, opacity: 0.75 }}>
+                            Strengths: {backend.strengths.join(" | ")}
+                          </div>
+                        </div>
+                      ))}
+                  </div>
+                </div>
+              ) : null}
             </div>
 
             <div style={{ marginTop: 16 }}>
