@@ -3,7 +3,7 @@
 ## Metadata
 - ID: WP-0120
 - Owner: Codex
-- Status: BACKLOG
+- Status: DONE
 - Created: 2026-03-08
 - Target milestone: Repo audit tranche
 
@@ -40,3 +40,4 @@ Out of scope:
 ## Status updates
 
 - 2026-03-08: Created as stage 3 of the multi-stage repo audit tranche.
+- 2026-03-08: Completed persistence, data safety, and artifact lifecycle audit. Proof captured under `product/desktop/Build Target/tool_artifacts/wp_runs/WP-0120/20260308_163100/`.

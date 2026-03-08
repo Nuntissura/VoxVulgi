@@ -80,7 +80,7 @@ Date: 2026-03-08
 
 - WP-0118: Governance, spec, and traceability audit. DONE.
 - WP-0119: Static code hygiene and architecture audit. DONE.
-- WP-0120: Persistence, data safety, and artifact lifecycle audit.
+- WP-0120: Persistence, data safety, and artifact lifecycle audit. DONE.
 - WP-0121: Contention-tolerant performance and responsiveness audit focused on graceful degradation under heavy external CPU load.
 - WP-0122: Test coverage, proof, and dependency audit.
 - WP-0123: Technical debt ledger and remediation program.
