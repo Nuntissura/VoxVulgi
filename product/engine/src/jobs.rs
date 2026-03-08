@@ -10813,7 +10813,7 @@ fn prepare_tts_text(text: &str, settings: &SpeakerRenderSettings) -> String {
     out
 }
 
-fn analyze_audio_for_qc(
+pub(crate) fn analyze_audio_for_qc(
     paths: &AppPaths,
     input_path: &Path,
     temp_dir: &Path,
@@ -10825,7 +10825,7 @@ fn analyze_audio_for_qc(
     analyze_wav_stats(&temp_path)
 }
 
-fn analyze_wav_stats(path: &Path) -> Result<VoiceAudioStats> {
+pub(crate) fn analyze_wav_stats(path: &Path) -> Result<VoiceAudioStats> {
     let mut reader = hound::WavReader::open(path).map_err(|e| {
         EngineError::InstallFailed(format!(
             "open wav for QC failed ({}): {e}",
@@ -11115,7 +11115,7 @@ pub(crate) fn collect_voice_qc(
     Ok((report, issues))
 }
 
-fn voice_qc_messages(
+pub(crate) fn voice_qc_messages(
     stats: &VoiceAudioStats,
     is_reference: bool,
     reference_pitch_hz: Option<f32>,

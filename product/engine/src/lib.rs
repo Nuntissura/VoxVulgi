@@ -23,6 +23,7 @@ pub mod voice_benchmarks;
 pub mod voice_cast_packs;
 pub mod voice_cleanup;
 pub mod voice_library;
+pub mod voice_reference_curation;
 pub mod voice_templates;
 
 pub use error::{EngineError, Result};

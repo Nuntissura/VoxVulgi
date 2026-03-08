@@ -11,7 +11,7 @@ use voxvulgi_engine::paths::AppPaths;
 use voxvulgi_engine::{
     config, db, diagnostics, instagram_subscriptions, jobs, library, speakers, subscriptions,
     subtitle_tracks, subtitles, tools, voice_backend_adapters, voice_backends, voice_benchmarks,
-    voice_cast_packs, voice_cleanup, voice_library, voice_templates,
+    voice_cast_packs, voice_cleanup, voice_library, voice_reference_curation, voice_templates,
 };
 
 #[derive(Debug, Clone, serde::Deserialize)]
@@ -1549,6 +1549,31 @@ fn item_artifacts_list_v1(
         }
     }
 
+    let curation_dir = item_dir.join("voice_reference_curation");
+    if curation_dir.exists() {
+        if let Ok(entries) = std::fs::read_dir(&curation_dir) {
+            for entry in entries.flatten() {
+                let path = entry.path();
+                if !path.is_file() {
+                    continue;
+                }
+                let Some(name) = path.file_name().and_then(|value| value.to_str()) else {
+                    continue;
+                };
+                let lower = name.to_ascii_lowercase();
+                if !(lower.ends_with(".json") || lower.ends_with(".md")) {
+                    continue;
+                }
+                push(
+                    &format!("reference_curation_{}", name.replace('.', "_")),
+                    &format!("Reference curation ({name})"),
+                    "Reference curation",
+                    path,
+                );
+            }
+        }
+    }
+
     out.sort_by(|a, b| {
         a.group
             .cmp(&b.group)
@@ -2381,6 +2406,101 @@ async fn voice_benchmark_load(
             &item_id,
             &track_id,
             goal.as_deref(),
+        )
+        .map_err(|e| e.to_string())
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
+#[tauri::command]
+#[allow(non_snake_case)]
+async fn voice_reference_curation_generate(
+    state: State<'_, AppState>,
+    item_id: Option<String>,
+    itemId: Option<String>,
+    speaker_key: Option<String>,
+    speakerKey: Option<String>,
+) -> Result<voice_reference_curation::VoiceReferenceCurationReport, String> {
+    let paths = state.paths.clone();
+    let item_id = item_id
+        .or(itemId)
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty())
+        .ok_or_else(|| "missing required key itemId".to_string())?;
+    let speaker_key = speaker_key
+        .or(speakerKey)
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty())
+        .ok_or_else(|| "missing required key speakerKey".to_string())?;
+    tauri::async_runtime::spawn_blocking(move || {
+        voice_reference_curation::generate_reference_curation_report(
+            &paths,
+            &item_id,
+            &speaker_key,
+        )
+        .map_err(|e| e.to_string())
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
+#[tauri::command]
+#[allow(non_snake_case)]
+async fn voice_reference_curation_load(
+    state: State<'_, AppState>,
+    item_id: Option<String>,
+    itemId: Option<String>,
+    speaker_key: Option<String>,
+    speakerKey: Option<String>,
+) -> Result<Option<voice_reference_curation::VoiceReferenceCurationReport>, String> {
+    let paths = state.paths.clone();
+    let item_id = item_id
+        .or(itemId)
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty())
+        .ok_or_else(|| "missing required key itemId".to_string())?;
+    let speaker_key = speaker_key
+        .or(speakerKey)
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty())
+        .ok_or_else(|| "missing required key speakerKey".to_string())?;
+    tauri::async_runtime::spawn_blocking(move || {
+        voice_reference_curation::load_reference_curation_report(&paths, &item_id, &speaker_key)
+            .map_err(|e| e.to_string())
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
+#[tauri::command]
+#[allow(non_snake_case)]
+async fn voice_reference_curation_apply(
+    state: State<'_, AppState>,
+    item_id: Option<String>,
+    itemId: Option<String>,
+    speaker_key: Option<String>,
+    speakerKey: Option<String>,
+    mode: Option<String>,
+) -> Result<speakers::ItemSpeakerSetting, String> {
+    let paths = state.paths.clone();
+    let item_id = item_id
+        .or(itemId)
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty())
+        .ok_or_else(|| "missing required key itemId".to_string())?;
+    let speaker_key = speaker_key
+        .or(speakerKey)
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty())
+        .ok_or_else(|| "missing required key speakerKey".to_string())?;
+    let mode = mode.unwrap_or_else(|| "ranked".to_string());
+    tauri::async_runtime::spawn_blocking(move || {
+        voice_reference_curation::apply_reference_curation(
+            &paths,
+            &item_id,
+            &speaker_key,
+            &mode,
         )
         .map_err(|e| e.to_string())
     })
@@ -3904,6 +4024,9 @@ pub fn run() {
             voice_backends_recommend,
             voice_benchmark_generate,
             voice_benchmark_load,
+            voice_reference_curation_generate,
+            voice_reference_curation_load,
+            voice_reference_curation_apply,
             voice_backend_adapters_list,
             voice_backend_adapter_upsert,
             voice_backend_adapter_delete,

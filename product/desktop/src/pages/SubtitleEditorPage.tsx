@@ -517,6 +517,56 @@ type VoiceBenchmarkReport = {
   candidates: VoiceBenchmarkCandidate[];
 };
 
+type VoiceReferenceCurationScoreTerm = {
+  key: string;
+  label: string;
+  weight: number;
+  value: number;
+  points: number;
+};
+
+type VoiceReferenceCurationStats = {
+  duration_ms: number;
+  sample_rate: number;
+  peak_abs: number;
+  rms: number;
+  clipped_ratio: number;
+  silence_ratio: number;
+  zero_cross_ratio: number;
+  pitch_hz: number | null;
+};
+
+type VoiceReferenceCurationEntry = {
+  rank: number;
+  path: string;
+  label: string;
+  score: number;
+  warn_count: number;
+  fail_count: number;
+  recommended_primary: boolean;
+  recommended_compact: boolean;
+  stats: VoiceReferenceCurationStats;
+  warnings: string[];
+  strengths: string[];
+  concerns: string[];
+  score_breakdown: VoiceReferenceCurationScoreTerm[];
+};
+
+type VoiceReferenceCurationReport = {
+  schema_version: number;
+  generated_at_ms: number;
+  item_id: string;
+  speaker_key: string;
+  reference_count: number;
+  recommended_primary_path: string | null;
+  recommended_ranked_paths: string[];
+  recommended_compact_paths: string[];
+  summary: string[];
+  json_path: string;
+  markdown_path: string;
+  references: VoiceReferenceCurationEntry[];
+};
+
 type LocalizationBatchRequest = {
   item_ids: string[];
   template_id: string | null;
@@ -882,6 +932,11 @@ export function SubtitleEditorPage({ itemId }: { itemId: string }) {
     useState<VoiceBackendRecommendation | null>(null);
   const [voiceBenchmarkReport, setVoiceBenchmarkReport] = useState<VoiceBenchmarkReport | null>(null);
   const [voiceBenchmarkBusy, setVoiceBenchmarkBusy] = useState(false);
+  const [voiceReferenceCurationReports, setVoiceReferenceCurationReports] = useState<
+    Record<string, VoiceReferenceCurationReport | null>
+  >({});
+  const [voiceReferenceCurationBusyKey, setVoiceReferenceCurationBusyKey] =
+    useState<string | null>(null);
   const [voiceBackendGoal, setVoiceBackendGoal] = useState<
     "balanced" | "identity" | "expressive" | "timing" | "speed"
   >(() => {
@@ -2851,6 +2906,76 @@ export function SubtitleEditorPage({ itemId }: { itemId: string }) {
     setNotice(`Applied cleaned reference for ${speakerKey} and kept existing refs.`);
   }
 
+  async function loadVoiceReferenceCuration(speakerKey: string) {
+    try {
+      const report = await invoke<VoiceReferenceCurationReport | null>(
+        "voice_reference_curation_load",
+        {
+          itemId,
+          speakerKey,
+        },
+      );
+      setVoiceReferenceCurationReports((prev) => ({ ...prev, [speakerKey]: report }));
+      return report;
+    } catch (e) {
+      setError(String(e));
+      return null;
+    }
+  }
+
+  async function generateVoiceReferenceCuration(speakerKey: string) {
+    setError(null);
+    setVoiceReferenceCurationBusyKey(speakerKey);
+    try {
+      const report = await invoke<VoiceReferenceCurationReport>(
+        "voice_reference_curation_generate",
+        {
+          itemId,
+          speakerKey,
+        },
+      );
+      setVoiceReferenceCurationReports((prev) => ({ ...prev, [speakerKey]: report }));
+      setNotice(`Generated reference curation report for ${speakerKey}.`);
+      refreshArtifacts().catch(() => undefined);
+      return report;
+    } catch (e) {
+      setError(String(e));
+      return null;
+    } finally {
+      setVoiceReferenceCurationBusyKey(null);
+    }
+  }
+
+  async function applyVoiceReferenceCuration(
+    speakerKey: string,
+    mode: "ranked" | "compact",
+  ) {
+    setError(null);
+    setVoiceReferenceCurationBusyKey(speakerKey);
+    try {
+      await invoke<ItemSpeakerSetting>("voice_reference_curation_apply", {
+        itemId,
+        speakerKey,
+        mode,
+      });
+      await refreshSpeakerSettings();
+      const report = await loadVoiceReferenceCuration(speakerKey);
+      const bundleCount =
+        mode === "compact"
+          ? report?.recommended_compact_paths.length ?? 0
+          : report?.recommended_ranked_paths.length ?? 0;
+      setNotice(
+        mode === "compact"
+          ? `Applied curated compact bundle (${bundleCount} ref${bundleCount === 1 ? "" : "s"}) for ${speakerKey}.`
+          : `Applied curated ranked order for ${speakerKey}.`,
+      );
+    } catch (e) {
+      setError(String(e));
+    } finally {
+      setVoiceReferenceCurationBusyKey(null);
+    }
+  }
+
   async function createVoiceLibraryFromSpeaker(kind: "memory" | "character", speakerKey: string) {
     const name = (kind === "memory" ? memoryProfileName : characterProfileName).trim();
     if (!name) {
@@ -4788,7 +4913,7 @@ export function SubtitleEditorPage({ itemId }: { itemId: string }) {
                         <button
                           type="button"
                           disabled={speakerSettingsBusy || !profilePaths.length}
-                          onClick={() => {
+                      onClick={() => {
                             clearSpeakerVoiceProfiles(speakerKey).catch(() => undefined);
                           }}
                         >
@@ -4811,6 +4936,42 @@ export function SubtitleEditorPage({ itemId }: { itemId: string }) {
                           }}
                         >
                           Use cleaned ref
+                        </button>
+                        <button
+                          type="button"
+                          disabled={voiceReferenceCurationBusyKey === speakerKey || !profilePaths.length}
+                          onClick={() => {
+                            generateVoiceReferenceCuration(speakerKey).catch(() => undefined);
+                          }}
+                        >
+                          Curate refs
+                        </button>
+                        <button
+                          type="button"
+                          disabled={voiceReferenceCurationBusyKey === speakerKey || !profilePaths.length}
+                          onClick={() => {
+                            loadVoiceReferenceCuration(speakerKey).catch(() => undefined);
+                          }}
+                        >
+                          Reload curation
+                        </button>
+                        <button
+                          type="button"
+                          disabled={voiceReferenceCurationBusyKey === speakerKey || !profilePaths.length}
+                          onClick={() => {
+                            applyVoiceReferenceCuration(speakerKey, "ranked").catch(() => undefined);
+                          }}
+                        >
+                          Apply ranked
+                        </button>
+                        <button
+                          type="button"
+                          disabled={voiceReferenceCurationBusyKey === speakerKey || !profilePaths.length}
+                          onClick={() => {
+                            applyVoiceReferenceCuration(speakerKey, "compact").catch(() => undefined);
+                          }}
+                        >
+                          Apply compact
                         </button>
                         <button
                           type="button"
@@ -4839,6 +5000,100 @@ export function SubtitleEditorPage({ itemId }: { itemId: string }) {
                           <div style={{ fontSize: 12, opacity: 0.75 }}>
                             Latest cleanup:{" "}
                             {fileNameFromPath(speakerCleanupRecords[speakerKey]?.[0]?.cleaned_path ?? "")}
+                          </div>
+                        ) : null}
+                        {voiceReferenceCurationReports[speakerKey] ? (
+                          <div
+                            style={{
+                              border: "1px solid #e5e7eb",
+                              borderRadius: 8,
+                              padding: 8,
+                              display: "flex",
+                              flexDirection: "column",
+                              gap: 6,
+                            }}
+                          >
+                            <div className="row" style={{ alignItems: "center", gap: 8, flexWrap: "wrap" }}>
+                              <div style={{ fontSize: 12, opacity: 0.85 }}>Reference curation</div>
+                              <button
+                                type="button"
+                                disabled={busy || !voiceReferenceCurationReports[speakerKey]?.markdown_path}
+                                onClick={() =>
+                                  openPathBestEffort(
+                                    voiceReferenceCurationReports[speakerKey]?.markdown_path ?? "",
+                                  ).catch(() => undefined)
+                                }
+                              >
+                                Open markdown
+                              </button>
+                              <button
+                                type="button"
+                                disabled={busy || !voiceReferenceCurationReports[speakerKey]?.json_path}
+                                onClick={() =>
+                                  revealPath(
+                                    voiceReferenceCurationReports[speakerKey]?.json_path ?? "",
+                                  ).catch((e) => setError(String(e)))
+                                }
+                              >
+                                Reveal report
+                              </button>
+                            </div>
+                            {voiceReferenceCurationReports[speakerKey]?.summary.length ? (
+                              <div style={{ fontSize: 12, opacity: 0.75 }}>
+                                {voiceReferenceCurationReports[speakerKey]?.summary.join(" ")}
+                              </div>
+                            ) : null}
+                            <div style={{ fontSize: 12, opacity: 0.75 }}>
+                              Primary:{" "}
+                              <code>
+                                {fileNameFromPath(
+                                  voiceReferenceCurationReports[speakerKey]?.recommended_primary_path ??
+                                    "",
+                                ) || "-"}
+                              </code>
+                              {" | "}
+                              Compact:{" "}
+                              {(voiceReferenceCurationReports[speakerKey]?.recommended_compact_paths ?? [])
+                                .map((path) => fileNameFromPath(path))
+                                .join(" | ") || "-"}
+                            </div>
+                            <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
+                              {(voiceReferenceCurationReports[speakerKey]?.references ?? [])
+                                .slice(0, 3)
+                                .map((entry) => (
+                                  <div
+                                    key={`${speakerKey}-${entry.path}`}
+                                    style={{
+                                      border: "1px solid #e5e7eb",
+                                      borderRadius: 8,
+                                      padding: 8,
+                                      display: "flex",
+                                      flexDirection: "column",
+                                      gap: 4,
+                                    }}
+                                  >
+                                    <div className="row" style={{ justifyContent: "space-between", gap: 8 }}>
+                                      <div style={{ fontWeight: 600 }}>
+                                        #{entry.rank} {entry.label}
+                                      </div>
+                                      <code>{entry.score.toFixed(1)}</code>
+                                    </div>
+                                    <div style={{ fontSize: 12, opacity: 0.75 }}>
+                                      {`dur ${Math.round(entry.stats.duration_ms)} ms | silence ${Math.round(entry.stats.silence_ratio * 100)}% | clipping ${(entry.stats.clipped_ratio * 100).toFixed(2)}% | warnings ${entry.warn_count} | fails ${entry.fail_count}`}
+                                    </div>
+                                    {entry.strengths.length ? (
+                                      <div style={{ fontSize: 12, opacity: 0.75 }}>
+                                        Strengths: {entry.strengths.join(" | ")}
+                                      </div>
+                                    ) : null}
+                                    {entry.concerns.length ? (
+                                      <div style={{ fontSize: 12, opacity: 0.75 }}>
+                                        Concerns: {entry.concerns.join(" | ")}
+                                      </div>
+                                    ) : null}
+                                  </div>
+                                ))}
+                            </div>
                           </div>
                         ) : null}
                         <div className="row" style={{ alignItems: "center", gap: 10, flexWrap: "wrap" }}>
