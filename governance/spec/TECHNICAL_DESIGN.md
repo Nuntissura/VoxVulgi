@@ -159,6 +159,10 @@ Requirements:
 - Inspectable: each job has logs and artifacts.
 - Recovery: support a **Safe Mode** startup path that disables auto-refresh and heavy background work so users can always export/manage their data.
 - Shared window data should be retained and reused where safe so pane switches do not refetch or recompute unchanged state.
+- Contention-tolerant runtime behavior is a design requirement:
+  - heavy external CPU load from other apps/models is expected on operator machines,
+  - UI-thread work must stay minimal even when local workers or third-party tools are saturated,
+  - long scans, indexing, diagnostics reads, and archive operations should prefer bounded, resumable, and observable execution over large eager passes.
 
 Implementation sketch:
 

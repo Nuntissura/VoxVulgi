@@ -315,6 +315,8 @@ Current implementation status:
 - Startup UX: show visible loading progress instead of opaque background work.
 - Window switching: no multi-second freezes during normal navigation.
 - Diagnostics entry: render shell immediately and load sections incrementally with explicit readiness states.
+- Heavy external CPU load: the app should degrade gracefully when other software is consuming CPU; long-running work must stay bounded, queued, resumable, and visibly in-progress rather than freezing the shell.
+- Contention tolerance: avoid synchronous recompute/refetch/remount loops on pane changes, and keep operator-facing actions responsive even when background jobs or third-party tools are busy.
 
 ### 8.1.4 Reliability requirement: shared storage roots
 

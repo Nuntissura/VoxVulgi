@@ -76,6 +76,15 @@ Date: 2026-03-08
 - WP-0116: Backend-specific starter recipes/templates for CosyVoice, Seed-VC, XTTS-style adapters, and similar local BYO stacks. DONE.
 - WP-0117: Promote benchmark winners directly into reusable voice-template and cast-pack defaults so later items inherit proven backend choices. DONE.
 
+## Repo Audit and Technical Debt Program (2026-03)
+
+- WP-0118: Governance, spec, and traceability audit.
+- WP-0119: Static code hygiene and architecture audit.
+- WP-0120: Persistence, data safety, and artifact lifecycle audit.
+- WP-0121: Contention-tolerant performance and responsiveness audit focused on graceful degradation under heavy external CPU load.
+- WP-0122: Test coverage, proof, and dependency audit.
+- WP-0123: Technical debt ledger and remediation program.
+
 ## Phase 0 — Decisions (1–2 days)
 
 - Pick stack: Tauri/Rust + Python workers (recommended) vs Qt vs Electron.
