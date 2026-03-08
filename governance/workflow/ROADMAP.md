@@ -82,7 +82,7 @@ Date: 2026-03-08
 - WP-0119: Static code hygiene and architecture audit. DONE.
 - WP-0120: Persistence, data safety, and artifact lifecycle audit. DONE.
 - WP-0121: Contention-tolerant performance and responsiveness audit focused on graceful degradation under heavy external CPU load. DONE.
-- WP-0122: Test coverage, proof, and dependency audit.
+- WP-0122: Test coverage, proof, and dependency audit. DONE.
 - WP-0123: Technical debt ledger and remediation program.
 
 ## Phase 0 — Decisions (1–2 days)
