@@ -69,6 +69,13 @@ Date: 2026-03-08
 - WP-0112: Add item-scoped voice plans and explicit promotion of recommendation/benchmark outcomes into those plans. DONE.
 - WP-0113: Extend BYO adapters into experimental render runs that emit standard manifests/reports for benchmarking and downstream mix/mux flows. DONE.
 
+## Voice Backend Operations and Reuse (2026-03)
+
+- WP-0114: Batch experimental backend runs across one bounded item set using shared batch IDs and backend-aware queue summaries.
+- WP-0115: Benchmark leaderboard export and compare history with durable snapshot artifacts.
+- WP-0116: Backend-specific starter recipes/templates for CosyVoice, Seed-VC, XTTS-style adapters, and similar local BYO stacks.
+- WP-0117: Promote benchmark winners directly into reusable voice-template and cast-pack defaults so later items inherit proven backend choices.
+
 ## Phase 0 — Decisions (1–2 days)
 
 - Pick stack: Tauri/Rust + Python workers (recommended) vs Qt vs Electron.

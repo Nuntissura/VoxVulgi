@@ -294,7 +294,11 @@ Voice-preserving approach (core feature):
   - add a benchmark lab that evaluates existing voice artifacts and variants before backend promotion decisions,
   - add item-scoped voice plans so recommendation and benchmark outcomes become durable operator choices,
   - add ranked reference-bundle curation so multi-reference profiles are evidence-driven rather than ad hoc,
-  - add explicit experimental render runs so configured BYO backends can produce standard manifests for downstream VoxVulgi workflows.
+  - add explicit experimental render runs so configured BYO backends can produce standard manifests for downstream VoxVulgi workflows,
+  - add bounded batch experimental runs so backend experiments can be repeated over one operator-selected item set,
+  - add durable benchmark compare history plus leaderboard export artifacts,
+  - add backend-specific starter recipes so known OSS adapter families are bootstrapable without hand-authoring every command,
+  - add reusable template/cast-pack backend defaults so benchmark winners can be carried forward beyond one item.
 - Dubbing-control expansion remains operator-directed; the app should not add content-judgment or censorship workflows as part of these features.
 
 R&D plan: see `governance/spec/VOICE_PRESERVING_DUBBING_RD_PLAN.md`.
@@ -336,6 +340,10 @@ Voice benchmark lab design:
   - it reuses existing local voice QC analysis for reference/output health and combines that with subtitle timing-fit metrics,
   - it writes durable `voice_benchmark_v1_<track>_<goal>.json` and `.md` artifacts under `derived/items/<item>/voice_benchmark/`,
   - Localization Studio loads and displays the top benchmark candidates for the currently selected goal.
+- Next operational tranche:
+  - keep the stable latest-report path while also archiving immutable benchmark snapshots under a compare-history folder,
+  - expose list/load/export commands so the UI can compare earlier runs and export leaderboard views as JSON/Markdown/CSV,
+  - allow batch render flows to optionally emit or refresh benchmark artifacts over a bounded item set.
 
 Reference-curation design:
 
@@ -375,11 +383,15 @@ Experimental BYO adapter design:
   - adapter configs are stored in app config as local JSON, plus a cached probe-results file,
   - Diagnostics provides explicit save/probe/remove controls for known BYO backend templates,
   - the backend catalog reads cached probe state so Diagnostics and Localization Studio can distinguish `available_via_byo`, `byo_configured_unprobed`, `byo_ready`, and `byo_probe_failed`.
+- Current execution shape:
+  - adapter configs support an explicit render-command template with placeholder expansion for request/manifest/report/output paths,
+  - experimental runs execute as queued jobs, not as inline UI invocations,
+  - the run emits a standard manifest under `derived/items/<item>/tts_preview/<backend>/variants/<label>/manifest.json`,
+  - existing artifact discovery, benchmark, mix, mux, QC, and export flows treat these runs like first-class candidates instead of a separate side channel.
 - Next execution tranche:
-  - adapter configs should also support an explicit render-command template with placeholder expansion for request/manifest/report/output paths,
-  - experimental runs should execute as queued jobs, not as inline UI invocations,
-  - the run should emit a standard manifest under `derived/items/<item>/tts_preview/<backend>/variants/<label>/manifest.json`,
-  - existing artifact discovery, benchmark, mix, mux, QC, and export flows should treat these runs like first-class candidates instead of a separate side channel.
+  - add starter-recipe definitions per backend family with richer default probe/render command templates and bootstrap notes,
+  - add batch experimental queueing that reuses the bounded item-set selection pattern already used by batch dubbing,
+  - let reusable voice templates and cast packs store backend-default metadata that can seed later item plans.
 
 ## 5.6 Downloader (Phase 2)
 

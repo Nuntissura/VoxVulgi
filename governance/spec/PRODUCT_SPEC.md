@@ -183,14 +183,18 @@ Initial language focus: **Korean + Japanese → English**.
   - backend selection changes should be evidence-driven through durable report artifacts instead of implicit replacement of the shipped default,
   - benchmark and recommendation outcomes should be promotable into an explicit item-scoped voice plan instead of living only as transient UI state,
   - operators should be able to run configured experimental BYO backends into standard VoxVulgi manifests for real side-by-side comparison,
-  - reference bundles should be rankable and promotable so the app helps choose the best subset/order of multi-reference clips.
+  - reference bundles should be rankable and promotable so the app helps choose the best subset/order of multi-reference clips,
+  - experimental backend runs should also support bounded item-set batches so one backend family can be evaluated across a representative series sample,
+  - benchmark reports should keep durable compare history and exportable leaderboard snapshots instead of only the latest in-place report,
+  - Diagnostics should provide backend-specific starter recipes for known OSS stacks rather than only blank BYO adapter forms,
+  - benchmark winners should be promotable into reusable template and cast-pack defaults, not only the current item voice plan.
 
 Current implementation status:
 
 - Localization Studio surfaces batch dubbing, A/B speaker previews, export stems/alternates visibility, voice memory, character libraries, and reference cleanup controls.
 - Localization Studio now also generates goal-aware voice benchmark reports, stores them as durable JSON/Markdown artifacts, and surfaces the top-ranked candidates with explainable metric breakdowns.
 - Diagnostics now exposes a local-only BYO backend registry where operators can save, probe, and remove experimental backend adapters without bundling or auto-installing those stacks.
-- The next implementation tranche should turn these advisory surfaces into execution workflow by adding item voice plans, reference-bundle curation, and experimental backend render runs.
+- The next implementation tranche should operationalize comparison/reuse further by adding batch experimental backend runs, durable benchmark compare history/exports, richer backend starter recipes, and promotion of benchmark winners into reusable template/cast-pack defaults.
 - Export packs include speech stems and alternate dubbed variants when available.
 - Artifact-browser actions must remain variant-aware:
   - rerun, status, and log links for A/B/alternate artifacts must target the matching variant/track/container instead of falling back to the base artifact state,
@@ -220,7 +224,11 @@ Current implementation status:
   - benchmark-driven promotion of future managed backends,
   - item-scoped backend plans that persist operator decisions,
   - ranked reference-bundle curation and promotion,
-  - experimental backend execution against real subtitle tracks via explicit local adapters.
+  - experimental backend execution against real subtitle tracks via explicit local adapters,
+  - multi-item experimental render matrices for representative episode sets,
+  - durable benchmark history and leaderboard export artifacts,
+  - backend-specific starter-recipe workflows for known OSS adapter families,
+  - reusable template/cast-pack backend defaults informed by benchmark promotion.
 
 ## 7) UX Principles
 
