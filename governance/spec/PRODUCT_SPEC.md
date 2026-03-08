@@ -194,7 +194,8 @@ Current implementation status:
 - Localization Studio surfaces batch dubbing, A/B speaker previews, export stems/alternates visibility, voice memory, character libraries, and reference cleanup controls.
 - Localization Studio now also generates goal-aware voice benchmark reports, stores them as durable JSON/Markdown artifacts, and surfaces the top-ranked candidates with explainable metric breakdowns.
 - Diagnostics now exposes a local-only BYO backend registry where operators can save, probe, and remove experimental backend adapters without bundling or auto-installing those stacks.
-- The next implementation tranche should operationalize comparison/reuse further by adding batch experimental backend runs, durable benchmark compare history/exports, richer backend starter recipes, and promotion of benchmark winners into reusable template/cast-pack defaults.
+- Current implementation now also includes bounded batch experimental backend runs across one selected item set.
+- The remaining next implementation tranche should add durable benchmark compare history/exports, richer backend starter recipes, and promotion of benchmark winners into reusable template/cast-pack defaults.
 - Export packs include speech stems and alternate dubbed variants when available.
 - Artifact-browser actions must remain variant-aware:
   - rerun, status, and log links for A/B/alternate artifacts must target the matching variant/track/container instead of falling back to the base artifact state,

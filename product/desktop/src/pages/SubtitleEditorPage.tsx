@@ -700,6 +700,32 @@ type LocalizationBatchQueueSummary = {
   items: LocalizationBatchItemResult[];
 };
 
+type ExperimentalBackendBatchRequest = {
+  item_ids: string[];
+  backend_ids: string[];
+  variant_label: string | null;
+  auto_pipeline: boolean;
+  separation_backend: string | null;
+  queue_export_pack: boolean;
+  queue_qc: boolean;
+};
+
+type ExperimentalBackendBatchItemResult = {
+  item_id: string;
+  title: string;
+  track_id: string | null;
+  queued_jobs: JobRow[];
+  warnings: string[];
+};
+
+type ExperimentalBackendBatchQueueSummary = {
+  batch_id: string;
+  backend_ids: string[];
+  queued_jobs_total: number;
+  warnings: string[];
+  items: ExperimentalBackendBatchItemResult[];
+};
+
 const STYLE_PRESET_OPTIONS = [
   { value: "", label: "Default style" },
   { value: "neutral", label: "Neutral" },
@@ -1054,6 +1080,10 @@ export function SubtitleEditorPage({ itemId }: { itemId: string }) {
   const [experimentalRenderJobProgress, setExperimentalRenderJobProgress] = useState<number | null>(
     null,
   );
+  const [experimentalBatchBackendIds, setExperimentalBatchBackendIds] = useState<string[]>([]);
+  const [experimentalBatchBusy, setExperimentalBatchBusy] = useState(false);
+  const [experimentalBatchSummary, setExperimentalBatchSummary] =
+    useState<ExperimentalBackendBatchQueueSummary | null>(null);
   const [voiceBenchmarkReport, setVoiceBenchmarkReport] = useState<VoiceBenchmarkReport | null>(null);
   const [voiceBenchmarkBusy, setVoiceBenchmarkBusy] = useState(false);
   const [voiceReferenceCurationReports, setVoiceReferenceCurationReports] = useState<
@@ -1687,6 +1717,22 @@ export function SubtitleEditorPage({ itemId }: { itemId: string }) {
     voiceBackendAdapters,
     voiceBackendRecommendation?.preferred_backend_id,
   ]);
+
+  useEffect(() => {
+    setExperimentalBatchBackendIds((prev) => {
+      const valid = prev.filter((backendId) =>
+        experimentalReadyAdapters.some((detail) => detail.template.backend_id === backendId),
+      );
+      if (valid.length) return valid;
+      if (
+        experimentalBackendId &&
+        experimentalReadyAdapters.some((detail) => detail.template.backend_id === experimentalBackendId)
+      ) {
+        return [experimentalBackendId];
+      }
+      return experimentalReadyAdapters.slice(0, 1).map((detail) => detail.template.backend_id);
+    });
+  }, [experimentalBackendId, experimentalReadyAdapters]);
 
   useEffect(() => {
     setExperimentalVariantLabel((prev) => {
@@ -3507,6 +3553,60 @@ export function SubtitleEditorPage({ itemId }: { itemId: string }) {
       setError(String(e));
     } finally {
       setBatchQueueBusy(false);
+    }
+  }
+
+  function toggleExperimentalBatchBackend(backendId: string, checked: boolean) {
+    setExperimentalBatchBackendIds((prev) => {
+      const set = new Set(prev);
+      if (checked) {
+        set.add(backendId);
+      } else {
+        set.delete(backendId);
+      }
+      return Array.from(set);
+    });
+  }
+
+  async function queueExperimentalBackendBatch() {
+    const itemIds = Array.from(new Set(batchSelectedItemIds.map((value) => value.trim()).filter(Boolean)));
+    const backendIds = Array.from(
+      new Set(experimentalBatchBackendIds.map((value) => value.trim()).filter(Boolean)),
+    );
+    if (!itemIds.length) {
+      setError("Choose at least one item for experimental backend batch runs.");
+      return;
+    }
+    if (!backendIds.length) {
+      setError("Choose at least one ready experimental backend.");
+      return;
+    }
+    setError(null);
+    setExperimentalBatchBusy(true);
+    try {
+      const summary = await invoke<ExperimentalBackendBatchQueueSummary>(
+        "jobs_enqueue_experimental_backend_batch_v1",
+        {
+          request: {
+            item_ids: itemIds,
+            backend_ids: backendIds,
+            variant_label: trimOrNull(experimentalVariantLabel),
+            auto_pipeline: experimentalAutoPipeline,
+            separation_backend: separationBackend,
+            queue_export_pack: experimentalQueueExportPack,
+            queue_qc: experimentalQueueQc,
+          } satisfies ExperimentalBackendBatchRequest,
+        },
+      );
+      setExperimentalBatchSummary(summary);
+      setNotice(
+        `Queued ${summary.queued_jobs_total} experimental backend job(s) across ${summary.items.length} item(s).`,
+      );
+      refreshItemJobs().catch(() => undefined);
+    } catch (e) {
+      setError(String(e));
+    } finally {
+      setExperimentalBatchBusy(false);
     }
   }
 
@@ -6818,6 +6918,122 @@ export function SubtitleEditorPage({ itemId }: { itemId: string }) {
                     and run a successful probe in Diagnostics first.
                   </div>
                 ) : null}
+                <div
+                  style={{
+                    borderTop: "1px solid #e5e7eb",
+                    paddingTop: 10,
+                    display: "flex",
+                    flexDirection: "column",
+                    gap: 10,
+                  }}
+                >
+                  <div className="row" style={{ alignItems: "center", gap: 10, flexWrap: "wrap" }}>
+                    <div style={{ fontSize: 12, opacity: 0.85 }}>Batch experimental runs</div>
+                    <button
+                      type="button"
+                      disabled={busy || experimentalBatchBusy || !experimentalBackendId}
+                      onClick={() =>
+                        setExperimentalBatchBackendIds(
+                          experimentalBackendId ? [experimentalBackendId] : [],
+                        )
+                      }
+                    >
+                      Current backend only
+                    </button>
+                    <button
+                      type="button"
+                      disabled={busy || experimentalBatchBusy || !experimentalReadyAdapters.length}
+                      onClick={() =>
+                        setExperimentalBatchBackendIds(
+                          experimentalReadyAdapters.map((detail) => detail.template.backend_id),
+                        )
+                      }
+                    >
+                      Select all ready backends
+                    </button>
+                    <button
+                      type="button"
+                      disabled={busy || experimentalBatchBusy}
+                      onClick={() => {
+                        queueExperimentalBackendBatch().catch(() => undefined);
+                      }}
+                    >
+                      Queue batch experimental runs
+                    </button>
+                  </div>
+                  <div style={{ fontSize: 12, opacity: 0.7 }}>
+                    Uses the same selected item set as Batch dubbing below. Batch runs always write
+                    variant-labeled artifacts; if you leave the label blank, VoxVulgi generates a
+                    batch label automatically so base outputs are not overwritten.
+                  </div>
+                  <div style={{ fontSize: 12, opacity: 0.7 }}>
+                    {batchSelectedItemIds.length} item(s) selected, {experimentalBatchBackendIds.length} backend(s) selected.
+                  </div>
+                  <div
+                    style={{
+                      maxHeight: 120,
+                      overflow: "auto",
+                      border: "1px solid #e5e7eb",
+                      borderRadius: 8,
+                      padding: 10,
+                      display: "flex",
+                      flexDirection: "column",
+                      gap: 6,
+                    }}
+                  >
+                    {experimentalReadyAdapters.length ? (
+                      experimentalReadyAdapters.map((detail) => (
+                        <label
+                          key={`exp-batch-${detail.template.backend_id}`}
+                          style={{ display: "flex", alignItems: "center", gap: 8 }}
+                        >
+                          <input
+                            type="checkbox"
+                            checked={experimentalBatchBackendIds.includes(detail.template.backend_id)}
+                            onChange={(e) =>
+                              toggleExperimentalBatchBackend(
+                                detail.template.backend_id,
+                                e.currentTarget.checked,
+                              )
+                            }
+                          />
+                          <span>{detail.template.display_name}</span>
+                          <code>{detail.template.backend_id}</code>
+                        </label>
+                      ))
+                    ) : (
+                      <div style={{ fontSize: 12, opacity: 0.65 }}>
+                        No probed render-ready adapters available for batch runs yet.
+                      </div>
+                    )}
+                  </div>
+                  {experimentalBatchSummary ? (
+                    <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
+                      <div style={{ fontSize: 12, opacity: 0.8 }}>
+                        Batch <code>{experimentalBatchSummary.batch_id}</code> queued{" "}
+                        {experimentalBatchSummary.queued_jobs_total} job(s) across{" "}
+                        {experimentalBatchSummary.backend_ids.length} backend(s).
+                      </div>
+                      {experimentalBatchSummary.warnings.slice(0, 2).map((warning, index) => (
+                        <div
+                          key={`exp-batch-warning-${index}`}
+                          style={{ fontSize: 12, opacity: 0.75 }}
+                        >
+                          Warning: {warning}
+                        </div>
+                      ))}
+                      {experimentalBatchSummary.items.slice(0, 8).map((entry) => (
+                        <div
+                          key={`exp-batch-item-${entry.item_id}`}
+                          style={{ fontSize: 12, opacity: 0.8 }}
+                        >
+                          {entry.title}: {entry.queued_jobs.length} job(s)
+                          {entry.warnings.length ? `, warning: ${entry.warnings[0]}` : ""}
+                        </div>
+                      ))}
+                    </div>
+                  ) : null}
+                </div>
               </div>
             </div>
 

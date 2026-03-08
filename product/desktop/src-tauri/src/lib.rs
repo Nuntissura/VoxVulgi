@@ -3860,6 +3860,14 @@ fn jobs_enqueue_experimental_voice_backend_render_v1(
 }
 
 #[tauri::command]
+fn jobs_enqueue_experimental_backend_batch_v1(
+    state: State<'_, AppState>,
+    request: jobs::ExperimentalBackendBatchRequest,
+) -> Result<jobs::ExperimentalBackendBatchQueueSummary, String> {
+    jobs::enqueue_experimental_backend_batch_v1(&state.paths, request).map_err(|e| e.to_string())
+}
+
+#[tauri::command]
 fn jobs_enqueue_mix_dub_preview_v1(
     state: State<'_, AppState>,
     item_id: Option<String>,
@@ -4230,6 +4238,7 @@ pub fn run() {
             jobs_enqueue_tts_neural_local_v1,
             jobs_enqueue_dub_voice_preserving_v1,
             jobs_enqueue_experimental_voice_backend_render_v1,
+            jobs_enqueue_experimental_backend_batch_v1,
             jobs_enqueue_mix_dub_preview_v1,
             jobs_enqueue_mux_dub_preview_v1,
             jobs_enqueue_separate_audio_spleeter,

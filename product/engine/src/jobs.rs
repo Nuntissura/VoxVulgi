@@ -429,6 +429,38 @@ pub struct LocalizationBatchQueueSummary {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ExperimentalBackendBatchRequest {
+    pub item_ids: Vec<String>,
+    pub backend_ids: Vec<String>,
+    pub variant_label: Option<String>,
+    #[serde(default)]
+    pub auto_pipeline: bool,
+    pub separation_backend: Option<String>,
+    #[serde(default)]
+    pub queue_export_pack: bool,
+    #[serde(default)]
+    pub queue_qc: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ExperimentalBackendBatchItemResult {
+    pub item_id: String,
+    pub title: String,
+    pub track_id: Option<String>,
+    pub queued_jobs: Vec<JobRow>,
+    pub warnings: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ExperimentalBackendBatchQueueSummary {
+    pub batch_id: String,
+    pub backend_ids: Vec<String>,
+    pub queued_jobs_total: usize,
+    pub warnings: Vec<String>,
+    pub items: Vec<ExperimentalBackendBatchItemResult>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct VoiceAbPreviewRequest {
     pub item_id: String,
     pub source_track_id: String,
@@ -808,6 +840,32 @@ pub fn enqueue_experimental_voice_backend_render_v1(
     queue_qc: bool,
     queue_export_pack: bool,
 ) -> Result<JobRow> {
+    enqueue_experimental_voice_backend_render_v1_with_batch_id(
+        paths,
+        item_id,
+        source_track_id,
+        backend_id,
+        variant_label,
+        auto_pipeline,
+        separation_backend,
+        queue_qc,
+        queue_export_pack,
+        None,
+    )
+}
+
+fn enqueue_experimental_voice_backend_render_v1_with_batch_id(
+    paths: &AppPaths,
+    item_id: String,
+    source_track_id: String,
+    backend_id: String,
+    variant_label: Option<String>,
+    auto_pipeline: bool,
+    separation_backend: Option<String>,
+    queue_qc: bool,
+    queue_export_pack: bool,
+    batch_id: Option<String>,
+) -> Result<JobRow> {
     let backend_id = backend_id.trim().to_string();
     if backend_id.is_empty() {
         return Err(EngineError::InstallFailed(
@@ -831,11 +889,12 @@ pub fn enqueue_experimental_voice_backend_render_v1(
             speaker_overrides: Vec::new(),
         }),
     })?;
-    enqueue_with_type_and_item_id(
+    enqueue_with_type_item_and_batch_id(
         paths,
         JobType::ExperimentalVoiceBackendRenderV1,
         params_json,
         Some(item_id),
+        batch_id,
     )
 }
 
@@ -1128,6 +1187,92 @@ pub fn enqueue_localization_batch_v1(
     Ok(LocalizationBatchQueueSummary {
         batch_id,
         queued_jobs_total,
+        items,
+    })
+}
+
+pub fn enqueue_experimental_backend_batch_v1(
+    paths: &AppPaths,
+    request: ExperimentalBackendBatchRequest,
+) -> Result<ExperimentalBackendBatchQueueSummary> {
+    let item_ids = normalize_localization_batch_item_ids(request.item_ids)?;
+    if item_ids.is_empty() {
+        return Err(EngineError::InstallFailed(
+            "choose at least one item for experimental backend batch runs".to_string(),
+        ));
+    }
+    let backend_ids = normalize_experimental_backend_batch_backend_ids(request.backend_ids)?;
+    if backend_ids.is_empty() {
+        return Err(EngineError::InstallFailed(
+            "choose at least one experimental backend".to_string(),
+        ));
+    }
+    let batch_id = Uuid::new_v4().to_string();
+    let targets = resolve_experimental_backend_batch_targets(
+        paths,
+        &backend_ids,
+        request.variant_label.as_deref(),
+        &batch_id,
+    )?;
+    if targets.backends.is_empty() {
+        return Err(EngineError::InstallFailed(
+            "none of the selected experimental backends are ready; configure and probe them in Diagnostics first"
+                .to_string(),
+        ));
+    }
+    let separation_backend = normalize_separation_backend(request.separation_backend.as_deref());
+    let mut items: Vec<ExperimentalBackendBatchItemResult> = Vec::new();
+
+    for item_id in item_ids {
+        let item = library::get_item_by_id(paths, &item_id)?;
+        let selected_track = select_localization_batch_track(paths, &item_id)?;
+        let track = match selected_track {
+            Some(track) => track,
+            None => {
+                items.push(ExperimentalBackendBatchItemResult {
+                    item_id: item_id.clone(),
+                    title: item.title.clone(),
+                    track_id: None,
+                    queued_jobs: Vec::new(),
+                    warnings: vec!["No subtitle track found for this item.".to_string()],
+                });
+                continue;
+            }
+        };
+        let mut queued_jobs: Vec<JobRow> = Vec::new();
+        for backend in &targets.backends {
+            queued_jobs.push(enqueue_experimental_voice_backend_render_v1_with_batch_id(
+                paths,
+                item_id.clone(),
+                track.id.clone(),
+                backend.backend_id.clone(),
+                backend.variant_label.clone(),
+                request.auto_pipeline,
+                separation_backend.clone(),
+                request.queue_qc,
+                request.queue_export_pack,
+                Some(batch_id.clone()),
+            )?);
+        }
+        items.push(ExperimentalBackendBatchItemResult {
+            item_id,
+            title: item.title,
+            track_id: Some(track.id),
+            queued_jobs,
+            warnings: Vec::new(),
+        });
+    }
+
+    let queued_jobs_total = items.iter().map(|item| item.queued_jobs.len()).sum();
+    Ok(ExperimentalBackendBatchQueueSummary {
+        batch_id,
+        backend_ids: targets
+            .backends
+            .iter()
+            .map(|value| value.backend_id.clone())
+            .collect(),
+        queued_jobs_total,
+        warnings: targets.warnings,
         items,
     })
 }
@@ -11073,6 +11218,90 @@ fn normalize_localization_batch_item_ids(item_ids: Vec<String>) -> Result<Vec<St
     Ok(out)
 }
 
+#[derive(Debug, Clone)]
+struct ExperimentalBatchBackendTarget {
+    backend_id: String,
+    variant_label: Option<String>,
+}
+
+#[derive(Debug, Clone)]
+struct ExperimentalBatchBackendTargets {
+    backends: Vec<ExperimentalBatchBackendTarget>,
+    warnings: Vec<String>,
+}
+
+fn normalize_experimental_backend_batch_backend_ids(
+    backend_ids: Vec<String>,
+) -> Result<Vec<String>> {
+    const MAX_EXPERIMENTAL_BATCH_BACKENDS: usize = 8;
+    let mut out: Vec<String> = Vec::new();
+    let mut seen: HashSet<String> = HashSet::new();
+    for backend_id in backend_ids {
+        let Some(normalized) = normalize_backend_id(Some(&backend_id)) else {
+            continue;
+        };
+        if seen.insert(normalized.clone()) {
+            out.push(normalized);
+        }
+    }
+    if out.len() > MAX_EXPERIMENTAL_BATCH_BACKENDS {
+        return Err(EngineError::InstallFailed(format!(
+            "experimental backend batch supports at most {MAX_EXPERIMENTAL_BATCH_BACKENDS} backends per submission"
+        )));
+    }
+    Ok(out)
+}
+
+fn resolve_experimental_backend_batch_targets(
+    paths: &AppPaths,
+    backend_ids: &[String],
+    variant_label: Option<&str>,
+    batch_id: &str,
+) -> Result<ExperimentalBatchBackendTargets> {
+    let mut backends: Vec<ExperimentalBatchBackendTarget> = Vec::new();
+    let mut warnings: Vec<String> = Vec::new();
+    let variant_label = experimental_batch_variant_label(variant_label, batch_id);
+    for backend_id in backend_ids {
+        let detail = voice_backend_adapters::get_voice_backend_adapter_detail(paths, backend_id)?;
+        let backend_id = detail.template.backend_id.clone();
+        let render_ready = detail.config.as_ref().map(|value| value.enabled).unwrap_or(false)
+            && detail
+                .config
+                .as_ref()
+                .map(|value| !value.render_command.is_empty())
+                .unwrap_or(false)
+            && detail
+                .last_probe
+                .as_ref()
+                .map(|value| value.ready)
+                .unwrap_or(false);
+        if !render_ready {
+            let summary = detail
+                .last_probe
+                .as_ref()
+                .map(|value| value.summary.clone())
+                .unwrap_or_else(|| "No successful probe recorded yet.".to_string());
+            warnings.push(format!(
+                "Skipped backend {} because it is not render-ready. {}",
+                detail.template.display_name, summary
+            ));
+            continue;
+        }
+        backends.push(ExperimentalBatchBackendTarget {
+            backend_id,
+            variant_label: variant_label.clone(),
+        });
+    }
+    Ok(ExperimentalBatchBackendTargets { backends, warnings })
+}
+
+fn experimental_batch_variant_label(raw: Option<&str>, batch_id: &str) -> Option<String> {
+    normalize_variant_label(raw).or_else(|| {
+        let short_batch = batch_id.chars().take(8).collect::<String>();
+        normalize_variant_label(Some(&format!("batch_{short_batch}")))
+    })
+}
+
 fn select_localization_batch_track(
     paths: &AppPaths,
     item_id: &str,
@@ -11899,11 +12128,27 @@ mod tests {
     use std::path::Path;
 
     fn seed_item_and_track(paths: &AppPaths) {
+        seed_item_and_track_named(paths, "item-1", "track-1", "Item 1");
+    }
+
+    fn seed_item_and_track_named(
+        paths: &AppPaths,
+        item_id: &str,
+        track_id: &str,
+        title: &str,
+    ) {
         let conn = db::open(paths).expect("open db");
         db::migrate(&conn).expect("migrate");
         conn.execute(
             "INSERT INTO library_item (id, created_at_ms, source_type, source_uri, title, media_path) VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
-            params!["item-1", 1_i64, "file", "file://item-1", "Item 1", "D:/media/item1.mp4"],
+            params![
+                item_id,
+                1_i64,
+                "file",
+                format!("file://{item_id}"),
+                title,
+                format!("D:/media/{item_id}.mp4")
+            ],
         )
         .expect("insert item");
 
@@ -11920,7 +12165,7 @@ mod tests {
             }],
         };
         let track_path = paths
-            .derived_item_dir("item-1")
+            .derived_item_dir(item_id)
             .join("translate")
             .join("track.json");
         if let Some(parent) = track_path.parent() {
@@ -11934,8 +12179,8 @@ mod tests {
         conn.execute(
             "INSERT INTO subtitle_track (id, item_id, kind, lang, format, path, created_by, version) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
             params![
-                "track-1",
-                "item-1",
+                track_id,
+                item_id,
                 "translated",
                 "eng",
                 "ytfetch_subtitle_json_v1",
@@ -12216,6 +12461,81 @@ EOF
         assert!(out_dir.join("manifest.json").exists());
         assert!(out_dir.join("report.json").exists());
         assert!(out_dir.join("segments").join("seg_0001.wav").exists());
+    }
+
+    #[test]
+    fn experimental_backend_batch_queue_uses_shared_batch_id_and_ready_backend() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let paths = AppPaths::new(dir.path().to_path_buf());
+        seed_item_and_track_named(&paths, "item-1", "track-1", "Item 1");
+        seed_item_and_track_named(&paths, "item-2", "track-2", "Item 2");
+        std::fs::write(dir.path().join("webui.py"), "print('ok')\n").expect("marker");
+        std::fs::write(dir.path().join("requirements.txt"), "ok\n").expect("marker2");
+        let probe_command = if cfg!(windows) {
+            vec!["cmd".to_string(), "/C".to_string(), "echo ok".to_string()]
+        } else {
+            vec!["/bin/sh".to_string(), "-c".to_string(), "echo ok".to_string()]
+        };
+        voice_backend_adapters::upsert_voice_backend_adapter(
+            &paths,
+            voice_backend_adapters::VoiceBackendAdapterConfig {
+                backend_id: "cosyvoice".to_string(),
+                enabled: true,
+                root_dir: Some(dir.path().to_string_lossy().to_string()),
+                python_exe: None,
+                model_dir: None,
+                entry_command: vec!["{python_exe}".to_string(), "webui.py".to_string()],
+                probe_command,
+                render_command: vec!["echo".to_string(), "render".to_string()],
+                notes: Some("test batch".to_string()),
+                updated_at_ms: 0,
+            },
+        )
+        .expect("upsert adapter");
+        voice_backend_adapters::probe_voice_backend_adapter(&paths, "cosyvoice").expect("probe");
+
+        let summary = enqueue_experimental_backend_batch_v1(
+            &paths,
+            ExperimentalBackendBatchRequest {
+                item_ids: vec!["item-1".to_string(), "item-2".to_string()],
+                backend_ids: vec!["cosyvoice".to_string()],
+                variant_label: None,
+                auto_pipeline: false,
+                separation_backend: None,
+                queue_export_pack: false,
+                queue_qc: false,
+            },
+        )
+        .expect("queue batch");
+
+        assert_eq!(summary.items.len(), 2);
+        assert_eq!(summary.backend_ids, vec!["cosyvoice".to_string()]);
+        assert_eq!(summary.queued_jobs_total, 2);
+        assert!(summary.warnings.is_empty());
+        assert!(summary.batch_id.len() > 8);
+        for item in &summary.items {
+            assert_eq!(item.queued_jobs.len(), 1);
+            assert!(item.warnings.is_empty());
+            let job = &item.queued_jobs[0];
+            assert_eq!(job.job_type, "experimental_voice_backend_render_v1");
+            assert_eq!(job.batch_id.as_deref(), Some(summary.batch_id.as_str()));
+            let params: ExperimentalVoiceBackendRenderV1Params =
+                serde_json::from_str(&job.params_json).expect("params");
+            assert_eq!(params.backend_id, "cosyvoice");
+            assert!(params.variant_label.as_deref().unwrap_or("").starts_with("batch_"));
+        }
+    }
+
+    #[test]
+    fn normalize_experimental_backend_batch_backend_ids_enforces_cap() {
+        let backend_ids = (0..9)
+            .map(|index| format!("backend_{index}"))
+            .collect::<Vec<_>>();
+        let err = normalize_experimental_backend_batch_backend_ids(backend_ids).expect_err("cap");
+        assert!(
+            err.to_string().contains("at most 8 backends"),
+            "unexpected error: {err}"
+        );
     }
 
     #[test]
