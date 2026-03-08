@@ -100,7 +100,7 @@ Initial language focus: **Korean + Japanese → English**.
   - split/merge,
   - time nudge and reflow.
 
-### 4.3 Translate CC (JA/KO → EN) v1
+### 4.3 Translate CC (JA/KO -> EN) v1
 
 - One-click translation pass producing:
   - translated subtitles (EN),
@@ -130,7 +130,7 @@ Initial language focus: **Korean + Japanese → English**.
 
 ### 5.1 Multi-speaker segmentation
 
-- Speaker diarization (label Speaker 1/2/3…).
+- Speaker diarization (label Speaker 1/2/3...).
 - UI to map speaker labels to:
   - a TTS voice (MVP-safe approach), or
   - a voice-preserved model (advanced).
@@ -206,12 +206,12 @@ Current implementation status:
 
 ## 6) Phase 3 (Power Features)
 
-- “Smart tags” v2:
+- "Smart tags" v2:
   - named entities (people/places/orgs),
   - topic clustering,
-  - “find similar clips” via embeddings.
+  - "find similar clips" via embeddings.
 - Content-aware workflows:
-  - batch processing rules (“auto-translate all new JA videos”),
+  - batch processing rules ("auto-translate all new JA videos"),
   - watch folders,
   - scheduled tasks.
 - Collaboration:
@@ -245,7 +245,7 @@ Current implementation status:
 
 ## 8) Key UX Screens
 
-- **Library**: grid/list, filters, collections, “import” CTA.
+- **Library**: grid/list, filters, collections, "import" CTA.
 - **Item detail**:
   - player preview,
   - job history,
@@ -268,7 +268,7 @@ Current implementation status:
 - **Video Archiver**: local import + URL batch ingest + presets/templates + YouTube subscriptions/groups + legacy archive reconciliation.
 - **Instagram Archiver**: dedicated Instagram batch ingest workflow plus recurring archive targets.
 - **Image Archive**: dedicated crawler-based image archive ingest workflow.
-- **Media Library**: renamed from ambiguous â€œItemsâ€; browse imported media and hand off to Localization Studio.
+- **Media Library**: renamed from ambiguous "Items"; browse imported media and hand off to Localization Studio.
 - **Jobs/Queue**: execution state + retry/cancel + logs and output reveal.
 - **Diagnostics**: non-blocking, section-by-section loading with explicit readiness states, recent local trace rows, and startup/tool-lifecycle visibility.
 

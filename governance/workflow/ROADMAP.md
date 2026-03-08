@@ -1,4 +1,4 @@
-# VoxVulgi — Roadmap / Backlog (Draft)
+# VoxVulgi - Roadmap / Backlog (Draft)
 
 Date: 2026-03-08
 
@@ -43,7 +43,7 @@ Date: 2026-03-08
 
 ## Manual App Validation Follow-up (2026-03)
 
-- WP-0095: Run a real Localization Studio app smoke for `WP-0092` to `WP-0094`, capture operator-facing proof, and queue any remaining defects as explicit follow-up packets.
+- WP-0095: Run a real Localization Studio app smoke covering the current remediation and voice-backend operator surfaces (`WP-0092` to `WP-0094`, `WP-0109`, and `WP-0112` to `WP-0117`), capture operator-facing proof, and queue any remaining defects as explicit follow-up packets.
 
 ## Workflow and Archive UX Hardening (2026-03)
 
@@ -87,7 +87,7 @@ Date: 2026-03-08
 
 ## Audit Remediation Program (2026-03)
 
-- WP-0124: Governance hygiene and manual smoke scope reconciliation.
+- WP-0124: Governance hygiene and manual smoke scope reconciliation. DONE.
 - WP-0125: Safe cleanup boundaries and artifact retention policy.
 - WP-0126: Schema versioning and atomic config persistence.
 - WP-0127: Visibility-aware polling and background work suspension.
@@ -95,43 +95,43 @@ Date: 2026-03-08
 - WP-0129: Reproducible offline bundle and vendor patch hardening.
 - WP-0130: Proof standardization and frontend/Tauri regression harness.
 
-## Phase 0 — Decisions (1–2 days)
+## Phase 0 - Decisions (1-2 days)
 
 - Pick stack: Tauri/Rust + Python workers (recommended) vs Qt vs Electron.
 - Confirm runtime stance: local-first by default; define optional cloud providers + opt-in UX (ASR/translation/dubbing).
-- Define policy/UX for consent-gating voice preservation.
+- Define operator-facing voice-preservation controls, provenance defaults, and compliance messaging without adding consent-gating product flows.
 - Define downloader provider list (or local import only for MVP).
 - Define diagnostics + data retention defaults (logs, cache, derived artifacts).
 
-## Phase 1 — MVP (Library + CC + Translate CC) (2–4 weeks)
+## Phase 1 - MVP (Library + CC + Translate CC) (2-4 weeks)
 
 - Library DB + import flow (ffprobe metadata, thumbnails).
 - Downloader provider interface (local import always supported).
 - Library UX: search/filter/collections, item detail view.
 - Job system + queue UI (non-blocking).
 - ASR pipeline (JA/KO) + subtitle editor v1.
-- Translate CC pipeline (JA/KO → EN) with glossary + QC rules.
+- Translate CC pipeline (JA/KO -> EN) with glossary + QC rules.
 - Diagnostics page + export bundle.
 - Log rotation/retention + cache cleanup tools.
 
-## Phase 2 — Dubbing MVP (Safe; Multi-speaker; Background preservation) (3–6 weeks)
+## Phase 2 - Dubbing MVP (Safe; Multi-speaker; Background preservation) (3-6 weeks)
 
 - Diarization + speaker mapping UI.
 - Background separation + mixing pipeline (best-effort).
 - Multi-speaker English dubbing via selected TTS voices (no voice cloning).
 - Alignment/time-fit controls (time-stretch/fit, pacing warnings).
 - Export muxed video + separate audio/subtitle artifacts.
-- Evaluation harness (sample set + MOS-style rubric) focused on JA/KO → EN educational clarity.
+- Evaluation harness (sample set + MOS-style rubric) focused on JA/KO -> EN educational clarity.
 
-## Phase 3 — Voice-preserving dubbing (R&D; gated) (4–10 weeks)
+## Phase 3 - Voice-preserving dubbing (R&D; operator-controlled) (4-10 weeks)
 
-- Voice conversion / identity-preserving pipeline behind explicit consent.
-- Multi-speaker robustness: prevent speaker “bleed” and identity swaps.
+- Voice conversion / identity-preserving pipeline with explicit operator-selected workflows and provenance.
+- Multi-speaker robustness: prevent speaker "bleed" and identity swaps.
 - Preserve timbre/tone while matching English prosody as naturally as possible.
-- Background preservation benchmarks + regression tests (avoid “underwater” artifacts).
+- Background preservation benchmarks + regression tests (avoid "underwater" artifacts).
 - Provenance + labeling in exports (what was generated, with what settings).
 
-## Phase 4 — Smart tags + Scaling (2–4 weeks)
+## Phase 4 - Smart tags + Scaling (2-4 weeks)
 
 - Smart tags v1 (language, keywords, topic summary, speaker count estimate).
 - Full-text search over transcripts/subtitles (FTS5).

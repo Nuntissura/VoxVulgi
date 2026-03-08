@@ -3,7 +3,7 @@
 ## Metadata
 - ID: WP-0124
 - Owner: Codex
-- Status: BACKLOG
+- Status: DONE
 - Created: 2026-03-08
 - Target milestone: Audit remediation tranche
 
@@ -30,6 +30,7 @@ Out of scope:
 - Canonical governance files no longer contradict the current spec stance.
 - `WP-0095` reflects the real current operator surfaces that need manual smoke coverage.
 - Stale proof references and mojibake are removed from canonical governance docs.
+- Proof is captured under `product/desktop/Build Target/tool_artifacts/wp_runs/WP-0124/20260308_164400/`.
 
 ## Test / verification plan
 
@@ -39,3 +40,4 @@ Out of scope:
 ## Status updates
 
 - 2026-03-08: Created from `WP-0118` governance drift findings.
+- 2026-03-08: Completed governance reconciliation by removing consent-gating roadmap drift, expanding `WP-0095` to the current Localization Studio operator surface, refreshing `WP-0098` proof references with the live bounded reconciliation pass, and normalizing remaining canonical mojibake in roadmap/spec docs.
