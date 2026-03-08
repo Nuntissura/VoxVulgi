@@ -290,6 +290,7 @@ type VoiceTemplate = {
   name: string;
   speaker_count: number;
   dir_path: string;
+  voice_plan_default: ReusableVoicePlanDefault | null;
   created_at_ms: number;
   updated_at_ms: number;
 };
@@ -346,6 +347,7 @@ type VoiceCastPack = {
   id: string;
   name: string;
   role_count: number;
+  voice_plan_default: ReusableVoicePlanDefault | null;
   created_at_ms: number;
   updated_at_ms: number;
 };
@@ -720,6 +722,14 @@ type ItemVoicePlanUpsert = {
   notes: string | null;
 };
 
+type ReusableVoicePlanDefault = {
+  goal: string;
+  preferred_backend_id: string | null;
+  fallback_backend_id: string | null;
+  selected_variant_label: string | null;
+  notes: string | null;
+};
+
 type LocalizationBatchRequest = {
   item_ids: string[];
   template_id: string | null;
@@ -820,6 +830,21 @@ function formatTc(ms: number): string {
   const ss = String(s).padStart(2, "0");
   const ms3 = String(milli).padStart(3, "0");
   return `${hh}:${mm}:${ss}.${ms3}`;
+}
+
+function formatReusableVoicePlanDefault(plan: ReusableVoicePlanDefault | null | undefined): string {
+  if (!plan) return "No reusable backend default saved.";
+  const bits = [
+    plan.goal || "balanced",
+    trimOrNull(plan.preferred_backend_id) ?? "no preferred backend",
+    trimOrNull(plan.fallback_backend_id)
+      ? `fallback ${plan.fallback_backend_id}`
+      : null,
+    trimOrNull(plan.selected_variant_label)
+      ? `variant ${plan.selected_variant_label}`
+      : null,
+  ].filter((value): value is string => !!value);
+  return bits.join(" / ");
 }
 
 function normalizeDoc(doc: SubtitleDocument): SubtitleDocument {
@@ -1073,6 +1098,7 @@ export function SubtitleEditorPage({ itemId }: { itemId: string }) {
   const [selectedVoiceTemplateDetail, setSelectedVoiceTemplateDetail] =
     useState<VoiceTemplateDetail | null>(null);
   const [voiceTemplateMappings, setVoiceTemplateMappings] = useState<Record<string, string>>({});
+  const [seedVoicePlanFromTemplateOnApply, setSeedVoicePlanFromTemplateOnApply] = useState(true);
   const [voiceCastPacks, setVoiceCastPacks] = useState<VoiceCastPack[]>([]);
   const [voiceCastPacksBusy, setVoiceCastPacksBusy] = useState(false);
   const [voiceCastPackActionBusy, setVoiceCastPackActionBusy] = useState(false);
@@ -1081,6 +1107,7 @@ export function SubtitleEditorPage({ itemId }: { itemId: string }) {
   const [selectedVoiceCastPackDetail, setSelectedVoiceCastPackDetail] =
     useState<VoiceCastPackDetail | null>(null);
   const [voiceCastPackMappings, setVoiceCastPackMappings] = useState<Record<string, string>>({});
+  const [seedVoicePlanFromCastPackOnApply, setSeedVoicePlanFromCastPackOnApply] = useState(true);
   const [memoryProfiles, setMemoryProfiles] = useState<VoiceLibraryProfile[]>([]);
   const [characterProfiles, setCharacterProfiles] = useState<VoiceLibraryProfile[]>([]);
   const [voiceLibraryBusy, setVoiceLibraryBusy] = useState(false);
@@ -3153,6 +3180,7 @@ export function SubtitleEditorPage({ itemId }: { itemId: string }) {
         itemId,
         templateId: selectedVoiceTemplateId,
         mappings,
+        seedVoicePlan: seedVoicePlanFromTemplateOnApply,
       });
       setSpeakerSettings(next);
       const nextDrafts: Record<string, string> = {};
@@ -3164,7 +3192,63 @@ export function SubtitleEditorPage({ itemId }: { itemId: string }) {
       }
       setSpeakerNameDrafts((prev) => ({ ...prev, ...nextDrafts }));
       setSpeakerPronunciationDrafts((prev) => ({ ...prev, ...nextPronunciations }));
+      if (seedVoicePlanFromTemplateOnApply) {
+        await refreshItemVoicePlan();
+      }
       setNotice(`Applied voice template to ${mappings.length} speaker(s).`);
+    } catch (e) {
+      setError(String(e));
+    } finally {
+      setVoiceTemplateActionBusy(false);
+    }
+  }
+
+  async function clearSelectedVoiceTemplateDefault() {
+    if (!selectedVoiceTemplateId) {
+      setError("Choose a voice template first.");
+      return;
+    }
+    setError(null);
+    setVoiceTemplateActionBusy(true);
+    try {
+      const detail = await invoke<VoiceTemplateDetail>("voice_templates_clear_voice_plan_default", {
+        templateId: selectedVoiceTemplateId,
+      });
+      setSelectedVoiceTemplateDetail(detail);
+      await refreshVoiceTemplates();
+      setNotice(`Cleared reusable backend default for "${detail.template.name}".`);
+    } catch (e) {
+      setError(String(e));
+    } finally {
+      setVoiceTemplateActionBusy(false);
+    }
+  }
+
+  async function promoteBenchmarkCandidateToSelectedVoiceTemplate(candidateId: string) {
+    if (!selectedVoiceTemplateId) {
+      setError("Choose a voice template first.");
+      return;
+    }
+    if (!trackId) {
+      setError("Select a subtitle track first.");
+      return;
+    }
+    setError(null);
+    setVoiceTemplateActionBusy(true);
+    try {
+      const detail = await invoke<VoiceTemplateDetail>(
+        "voice_templates_promote_benchmark_candidate_default",
+        {
+          templateId: selectedVoiceTemplateId,
+          itemId,
+          trackId,
+          goal: voiceBackendGoal,
+          candidateId,
+        },
+      );
+      setSelectedVoiceTemplateDetail(detail);
+      await refreshVoiceTemplates();
+      setNotice(`Saved benchmark winner as reusable template default for "${detail.template.name}".`);
     } catch (e) {
       setError(String(e));
     } finally {
@@ -3280,6 +3364,7 @@ export function SubtitleEditorPage({ itemId }: { itemId: string }) {
         itemId,
         packId: selectedVoiceCastPackId,
         mappings,
+        seedVoicePlan: seedVoicePlanFromCastPackOnApply,
       });
       setSpeakerSettings(next);
       const nextDrafts: Record<string, string> = {};
@@ -3291,7 +3376,63 @@ export function SubtitleEditorPage({ itemId }: { itemId: string }) {
       }
       setSpeakerNameDrafts((prev) => ({ ...prev, ...nextDrafts }));
       setSpeakerPronunciationDrafts((prev) => ({ ...prev, ...nextPronunciations }));
+      if (seedVoicePlanFromCastPackOnApply) {
+        await refreshItemVoicePlan();
+      }
       setNotice(`Applied cast pack to ${mappings.length} speaker(s).`);
+    } catch (e) {
+      setError(String(e));
+    } finally {
+      setVoiceCastPackActionBusy(false);
+    }
+  }
+
+  async function clearSelectedVoiceCastPackDefault() {
+    if (!selectedVoiceCastPackId) {
+      setError("Choose a cast pack first.");
+      return;
+    }
+    setError(null);
+    setVoiceCastPackActionBusy(true);
+    try {
+      const detail = await invoke<VoiceCastPackDetail>("voice_cast_packs_clear_voice_plan_default", {
+        packId: selectedVoiceCastPackId,
+      });
+      setSelectedVoiceCastPackDetail(detail);
+      await refreshVoiceCastPacks();
+      setNotice(`Cleared reusable backend default for "${detail.pack.name}".`);
+    } catch (e) {
+      setError(String(e));
+    } finally {
+      setVoiceCastPackActionBusy(false);
+    }
+  }
+
+  async function promoteBenchmarkCandidateToSelectedVoiceCastPack(candidateId: string) {
+    if (!selectedVoiceCastPackId) {
+      setError("Choose a cast pack first.");
+      return;
+    }
+    if (!trackId) {
+      setError("Select a subtitle track first.");
+      return;
+    }
+    setError(null);
+    setVoiceCastPackActionBusy(true);
+    try {
+      const detail = await invoke<VoiceCastPackDetail>(
+        "voice_cast_packs_promote_benchmark_candidate_default",
+        {
+          packId: selectedVoiceCastPackId,
+          itemId,
+          trackId,
+          goal: voiceBackendGoal,
+          candidateId,
+        },
+      );
+      setSelectedVoiceCastPackDetail(detail);
+      await refreshVoiceCastPacks();
+      setNotice(`Saved benchmark winner as reusable cast-pack default for "${detail.pack.name}".`);
     } catch (e) {
       setError(String(e));
     } finally {
@@ -5901,6 +6042,36 @@ export function SubtitleEditorPage({ itemId }: { itemId: string }) {
                     <div className="k">Saved references</div>
                     <div className="v">{selectedVoiceTemplateDetail.references.length}</div>
                   </div>
+                  <div className="kv">
+                    <div className="k">Backend default</div>
+                    <div className="v">
+                      {formatReusableVoicePlanDefault(
+                        selectedVoiceTemplateDetail.template.voice_plan_default,
+                      )}
+                    </div>
+                  </div>
+                  {selectedVoiceTemplateDetail.template.voice_plan_default?.notes ? (
+                    <div style={{ fontSize: 12, opacity: 0.7 }}>
+                      {selectedVoiceTemplateDetail.template.voice_plan_default.notes}
+                    </div>
+                  ) : null}
+                  <div className="row" style={{ gap: 8, flexWrap: "wrap" }}>
+                    <button
+                      type="button"
+                      disabled={
+                        voiceTemplateActionBusy ||
+                        !selectedVoiceTemplateDetail.template.voice_plan_default
+                      }
+                      onClick={() => {
+                        clearSelectedVoiceTemplateDefault().catch(() => undefined);
+                      }}
+                    >
+                      Clear backend default
+                    </button>
+                    <div style={{ fontSize: 12, opacity: 0.65 }}>
+                      Benchmark winners can be promoted into this template from the benchmark lab.
+                    </div>
+                  </div>
                   <div style={{ marginTop: 10, display: "flex", flexDirection: "column", gap: 10 }}>
                     {selectedVoiceTemplateDetail.speakers.map((speaker) => {
                       const references =
@@ -6150,6 +6321,17 @@ export function SubtitleEditorPage({ itemId }: { itemId: string }) {
                     className="row"
                     style={{ marginTop: 10, alignItems: "center", gap: 10, flexWrap: "wrap" }}
                   >
+                    <label
+                      className="row"
+                      style={{ gap: 6, fontSize: 12, opacity: 0.8, alignItems: "center" }}
+                    >
+                      <input
+                        type="checkbox"
+                        checked={seedVoicePlanFromTemplateOnApply}
+                        onChange={(e) => setSeedVoicePlanFromTemplateOnApply(e.currentTarget.checked)}
+                      />
+                      Seed item voice plan from template default
+                    </label>
                     <button
                       type="button"
                       disabled={
@@ -6268,6 +6450,36 @@ export function SubtitleEditorPage({ itemId }: { itemId: string }) {
                       {selectedVoiceCastPackDetail.roles.length === 1 ? "" : "s"}
                     </div>
                   </div>
+                  <div className="kv">
+                    <div className="k">Backend default</div>
+                    <div className="v">
+                      {formatReusableVoicePlanDefault(
+                        selectedVoiceCastPackDetail.pack.voice_plan_default,
+                      )}
+                    </div>
+                  </div>
+                  {selectedVoiceCastPackDetail.pack.voice_plan_default?.notes ? (
+                    <div style={{ fontSize: 12, opacity: 0.7 }}>
+                      {selectedVoiceCastPackDetail.pack.voice_plan_default.notes}
+                    </div>
+                  ) : null}
+                  <div className="row" style={{ gap: 8, flexWrap: "wrap" }}>
+                    <button
+                      type="button"
+                      disabled={
+                        voiceCastPackActionBusy ||
+                        !selectedVoiceCastPackDetail.pack.voice_plan_default
+                      }
+                      onClick={() => {
+                        clearSelectedVoiceCastPackDefault().catch(() => undefined);
+                      }}
+                    >
+                      Clear backend default
+                    </button>
+                    <div style={{ fontSize: 12, opacity: 0.65 }}>
+                      Cast packs can carry a proven backend choice forward into later episodes.
+                    </div>
+                  </div>
                   <div style={{ marginTop: 10, display: "flex", flexDirection: "column", gap: 8 }}>
                     {speakersInTrack.length ? (
                       speakersInTrack.map((speakerKey) => {
@@ -6345,6 +6557,17 @@ export function SubtitleEditorPage({ itemId }: { itemId: string }) {
                     className="row"
                     style={{ marginTop: 10, alignItems: "center", gap: 10, flexWrap: "wrap" }}
                   >
+                    <label
+                      className="row"
+                      style={{ gap: 6, fontSize: 12, opacity: 0.8, alignItems: "center" }}
+                    >
+                      <input
+                        type="checkbox"
+                        checked={seedVoicePlanFromCastPackOnApply}
+                        onChange={(e) => setSeedVoicePlanFromCastPackOnApply(e.currentTarget.checked)}
+                      />
+                      Seed item voice plan from cast-pack default
+                    </label>
                     <button
                       type="button"
                       disabled={
@@ -7317,6 +7540,28 @@ export function SubtitleEditorPage({ itemId }: { itemId: string }) {
                             }}
                           >
                             Promote to plan
+                          </button>
+                          <button
+                            type="button"
+                            disabled={busy || voiceTemplateActionBusy || !selectedVoiceTemplateId}
+                            onClick={() => {
+                              promoteBenchmarkCandidateToSelectedVoiceTemplate(
+                                candidate.candidate_id,
+                              ).catch(() => undefined);
+                            }}
+                          >
+                            Use for template
+                          </button>
+                          <button
+                            type="button"
+                            disabled={busy || voiceCastPackActionBusy || !selectedVoiceCastPackId}
+                            onClick={() => {
+                              promoteBenchmarkCandidateToSelectedVoiceCastPack(
+                                candidate.candidate_id,
+                              ).catch(() => undefined);
+                            }}
+                          >
+                            Use for cast pack
                           </button>
                         </div>
                       </div>

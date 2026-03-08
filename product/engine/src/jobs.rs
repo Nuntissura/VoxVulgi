@@ -1088,6 +1088,7 @@ pub fn enqueue_localization_batch_v1(
                     &item_id,
                     template_id,
                     &mappings,
+                    request.cast_pack_id.is_none(),
                 )?;
             }
         }
@@ -1101,7 +1102,11 @@ pub fn enqueue_localization_batch_v1(
             } else {
                 applied_mapping_count += mappings.len();
                 let _ = voice_cast_packs::apply_voice_cast_pack_to_item(
-                    paths, &item_id, pack_id, &mappings,
+                    paths,
+                    &item_id,
+                    pack_id,
+                    &mappings,
+                    true,
                 )?;
             }
         }

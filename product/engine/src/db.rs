@@ -135,6 +135,11 @@ CREATE INDEX IF NOT EXISTS idx_item_voice_plan_updated
 CREATE TABLE IF NOT EXISTS voice_template (
   id TEXT PRIMARY KEY,
   name TEXT NOT NULL,
+  goal TEXT,
+  preferred_backend_id TEXT,
+  fallback_backend_id TEXT,
+  selected_variant_label TEXT,
+  notes TEXT,
   created_at_ms INTEGER NOT NULL,
   updated_at_ms INTEGER NOT NULL
 );
@@ -181,6 +186,11 @@ CREATE INDEX IF NOT EXISTS idx_voice_template_reference_template
 CREATE TABLE IF NOT EXISTS voice_cast_pack (
   id TEXT PRIMARY KEY,
   name TEXT NOT NULL,
+  goal TEXT,
+  preferred_backend_id TEXT,
+  fallback_backend_id TEXT,
+  selected_variant_label TEXT,
+  notes TEXT,
   created_at_ms INTEGER NOT NULL,
   updated_at_ms INTEGER NOT NULL
 );
@@ -391,6 +401,16 @@ CREATE INDEX IF NOT EXISTS idx_ingest_provenance_created ON ingest_provenance(cr
         "subtitle_prosody_mode",
         "TEXT",
     )?;
+    ensure_column(conn, "voice_template", "goal", "TEXT")?;
+    ensure_column(conn, "voice_template", "preferred_backend_id", "TEXT")?;
+    ensure_column(conn, "voice_template", "fallback_backend_id", "TEXT")?;
+    ensure_column(conn, "voice_template", "selected_variant_label", "TEXT")?;
+    ensure_column(conn, "voice_template", "notes", "TEXT")?;
+    ensure_column(conn, "voice_cast_pack", "goal", "TEXT")?;
+    ensure_column(conn, "voice_cast_pack", "preferred_backend_id", "TEXT")?;
+    ensure_column(conn, "voice_cast_pack", "fallback_backend_id", "TEXT")?;
+    ensure_column(conn, "voice_cast_pack", "selected_variant_label", "TEXT")?;
+    ensure_column(conn, "voice_cast_pack", "notes", "TEXT")?;
     ensure_column(
         conn,
         "voice_cast_pack_role",

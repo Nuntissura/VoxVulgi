@@ -1,5 +1,5 @@
 use crate::paths::AppPaths;
-use crate::{db, speakers, voice_templates, EngineError, Result};
+use crate::{db, speakers, voice_plans, voice_templates, EngineError, Result};
 use rusqlite::params;
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
@@ -11,6 +11,7 @@ pub struct VoiceCastPack {
     pub id: String,
     pub name: String,
     pub role_count: usize,
+    pub voice_plan_default: Option<voice_plans::ReusableVoicePlanDefault>,
     pub created_at_ms: i64,
     pub updated_at_ms: i64,
 }
@@ -53,12 +54,26 @@ pub fn list_voice_cast_packs(paths: &AppPaths) -> Result<Vec<VoiceCastPack>> {
 SELECT
   p.id,
   p.name,
+  p.goal,
+  p.preferred_backend_id,
+  p.fallback_backend_id,
+  p.selected_variant_label,
+  p.notes,
   p.created_at_ms,
   p.updated_at_ms,
   COUNT(r.role_key) AS role_count
 FROM voice_cast_pack p
 LEFT JOIN voice_cast_pack_role r ON r.pack_id = p.id
-GROUP BY p.id, p.name, p.created_at_ms, p.updated_at_ms
+GROUP BY
+  p.id,
+  p.name,
+  p.goal,
+  p.preferred_backend_id,
+  p.fallback_backend_id,
+  p.selected_variant_label,
+  p.notes,
+  p.created_at_ms,
+  p.updated_at_ms
 ORDER BY p.updated_at_ms DESC, p.name COLLATE NOCASE ASC
 "#,
     )?;
@@ -68,9 +83,16 @@ ORDER BY p.updated_at_ms DESC, p.name COLLATE NOCASE ASC
             Ok(VoiceCastPack {
                 id: row.get(0)?,
                 name: row.get(1)?,
-                created_at_ms: row.get(2)?,
-                updated_at_ms: row.get(3)?,
-                role_count: row.get::<_, i64>(4)? as usize,
+                voice_plan_default: map_reusable_voice_plan_default(
+                    row.get(2)?,
+                    row.get(3)?,
+                    row.get(4)?,
+                    row.get(5)?,
+                    row.get(6)?,
+                ),
+                created_at_ms: row.get(7)?,
+                updated_at_ms: row.get(8)?,
+                role_count: row.get::<_, i64>(9)? as usize,
             })
         })?
         .collect::<rusqlite::Result<Vec<_>>>()?;
@@ -91,22 +113,43 @@ pub fn get_voice_cast_pack(paths: &AppPaths, pack_id: &str) -> Result<VoiceCastP
 SELECT
   p.id,
   p.name,
+  p.goal,
+  p.preferred_backend_id,
+  p.fallback_backend_id,
+  p.selected_variant_label,
+  p.notes,
   p.created_at_ms,
   p.updated_at_ms,
   COUNT(r.role_key) AS role_count
 FROM voice_cast_pack p
 LEFT JOIN voice_cast_pack_role r ON r.pack_id = p.id
 WHERE p.id=?1
-GROUP BY p.id, p.name, p.created_at_ms, p.updated_at_ms
+GROUP BY
+  p.id,
+  p.name,
+  p.goal,
+  p.preferred_backend_id,
+  p.fallback_backend_id,
+  p.selected_variant_label,
+  p.notes,
+  p.created_at_ms,
+  p.updated_at_ms
 "#,
         params![pack_id],
         |row| {
             Ok(VoiceCastPack {
                 id: row.get(0)?,
                 name: row.get(1)?,
-                created_at_ms: row.get(2)?,
-                updated_at_ms: row.get(3)?,
-                role_count: row.get::<_, i64>(4)? as usize,
+                voice_plan_default: map_reusable_voice_plan_default(
+                    row.get(2)?,
+                    row.get(3)?,
+                    row.get(4)?,
+                    row.get(5)?,
+                    row.get(6)?,
+                ),
+                created_at_ms: row.get(7)?,
+                updated_at_ms: row.get(8)?,
+                role_count: row.get::<_, i64>(9)? as usize,
             })
         },
     )?;
@@ -188,11 +231,46 @@ pub fn create_voice_cast_pack_from_template(
 INSERT INTO voice_cast_pack (
   id,
   name,
+  goal,
+  preferred_backend_id,
+  fallback_backend_id,
+  selected_variant_label,
+  notes,
   created_at_ms,
   updated_at_ms
-) VALUES (?1, ?2, ?3, ?4)
+) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)
 "#,
-        params![pack_id, name, now, now],
+        params![
+            pack_id,
+            name,
+            template
+                .template
+                .voice_plan_default
+                .as_ref()
+                .map(|value| value.goal.clone()),
+            template
+                .template
+                .voice_plan_default
+                .as_ref()
+                .and_then(|value| value.preferred_backend_id.clone()),
+            template
+                .template
+                .voice_plan_default
+                .as_ref()
+                .and_then(|value| value.fallback_backend_id.clone()),
+            template
+                .template
+                .voice_plan_default
+                .as_ref()
+                .and_then(|value| value.selected_variant_label.clone()),
+            template
+                .template
+                .voice_plan_default
+                .as_ref()
+                .and_then(|value| value.notes.clone()),
+            now,
+            now,
+        ],
     )?;
 
     for (index, speaker) in template.speakers.iter().enumerate() {
@@ -271,6 +349,31 @@ pub fn update_voice_cast_pack(
     get_voice_cast_pack(paths, pack_id)
 }
 
+pub fn clear_voice_cast_pack_voice_plan_default(
+    paths: &AppPaths,
+    pack_id: &str,
+) -> Result<VoiceCastPackDetail> {
+    set_voice_cast_pack_voice_plan_default(paths, pack_id, None)
+}
+
+pub fn promote_benchmark_candidate_to_voice_cast_pack_voice_plan_default(
+    paths: &AppPaths,
+    pack_id: &str,
+    item_id: &str,
+    track_id: &str,
+    goal: Option<&str>,
+    candidate_id: &str,
+) -> Result<VoiceCastPackDetail> {
+    let default = voice_plans::promote_benchmark_candidate_to_reusable_voice_plan_default(
+        paths,
+        item_id,
+        track_id,
+        goal,
+        candidate_id,
+    )?;
+    set_voice_cast_pack_voice_plan_default(paths, pack_id, Some(&default))
+}
+
 pub fn delete_voice_cast_pack(paths: &AppPaths, pack_id: &str) -> Result<()> {
     let pack_id = pack_id.trim();
     if pack_id.is_empty() {
@@ -294,6 +397,7 @@ pub fn apply_voice_cast_pack_to_item(
     item_id: &str,
     pack_id: &str,
     mappings: &[VoiceCastPackApplyMapping],
+    seed_voice_plan: bool,
 ) -> Result<Vec<speakers::ItemSpeakerSetting>> {
     let item_id = item_id.trim();
     let pack_id = pack_id.trim();
@@ -350,6 +454,7 @@ pub fn apply_voice_cast_pack_to_item(
         item_id,
         &template_id,
         &template_mapping,
+        false,
     )?;
     let existing_by_key: HashMap<String, speakers::ItemSpeakerSetting> =
         speakers::list_item_speaker_settings(paths, item_id)?
@@ -397,7 +502,81 @@ pub fn apply_voice_cast_pack_to_item(
         )?;
     }
 
+    if seed_voice_plan {
+        if let Some(default) = detail.pack.voice_plan_default.as_ref() {
+            let source_note = format!("Seeded from cast pack \"{}\".", detail.pack.name);
+            let _ = voice_plans::upsert_item_voice_plan_from_reusable_default(
+                paths,
+                item_id,
+                default,
+                Some(source_note.as_str()),
+            )?;
+        }
+    }
+
     speakers::list_item_speaker_settings(paths, item_id)
+}
+
+fn set_voice_cast_pack_voice_plan_default(
+    paths: &AppPaths,
+    pack_id: &str,
+    default: Option<&voice_plans::ReusableVoicePlanDefault>,
+) -> Result<VoiceCastPackDetail> {
+    let pack_id = pack_id.trim();
+    if pack_id.is_empty() {
+        return Err(EngineError::InstallFailed("pack_id is empty".to_string()));
+    }
+
+    let mut conn = db::open(paths)?;
+    db::migrate(&conn)?;
+    let tx = conn.transaction()?;
+    let now = now_ms();
+    let updated = tx.execute(
+        r#"
+UPDATE voice_cast_pack
+SET
+  goal=?2,
+  preferred_backend_id=?3,
+  fallback_backend_id=?4,
+  selected_variant_label=?5,
+  notes=?6,
+  updated_at_ms=?7
+WHERE id=?1
+"#,
+        params![
+            pack_id,
+            default.map(|value| value.goal.clone()),
+            default.and_then(|value| value.preferred_backend_id.clone()),
+            default.and_then(|value| value.fallback_backend_id.clone()),
+            default.and_then(|value| value.selected_variant_label.clone()),
+            default.and_then(|value| value.notes.clone()),
+            now,
+        ],
+    )?;
+    if updated == 0 {
+        return Err(EngineError::InstallFailed(format!(
+            "cast pack not found: {pack_id}"
+        )));
+    }
+    tx.commit()?;
+
+    get_voice_cast_pack(paths, pack_id)
+}
+
+fn map_reusable_voice_plan_default(
+    goal: Option<String>,
+    preferred_backend_id: Option<String>,
+    fallback_backend_id: Option<String>,
+    selected_variant_label: Option<String>,
+    notes: Option<String>,
+) -> Option<voice_plans::ReusableVoicePlanDefault> {
+    voice_plans::reusable_voice_plan_default_from_parts(
+        goal,
+        preferred_backend_id,
+        fallback_backend_id,
+        selected_variant_label,
+        notes,
+    )
 }
 
 fn unique_role_key(used: &mut HashSet<String>, raw: &str) -> String {
@@ -462,6 +641,10 @@ fn now_ms() -> i64 {
 mod tests {
     use super::*;
     use crate::db;
+    use crate::voice_benchmarks::{
+        VoiceBenchmarkCandidate, VoiceBenchmarkReport, VoiceBenchmarkScoreTerm,
+    };
+    use crate::voice_plans;
     use rusqlite::params;
     use std::path::Path;
     use tempfile::tempdir;
@@ -606,6 +789,7 @@ INSERT INTO library_item (
                 item_speaker_key: "S9".to_string(),
                 pack_role_key: pack.roles[0].role_key.clone(),
             }],
+            false,
         )
         .expect("apply cast pack");
 
@@ -666,5 +850,179 @@ INSERT INTO library_item (
         let renamed =
             update_voice_cast_pack(&paths, &pack.pack.id, "Renamed pack").expect("rename pack");
         assert_eq!(renamed.pack.name, "Renamed pack");
+    }
+
+    #[test]
+    fn cast_pack_inherits_template_default_and_seeds_item_plan() {
+        let tmp = tempdir().expect("tempdir");
+        let paths = AppPaths::new(tmp.path().to_path_buf());
+        let template_media = tmp.path().join("template.mp4");
+        let target_media = tmp.path().join("target.mp4");
+        let reference_path = tmp.path().join("refs").join("panel.wav");
+        std::fs::write(&template_media, b"fake-media").expect("write template media");
+        std::fs::write(&target_media, b"fake-media").expect("write target media");
+        std::fs::create_dir_all(reference_path.parent().expect("parent")).expect("mkdir refs");
+        std::fs::write(&reference_path, b"fake-wav").expect("write ref");
+        insert_test_item(&paths, "template-item", &template_media, "Template");
+        insert_test_item(&paths, "target-item", &target_media, "Target");
+
+        speakers::upsert_item_speaker_setting(
+            &paths,
+            "template-item",
+            "S1",
+            Some("Panel Host".to_string()),
+            None,
+            Some("af_heart".to_string()),
+            Some(reference_path.to_string_lossy().to_string()),
+            Some(vec![reference_path.to_string_lossy().to_string()]),
+            Some("game_show_energy".to_string()),
+            Some("more_excited".to_string()),
+            None,
+            Some("clone".to_string()),
+            None,
+        )
+        .expect("template speaker");
+        let template =
+            voice_templates::create_voice_template_from_item(&paths, "template-item", "Panel")
+                .expect("template");
+
+        write_benchmark_report(
+            &paths,
+            "template-item",
+            "track-1",
+            "timing",
+            "xtts_a",
+            "XTTS A",
+            "xtts_v2",
+            Some("xtts_fast"),
+            88.0,
+        );
+
+        let template = voice_templates::promote_benchmark_candidate_to_voice_template_voice_plan_default(
+            &paths,
+            &template.template.id,
+            "template-item",
+            "track-1",
+            Some("timing"),
+            "xtts_a",
+        )
+        .expect("promote template default");
+        let pack =
+            create_voice_cast_pack_from_template(&paths, &template.template.id, "Panel pack")
+                .expect("cast pack");
+        assert_eq!(
+            pack.pack
+                .voice_plan_default
+                .as_ref()
+                .and_then(|value| value.preferred_backend_id.as_deref()),
+            Some("xtts_v2")
+        );
+
+        speakers::upsert_item_speaker_setting(
+            &paths,
+            "target-item",
+            "S9",
+            Some("Old name".to_string()),
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+        )
+        .expect("target speaker");
+
+        let _ = apply_voice_cast_pack_to_item(
+            &paths,
+            "target-item",
+            &pack.pack.id,
+            &[VoiceCastPackApplyMapping {
+                item_speaker_key: "S9".to_string(),
+                pack_role_key: pack.roles[0].role_key.clone(),
+            }],
+            true,
+        )
+        .expect("apply cast pack");
+
+        let plan = voice_plans::get_item_voice_plan(&paths, "target-item")
+            .expect("load plan")
+            .expect("plan exists");
+        assert_eq!(plan.goal, "timing");
+        assert_eq!(plan.preferred_backend_id.as_deref(), Some("xtts_v2"));
+        assert_eq!(plan.selected_variant_label.as_deref(), Some("xtts_fast"));
+    }
+
+    fn write_benchmark_report(
+        paths: &AppPaths,
+        item_id: &str,
+        track_id: &str,
+        goal: &str,
+        candidate_id: &str,
+        display_name: &str,
+        backend_id: &str,
+        variant_label: Option<&str>,
+        score: f32,
+    ) {
+        let benchmark_dir = paths.derived_item_dir(item_id).join("voice_benchmark");
+        std::fs::create_dir_all(&benchmark_dir).expect("benchmark dir");
+        let report = VoiceBenchmarkReport {
+            schema_version: 1,
+            generated_at_ms: 0,
+            item_id: item_id.to_string(),
+            track_id: track_id.to_string(),
+            goal: goal.to_string(),
+            recommended_candidate_id: Some(candidate_id.to_string()),
+            candidate_count: 1,
+            summary: vec!["ok".to_string()],
+            json_path: benchmark_dir
+                .join(format!("voice_benchmark_v1_{track_id}_{goal}.json"))
+                .to_string_lossy()
+                .to_string(),
+            markdown_path: benchmark_dir
+                .join(format!("voice_benchmark_v1_{track_id}_{goal}.md"))
+                .to_string_lossy()
+                .to_string(),
+            candidates: vec![VoiceBenchmarkCandidate {
+                candidate_id: candidate_id.to_string(),
+                display_name: display_name.to_string(),
+                backend_id: backend_id.to_string(),
+                variant_label: variant_label.map(|value| value.to_string()),
+                manifest_path: "manifest.json".to_string(),
+                expected_segments: 1,
+                rendered_segments: 1,
+                coverage_ratio: 1.0,
+                timing_fit_ratio: 1.0,
+                timing_overrun_segments: 0,
+                timing_short_segments: 0,
+                warn_count: 0,
+                fail_count: 0,
+                reference_warn_count: 0,
+                reference_fail_count: 0,
+                output_warn_count: 0,
+                output_fail_count: 0,
+                similarity_proxy: Some(0.9),
+                converted_ratio: Some(0.9),
+                final_mix_ready: true,
+                export_pack_ready: true,
+                score,
+                score_breakdown: vec![VoiceBenchmarkScoreTerm {
+                    key: "coverage".to_string(),
+                    label: "Coverage".to_string(),
+                    weight: 1.0,
+                    value: 0.9,
+                    points: 90.0,
+                }],
+                strengths: vec![],
+                concerns: vec![],
+            }],
+        };
+        std::fs::write(
+            &report.json_path,
+            format!("{}\n", serde_json::to_string_pretty(&report).expect("json")),
+        )
+        .expect("write report");
     }
 }

@@ -389,9 +389,8 @@ Experimental BYO adapter design:
   - the run emits a standard manifest under `derived/items/<item>/tts_preview/<backend>/variants/<label>/manifest.json`,
   - existing artifact discovery, benchmark, mix, mux, QC, and export flows treat these runs like first-class candidates instead of a separate side channel,
   - bounded batch experimental queueing reuses the existing item-set picker pattern so multiple items can be evaluated against one or more ready BYO adapters under one batch ID,
-  - starter-recipe definitions now provide backend-specific default probe/render command templates and bootstrap notes for known OSS adapter families.
-- Next execution tranche:
-  - let reusable voice templates and cast packs store backend-default metadata that can seed later item plans.
+  - starter-recipe definitions now provide backend-specific default probe/render command templates and bootstrap notes for known OSS adapter families,
+  - reusable voice templates and cast packs now also store backend-default metadata so benchmark-winner promotions can seed later item plans during apply.
 
 ## 5.6 Downloader (Phase 2)
 

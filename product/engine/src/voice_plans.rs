@@ -27,6 +27,15 @@ pub struct ItemVoicePlanUpsert {
     pub notes: Option<String>,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ReusableVoicePlanDefault {
+    pub goal: String,
+    pub preferred_backend_id: Option<String>,
+    pub fallback_backend_id: Option<String>,
+    pub selected_variant_label: Option<String>,
+    pub notes: Option<String>,
+}
+
 pub fn get_item_voice_plan(paths: &AppPaths, item_id: &str) -> Result<Option<ItemVoicePlan>> {
     let item_id = item_id.trim();
     if item_id.is_empty() {
@@ -194,6 +203,102 @@ pub fn promote_benchmark_candidate_to_item_voice_plan(
     )
 }
 
+pub fn reusable_voice_plan_default_from_parts(
+    goal: Option<String>,
+    preferred_backend_id: Option<String>,
+    fallback_backend_id: Option<String>,
+    selected_variant_label: Option<String>,
+    notes: Option<String>,
+) -> Option<ReusableVoicePlanDefault> {
+    let preferred_backend_id = normalize_optional_string(preferred_backend_id);
+    let fallback_backend_id = normalize_optional_string(fallback_backend_id);
+    let selected_variant_label = normalize_optional_string(selected_variant_label);
+    let notes = normalize_optional_string(notes);
+    let goal = goal
+        .as_deref()
+        .map(|value| normalize_goal(Some(value)))
+        .or_else(|| {
+            if preferred_backend_id.is_some()
+                || fallback_backend_id.is_some()
+                || selected_variant_label.is_some()
+                || notes.is_some()
+            {
+                Some("balanced".to_string())
+            } else {
+                None
+            }
+        })?;
+
+    Some(ReusableVoicePlanDefault {
+        goal,
+        preferred_backend_id,
+        fallback_backend_id,
+        selected_variant_label,
+        notes,
+    })
+}
+
+pub fn promote_benchmark_candidate_to_reusable_voice_plan_default(
+    paths: &AppPaths,
+    item_id: &str,
+    track_id: &str,
+    goal: Option<&str>,
+    candidate_id: &str,
+) -> Result<ReusableVoicePlanDefault> {
+    let report = voice_benchmarks::load_voice_benchmark_report(paths, item_id, track_id, goal)?
+        .ok_or_else(|| {
+            EngineError::InstallFailed(
+                "voice benchmark report not found; generate the report first".to_string(),
+            )
+        })?;
+    let candidate_id = candidate_id.trim();
+    if candidate_id.is_empty() {
+        return Err(EngineError::InstallFailed(
+            "candidate_id is empty".to_string(),
+        ));
+    }
+    let candidate = report
+        .candidates
+        .into_iter()
+        .find(|value| value.candidate_id == candidate_id)
+        .ok_or_else(|| {
+            EngineError::InstallFailed(format!(
+                "voice benchmark candidate not found: {candidate_id}"
+            ))
+        })?;
+
+    Ok(ReusableVoicePlanDefault {
+        goal: report.goal,
+        preferred_backend_id: Some(candidate.backend_id),
+        fallback_backend_id: None,
+        selected_variant_label: candidate.variant_label,
+        notes: Some(format!(
+            "Promoted from benchmark candidate {} ({:.1}).",
+            candidate.display_name, candidate.score
+        )),
+    })
+}
+
+pub fn upsert_item_voice_plan_from_reusable_default(
+    paths: &AppPaths,
+    item_id: &str,
+    default: &ReusableVoicePlanDefault,
+    source_note: Option<&str>,
+) -> Result<ItemVoicePlan> {
+    upsert_item_voice_plan(
+        paths,
+        item_id,
+        ItemVoicePlanUpsert {
+            goal: Some(default.goal.clone()),
+            preferred_backend_id: default.preferred_backend_id.clone(),
+            fallback_backend_id: default.fallback_backend_id.clone(),
+            selected_candidate_id: None,
+            selected_variant_label: default.selected_variant_label.clone(),
+            notes: combine_note_parts(source_note, default.notes.as_deref()),
+        },
+    )
+}
+
 fn map_plan_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<ItemVoicePlan> {
     Ok(ItemVoicePlan {
         item_id: row.get(0)?,
@@ -227,6 +332,21 @@ fn normalize_optional_string(value: Option<String>) -> Option<String> {
             Some(trimmed)
         }
     })
+}
+
+fn combine_note_parts(first: Option<&str>, second: Option<&str>) -> Option<String> {
+    let mut parts: Vec<String> = Vec::new();
+    for value in [first, second] {
+        let trimmed = value.unwrap_or("").trim();
+        if !trimmed.is_empty() {
+            parts.push(trimmed.to_string());
+        }
+    }
+    if parts.is_empty() {
+        None
+    } else {
+        Some(parts.join(" "))
+    }
 }
 
 fn now_ms() -> i64 {

@@ -3002,11 +3002,57 @@ async fn voice_templates_apply_to_item(
     item_id: String,
     template_id: String,
     mappings: Vec<voice_templates::VoiceTemplateApplyMapping>,
+    seed_voice_plan: bool,
 ) -> Result<Vec<speakers::ItemSpeakerSetting>, String> {
     let paths = state.paths.clone();
     tauri::async_runtime::spawn_blocking(move || {
-        voice_templates::apply_voice_template_to_item(&paths, &item_id, &template_id, &mappings)
+        voice_templates::apply_voice_template_to_item(
+            &paths,
+            &item_id,
+            &template_id,
+            &mappings,
+            seed_voice_plan,
+        )
+        .map_err(|e| e.to_string())
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
+#[tauri::command]
+async fn voice_templates_clear_voice_plan_default(
+    state: State<'_, AppState>,
+    template_id: String,
+) -> Result<voice_templates::VoiceTemplateDetail, String> {
+    let paths = state.paths.clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        voice_templates::clear_voice_template_voice_plan_default(&paths, &template_id)
             .map_err(|e| e.to_string())
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
+#[tauri::command]
+async fn voice_templates_promote_benchmark_candidate_default(
+    state: State<'_, AppState>,
+    template_id: String,
+    item_id: String,
+    track_id: String,
+    goal: Option<String>,
+    candidate_id: String,
+) -> Result<voice_templates::VoiceTemplateDetail, String> {
+    let paths = state.paths.clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        voice_templates::promote_benchmark_candidate_to_voice_template_voice_plan_default(
+            &paths,
+            &template_id,
+            &item_id,
+            &track_id,
+            goal.as_deref(),
+            &candidate_id,
+        )
+        .map_err(|e| e.to_string())
     })
     .await
     .map_err(|e| e.to_string())?
@@ -3085,11 +3131,57 @@ async fn voice_cast_packs_apply_to_item(
     item_id: String,
     pack_id: String,
     mappings: Vec<voice_cast_packs::VoiceCastPackApplyMapping>,
+    seed_voice_plan: bool,
 ) -> Result<Vec<speakers::ItemSpeakerSetting>, String> {
     let paths = state.paths.clone();
     tauri::async_runtime::spawn_blocking(move || {
-        voice_cast_packs::apply_voice_cast_pack_to_item(&paths, &item_id, &pack_id, &mappings)
+        voice_cast_packs::apply_voice_cast_pack_to_item(
+            &paths,
+            &item_id,
+            &pack_id,
+            &mappings,
+            seed_voice_plan,
+        )
+        .map_err(|e| e.to_string())
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
+#[tauri::command]
+async fn voice_cast_packs_clear_voice_plan_default(
+    state: State<'_, AppState>,
+    pack_id: String,
+) -> Result<voice_cast_packs::VoiceCastPackDetail, String> {
+    let paths = state.paths.clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        voice_cast_packs::clear_voice_cast_pack_voice_plan_default(&paths, &pack_id)
             .map_err(|e| e.to_string())
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
+#[tauri::command]
+async fn voice_cast_packs_promote_benchmark_candidate_default(
+    state: State<'_, AppState>,
+    pack_id: String,
+    item_id: String,
+    track_id: String,
+    goal: Option<String>,
+    candidate_id: String,
+) -> Result<voice_cast_packs::VoiceCastPackDetail, String> {
+    let paths = state.paths.clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        voice_cast_packs::promote_benchmark_candidate_to_voice_cast_pack_voice_plan_default(
+            &paths,
+            &pack_id,
+            &item_id,
+            &track_id,
+            goal.as_deref(),
+            &candidate_id,
+        )
+        .map_err(|e| e.to_string())
     })
     .await
     .map_err(|e| e.to_string())?
@@ -4370,17 +4462,21 @@ pub fn run() {
             voice_cleanup_run_for_speaker,
             voice_templates_apply_to_item,
             voice_templates_add_reference,
+            voice_templates_clear_voice_plan_default,
             voice_templates_create_from_item,
             voice_templates_delete,
             voice_templates_get,
             voice_templates_list,
+            voice_templates_promote_benchmark_candidate_default,
             voice_templates_remove_reference,
             voice_templates_update_speaker,
             voice_cast_packs_apply_to_item,
+            voice_cast_packs_clear_voice_plan_default,
             voice_cast_packs_create_from_template,
             voice_cast_packs_delete,
             voice_cast_packs_get,
             voice_cast_packs_list,
+            voice_cast_packs_promote_benchmark_candidate_default,
             voice_cast_packs_update,
             subtitles_export_doc_srt,
             subtitles_export_doc_vtt,

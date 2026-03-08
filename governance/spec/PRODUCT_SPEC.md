@@ -197,7 +197,7 @@ Current implementation status:
 - Current implementation now also includes bounded batch experimental backend runs across one selected item set.
 - Current implementation now also includes immutable benchmark compare history and leaderboard export artifacts for the current item/track/goal.
 - Current implementation now also includes backend-specific starter recipes so Diagnostics can prefill stronger BYO adapter drafts for known OSS stacks.
-- The remaining next implementation tranche should add promotion of benchmark winners into reusable template/cast-pack defaults.
+- Current implementation now also lets operators promote benchmark winners directly into the selected reusable voice template or cast pack and optionally seed later item voice plans from those saved defaults during apply.
 - Export packs include speech stems and alternate dubbed variants when available.
 - Artifact-browser actions must remain variant-aware:
   - rerun, status, and log links for A/B/alternate artifacts must target the matching variant/track/container instead of falling back to the base artifact state,
