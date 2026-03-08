@@ -57,6 +57,7 @@ Design goals:
 - SQLite schema evolution should be driven by explicit numbered migrations via `PRAGMA user_version`, with each migration step applied transactionally.
 - Config, override, adapter-store, and secret writes should use atomic temp-file-plus-replace helpers instead of direct in-place writes.
 - Recurring UI polling should use shared non-overlapping visibility-aware loops, and mounted-but-hidden pages must suspend background refresh until active again.
+- Localization Studio artifact/runtime contracts should be serialized from Rust as typed metadata (`kind`, job type, variant, backend, container, rerun class) and consumed from shared frontend modules rather than reconstructed ad hoc from artifact IDs and filenames.
 - Explicit consent mechanisms must not be implemented.
 - Anti-abuse controls must not be included.
 - These features must not appear in development or the final product. Users must comply with all local regulations.

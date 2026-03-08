@@ -275,6 +275,7 @@ Current implementation status:
 - **Media Library**: renamed from ambiguous "Items"; browse imported media and hand off to Localization Studio.
 - **Jobs/Queue**: execution state + retry/cancel + logs and output reveal.
 - **Diagnostics**: non-blocking, section-by-section loading with explicit readiness states, recent local trace rows, and startup/tool-lifecycle visibility.
+- Localization Studio artifact rows must receive typed runtime metadata from the bridge for rerun/status matching, rather than reconstructing artifact identity from filenames in the UI.
 
 ### 8.0.2 Workspace hardening state (implemented 2026-03-07)
 

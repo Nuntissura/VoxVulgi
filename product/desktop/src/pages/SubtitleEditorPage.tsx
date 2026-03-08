@@ -3,6 +3,17 @@ import { convertFileSrc, invoke } from "@tauri-apps/api/core";
 import { confirm, open, save } from "@tauri-apps/plugin-dialog";
 import { usePageActivity, usePollingLoop } from "../lib/activity";
 import { diagnosticsTrace } from "../lib/diagnosticsTrace";
+import {
+  artifactPreferredVideoPreviewMode,
+  artifactSupportsRerun,
+  canonicalTtsBackendId,
+  isAudioPath,
+  isVideoPath,
+  jobMatchesArtifact,
+  normalizeVariantLabel,
+  ttsBackendIdsMatch,
+  type ArtifactInfo,
+} from "../lib/localizationRuntime";
 import { copyPathToClipboard, openPathBestEffort, revealPath } from "../lib/pathOpener";
 import { safeLocalStorageGet, safeLocalStorageSet } from "../lib/persist";
 import { useSharedDownloadDirStatus } from "../lib/sharedDownloadDir";
@@ -70,23 +81,6 @@ type ItemOutputs = {
   export_pack_v1_zip_exists: boolean;
 };
 
-type ArtifactInfo = {
-  id: string;
-  title: string;
-  path: string;
-  exists: boolean;
-  group: string;
-};
-
-type ArtifactIdentity = {
-  jobType: string | null;
-  variantLabel: string | null;
-  trackId: string | null;
-  muxContainer: "mp4" | "mkv" | null;
-  ttsBackendId: string | null;
-  rerunSupported: boolean;
-};
-
 type ExportedFile = {
   out_path: string;
   file_bytes: number;
@@ -125,121 +119,6 @@ function stemFromPath(path: string): string {
 function trimOrNull(value: string | null | undefined): string | null {
   const next = (value ?? "").trim();
   return next ? next : null;
-}
-
-function normalizeVariantLabel(value: string | null | undefined): string | null {
-  const raw = (value ?? "").trim();
-  if (!raw) return null;
-  let out = "";
-  let prevUnderscore = false;
-  for (const ch of raw) {
-    const mapped = /[a-z0-9]/i.test(ch) ? ch.toLowerCase() : "_";
-    if (mapped === "_") {
-      if (prevUnderscore) continue;
-      prevUnderscore = true;
-    } else {
-      prevUnderscore = false;
-    }
-    out += mapped;
-  }
-  const normalized = out.replace(/^_+|_+$/g, "");
-  return normalized ? normalized : null;
-}
-
-function canonicalTtsBackendId(value: string | null | undefined): string {
-  const raw = (value ?? "").trim().toLowerCase();
-  if (!raw) return "";
-  if (
-    raw === "openvoice_v2" ||
-    raw === "voice_preserving_local_v1" ||
-    raw === "dub_voice_preserving_v1"
-  ) {
-    return "openvoice_v2";
-  }
-  if (raw === "tts_neural_local_v1" || raw === "kokoro") return "tts_neural_local_v1";
-  if (raw === "pyttsx3_v1" || raw === "tts_preview_pyttsx3_v1") return "pyttsx3_v1";
-  return raw;
-}
-
-function ttsBackendIdsMatch(left: string | null | undefined, right: string | null | undefined): boolean {
-  const a = canonicalTtsBackendId(left);
-  const b = canonicalTtsBackendId(right);
-  return !!a && a === b;
-}
-
-function asRecord(value: unknown): Record<string, unknown> | null {
-  return value && typeof value === "object" && !Array.isArray(value)
-    ? (value as Record<string, unknown>)
-    : null;
-}
-
-function asString(value: unknown): string | null {
-  return typeof value === "string" ? trimOrNull(value) : null;
-}
-
-function parseJobParams(job: JobRow): Record<string, unknown> | null {
-  const raw = (job.params_json ?? "").trim();
-  if (!raw) return null;
-  try {
-    return asRecord(JSON.parse(raw));
-  } catch {
-    return null;
-  }
-}
-
-function artifactVariantLabel(artifact: ArtifactInfo): string | null {
-  const byId = [
-    "tts_voice_preserving_manifest_variant_",
-    "dub_mix_variant_",
-    "dub_speech_stem_variant_",
-    "dub_mux_mp4_variant_",
-    "dub_mux_mkv_variant_",
-  ].find((prefix) => artifact.id.startsWith(prefix));
-  if (byId) {
-    return normalizeVariantLabel(artifact.id.slice(byId.length));
-  }
-  const experimentalById = artifact.id.match(
-    /^tts_(?:manifest|request|report)_backend_(.+?)_variant_(.+)$/i,
-  );
-  if (experimentalById) {
-    return normalizeVariantLabel(experimentalById[2]);
-  }
-  const name = fileNameFromPath(artifact.path);
-  if (name === "export_pack_v1.zip") return null;
-  if (name.startsWith("export_pack_v1_") && name.endsWith(".zip")) {
-    return normalizeVariantLabel(name.slice("export_pack_v1_".length, -".zip".length));
-  }
-  const qcMatch = name.match(/^qc_report_v1_([0-9a-f-]{36})(?:_(.+))?\.json$/i);
-  if (qcMatch) {
-    return normalizeVariantLabel(qcMatch[2] ?? null);
-  }
-  return null;
-}
-
-function artifactTrackId(artifact: ArtifactInfo): string | null {
-  const qcMatch = fileNameFromPath(artifact.path).match(/^qc_report_v1_([0-9a-f-]{36})(?:_(.+))?\.json$/i);
-  return qcMatch ? trimOrNull(qcMatch[1]) : null;
-}
-
-function artifactTtsBackendId(artifact: ArtifactInfo): string | null {
-  if (
-    artifact.id === "tts_voice_preserving_manifest" ||
-    artifact.id.startsWith("tts_voice_preserving_manifest_variant_")
-  ) {
-    return "openvoice_v2";
-  }
-  if (artifact.id === "tts_neural_manifest") return "tts_neural_local_v1";
-  if (artifact.id === "tts_pyttsx3_manifest") return "pyttsx3_v1";
-  const experimentalMatch = artifact.id.match(
-    /^tts_(?:manifest|request|report)_backend_(.+?)(?:_variant_.+)?$/i,
-  );
-  return experimentalMatch ? canonicalTtsBackendId(experimentalMatch[1]) : null;
-}
-
-function artifactMuxContainer(artifactId: string): "mp4" | "mkv" | null {
-  if (artifactId.startsWith("dub_mux_mp4")) return "mp4";
-  if (artifactId.startsWith("dub_mux_mkv")) return "mkv";
-  return null;
 }
 
 function uniquePaths(paths: Array<string | null | undefined>): string[] {
@@ -4510,143 +4389,11 @@ export function SubtitleEditorPage({ itemId, visible = true }: { itemId: string;
     }
   }
 
-  function artifactJobType(artifactId: string): string | null {
-    if (artifactId.startsWith("sep_spleeter_")) return "separate_audio_spleeter";
-    if (artifactId.startsWith("sep_demucs_")) return "separate_audio_demucs_v1";
-    if (artifactId === "cleanup_vocals") return "clean_vocals_v1";
-    if (artifactId === "tts_pyttsx3_manifest") return "tts_preview_pyttsx3_v1";
-    if (artifactId === "tts_neural_manifest") return "tts_neural_local_v1";
-    if (artifactId.startsWith("tts_manifest_backend_") || artifactId.startsWith("tts_request_backend_") || artifactId.startsWith("tts_report_backend_")) {
-      return "experimental_voice_backend_render_v1";
-    }
-    if (
-      artifactId === "tts_voice_preserving_manifest" ||
-      artifactId.startsWith("tts_voice_preserving_manifest_variant_")
-    ) {
-      return "dub_voice_preserving_v1";
-    }
-    if (
-      artifactId === "dub_mix" ||
-      artifactId === "dub_speech_stem" ||
-      artifactId.startsWith("dub_mix_variant_") ||
-      artifactId.startsWith("dub_speech_stem_variant_")
-    ) {
-      return "mix_dub_preview_v1";
-    }
-    if (artifactId.startsWith("dub_mux_")) return "mux_dub_preview_v1";
-    if (artifactId === "export_pack" || artifactId.startsWith("export_")) return "export_pack_v1";
-    if (artifactId.startsWith("qc_")) return "qc_report_v1";
-    return null;
-  }
-
-  function artifactIdentity(artifact: ArtifactInfo): ArtifactIdentity {
-    return {
-      jobType: artifactJobType(artifact.id),
-      variantLabel: artifactVariantLabel(artifact),
-      trackId: artifactTrackId(artifact),
-      muxContainer: artifactMuxContainer(artifact.id),
-      ttsBackendId: artifactTtsBackendId(artifact),
-      rerunSupported:
-        artifact.id.startsWith("sep_spleeter_") ||
-        artifact.id.startsWith("sep_demucs_") ||
-        artifact.id === "cleanup_vocals" ||
-        artifact.id === "tts_pyttsx3_manifest" ||
-        artifact.id === "tts_neural_manifest" ||
-        artifact.id === "tts_voice_preserving_manifest" ||
-        artifact.id.startsWith("tts_manifest_backend_") ||
-        artifact.id.startsWith("tts_request_backend_") ||
-        artifact.id.startsWith("tts_report_backend_") ||
-        artifact.id === "dub_mix" ||
-        artifact.id === "dub_speech_stem" ||
-        artifact.id === "dub_mux_mp4" ||
-        artifact.id === "dub_mux_mkv" ||
-        artifact.id === "export_pack",
-    };
-  }
-
-  function jobIdentity(job: JobRow): ArtifactIdentity {
-    const params = parseJobParams(job);
-    const pipeline = asRecord(params?.pipeline);
-    const rawVariant =
-      asString(params?.variant_label) ?? asString(pipeline?.variant_label) ?? null;
-    const rawTrackId = asString(params?.track_id) ?? null;
-    const rawMuxContainer = asString(params?.output_container);
-    return {
-      jobType: job.job_type,
-      variantLabel: normalizeVariantLabel(rawVariant),
-      trackId: rawTrackId,
-      muxContainer:
-        job.job_type === "mux_dub_preview_v1"
-          ? rawMuxContainer === "mkv"
-            ? "mkv"
-            : "mp4"
-          : null,
-      ttsBackendId:
-        job.job_type === "experimental_voice_backend_render_v1"
-          ? canonicalTtsBackendId(
-              asString(params?.backend_id) ?? asString(pipeline?.tts_backend_id) ?? null,
-            )
-          : canonicalTtsBackendId(asString(pipeline?.tts_backend_id) ?? null),
-      rerunSupported: true,
-    };
-  }
-
-  function jobMatchesArtifact(job: JobRow, artifact: ArtifactInfo): boolean {
-    const artifactMeta = artifactIdentity(artifact);
-    if (!artifactMeta.jobType || job.job_type !== artifactMeta.jobType) {
-      return false;
-    }
-    const jobMeta = jobIdentity(job);
-    if (artifactMeta.jobType === "mux_dub_preview_v1") {
-      return (
-        jobMeta.variantLabel === artifactMeta.variantLabel &&
-        jobMeta.muxContainer === artifactMeta.muxContainer
-      );
-    }
-    if (artifactMeta.jobType === "qc_report_v1") {
-      return (
-        jobMeta.trackId === artifactMeta.trackId &&
-        jobMeta.variantLabel === artifactMeta.variantLabel
-      );
-    }
-    if (
-      artifactMeta.jobType === "dub_voice_preserving_v1" ||
-      artifactMeta.jobType === "mix_dub_preview_v1" ||
-      artifactMeta.jobType === "export_pack_v1"
-    ) {
-      return jobMeta.variantLabel === artifactMeta.variantLabel;
-    }
-    if (artifactMeta.jobType === "experimental_voice_backend_render_v1") {
-      return (
-        jobMeta.variantLabel === artifactMeta.variantLabel &&
-        ttsBackendIdsMatch(jobMeta.ttsBackendId, artifactMeta.ttsBackendId)
-      );
-    }
-    return true;
-  }
-
-  function extLower(path: string): string {
-    const p = (path ?? "").trim();
-    const idx = p.lastIndexOf(".");
-    return idx >= 0 ? p.slice(idx + 1).toLowerCase() : "";
-  }
-
-  function isAudioPath(path: string): boolean {
-    return ["wav", "mp3", "m4a", "flac", "ogg", "aac", "opus"].includes(extLower(path));
-  }
-
-  function isVideoPath(path: string): boolean {
-    return ["mp4", "mkv", "mov", "webm"].includes(extLower(path));
-  }
-
   async function playArtifact(artifact: ArtifactInfo) {
     if (!artifact.exists) return;
-    if (artifact.id === "dub_mux_mp4") {
-      setVideoPreviewMode("mux_mp4");
-      return;
-    }
-    if (artifact.id === "dub_mux_mkv") {
-      setVideoPreviewMode("mux_mkv");
+    const previewMode = artifactPreferredVideoPreviewMode(artifact);
+    if (previewMode) {
+      setVideoPreviewMode(previewMode);
       return;
     }
     if (isAudioPath(artifact.path)) {
@@ -4672,39 +4419,35 @@ export function SubtitleEditorPage({ itemId, visible = true }: { itemId: string;
         setNotice(`Queued rerun for ${artifact.title}.`);
         return;
       }
-      if (artifact.id.startsWith("sep_spleeter_")) {
+      if (artifact.rerun_kind === "separate_spleeter") {
         await invoke("jobs_enqueue_separate_audio_spleeter", { itemId });
         setNotice("Queued Spleeter separation.");
         return;
       }
-      if (artifact.id.startsWith("sep_demucs_")) {
+      if (artifact.rerun_kind === "separate_demucs") {
         await invoke("jobs_enqueue_separate_audio_demucs_v1", { itemId });
         setNotice("Queued Demucs separation.");
         return;
       }
-      if (artifact.id === "cleanup_vocals") {
+      if (artifact.rerun_kind === "clean_vocals") {
         await enqueueCleanVocals();
         return;
       }
-      if (artifact.id === "tts_pyttsx3_manifest") {
+      if (artifact.rerun_kind === "tts_pyttsx3") {
         await enqueueTtsPreview();
         return;
       }
-      if (artifact.id === "tts_neural_manifest") {
+      if (artifact.rerun_kind === "tts_neural_local_v1") {
         await enqueueTtsNeuralLocalV1Preview();
         return;
       }
-      if (artifact.id === "tts_voice_preserving_manifest") {
+      if (artifact.rerun_kind === "dub_voice_preserving_v1") {
         await enqueueDubVoicePreservingV1();
         return;
       }
-      if (
-        artifact.id.startsWith("tts_manifest_backend_") ||
-        artifact.id.startsWith("tts_request_backend_") ||
-        artifact.id.startsWith("tts_report_backend_")
-      ) {
-        const backendId = artifactTtsBackendId(artifact);
-        const variantLabel = artifactVariantLabel(artifact);
+      if (artifact.rerun_kind === "experimental_voice_backend_render_v1") {
+        const backendId = canonicalTtsBackendId(artifact.tts_backend_id);
+        const variantLabel = artifact.variant_label;
         if (!backendId) {
           throw new Error("Experimental backend id could not be resolved for this artifact.");
         }
@@ -4729,21 +4472,17 @@ export function SubtitleEditorPage({ itemId, visible = true }: { itemId: string;
         setNotice(`Queued experimental render for ${backendId}.`);
         return;
       }
-      if (artifact.id === "dub_mix" || artifact.id === "dub_speech_stem") {
+      if (artifact.rerun_kind === "mix_dub_preview_v1") {
         await enqueueMixDubPreview();
         return;
       }
-      if (artifact.id === "dub_mux_mp4") {
-        await invoke("jobs_enqueue_mux_dub_preview_v1", { itemId, outputContainer: "mp4" });
-        setNotice("Queued mux preview (MP4).");
+      if (artifact.rerun_kind === "mux_dub_preview_v1") {
+        const outputContainer = artifact.mux_container === "mkv" ? "mkv" : "mp4";
+        await invoke("jobs_enqueue_mux_dub_preview_v1", { itemId, outputContainer });
+        setNotice(`Queued mux preview (${outputContainer.toUpperCase()}).`);
         return;
       }
-      if (artifact.id === "dub_mux_mkv") {
-        await invoke("jobs_enqueue_mux_dub_preview_v1", { itemId, outputContainer: "mkv" });
-        setNotice("Queued mux preview (MKV).");
-        return;
-      }
-      if (artifact.id === "export_pack") {
+      if (artifact.rerun_kind === "export_pack_v1") {
         await enqueueExportPack();
         return;
       }
@@ -8083,13 +7822,10 @@ export function SubtitleEditorPage({ itemId, visible = true }: { itemId: string;
             <tbody>
               {artifacts.length ? (
                 artifacts.map((a) => {
-                  const artifactMeta = artifactIdentity(a);
                   const job = latestItemJobByArtifactId.get(a.id) ?? null;
                   const finished = formatTs(job?.finished_at_ms ?? null);
                   const canPlay = a.exists && (isAudioPath(a.path) || isVideoPath(a.path));
-                  const canRerun =
-                    artifactMeta.rerunSupported ||
-                    !!latestItemJobByArtifactId.get(a.id);
+                  const canRerun = artifactSupportsRerun(a) || !!latestItemJobByArtifactId.get(a.id);
                   const rerunBusy =
                     job?.status === "queued" || job?.status === "running";
 

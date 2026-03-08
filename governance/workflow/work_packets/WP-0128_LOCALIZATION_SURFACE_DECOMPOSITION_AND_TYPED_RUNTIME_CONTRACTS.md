@@ -3,7 +3,7 @@
 ## Metadata
 - ID: WP-0128
 - Owner: Codex
-- Status: BACKLOG
+- Status: DONE
 - Created: 2026-03-08
 - Target milestone: Audit remediation tranche
 
@@ -39,3 +39,4 @@ Out of scope:
 ## Status updates
 
 - 2026-03-08: Created from `WP-0119` architecture and contract findings.
+- 2026-03-08: Completed. Item artifacts now carry typed runtime metadata from Tauri, and the frontend artifact/job-matching contract moved into a shared localization runtime module instead of inline filename heuristics in `SubtitleEditorPage`. Proof: `product/desktop/Build Target/tool_artifacts/wp_runs/WP-0128/20260308_203600/`.

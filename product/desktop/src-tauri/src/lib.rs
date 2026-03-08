@@ -31,12 +31,52 @@ struct Phase2InstallLatestState {
 }
 
 #[derive(Debug, Clone, serde::Serialize)]
+#[serde(rename_all = "snake_case")]
+enum ArtifactKind {
+    SeparationStem,
+    CleanupAudio,
+    CleanupManifest,
+    TtsManifest,
+    TtsRequest,
+    TtsReport,
+    DubMix,
+    DubSpeechStem,
+    DubMux,
+    ExportPack,
+    QcReport,
+    BenchmarkReport,
+    ReferenceCurationReport,
+}
+
+#[derive(Debug, Clone, serde::Serialize)]
+#[serde(rename_all = "snake_case")]
+enum ArtifactRerunKind {
+    SeparateSpleeter,
+    SeparateDemucs,
+    CleanVocals,
+    TtsPyttsx3,
+    TtsNeuralLocalV1,
+    DubVoicePreservingV1,
+    ExperimentalVoiceBackendRenderV1,
+    MixDubPreviewV1,
+    MuxDubPreviewV1,
+    ExportPackV1,
+}
+
+#[derive(Debug, Clone, serde::Serialize)]
 struct ArtifactInfo {
     id: String,
     title: String,
     path: String,
     exists: bool,
     group: String,
+    kind: ArtifactKind,
+    job_type: Option<String>,
+    variant_label: Option<String>,
+    track_id: Option<String>,
+    mux_container: Option<String>,
+    tts_backend_id: Option<String>,
+    rerun_kind: Option<ArtifactRerunKind>,
 }
 
 #[derive(Debug, Clone)]
@@ -1228,6 +1268,53 @@ fn item_qc_report_v1_load(
     Ok(Some(parsed))
 }
 
+fn normalize_variant_label(raw: Option<&str>) -> Option<String> {
+    let value = raw?.trim();
+    if value.is_empty() {
+        return None;
+    }
+    let mut out = String::new();
+    let mut prev_underscore = false;
+    for ch in value.chars() {
+        let mapped = if ch.is_ascii_alphanumeric() {
+            ch.to_ascii_lowercase()
+        } else {
+            '_'
+        };
+        if mapped == '_' {
+            if prev_underscore {
+                continue;
+            }
+            prev_underscore = true;
+        } else {
+            prev_underscore = false;
+        }
+        out.push(mapped);
+    }
+    let trimmed = out.trim_matches('_').to_string();
+    if trimmed.is_empty() {
+        None
+    } else {
+        Some(trimmed)
+    }
+}
+
+fn qc_report_identity(file_name: &str) -> (Option<String>, Option<String>) {
+    let Some(stem) = file_name.strip_suffix(".json") else {
+        return (None, None);
+    };
+    let Some(rest) = stem.strip_prefix("qc_report_v1_") else {
+        return (None, None);
+    };
+    let mut parts = rest.splitn(2, '_');
+    let track_id = parts.next().map(|value| value.trim().to_string());
+    let variant_label = normalize_variant_label(parts.next());
+    (
+        track_id.filter(|value| !value.is_empty()),
+        variant_label,
+    )
+}
+
 #[tauri::command]
 #[allow(non_snake_case)]
 fn item_artifacts_list_v1(
@@ -1244,13 +1331,32 @@ fn item_artifacts_list_v1(
     let item_dir = state.paths.derived_item_dir(&item_id);
     let mut out: Vec<ArtifactInfo> = Vec::new();
 
-    let mut push = |id: &str, title: &str, group: &str, path: std::path::PathBuf| {
+    let mut push = |
+        id: &str,
+        title: &str,
+        group: &str,
+        kind: ArtifactKind,
+        job_type: Option<&str>,
+        variant_label: Option<String>,
+        track_id: Option<String>,
+        mux_container: Option<&str>,
+        tts_backend_id: Option<&str>,
+        rerun_kind: Option<ArtifactRerunKind>,
+        path: std::path::PathBuf,
+    | {
         out.push(ArtifactInfo {
             id: id.to_string(),
             title: title.to_string(),
             path: path.to_string_lossy().to_string(),
             exists: path.exists(),
             group: group.to_string(),
+            kind,
+            job_type: job_type.map(|value| value.to_string()),
+            variant_label,
+            track_id,
+            mux_container: mux_container.map(|value| value.to_string()),
+            tts_backend_id: tts_backend_id.map(|value| value.to_string()),
+            rerun_kind,
         });
     };
 
@@ -1259,6 +1365,13 @@ fn item_artifacts_list_v1(
         "sep_spleeter_vocals",
         "Vocals (Spleeter)",
         "Separation",
+        ArtifactKind::SeparationStem,
+        Some("separate_audio_spleeter"),
+        None,
+        None,
+        None,
+        None,
+        Some(ArtifactRerunKind::SeparateSpleeter),
         item_dir
             .join("separation")
             .join("spleeter_2stems")
@@ -1268,6 +1381,13 @@ fn item_artifacts_list_v1(
         "sep_spleeter_background",
         "Background (Spleeter)",
         "Separation",
+        ArtifactKind::SeparationStem,
+        Some("separate_audio_spleeter"),
+        None,
+        None,
+        None,
+        None,
+        Some(ArtifactRerunKind::SeparateSpleeter),
         item_dir
             .join("separation")
             .join("spleeter_2stems")
@@ -1277,6 +1397,13 @@ fn item_artifacts_list_v1(
         "sep_demucs_vocals",
         "Vocals (Demucs)",
         "Separation",
+        ArtifactKind::SeparationStem,
+        Some("separate_audio_demucs_v1"),
+        None,
+        None,
+        None,
+        None,
+        Some(ArtifactRerunKind::SeparateDemucs),
         item_dir
             .join("separation")
             .join("demucs_two_stems_v1")
@@ -1286,6 +1413,13 @@ fn item_artifacts_list_v1(
         "sep_demucs_background",
         "Background (Demucs)",
         "Separation",
+        ArtifactKind::SeparationStem,
+        Some("separate_audio_demucs_v1"),
+        None,
+        None,
+        None,
+        None,
+        Some(ArtifactRerunKind::SeparateDemucs),
         item_dir
             .join("separation")
             .join("demucs_two_stems_v1")
@@ -1297,6 +1431,13 @@ fn item_artifacts_list_v1(
         "cleanup_vocals",
         "Vocals cleaned",
         "Cleanup",
+        ArtifactKind::CleanupAudio,
+        Some("clean_vocals_v1"),
+        None,
+        None,
+        None,
+        None,
+        Some(ArtifactRerunKind::CleanVocals),
         item_dir.join("cleanup").join("vocals_clean_v1.wav"),
     );
 
@@ -1305,6 +1446,13 @@ fn item_artifacts_list_v1(
         "tts_pyttsx3_manifest",
         "TTS manifest (pyttsx3)",
         "TTS",
+        ArtifactKind::TtsManifest,
+        Some("tts_preview_pyttsx3_v1"),
+        None,
+        None,
+        None,
+        Some("pyttsx3_v1"),
+        Some(ArtifactRerunKind::TtsPyttsx3),
         item_dir
             .join("tts_preview")
             .join("pyttsx3_v1")
@@ -1314,6 +1462,13 @@ fn item_artifacts_list_v1(
         "tts_neural_manifest",
         "TTS manifest (neural local v1)",
         "TTS",
+        ArtifactKind::TtsManifest,
+        Some("tts_neural_local_v1"),
+        None,
+        None,
+        None,
+        Some("tts_neural_local_v1"),
+        Some(ArtifactRerunKind::TtsNeuralLocalV1),
         item_dir
             .join("tts_preview")
             .join("tts_neural_local_v1")
@@ -1323,6 +1478,13 @@ fn item_artifacts_list_v1(
         "tts_voice_preserving_manifest",
         "TTS manifest (voice-preserving)",
         "TTS",
+        ArtifactKind::TtsManifest,
+        Some("dub_voice_preserving_v1"),
+        None,
+        None,
+        None,
+        Some("openvoice_v2"),
+        Some(ArtifactRerunKind::DubVoicePreservingV1),
         item_dir
             .join("tts_preview")
             .join("dub_voice_preserving_v1")
@@ -1345,6 +1507,13 @@ fn item_artifacts_list_v1(
                 &format!("tts_voice_preserving_manifest_variant_{label}"),
                 &format!("TTS manifest (voice-preserving {label})"),
                 "TTS alternates",
+                ArtifactKind::TtsManifest,
+                Some("dub_voice_preserving_v1"),
+                normalize_variant_label(Some(label)),
+                None,
+                None,
+                Some("openvoice_v2"),
+                Some(ArtifactRerunKind::DubVoicePreservingV1),
                 path.join("manifest.json"),
             );
         }
@@ -1370,18 +1539,39 @@ fn item_artifacts_list_v1(
                 &format!("tts_manifest_backend_{backend_id}"),
                 &format!("TTS manifest ({backend_id})"),
                 "TTS experiments",
+                ArtifactKind::TtsManifest,
+                Some("experimental_voice_backend_render_v1"),
+                None,
+                None,
+                None,
+                Some(backend_id),
+                Some(ArtifactRerunKind::ExperimentalVoiceBackendRenderV1),
                 backend_dir.join("manifest.json"),
             );
             push(
                 &format!("tts_request_backend_{backend_id}"),
                 &format!("TTS request ({backend_id})"),
                 "TTS experiments",
+                ArtifactKind::TtsRequest,
+                Some("experimental_voice_backend_render_v1"),
+                None,
+                None,
+                None,
+                Some(backend_id),
+                Some(ArtifactRerunKind::ExperimentalVoiceBackendRenderV1),
                 backend_dir.join("request.json"),
             );
             push(
                 &format!("tts_report_backend_{backend_id}"),
                 &format!("TTS report ({backend_id})"),
                 "TTS experiments",
+                ArtifactKind::TtsReport,
+                Some("experimental_voice_backend_render_v1"),
+                None,
+                None,
+                None,
+                Some(backend_id),
+                Some(ArtifactRerunKind::ExperimentalVoiceBackendRenderV1),
                 backend_dir.join("report.json"),
             );
 
@@ -1401,18 +1591,39 @@ fn item_artifacts_list_v1(
                     &format!("tts_manifest_backend_{backend_id}_variant_{label}"),
                     &format!("TTS manifest ({backend_id} {label})"),
                     "TTS experiment alternates",
+                    ArtifactKind::TtsManifest,
+                    Some("experimental_voice_backend_render_v1"),
+                    normalize_variant_label(Some(label)),
+                    None,
+                    None,
+                    Some(backend_id),
+                    Some(ArtifactRerunKind::ExperimentalVoiceBackendRenderV1),
                     variant_path.join("manifest.json"),
                 );
                 push(
                     &format!("tts_request_backend_{backend_id}_variant_{label}"),
                     &format!("TTS request ({backend_id} {label})"),
                     "TTS experiment alternates",
+                    ArtifactKind::TtsRequest,
+                    Some("experimental_voice_backend_render_v1"),
+                    normalize_variant_label(Some(label)),
+                    None,
+                    None,
+                    Some(backend_id),
+                    Some(ArtifactRerunKind::ExperimentalVoiceBackendRenderV1),
                     variant_path.join("request.json"),
                 );
                 push(
                     &format!("tts_report_backend_{backend_id}_variant_{label}"),
                     &format!("TTS report ({backend_id} {label})"),
                     "TTS experiment alternates",
+                    ArtifactKind::TtsReport,
+                    Some("experimental_voice_backend_render_v1"),
+                    normalize_variant_label(Some(label)),
+                    None,
+                    None,
+                    Some(backend_id),
+                    Some(ArtifactRerunKind::ExperimentalVoiceBackendRenderV1),
                     variant_path.join("report.json"),
                 );
             }
@@ -1424,12 +1635,26 @@ fn item_artifacts_list_v1(
         "dub_mix",
         "Mix dub preview (WAV)",
         "Dub preview",
+        ArtifactKind::DubMix,
+        Some("mix_dub_preview_v1"),
+        None,
+        None,
+        None,
+        None,
+        Some(ArtifactRerunKind::MixDubPreviewV1),
         item_dir.join("dub_preview").join("mix_dub_preview_v1.wav"),
     );
     push(
         "dub_speech_stem",
         "Speech stem (WAV)",
         "Dub preview",
+        ArtifactKind::DubSpeechStem,
+        Some("mix_dub_preview_v1"),
+        None,
+        None,
+        None,
+        None,
+        Some(ArtifactRerunKind::MixDubPreviewV1),
         item_dir
             .join("dub_preview")
             .join("speech_dub_preview_v1.wav"),
@@ -1438,12 +1663,26 @@ fn item_artifacts_list_v1(
         "dub_mux_mp4",
         "Mux dub preview (MP4)",
         "Dub preview",
+        ArtifactKind::DubMux,
+        Some("mux_dub_preview_v1"),
+        None,
+        None,
+        Some("mp4"),
+        None,
+        Some(ArtifactRerunKind::MuxDubPreviewV1),
         item_dir.join("dub_preview").join("mux_dub_preview_v1.mp4"),
     );
     push(
         "dub_mux_mkv",
         "Mux dub preview (MKV)",
         "Dub preview",
+        ArtifactKind::DubMux,
+        Some("mux_dub_preview_v1"),
+        None,
+        None,
+        Some("mkv"),
+        None,
+        Some(ArtifactRerunKind::MuxDubPreviewV1),
         item_dir.join("dub_preview").join("mux_dub_preview_v1.mkv"),
     );
     let alternate_dir = item_dir.join("dub_preview").join("alternates");
@@ -1460,24 +1699,52 @@ fn item_artifacts_list_v1(
                 &format!("dub_mix_variant_{label}"),
                 &format!("Mix dub preview ({label})"),
                 "Dub alternates",
+                ArtifactKind::DubMix,
+                Some("mix_dub_preview_v1"),
+                normalize_variant_label(Some(label)),
+                None,
+                None,
+                None,
+                Some(ArtifactRerunKind::MixDubPreviewV1),
                 path.join("mix_dub_preview_v1.wav"),
             );
             push(
                 &format!("dub_speech_stem_variant_{label}"),
                 &format!("Speech stem ({label})"),
                 "Dub alternates",
+                ArtifactKind::DubSpeechStem,
+                Some("mix_dub_preview_v1"),
+                normalize_variant_label(Some(label)),
+                None,
+                None,
+                None,
+                Some(ArtifactRerunKind::MixDubPreviewV1),
                 path.join("speech_dub_preview_v1.wav"),
             );
             push(
                 &format!("dub_mux_mp4_variant_{label}"),
                 &format!("Mux dub preview MP4 ({label})"),
                 "Dub alternates",
+                ArtifactKind::DubMux,
+                Some("mux_dub_preview_v1"),
+                normalize_variant_label(Some(label)),
+                None,
+                Some("mp4"),
+                None,
+                Some(ArtifactRerunKind::MuxDubPreviewV1),
                 path.join("mux_dub_preview_v1.mp4"),
             );
             push(
                 &format!("dub_mux_mkv_variant_{label}"),
                 &format!("Mux dub preview MKV ({label})"),
                 "Dub alternates",
+                ArtifactKind::DubMux,
+                Some("mux_dub_preview_v1"),
+                normalize_variant_label(Some(label)),
+                None,
+                Some("mkv"),
+                None,
+                Some(ArtifactRerunKind::MuxDubPreviewV1),
                 path.join("mux_dub_preview_v1.mkv"),
             );
         }
@@ -1488,6 +1755,13 @@ fn item_artifacts_list_v1(
         "export_pack",
         "Export pack (zip)",
         "Export",
+        ArtifactKind::ExportPack,
+        Some("export_pack_v1"),
+        None,
+        None,
+        None,
+        None,
+        Some(ArtifactRerunKind::ExportPackV1),
         item_dir.join("exports").join("export_pack_v1.zip"),
     );
     let export_dir = item_dir.join("exports");
@@ -1507,6 +1781,17 @@ fn item_artifacts_list_v1(
                 &format!("export_{}", name.replace('.', "_")),
                 &format!("Export pack ({name})"),
                 "Export alternates",
+                ArtifactKind::ExportPack,
+                Some("export_pack_v1"),
+                normalize_variant_label(Some(
+                    name.strip_prefix("export_pack_v1_")
+                        .and_then(|value| value.strip_suffix(".zip"))
+                        .unwrap_or(""),
+                )),
+                None,
+                None,
+                None,
+                Some(ArtifactRerunKind::ExportPackV1),
                 path,
             );
         }
@@ -1559,12 +1844,26 @@ fn item_artifacts_list_v1(
                         &format!("voice_cleanup_{speaker_label}_{cleanup_id}"),
                         &format!("Voice cleanup {speaker_title} ({cleanup_id})"),
                         "Voice cleanup",
+                        ArtifactKind::CleanupAudio,
+                        None,
+                        None,
+                        None,
+                        None,
+                        None,
+                        None,
                         cleanup_path.join("cleaned_ref.wav"),
                     );
                     push(
                         &format!("voice_cleanup_manifest_{speaker_label}_{cleanup_id}"),
                         &format!("Voice cleanup manifest {speaker_title} ({cleanup_id})"),
                         "Voice cleanup",
+                        ArtifactKind::CleanupManifest,
+                        None,
+                        None,
+                        None,
+                        None,
+                        None,
+                        None,
                         manifest_path,
                     );
                 }
@@ -1587,6 +1886,13 @@ fn item_artifacts_list_v1(
                         &format!("qc_{name}"),
                         &format!("QC report ({name})"),
                         "QC",
+                        ArtifactKind::QcReport,
+                        Some("qc_report_v1"),
+                        qc_report_identity(name).1,
+                        qc_report_identity(name).0,
+                        None,
+                        None,
+                        None,
                         path,
                     );
                 }
@@ -1613,6 +1919,13 @@ fn item_artifacts_list_v1(
                     &format!("benchmark_{}", name.replace('.', "_")),
                     &format!("Voice benchmark ({name})"),
                     "Benchmark",
+                    ArtifactKind::BenchmarkReport,
+                    None,
+                    None,
+                    None,
+                    None,
+                    None,
+                    None,
                     path,
                 );
             }
@@ -1638,6 +1951,13 @@ fn item_artifacts_list_v1(
                     &format!("reference_curation_{}", name.replace('.', "_")),
                     &format!("Reference curation ({name})"),
                     "Reference curation",
+                    ArtifactKind::ReferenceCurationReport,
+                    None,
+                    None,
+                    None,
+                    None,
+                    None,
+                    None,
                     path,
                 );
             }
