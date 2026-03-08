@@ -124,6 +124,7 @@ Initial language focus: **Korean + Japanese → English**.
 - Log rotation and retention (cap by size + age).
 - Diagnostics must surface the derived-artifact retention policy so operators can distinguish working files, durable reports, and durable deliverables.
 - Cache/history cleanup must be split from output-folder deletion, and custom or external output folders must require a separate explicit opt-in before deletion.
+- Local config, override, and secret writes must be crash-safe and atomic rather than direct in-place truncation writes.
 - "Export diagnostics bundle" (logs + job metadata + redacted config).
 - Recovery UX:
   - a **Safe Mode** startup path to open the app without auto-refresh or heavy background work (so users can export/manage data even when providers regress).

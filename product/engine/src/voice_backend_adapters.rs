@@ -1,5 +1,5 @@
 use crate::paths::AppPaths;
-use crate::{EngineError, Result};
+use crate::{persistence, EngineError, Result};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -902,7 +902,9 @@ fn save_configs(paths: &AppPaths, configs: &[VoiceBackendAdapterConfig]) -> Resu
         adapters: configs.to_vec(),
     };
     let json = serde_json::to_string_pretty(&store)?;
-    std::fs::write(paths.voice_backend_adapters_path(), format!("{json}\n"))?;
+    let path = paths.voice_backend_adapters_path();
+    let text = format!("{json}\n");
+    persistence::atomic_write_text(&path, &text)?;
     Ok(())
 }
 
@@ -922,7 +924,9 @@ fn save_probes(paths: &AppPaths, probes: &[VoiceBackendAdapterProbe]) -> Result<
         probes: probes.to_vec(),
     };
     let json = serde_json::to_string_pretty(&store)?;
-    std::fs::write(paths.voice_backend_adapter_probes_path(), format!("{json}\n"))?;
+    let path = paths.voice_backend_adapter_probes_path();
+    let text = format!("{json}\n");
+    persistence::atomic_write_text(&path, &text)?;
     Ok(())
 }
 

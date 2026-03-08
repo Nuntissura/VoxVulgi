@@ -1,3 +1,4 @@
+use crate::persistence;
 use std::path::{Path, PathBuf};
 
 #[derive(Debug, Clone)]
@@ -157,11 +158,9 @@ impl AppPaths {
     }
 
     pub fn set_diagnostics_trace_dir_override(&self, dir: &Path) -> std::io::Result<()> {
-        std::fs::create_dir_all(self.config_dir())?;
-        std::fs::write(
-            self.diagnostics_trace_dir_override_path(),
-            format!("{}\n", dir.to_string_lossy()),
-        )?;
+        let path = self.diagnostics_trace_dir_override_path();
+        let text = format!("{}\n", dir.to_string_lossy());
+        persistence::atomic_write_text(&path, &text)?;
         let legacy = self.legacy_diagnostics_trace_override_path();
         if legacy.exists() {
             std::fs::remove_file(legacy)?;
@@ -197,11 +196,9 @@ impl AppPaths {
     }
 
     pub fn set_python_exe_override(&self, exe_path: &Path) -> std::io::Result<()> {
-        std::fs::create_dir_all(self.config_dir())?;
-        std::fs::write(
-            self.python_exe_override_path(),
-            format!("{}\n", exe_path.to_string_lossy()),
-        )?;
+        let path = self.python_exe_override_path();
+        let text = format!("{}\n", exe_path.to_string_lossy());
+        persistence::atomic_write_text(&path, &text)?;
         Ok(())
     }
 
@@ -245,11 +242,9 @@ impl AppPaths {
     }
 
     pub fn set_download_dir_override(&self, dir: &Path) -> std::io::Result<()> {
-        std::fs::create_dir_all(self.config_dir())?;
-        std::fs::write(
-            self.download_dir_override_path(),
-            format!("{}\n", dir.to_string_lossy()),
-        )?;
+        let path = self.download_dir_override_path();
+        let text = format!("{}\n", dir.to_string_lossy());
+        persistence::atomic_write_text(&path, &text)?;
         Ok(())
     }
 

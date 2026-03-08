@@ -1,5 +1,5 @@
 use crate::paths::AppPaths;
-use crate::{EngineError, Result};
+use crate::{persistence, EngineError, Result};
 use serde::{Deserialize, Serialize};
 use std::path::Path;
 
@@ -45,7 +45,8 @@ pub fn save_batch_on_import_rules(paths: &AppPaths, rules: &BatchOnImportRules) 
         std::fs::create_dir_all(parent)?;
     }
     let json = serde_json::to_string_pretty(rules)?;
-    std::fs::write(&path, format!("{json}\n"))?;
+    let text = format!("{json}\n");
+    persistence::atomic_write_text(&path, &text)?;
     Ok(())
 }
 
@@ -82,7 +83,8 @@ pub fn save_safe_mode_config(paths: &AppPaths, config: &SafeModeConfig) -> Resul
         std::fs::create_dir_all(parent)?;
     }
     let json = serde_json::to_string_pretty(config)?;
-    std::fs::write(&path, format!("{json}\n"))?;
+    let text = format!("{json}\n");
+    persistence::atomic_write_text(&path, &text)?;
     Ok(())
 }
 
@@ -146,7 +148,8 @@ pub fn save_download_presets_config(
         std::fs::create_dir_all(parent)?;
     }
     let json = serde_json::to_string_pretty(&normalized)?;
-    std::fs::write(&path, format!("{json}\n"))?;
+    let text = format!("{json}\n");
+    persistence::atomic_write_text(&path, &text)?;
     Ok(())
 }
 
@@ -274,7 +277,8 @@ pub fn save_optional_diarization_backend_config(
         std::fs::create_dir_all(parent)?;
     }
     let json = serde_json::to_string_pretty(config)?;
-    std::fs::write(&config_path, format!("{json}\n"))?;
+    let text = format!("{json}\n");
+    persistence::atomic_write_text(&config_path, &text)?;
 
     if let Some(token) = token {
         write_secret_token(&paths.diarization_optional_backend_token_path(), token)?;
@@ -312,6 +316,7 @@ fn write_secret_token(path: &Path, token: &str) -> Result<()> {
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent)?;
     }
-    std::fs::write(path, format!("{token}\n"))?;
+    let text = format!("{token}\n");
+    persistence::atomic_write_text(path, &text)?;
     Ok(())
 }

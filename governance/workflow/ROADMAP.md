@@ -89,7 +89,7 @@ Date: 2026-03-08
 
 - WP-0124: Governance hygiene and manual smoke scope reconciliation. DONE.
 - WP-0125: Safe cleanup boundaries and artifact retention policy. DONE.
-- WP-0126: Schema versioning and atomic config persistence.
+- WP-0126: Schema versioning and atomic config persistence. DONE.
 - WP-0127: Visibility-aware polling and background work suspension.
 - WP-0128: Localization surface decomposition and typed runtime contracts.
 - WP-0129: Reproducible offline bundle and vendor patch hardening.

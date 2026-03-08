@@ -1,6 +1,6 @@
 use crate::paths::AppPaths;
 use crate::{
-    asr, cmd, config, db, ffmpeg, image_batch, library, speakers, subscriptions, subtitle_tracks,
+    asr, cmd, config, db, ffmpeg, image_batch, library, persistence, speakers, subscriptions, subtitle_tracks,
     subtitles, tools, translate, voice_backend_adapters, voice_cast_packs, voice_plans,
     voice_templates, EngineError, Result,
 };
@@ -8796,7 +8796,7 @@ fn write_cookie_header_as_netscape_path(
             "{domain}\t{include_subdomains}\t/\t{secure}\t2147483647\t{name}\t{value}\n"
         ));
     }
-    std::fs::write(cookie_path, contents)?;
+    persistence::atomic_write_text(cookie_path, &contents)?;
     Ok(())
 }
 
@@ -10821,12 +10821,8 @@ fn write_job_cookie_secret(paths: &AppPaths, job_id: &str, cookie_header: &str) 
         std::fs::create_dir_all(parent)?;
     }
 
-    let tmp_path = path.with_extension("tmp");
-    std::fs::write(&tmp_path, format!("{cookie_header}\n"))?;
-    if path.exists() {
-        let _ = std::fs::remove_file(&path);
-    }
-    std::fs::rename(&tmp_path, &path)?;
+    let text = format!("{cookie_header}\n");
+    persistence::atomic_write_text(&path, &text)?;
     Ok(())
 }
 

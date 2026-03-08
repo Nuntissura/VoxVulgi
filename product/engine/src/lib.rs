@@ -11,6 +11,7 @@ pub mod jobs;
 pub mod library;
 pub mod models;
 pub mod paths;
+pub mod persistence;
 pub mod speakers;
 pub mod subscriptions;
 pub mod subtitle_tracks;

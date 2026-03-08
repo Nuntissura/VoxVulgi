@@ -408,16 +408,7 @@ fn export_db_and_jobs(
     let conn = db::open(paths)?;
     db::migrate(&conn)?;
 
-    let schema_version_raw: Option<String> = match conn.query_row(
-        "SELECT value FROM meta WHERE key='schema_version'",
-        [],
-        |row| row.get(0),
-    ) {
-        Ok(v) => Some(v),
-        Err(rusqlite::Error::QueryReturnedNoRows) => None,
-        Err(e) => return Err(e.into()),
-    };
-    let schema_version = schema_version_raw.and_then(|v| v.parse::<u32>().ok());
+    let schema_version = Some(db::schema_user_version(&conn)?);
 
     let mut counts = BTreeMap::new();
     for (name, sql) in [

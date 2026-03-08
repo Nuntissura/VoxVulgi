@@ -3,6 +3,24 @@ use crate::Result;
 use rusqlite::{Connection, OpenFlags};
 use std::time::Duration;
 
+const CURRENT_SCHEMA_VERSION: u32 = 10;
+
+struct MigrationStep {
+    version: u32,
+    apply: fn(&Connection) -> Result<()>,
+}
+
+const MIGRATION_STEPS: &[MigrationStep] = &[
+    MigrationStep {
+        version: 1,
+        apply: apply_base_schema_v1,
+    },
+    MigrationStep {
+        version: CURRENT_SCHEMA_VERSION,
+        apply: apply_schema_v10,
+    },
+];
+
 pub fn open(paths: &AppPaths) -> Result<Connection> {
     paths.ensure_dirs()?;
 
@@ -22,6 +40,51 @@ pub fn open(paths: &AppPaths) -> Result<Connection> {
 }
 
 pub fn migrate(conn: &Connection) -> Result<()> {
+    let mut current_version = schema_user_version(conn)?;
+    for step in MIGRATION_STEPS {
+        if current_version >= step.version {
+            continue;
+        }
+        let tx = conn.unchecked_transaction()?;
+        (step.apply)(&tx)?;
+        tx.pragma_update(None, "user_version", step.version)?;
+        upsert_schema_version_meta(&tx, step.version)?;
+        tx.commit()?;
+        current_version = step.version;
+    }
+    if current_version == 0 {
+        upsert_schema_version_meta(conn, 0)?;
+    }
+    Ok(())
+}
+
+pub fn schema_user_version(conn: &Connection) -> Result<u32> {
+    let version = conn.pragma_query_value(None, "user_version", |row| row.get::<_, i32>(0))?;
+    Ok(version.max(0) as u32)
+}
+
+fn upsert_schema_version_meta(conn: &Connection, version: u32) -> Result<()> {
+    conn.execute(
+        "INSERT INTO meta(key, value) VALUES('schema_version', ?1)
+         ON CONFLICT(key) DO UPDATE SET value=excluded.value",
+        [version.to_string()],
+    )?;
+    Ok(())
+}
+
+fn apply_base_schema_v1(conn: &Connection) -> Result<()> {
+    conn.execute_batch(
+        r#"
+CREATE TABLE IF NOT EXISTS meta (
+  key TEXT PRIMARY KEY,
+  value TEXT NOT NULL
+);
+"#,
+    )?;
+    Ok(())
+}
+
+fn apply_schema_v10(conn: &Connection) -> Result<()> {
     conn.execute_batch(
         r#"
 CREATE TABLE IF NOT EXISTS meta (
@@ -557,26 +620,6 @@ CREATE INDEX IF NOT EXISTS idx_ingest_provenance_created ON ingest_provenance(cr
         [],
     )?;
 
-    let current_schema_version = 9;
-    let existing: Option<String> = conn
-        .query_row(
-            "SELECT value FROM meta WHERE key='schema_version'",
-            [],
-            |row| row.get(0),
-        )
-        .optional()?;
-
-    match existing {
-        Some(v) if v == current_schema_version.to_string() => {}
-        _ => {
-            conn.execute(
-                "INSERT INTO meta(key, value) VALUES('schema_version', ?)
-                 ON CONFLICT(key) DO UPDATE SET value=excluded.value",
-                [current_schema_version.to_string()],
-            )?;
-        }
-    }
-
     Ok(())
 }
 
@@ -603,24 +646,11 @@ pub fn ensure_schema(paths: &AppPaths) -> Result<()> {
     Ok(())
 }
 
-trait OptionalRowExt<T> {
-    fn optional(self) -> rusqlite::Result<Option<T>>;
-}
-
-impl<T> OptionalRowExt<T> for rusqlite::Result<T> {
-    fn optional(self) -> rusqlite::Result<Option<T>> {
-        match self {
-            Ok(v) => Ok(Some(v)),
-            Err(rusqlite::Error::QueryReturnedNoRows) => Ok(None),
-            Err(e) => Err(e),
-        }
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::paths::AppPaths;
+    use rusqlite::OptionalExtension;
 
     #[test]
     fn migrate_adds_batch_id_for_legacy_job_table() {
@@ -665,6 +695,10 @@ CREATE TABLE IF NOT EXISTS job (
             }
         }
         assert!(has_batch_id, "batch_id column should exist after migrate");
+        assert_eq!(
+            schema_user_version(&conn).expect("schema version"),
+            CURRENT_SCHEMA_VERSION as u32
+        );
     }
 
     #[test]
@@ -760,5 +794,22 @@ CREATE TABLE IF NOT EXISTS job (
                 "voice_template_reference".to_string()
             ]
         );
+    }
+
+    #[test]
+    fn migrate_sets_user_version_and_meta_schema_version() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let paths = AppPaths::new(dir.path().to_path_buf());
+        let conn = open(&paths).expect("open");
+        migrate(&conn).expect("migrate");
+
+        assert_eq!(
+            schema_user_version(&conn).expect("schema version"),
+            CURRENT_SCHEMA_VERSION as u32
+        );
+        let meta: String = conn
+            .query_row("SELECT value FROM meta WHERE key='schema_version'", [], |row| row.get(0))
+            .expect("meta schema version");
+        assert_eq!(meta, CURRENT_SCHEMA_VERSION.to_string());
     }
 }
