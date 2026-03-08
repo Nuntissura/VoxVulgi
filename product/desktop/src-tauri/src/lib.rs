@@ -11,7 +11,8 @@ use voxvulgi_engine::paths::AppPaths;
 use voxvulgi_engine::{
     config, db, diagnostics, instagram_subscriptions, jobs, library, speakers, subscriptions,
     subtitle_tracks, subtitles, tools, voice_backend_adapters, voice_backends, voice_benchmarks,
-    voice_cast_packs, voice_cleanup, voice_library, voice_reference_curation, voice_templates,
+    voice_cast_packs, voice_cleanup, voice_library, voice_plans, voice_reference_curation,
+    voice_templates,
 };
 
 #[derive(Debug, Clone, serde::Deserialize)]
@@ -2509,6 +2510,131 @@ async fn voice_reference_curation_apply(
 }
 
 #[tauri::command]
+#[allow(non_snake_case)]
+async fn item_voice_plan_get(
+    state: State<'_, AppState>,
+    item_id: Option<String>,
+    itemId: Option<String>,
+) -> Result<Option<voice_plans::ItemVoicePlan>, String> {
+    let paths = state.paths.clone();
+    let item_id = item_id
+        .or(itemId)
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty())
+        .ok_or_else(|| "missing required key itemId".to_string())?;
+    tauri::async_runtime::spawn_blocking(move || {
+        voice_plans::get_item_voice_plan(&paths, &item_id).map_err(|e| e.to_string())
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
+#[tauri::command]
+#[allow(non_snake_case)]
+async fn item_voice_plan_upsert(
+    state: State<'_, AppState>,
+    item_id: Option<String>,
+    itemId: Option<String>,
+    plan: voice_plans::ItemVoicePlanUpsert,
+) -> Result<voice_plans::ItemVoicePlan, String> {
+    let paths = state.paths.clone();
+    let item_id = item_id
+        .or(itemId)
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty())
+        .ok_or_else(|| "missing required key itemId".to_string())?;
+    tauri::async_runtime::spawn_blocking(move || {
+        voice_plans::upsert_item_voice_plan(&paths, &item_id, plan).map_err(|e| e.to_string())
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
+#[tauri::command]
+#[allow(non_snake_case)]
+async fn item_voice_plan_delete(
+    state: State<'_, AppState>,
+    item_id: Option<String>,
+    itemId: Option<String>,
+) -> Result<(), String> {
+    let paths = state.paths.clone();
+    let item_id = item_id
+        .or(itemId)
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty())
+        .ok_or_else(|| "missing required key itemId".to_string())?;
+    tauri::async_runtime::spawn_blocking(move || {
+        voice_plans::delete_item_voice_plan(&paths, &item_id).map_err(|e| e.to_string())
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
+#[tauri::command]
+#[allow(non_snake_case)]
+async fn item_voice_plan_promote_recommendation(
+    state: State<'_, AppState>,
+    item_id: Option<String>,
+    itemId: Option<String>,
+    recommendation: voice_backends::VoiceBackendRecommendation,
+) -> Result<voice_plans::ItemVoicePlan, String> {
+    let paths = state.paths.clone();
+    let item_id = item_id
+        .or(itemId)
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty())
+        .ok_or_else(|| "missing required key itemId".to_string())?;
+    tauri::async_runtime::spawn_blocking(move || {
+        voice_plans::promote_recommendation_to_item_voice_plan(&paths, &item_id, recommendation)
+            .map_err(|e| e.to_string())
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
+#[tauri::command]
+#[allow(non_snake_case)]
+async fn item_voice_plan_promote_benchmark_candidate(
+    state: State<'_, AppState>,
+    item_id: Option<String>,
+    itemId: Option<String>,
+    track_id: Option<String>,
+    trackId: Option<String>,
+    goal: Option<String>,
+    candidate_id: Option<String>,
+    candidateId: Option<String>,
+) -> Result<voice_plans::ItemVoicePlan, String> {
+    let paths = state.paths.clone();
+    let item_id = item_id
+        .or(itemId)
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty())
+        .ok_or_else(|| "missing required key itemId".to_string())?;
+    let track_id = track_id
+        .or(trackId)
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty())
+        .ok_or_else(|| "missing required key trackId".to_string())?;
+    let candidate_id = candidate_id
+        .or(candidateId)
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty())
+        .ok_or_else(|| "missing required key candidateId".to_string())?;
+    tauri::async_runtime::spawn_blocking(move || {
+        voice_plans::promote_benchmark_candidate_to_item_voice_plan(
+            &paths,
+            &item_id,
+            &track_id,
+            goal.as_deref(),
+            &candidate_id,
+        )
+        .map_err(|e| e.to_string())
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
+#[tauri::command]
 async fn voice_backend_adapters_list(
     state: State<'_, AppState>,
 ) -> Result<Vec<voice_backend_adapters::VoiceBackendAdapterDetail>, String> {
@@ -4027,6 +4153,11 @@ pub fn run() {
             voice_reference_curation_generate,
             voice_reference_curation_load,
             voice_reference_curation_apply,
+            item_voice_plan_get,
+            item_voice_plan_upsert,
+            item_voice_plan_delete,
+            item_voice_plan_promote_recommendation,
+            item_voice_plan_promote_benchmark_candidate,
             voice_backend_adapters_list,
             voice_backend_adapter_upsert,
             voice_backend_adapter_delete,

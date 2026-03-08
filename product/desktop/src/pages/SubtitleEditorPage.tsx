@@ -567,6 +567,27 @@ type VoiceReferenceCurationReport = {
   references: VoiceReferenceCurationEntry[];
 };
 
+type ItemVoicePlan = {
+  item_id: string;
+  goal: string;
+  preferred_backend_id: string | null;
+  fallback_backend_id: string | null;
+  selected_candidate_id: string | null;
+  selected_variant_label: string | null;
+  notes: string | null;
+  created_at_ms: number;
+  updated_at_ms: number;
+};
+
+type ItemVoicePlanUpsert = {
+  goal: string | null;
+  preferred_backend_id: string | null;
+  fallback_backend_id: string | null;
+  selected_candidate_id: string | null;
+  selected_variant_label: string | null;
+  notes: string | null;
+};
+
 type LocalizationBatchRequest = {
   item_ids: string[];
   template_id: string | null;
@@ -937,6 +958,9 @@ export function SubtitleEditorPage({ itemId }: { itemId: string }) {
   >({});
   const [voiceReferenceCurationBusyKey, setVoiceReferenceCurationBusyKey] =
     useState<string | null>(null);
+  const [itemVoicePlan, setItemVoicePlan] = useState<ItemVoicePlan | null>(null);
+  const [itemVoicePlanBusy, setItemVoicePlanBusy] = useState(false);
+  const [itemVoicePlanNotes, setItemVoicePlanNotes] = useState("");
   const [voiceBackendGoal, setVoiceBackendGoal] = useState<
     "balanced" | "identity" | "expressive" | "timing" | "speed"
   >(() => {
@@ -1243,6 +1267,17 @@ export function SubtitleEditorPage({ itemId }: { itemId: string }) {
     }
   }, [asrLang, doc?.lang, itemId, speakerSettings, trackId, tracks, voiceBackendGoal]);
 
+  const refreshItemVoicePlan = useCallback(async () => {
+    try {
+      const plan = await invoke<ItemVoicePlan | null>("item_voice_plan_get", { itemId });
+      setItemVoicePlan(plan);
+      setItemVoicePlanNotes(plan?.notes ?? "");
+      return plan;
+    } catch {
+      return null;
+    }
+  }, [itemId]);
+
   const refreshItemJobs = useCallback(async () => {
     try {
       const rows = await invoke<JobRow[]>("jobs_list_for_item", { itemId, limit: 1000, offset: 0 });
@@ -1280,6 +1315,7 @@ export function SubtitleEditorPage({ itemId }: { itemId: string }) {
       refreshMemorySuggestions(),
       refreshCharacterSuggestions(),
       refreshVoiceBackendStrategy(),
+      refreshItemVoicePlan(),
       refreshLibraryItems(),
       refreshOutputs(),
       refreshArtifacts(),
@@ -1306,6 +1342,7 @@ export function SubtitleEditorPage({ itemId }: { itemId: string }) {
     refreshMemorySuggestions,
     refreshCharacterSuggestions,
     refreshVoiceBackendStrategy,
+    refreshItemVoicePlan,
     refreshLibraryItems,
     refreshOutputs,
     refreshArtifacts,
@@ -1320,6 +1357,14 @@ export function SubtitleEditorPage({ itemId }: { itemId: string }) {
   useEffect(() => {
     refreshVoiceBackendStrategy().catch(() => undefined);
   }, [refreshVoiceBackendStrategy]);
+
+  useEffect(() => {
+    if (!itemVoicePlan?.goal) return;
+    setVoiceBackendGoal((prev) => {
+      const next = itemVoicePlan.goal as typeof prev;
+      return prev === next ? prev : next;
+    });
+  }, [itemVoicePlan?.goal]);
 
   const trackOptions = useMemo(() => {
     return tracks.map((t) => ({
@@ -2259,6 +2304,103 @@ export function SubtitleEditorPage({ itemId }: { itemId: string }) {
       setError(String(e));
     } finally {
       setVoiceBenchmarkBusy(false);
+    }
+  }
+
+  async function saveItemVoicePlan() {
+    setError(null);
+    setItemVoicePlanBusy(true);
+    try {
+      const payload: ItemVoicePlanUpsert = {
+        goal: itemVoicePlan?.goal ?? voiceBackendGoal,
+        preferred_backend_id:
+          itemVoicePlan?.preferred_backend_id ??
+          voiceBackendRecommendation?.preferred_backend_id ??
+          null,
+        fallback_backend_id:
+          itemVoicePlan?.fallback_backend_id ??
+          voiceBackendRecommendation?.fallback_backend_id ??
+          null,
+        selected_candidate_id: itemVoicePlan?.selected_candidate_id ?? null,
+        selected_variant_label: itemVoicePlan?.selected_variant_label ?? null,
+        notes: trimOrNull(itemVoicePlanNotes),
+      };
+      const plan = await invoke<ItemVoicePlan>("item_voice_plan_upsert", {
+        itemId,
+        plan: payload,
+      });
+      setItemVoicePlan(plan);
+      setItemVoicePlanNotes(plan.notes ?? "");
+      setNotice("Saved item voice plan.");
+    } catch (e) {
+      setError(String(e));
+    } finally {
+      setItemVoicePlanBusy(false);
+    }
+  }
+
+  async function clearItemVoicePlan() {
+    const ok = await confirm("Remove the saved voice plan for this item?", {
+      title: "Clear item voice plan",
+    });
+    if (!ok) return;
+    setError(null);
+    setItemVoicePlanBusy(true);
+    try {
+      await invoke("item_voice_plan_delete", { itemId });
+      setItemVoicePlan(null);
+      setItemVoicePlanNotes("");
+      setNotice("Cleared item voice plan.");
+    } catch (e) {
+      setError(String(e));
+    } finally {
+      setItemVoicePlanBusy(false);
+    }
+  }
+
+  async function promoteRecommendationToItemVoicePlan() {
+    if (!voiceBackendRecommendation) {
+      setError("Refresh voice backend strategy first.");
+      return;
+    }
+    setError(null);
+    setItemVoicePlanBusy(true);
+    try {
+      const plan = await invoke<ItemVoicePlan>("item_voice_plan_promote_recommendation", {
+        itemId,
+        recommendation: voiceBackendRecommendation,
+      });
+      setItemVoicePlan(plan);
+      setItemVoicePlanNotes(plan.notes ?? "");
+      setNotice(`Promoted recommended backend ${plan.preferred_backend_id ?? "-"} into the item voice plan.`);
+    } catch (e) {
+      setError(String(e));
+    } finally {
+      setItemVoicePlanBusy(false);
+    }
+  }
+
+  async function promoteBenchmarkCandidateToItemVoicePlan(candidateId: string) {
+    if (!trackId) {
+      setError("Select a subtitle track first.");
+      return;
+    }
+    setError(null);
+    setItemVoicePlanBusy(true);
+    try {
+      const plan = await invoke<ItemVoicePlan>("item_voice_plan_promote_benchmark_candidate", {
+        itemId,
+        trackId,
+        goal: voiceBackendGoal,
+        candidateId,
+      });
+      setItemVoicePlan(plan);
+      setItemVoicePlanNotes(plan.notes ?? "");
+      setNotice(`Promoted benchmark winner ${plan.preferred_backend_id ?? "-"} into the item voice plan.`);
+    } catch (e) {
+      setError(String(e));
+    } finally {
+      setItemVoicePlanBusy(false);
     }
   }
 
@@ -6049,122 +6191,222 @@ export function SubtitleEditorPage({ itemId }: { itemId: string }) {
               </div>
             </div>
 
-            <div style={{ marginTop: 16 }}>
-              <div className="row" style={{ alignItems: "center", gap: 10, flexWrap: "wrap" }}>
-                <div style={{ fontSize: 12, opacity: 0.85 }}>Voice backend strategy</div>
-                <select
-                  value={voiceBackendGoal}
-                  disabled={busy}
-                  onChange={(e) =>
-                    setVoiceBackendGoal(
-                      (e.currentTarget.value as
-                        | "balanced"
-                        | "identity"
-                        | "expressive"
-                        | "timing"
-                        | "speed") ?? "balanced",
-                    )
-                  }
-                >
-                  {VOICE_BACKEND_GOAL_OPTIONS.map((option) => (
-                    <option key={option.value} value={option.value}>
-                      {option.label}
-                    </option>
-                  ))}
-                </select>
-                <button
-                  type="button"
-                  disabled={busy}
-                  onClick={() => {
-                    refreshVoiceBackendStrategy().catch(() => undefined);
-                  }}
-                >
-                  Refresh strategy
-                </button>
-              </div>
-              <div style={{ marginTop: 8, fontSize: 12, opacity: 0.7 }}>
-                Managed default remains OpenVoice until benchmark evidence supports a change.
-              </div>
-              {voiceBackendRecommendation ? (
-                <div
-                  style={{
-                    marginTop: 10,
-                    border: "1px solid #e5e7eb",
-                    borderRadius: 8,
-                    padding: 10,
-                    display: "flex",
-                    flexDirection: "column",
-                    gap: 8,
-                  }}
-                >
-                  <div className="kv">
-                    <div className="k">Recommended backend</div>
-                    <div className="v">{voiceBackendRecommendation.preferred_backend_id}</div>
-                  </div>
-                  {voiceBackendRecommendation.fallback_backend_id ? (
-                    <div className="kv">
-                      <div className="k">Fallback</div>
-                      <div className="v">{voiceBackendRecommendation.fallback_backend_id}</div>
-                    </div>
-                  ) : null}
-                  <div className="kv">
-                    <div className="k">Context</div>
-                    <div className="v">
-                      {voiceBackendRecommendation.source_lang} -&gt;{" "}
-                      {voiceBackendRecommendation.target_lang};{" "}
-                      {voiceBackendRecommendation.performance_tier};{" "}
-                      {voiceBackendRecommendation.reference_count} ref(s)
-                    </div>
-                  </div>
-                  <div style={{ fontSize: 12, opacity: 0.75 }}>
-                    {voiceBackendRecommendation.rationale.join(" ")}
-                  </div>
-                  {voiceBackendRecommendation.warnings.length ? (
-                    <div style={{ fontSize: 12, opacity: 0.75 }}>
-                      Warnings: {voiceBackendRecommendation.warnings.join(" | ")}
-                    </div>
-                  ) : null}
-                  <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
-                    {(voiceBackendCatalog?.backends ?? [])
-                      .filter(
-                        (backend) =>
-                          backend.id === voiceBackendRecommendation.preferred_backend_id ||
-                          backend.id === voiceBackendRecommendation.fallback_backend_id ||
-                          backend.managed_default,
-                      )
-                      .slice(0, 3)
-                      .map((backend) => (
-                        <div
-                          key={`voice-backend-${backend.id}`}
-                          style={{
-                            border: "1px solid #e5e7eb",
-                            borderRadius: 8,
-                            padding: 8,
-                            display: "flex",
-                            flexDirection: "column",
-                            gap: 4,
-                          }}
-                        >
-                          <div className="row" style={{ justifyContent: "space-between", gap: 8 }}>
-                            <div style={{ fontWeight: 600 }}>
-                              {backend.display_name}
-                              {backend.managed_default ? " (managed default)" : ""}
-                            </div>
-                            <code>{backend.status}</code>
-                          </div>
-                          <div style={{ fontSize: 12, opacity: 0.75 }}>{backend.status_detail}</div>
-                          <div style={{ fontSize: 12, opacity: 0.75 }}>
-                            {backend.family} / {backend.install_mode}; GPU recommended:{" "}
-                            {backend.gpu_recommended ? "yes" : "no"}
-                          </div>
-                          <div style={{ fontSize: 12, opacity: 0.75 }}>
-                            Strengths: {backend.strengths.join(" | ")}
-                          </div>
-                        </div>
-                      ))}
+            <div style={{ marginTop: 16, display: "flex", flexDirection: "column", gap: 16 }}>
+              <div
+                style={{
+                  border: "1px solid #e5e7eb",
+                  borderRadius: 8,
+                  padding: 10,
+                  display: "flex",
+                  flexDirection: "column",
+                  gap: 8,
+                }}
+              >
+                <div className="row" style={{ alignItems: "center", gap: 10, flexWrap: "wrap" }}>
+                  <div style={{ fontSize: 12, opacity: 0.85 }}>Item voice plan</div>
+                  <button
+                    type="button"
+                    disabled={busy || itemVoicePlanBusy}
+                    onClick={() => {
+                      refreshItemVoicePlan().catch(() => undefined);
+                    }}
+                  >
+                    Reload plan
+                  </button>
+                  <button
+                    type="button"
+                    disabled={busy || itemVoicePlanBusy}
+                    onClick={() => {
+                      saveItemVoicePlan().catch(() => undefined);
+                    }}
+                  >
+                    Save plan
+                  </button>
+                  <button
+                    type="button"
+                    disabled={busy || itemVoicePlanBusy || !itemVoicePlan}
+                    onClick={() => {
+                      clearItemVoicePlan().catch(() => undefined);
+                    }}
+                  >
+                    Clear plan
+                  </button>
+                </div>
+                <div className="kv">
+                  <div className="k">Goal</div>
+                  <div className="v">{itemVoicePlan?.goal ?? voiceBackendGoal}</div>
+                </div>
+                <div className="kv">
+                  <div className="k">Preferred backend</div>
+                  <div className="v">
+                    {itemVoicePlan?.preferred_backend_id ??
+                      voiceBackendRecommendation?.preferred_backend_id ??
+                      "-"}
                   </div>
                 </div>
-              ) : null}
+                <div className="kv">
+                  <div className="k">Fallback</div>
+                  <div className="v">
+                    {itemVoicePlan?.fallback_backend_id ??
+                      voiceBackendRecommendation?.fallback_backend_id ??
+                      "-"}
+                  </div>
+                </div>
+                <div className="kv">
+                  <div className="k">Candidate / variant</div>
+                  <div className="v">
+                    {itemVoicePlan?.selected_candidate_id ?? "-"}
+                    {itemVoicePlan?.selected_variant_label
+                      ? ` / ${itemVoicePlan.selected_variant_label}`
+                      : ""}
+                  </div>
+                </div>
+                <label style={{ display: "flex", flexDirection: "column", gap: 6 }}>
+                  <span style={{ fontSize: 12, opacity: 0.75 }}>Operator notes</span>
+                  <textarea
+                    value={itemVoicePlanNotes}
+                    disabled={busy || itemVoicePlanBusy}
+                    onChange={(e) => setItemVoicePlanNotes(e.currentTarget.value)}
+                    rows={3}
+                    style={{
+                      width: "100%",
+                      resize: "vertical",
+                      borderRadius: 10,
+                      border: "1px solid #d1d5db",
+                      padding: "8px 10px",
+                      fontFamily: "inherit",
+                      fontSize: 14,
+                      lineHeight: "20px",
+                    }}
+                  />
+                </label>
+              </div>
+
+              <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
+                <div className="row" style={{ alignItems: "center", gap: 10, flexWrap: "wrap" }}>
+                  <div style={{ fontSize: 12, opacity: 0.85 }}>Voice backend strategy</div>
+                  <select
+                    value={voiceBackendGoal}
+                    disabled={busy}
+                    onChange={(e) =>
+                      setVoiceBackendGoal(
+                        (e.currentTarget.value as
+                          | "balanced"
+                          | "identity"
+                          | "expressive"
+                          | "timing"
+                          | "speed") ?? "balanced",
+                      )
+                    }
+                  >
+                    {VOICE_BACKEND_GOAL_OPTIONS.map((option) => (
+                      <option key={option.value} value={option.value}>
+                        {option.label}
+                      </option>
+                    ))}
+                  </select>
+                  <button
+                    type="button"
+                    disabled={busy}
+                    onClick={() => {
+                      refreshVoiceBackendStrategy().catch(() => undefined);
+                    }}
+                  >
+                    Refresh strategy
+                  </button>
+                  <button
+                    type="button"
+                    disabled={busy || itemVoicePlanBusy || !voiceBackendRecommendation}
+                    onClick={() => {
+                      promoteRecommendationToItemVoicePlan().catch(() => undefined);
+                    }}
+                  >
+                    Promote strategy to plan
+                  </button>
+                </div>
+                <div style={{ fontSize: 12, opacity: 0.7 }}>
+                  Managed default remains OpenVoice until benchmark evidence supports a change.
+                </div>
+                {voiceBackendRecommendation ? (
+                  <div
+                    style={{
+                      border: "1px solid #e5e7eb",
+                      borderRadius: 8,
+                      padding: 10,
+                      display: "flex",
+                      flexDirection: "column",
+                      gap: 8,
+                    }}
+                  >
+                    <div className="kv">
+                      <div className="k">Recommended backend</div>
+                      <div className="v">{voiceBackendRecommendation.preferred_backend_id}</div>
+                    </div>
+                    {voiceBackendRecommendation.fallback_backend_id ? (
+                      <div className="kv">
+                        <div className="k">Fallback</div>
+                        <div className="v">{voiceBackendRecommendation.fallback_backend_id}</div>
+                      </div>
+                    ) : null}
+                    <div className="kv">
+                      <div className="k">Context</div>
+                      <div className="v">
+                        {voiceBackendRecommendation.source_lang} -&gt;{" "}
+                        {voiceBackendRecommendation.target_lang};{" "}
+                        {voiceBackendRecommendation.performance_tier};{" "}
+                        {voiceBackendRecommendation.reference_count} ref(s)
+                      </div>
+                    </div>
+                    <div style={{ fontSize: 12, opacity: 0.75 }}>
+                      {voiceBackendRecommendation.rationale.join(" ")}
+                    </div>
+                    {voiceBackendRecommendation.warnings.length ? (
+                      <div style={{ fontSize: 12, opacity: 0.75 }}>
+                        Warnings: {voiceBackendRecommendation.warnings.join(" | ")}
+                      </div>
+                    ) : null}
+                    <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
+                      {(voiceBackendCatalog?.backends ?? [])
+                        .filter(
+                          (backend) =>
+                            backend.id === voiceBackendRecommendation.preferred_backend_id ||
+                            backend.id === voiceBackendRecommendation.fallback_backend_id ||
+                            backend.managed_default,
+                        )
+                        .slice(0, 3)
+                        .map((backend) => (
+                          <div
+                            key={`voice-backend-${backend.id}`}
+                            style={{
+                              border: "1px solid #e5e7eb",
+                              borderRadius: 8,
+                              padding: 8,
+                              display: "flex",
+                              flexDirection: "column",
+                              gap: 4,
+                            }}
+                          >
+                            <div className="row" style={{ justifyContent: "space-between", gap: 8 }}>
+                              <div style={{ fontWeight: 600 }}>
+                                {backend.display_name}
+                                {backend.managed_default ? " (managed default)" : ""}
+                              </div>
+                              <code>{backend.status}</code>
+                            </div>
+                            <div style={{ fontSize: 12, opacity: 0.75 }}>{backend.status_detail}</div>
+                            <div style={{ fontSize: 12, opacity: 0.75 }}>
+                              {backend.family} / {backend.install_mode}; GPU recommended:{" "}
+                              {backend.gpu_recommended ? "yes" : "no"}
+                            </div>
+                            <div style={{ fontSize: 12, opacity: 0.75 }}>
+                              Strengths: {backend.strengths.join(" | ")}
+                            </div>
+                          </div>
+                        ))}
+                    </div>
+                  </div>
+                ) : null}
+              </div>
             </div>
 
             <div style={{ marginTop: 16 }}>
@@ -6295,6 +6537,19 @@ export function SubtitleEditorPage({ itemId }: { itemId: string }) {
                               .join(" | ")}
                           </div>
                         ) : null}
+                        <div className="row" style={{ gap: 8, flexWrap: "wrap" }}>
+                          <button
+                            type="button"
+                            disabled={busy || itemVoicePlanBusy}
+                            onClick={() => {
+                              promoteBenchmarkCandidateToItemVoicePlan(
+                                candidate.candidate_id,
+                              ).catch(() => undefined);
+                            }}
+                          >
+                            Promote to plan
+                          </button>
+                        </div>
                       </div>
                     ))}
                   </div>

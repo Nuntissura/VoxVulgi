@@ -116,6 +116,22 @@ CREATE TABLE IF NOT EXISTS item_speaker (
 
 CREATE INDEX IF NOT EXISTS idx_item_speaker_item ON item_speaker(item_id);
 
+CREATE TABLE IF NOT EXISTS item_voice_plan (
+  item_id TEXT PRIMARY KEY,
+  goal TEXT NOT NULL,
+  preferred_backend_id TEXT,
+  fallback_backend_id TEXT,
+  selected_candidate_id TEXT,
+  selected_variant_label TEXT,
+  notes TEXT,
+  created_at_ms INTEGER NOT NULL,
+  updated_at_ms INTEGER NOT NULL,
+  FOREIGN KEY (item_id) REFERENCES library_item(id) ON DELETE CASCADE
+);
+
+CREATE INDEX IF NOT EXISTS idx_item_voice_plan_updated
+  ON item_voice_plan(updated_at_ms);
+
 CREATE TABLE IF NOT EXISTS voice_template (
   id TEXT PRIMARY KEY,
   name TEXT NOT NULL,

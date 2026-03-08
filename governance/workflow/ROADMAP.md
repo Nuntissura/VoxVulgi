@@ -66,7 +66,7 @@ Date: 2026-03-08
 - WP-0109: Add a benchmark lab that compares current voice outputs and variants using ranked local metrics. DONE.
 - WP-0110: Add explicit BYO backend adapters for strong OSS candidates that should not be shipped or auto-installed by default. DONE.
 - WP-0111: Add a reference-curation lab that ranks existing speaker references and lets operators promote the strongest bundle into live item settings. DONE.
-- WP-0112: Add item-scoped voice plans and explicit promotion of recommendation/benchmark outcomes into those plans.
+- WP-0112: Add item-scoped voice plans and explicit promotion of recommendation/benchmark outcomes into those plans. DONE.
 - WP-0113: Extend BYO adapters into experimental render runs that emit standard manifests/reports for benchmarking and downstream mix/mux flows.
 
 ## Phase 0 — Decisions (1–2 days)
