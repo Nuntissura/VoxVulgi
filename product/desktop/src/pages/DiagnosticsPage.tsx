@@ -1,6 +1,7 @@
 import { startTransition, useCallback, useEffect, useMemo, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { confirm, open, save } from "@tauri-apps/plugin-dialog";
+import { usePageActivity, usePollingLoop } from "../lib/activity";
 import { copyPathToClipboard, openPathBestEffort, revealPath as revealFilesystemPath } from "../lib/pathOpener";
 
 type DiagnosticsInfo = {
@@ -473,7 +474,8 @@ function defaultAdapterConfig(template: VoiceBackendAdapterTemplate): VoiceBacke
   };
 }
 
-export function DiagnosticsPage() {
+export function DiagnosticsPage({ visible = true }: { visible?: boolean }) {
+  const pageActive = usePageActivity(visible);
   const [info, setInfo] = useState<DiagnosticsInfo | null>(null);
   const [startup, setStartup] = useState<StartupStatus | null>(null);
   const [inventory, setInventory] = useState<ModelInventory | null>(null);
@@ -931,22 +933,20 @@ export function DiagnosticsPage() {
     return phase2Steps.some((s) => s?.status === "queued" || s?.status === "running");
   }, [phase2Steps]);
 
-  useEffect(() => {
-    if (!phase2HasActive) return;
-    let alive = true;
-    const timer = window.setInterval(() => {
-      invoke<Phase2InstallLatestState>("tools_phase2_packs_install_latest_state")
-        .then((next) => {
-          if (!alive) return;
-          setPhase2Latest(next);
-        })
-        .catch(() => undefined);
-    }, 1000);
-    return () => {
-      alive = false;
-      window.clearInterval(timer);
-    };
-  }, [phase2HasActive]);
+  usePollingLoop(
+    async () => {
+      const next = await invoke<Phase2InstallLatestState>("tools_phase2_packs_install_latest_state").catch(
+        () => null,
+      );
+      if (next) {
+        setPhase2Latest(next);
+      }
+    },
+    {
+      enabled: pageActive && phase2HasActive,
+      intervalMs: 1000,
+    },
+  );
 
   async function installDemo() {
     await installModel("demo-ja-asr");

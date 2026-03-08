@@ -56,6 +56,7 @@ Design goals:
 - Cleanup summaries should surface failed path deletions and keep job provenance for job-linked cleanup failures.
 - SQLite schema evolution should be driven by explicit numbered migrations via `PRAGMA user_version`, with each migration step applied transactionally.
 - Config, override, adapter-store, and secret writes should use atomic temp-file-plus-replace helpers instead of direct in-place writes.
+- Recurring UI polling should use shared non-overlapping visibility-aware loops, and mounted-but-hidden pages must suspend background refresh until active again.
 - Explicit consent mechanisms must not be implemented.
 - Anti-abuse controls must not be included.
 - These features must not appear in development or the final product. Users must comply with all local regulations.

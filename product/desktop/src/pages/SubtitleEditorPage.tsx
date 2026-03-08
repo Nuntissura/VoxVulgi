@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { convertFileSrc, invoke } from "@tauri-apps/api/core";
 import { confirm, open, save } from "@tauri-apps/plugin-dialog";
+import { usePageActivity, usePollingLoop } from "../lib/activity";
 import { diagnosticsTrace } from "../lib/diagnosticsTrace";
 import { copyPathToClipboard, openPathBestEffort, revealPath } from "../lib/pathOpener";
 import { safeLocalStorageGet, safeLocalStorageSet } from "../lib/persist";
@@ -947,7 +948,8 @@ function pickLatestTrack(
   return candidates[0] ?? null;
 }
 
-export function SubtitleEditorPage({ itemId }: { itemId: string }) {
+export function SubtitleEditorPage({ itemId, visible = true }: { itemId: string; visible?: boolean }) {
+  const pageActive = usePageActivity(visible);
   const videoRef = useRef<HTMLVideoElement | null>(null);
   const textRefs = useRef<Record<number, HTMLTextAreaElement | null>>({});
 
@@ -4086,255 +4088,132 @@ export function SubtitleEditorPage({ itemId }: { itemId: string }) {
     }
   }
 
-  useEffect(() => {
-    if (!translateJobId) return;
-    let alive = true;
-    let timer: number | null = null;
+  const trackedJobIds = useMemo(
+    () =>
+      [
+        translateJobId,
+        diarizeJobId,
+        ttsJobId,
+        ttsNeuralLocalV1JobId,
+        dubVoicePreservingJobId,
+        experimentalRenderJobId,
+        qcJobId,
+      ].filter((value): value is string => Boolean(value)),
+    [
+      diarizeJobId,
+      dubVoicePreservingJobId,
+      experimentalRenderJobId,
+      qcJobId,
+      translateJobId,
+      ttsJobId,
+      ttsNeuralLocalV1JobId,
+    ],
+  );
 
-    async function tick() {
+  const shouldPollTrackedJobs = useMemo(
+    () =>
+      [
+        [translateJobId, translateJobStatus],
+        [diarizeJobId, diarizeJobStatus],
+        [ttsJobId, ttsJobStatus],
+        [ttsNeuralLocalV1JobId, ttsNeuralLocalV1JobStatus],
+        [dubVoicePreservingJobId, dubVoicePreservingJobStatus],
+        [experimentalRenderJobId, experimentalRenderJobStatus],
+        [qcJobId, qcJobStatus],
+      ].some(([jobId, status]) => {
+        if (!jobId) return false;
+        return status === null || status === "queued" || status === "running";
+      }),
+    [
+      diarizeJobId,
+      diarizeJobStatus,
+      dubVoicePreservingJobId,
+      dubVoicePreservingJobStatus,
+      experimentalRenderJobId,
+      experimentalRenderJobStatus,
+      qcJobId,
+      qcJobStatus,
+      translateJobId,
+      translateJobStatus,
+      ttsJobId,
+      ttsJobStatus,
+      ttsNeuralLocalV1JobId,
+      ttsNeuralLocalV1JobStatus,
+    ],
+  );
+
+  usePollingLoop(
+    async () => {
       try {
         const rows = await invoke<JobRow[]>("jobs_list", { limit: 200, offset: 0 });
-        const job = rows.find((j) => j.id === translateJobId);
-        if (!alive || !job) return;
-        setTranslateJobStatus(job.status);
-        setTranslateJobError(job.error);
-        setTranslateJobProgress(job.progress);
+        const byId = new Map(rows.map((job) => [job.id, job]));
 
-        if (job.status === "succeeded" || job.status === "failed" || job.status === "canceled") {
-          if (timer !== null) window.clearInterval(timer);
-          timer = null;
+        const applyJobState = (
+          jobId: string | null,
+          setStatus: (status: JobStatus | null) => void,
+          setJobError: (value: string | null) => void,
+          setProgress: (value: number) => void,
+          onTerminal?: (job: JobRow) => void,
+        ) => {
+          if (!jobId) return;
+          const job = byId.get(jobId);
+          if (!job) return;
+          setStatus(job.status);
+          setJobError(job.error);
+          setProgress(job.progress);
+          if (job.status === "queued" || job.status === "running") return;
+          onTerminal?.(job);
+        };
+
+        applyJobState(translateJobId, setTranslateJobStatus, setTranslateJobError, setTranslateJobProgress, (job) => {
           if (job.status === "succeeded") {
             refreshTracks().catch(() => undefined);
           }
-        }
-      } catch {
-        // ignore polling errors
-      }
-    }
-
-    void tick();
-    timer = window.setInterval(() => {
-      void tick();
-    }, 1000);
-
-    return () => {
-      alive = false;
-      if (timer !== null) window.clearInterval(timer);
-    };
-  }, [refreshTracks, translateJobId]);
-
-  useEffect(() => {
-    if (!diarizeJobId) return;
-    let alive = true;
-    let timer: number | null = null;
-
-    async function tick() {
-      try {
-        const rows = await invoke<JobRow[]>("jobs_list", { limit: 200, offset: 0 });
-        const job = rows.find((j) => j.id === diarizeJobId);
-        if (!alive || !job) return;
-        setDiarizeJobStatus(job.status);
-        setDiarizeJobError(job.error);
-        setDiarizeJobProgress(job.progress);
-
-        if (job.status === "succeeded" || job.status === "failed" || job.status === "canceled") {
-          if (timer !== null) window.clearInterval(timer);
-          timer = null;
+        });
+        applyJobState(diarizeJobId, setDiarizeJobStatus, setDiarizeJobError, setDiarizeJobProgress, (job) => {
           if (job.status === "succeeded") {
             refreshTracks().catch(() => undefined);
           }
-        }
-      } catch {
-        // ignore polling errors
-      }
-    }
-
-    void tick();
-    timer = window.setInterval(() => {
-      void tick();
-    }, 1000);
-
-    return () => {
-      alive = false;
-      if (timer !== null) window.clearInterval(timer);
-    };
-  }, [diarizeJobId, refreshTracks]);
-
-  useEffect(() => {
-    if (!ttsJobId) return;
-    let alive = true;
-    let timer: number | null = null;
-
-    async function tick() {
-      try {
-        const rows = await invoke<JobRow[]>("jobs_list", { limit: 200, offset: 0 });
-        const job = rows.find((j) => j.id === ttsJobId);
-        if (!alive || !job) return;
-        setTtsJobStatus(job.status);
-        setTtsJobError(job.error);
-        setTtsJobProgress(job.progress);
-
-        if (job.status === "succeeded" || job.status === "failed" || job.status === "canceled") {
-          if (timer !== null) window.clearInterval(timer);
-          timer = null;
-        }
-      } catch {
-        // ignore polling errors
-      }
-    }
-
-    void tick();
-    timer = window.setInterval(() => {
-      void tick();
-    }, 1000);
-
-    return () => {
-      alive = false;
-      if (timer !== null) window.clearInterval(timer);
-    };
-  }, [ttsJobId]);
-
-  useEffect(() => {
-    if (!ttsNeuralLocalV1JobId) return;
-    let alive = true;
-    let timer: number | null = null;
-
-    async function tick() {
-      try {
-        const rows = await invoke<JobRow[]>("jobs_list", { limit: 200, offset: 0 });
-        const job = rows.find((j) => j.id === ttsNeuralLocalV1JobId);
-        if (!alive || !job) return;
-        setTtsNeuralLocalV1JobStatus(job.status);
-        setTtsNeuralLocalV1JobError(job.error);
-        setTtsNeuralLocalV1JobProgress(job.progress);
-
-        if (job.status === "succeeded" || job.status === "failed" || job.status === "canceled") {
-          if (timer !== null) window.clearInterval(timer);
-          timer = null;
-        }
-      } catch {
-        // ignore polling errors
-      }
-    }
-
-    void tick();
-    timer = window.setInterval(() => {
-      void tick();
-    }, 1000);
-
-    return () => {
-      alive = false;
-      if (timer !== null) window.clearInterval(timer);
-    };
-  }, [ttsNeuralLocalV1JobId]);
-
-  useEffect(() => {
-    if (!dubVoicePreservingJobId) return;
-    let alive = true;
-    let timer: number | null = null;
-
-    async function tick() {
-      try {
-        const rows = await invoke<JobRow[]>("jobs_list", { limit: 200, offset: 0 });
-        const job = rows.find((j) => j.id === dubVoicePreservingJobId);
-        if (!alive || !job) return;
-        setDubVoicePreservingJobStatus(job.status);
-        setDubVoicePreservingJobError(job.error);
-        setDubVoicePreservingJobProgress(job.progress);
-
-        if (job.status === "succeeded" || job.status === "failed" || job.status === "canceled") {
-          if (timer !== null) window.clearInterval(timer);
-          timer = null;
-        }
-      } catch {
-        // ignore polling errors
-      }
-    }
-
-    void tick();
-    timer = window.setInterval(() => {
-      void tick();
-    }, 1000);
-
-    return () => {
-      alive = false;
-      if (timer !== null) window.clearInterval(timer);
-    };
-  }, [dubVoicePreservingJobId]);
-
-  useEffect(() => {
-    if (!experimentalRenderJobId) return;
-    let alive = true;
-    let timer: number | null = null;
-
-    async function tick() {
-      try {
-        const rows = await invoke<JobRow[]>("jobs_list", { limit: 200, offset: 0 });
-        const job = rows.find((j) => j.id === experimentalRenderJobId);
-        if (!alive || !job) return;
-        setExperimentalRenderJobStatus(job.status);
-        setExperimentalRenderJobError(job.error);
-        setExperimentalRenderJobProgress(job.progress);
-
-        if (job.status === "succeeded" || job.status === "failed" || job.status === "canceled") {
-          if (timer !== null) window.clearInterval(timer);
-          timer = null;
-          refreshArtifacts().catch(() => undefined);
-          refreshItemJobs().catch(() => undefined);
-        }
-      } catch {
-        // ignore polling errors
-      }
-    }
-
-    void tick();
-    timer = window.setInterval(() => {
-      void tick();
-    }, 1000);
-
-    return () => {
-      alive = false;
-      if (timer !== null) window.clearInterval(timer);
-    };
-  }, [experimentalRenderJobId, refreshArtifacts, refreshItemJobs]);
-
-  useEffect(() => {
-    if (!qcJobId) return;
-    let alive = true;
-    let timer: number | null = null;
-
-    async function tick() {
-      try {
-        const rows = await invoke<JobRow[]>("jobs_list", { limit: 200, offset: 0 });
-        const job = rows.find((j) => j.id === qcJobId);
-        if (!alive || !job) return;
-        setQcJobStatus(job.status);
-        setQcJobError(job.error);
-        setQcJobProgress(job.progress);
-
-        if (job.status === "succeeded" || job.status === "failed" || job.status === "canceled") {
-          if (timer !== null) window.clearInterval(timer);
-          timer = null;
+        });
+        applyJobState(ttsJobId, setTtsJobStatus, setTtsJobError, setTtsJobProgress);
+        applyJobState(
+          ttsNeuralLocalV1JobId,
+          setTtsNeuralLocalV1JobStatus,
+          setTtsNeuralLocalV1JobError,
+          setTtsNeuralLocalV1JobProgress,
+        );
+        applyJobState(
+          dubVoicePreservingJobId,
+          setDubVoicePreservingJobStatus,
+          setDubVoicePreservingJobError,
+          setDubVoicePreservingJobProgress,
+        );
+        applyJobState(
+          experimentalRenderJobId,
+          setExperimentalRenderJobStatus,
+          setExperimentalRenderJobError,
+          setExperimentalRenderJobProgress,
+          () => {
+            refreshArtifacts().catch(() => undefined);
+            refreshItemJobs().catch(() => undefined);
+          },
+        );
+        applyJobState(qcJobId, setQcJobStatus, setQcJobError, setQcJobProgress, (job) => {
           if (job.status === "succeeded") {
             loadQcReport().catch(() => undefined);
             refreshArtifacts().catch(() => undefined);
           }
-        }
+        });
+
       } catch {
         // ignore polling errors
       }
-    }
-
-    void tick();
-    timer = window.setInterval(() => {
-      void tick();
-    }, 1000);
-
-    return () => {
-      alive = false;
-      if (timer !== null) window.clearInterval(timer);
-    };
-  }, [qcJobId, loadQcReport, refreshArtifacts]);
+    },
+    {
+      enabled: pageActive && trackedJobIds.length > 0 && shouldPollTrackedJobs,
+      intervalMs: 1000,
+    },
+  );
 
   async function chooseExportOutputDir() {
     setError(null);

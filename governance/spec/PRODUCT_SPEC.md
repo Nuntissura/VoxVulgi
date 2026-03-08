@@ -120,7 +120,8 @@ Initial language focus: **Korean + Japanese → English**.
 - Startup and performance diagnostics:
   - show a meaningful startup progress bar or phase list while heavyweight background initialization is in flight,
   - capture deterministic local traces for startup phases, pane activation, resource usage, and major failures,
-  - explain tool state in operator terms such as bundled, hydrated, installed, loaded, and ready.
+  - explain tool state in operator terms such as bundled, hydrated, installed, loaded, and ready,
+  - suspend recurring pane-local polling and heartbeats when the page or app is not active so the UI degrades gracefully under heavy external CPU load.
 - Log rotation and retention (cap by size + age).
 - Diagnostics must surface the derived-artifact retention policy so operators can distinguish working files, durable reports, and durable deliverables.
 - Cache/history cleanup must be split from output-folder deletion, and custom or external output folders must require a separate explicit opt-in before deletion.

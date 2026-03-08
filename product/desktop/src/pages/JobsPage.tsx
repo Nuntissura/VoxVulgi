@@ -1,6 +1,7 @@
 import { Fragment, useCallback, useEffect, useMemo, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { confirm, save } from "@tauri-apps/plugin-dialog";
+import { usePageActivity, usePollingLoop } from "../lib/activity";
 import { copyPathToClipboard, openPathBestEffort, requireOpenablePath, revealPath } from "../lib/pathOpener";
 
 type JobStatus = "queued" | "running" | "succeeded" | "failed" | "canceled";
@@ -171,7 +172,8 @@ function parseExternalToolMissing(error: string | null): string | null {
   return tool ? tool.split(/\s+/)[0] : null;
 }
 
-export function JobsPage() {
+export function JobsPage({ visible = true }: { visible?: boolean }) {
+  const pageActive = usePageActivity(visible);
   const [jobs, setJobs] = useState<JobRow[]>([]);
   const [expandedGroups, setExpandedGroups] = useState<Record<string, boolean>>({});
   const [appDataDir, setAppDataDir] = useState<string>("");
@@ -200,8 +202,9 @@ export function JobsPage() {
   }, []);
 
   useEffect(() => {
+    if (!pageActive) return;
     refresh().catch((e) => setError(String(e)));
-  }, [refresh]);
+  }, [pageActive, refresh]);
 
   useEffect(() => {
     invoke<DiagnosticsInfo>("diagnostics_info")
@@ -252,13 +255,15 @@ export function JobsPage() {
     });
   }, [groupedJobs]);
 
-  useEffect(() => {
-    if (!hasActive) return;
-    const id = setInterval(() => {
-      refresh().catch(() => undefined);
-    }, 1000);
-    return () => clearInterval(id);
-  }, [hasActive, refresh]);
+  usePollingLoop(
+    async () => {
+      await refresh().catch(() => undefined);
+    },
+    {
+      enabled: pageActive && hasActive,
+      intervalMs: 1000,
+    },
+  );
 
   async function enqueueDummy() {
     setBusy(true);

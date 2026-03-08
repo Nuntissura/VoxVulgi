@@ -3,6 +3,7 @@ import { invoke } from "@tauri-apps/api/core";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import { open } from "@tauri-apps/plugin-dialog";
 import "./App.css";
+import { useDesktopActivity, usePollingLoop } from "./lib/activity";
 import { diagnosticsTrace } from "./lib/diagnosticsTrace";
 import { safeLocalStorageGet, safeLocalStorageSet } from "./lib/persist";
 
@@ -201,6 +202,7 @@ function App() {
   const [editorItemId, setEditorItemId] = useState<string | null>(null);
   const [safeMode, setSafeMode] = useState<SafeModeStatus | null>(null);
   const [startup, setStartup] = useState<StartupStatus | null>(null);
+  const desktopActivity = useDesktopActivity();
 
   useEffect(() => {
     invoke<SafeModeStatus>("safe_mode_status")
@@ -212,73 +214,49 @@ function App() {
     safeLocalStorageSet(ACTIVE_PAGE_KEY, page);
   }, [page]);
 
-  useEffect(() => {
-    let alive = true;
-    let timer: number | null = null;
-
-    const tick = () => {
-      invoke<StartupStatus>("startup_status")
-        .then((status) => {
-          if (!alive) return;
-          setStartup(status);
-          const keepPolling =
-            status.offline_bundle_state === "pending" || status.offline_bundle_state === "running";
-          if (!keepPolling && timer !== null) {
-            window.clearInterval(timer);
-            timer = null;
-          }
-        })
-        .catch(() => undefined);
-    };
-
-    tick();
-    timer = window.setInterval(tick, 1200);
-    return () => {
-      alive = false;
-      if (timer !== null) {
-        window.clearInterval(timer);
+  usePollingLoop(
+    async () => {
+      try {
+        const status = await invoke<StartupStatus>("startup_status");
+        setStartup(status);
+      } catch {
+        // Ignore startup status polling errors.
       }
-    };
-  }, []);
+    },
+    {
+      enabled:
+        desktopActivity.active &&
+        (startup === null ||
+          startup.offline_bundle_state === "pending" ||
+          startup.offline_bundle_state === "running"),
+      intervalMs: 1200,
+    },
+  );
 
-  useEffect(() => {
-    if (safeMode?.enabled) return;
-    let alive = true;
-    let firstTimer: number | null = null;
-    let intervalTimer: number | null = null;
-
-    const queueDueInstagramSubscriptions = () => {
-      invoke<Array<{ id: string }>>("instagram_subscriptions_queue_all_active")
-        .then((queued) => {
-          if (!alive || !queued.length) return;
-          void diagnosticsTrace("instagram_subscription_heartbeat_queued", {
-            queued_jobs: queued.length,
-          });
-        })
-        .catch((error) => {
-          if (!alive) return;
-          void diagnosticsTrace(
-            "instagram_subscription_heartbeat_failed",
-            {
-              error: String(error),
-            },
-            "warn",
-          );
+  usePollingLoop(
+    async () => {
+      try {
+        const queued = await invoke<Array<{ id: string }>>("instagram_subscriptions_queue_all_active");
+        if (!queued.length) return;
+        void diagnosticsTrace("instagram_subscription_heartbeat_queued", {
+          queued_jobs: queued.length,
         });
-    };
-
-    firstTimer = window.setTimeout(queueDueInstagramSubscriptions, 12_000);
-    intervalTimer = window.setInterval(queueDueInstagramSubscriptions, 60_000);
-    return () => {
-      alive = false;
-      if (firstTimer !== null) {
-        window.clearTimeout(firstTimer);
+      } catch (error) {
+        void diagnosticsTrace(
+          "instagram_subscription_heartbeat_failed",
+          {
+            error: String(error),
+          },
+          "warn",
+        );
       }
-      if (intervalTimer !== null) {
-        window.clearInterval(intervalTimer);
-      }
-    };
-  }, [safeMode?.enabled]);
+    },
+    {
+      enabled: !safeMode?.enabled && desktopActivity.active,
+      intervalMs: 60_000,
+      initialDelayMs: 12_000,
+    },
+  );
 
   async function startWindowDrag() {
     try {
@@ -347,7 +325,7 @@ function App() {
             onOpenVideoArchiver={() => switchPage("video_ingest")}
             onOpenMediaLibrary={() => switchPage("media_library")}
           />
-          <SubtitleEditorPage key={editorItemId} itemId={editorItemId} />
+          <SubtitleEditorPage key={editorItemId} itemId={editorItemId} visible={page === "localization"} />
         </>
       ) : (
         <LocalizationStudioHome
@@ -358,6 +336,7 @@ function App() {
       video_ingest: (
         <LibraryPage
           mode="video_ingest"
+          visible={page === "video_ingest"}
           onOpenEditor={(itemId) => {
             setEditorItemId(itemId);
             switchPage("localization", { item_id: itemId });
@@ -366,12 +345,23 @@ function App() {
         />
       ),
       instagram_archive: (
-        <LibraryPage mode="instagram_archive" onOpenOptions={() => switchPage("options")} />
+        <LibraryPage
+          mode="instagram_archive"
+          visible={page === "instagram_archive"}
+          onOpenOptions={() => switchPage("options")}
+        />
       ),
-      image_archive: <LibraryPage mode="image_archive" onOpenOptions={() => switchPage("options")} />,
+      image_archive: (
+        <LibraryPage
+          mode="image_archive"
+          visible={page === "image_archive"}
+          onOpenOptions={() => switchPage("options")}
+        />
+      ),
       media_library: (
         <LibraryPage
           mode="media_library"
+          visible={page === "media_library"}
           onOpenEditor={(itemId) => {
             setEditorItemId(itemId);
             switchPage("localization", { item_id: itemId });
@@ -379,11 +369,11 @@ function App() {
           onOpenOptions={() => switchPage("options")}
         />
       ),
-      jobs: <JobsPage />,
-      diagnostics: <DiagnosticsPage />,
+      jobs: <JobsPage visible={page === "jobs"} />,
+      diagnostics: <DiagnosticsPage visible={page === "diagnostics"} />,
       options: <OptionsPage />,
     }),
-    [editorItemId],
+    [editorItemId, page],
   );
 
   const visitedPageList = useMemo(

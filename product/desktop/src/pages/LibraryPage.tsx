@@ -155,6 +155,7 @@ function deriveContainerLabel(item: LibraryItem, downloadRoot: string): string {
 type LibraryPageProps = {
   onOpenEditor?: (itemId: string) => void;
   mode?: LibraryPageMode;
+  visible?: boolean;
   onOpenOptions?: () => void;
 };
 
