@@ -185,6 +185,7 @@ Initial language focus: **Korean + Japanese → English**.
 Current implementation status:
 
 - Localization Studio surfaces batch dubbing, A/B speaker previews, export stems/alternates visibility, voice memory, character libraries, and reference cleanup controls.
+- Localization Studio now also generates goal-aware voice benchmark reports, stores them as durable JSON/Markdown artifacts, and surfaces the top-ranked candidates with explainable metric breakdowns.
 - Export packs include speech stems and alternate dubbed variants when available.
 - Artifact-browser actions must remain variant-aware:
   - rerun, status, and log links for A/B/alternate artifacts must target the matching variant/track/container instead of falling back to the base artifact state,

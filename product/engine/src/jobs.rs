@@ -453,100 +453,100 @@ struct TtsPreviewManifest {
 }
 
 #[derive(Debug, Clone, Deserialize)]
-struct TtsPreviewManifestSegment {
-    index: u32,
-    start_ms: i64,
-    end_ms: i64,
+pub(crate) struct TtsPreviewManifestSegment {
+    pub(crate) index: u32,
+    pub(crate) start_ms: i64,
+    pub(crate) end_ms: i64,
     #[serde(default)]
-    speaker: Option<String>,
+    pub(crate) speaker: Option<String>,
     #[serde(default)]
-    audio_path: Option<String>,
+    pub(crate) audio_path: Option<String>,
     #[serde(default)]
-    audio_exists: bool,
+    pub(crate) audio_exists: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-struct QcThresholds {
-    cps_warn: f32,
-    cps_fail: f32,
-    line_chars_warn: usize,
-    line_chars_fail: usize,
-    overlap_warn_ms: i64,
+pub(crate) struct QcThresholds {
+    pub(crate) cps_warn: f32,
+    pub(crate) cps_fail: f32,
+    pub(crate) line_chars_warn: usize,
+    pub(crate) line_chars_fail: usize,
+    pub(crate) overlap_warn_ms: i64,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-struct QcSummary {
-    total_segments: usize,
-    issues_total: usize,
-    issues_by_kind: std::collections::BTreeMap<String, usize>,
+pub(crate) struct QcSummary {
+    pub(crate) total_segments: usize,
+    pub(crate) issues_total: usize,
+    pub(crate) issues_by_kind: std::collections::BTreeMap<String, usize>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-struct QcIssueRecord {
-    kind: String,
-    severity: String,
-    segment_index: u32,
-    start_ms: i64,
-    end_ms: i64,
-    message: String,
-    value: Option<f64>,
+pub(crate) struct QcIssueRecord {
+    pub(crate) kind: String,
+    pub(crate) severity: String,
+    pub(crate) segment_index: u32,
+    pub(crate) start_ms: i64,
+    pub(crate) end_ms: i64,
+    pub(crate) message: String,
+    pub(crate) value: Option<f64>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    speaker_key: Option<String>,
+    pub(crate) speaker_key: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    artifact_path: Option<String>,
+    pub(crate) artifact_path: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
-struct VoiceAudioStats {
-    duration_ms: i64,
-    sample_rate: u32,
-    peak_abs: f32,
-    rms: f32,
-    clipped_ratio: f32,
-    silence_ratio: f32,
-    zero_cross_ratio: f32,
-    pitch_hz: Option<f32>,
+pub(crate) struct VoiceAudioStats {
+    pub(crate) duration_ms: i64,
+    pub(crate) sample_rate: u32,
+    pub(crate) peak_abs: f32,
+    pub(crate) rms: f32,
+    pub(crate) clipped_ratio: f32,
+    pub(crate) silence_ratio: f32,
+    pub(crate) zero_cross_ratio: f32,
+    pub(crate) pitch_hz: Option<f32>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-struct VoiceReferenceQcRecord {
-    speaker_key: String,
-    path: String,
-    label: Option<String>,
-    stats: VoiceAudioStats,
-    warnings: Vec<String>,
+pub(crate) struct VoiceReferenceQcRecord {
+    pub(crate) speaker_key: String,
+    pub(crate) path: String,
+    pub(crate) label: Option<String>,
+    pub(crate) stats: VoiceAudioStats,
+    pub(crate) warnings: Vec<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-struct VoiceOutputQcRecord {
-    speaker_key: Option<String>,
-    segment_index: u32,
-    path: String,
-    stats: VoiceAudioStats,
-    warnings: Vec<String>,
+pub(crate) struct VoiceOutputQcRecord {
+    pub(crate) speaker_key: Option<String>,
+    pub(crate) segment_index: u32,
+    pub(crate) path: String,
+    pub(crate) stats: VoiceAudioStats,
+    pub(crate) warnings: Vec<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
-struct VoiceQcReportSection {
-    references: Vec<VoiceReferenceQcRecord>,
-    outputs: Vec<VoiceOutputQcRecord>,
+pub(crate) struct VoiceQcReportSection {
+    pub(crate) references: Vec<VoiceReferenceQcRecord>,
+    pub(crate) outputs: Vec<VoiceOutputQcRecord>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-struct QcReportV1 {
-    schema_version: u32,
-    generated_at_ms: i64,
-    item_id: String,
-    track_id: String,
-    lang: String,
+pub(crate) struct QcReportV1 {
+    pub(crate) schema_version: u32,
+    pub(crate) generated_at_ms: i64,
+    pub(crate) item_id: String,
+    pub(crate) track_id: String,
+    pub(crate) lang: String,
     #[serde(skip_serializing_if = "Option::is_none")]
-    variant_label: Option<String>,
-    thresholds: QcThresholds,
-    tts_backend: Option<String>,
-    tts_manifest_path: Option<String>,
-    issues: Vec<QcIssueRecord>,
-    voice: VoiceQcReportSection,
-    summary: QcSummary,
+    pub(crate) variant_label: Option<String>,
+    pub(crate) thresholds: QcThresholds,
+    pub(crate) tts_backend: Option<String>,
+    pub(crate) tts_manifest_path: Option<String>,
+    pub(crate) issues: Vec<QcIssueRecord>,
+    pub(crate) voice: VoiceQcReportSection,
+    pub(crate) summary: QcSummary,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -10943,7 +10943,7 @@ fn median_pitch_hz(values: &[f32]) -> Option<f32> {
     Some(ordered[ordered.len() / 2])
 }
 
-fn collect_voice_qc(
+pub(crate) fn collect_voice_qc(
     paths: &AppPaths,
     item_id: &str,
     manifest_segments: &[TtsPreviewManifestSegment],

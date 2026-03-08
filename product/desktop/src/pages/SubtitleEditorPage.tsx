@@ -467,6 +467,56 @@ type VoiceBackendRecommendation = {
   warnings: string[];
 };
 
+type VoiceBenchmarkScoreTerm = {
+  key: string;
+  label: string;
+  weight: number;
+  value: number;
+  points: number;
+};
+
+type VoiceBenchmarkCandidate = {
+  candidate_id: string;
+  display_name: string;
+  backend_id: string;
+  variant_label: string | null;
+  manifest_path: string;
+  expected_segments: number;
+  rendered_segments: number;
+  coverage_ratio: number;
+  timing_fit_ratio: number;
+  timing_overrun_segments: number;
+  timing_short_segments: number;
+  warn_count: number;
+  fail_count: number;
+  reference_warn_count: number;
+  reference_fail_count: number;
+  output_warn_count: number;
+  output_fail_count: number;
+  similarity_proxy: number | null;
+  converted_ratio: number | null;
+  final_mix_ready: boolean;
+  export_pack_ready: boolean;
+  score: number;
+  score_breakdown: VoiceBenchmarkScoreTerm[];
+  strengths: string[];
+  concerns: string[];
+};
+
+type VoiceBenchmarkReport = {
+  schema_version: number;
+  generated_at_ms: number;
+  item_id: string;
+  track_id: string;
+  goal: string;
+  recommended_candidate_id: string | null;
+  candidate_count: number;
+  summary: string[];
+  json_path: string;
+  markdown_path: string;
+  candidates: VoiceBenchmarkCandidate[];
+};
+
 type LocalizationBatchRequest = {
   item_ids: string[];
   template_id: string | null;
@@ -830,6 +880,8 @@ export function SubtitleEditorPage({ itemId }: { itemId: string }) {
   const [voiceBackendCatalog, setVoiceBackendCatalog] = useState<VoiceBackendCatalog | null>(null);
   const [voiceBackendRecommendation, setVoiceBackendRecommendation] =
     useState<VoiceBackendRecommendation | null>(null);
+  const [voiceBenchmarkReport, setVoiceBenchmarkReport] = useState<VoiceBenchmarkReport | null>(null);
+  const [voiceBenchmarkBusy, setVoiceBenchmarkBusy] = useState(false);
   const [voiceBackendGoal, setVoiceBackendGoal] = useState<
     "balanced" | "identity" | "expressive" | "timing" | "speed"
   >(() => {
@@ -2116,6 +2168,48 @@ export function SubtitleEditorPage({ itemId }: { itemId: string }) {
       setError(String(e));
     }
   }, [itemId, trackId]);
+
+  const loadVoiceBenchmarkReport = useCallback(async () => {
+    if (!trackId) {
+      setVoiceBenchmarkReport(null);
+      return;
+    }
+    try {
+      const report = await invoke<VoiceBenchmarkReport | null>("voice_benchmark_load", {
+        itemId,
+        trackId,
+        goal: voiceBackendGoal,
+      });
+      setVoiceBenchmarkReport(report);
+    } catch (e) {
+      setError(String(e));
+    }
+  }, [itemId, trackId, voiceBackendGoal]);
+
+  async function generateVoiceBenchmarkReport() {
+    if (!trackId) return;
+    setVoiceBenchmarkBusy(true);
+    setError(null);
+    setNotice(null);
+    try {
+      const report = await invoke<VoiceBenchmarkReport>("voice_benchmark_generate", {
+        itemId,
+        trackId,
+        goal: voiceBackendGoal,
+      });
+      setVoiceBenchmarkReport(report);
+      setNotice("Generated voice benchmark report.");
+      refreshArtifacts().catch(() => undefined);
+    } catch (e) {
+      setError(String(e));
+    } finally {
+      setVoiceBenchmarkBusy(false);
+    }
+  }
+
+  useEffect(() => {
+    loadVoiceBenchmarkReport().catch(() => undefined);
+  }, [loadVoiceBenchmarkReport]);
 
   async function enqueueExportPack() {
     setBusy(true);
@@ -5816,6 +5910,145 @@ export function SubtitleEditorPage({ itemId }: { itemId: string }) {
                   </div>
                 </div>
               ) : null}
+            </div>
+
+            <div style={{ marginTop: 16 }}>
+              <div className="row" style={{ alignItems: "center", gap: 10, flexWrap: "wrap" }}>
+                <div style={{ fontSize: 12, opacity: 0.85 }}>Voice benchmark lab</div>
+                <button
+                  type="button"
+                  disabled={busy || voiceBenchmarkBusy || !trackId}
+                  onClick={() => {
+                    generateVoiceBenchmarkReport().catch(() => undefined);
+                  }}
+                >
+                  Generate report
+                </button>
+                <button
+                  type="button"
+                  disabled={busy || voiceBenchmarkBusy || !trackId}
+                  onClick={() => {
+                    loadVoiceBenchmarkReport().catch(() => undefined);
+                  }}
+                >
+                  Reload report
+                </button>
+                <button
+                  type="button"
+                  disabled={busy || !voiceBenchmarkReport?.markdown_path}
+                  onClick={() =>
+                    openPathBestEffort(voiceBenchmarkReport?.markdown_path ?? "").catch(() => undefined)
+                  }
+                >
+                  Open markdown
+                </button>
+                <button
+                  type="button"
+                  disabled={busy || !voiceBenchmarkReport?.json_path}
+                  onClick={() =>
+                    revealPath(voiceBenchmarkReport?.json_path ?? "").catch((e) => setError(String(e)))
+                  }
+                >
+                  Reveal report
+                </button>
+              </div>
+              <div style={{ marginTop: 8, fontSize: 12, opacity: 0.7 }}>
+                Benchmarks rank current rendered voice candidates and variants using local timing,
+                coverage, reference health, output health, and similarity-proxy signals.
+              </div>
+              {voiceBenchmarkReport ? (
+                <div
+                  style={{
+                    marginTop: 10,
+                    border: "1px solid #e5e7eb",
+                    borderRadius: 8,
+                    padding: 10,
+                    display: "flex",
+                    flexDirection: "column",
+                    gap: 10,
+                  }}
+                >
+                  <div className="kv">
+                    <div className="k">Goal</div>
+                    <div className="v">
+                      {voiceBenchmarkReport.goal} / {voiceBenchmarkReport.candidate_count} candidate(s)
+                    </div>
+                  </div>
+                  <div className="kv">
+                    <div className="k">Generated</div>
+                    <div className="v">{formatTs(voiceBenchmarkReport.generated_at_ms)}</div>
+                  </div>
+                  {voiceBenchmarkReport.summary.length ? (
+                    <div style={{ fontSize: 12, opacity: 0.75 }}>
+                      {voiceBenchmarkReport.summary.join(" ")}
+                    </div>
+                  ) : null}
+                  <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
+                    {voiceBenchmarkReport.candidates.slice(0, 4).map((candidate, index) => (
+                      <div
+                        key={candidate.candidate_id}
+                        style={{
+                          border: "1px solid #e5e7eb",
+                          borderRadius: 8,
+                          padding: 10,
+                          display: "flex",
+                          flexDirection: "column",
+                          gap: 6,
+                        }}
+                      >
+                        <div className="row" style={{ justifyContent: "space-between", gap: 10 }}>
+                          <div style={{ fontWeight: 600 }}>
+                            #{index + 1} {candidate.display_name}
+                          </div>
+                          <code>{candidate.score.toFixed(1)}</code>
+                        </div>
+                        <div className="row" style={{ gap: 12, flexWrap: "wrap", fontSize: 12, opacity: 0.8 }}>
+                          <span>coverage {(candidate.coverage_ratio * 100).toFixed(0)}%</span>
+                          <span>timing {(candidate.timing_fit_ratio * 100).toFixed(0)}%</span>
+                          <span>output fails {candidate.output_fail_count}</span>
+                          <span>
+                            similarity{" "}
+                            {candidate.similarity_proxy === null
+                              ? "-"
+                              : `${(candidate.similarity_proxy * 100).toFixed(0)}%`}
+                          </span>
+                          <span>
+                            conversion{" "}
+                            {candidate.converted_ratio === null
+                              ? "-"
+                              : `${(candidate.converted_ratio * 100).toFixed(0)}%`}
+                          </span>
+                        </div>
+                        {candidate.strengths.length ? (
+                          <div style={{ fontSize: 12, opacity: 0.75 }}>
+                            Strengths: {candidate.strengths.join(" | ")}
+                          </div>
+                        ) : null}
+                        {candidate.concerns.length ? (
+                          <div style={{ fontSize: 12, opacity: 0.75 }}>
+                            Concerns: {candidate.concerns.join(" | ")}
+                          </div>
+                        ) : null}
+                        {candidate.score_breakdown.length ? (
+                          <div style={{ fontSize: 12, opacity: 0.7 }}>
+                            {candidate.score_breakdown
+                              .slice(0, 4)
+                              .map(
+                                (term) =>
+                                  `${term.label} ${(term.value * 100).toFixed(0)}% x ${(term.weight * 100).toFixed(0)}%`,
+                              )
+                              .join(" | ")}
+                          </div>
+                        ) : null}
+                      </div>
+                    ))}
+                  </div>
+                </div>
+              ) : (
+                <div style={{ marginTop: 8, fontSize: 12, opacity: 0.65 }}>
+                  No benchmark report saved yet for this track and goal.
+                </div>
+              )}
             </div>
 
             <div style={{ marginTop: 16 }}>

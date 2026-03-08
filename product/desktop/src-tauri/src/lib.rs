@@ -10,8 +10,8 @@ use voxvulgi_engine::models::ModelStore;
 use voxvulgi_engine::paths::AppPaths;
 use voxvulgi_engine::{
     config, db, diagnostics, instagram_subscriptions, jobs, library, speakers, subscriptions,
-    subtitle_tracks, subtitles, tools, voice_backends, voice_cast_packs, voice_cleanup,
-    voice_library, voice_templates,
+    subtitle_tracks, subtitles, tools, voice_backends, voice_benchmarks, voice_cast_packs,
+    voice_cleanup, voice_library, voice_templates,
 };
 
 #[derive(Debug, Clone, serde::Deserialize)]
@@ -1524,6 +1524,31 @@ fn item_artifacts_list_v1(
         }
     }
 
+    let benchmark_dir = item_dir.join("voice_benchmark");
+    if benchmark_dir.exists() {
+        if let Ok(entries) = std::fs::read_dir(&benchmark_dir) {
+            for entry in entries.flatten() {
+                let path = entry.path();
+                if !path.is_file() {
+                    continue;
+                }
+                let Some(name) = path.file_name().and_then(|value| value.to_str()) else {
+                    continue;
+                };
+                let lower = name.to_ascii_lowercase();
+                if !(lower.ends_with(".json") || lower.ends_with(".md")) {
+                    continue;
+                }
+                push(
+                    &format!("benchmark_{}", name.replace('.', "_")),
+                    &format!("Voice benchmark ({name})"),
+                    "Benchmark",
+                    path,
+                );
+            }
+        }
+    }
+
     out.sort_by(|a, b| {
         a.group
             .cmp(&b.group)
@@ -2290,6 +2315,74 @@ async fn voice_backends_recommend(
     let request = request.unwrap_or_default();
     tauri::async_runtime::spawn_blocking(move || {
         Ok(voice_backends::recommend_backend(&paths, request))
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
+#[tauri::command]
+#[allow(non_snake_case)]
+async fn voice_benchmark_generate(
+    state: State<'_, AppState>,
+    item_id: Option<String>,
+    itemId: Option<String>,
+    track_id: Option<String>,
+    trackId: Option<String>,
+    goal: Option<String>,
+) -> Result<voice_benchmarks::VoiceBenchmarkReport, String> {
+    let paths = state.paths.clone();
+    let item_id = item_id
+        .or(itemId)
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty())
+        .ok_or_else(|| "missing required key itemId".to_string())?;
+    let track_id = track_id
+        .or(trackId)
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty())
+        .ok_or_else(|| "missing required key trackId".to_string())?;
+    tauri::async_runtime::spawn_blocking(move || {
+        voice_benchmarks::generate_voice_benchmark_report(
+            &paths,
+            &item_id,
+            &track_id,
+            goal.as_deref(),
+        )
+        .map_err(|e| e.to_string())
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
+#[tauri::command]
+#[allow(non_snake_case)]
+async fn voice_benchmark_load(
+    state: State<'_, AppState>,
+    item_id: Option<String>,
+    itemId: Option<String>,
+    track_id: Option<String>,
+    trackId: Option<String>,
+    goal: Option<String>,
+) -> Result<Option<voice_benchmarks::VoiceBenchmarkReport>, String> {
+    let paths = state.paths.clone();
+    let item_id = item_id
+        .or(itemId)
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty())
+        .ok_or_else(|| "missing required key itemId".to_string())?;
+    let track_id = track_id
+        .or(trackId)
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty())
+        .ok_or_else(|| "missing required key trackId".to_string())?;
+    tauri::async_runtime::spawn_blocking(move || {
+        voice_benchmarks::load_voice_benchmark_report(
+            &paths,
+            &item_id,
+            &track_id,
+            goal.as_deref(),
+        )
+        .map_err(|e| e.to_string())
     })
     .await
     .map_err(|e| e.to_string())?
@@ -3755,6 +3848,8 @@ pub fn run() {
             voice_library_update,
             voice_backends_catalog,
             voice_backends_recommend,
+            voice_benchmark_generate,
+            voice_benchmark_load,
             voice_cleanup_list_for_speaker,
             voice_cleanup_run_for_speaker,
             voice_templates_apply_to_item,

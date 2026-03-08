@@ -3,7 +3,7 @@
 ## Metadata
 - ID: WP-0109
 - Owner: Codex
-- Status: BACKLOG
+- Status: DONE
 - Created: 2026-03-08
 - Target milestone: Voice backend modernization
 
@@ -41,3 +41,4 @@ Out of scope:
 ## Status updates
 
 - 2026-03-08: Created from the research transfer packet.
+- 2026-03-08: Implemented engine-side benchmark generation, Localization Studio benchmark surfacing, and durable JSON/Markdown benchmark artifacts; proof in `product/desktop/Build Target/tool_artifacts/wp_runs/WP-0109/20260308_024800/`.

@@ -18,6 +18,7 @@ pub mod subtitles;
 pub mod tools;
 pub mod translate;
 pub mod voice_backends;
+pub mod voice_benchmarks;
 pub mod voice_cast_packs;
 pub mod voice_cleanup;
 pub mod voice_library;

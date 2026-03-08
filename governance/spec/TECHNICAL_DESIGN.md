@@ -328,6 +328,11 @@ Voice benchmark lab design:
   - similarity proxies derived from local embeddings or existing QC metrics,
   - a transparent weighted ranking score.
 - The benchmark lab should work on already-rendered artifacts first; it should not require a second backend to be installed in order to be useful.
+- Current implementation shape:
+  - engine module `voice_benchmarks` discovers manifest-backed candidates per item/track,
+  - it reuses existing local voice QC analysis for reference/output health and combines that with subtitle timing-fit metrics,
+  - it writes durable `voice_benchmark_v1_<track>_<goal>.json` and `.md` artifacts under `derived/items/<item>/voice_benchmark/`,
+  - Localization Studio loads and displays the top benchmark candidates for the currently selected goal.
 
 Experimental BYO adapter design:
 

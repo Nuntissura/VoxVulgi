@@ -63,7 +63,7 @@ Date: 2026-03-08
 
 - WP-0107: Refresh the voice-cloning research base, transfer it into spec/governance, and pin the next backend strategy. DONE.
 - WP-0108: Add a first-class backend catalog and recommendation surface so operators can see which backend family fits their dubbing goal. DONE.
-- WP-0109: Add a benchmark lab that compares current voice outputs and variants using ranked local metrics.
+- WP-0109: Add a benchmark lab that compares current voice outputs and variants using ranked local metrics. DONE.
 - WP-0110: Add explicit BYO backend adapters for strong OSS candidates that should not be shipped or auto-installed by default.
 
 ## Phase 0 — Decisions (1–2 days)
