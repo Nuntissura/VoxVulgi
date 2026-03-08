@@ -49,8 +49,11 @@ Design goals:
 - The shared download/export root should be configured once from a global Options surface, not duplicated as pane-local state.
 - Selecting an existing valid root should hydrate expected app-managed folders and index known existing archive folders instead of briefly treating the root as missing.
 - Allow "clear cache" without touching library media.
+- Generic job-history cleanup must never remove item-scoped deliverables or user-selected output folders unless the operator explicitly opts into those output-folder classes.
 - Avoid storing large thumbnail blobs inside SQLite; store thumbnails on disk and keep the DB as metadata-only.
 - Keep derived outputs per item (reproducible and debuggable).
+- Item-scoped derived outputs should be classified as working files, durable reports, and durable deliverables, and Diagnostics should surface that contract.
+- Cleanup summaries should surface failed path deletions and keep job provenance for job-linked cleanup failures.
 - Explicit consent mechanisms must not be implemented.
 - Anti-abuse controls must not be included.
 - These features must not appear in development or the final product. Users must comply with all local regulations.

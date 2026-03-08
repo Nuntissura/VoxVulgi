@@ -256,12 +256,55 @@ type JobRow = {
   logs_path: string;
 };
 
-type JobFlushSummary = {
+type JobCleanupOutputTarget = {
+  path: string;
+  source_job_ids: string[];
+};
+
+type JobCleanupPreview = {
+  terminal_job_count: number;
+  log_file_count: number;
+  artifact_dir_count: number;
+  cache_entry_count: number;
+  managed_output_dirs: JobCleanupOutputTarget[];
+  external_output_dirs: JobCleanupOutputTarget[];
+};
+
+type JobCleanupOptions = {
+  remove_managed_output_dirs: boolean;
+  remove_external_output_dirs: boolean;
+};
+
+type JobCleanupFailure = {
+  scope: string;
+  path: string;
+  message: string;
+};
+
+type JobCleanupSummary = {
   removed_jobs: number;
+  kept_jobs_due_to_failures: number;
   removed_log_files: number;
   removed_artifact_dirs: number;
-  removed_output_dirs: number;
+  removed_managed_output_dirs: number;
+  removed_external_output_dirs: number;
+  skipped_managed_output_dirs: number;
+  skipped_external_output_dirs: number;
   removed_cache_entries: number;
+  failed_paths: JobCleanupFailure[];
+};
+
+type ItemArtifactRetentionClass = {
+  id: string;
+  title: string;
+  default_behavior: string;
+  description: string;
+  examples: string[];
+};
+
+type ItemArtifactRetentionPolicy = {
+  summary: string[];
+  classes: ItemArtifactRetentionClass[];
 };
 
 type BatchOnImportRules = {
@@ -470,6 +513,8 @@ export function DiagnosticsPage() {
   const [storage, setStorage] = useState<StorageBreakdown | null>(null);
   const [thumbnailCache, setThumbnailCache] = useState<ThumbnailCacheStatus | null>(null);
   const [policy, setPolicy] = useState<JobLogRetentionPolicy | null>(null);
+  const [artifactRetentionPolicy, setArtifactRetentionPolicy] =
+    useState<ItemArtifactRetentionPolicy | null>(null);
   const [diagnosticsTraceDir, setDiagnosticsTraceDir] =
     useState<DiagnosticsTraceDirStatus | null>(null);
   const [recentTrace, setRecentTrace] = useState<DiagnosticsTraceEntry[]>([]);
@@ -531,6 +576,7 @@ export function DiagnosticsPage() {
         nextStorage,
         nextThumbnailCache,
         nextPolicy,
+        nextArtifactRetentionPolicy,
         nextDiagnosticsTraceDir,
         nextRecentTrace,
         nextJobs,
@@ -560,6 +606,7 @@ export function DiagnosticsPage() {
         invoke<StorageBreakdown>("diagnostics_storage_breakdown"),
         invoke<ThumbnailCacheStatus>("diagnostics_thumbnail_cache_status"),
         invoke<JobLogRetentionPolicy>("jobs_log_retention_policy"),
+        invoke<ItemArtifactRetentionPolicy>("jobs_item_artifact_retention_policy"),
         invoke<DiagnosticsTraceDirStatus>("diagnostics_trace_dir_status"),
         invoke<DiagnosticsTraceEntry[]>("diagnostics_trace_recent", { limit: 120 }),
         invoke<JobRow[]>("jobs_list", { limit: 200, offset: 0 }),
@@ -611,6 +658,7 @@ export function DiagnosticsPage() {
         setStorage(nextStorage);
         setThumbnailCache(nextThumbnailCache);
         setPolicy(nextPolicy);
+        setArtifactRetentionPolicy(nextArtifactRetentionPolicy);
         setDiagnosticsTraceDir(nextDiagnosticsTraceDir);
         setRecentTrace(nextRecentTrace);
         setJobs(nextJobs);
@@ -755,13 +803,17 @@ export function DiagnosticsPage() {
   const loadStorageSection = useCallback(async () => {
     updateSectionStatus("storage", "loading");
     try {
-      const [nextStorage, nextThumbnailCache] = await Promise.all([
+      const [nextStorage, nextThumbnailCache, nextPolicy, nextArtifactRetentionPolicy] = await Promise.all([
         invoke<StorageBreakdown>("diagnostics_storage_breakdown"),
         invoke<ThumbnailCacheStatus>("diagnostics_thumbnail_cache_status"),
+        invoke<JobLogRetentionPolicy>("jobs_log_retention_policy"),
+        invoke<ItemArtifactRetentionPolicy>("jobs_item_artifact_retention_policy"),
       ]);
       startTransition(() => {
         setStorage(nextStorage);
         setThumbnailCache(nextThumbnailCache);
+        setPolicy(nextPolicy);
+        setArtifactRetentionPolicy(nextArtifactRetentionPolicy);
         updateSectionStatus("storage", "ready");
       });
     } catch (e) {
@@ -1493,28 +1545,81 @@ export function DiagnosticsPage() {
   }
 
   async function flushJobsCache() {
-    const ok = await confirm(
-      "Flush finished/failed/canceled jobs and remove their logs/artifacts? Active jobs are kept.",
-      {
-        title: "Flush job history",
-        kind: "warning",
-      },
-    );
-    if (!ok) return;
-
-    setBusy(true);
-    setError(null);
-    setNotice(null);
     try {
-      const summary = await invoke<JobFlushSummary>("jobs_flush_cache");
-      setNotice(
-        `Flushed ${summary.removed_jobs} jobs, ${summary.removed_log_files} log files, ${summary.removed_artifact_dirs} artifact folders, ${summary.removed_output_dirs} output folders, ${summary.removed_cache_entries} cache entries.`,
+      const preview = await invoke<JobCleanupPreview>("jobs_cleanup_preview");
+      if (
+        preview.terminal_job_count === 0 &&
+        preview.log_file_count === 0 &&
+        preview.artifact_dir_count === 0 &&
+        preview.cache_entry_count === 0 &&
+        preview.managed_output_dirs.length === 0 &&
+        preview.external_output_dirs.length === 0
+      ) {
+        setNotice("No terminal jobs, logs, artifacts, cache entries, or output folders need cleanup.");
+        return;
+      }
+
+      const ok = await confirm(
+        `Forget ${preview.terminal_job_count} terminal job${preview.terminal_job_count === 1 ? "" : "s"}, remove ${preview.log_file_count} log file${preview.log_file_count === 1 ? "" : "s"}, ${preview.artifact_dir_count} job artifact folder${preview.artifact_dir_count === 1 ? "" : "s"}, and ${preview.cache_entry_count} cache entr${preview.cache_entry_count === 1 ? "y" : "ies"}? Output folders are handled by separate prompts.`,
+        {
+          title: "Flush job history",
+          kind: "warning",
+        },
       );
-      await refresh();
+      if (!ok) return;
+
+      let removeManagedOutputDirs = false;
+      if (preview.managed_output_dirs.length > 0) {
+        removeManagedOutputDirs = await confirm(
+          `Also delete ${preview.managed_output_dirs.length} app-managed output folder${preview.managed_output_dirs.length === 1 ? "" : "s"} created by terminal jobs? Deliverables outside those folders are not touched.`,
+          {
+            title: "Delete managed output folders",
+            kind: "warning",
+          },
+        );
+      }
+
+      let removeExternalOutputDirs = false;
+      if (preview.external_output_dirs.length > 0) {
+        removeExternalOutputDirs = await confirm(
+          `Also delete ${preview.external_output_dirs.length} external/custom output folder${preview.external_output_dirs.length === 1 ? "" : "s"}? These may be outside VoxVulgi-managed paths.`,
+          {
+            title: "Delete external output folders",
+            kind: "warning",
+          },
+        );
+      }
+
+      setBusy(true);
+      setError(null);
+      setNotice(null);
+      try {
+        const summary = await invoke<JobCleanupSummary>("jobs_flush_cache", {
+          options: {
+            remove_managed_output_dirs: removeManagedOutputDirs,
+            remove_external_output_dirs: removeExternalOutputDirs,
+          } satisfies JobCleanupOptions,
+        });
+        setNotice(
+          `Flushed ${summary.removed_jobs} jobs, kept ${summary.kept_jobs_due_to_failures} job${summary.kept_jobs_due_to_failures === 1 ? "" : "s"} due to cleanup failures, removed ${summary.removed_log_files} log files, ${summary.removed_artifact_dirs} artifact folders, ${summary.removed_managed_output_dirs} managed output folders, ${summary.removed_external_output_dirs} external output folders, and ${summary.removed_cache_entries} cache entries.`,
+        );
+        if (summary.failed_paths.length > 0) {
+          const detail = summary.failed_paths
+            .slice(0, 5)
+            .map((failure) => `${failure.scope}: ${failure.path} (${failure.message})`)
+            .join("\n");
+          setError(
+            `Cleanup left ${summary.failed_paths.length} path failure${summary.failed_paths.length === 1 ? "" : "s"}.\n${detail}`,
+          );
+        }
+        await refresh();
+      } catch (e) {
+        setError(String(e));
+      } finally {
+        setBusy(false);
+      }
     } catch (e) {
       setError(String(e));
-    } finally {
-      setBusy(false);
     }
   }
 
@@ -2952,6 +3057,26 @@ export function DiagnosticsPage() {
               : "-"}
           </div>
         </div>
+        <div className="kv">
+          <div className="k">Derived artifact policy</div>
+          <div className="v">
+            {artifactRetentionPolicy
+              ? artifactRetentionPolicy.summary.join(" ")
+              : "-"}
+          </div>
+        </div>
+        {artifactRetentionPolicy?.classes.map((entry) => (
+          <div key={entry.id} style={{ marginTop: 12, padding: 12, border: "1px solid rgba(255,255,255,0.12)", borderRadius: 10 }}>
+            <div style={{ fontWeight: 600 }}>{entry.title}</div>
+            <div style={{ fontSize: 12, opacity: 0.82, marginTop: 4 }}>{entry.description}</div>
+            <div style={{ fontSize: 12, marginTop: 6 }}>
+              <strong>Default:</strong> {entry.default_behavior}
+            </div>
+            <div style={{ fontSize: 12, marginTop: 6 }}>
+              <strong>Examples:</strong> {entry.examples.join(", ")}
+            </div>
+          </div>
+        ))}
       </div>
 
       <div className="card">

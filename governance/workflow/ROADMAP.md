@@ -88,7 +88,7 @@ Date: 2026-03-08
 ## Audit Remediation Program (2026-03)
 
 - WP-0124: Governance hygiene and manual smoke scope reconciliation. DONE.
-- WP-0125: Safe cleanup boundaries and artifact retention policy.
+- WP-0125: Safe cleanup boundaries and artifact retention policy. DONE.
 - WP-0126: Schema versioning and atomic config persistence.
 - WP-0127: Visibility-aware polling and background work suspension.
 - WP-0128: Localization surface decomposition and typed runtime contracts.

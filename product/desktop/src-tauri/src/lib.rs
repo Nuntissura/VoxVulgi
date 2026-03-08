@@ -4217,8 +4217,23 @@ fn jobs_runtime_settings_set(
 }
 
 #[tauri::command]
-fn jobs_flush_cache(state: State<'_, AppState>) -> Result<jobs::JobFlushSummary, String> {
-    jobs::flush_jobs_cache(&state.paths).map_err(|e| e.to_string())
+fn jobs_cleanup_preview(state: State<'_, AppState>) -> Result<jobs::JobCleanupPreview, String> {
+    jobs::preview_jobs_cleanup(&state.paths).map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+fn jobs_item_artifact_retention_policy(
+    _state: State<'_, AppState>,
+) -> Result<jobs::ItemArtifactRetentionPolicy, String> {
+    Ok(jobs::item_artifact_retention_policy())
+}
+
+#[tauri::command]
+fn jobs_flush_cache(
+    state: State<'_, AppState>,
+    options: Option<jobs::JobCleanupOptions>,
+) -> Result<jobs::JobCleanupSummary, String> {
+    jobs::flush_jobs_cache(&state.paths, options).map_err(|e| e.to_string())
 }
 
 #[tauri::command]
@@ -4413,11 +4428,13 @@ pub fn run() {
             jobs_enqueue_localization_batch_v1,
             jobs_enqueue_voice_ab_preview_v1,
             jobs_enqueue_translate_local,
+            jobs_cleanup_preview,
             jobs_flush_cache,
             jobs_list,
             jobs_list_for_item,
             jobs_queue_control_get,
             jobs_queue_control_set,
+            jobs_item_artifact_retention_policy,
             jobs_log_retention_policy,
             jobs_prune_logs,
             jobs_runtime_settings_get,

@@ -208,12 +208,63 @@ pub struct JobQueueControlState {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct JobFlushSummary {
+pub struct JobCleanupPreview {
+    pub terminal_job_count: usize,
+    pub log_file_count: usize,
+    pub artifact_dir_count: usize,
+    pub cache_entry_count: usize,
+    pub managed_output_dirs: Vec<JobCleanupOutputTarget>,
+    pub external_output_dirs: Vec<JobCleanupOutputTarget>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct JobCleanupOptions {
+    #[serde(default)]
+    pub remove_managed_output_dirs: bool,
+    #[serde(default)]
+    pub remove_external_output_dirs: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct JobCleanupOutputTarget {
+    pub path: String,
+    pub source_job_ids: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct JobCleanupFailure {
+    pub scope: String,
+    pub path: String,
+    pub message: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct JobCleanupSummary {
     pub removed_jobs: usize,
+    pub kept_jobs_due_to_failures: usize,
     pub removed_log_files: usize,
     pub removed_artifact_dirs: usize,
-    pub removed_output_dirs: usize,
+    pub removed_managed_output_dirs: usize,
+    pub removed_external_output_dirs: usize,
+    pub skipped_managed_output_dirs: usize,
+    pub skipped_external_output_dirs: usize,
     pub removed_cache_entries: usize,
+    pub failed_paths: Vec<JobCleanupFailure>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ItemArtifactRetentionClass {
+    pub id: String,
+    pub title: String,
+    pub default_behavior: String,
+    pub description: String,
+    pub examples: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ItemArtifactRetentionPolicy {
+    pub summary: Vec<String>,
+    pub classes: Vec<ItemArtifactRetentionClass>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -1793,7 +1844,186 @@ pub fn cancel_all_jobs(paths: &AppPaths) -> Result<usize> {
     Ok(updated)
 }
 
-pub fn flush_jobs_cache(paths: &AppPaths) -> Result<JobFlushSummary> {
+#[derive(Debug, Clone)]
+struct TerminalJobCleanupRecord {
+    job_id: String,
+    job_type: String,
+    params_json: String,
+    logs_path: String,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum CleanupOutputDirClass {
+    Managed,
+    External,
+}
+
+#[derive(Debug, Clone)]
+struct CleanupOutputDirTargetInternal {
+    path: PathBuf,
+    class_name: CleanupOutputDirClass,
+    source_job_ids: HashSet<String>,
+}
+
+#[derive(Debug, Clone)]
+struct JobCleanupPlan {
+    terminal_jobs: Vec<TerminalJobCleanupRecord>,
+    log_file_count: usize,
+    artifact_dir_count: usize,
+    cache_entry_count: usize,
+    managed_output_dirs: Vec<CleanupOutputDirTargetInternal>,
+    external_output_dirs: Vec<CleanupOutputDirTargetInternal>,
+}
+
+pub fn preview_jobs_cleanup(paths: &AppPaths) -> Result<JobCleanupPreview> {
+    let plan = build_job_cleanup_plan(paths)?;
+    Ok(JobCleanupPreview {
+        terminal_job_count: plan.terminal_jobs.len(),
+        log_file_count: plan.log_file_count,
+        artifact_dir_count: plan.artifact_dir_count,
+        cache_entry_count: plan.cache_entry_count,
+        managed_output_dirs: cleanup_output_targets_for_ui(&plan.managed_output_dirs),
+        external_output_dirs: cleanup_output_targets_for_ui(&plan.external_output_dirs),
+    })
+}
+
+pub fn item_artifact_retention_policy() -> ItemArtifactRetentionPolicy {
+    ItemArtifactRetentionPolicy {
+        summary: vec![
+            "Generic job-history cleanup only removes terminal job rows, job logs, job-scoped artifacts, and shared cache entries.".to_string(),
+            "Item-scoped derived outputs are split into working files, durable reports, and deliverables so operator-visible exports are not silently swept by cache/history cleanup.".to_string(),
+            "Custom or external output folders require a separate explicit opt-in before deletion.".to_string(),
+        ],
+        classes: vec![
+            ItemArtifactRetentionClass {
+                id: "working".to_string(),
+                title: "Working files".to_string(),
+                default_behavior: "Kept for reproducibility; never removed by generic cache/history cleanup.".to_string(),
+                description: "Intermediate item-scoped outputs that help resume or debug localization and dubbing flows.".to_string(),
+                examples: vec![
+                    "derived/items/<item>/asr/".to_string(),
+                    "derived/items/<item>/translate/".to_string(),
+                    "derived/items/<item>/diarize/".to_string(),
+                    "derived/items/<item>/cleanup/".to_string(),
+                    "derived/items/<item>/voice/cleanup/".to_string(),
+                ],
+            },
+            ItemArtifactRetentionClass {
+                id: "durable_report".to_string(),
+                title: "Durable reports".to_string(),
+                default_behavior: "Retained until an explicit operator cleanup flow removes them.".to_string(),
+                description: "Review and benchmark artifacts that document how a result was produced and evaluated.".to_string(),
+                examples: vec![
+                    "derived/items/<item>/qc/".to_string(),
+                    "derived/items/<item>/voice_benchmark/".to_string(),
+                    "derived/items/<item>/voice_reference_curation/".to_string(),
+                    "derived/items/<item>/tts_preview/<backend>/report.json".to_string(),
+                ],
+            },
+            ItemArtifactRetentionClass {
+                id: "deliverable".to_string(),
+                title: "Deliverables".to_string(),
+                default_behavior: "Durable by default; never removed by cache/history cleanup.".to_string(),
+                description: "Operator-facing outputs intended for reuse, export, review, or handoff.".to_string(),
+                examples: vec![
+                    "derived/items/<item>/dub_preview/".to_string(),
+                    "derived/items/<item>/localization/".to_string(),
+                    "downloads/localization/<lang>/<media-stem>/".to_string(),
+                    "export packs, stems, and alternate dubbed variants".to_string(),
+                ],
+            },
+        ],
+    }
+}
+
+pub fn flush_jobs_cache(paths: &AppPaths, options: Option<JobCleanupOptions>) -> Result<JobCleanupSummary> {
+    let plan = build_job_cleanup_plan(paths)?;
+    let options = options.unwrap_or_default();
+    let mut failed_paths: Vec<JobCleanupFailure> = Vec::new();
+    let mut failed_job_ids: HashSet<String> = HashSet::new();
+
+    let mut removed_log_files = 0_usize;
+    for job in &plan.terminal_jobs {
+        let log_path = PathBuf::from(&job.logs_path);
+        removed_log_files += remove_job_log_files_detailed(
+            &log_path,
+            &mut failed_paths,
+            &mut failed_job_ids,
+            Some(&job.job_id),
+        );
+    }
+
+    let mut removed_artifact_dirs = 0_usize;
+    for job in &plan.terminal_jobs {
+        let artifacts_dir = paths.job_artifacts_dir(&job.job_id);
+        if !artifacts_dir.exists() {
+            continue;
+        }
+        if remove_path_recursively(&artifacts_dir, "job_artifacts", &mut failed_paths).is_ok() {
+            removed_artifact_dirs += 1;
+        } else {
+            failed_job_ids.insert(job.job_id.clone());
+        }
+    }
+
+    let mut removed_managed_output_dirs = 0_usize;
+    if options.remove_managed_output_dirs {
+        removed_managed_output_dirs = remove_output_dir_targets(
+            &plan.managed_output_dirs,
+            "managed_output_dir",
+            &mut failed_paths,
+            &mut failed_job_ids,
+        );
+    }
+
+    let mut removed_external_output_dirs = 0_usize;
+    if options.remove_external_output_dirs {
+        removed_external_output_dirs = remove_output_dir_targets(
+            &plan.external_output_dirs,
+            "external_output_dir",
+            &mut failed_paths,
+            &mut failed_job_ids,
+        );
+    }
+
+    let removed_cache_entries =
+        clear_dir_entries_detailed(&paths.cache_dir(), "cache_entry", &mut failed_paths)?;
+
+    let removable_job_ids: Vec<String> = plan
+        .terminal_jobs
+        .iter()
+        .filter(|job| !failed_job_ids.contains(&job.job_id))
+        .map(|job| job.job_id.clone())
+        .collect();
+    let kept_jobs_due_to_failures = plan
+        .terminal_jobs
+        .len()
+        .saturating_sub(removable_job_ids.len());
+    let removed_jobs = delete_terminal_jobs_by_ids(paths, &removable_job_ids)?;
+
+    Ok(JobCleanupSummary {
+        removed_jobs,
+        kept_jobs_due_to_failures,
+        removed_log_files,
+        removed_artifact_dirs,
+        removed_managed_output_dirs,
+        removed_external_output_dirs,
+        skipped_managed_output_dirs: if options.remove_managed_output_dirs {
+            0
+        } else {
+            plan.managed_output_dirs.len()
+        },
+        skipped_external_output_dirs: if options.remove_external_output_dirs {
+            0
+        } else {
+            plan.external_output_dirs.len()
+        },
+        removed_cache_entries,
+        failed_paths,
+    })
+}
+
+fn build_job_cleanup_plan(paths: &AppPaths) -> Result<JobCleanupPlan> {
     let conn = db::open(paths)?;
     db::migrate(&conn)?;
 
@@ -1818,82 +2048,64 @@ pub fn flush_jobs_cache(paths: &AppPaths) -> Result<JobFlushSummary> {
                 let job_type: String = row.get(1)?;
                 let params_json: String = row.get(2)?;
                 let logs_path: String = row.get(3)?;
-                Ok((id, job_type, params_json, logs_path))
+                Ok(TerminalJobCleanupRecord {
+                    job_id: id,
+                    job_type,
+                    params_json,
+                    logs_path,
+                })
             },
         )?
         .collect::<rusqlite::Result<Vec<_>>>()?;
-
-    let removed_jobs = conn.execute(
-        "DELETE FROM job WHERE status IN (?1, ?2, ?3)",
-        params![
-            terminal_statuses[0],
-            terminal_statuses[1],
-            terminal_statuses[2]
-        ],
-    )?;
     drop(stmt);
     drop(conn);
 
-    let mut removed_log_files = 0_usize;
-    let mut removed_artifact_dirs = 0_usize;
     let download_root = match paths.effective_download_dir() {
         Ok(v) => v,
         Err(_) => paths.default_download_dir(),
     };
-    let mut output_dirs: HashSet<PathBuf> = HashSet::new();
+    let mut output_dirs: HashMap<PathBuf, CleanupOutputDirTargetInternal> = HashMap::new();
+    let mut log_file_count = 0_usize;
+    let mut artifact_dir_count = 0_usize;
 
-    for (job_id, job_type, params_json, logs_path) in &terminal_jobs {
-        let log_path = PathBuf::from(logs_path);
-        removed_log_files += remove_job_log_files(&log_path);
-        remove_job_cookie_secret(paths, job_id);
+    for job in &terminal_jobs {
+        log_file_count += count_job_log_files(Path::new(&job.logs_path));
 
-        let artifacts_dir = paths.job_artifacts_dir(job_id);
-        if artifacts_dir.exists() && std::fs::remove_dir_all(&artifacts_dir).is_ok() {
-            removed_artifact_dirs += 1;
+        let artifacts_dir = paths.job_artifacts_dir(&job.job_id);
+        if artifacts_dir.exists() {
+            artifact_dir_count += 1;
         }
 
-        if job_type == JobType::DownloadImageBatch.as_str() {
-            if let Ok(params) = serde_json::from_str::<DownloadImageBatchParams>(params_json) {
-                if let Some(raw_dir) = normalize_output_dir(params.output_dir) {
-                    let mut custom_dir = PathBuf::from(raw_dir);
-                    if !custom_dir.is_absolute() {
-                        if let Ok(cwd) = std::env::current_dir() {
-                            custom_dir = cwd.join(custom_dir);
-                        }
-                    }
-                    output_dirs.insert(custom_dir);
-                } else {
-                    let subdir = params.output_subdir.trim();
-                    if !subdir.is_empty() {
-                        // Current layout stores image jobs under downloads/images/<subdir>.
-                        output_dirs.insert(
-                            download_root
-                                .join(DEFAULT_IMAGES_OUTPUT_SUBDIR)
-                                .join(subdir),
-                        );
-                        // Backward compatibility for older jobs written at downloads/<subdir>.
-                        output_dirs.insert(download_root.join(subdir));
-                    }
-                }
-            }
-        }
+        collect_output_dir_targets(
+            &download_root,
+            &job.job_id,
+            &job.job_type,
+            &job.params_json,
+            &mut output_dirs,
+        );
     }
 
-    let mut removed_output_dirs = 0_usize;
-    for output_dir in output_dirs {
-        if output_dir.exists() && std::fs::remove_dir_all(&output_dir).is_ok() {
-            removed_output_dirs += 1;
+    let mut managed_output_dirs: Vec<CleanupOutputDirTargetInternal> = Vec::new();
+    let mut external_output_dirs: Vec<CleanupOutputDirTargetInternal> = Vec::new();
+    for target in output_dirs.into_values() {
+        if !target.path.exists() {
+            continue;
+        }
+        match target.class_name {
+            CleanupOutputDirClass::Managed => managed_output_dirs.push(target),
+            CleanupOutputDirClass::External => external_output_dirs.push(target),
         }
     }
+    managed_output_dirs.sort_by(|a, b| a.path.cmp(&b.path));
+    external_output_dirs.sort_by(|a, b| a.path.cmp(&b.path));
 
-    let removed_cache_entries = clear_dir_entries(&paths.cache_dir())?;
-
-    Ok(JobFlushSummary {
-        removed_jobs,
-        removed_log_files,
-        removed_artifact_dirs,
-        removed_output_dirs,
-        removed_cache_entries,
+    Ok(JobCleanupPlan {
+        terminal_jobs,
+        log_file_count,
+        artifact_dir_count,
+        cache_entry_count: count_dir_entries(&paths.cache_dir())?,
+        managed_output_dirs,
+        external_output_dirs,
     })
 }
 
@@ -7844,15 +8056,47 @@ fn is_queue_paused_conn(conn: &rusqlite::Connection) -> Result<bool> {
     }
 }
 
-fn remove_job_log_files(base_path: &Path) -> usize {
+fn cleanup_output_targets_for_ui(
+    targets: &[CleanupOutputDirTargetInternal],
+) -> Vec<JobCleanupOutputTarget> {
+    targets
+        .iter()
+        .map(|target| {
+            let mut source_job_ids: Vec<String> = target.source_job_ids.iter().cloned().collect();
+            source_job_ids.sort();
+            JobCleanupOutputTarget {
+                path: target.path.to_string_lossy().to_string(),
+                source_job_ids,
+            }
+        })
+        .collect()
+}
+
+fn remove_job_log_files_detailed(
+    base_path: &Path,
+    failures: &mut Vec<JobCleanupFailure>,
+    failed_job_ids: &mut HashSet<String>,
+    job_id: Option<&str>,
+) -> usize {
     let mut removed = 0_usize;
-    if base_path.exists() && std::fs::remove_file(base_path).is_ok() {
-        removed += 1;
-    }
-    for i in 1..=JOB_LOG_MAX_BACKUPS {
-        let backup = path_with_suffix(base_path, &format!(".{i}"));
-        if backup.exists() && std::fs::remove_file(backup).is_ok() {
-            removed += 1;
+    for path in std::iter::once(base_path.to_path_buf())
+        .chain((1..=JOB_LOG_MAX_BACKUPS).map(|i| path_with_suffix(base_path, &format!(".{i}"))))
+    {
+        if !path.exists() {
+            continue;
+        }
+        match std::fs::remove_file(&path) {
+            Ok(_) => removed += 1,
+            Err(err) => {
+                failures.push(JobCleanupFailure {
+                    scope: "job_log".to_string(),
+                    path: path.to_string_lossy().to_string(),
+                    message: err.to_string(),
+                });
+                if let Some(job_id) = job_id {
+                    failed_job_ids.insert(job_id.to_string());
+                }
+            }
         }
     }
     removed
@@ -7879,6 +8123,226 @@ fn clear_dir_entries(dir: &Path) -> Result<usize> {
             removed += 1;
         }
     }
+    Ok(removed)
+}
+
+fn clear_dir_entries_detailed(
+    dir: &Path,
+    scope: &str,
+    failures: &mut Vec<JobCleanupFailure>,
+) -> Result<usize> {
+    if !dir.exists() {
+        return Ok(0);
+    }
+
+    let mut removed = 0_usize;
+    for entry in std::fs::read_dir(dir)? {
+        let entry = match entry {
+            Ok(v) => v,
+            Err(err) => {
+                failures.push(JobCleanupFailure {
+                    scope: scope.to_string(),
+                    path: dir.to_string_lossy().to_string(),
+                    message: err.to_string(),
+                });
+                continue;
+            }
+        };
+        let path = entry.path();
+        if remove_path_recursively(&path, scope, failures).is_ok() {
+            removed += 1;
+        }
+    }
+    Ok(removed)
+}
+
+fn remove_output_dir_targets(
+    targets: &[CleanupOutputDirTargetInternal],
+    scope: &str,
+    failures: &mut Vec<JobCleanupFailure>,
+    failed_job_ids: &mut HashSet<String>,
+) -> usize {
+    let mut removed = 0_usize;
+    for target in targets {
+        if !target.path.exists() {
+            continue;
+        }
+        let meta = match std::fs::symlink_metadata(&target.path) {
+            Ok(value) => value,
+            Err(err) => {
+                failures.push(JobCleanupFailure {
+                    scope: scope.to_string(),
+                    path: target.path.to_string_lossy().to_string(),
+                    message: err.to_string(),
+                });
+                failed_job_ids.extend(target.source_job_ids.iter().cloned());
+                continue;
+            }
+        };
+        if !meta.is_dir() {
+            failures.push(JobCleanupFailure {
+                scope: scope.to_string(),
+                path: target.path.to_string_lossy().to_string(),
+                message: "expected an output directory but found a file".to_string(),
+            });
+            failed_job_ids.extend(target.source_job_ids.iter().cloned());
+            continue;
+        }
+        if remove_path_recursively(&target.path, scope, failures).is_ok() {
+            removed += 1;
+        } else {
+            failed_job_ids.extend(target.source_job_ids.iter().cloned());
+        }
+    }
+    removed
+}
+
+fn remove_path_recursively(
+    path: &Path,
+    scope: &str,
+    failures: &mut Vec<JobCleanupFailure>,
+) -> std::io::Result<()> {
+    let meta = match std::fs::symlink_metadata(path) {
+        Ok(value) => value,
+        Err(err) => {
+            failures.push(JobCleanupFailure {
+                scope: scope.to_string(),
+                path: path.to_string_lossy().to_string(),
+                message: err.to_string(),
+            });
+            return Err(err);
+        }
+    };
+
+    let outcome = if meta.is_dir() {
+        std::fs::remove_dir_all(path)
+    } else {
+        std::fs::remove_file(path)
+    };
+    if let Err(err) = outcome {
+        failures.push(JobCleanupFailure {
+            scope: scope.to_string(),
+            path: path.to_string_lossy().to_string(),
+            message: err.to_string(),
+        });
+        return Err(err);
+    }
+    Ok(())
+}
+
+fn count_job_log_files(base_path: &Path) -> usize {
+    let mut count = 0_usize;
+    if base_path.exists() {
+        count += 1;
+    }
+    for i in 1..=JOB_LOG_MAX_BACKUPS {
+        if path_with_suffix(base_path, &format!(".{i}")).exists() {
+            count += 1;
+        }
+    }
+    count
+}
+
+fn count_dir_entries(dir: &Path) -> Result<usize> {
+    if !dir.exists() {
+        return Ok(0);
+    }
+
+    let mut count = 0_usize;
+    for entry in std::fs::read_dir(dir)? {
+        if entry.is_ok() {
+            count += 1;
+        }
+    }
+    Ok(count)
+}
+
+fn collect_output_dir_targets(
+    download_root: &Path,
+    job_id: &str,
+    job_type: &str,
+    params_json: &str,
+    out: &mut HashMap<PathBuf, CleanupOutputDirTargetInternal>,
+) {
+    if job_type != JobType::DownloadImageBatch.as_str() {
+        return;
+    }
+
+    let Ok(params) = serde_json::from_str::<DownloadImageBatchParams>(params_json) else {
+        return;
+    };
+
+    if let Some(raw_dir) = normalize_output_dir(params.output_dir) {
+        let mut custom_dir = PathBuf::from(raw_dir);
+        if !custom_dir.is_absolute() {
+            if let Ok(cwd) = std::env::current_dir() {
+                custom_dir = cwd.join(custom_dir);
+            }
+        }
+        upsert_cleanup_output_target(out, custom_dir, CleanupOutputDirClass::External, job_id);
+        return;
+    }
+
+    let subdir = params.output_subdir.trim();
+    if subdir.is_empty() {
+        return;
+    }
+
+    upsert_cleanup_output_target(
+        out,
+        download_root.join(DEFAULT_IMAGES_OUTPUT_SUBDIR).join(subdir),
+        CleanupOutputDirClass::Managed,
+        job_id,
+    );
+    upsert_cleanup_output_target(
+        out,
+        download_root.join(subdir),
+        CleanupOutputDirClass::Managed,
+        job_id,
+    );
+}
+
+fn upsert_cleanup_output_target(
+    out: &mut HashMap<PathBuf, CleanupOutputDirTargetInternal>,
+    path: PathBuf,
+    class_name: CleanupOutputDirClass,
+    job_id: &str,
+) {
+    use std::collections::hash_map::Entry;
+
+    match out.entry(path.clone()) {
+        Entry::Occupied(mut existing) => {
+            existing.get_mut().source_job_ids.insert(job_id.to_string());
+            if class_name == CleanupOutputDirClass::External {
+                existing.get_mut().class_name = CleanupOutputDirClass::External;
+            }
+        }
+        Entry::Vacant(vacant) => {
+            let mut source_job_ids = HashSet::new();
+            source_job_ids.insert(job_id.to_string());
+            vacant.insert(CleanupOutputDirTargetInternal {
+                path,
+                class_name,
+                source_job_ids,
+            });
+        }
+    }
+}
+
+fn delete_terminal_jobs_by_ids(paths: &AppPaths, job_ids: &[String]) -> Result<usize> {
+    if job_ids.is_empty() {
+        return Ok(0);
+    }
+
+    let conn = db::open(paths)?;
+    db::migrate(&conn)?;
+    let tx = conn.unchecked_transaction()?;
+    let mut removed = 0_usize;
+    for job_id in job_ids {
+        removed += tx.execute("DELETE FROM job WHERE id=?1", [job_id])?;
+        remove_job_cookie_secret(paths, job_id);
+    }
+    tx.commit()?;
     Ok(removed)
 }
 
@@ -12842,12 +13306,25 @@ EOF
         std::fs::write(paths.cache_dir().join("tmp.bin"), "x").expect("cache file");
         std::fs::create_dir_all(paths.cache_dir().join("tmpdir")).expect("cache subdir");
 
-        let summary = flush_jobs_cache(&paths).expect("flush");
+        let preview = preview_jobs_cleanup(&paths).expect("preview");
+        assert_eq!(preview.terminal_job_count, 2);
+        assert!(preview.log_file_count >= 2);
+        assert_eq!(preview.artifact_dir_count, 2);
+        assert!(preview.cache_entry_count >= 2);
+        assert_eq!(preview.managed_output_dirs.len(), 0);
+        assert_eq!(preview.external_output_dirs.len(), 0);
+
+        let summary = flush_jobs_cache(&paths, None).expect("flush");
         assert_eq!(summary.removed_jobs, 2);
+        assert_eq!(summary.kept_jobs_due_to_failures, 0);
         assert!(summary.removed_log_files >= 2);
         assert_eq!(summary.removed_artifact_dirs, 2);
-        assert_eq!(summary.removed_output_dirs, 0);
+        assert_eq!(summary.removed_managed_output_dirs, 0);
+        assert_eq!(summary.removed_external_output_dirs, 0);
+        assert_eq!(summary.skipped_managed_output_dirs, 0);
+        assert_eq!(summary.skipped_external_output_dirs, 0);
         assert!(summary.removed_cache_entries >= 2);
+        assert!(summary.failed_paths.is_empty());
 
         let remaining = list_jobs(&paths, 20, 0).expect("list");
         assert_eq!(remaining.len(), 1);
@@ -12860,7 +13337,7 @@ EOF
     }
 
     #[test]
-    fn flush_jobs_cache_removes_image_batch_output_subdir() {
+    fn flush_jobs_cache_does_not_remove_output_dirs_without_opt_in() {
         let dir = tempfile::tempdir().expect("tempdir");
         let paths = AppPaths::new(dir.path().to_path_buf());
         db::ensure_schema(&paths).expect("schema");
@@ -12897,10 +13374,198 @@ EOF
         std::fs::create_dir_all(&output_dir).expect("output dir");
         std::fs::write(output_dir.join("thumb.jpg"), "x").expect("output file");
 
-        let summary = flush_jobs_cache(&paths).expect("flush");
+        let preview = preview_jobs_cleanup(&paths).expect("preview");
+        assert_eq!(preview.managed_output_dirs.len(), 1);
+
+        let summary = flush_jobs_cache(&paths, None).expect("flush");
         assert_eq!(summary.removed_jobs, 1);
-        assert_eq!(summary.removed_output_dirs, 1);
-        assert!(!output_dir.exists());
+        assert_eq!(summary.removed_managed_output_dirs, 0);
+        assert_eq!(summary.skipped_managed_output_dirs, 1);
+        assert!(output_dir.exists());
+    }
+
+    #[test]
+    fn flush_jobs_cache_removes_managed_output_dirs_only_with_opt_in() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let paths = AppPaths::new(dir.path().to_path_buf());
+        db::ensure_schema(&paths).expect("schema");
+
+        let downloads = dir.path().join("downloads");
+        std::fs::create_dir_all(&downloads).expect("downloads dir");
+        paths
+            .set_download_dir_override(&downloads)
+            .expect("set download override");
+
+        let job = enqueue_download_image_batch(
+            &paths,
+            vec!["https://example.com/forum".to_string()],
+            Some(2),
+            Some(0),
+            Some(false),
+            Some(false),
+            vec![],
+            Some("wipe_me".to_string()),
+            None,
+            None,
+        )
+        .expect("enqueue image batch");
+
+        let conn = db::open(&paths).expect("open");
+        db::migrate(&conn).expect("migrate");
+        conn.execute(
+            "UPDATE job SET status=?1, finished_at_ms=?2, error=?3 WHERE id=?4",
+            params![JobStatus::Failed.as_str(), now_ms(), "forced", &job.id],
+        )
+        .expect("mark failed");
+
+        let managed_dir = downloads.join(DEFAULT_IMAGES_OUTPUT_SUBDIR).join("wipe_me");
+        let legacy_dir = downloads.join("wipe_me");
+        std::fs::create_dir_all(&managed_dir).expect("managed dir");
+        std::fs::create_dir_all(&legacy_dir).expect("legacy dir");
+        std::fs::write(managed_dir.join("thumb.jpg"), "x").expect("managed file");
+        std::fs::write(legacy_dir.join("thumb.jpg"), "x").expect("legacy file");
+
+        let summary = flush_jobs_cache(
+            &paths,
+            Some(JobCleanupOptions {
+                remove_managed_output_dirs: true,
+                remove_external_output_dirs: false,
+            }),
+        )
+        .expect("flush");
+        assert_eq!(summary.removed_managed_output_dirs, 2);
+        assert_eq!(summary.removed_external_output_dirs, 0);
+        assert!(!managed_dir.exists());
+        assert!(!legacy_dir.exists());
+    }
+
+    #[test]
+    fn flush_jobs_cache_requires_external_output_opt_in() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let paths = AppPaths::new(dir.path().to_path_buf());
+        db::ensure_schema(&paths).expect("schema");
+
+        let external_output_dir = dir.path().join("custom_output");
+        let job = enqueue_download_image_batch(
+            &paths,
+            vec!["https://example.com/forum".to_string()],
+            Some(2),
+            Some(0),
+            Some(false),
+            Some(false),
+            vec![],
+            None,
+            Some(external_output_dir.to_string_lossy().to_string()),
+            None,
+        )
+        .expect("enqueue image batch");
+
+        let conn = db::open(&paths).expect("open");
+        db::migrate(&conn).expect("migrate");
+        conn.execute(
+            "UPDATE job SET status=?1, finished_at_ms=?2, error=?3 WHERE id=?4",
+            params![JobStatus::Failed.as_str(), now_ms(), "forced", &job.id],
+        )
+        .expect("mark failed");
+
+        std::fs::create_dir_all(&external_output_dir).expect("external dir");
+        std::fs::write(external_output_dir.join("thumb.jpg"), "x").expect("external file");
+
+        let preview = preview_jobs_cleanup(&paths).expect("preview");
+        assert_eq!(preview.external_output_dirs.len(), 1);
+
+        let safe_summary = flush_jobs_cache(&paths, None).expect("safe flush");
+        assert_eq!(safe_summary.removed_external_output_dirs, 0);
+        assert_eq!(safe_summary.skipped_external_output_dirs, 1);
+        assert!(external_output_dir.exists());
+
+        let external_job = enqueue_download_image_batch(
+            &paths,
+            vec!["https://example.com/forum2".to_string()],
+            Some(2),
+            Some(0),
+            Some(false),
+            Some(false),
+            vec![],
+            None,
+            Some(external_output_dir.to_string_lossy().to_string()),
+            None,
+        )
+        .expect("enqueue image batch again");
+        let conn = db::open(&paths).expect("reopen");
+        db::migrate(&conn).expect("migrate");
+        conn.execute(
+            "UPDATE job SET status=?1, finished_at_ms=?2, error=?3 WHERE id=?4",
+            params![JobStatus::Failed.as_str(), now_ms(), "forced", &external_job.id],
+        )
+        .expect("mark failed");
+
+        let destructive_summary = flush_jobs_cache(
+            &paths,
+            Some(JobCleanupOptions {
+                remove_managed_output_dirs: false,
+                remove_external_output_dirs: true,
+            }),
+        )
+        .expect("destructive flush");
+        assert_eq!(destructive_summary.removed_external_output_dirs, 1);
+        assert!(!external_output_dir.exists());
+    }
+
+    #[test]
+    fn flush_jobs_cache_surfaces_output_cleanup_failures_and_keeps_job_history() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let paths = AppPaths::new(dir.path().to_path_buf());
+        db::ensure_schema(&paths).expect("schema");
+
+        let downloads = dir.path().join("downloads");
+        std::fs::create_dir_all(&downloads).expect("downloads dir");
+        paths
+            .set_download_dir_override(&downloads)
+            .expect("set download override");
+
+        let job = enqueue_download_image_batch(
+            &paths,
+            vec!["https://example.com/forum".to_string()],
+            Some(2),
+            Some(0),
+            Some(false),
+            Some(false),
+            vec![],
+            Some("broken_target".to_string()),
+            None,
+            None,
+        )
+        .expect("enqueue image batch");
+
+        let conn = db::open(&paths).expect("open");
+        db::migrate(&conn).expect("migrate");
+        conn.execute(
+            "UPDATE job SET status=?1, finished_at_ms=?2, error=?3 WHERE id=?4",
+            params![JobStatus::Failed.as_str(), now_ms(), "forced", &job.id],
+        )
+        .expect("mark failed");
+
+        let managed_dir = downloads.join(DEFAULT_IMAGES_OUTPUT_SUBDIR).join("broken_target");
+        std::fs::create_dir_all(managed_dir.parent().expect("managed parent")).expect("parent dir");
+        std::fs::write(&managed_dir, "not-a-dir").expect("write blocking file");
+
+        let summary = flush_jobs_cache(
+            &paths,
+            Some(JobCleanupOptions {
+                remove_managed_output_dirs: true,
+                remove_external_output_dirs: false,
+            }),
+        )
+        .expect("flush with failure");
+        assert_eq!(summary.removed_jobs, 0);
+        assert_eq!(summary.kept_jobs_due_to_failures, 1);
+        assert_eq!(summary.removed_managed_output_dirs, 0);
+        assert!(!summary.failed_paths.is_empty());
+
+        let remaining = list_jobs(&paths, 20, 0).expect("list");
+        assert_eq!(remaining.len(), 1);
+        assert_eq!(remaining[0].id, job.id);
     }
 
     #[test]

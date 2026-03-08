@@ -3,7 +3,7 @@
 ## Metadata
 - ID: WP-0125
 - Owner: Codex
-- Status: BACKLOG
+- Status: DONE
 - Created: 2026-03-08
 - Target milestone: Audit remediation tranche
 
@@ -31,6 +31,7 @@ Out of scope:
 - External/custom output directories require explicit separate opt-in before deletion.
 - Item-derived artifact classes and retention policy are documented and implemented.
 - Cleanup summaries surface failed deletions clearly.
+- Proof is captured under `product/desktop/Build Target/tool_artifacts/wp_runs/WP-0125/20260308_183800/`.
 
 ## Test / verification plan
 
@@ -40,3 +41,4 @@ Out of scope:
 ## Status updates
 
 - 2026-03-08: Created from `WP-0120` persistence/data-safety findings.
+- 2026-03-08: Completed by adding previewable cleanup scope, separate managed/external output-folder opt-ins, failed-path reporting with kept job provenance on job-linked failures, and a Diagnostics-facing retention policy for working files, durable reports, and deliverables.

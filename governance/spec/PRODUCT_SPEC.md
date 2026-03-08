@@ -122,6 +122,8 @@ Initial language focus: **Korean + Japanese → English**.
   - capture deterministic local traces for startup phases, pane activation, resource usage, and major failures,
   - explain tool state in operator terms such as bundled, hydrated, installed, loaded, and ready.
 - Log rotation and retention (cap by size + age).
+- Diagnostics must surface the derived-artifact retention policy so operators can distinguish working files, durable reports, and durable deliverables.
+- Cache/history cleanup must be split from output-folder deletion, and custom or external output folders must require a separate explicit opt-in before deletion.
 - "Export diagnostics bundle" (logs + job metadata + redacted config).
 - Recovery UX:
   - a **Safe Mode** startup path to open the app without auto-refresh or heavy background work (so users can export/manage data even when providers regress).
@@ -292,6 +294,7 @@ Current implementation status:
 - Shared download/export roots must persist without temporary "missing folder" states.
 - Operators should be able to reveal files or parent folders anywhere the app creates an output or artifact.
 - Localization exports must be easy to find, with a predictable default folder map and direct open/reveal actions for both source files and generated deliverables.
+- Generic cache/history cleanup must never silently remove Localization Studio deliverables, benchmark/report history, or custom output folders.
 - Default preview/download video outputs should be MP4 wherever the local toolchain can merge/remux cleanly.
 - Default archive image outputs should prefer JPEG where practical.
 - UX must be fast enough for daily production use before any commercial release.
