@@ -344,6 +344,10 @@ Experimental BYO adapter design:
   - environment overrides if needed,
   - capability metadata and operator notes.
 - The app may probe adapters and surface readiness/errors, but must not silently install or update them.
+- Current implementation shape:
+  - adapter configs are stored in app config as local JSON, plus a cached probe-results file,
+  - Diagnostics provides explicit save/probe/remove controls for known BYO backend templates,
+  - the backend catalog reads cached probe state so Diagnostics and Localization Studio can distinguish `available_via_byo`, `byo_configured_unprobed`, `byo_ready`, and `byo_probe_failed`.
 
 ## 5.6 Downloader (Phase 2)
 

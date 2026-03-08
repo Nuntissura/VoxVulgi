@@ -18,6 +18,14 @@ impl AppPaths {
         self.config_dir().join("glossary.json")
     }
 
+    pub fn voice_backend_adapters_path(&self) -> PathBuf {
+        self.config_dir().join("voice_backend_adapters.json")
+    }
+
+    pub fn voice_backend_adapter_probes_path(&self) -> PathBuf {
+        self.config_dir().join("voice_backend_adapter_probes.json")
+    }
+
     pub fn library_dir(&self) -> PathBuf {
         self.base_dir.join("library")
     }

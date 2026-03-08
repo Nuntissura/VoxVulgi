@@ -10,8 +10,8 @@ use voxvulgi_engine::models::ModelStore;
 use voxvulgi_engine::paths::AppPaths;
 use voxvulgi_engine::{
     config, db, diagnostics, instagram_subscriptions, jobs, library, speakers, subscriptions,
-    subtitle_tracks, subtitles, tools, voice_backends, voice_benchmarks, voice_cast_packs,
-    voice_cleanup, voice_library, voice_templates,
+    subtitle_tracks, subtitles, tools, voice_backend_adapters, voice_backends, voice_benchmarks,
+    voice_cast_packs, voice_cleanup, voice_library, voice_templates,
 };
 
 #[derive(Debug, Clone, serde::Deserialize)]
@@ -2389,6 +2389,60 @@ async fn voice_benchmark_load(
 }
 
 #[tauri::command]
+async fn voice_backend_adapters_list(
+    state: State<'_, AppState>,
+) -> Result<Vec<voice_backend_adapters::VoiceBackendAdapterDetail>, String> {
+    let paths = state.paths.clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        voice_backend_adapters::list_voice_backend_adapters(&paths).map_err(|e| e.to_string())
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
+#[tauri::command]
+async fn voice_backend_adapter_upsert(
+    state: State<'_, AppState>,
+    config: voice_backend_adapters::VoiceBackendAdapterConfig,
+) -> Result<voice_backend_adapters::VoiceBackendAdapterDetail, String> {
+    let paths = state.paths.clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        voice_backend_adapters::upsert_voice_backend_adapter(&paths, config)
+            .map_err(|e| e.to_string())
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
+#[tauri::command]
+async fn voice_backend_adapter_delete(
+    state: State<'_, AppState>,
+    backend_id: String,
+) -> Result<(), String> {
+    let paths = state.paths.clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        voice_backend_adapters::delete_voice_backend_adapter(&paths, backend_id.trim())
+            .map_err(|e| e.to_string())
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
+#[tauri::command]
+async fn voice_backend_adapter_probe(
+    state: State<'_, AppState>,
+    backend_id: String,
+) -> Result<voice_backend_adapters::VoiceBackendAdapterDetail, String> {
+    let paths = state.paths.clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        voice_backend_adapters::probe_voice_backend_adapter(&paths, backend_id.trim())
+            .map_err(|e| e.to_string())
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
+#[tauri::command]
 async fn tools_tts_preview_pyttsx3_voices(
     state: State<'_, AppState>,
 ) -> Result<Vec<tools::Pyttsx3Voice>, String> {
@@ -3850,6 +3904,10 @@ pub fn run() {
             voice_backends_recommend,
             voice_benchmark_generate,
             voice_benchmark_load,
+            voice_backend_adapters_list,
+            voice_backend_adapter_upsert,
+            voice_backend_adapter_delete,
+            voice_backend_adapter_probe,
             voice_cleanup_list_for_speaker,
             voice_cleanup_run_for_speaker,
             voice_templates_apply_to_item,

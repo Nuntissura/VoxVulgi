@@ -129,6 +129,50 @@ type VoiceBackendRecommendation = {
   warnings: string[];
 };
 
+type VoiceBackendAdapterTemplate = {
+  backend_id: string;
+  display_name: string;
+  expected_markers: string[];
+  default_entry_command: string[];
+  probe_hint: string;
+};
+
+type VoiceBackendAdapterConfig = {
+  backend_id: string;
+  enabled: boolean;
+  root_dir: string | null;
+  python_exe: string | null;
+  model_dir: string | null;
+  entry_command: string[];
+  probe_command: string[];
+  notes: string | null;
+  updated_at_ms: number;
+};
+
+type VoiceBackendAdapterProbe = {
+  backend_id: string;
+  ready: boolean;
+  status: string;
+  summary: string;
+  checked_at_ms: number;
+  root_exists: boolean;
+  python_exists: boolean;
+  model_dir_exists: boolean;
+  entry_exists: boolean;
+  markers_found: string[];
+  missing_markers: string[];
+  command_exit_code: number | null;
+  stdout_preview: string | null;
+  stderr_preview: string | null;
+  messages: string[];
+};
+
+type VoiceBackendAdapterDetail = {
+  template: VoiceBackendAdapterTemplate;
+  config: VoiceBackendAdapterConfig | null;
+  last_probe: VoiceBackendAdapterProbe | null;
+};
+
 type ModelInventoryItem = {
   id: string;
   name: string;
@@ -358,6 +402,20 @@ function formatTraceDetails(value: unknown): string {
   }
 }
 
+function defaultAdapterConfig(template: VoiceBackendAdapterTemplate): VoiceBackendAdapterConfig {
+  return {
+    backend_id: template.backend_id,
+    enabled: true,
+    root_dir: null,
+    python_exe: null,
+    model_dir: null,
+    entry_command: [...template.default_entry_command],
+    probe_command: [],
+    notes: null,
+    updated_at_ms: 0,
+  };
+}
+
 export function DiagnosticsPage() {
   const [info, setInfo] = useState<DiagnosticsInfo | null>(null);
   const [startup, setStartup] = useState<StartupStatus | null>(null);
@@ -376,6 +434,11 @@ export function DiagnosticsPage() {
   const [ttsVoicePreservingLocalV1, setTtsVoicePreservingLocalV1] =
     useState<TtsVoicePreservingLocalV1PackStatus | null>(null);
   const [voiceBackendCatalog, setVoiceBackendCatalog] = useState<VoiceBackendCatalog | null>(null);
+  const [voiceBackendAdapters, setVoiceBackendAdapters] = useState<VoiceBackendAdapterDetail[]>([]);
+  const [voiceBackendAdapterDrafts, setVoiceBackendAdapterDrafts] = useState<
+    Record<string, VoiceBackendAdapterConfig>
+  >({});
+  const [voiceBackendAdapterBusy, setVoiceBackendAdapterBusy] = useState<string | null>(null);
   const [voiceBackendRecommendation, setVoiceBackendRecommendation] =
     useState<VoiceBackendRecommendation | null>(null);
   const [integrity, setIntegrity] = useState<PackIntegrityManifestStatus | null>(null);
@@ -442,6 +505,7 @@ export function DiagnosticsPage() {
         nextTtsNeuralLocalV1,
         nextTtsVoicePreservingLocalV1,
         nextVoiceBackendCatalog,
+        nextVoiceBackendAdapters,
         nextVoiceBackendRecommendation,
         nextIntegrity,
         nextPerfTier,
@@ -470,6 +534,7 @@ export function DiagnosticsPage() {
         invoke<TtsNeuralLocalV1PackStatus>("tools_tts_neural_local_v1_status"),
         invoke<TtsVoicePreservingLocalV1PackStatus>("tools_tts_voice_preserving_local_v1_status"),
         invoke<VoiceBackendCatalog>("voice_backends_catalog"),
+        invoke<VoiceBackendAdapterDetail[]>("voice_backend_adapters_list"),
         invoke<VoiceBackendRecommendation>("voice_backends_recommend"),
         invoke<PackIntegrityManifestStatus>("tools_pack_integrity_manifest_status"),
         invoke<PerformanceTierStatus>("tools_performance_tier_status"),
@@ -499,6 +564,18 @@ export function DiagnosticsPage() {
         setTtsNeuralLocalV1(nextTtsNeuralLocalV1);
         setTtsVoicePreservingLocalV1(nextTtsVoicePreservingLocalV1);
         setVoiceBackendCatalog(nextVoiceBackendCatalog);
+        setVoiceBackendAdapters(nextVoiceBackendAdapters);
+        setVoiceBackendAdapterDrafts((prev) => {
+          const next: Record<string, VoiceBackendAdapterConfig> = { ...prev };
+          for (const detail of nextVoiceBackendAdapters) {
+            if (!next[detail.template.backend_id]) {
+              next[detail.template.backend_id] = detail.config
+                ? { ...detail.config }
+                : defaultAdapterConfig(detail.template);
+            }
+          }
+          return next;
+        });
         setVoiceBackendRecommendation(nextVoiceBackendRecommendation);
         setIntegrity(nextIntegrity);
         setPerfTier(nextPerfTier);
@@ -566,6 +643,7 @@ export function DiagnosticsPage() {
         nextTtsNeuralLocalV1,
         nextTtsVoicePreservingLocalV1,
         nextVoiceBackendCatalog,
+        nextVoiceBackendAdapters,
         nextVoiceBackendRecommendation,
         nextIntegrity,
         nextPerfTier,
@@ -581,6 +659,7 @@ export function DiagnosticsPage() {
         invoke<TtsNeuralLocalV1PackStatus>("tools_tts_neural_local_v1_status"),
         invoke<TtsVoicePreservingLocalV1PackStatus>("tools_tts_voice_preserving_local_v1_status"),
         invoke<VoiceBackendCatalog>("voice_backends_catalog"),
+        invoke<VoiceBackendAdapterDetail[]>("voice_backend_adapters_list"),
         invoke<VoiceBackendRecommendation>("voice_backends_recommend"),
         invoke<PackIntegrityManifestStatus>("tools_pack_integrity_manifest_status"),
         invoke<PerformanceTierStatus>("tools_performance_tier_status"),
@@ -597,6 +676,18 @@ export function DiagnosticsPage() {
         setTtsNeuralLocalV1(nextTtsNeuralLocalV1);
         setTtsVoicePreservingLocalV1(nextTtsVoicePreservingLocalV1);
         setVoiceBackendCatalog(nextVoiceBackendCatalog);
+        setVoiceBackendAdapters(nextVoiceBackendAdapters);
+        setVoiceBackendAdapterDrafts((prev) => {
+          const next: Record<string, VoiceBackendAdapterConfig> = { ...prev };
+          for (const detail of nextVoiceBackendAdapters) {
+            if (!next[detail.template.backend_id]) {
+              next[detail.template.backend_id] = detail.config
+                ? { ...detail.config }
+                : defaultAdapterConfig(detail.template);
+            }
+          }
+          return next;
+        });
         setVoiceBackendRecommendation(nextVoiceBackendRecommendation);
         setIntegrity(nextIntegrity);
         setPerfTier(nextPerfTier);
@@ -929,6 +1020,81 @@ export function DiagnosticsPage() {
       setError(String(e));
     } finally {
       setBusy(false);
+    }
+  }
+
+  function updateAdapterDraft(
+    backendId: string,
+    updater: (draft: VoiceBackendAdapterConfig) => VoiceBackendAdapterConfig,
+  ) {
+    setVoiceBackendAdapterDrafts((prev) => {
+      const current =
+        prev[backendId] ??
+        defaultAdapterConfig(
+          voiceBackendAdapters.find((value) => value.template.backend_id === backendId)?.template ?? {
+            backend_id: backendId,
+            display_name: backendId,
+            expected_markers: [],
+            default_entry_command: [],
+            probe_hint: "",
+          },
+        );
+      return {
+        ...prev,
+        [backendId]: updater({ ...current }),
+      };
+    });
+  }
+
+  async function saveVoiceBackendAdapter(backendId: string) {
+    const draft = voiceBackendAdapterDrafts[backendId];
+    if (!draft) return;
+    setVoiceBackendAdapterBusy(backendId);
+    setError(null);
+    setNotice(null);
+    try {
+      await invoke<VoiceBackendAdapterDetail>("voice_backend_adapter_upsert", { config: draft });
+      setNotice(`Saved BYO adapter for ${backendId}.`);
+      await loadToolsSection();
+    } catch (e) {
+      setError(String(e));
+    } finally {
+      setVoiceBackendAdapterBusy(null);
+    }
+  }
+
+  async function probeVoiceBackendAdapter(backendId: string) {
+    setVoiceBackendAdapterBusy(backendId);
+    setError(null);
+    setNotice(null);
+    try {
+      await invoke<VoiceBackendAdapterDetail>("voice_backend_adapter_probe", { backendId });
+      setNotice(`Probed BYO adapter for ${backendId}.`);
+      await loadToolsSection();
+    } catch (e) {
+      setError(String(e));
+    } finally {
+      setVoiceBackendAdapterBusy(null);
+    }
+  }
+
+  async function deleteVoiceBackendAdapter(backendId: string) {
+    const ok = await confirm(`Remove the BYO adapter for ${backendId}?`, {
+      title: "Remove BYO adapter",
+      kind: "warning",
+    });
+    if (!ok) return;
+    setVoiceBackendAdapterBusy(backendId);
+    setError(null);
+    setNotice(null);
+    try {
+      await invoke("voice_backend_adapter_delete", { backendId });
+      setNotice(`Removed BYO adapter for ${backendId}.`);
+      await loadToolsSection();
+    } catch (e) {
+      setError(String(e));
+    } finally {
+      setVoiceBackendAdapterBusy(null);
     }
   }
 
@@ -1827,6 +1993,202 @@ export function DiagnosticsPage() {
                 <div style={{ fontSize: 12, opacity: 0.75 }}>Risks: {backend.risks.join(" | ")}</div>
               </div>
             ))}
+          </div>
+        ) : null}
+        {voiceBackendAdapters.length ? (
+          <div style={{ marginTop: 16, display: "flex", flexDirection: "column", gap: 10 }}>
+            <div style={{ fontSize: 12, opacity: 0.75 }}>
+              BYO adapter registry is local-only. VoxVulgi never auto-installs these backends; you
+              point the app at a prepared local checkout or environment and run explicit probes.
+            </div>
+            {voiceBackendAdapters.map((detail) => {
+              const backendId = detail.template.backend_id;
+              const draft = voiceBackendAdapterDrafts[backendId] ?? defaultAdapterConfig(detail.template);
+              const adapterBusy = voiceBackendAdapterBusy === backendId;
+              return (
+                <div
+                  key={`adapter-${backendId}`}
+                  style={{
+                    border: "1px solid #e5e7eb",
+                    borderRadius: 8,
+                    padding: 10,
+                    display: "flex",
+                    flexDirection: "column",
+                    gap: 8,
+                  }}
+                >
+                  <div className="row" style={{ justifyContent: "space-between", alignItems: "center" }}>
+                    <div style={{ fontWeight: 600 }}>{detail.template.display_name}</div>
+                    <code>{detail.last_probe?.status ?? (detail.config ? "configured" : "not configured")}</code>
+                  </div>
+                  <div style={{ fontSize: 12, opacity: 0.75 }}>{detail.template.probe_hint}</div>
+                  <label style={{ display: "flex", alignItems: "center", gap: 8 }}>
+                    <input
+                      type="checkbox"
+                      checked={draft.enabled}
+                      onChange={(e) =>
+                        updateAdapterDraft(backendId, (current) => ({
+                          ...current,
+                          enabled: e.currentTarget.checked,
+                        }))
+                      }
+                    />
+                    <span>Enabled</span>
+                  </label>
+                  <label style={{ display: "flex", flexDirection: "column", gap: 4 }}>
+                    <span style={{ fontSize: 12, opacity: 0.75 }}>Root directory</span>
+                    <div className="row" style={{ gap: 8, flexWrap: "wrap" }}>
+                      <input
+                        value={draft.root_dir ?? ""}
+                        onChange={(e) =>
+                          updateAdapterDraft(backendId, (current) => ({
+                            ...current,
+                            root_dir: e.currentTarget.value.trim() || null,
+                          }))
+                        }
+                        placeholder="Path to local checkout or packaged env"
+                        style={{ minWidth: 360 }}
+                      />
+                      <button
+                        type="button"
+                        disabled={adapterBusy}
+                        onClick={async () => {
+                          const selected = await open({
+                            directory: true,
+                            multiple: false,
+                            title: `Select ${detail.template.display_name} root`,
+                          });
+                          if (typeof selected === "string") {
+                            updateAdapterDraft(backendId, (current) => ({
+                              ...current,
+                              root_dir: selected,
+                            }));
+                          }
+                        }}
+                      >
+                        Browse
+                      </button>
+                      <button
+                        type="button"
+                        disabled={adapterBusy || !(draft.root_dir ?? "").trim()}
+                        onClick={() => openPathBestEffort(draft.root_dir ?? "").catch(() => undefined)}
+                      >
+                        Open root
+                      </button>
+                    </div>
+                  </label>
+                  <label style={{ display: "flex", flexDirection: "column", gap: 4 }}>
+                    <span style={{ fontSize: 12, opacity: 0.75 }}>Python executable</span>
+                    <input
+                      value={draft.python_exe ?? ""}
+                      onChange={(e) =>
+                        updateAdapterDraft(backendId, (current) => ({
+                          ...current,
+                          python_exe: e.currentTarget.value.trim() || null,
+                        }))
+                      }
+                      placeholder="Optional explicit python path"
+                    />
+                  </label>
+                  <label style={{ display: "flex", flexDirection: "column", gap: 4 }}>
+                    <span style={{ fontSize: 12, opacity: 0.75 }}>Model directory</span>
+                    <input
+                      value={draft.model_dir ?? ""}
+                      onChange={(e) =>
+                        updateAdapterDraft(backendId, (current) => ({
+                          ...current,
+                          model_dir: e.currentTarget.value.trim() || null,
+                        }))
+                      }
+                      placeholder="Optional model directory"
+                    />
+                  </label>
+                  <label style={{ display: "flex", flexDirection: "column", gap: 4 }}>
+                    <span style={{ fontSize: 12, opacity: 0.75 }}>
+                      Entry command tokens
+                    </span>
+                    <input
+                      value={draft.entry_command.join(" ")}
+                      onChange={(e) =>
+                        updateAdapterDraft(backendId, (current) => ({
+                          ...current,
+                          entry_command: e.currentTarget.value
+                            .split(/\s+/)
+                            .map((value) => value.trim())
+                            .filter(Boolean),
+                        }))
+                      }
+                      placeholder={detail.template.default_entry_command.join(" ")}
+                    />
+                  </label>
+                  <label style={{ display: "flex", flexDirection: "column", gap: 4 }}>
+                    <span style={{ fontSize: 12, opacity: 0.75 }}>
+                      Probe command tokens
+                    </span>
+                    <input
+                      value={draft.probe_command.join(" ")}
+                      onChange={(e) =>
+                        updateAdapterDraft(backendId, (current) => ({
+                          ...current,
+                          probe_command: e.currentTarget.value
+                            .split(/\s+/)
+                            .map((value) => value.trim())
+                            .filter(Boolean),
+                        }))
+                      }
+                      placeholder="Optional explicit non-destructive probe command"
+                    />
+                  </label>
+                  <label style={{ display: "flex", flexDirection: "column", gap: 4 }}>
+                    <span style={{ fontSize: 12, opacity: 0.75 }}>Notes</span>
+                    <textarea
+                      value={draft.notes ?? ""}
+                      onChange={(e) =>
+                        updateAdapterDraft(backendId, (current) => ({
+                          ...current,
+                          notes: e.currentTarget.value.trim() || null,
+                        }))
+                      }
+                      rows={2}
+                    />
+                  </label>
+                  <div style={{ fontSize: 12, opacity: 0.7 }}>
+                    Expected markers: {detail.template.expected_markers.join(" | ") || "-"}
+                  </div>
+                  {detail.last_probe ? (
+                    <div style={{ fontSize: 12, opacity: 0.75 }}>
+                      Probe: {detail.last_probe.summary}
+                      {detail.last_probe.messages.length
+                        ? ` Messages: ${detail.last_probe.messages.join(" | ")}`
+                        : ""}
+                    </div>
+                  ) : null}
+                  <div className="row" style={{ gap: 8, flexWrap: "wrap" }}>
+                    <button
+                      type="button"
+                      disabled={busy || adapterBusy}
+                      onClick={() => saveVoiceBackendAdapter(backendId).catch(() => undefined)}
+                    >
+                      Save adapter
+                    </button>
+                    <button
+                      type="button"
+                      disabled={busy || adapterBusy || !detail.config}
+                      onClick={() => probeVoiceBackendAdapter(backendId).catch(() => undefined)}
+                    >
+                      Probe adapter
+                    </button>
+                    <button
+                      type="button"
+                      disabled={busy || adapterBusy || !detail.config}
+                      onClick={() => deleteVoiceBackendAdapter(backendId).catch(() => undefined)}
+                    >
+                      Remove adapter
+                    </button>
+                  </div>
+                </div>
+              );
+            })}
           </div>
         ) : null}
 

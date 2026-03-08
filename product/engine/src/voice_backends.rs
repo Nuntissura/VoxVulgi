@@ -1,4 +1,4 @@
-use crate::{paths::AppPaths, tools};
+use crate::{paths::AppPaths, tools, voice_backend_adapters};
 use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -52,8 +52,11 @@ pub struct VoiceBackendRecommendation {
 pub fn backend_catalog(paths: &AppPaths) -> VoiceBackendCatalog {
     let performance = tools::performance_tier_status(paths);
     let pack = tools::tts_voice_preserving_local_v1_pack_status(paths);
+    let byo_status = voice_backend_adapters::catalog_status_overrides(paths).unwrap_or_default();
     let tier = performance.tier.clone();
-    let cosy_status = if let Some(version) = pack.cosyvoice_version.clone() {
+    let cosy_status = if let Some(override_status) = byo_status.get("cosyvoice") {
+        override_status.clone()
+    } else if let Some(version) = pack.cosyvoice_version.clone() {
         (
             "detected_python_env".to_string(),
             format!("CosyVoice detected in the current Python environment ({version})."),
@@ -135,9 +138,17 @@ pub fn backend_catalog(paths: &AppPaths) -> VoiceBackendCatalog {
             family: "voice_conversion_only".to_string(),
             mode: "voice_conversion_stage".to_string(),
             install_mode: "byo".to_string(),
-            status: "available_via_byo".to_string(),
-            status_detail: "Promising conversion-stage candidate, but not managed by VoxVulgi yet."
-                .to_string(),
+            status: byo_status
+                .get("seed_vc")
+                .map(|value| value.0.clone())
+                .unwrap_or_else(|| "available_via_byo".to_string()),
+            status_detail: byo_status
+                .get("seed_vc")
+                .map(|value| value.1.clone())
+                .unwrap_or_else(|| {
+                    "Promising conversion-stage candidate, but not managed by VoxVulgi yet."
+                        .to_string()
+                }),
             managed_default: false,
             language_scope: "speech-to-speech timbre transfer".to_string(),
             reference_expectation: "multiple clean references recommended for strong identity transfer"
@@ -161,9 +172,17 @@ pub fn backend_catalog(paths: &AppPaths) -> VoiceBackendCatalog {
             family: "direct_zero_shot_tts".to_string(),
             mode: "direct_conditioned_tts".to_string(),
             install_mode: "byo".to_string(),
-            status: "available_via_byo".to_string(),
-            status_detail: "Research-backed direct TTS candidate; not managed by VoxVulgi yet."
-                .to_string(),
+            status: byo_status
+                .get("indextts2")
+                .map(|value| value.0.clone())
+                .unwrap_or_else(|| "available_via_byo".to_string()),
+            status_detail: byo_status
+                .get("indextts2")
+                .map(|value| value.1.clone())
+                .unwrap_or_else(|| {
+                    "Research-backed direct TTS candidate; not managed by VoxVulgi yet."
+                        .to_string()
+                }),
             managed_default: false,
             language_scope: "zero-shot TTS with duration and emotion control".to_string(),
             reference_expectation: "short clean references; quality scales with better voice samples"
@@ -187,8 +206,16 @@ pub fn backend_catalog(paths: &AppPaths) -> VoiceBackendCatalog {
             family: "direct_zero_shot_tts".to_string(),
             mode: "direct_conditioned_tts".to_string(),
             install_mode: "byo".to_string(),
-            status: "available_via_byo".to_string(),
-            status_detail: "Long-form expressive candidate; not managed by VoxVulgi yet.".to_string(),
+            status: byo_status
+                .get("fish_speech")
+                .map(|value| value.0.clone())
+                .unwrap_or_else(|| "available_via_byo".to_string()),
+            status_detail: byo_status
+                .get("fish_speech")
+                .map(|value| value.1.clone())
+                .unwrap_or_else(|| {
+                    "Long-form expressive candidate; not managed by VoxVulgi yet.".to_string()
+                }),
             managed_default: false,
             language_scope: "multilingual long-form expressive TTS".to_string(),
             reference_expectation: "clean references and GPU-tier hardware recommended".to_string(),
@@ -211,8 +238,16 @@ pub fn backend_catalog(paths: &AppPaths) -> VoiceBackendCatalog {
             family: "direct_zero_shot_tts".to_string(),
             mode: "direct_conditioned_tts".to_string(),
             install_mode: "byo".to_string(),
-            status: "available_via_byo".to_string(),
-            status_detail: "Practical OSS reference backend; not managed by VoxVulgi yet.".to_string(),
+            status: byo_status
+                .get("xtts_v2")
+                .map(|value| value.0.clone())
+                .unwrap_or_else(|| "available_via_byo".to_string()),
+            status_detail: byo_status
+                .get("xtts_v2")
+                .map(|value| value.1.clone())
+                .unwrap_or_else(|| {
+                    "Practical OSS reference backend; not managed by VoxVulgi yet.".to_string()
+                }),
             managed_default: false,
             language_scope: "multilingual zero-shot TTS".to_string(),
             reference_expectation: "clean short references".to_string(),

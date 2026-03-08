@@ -3,7 +3,7 @@
 ## Metadata
 - ID: WP-0110
 - Owner: Codex
-- Status: BACKLOG
+- Status: DONE
 - Created: 2026-03-08
 - Target milestone: Voice backend modernization
 
@@ -41,3 +41,4 @@ Out of scope:
 ## Status updates
 
 - 2026-03-08: Created from the research transfer packet.
+- 2026-03-08: Implemented local BYO adapter config/probe storage, catalog status overlays, and Diagnostics management UI; proof in `product/desktop/Build Target/tool_artifacts/wp_runs/WP-0110/20260308_033400/`.
