@@ -30,6 +30,7 @@ This file defines how an AI coding agent should behave when working in this repo
   - a Work Packet in `governance/workflow/work_packets/`
   - a row in `governance/workflow/TASK_BOARD.md`
 - Treat `governance/spec/` as the canonical place for product requirements and technical design.
+- Treat `governance/workflow/PROOF_STANDARD.md` as the canonical `DONE` / verification policy.
 - For installer/uninstall mode semantics and wording, follow canonical policy in `governance/spec/PRODUCT_SPEC.md` and `governance/spec/TECHNICAL_DESIGN.md` (do not introduce alternate labels).
 - Treat `product/` as product implementation only (code, assets, build scripts).
 - If a requested change is ambiguous or risky, pause and ask for clarification.

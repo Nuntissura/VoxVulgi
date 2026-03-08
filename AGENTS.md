@@ -30,6 +30,12 @@
 - Use `governance/scripts/cleanup_artifacts.ps1` to remove generated test/tool artifacts.
 - Default mode is dry-run; pass `-Force` to execute deletions.
 
+## Proof Standard Policy
+
+- A WP is not `DONE` unless it satisfies `governance/workflow/PROOF_STANDARD.md`.
+- New proof bundles should include `summary.md` under `product/desktop/Build Target/tool_artifacts/wp_runs/<WP-ID>/...`.
+- Build-only verification is not sufficient for UI/operator-heavy packets when the proof standard requires app-boundary or manual evidence.
+
 ## Diagnostics Trace Folder Policy
 
 - Default folder: `%APPDATA%\\com.voxvulgi.voxvulgi\\diagnostics\\traces`.

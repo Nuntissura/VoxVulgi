@@ -9,7 +9,7 @@ This is the single source of truth for work status.
 - `BACKLOG` — not started
 - `IN_PROGRESS` — actively being worked on
 - `BLOCKED` — waiting on external input
-- `DONE` — completed + verified (per WP acceptance)
+- `DONE` — completed + verified per WP acceptance and `governance/workflow/PROOF_STANDARD.md`
 
 ## Work packets
 
@@ -143,4 +143,4 @@ This is the single source of truth for work status.
 | WP-0127 | Visibility-aware polling and background work suspension | DONE | Codex | Foreground responsiveness is hardened: recurring polling now uses shared visibility-aware non-overlapping loops, hidden mounted pages stop active polling, Jobs refreshes on return, and Localization Studio job-status polling is consolidated into one loop instead of seven parallel `jobs_list` intervals; proof in `product/desktop/Build Target/tool_artifacts/wp_runs/WP-0127/20260308_201100/`. |
 | WP-0128 | Localization surface decomposition and typed runtime contracts | DONE | Codex | Localization runtime contracts are now typed end to end: item-artifact metadata is serialized from Tauri with explicit kind/job/backend/container/rerun identity, the frontend consumes that through a shared localization runtime module, and `SubtitleEditorPage` no longer reconstructs artifact matching/rerun behavior from filename heuristics inline; proof in `product/desktop/Build Target/tool_artifacts/wp_runs/WP-0128/20260308_203600/`. |
 | WP-0129 | Reproducible offline bundle and vendor patch hardening | DONE | Codex | Added tracked pinned dependency manifest, opt-in mutable fallback policy, tested Rust vendor patches, and offline payload hash verification; proof in `product/desktop/Build Target/tool_artifacts/wp_runs/WP-0129/20260308_222300/`. |
-| WP-0130 | Proof standardization and frontend/Tauri regression harness | BACKLOG | Codex | Queue verification follow-up for `DONE` proof policy, app-boundary harness coverage, and older proof normalization from `WP-0118` and `WP-0122`. |
+| WP-0130 | Proof standardization and frontend/Tauri regression harness | DONE | Codex | Added repo-wide proof policy, proof-summary template, frontend shared-runtime contract tests, and Tauri artifact/offline-hydration bridge coverage; proof in `product/desktop/Build Target/tool_artifacts/wp_runs/WP-0130/20260308_231800/`. |

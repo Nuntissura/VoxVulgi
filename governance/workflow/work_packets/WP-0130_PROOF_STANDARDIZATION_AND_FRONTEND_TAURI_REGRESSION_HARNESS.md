@@ -3,7 +3,7 @@
 ## Metadata
 - ID: WP-0130
 - Owner: Codex
-- Status: BACKLOG
+- Status: DONE
 - Created: 2026-03-08
 - Target milestone: Audit remediation tranche
 
@@ -39,3 +39,5 @@ Out of scope:
 ## Status updates
 
 - 2026-03-08: Created from `WP-0118` and `WP-0122` proof-discipline findings.
+- 2026-03-08: Began implementation of a repo-wide proof standard, legacy-proof normalization strategy, and focused frontend/Tauri contract harness for shared runtime/path and offline-hydration boundaries.
+- 2026-03-08: Completed. Added `governance/workflow/PROOF_STANDARD.md`, a reusable proof-summary template, root-doc references to the proof policy, frontend contract tests for shared runtime/path helpers, and extra Tauri bridge/offline-hydration contract coverage. Proof: `product/desktop/Build Target/tool_artifacts/wp_runs/WP-0130/20260308_231800/`.

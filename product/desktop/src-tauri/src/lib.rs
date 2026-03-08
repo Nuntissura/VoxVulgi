@@ -1022,6 +1022,33 @@ mod tests {
         let err = verify_offline_payload_integrity(&manifest, &payload).expect_err("mismatch");
         assert!(err.contains("sha256 mismatch"));
     }
+
+    #[test]
+    fn artifact_info_serializes_runtime_contract_in_snake_case() {
+        let artifact = ArtifactInfo {
+            id: "artifact-1".to_string(),
+            title: "Dub mux".to_string(),
+            path: "D:\\tmp\\mux.mp4".to_string(),
+            exists: true,
+            group: "dub".to_string(),
+            kind: ArtifactKind::DubMux,
+            job_type: Some("mux_dub_preview_v1".to_string()),
+            variant_label: Some("Take B".to_string()),
+            track_id: Some("track-en".to_string()),
+            mux_container: Some("mp4".to_string()),
+            tts_backend_id: Some("openvoice_v2".to_string()),
+            rerun_kind: Some(ArtifactRerunKind::MuxDubPreviewV1),
+        };
+
+        let value = serde_json::to_value(&artifact).expect("serialize artifact");
+        assert_eq!(value["kind"], "dub_mux");
+        assert_eq!(value["rerun_kind"], "mux_dub_preview_v1");
+        assert_eq!(value["job_type"], "mux_dub_preview_v1");
+        assert_eq!(value["variant_label"], "Take B");
+        assert_eq!(value["track_id"], "track-en");
+        assert_eq!(value["mux_container"], "mp4");
+        assert_eq!(value["tts_backend_id"], "openvoice_v2");
+    }
 }
 
 fn ensure_media_output_layout(root: &std::path::Path) -> Result<(), String> {

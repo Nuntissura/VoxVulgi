@@ -93,7 +93,7 @@ Date: 2026-03-08
 - WP-0127: Visibility-aware polling and background work suspension. DONE.
 - WP-0128: Localization surface decomposition and typed runtime contracts. DONE.
 - WP-0129: Reproducible offline bundle and vendor patch hardening. DONE.
-- WP-0130: Proof standardization and frontend/Tauri regression harness.
+- WP-0130: Proof standardization and frontend/Tauri regression harness. DONE.
 
 ## Phase 0 - Decisions (1-2 days)
 

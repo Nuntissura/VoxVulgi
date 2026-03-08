@@ -26,6 +26,7 @@ Rules:
 - Keep WPs small and shippable.
 - Don't mix unrelated work in one WP.
 - If scope changes, update the WP first, then code.
+- `DONE` requires a proof bundle and verification that meets `governance/workflow/PROOF_STANDARD.md`.
 
 ## 3) Where decisions live
 
