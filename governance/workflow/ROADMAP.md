@@ -83,7 +83,17 @@ Date: 2026-03-08
 - WP-0120: Persistence, data safety, and artifact lifecycle audit. DONE.
 - WP-0121: Contention-tolerant performance and responsiveness audit focused on graceful degradation under heavy external CPU load. DONE.
 - WP-0122: Test coverage, proof, and dependency audit. DONE.
-- WP-0123: Technical debt ledger and remediation program.
+- WP-0123: Technical debt ledger and remediation program. DONE.
+
+## Audit Remediation Program (2026-03)
+
+- WP-0124: Governance hygiene and manual smoke scope reconciliation.
+- WP-0125: Safe cleanup boundaries and artifact retention policy.
+- WP-0126: Schema versioning and atomic config persistence.
+- WP-0127: Visibility-aware polling and background work suspension.
+- WP-0128: Localization surface decomposition and typed runtime contracts.
+- WP-0129: Reproducible offline bundle and vendor patch hardening.
+- WP-0130: Proof standardization and frontend/Tauri regression harness.
 
 ## Phase 0 — Decisions (1–2 days)
 

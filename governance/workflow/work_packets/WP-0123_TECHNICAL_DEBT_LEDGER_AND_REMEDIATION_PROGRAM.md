@@ -3,7 +3,7 @@
 ## Metadata
 - ID: WP-0123
 - Owner: Codex
-- Status: BACKLOG
+- Status: DONE
 - Created: 2026-03-08
 - Target milestone: Repo audit tranche
 
@@ -38,3 +38,4 @@ Out of scope:
 ## Status updates
 
 - 2026-03-08: Created as stage 6 of the multi-stage repo audit tranche.
+- 2026-03-08: Consolidated `WP-0118` to `WP-0122` into a prioritized debt ledger and queued remediation packets `WP-0124` to `WP-0130`. Proof captured under `product/desktop/Build Target/tool_artifacts/wp_runs/WP-0123/20260308_163900/`.
