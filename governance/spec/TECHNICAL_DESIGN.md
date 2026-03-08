@@ -73,6 +73,10 @@ Implementation notes (desktop):
   - `offline/payload.zip` (contains `tools/`, `models/`, and `cache/huggingface/`)
 - On first run, the app extracts the payload into the user app-data dir and writes a marker (`config/offline_bundle_applied_v1.json`) so it only applies once per bundle id.
 - Build policy: desktop installer packaging must refresh `src-tauri/offline/payload.zip` before each release build so bundled dependencies match the current engine/toolchain state.
+- `offline/manifest.json` should carry payload byte size and SHA-256 when available, and startup hydration must verify those before extraction.
+- Bundled toolchain inputs should be tracked in a single pinned dependency manifest (`product/engine/resources/tooling/pinned_dependency_manifest.json`) so release provenance is reproducible and inspectable.
+- Mutable unpinned recovery installs remain available only behind an explicit local opt-in environment variable; release preparation must succeed without depending on them.
+- Third-party package patching should live in small tested Rust helper modules instead of large inline runtime patch scripts embedded in installer code paths.
 
 ### 2.1.1 Installer maintenance mode clarity
 

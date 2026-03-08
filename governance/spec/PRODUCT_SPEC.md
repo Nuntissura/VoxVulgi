@@ -122,6 +122,11 @@ Initial language focus: **Korean + Japanese → English**.
   - capture deterministic local traces for startup phases, pane activation, resource usage, and major failures,
   - explain tool state in operator terms such as bundled, hydrated, installed, loaded, and ready,
   - suspend recurring pane-local polling and heartbeats when the page or app is not active so the UI degrades gracefully under heavy external CPU load.
+- Supply-chain and reproducibility requirements:
+  - bundled dependency inputs must be tracked in a pinned manifest rather than scattered mutable constants,
+  - mutable unpinned fallback installs must be disabled by default and only run through an explicit local operator/developer opt-in,
+  - offline bundle hydration must verify payload size/hash when the bundle manifest provides them,
+  - third-party source patches used by bundled packs must live in tested maintainable helpers rather than large inline patch scripts.
 - Log rotation and retention (cap by size + age).
 - Diagnostics must surface the derived-artifact retention policy so operators can distinguish working files, durable reports, and durable deliverables.
 - Cache/history cleanup must be split from output-folder deletion, and custom or external output folders must require a separate explicit opt-in before deletion.

@@ -1,4 +1,5 @@
 use base64::Engine as _;
+use sha2::{Digest, Sha256};
 use std::sync::{
     atomic::{AtomicBool, Ordering},
     Arc, Mutex,
@@ -21,6 +22,12 @@ struct OfflineBundleManifest {
     bundle_id: String,
     #[serde(default)]
     payload_zip: Option<String>,
+    #[serde(default)]
+    payload_bytes: Option<u64>,
+    #[serde(default)]
+    payload_sha256: Option<String>,
+    #[serde(default)]
+    payload_sha256_algorithm: Option<String>,
 }
 
 #[derive(Debug, Clone, serde::Serialize)]
@@ -593,6 +600,89 @@ fn read_offline_bundle_manifest(
     })
 }
 
+fn sha256_hex_file(path: &std::path::Path) -> Result<String, String> {
+    let mut file = std::fs::File::open(path).map_err(|e| {
+        format!(
+            "failed to open payload zip {} for hashing: {e}",
+            path.to_string_lossy()
+        )
+    })?;
+    let mut hasher = Sha256::new();
+    let mut buf = [0_u8; 1024 * 1024];
+    loop {
+        use std::io::Read as _;
+        let read = file.read(&mut buf).map_err(|e| {
+            format!(
+                "failed to read payload zip {} for hashing: {e}",
+                path.to_string_lossy()
+            )
+        })?;
+        if read == 0 {
+            break;
+        }
+        hasher.update(&buf[..read]);
+    }
+    Ok(hex::encode_upper(hasher.finalize()))
+}
+
+fn verify_offline_payload_integrity(
+    manifest: &OfflineBundleManifest,
+    payload_zip_path: &std::path::Path,
+) -> Result<(), String> {
+    if let Some(expected_bytes) = manifest.payload_bytes {
+        let actual_bytes = std::fs::metadata(payload_zip_path)
+            .map_err(|e| {
+                format!(
+                    "failed to stat payload zip {}: {e}",
+                    payload_zip_path.to_string_lossy()
+                )
+            })?
+            .len();
+        if actual_bytes != expected_bytes {
+            return Err(format!(
+                "offline bundle payload byte mismatch for {}: expected={} actual={}",
+                payload_zip_path.to_string_lossy(),
+                expected_bytes,
+                actual_bytes
+            ));
+        }
+    }
+
+    if let Some(expected_sha256) = manifest
+        .payload_sha256
+        .as_ref()
+        .map(|value| value.trim())
+        .filter(|value| !value.is_empty())
+    {
+        let algorithm = manifest
+            .payload_sha256_algorithm
+            .as_deref()
+            .unwrap_or("sha256")
+            .trim()
+            .to_ascii_lowercase();
+        if algorithm != "sha256" {
+            return Err(format!(
+                "unsupported offline payload hash algorithm: {}",
+                manifest
+                    .payload_sha256_algorithm
+                    .as_deref()
+                    .unwrap_or("sha256")
+            ));
+        }
+        let actual = sha256_hex_file(payload_zip_path)?;
+        if !actual.eq_ignore_ascii_case(expected_sha256) {
+            return Err(format!(
+                "offline bundle payload sha256 mismatch for {}: expected={} actual={}",
+                payload_zip_path.to_string_lossy(),
+                expected_sha256,
+                actual
+            ));
+        }
+    }
+
+    Ok(())
+}
+
 fn offline_bundle_marker_path(paths: &AppPaths) -> std::path::PathBuf {
     paths.config_dir().join("offline_bundle_applied_v1.json")
 }
@@ -842,6 +932,7 @@ fn apply_offline_bundle_if_present(
     let payload_zip_path = bundle_root.join(&payload_zip_name);
 
     if payload_zip_path.is_file() {
+        verify_offline_payload_integrity(&manifest, &payload_zip_path)?;
         let sum = extract_payload_zip_best_effort(&payload_zip_path, paths)?;
         patch_venv_pyvenv_cfg_best_effort(paths)?;
         write_offline_bundle_marker(paths, &bundle_root, &manifest.bundle_id)?;
@@ -887,6 +978,50 @@ fn apply_offline_bundle_if_present(
     );
 
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn verify_offline_payload_integrity_accepts_matching_bytes_and_hash() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let payload = dir.path().join("payload.zip");
+        std::fs::write(&payload, b"payload-bytes").expect("write");
+
+        let manifest = OfflineBundleManifest {
+            schema_version: 1,
+            bundle_id: "bundle".to_string(),
+            payload_zip: Some("payload.zip".to_string()),
+            payload_bytes: Some(13),
+            payload_sha256: Some(
+                "808B59664B6ADB9274E3BBD0766E7AEC9659786C22FDB825C49CA7FDA1C6236E".to_string(),
+            ),
+            payload_sha256_algorithm: Some("sha256".to_string()),
+        };
+
+        verify_offline_payload_integrity(&manifest, &payload).expect("verify");
+    }
+
+    #[test]
+    fn verify_offline_payload_integrity_rejects_hash_mismatch() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let payload = dir.path().join("payload.zip");
+        std::fs::write(&payload, b"payload-bytes").expect("write");
+
+        let manifest = OfflineBundleManifest {
+            schema_version: 1,
+            bundle_id: "bundle".to_string(),
+            payload_zip: Some("payload.zip".to_string()),
+            payload_bytes: Some(13),
+            payload_sha256: Some("DEADBEEF".to_string()),
+            payload_sha256_algorithm: Some("sha256".to_string()),
+        };
+
+        let err = verify_offline_payload_integrity(&manifest, &payload).expect_err("mismatch");
+        assert!(err.contains("sha256 mismatch"));
+    }
 }
 
 fn ensure_media_output_layout(root: &std::path::Path) -> Result<(), String> {
@@ -1309,10 +1444,7 @@ fn qc_report_identity(file_name: &str) -> (Option<String>, Option<String>) {
     let mut parts = rest.splitn(2, '_');
     let track_id = parts.next().map(|value| value.trim().to_string());
     let variant_label = normalize_variant_label(parts.next());
-    (
-        track_id.filter(|value| !value.is_empty()),
-        variant_label,
-    )
+    (track_id.filter(|value| !value.is_empty()), variant_label)
 }
 
 #[tauri::command]
@@ -1331,19 +1463,17 @@ fn item_artifacts_list_v1(
     let item_dir = state.paths.derived_item_dir(&item_id);
     let mut out: Vec<ArtifactInfo> = Vec::new();
 
-    let mut push = |
-        id: &str,
-        title: &str,
-        group: &str,
-        kind: ArtifactKind,
-        job_type: Option<&str>,
-        variant_label: Option<String>,
-        track_id: Option<String>,
-        mux_container: Option<&str>,
-        tts_backend_id: Option<&str>,
-        rerun_kind: Option<ArtifactRerunKind>,
-        path: std::path::PathBuf,
-    | {
+    let mut push = |id: &str,
+                    title: &str,
+                    group: &str,
+                    kind: ArtifactKind,
+                    job_type: Option<&str>,
+                    variant_label: Option<String>,
+                    track_id: Option<String>,
+                    mux_container: Option<&str>,
+                    tts_backend_id: Option<&str>,
+                    rerun_kind: Option<ArtifactRerunKind>,
+                    path: std::path::PathBuf| {
         out.push(ArtifactInfo {
             id: id.to_string(),
             title: title.to_string(),
@@ -2791,13 +2921,8 @@ async fn voice_benchmark_load(
         .filter(|value| !value.is_empty())
         .ok_or_else(|| "missing required key trackId".to_string())?;
     tauri::async_runtime::spawn_blocking(move || {
-        voice_benchmarks::load_voice_benchmark_report(
-            &paths,
-            &item_id,
-            &track_id,
-            goal.as_deref(),
-        )
-        .map_err(|e| e.to_string())
+        voice_benchmarks::load_voice_benchmark_report(&paths, &item_id, &track_id, goal.as_deref())
+            .map_err(|e| e.to_string())
     })
     .await
     .map_err(|e| e.to_string())?
@@ -2887,12 +3012,8 @@ async fn voice_reference_curation_generate(
         .filter(|value| !value.is_empty())
         .ok_or_else(|| "missing required key speakerKey".to_string())?;
     tauri::async_runtime::spawn_blocking(move || {
-        voice_reference_curation::generate_reference_curation_report(
-            &paths,
-            &item_id,
-            &speaker_key,
-        )
-        .map_err(|e| e.to_string())
+        voice_reference_curation::generate_reference_curation_report(&paths, &item_id, &speaker_key)
+            .map_err(|e| e.to_string())
     })
     .await
     .map_err(|e| e.to_string())?
@@ -2949,13 +3070,8 @@ async fn voice_reference_curation_apply(
         .ok_or_else(|| "missing required key speakerKey".to_string())?;
     let mode = mode.unwrap_or_else(|| "ranked".to_string());
     tauri::async_runtime::spawn_blocking(move || {
-        voice_reference_curation::apply_reference_curation(
-            &paths,
-            &item_id,
-            &speaker_key,
-            &mode,
-        )
-        .map_err(|e| e.to_string())
+        voice_reference_curation::apply_reference_curation(&paths, &item_id, &speaker_key, &mode)
+            .map_err(|e| e.to_string())
     })
     .await
     .map_err(|e| e.to_string())?

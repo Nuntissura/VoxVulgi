@@ -1,0 +1,123 @@
+{
+  "schema_version": 1,
+  "allow_unpinned_fallback_env": "VOXVULGI_ALLOW_UNPINNED_FALLBACK",
+  "yt_dlp_windows": {
+    "version": "2026.03.03",
+    "url": "https://github.com/yt-dlp/yt-dlp/releases/download/2026.03.03/yt-dlp.exe",
+    "sha256_hex": "554E868CA1DF425D4FE90C224980F0862FE20E28DCED6256461F16752D7A1218",
+    "file_bytes": 18408128,
+    "source_label": "github:yt-dlp/yt-dlp"
+  },
+  "portable_python_windows": {
+    "version": "3.11.9",
+    "url": "https://www.nuget.org/api/v2/package/python/3.11.9",
+    "sha256_hex": "9283876D58C017E0E846F95B490DA3BCA0FC0A6EE1134B2870677CFB7EEC3C67",
+    "source_label": "nuget:python"
+  },
+  "spleeter": {
+    "bootstrap_packages": [
+      "numpy==1.26.4",
+      "h2==4.3.0"
+    ],
+    "candidate_pins": {
+      "py38_to_py311": "spleeter==2.4.2",
+      "py_lt_38": "spleeter==2.4.0",
+      "default_pinned": "spleeter==2.4.2"
+    },
+    "unpinned_fallback_spec": "spleeter",
+    "model": {
+      "repo": "deezer/spleeter",
+      "release": "v1.4.0",
+      "model_name": "2stems"
+    }
+  },
+  "demucs": {
+    "pinned_spec": "demucs-infer==4.1.2",
+    "unpinned_fallback_spec": "demucs-infer"
+  },
+  "diarization": {
+    "pinned": [
+      "resemblyzer==0.1.4",
+      "numpy==1.26.4",
+      "scikit-learn==1.8.0",
+      "webrtcvad==2.0.10",
+      "soundfile==0.13.1"
+    ],
+    "unpinned_fallback": [
+      "resemblyzer",
+      "numpy",
+      "scikit-learn",
+      "webrtcvad",
+      "soundfile"
+    ]
+  },
+  "tts_preview": {
+    "pinned": [
+      "pyttsx3==2.90"
+    ],
+    "unpinned_fallback": [
+      "pyttsx3"
+    ]
+  },
+  "tts_neural_local_v1": {
+    "compatibility_upgrades": [
+      "click==8.3.1",
+      "typer==0.24.1"
+    ],
+    "pinned": [
+      "kokoro==0.9.4",
+      "numpy==1.26.4",
+      "soundfile==0.13.1",
+      "torch==2.10.0"
+    ],
+    "unpinned_fallback": [
+      "kokoro",
+      "numpy",
+      "soundfile",
+      "torch"
+    ]
+  },
+  "tts_voice_preserving_local_v1": {
+    "openvoice_git_spec": "git+https://github.com/myshell-ai/OpenVoice.git@74a1d147b17a8c3092dd5430504bd83ef6c7eb23",
+    "pinned_dependencies": [
+      "huggingface_hub==1.4.1",
+      "librosa==0.11.0",
+      "soundfile==0.13.1",
+      "inflect==7.5.0",
+      "Unidecode==1.4.0",
+      "eng_to_ipa==0.0.2",
+      "pypinyin==0.55.0",
+      "cn2an==0.5.23",
+      "jieba==0.42.1"
+    ],
+    "unpinned_fallback_dependencies": [
+      "huggingface_hub",
+      "librosa",
+      "soundfile",
+      "inflect",
+      "Unidecode",
+      "eng_to_ipa",
+      "pypinyin",
+      "cn2an",
+      "jieba"
+    ],
+    "openvoice_v2": {
+      "repo_id": "myshell-ai/OpenVoiceV2",
+      "revision": "f36e7edfe1684461a8343844af60babc2efbb727",
+      "files": [
+        {
+          "filename": "converter/config.json",
+          "sha256_hex": "9dfff60350b8c63f2c664efd92a61b2516efb22671466960f0e5dfebd881fa47"
+        },
+        {
+          "filename": "converter/checkpoint.pth",
+          "sha256_hex": "9652c27e92b6b2a91632590ac9962ef7ae2b712e5c5b7f4c34ec55ee2b37ab9e"
+        },
+        {
+          "filename": "base_speakers/ses/en-default.pth",
+          "sha256_hex": "e4139de3bc2ea162f45a5a5f9559b710686c9689749b5ab8945ee5e2a082d154"
+        }
+      ]
+    }
+  }
+}

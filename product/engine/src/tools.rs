@@ -1,4 +1,5 @@
 use crate::paths::AppPaths;
+use crate::{pinned_dependency_manifest, vendor_patches};
 use crate::{EngineError, Result};
 use serde::{Deserialize, Serialize};
 use std::io::Write;
@@ -113,8 +114,7 @@ pub fn install_ytdlp_tools(paths: &AppPaths) -> Result<YtDlpToolsStatus> {
 
     #[cfg(windows)]
     {
-        const YT_DLP_WINDOWS_DOWNLOAD_URL: &str =
-            "https://github.com/yt-dlp/yt-dlp/releases/latest/download/yt-dlp.exe";
+        let pin = &pinned_dependency_manifest::manifest().yt_dlp_windows;
 
         let destination = bundled_ytdlp_path(paths);
         if let Some(parent) = destination.parent() {
@@ -123,7 +123,7 @@ pub fn install_ytdlp_tools(paths: &AppPaths) -> Result<YtDlpToolsStatus> {
 
         let tmp_path = destination.with_extension("download");
 
-        let resp = ureq::get(YT_DLP_WINDOWS_DOWNLOAD_URL)
+        let resp = ureq::get(&pin.url)
             .call()
             .map_err(|e| EngineError::InstallFailed(format!("yt-dlp download failed: {e}")))?;
         let status = resp.status();
@@ -140,13 +140,27 @@ pub fn install_ytdlp_tools(paths: &AppPaths) -> Result<YtDlpToolsStatus> {
             file.flush()?;
         }
 
-        let min_size = 512 * 1024_u64;
         let downloaded_size = std::fs::metadata(&tmp_path).map(|m| m.len()).unwrap_or(0);
-        if downloaded_size < min_size {
+        if downloaded_size != pin.file_bytes {
             let _ = std::fs::remove_file(&tmp_path);
-            return Err(EngineError::InstallFailed(
-                "downloaded yt-dlp is unexpectedly small".to_string(),
-            ));
+            return Err(EngineError::SizeMismatch {
+                path: tmp_path.clone(),
+                expected: pin.file_bytes,
+                actual: downloaded_size,
+            });
+        }
+
+        let expected = hex::decode(&pin.sha256_hex)
+            .map_err(|e| EngineError::InstallFailed(format!("invalid yt-dlp sha256 pin: {e}")))?;
+        let got = sha256_file(&tmp_path)?;
+        if got != expected {
+            let actual = hex::encode_upper(got);
+            let _ = std::fs::remove_file(&tmp_path);
+            return Err(EngineError::HashMismatch {
+                path: tmp_path.clone(),
+                expected: pin.sha256_hex.clone(),
+                actual,
+            });
         }
 
         if destination.exists() {
@@ -167,6 +181,19 @@ fn bundled_ytdlp_path(paths: &AppPaths) -> std::path::PathBuf {
         path.set_extension("exe");
     }
     path
+}
+
+fn unpinned_fallback_disabled_error(context: &str, pinned_err: &EngineError) -> EngineError {
+    EngineError::InstallFailed(format!(
+        "{context} failed after pinned install error: {pinned_err}. Mutable fallback installs are disabled by default. Set {}=1 to opt in for local recovery runs.",
+        pinned_dependency_manifest::allow_unpinned_fallback_env_name()
+    ))
+}
+
+fn pip_install_args<'a>(prefix: &[&'a str], packages: &'a [String]) -> Vec<&'a str> {
+    let mut args = prefix.to_vec();
+    args.extend(packages.iter().map(String::as_str));
+    args
 }
 
 fn tool_version_first_line_with_arg(
@@ -352,6 +379,9 @@ pub fn generate_pack_integrity_manifest(paths: &AppPaths) -> Result<PackIntegrit
         generated_at_ms: i64,
         portable_python: PortablePythonStatus,
         python_toolchain: PythonToolchainStatus,
+        pinned_dependency_manifest: serde_json::Value,
+        allow_unpinned_fallback_env: String,
+        allow_unpinned_fallback_enabled: bool,
         packs: PackIntegrityPacks,
         model_manifests: PackIntegrityModelManifests,
     }
@@ -377,6 +407,10 @@ pub fn generate_pack_integrity_manifest(paths: &AppPaths) -> Result<PackIntegrit
         generated_at_ms,
         portable_python: portable_python_status(paths),
         python_toolchain: python_toolchain_status(paths),
+        pinned_dependency_manifest: pinned_dependency_manifest::manifest_json_value(),
+        allow_unpinned_fallback_env: pinned_dependency_manifest::allow_unpinned_fallback_env_name()
+            .to_string(),
+        allow_unpinned_fallback_enabled: pinned_dependency_manifest::allow_unpinned_fallback(),
         packs: PackIntegrityPacks {
             spleeter: spleeter_pack_status(paths),
             demucs: demucs_pack_status(paths),
@@ -392,7 +426,7 @@ pub fn generate_pack_integrity_manifest(paths: &AppPaths) -> Result<PackIntegrit
     };
 
     let json = serde_json::to_string_pretty(&manifest)?;
-    std::fs::write(&out_path, format!("{json}\n"))?;
+    crate::persistence::atomic_write_text(&out_path, &format!("{json}\n"))?;
     let file_bytes = std::fs::metadata(&out_path).map(|m| m.len()).unwrap_or(0);
 
     Ok(PackIntegrityManifestResult {
@@ -511,10 +545,7 @@ pub fn install_portable_python(paths: &AppPaths) -> Result<PortablePythonStatus>
 
     #[cfg(windows)]
     {
-        const PYTHON_NUGET_VERSION: &str = "3.11.9";
-        const PYTHON_NUGET_SHA256_HEX: &str =
-            "9283876D58C017E0E846F95B490DA3BCA0FC0A6EE1134B2870677CFB7EEC3C67";
-        const PYTHON_NUGET_URL: &str = "https://www.nuget.org/api/v2/package/python/3.11.9";
+        let pin = &pinned_dependency_manifest::manifest().portable_python_windows;
 
         paths.ensure_dirs()?;
         let install_dir = paths.python_portable_dir();
@@ -534,12 +565,10 @@ pub fn install_portable_python(paths: &AppPaths) -> Result<PortablePythonStatus>
         }
         std::fs::create_dir_all(&install_dir)?;
 
-        let download_tmp = install_dir.join(format!(
-            "python-nuget-{PYTHON_NUGET_VERSION}.nupkg.download"
-        ));
-        let download_final = install_dir.join(format!("python-nuget-{PYTHON_NUGET_VERSION}.nupkg"));
+        let download_tmp = install_dir.join(format!("python-nuget-{}.nupkg.download", pin.version));
+        let download_final = install_dir.join(format!("python-nuget-{}.nupkg", pin.version));
 
-        let resp = ureq::get(PYTHON_NUGET_URL).call().map_err(|e| {
+        let resp = ureq::get(&pin.url).call().map_err(|e| {
             EngineError::InstallFailed(format!("portable Python download failed: {e}"))
         })?;
         let status = resp.status();
@@ -556,7 +585,7 @@ pub fn install_portable_python(paths: &AppPaths) -> Result<PortablePythonStatus>
             file.flush()?;
         }
 
-        let expected = hex::decode(PYTHON_NUGET_SHA256_HEX).map_err(|e| {
+        let expected = hex::decode(&pin.sha256_hex).map_err(|e| {
             EngineError::InstallFailed(format!("invalid embedded portable Python sha256: {e}"))
         })?;
         let got = sha256_file(&download_tmp)?;
@@ -581,14 +610,15 @@ pub fn install_portable_python(paths: &AppPaths) -> Result<PortablePythonStatus>
         let version = python_version(&exe, &[]).ok_or_else(|| {
             EngineError::InstallFailed("portable Python is not usable after install".to_string())
         })?;
-        std::fs::write(
+        crate::persistence::atomic_write_text(
             &marker,
             format!(
-                "OK\nversion={}\nsource=nuget:python:{}\nsha256={}\n",
+                "OK\nversion={}\nsource={}\nsha256={}\n",
                 version.trim(),
-                PYTHON_NUGET_VERSION,
-                PYTHON_NUGET_SHA256_HEX
-            ),
+                pin.source_label,
+                pin.sha256_hex
+            )
+            .as_str(),
         )?;
 
         let _ = generate_pack_integrity_manifest(paths);
@@ -897,6 +927,7 @@ pub fn install_spleeter_pack(paths: &AppPaths) -> Result<SpleeterPackStatus> {
     let venv_python = python_venv_python_path(paths)?;
     let py_version = python_version(&venv_python, &[]).unwrap_or_else(|| "unknown".to_string());
     let candidates = spleeter_install_candidates(&py_version);
+    let pin = &pinned_dependency_manifest::manifest().spleeter;
     let mut last_error: Option<String> = None;
     let models_dir = paths.python_models_dir().join("spleeter");
     std::fs::create_dir_all(&models_dir)?;
@@ -916,23 +947,15 @@ pub fn install_spleeter_pack(paths: &AppPaths) -> Result<SpleeterPackStatus> {
         "pip bootstrap failed",
     );
 
-    let _ = run_python_checked(
-        paths,
-        &venv_python,
-        &[
-            "-m",
-            "pip",
-            "install",
-            "--only-binary=:all:",
-            "numpy==1.26.4",
-        ],
-        "numpy bootstrap failed",
+    let bootstrap_args = pip_install_args(
+        &["-m", "pip", "install", "--only-binary=:all:"],
+        &pin.bootstrap_packages,
     );
     let _ = run_python_checked(
         paths,
         &venv_python,
-        &["-m", "pip", "install", "h2"],
-        "httpx HTTP/2 dependency bootstrap failed",
+        &bootstrap_args,
+        "spleeter bootstrap failed",
     );
 
     for spec in candidates.iter() {
@@ -982,9 +1005,9 @@ import urllib.request
 MODEL_PATH = r"{model_path}"
 os.makedirs(MODEL_PATH, exist_ok=True)
 
-model_name = "2stems"
-repo = "deezer/spleeter"
-release = "v1.4.0"
+model_name = "{model_name}"
+repo = "{repo}"
+release = "{release}"
 base = f"https://github.com/{{repo}}/releases/download/{{release}}"
 checksum_url = f"{{base}}/checksum.json"
 archive_url = f"{{base}}/{{model_name}}.tar.gz"
@@ -1048,7 +1071,10 @@ finally:
 
 print("spleeter_model_download_ok")
 "#,
-                    model_path = models_dir.to_string_lossy()
+                    model_path = models_dir.to_string_lossy(),
+                    model_name = pin.model.model_name,
+                    repo = pin.model.repo,
+                    release = pin.model.release,
                 );
                 run_python_checked(
                     paths,
@@ -1171,9 +1197,9 @@ import urllib.request
 MODEL_PATH = r"{model_path}"
 os.makedirs(MODEL_PATH, exist_ok=True)
 
-model_name = "2stems"
-repo = "deezer/spleeter"
-release = "v1.4.0"
+model_name = "{model_name}"
+repo = "{repo}"
+release = "{release}"
 base = f"https://github.com/{{repo}}/releases/download/{{release}}"
 checksum_url = f"{{base}}/checksum.json"
 archive_url = f"{{base}}/{{model_name}}.tar.gz"
@@ -1237,7 +1263,10 @@ finally:
 
 print("spleeter_model_download_ok")
 "#,
-                        model_path = models_dir.to_string_lossy()
+                        model_path = models_dir.to_string_lossy(),
+                        model_name = pin.model.model_name,
+                        repo = pin.model.repo,
+                        release = pin.model.release,
                     );
                     run_python_checked(
                         paths,
@@ -1424,15 +1453,19 @@ fn install_python_dependency_pin(
     )))
 }
 
-fn spleeter_install_candidates(py_version: &str) -> Vec<&'static str> {
-    match parse_python_major_minor(py_version) {
+fn spleeter_install_candidates(py_version: &str) -> Vec<String> {
+    let pin = &pinned_dependency_manifest::manifest().spleeter;
+    let mut candidates = match parse_python_major_minor(py_version) {
         Some((3, minor)) if (8..=11).contains(&minor) => {
-            vec!["spleeter==2.4.2", "spleeter"]
+            vec![pin.candidate_pins.py38_to_py311.clone()]
         }
-        Some((3, minor)) if minor < 8 => vec!["spleeter==2.4.0", "spleeter"],
-        Some((3, _)) => vec!["spleeter"],
-        _ => vec!["spleeter==2.4.2", "spleeter"],
+        Some((3, minor)) if minor < 8 => vec![pin.candidate_pins.py_lt_38.clone()],
+        _ => vec![pin.candidate_pins.default_pinned.clone()],
+    };
+    if pinned_dependency_manifest::allow_unpinned_fallback() {
+        candidates.push(pin.unpinned_fallback_spec.clone());
     }
+    candidates
 }
 
 fn parse_python_major_minor(version: &str) -> Option<(u32, u32)> {
@@ -1470,6 +1503,7 @@ pub fn install_demucs_pack(paths: &AppPaths) -> Result<DemucsPackStatus> {
     // Ensure venv exists first.
     let _ = install_python_toolchain(paths)?;
     let venv_python = python_venv_python_path(paths)?;
+    let pin = &pinned_dependency_manifest::manifest().demucs;
 
     let _ = run_python_checked(
         paths,
@@ -1487,17 +1521,34 @@ pub fn install_demucs_pack(paths: &AppPaths) -> Result<DemucsPackStatus> {
     );
 
     // Prefer an inference-only distribution (smaller surface area than full training stack).
-    let pinned = "demucs-infer==4.1.2";
     if let Err(err) = run_python_checked(
         paths,
         &venv_python,
-        &["-m", "pip", "install", "--prefer-binary", pinned],
+        &[
+            "-m",
+            "pip",
+            "install",
+            "--prefer-binary",
+            pin.pinned_spec.as_str(),
+        ],
         "pip install demucs-infer failed (pinned)",
     ) {
+        if !pinned_dependency_manifest::allow_unpinned_fallback() {
+            return Err(unpinned_fallback_disabled_error(
+                "demucs-infer install",
+                &err,
+            ));
+        }
         run_python_checked(
             paths,
             &venv_python,
-            &["-m", "pip", "install", "--prefer-binary", "demucs-infer"],
+            &[
+                "-m",
+                "pip",
+                "install",
+                "--prefer-binary",
+                pin.unpinned_fallback_spec.as_str(),
+            ],
             &format!("pip install demucs-infer failed (unpinned fallback): {err}"),
         )?;
     }
@@ -1552,42 +1603,33 @@ pub fn install_diarization_pack(paths: &AppPaths) -> Result<DiarizationPackStatu
     // Ensure venv exists first.
     let _ = install_python_toolchain(paths)?;
     let venv_python = python_venv_python_path(paths)?;
+    let pin = &pinned_dependency_manifest::manifest().diarization;
 
-    let pinned = [
-        "resemblyzer==0.1.4",
-        "numpy==1.26.4",
-        "scikit-learn==1.8.0",
-        "webrtcvad==2.0.10",
-        "soundfile==0.13.1",
-    ];
+    let pinned_args = pip_install_args(&["-m", "pip", "install"], &pin.pinned);
     let install_err = run_python_checked(
         paths,
         &venv_python,
-        &[
-            "-m", "pip", "install", pinned[0], pinned[1], pinned[2], pinned[3], pinned[4],
-        ],
+        &pinned_args,
         "pip install diarization dependencies failed (pinned)",
     );
     if let Err(err) = install_err {
+        if !pinned_dependency_manifest::allow_unpinned_fallback() {
+            return Err(unpinned_fallback_disabled_error(
+                "diarization dependency install",
+                &err,
+            ));
+        }
+        let fallback_args = pip_install_args(&["-m", "pip", "install"], &pin.unpinned_fallback);
         // Best-effort fallback when pinned wheels are unavailable.
         let _ = run_python_checked(
             paths,
             &venv_python,
-            &[
-                "-m",
-                "pip",
-                "install",
-                "resemblyzer",
-                "numpy",
-                "scikit-learn",
-                "webrtcvad",
-                "soundfile",
-            ],
+            &fallback_args,
             &format!("pip install diarization dependencies failed (unpinned fallback): {err}"),
         )?;
     }
 
-    patch_webrtcvad_pkg_resources_import(&venv_python)?;
+    vendor_patches::patch_webrtcvad_pkg_resources_import(&venv_python)?;
 
     // Best-effort warmup to ensure the embedding model weights shipped with the package are usable.
     let _ = run_python_checked(
@@ -1603,67 +1645,6 @@ pub fn install_diarization_pack(paths: &AppPaths) -> Result<DiarizationPackStatu
     let status = diarization_pack_status(paths);
     let _ = generate_pack_integrity_manifest(paths);
     Ok(status)
-}
-
-fn patch_webrtcvad_pkg_resources_import(python: &std::path::Path) -> Result<()> {
-    let venv_dir = python
-        .parent()
-        .and_then(|p| p.parent())
-        .ok_or_else(|| EngineError::InstallFailed("invalid venv python path".to_string()))?;
-
-    let mut candidates: Vec<std::path::PathBuf> = Vec::new();
-    if cfg!(windows) {
-        candidates.push(
-            venv_dir
-                .join("Lib")
-                .join("site-packages")
-                .join("webrtcvad.py"),
-        );
-    } else {
-        let lib_dir = venv_dir.join("lib");
-        if let Ok(entries) = std::fs::read_dir(&lib_dir) {
-            for entry in entries.flatten() {
-                let path = entry.path();
-                if !path.is_dir() {
-                    continue;
-                }
-                let name = path.file_name().and_then(|n| n.to_str()).unwrap_or("");
-                if !name.starts_with("python") {
-                    continue;
-                }
-                candidates.push(path.join("site-packages").join("webrtcvad.py"));
-            }
-        }
-    }
-
-    let file_path = candidates
-        .into_iter()
-        .find(|p| p.is_file())
-        .ok_or_else(|| EngineError::InstallFailed("webrtcvad.py not found".to_string()))?;
-    let bytes = std::fs::read(&file_path)
-        .map_err(|e| EngineError::InstallFailed(format!("failed to read webrtcvad.py: {e}")))?;
-    let mut text = String::from_utf8_lossy(&bytes).to_string();
-
-    if text.contains("try:") && text.contains("import pkg_resources") {
-        return Ok(());
-    }
-    if !text.contains("import pkg_resources") {
-        return Ok(());
-    }
-
-    // Patch only the fragile version lookup; keep behavior identical otherwise.
-    text = text.replace(
-        "import pkg_resources\n\nimport _webrtcvad\n",
-        "try:\n    import pkg_resources\nexcept Exception:  # pragma: no cover\n    pkg_resources = None\n\nimport _webrtcvad\n",
-    );
-    text = text.replace(
-        "__version__ = pkg_resources.get_distribution('webrtcvad').version",
-        "__version__ = (pkg_resources.get_distribution('webrtcvad').version if pkg_resources else 'installed')",
-    );
-
-    std::fs::write(&file_path, text)
-        .map_err(|e| EngineError::InstallFailed(format!("failed to patch webrtcvad.py: {e}")))?;
-    Ok(())
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -1693,18 +1674,21 @@ pub fn install_tts_preview_pack(paths: &AppPaths) -> Result<TtsPreviewPackStatus
     // Ensure venv exists first.
     let _ = install_python_toolchain(paths)?;
     let venv_python = python_venv_python_path(paths)?;
+    let pin = &pinned_dependency_manifest::manifest().tts_preview;
 
-    let pinned = "pyttsx3==2.90";
     if let Err(err) = run_python_checked(
         paths,
         &venv_python,
-        &["-m", "pip", "install", pinned],
+        &["-m", "pip", "install", pin.pinned[0].as_str()],
         "pip install pyttsx3 failed (pinned)",
     ) {
+        if !pinned_dependency_manifest::allow_unpinned_fallback() {
+            return Err(unpinned_fallback_disabled_error("pyttsx3 install", &err));
+        }
         run_python_checked(
             paths,
             &venv_python,
-            &["-m", "pip", "install", "pyttsx3"],
+            &["-m", "pip", "install", pin.unpinned_fallback[0].as_str()],
             &format!("pip install pyttsx3 failed (unpinned fallback): {err}"),
         )?;
     }
@@ -1753,6 +1737,7 @@ pub fn install_tts_neural_local_v1_pack(paths: &AppPaths) -> Result<TtsNeuralLoc
     // Ensure venv exists first.
     let _ = install_python_toolchain(paths)?;
     let venv_python = python_venv_python_path(paths)?;
+    let pin = &pinned_dependency_manifest::manifest().tts_neural_local_v1;
 
     let _ = run_python_checked(
         paths,
@@ -1766,44 +1751,32 @@ pub fn install_tts_neural_local_v1_pack(paths: &AppPaths) -> Result<TtsNeuralLoc
     let _ = run_python_checked(
         paths,
         &venv_python,
-        &[
-            "-m",
-            "pip",
-            "install",
-            "--upgrade",
-            "click>=8.1.7",
-            "typer>=0.12.0",
-        ],
+        &pip_install_args(
+            &["-m", "pip", "install", "--upgrade"],
+            &pin.compatibility_upgrades,
+        ),
         "pip upgrade click/typer compatibility for neural TTS failed",
     );
 
-    let pinned = [
-        "kokoro==0.9.4",
-        "numpy==1.26.4",
-        "soundfile==0.13.1",
-        "torch==2.10.0",
-    ];
+    let pinned_args = pip_install_args(&["-m", "pip", "install"], &pin.pinned);
     let install_err = run_python_checked(
         paths,
         &venv_python,
-        &[
-            "-m", "pip", "install", pinned[0], pinned[1], pinned[2], pinned[3],
-        ],
+        &pinned_args,
         "pip install neural TTS dependencies failed (pinned)",
     );
     if let Err(err) = install_err {
+        if !pinned_dependency_manifest::allow_unpinned_fallback() {
+            return Err(unpinned_fallback_disabled_error(
+                "neural TTS dependency install",
+                &err,
+            ));
+        }
+        let fallback_args = pip_install_args(&["-m", "pip", "install"], &pin.unpinned_fallback);
         run_python_checked(
             paths,
             &venv_python,
-            &[
-                "-m",
-                "pip",
-                "install",
-                "kokoro",
-                "numpy",
-                "soundfile",
-                "torch",
-            ],
+            &fallback_args,
             &format!("pip install neural TTS dependencies failed (unpinned fallback): {err}"),
         )?;
     }
@@ -1875,7 +1848,8 @@ pub fn tts_voice_preserving_local_v1_pack_status(
     let kokoro_version = python_module_version(&venv_python, "kokoro");
     let openvoice_version = python_module_version(&venv_python, "openvoice");
     let cosyvoice_version = python_module_version(&venv_python, "cosyvoice");
-    let openvoice_patch_applied = openvoice_api_patch_applied(&venv_python).unwrap_or(false);
+    let openvoice_patch_applied =
+        vendor_patches::openvoice_api_patch_applied(&venv_python).unwrap_or(false);
     let kokoro_warmup_ready = kokoro_warmup_probe_path(paths).exists();
     let models_dir = std::path::PathBuf::from(&openvoice_models_dir);
     let openvoice_models_installed = models_dir.join("converter").join("config.json").exists()
@@ -1901,6 +1875,7 @@ pub fn install_tts_voice_preserving_local_v1_pack(
 ) -> Result<TtsVoicePreservingLocalV1PackStatus> {
     let _ = install_python_toolchain(paths)?;
     let venv_python = python_venv_python_path(paths)?;
+    let pin = &pinned_dependency_manifest::manifest().tts_voice_preserving_local_v1;
 
     let _ = run_python_checked(
         paths,
@@ -1915,16 +1890,13 @@ pub fn install_tts_voice_preserving_local_v1_pack(
 
     let mut status_error: Option<String> = None;
     let mut openvoice_installed = false;
-    // Pin OpenVoice to a known-good commit for determinism.
-    const OPENVOICE_GIT_PIN: &str =
-        "git+https://github.com/myshell-ai/OpenVoice.git@74a1d147b17a8c3092dd5430504bd83ef6c7eb23";
     let attempts = vec![vec![
         "-m",
         "pip",
         "install",
         "--upgrade",
         "--no-deps",
-        OPENVOICE_GIT_PIN,
+        pin.openvoice_git_spec.as_str(),
     ]];
     for args in attempts {
         match run_python_checked(paths, &venv_python, &args, "pip install OpenVoice failed") {
@@ -1943,131 +1915,39 @@ pub fn install_tts_voice_preserving_local_v1_pack(
         )));
     }
 
-    let pinned = [
-        "huggingface_hub==1.4.1",
-        "librosa==0.11.0",
-        "soundfile==0.13.1",
-        "inflect==7.5.0",
-        "Unidecode==1.4.0",
-        "eng_to_ipa==0.0.2",
-        "pypinyin==0.55.0",
-        "cn2an==0.5.23",
-        "jieba==0.42.1",
-    ];
+    let pinned_args = pip_install_args(
+        &["-m", "pip", "install", "--upgrade"],
+        &pin.pinned_dependencies,
+    );
     let deps_err = run_python_checked(
         paths,
         &venv_python,
-        &[
-            "-m",
-            "pip",
-            "install",
-            "--upgrade",
-            pinned[0],
-            pinned[1],
-            pinned[2],
-            pinned[3],
-            pinned[4],
-            pinned[5],
-            pinned[6],
-            pinned[7],
-            pinned[8],
-        ],
+        &pinned_args,
         "pip install OpenVoice dependencies failed (pinned)",
     );
     if let Err(err) = deps_err {
+        if !pinned_dependency_manifest::allow_unpinned_fallback() {
+            return Err(unpinned_fallback_disabled_error(
+                "OpenVoice dependency install",
+                &err,
+            ));
+        }
+        let fallback_args = pip_install_args(
+            &["-m", "pip", "install", "--upgrade"],
+            &pin.unpinned_fallback_dependencies,
+        );
         let _ = run_python_checked(
             paths,
             &venv_python,
-            &[
-                "-m",
-                "pip",
-                "install",
-                "--upgrade",
-                "huggingface_hub",
-                "librosa",
-                "soundfile",
-                "inflect",
-                "Unidecode",
-                "eng_to_ipa",
-                "pypinyin",
-                "cn2an",
-                "jieba",
-            ],
+            &fallback_args,
             &format!("pip install OpenVoice dependencies failed (unpinned fallback): {err}"),
         )?;
     }
 
-    // Patch OpenVoice so `ToneColorConverter(enable_watermark=False)` works without requiring
-    // watermarking deps at runtime.
-    let openvoice_patch_code = r#"
-import pathlib
-import sys
-
-api_path = None
-for entry in sys.path:
-    try:
-        candidate = pathlib.Path(entry) / "openvoice" / "api.py"
-    except Exception:
-        continue
-    if candidate.is_file():
-        api_path = candidate
-        break
-
-if api_path is None:
-    raise RuntimeError("openvoice/api.py not found on sys.path")
-
-text = api_path.read_text(encoding="utf-8", errors="ignore")
-
-patched_marker = "kwargs.pop('enable_watermark'"
-broken_newline = "enable_watermark = kwargs.pop('enable_watermark', True)\\\\n        super().__init__(*args, **kwargs)"
-
-if broken_newline in text:
-    text = text.replace(
-        broken_newline,
-        "enable_watermark = kwargs.pop('enable_watermark', True)\n        super().__init__(*args, **kwargs)",
-        1,
-    )
-    if "if kwargs.get('enable_watermark', True):" in text:
-        text = text.replace("if kwargs.get('enable_watermark', True):", "if enable_watermark:", 1)
-    api_path.write_text(text, encoding="utf-8")
-    print("openvoice_api_fixed_newline")
-elif patched_marker in text:
-    print("openvoice_api_already_patched")
-else:
-    if "super().__init__(*args, **kwargs)" not in text:
-        raise RuntimeError("unexpected openvoice/api.py: missing super().__init__ call")
-    if "if kwargs.get('enable_watermark', True):" not in text:
-        raise RuntimeError("unexpected openvoice/api.py: missing enable_watermark condition")
-
-    text = text.replace(
-        "super().__init__(*args, **kwargs)",
-        "enable_watermark = kwargs.pop('enable_watermark', True)\n        super().__init__(*args, **kwargs)",
-        1,
-    )
-    text = text.replace("if kwargs.get('enable_watermark', True):", "if enable_watermark:", 1)
-    api_path.write_text(text, encoding="utf-8")
-    print("openvoice_api_patched")
-"#;
-
-    run_python_checked(
-        paths,
-        &venv_python,
-        &["-c", openvoice_patch_code],
-        "OpenVoice patch failed",
-    )?;
+    vendor_patches::patch_openvoice_api_enable_watermark(&venv_python)?;
 
     let models_dir = paths.python_models_dir().join("openvoice_v2");
     std::fs::create_dir_all(&models_dir)?;
-
-    // Pin the OpenVoiceV2 weights snapshot + verify hashes.
-    const OPENVOICEV2_REPO_ID: &str = "myshell-ai/OpenVoiceV2";
-    const OPENVOICEV2_REVISION: &str = "f36e7edfe1684461a8343844af60babc2efbb727";
-    const OPENVOICEV2_CONFIG_SHA256: &str =
-        "9dfff60350b8c63f2c664efd92a61b2516efb22671466960f0e5dfebd881fa47";
-    const OPENVOICEV2_CHECKPOINT_SHA256: &str =
-        "9652c27e92b6b2a91632590ac9962ef7ae2b712e5c5b7f4c34ec55ee2b37ab9e";
-    const OPENVOICEV2_BASE_SPEAKER_EN_DEFAULT_SHA256: &str =
-        "e4139de3bc2ea162f45a5a5f9559b710686c9689749b5ab8945ee5e2a082d154";
 
     let download_code = format!(
         r#"
@@ -2084,15 +1964,12 @@ base_dir = r"{models_dir}"
 os.makedirs(base_dir, exist_ok=True)
 
 files = [
-  {{"filename": "converter/config.json", "sha256": "{config_sha256}"}},
-  {{"filename": "converter/checkpoint.pth", "sha256": "{checkpoint_sha256}"}},
-  {{"filename": "base_speakers/ses/en-default.pth", "sha256": "{base_speaker_sha256}"}},
-]
+{files_json}
 
 downloaded = []
 for entry in files:
   filename = entry["filename"]
-  expected = entry["sha256"].lower()
+  expected = entry["sha256_hex"].lower()
   path = hf_hub_download(
     repo_id=repo_id,
     filename=filename,
@@ -2122,11 +1999,10 @@ with open(os.path.join(base_dir, "voxvulgi_openvoicev2_manifest.json"), "w", enc
   json.dump(manifest, f, ensure_ascii=False, indent=2)
 print("openvoicev2_download_ok")
 "#,
-        repo_id = OPENVOICEV2_REPO_ID,
-        revision = OPENVOICEV2_REVISION,
-        config_sha256 = OPENVOICEV2_CONFIG_SHA256,
-        checkpoint_sha256 = OPENVOICEV2_CHECKPOINT_SHA256,
-        base_speaker_sha256 = OPENVOICEV2_BASE_SPEAKER_EN_DEFAULT_SHA256,
+        repo_id = pin.openvoice_v2.repo_id,
+        revision = pin.openvoice_v2.revision,
+        files_json = serde_json::to_string_pretty(&pin.openvoice_v2.files)
+            .unwrap_or_else(|_| "[]".to_string()),
         models_dir = models_dir.to_string_lossy(),
     );
 
@@ -2292,52 +2168,6 @@ fn python_module_version(python: &std::path::Path, module: &str) -> Option<Strin
             Some(trimmed.to_string())
         }
     })
-}
-
-fn openvoice_api_patch_applied(python: &std::path::Path) -> Option<bool> {
-    // Status checks should be fast, deterministic, and independent from Python import side-effects.
-    // We derive the venv root from the venv python path and read `openvoice/api.py` directly.
-    let venv_dir = python.parent()?.parent()?;
-
-    let mut candidates: Vec<std::path::PathBuf> = Vec::new();
-    if cfg!(windows) {
-        candidates.push(
-            venv_dir
-                .join("Lib")
-                .join("site-packages")
-                .join("openvoice")
-                .join("api.py"),
-        );
-    } else {
-        let lib_dir = venv_dir.join("lib");
-        if let Ok(entries) = std::fs::read_dir(&lib_dir) {
-            for entry in entries.flatten() {
-                let path = entry.path();
-                if !path.is_dir() {
-                    continue;
-                }
-                let name = path.file_name().and_then(|n| n.to_str()).unwrap_or("");
-                if !name.starts_with("python") {
-                    continue;
-                }
-                candidates.push(path.join("site-packages").join("openvoice").join("api.py"));
-            }
-        }
-    }
-
-    let api_path = candidates.into_iter().find(|p| p.is_file())?;
-    let bytes = std::fs::read(api_path).ok()?;
-    let text = String::from_utf8_lossy(&bytes);
-
-    let has_pop = text.contains("kwargs.pop('enable_watermark'")
-        || text.contains("kwargs.pop(\"enable_watermark\"");
-    let has_if_enable = text.contains("if enable_watermark:");
-    let broken = text.contains("kwargs.pop('enable_watermark', True)\\\\n        super().__init__(*args, **kwargs)")
-        || text.contains("kwargs.pop(\"enable_watermark\", True)\\\\n        super().__init__(*args, **kwargs)")
-        || text.contains("enable_watermark = kwargs.pop('enable_watermark', True)\\\\n        super().__init__(*args, **kwargs)")
-        || text.contains("enable_watermark = kwargs.pop(\"enable_watermark\", True)\\\\n        super().__init__(*args, **kwargs)");
-
-    Some(has_pop && has_if_enable && !broken)
 }
 
 fn run_python_checked(

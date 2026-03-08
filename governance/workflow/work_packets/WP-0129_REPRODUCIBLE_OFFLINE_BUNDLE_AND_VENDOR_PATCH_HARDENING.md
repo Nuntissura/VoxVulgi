@@ -3,7 +3,7 @@
 ## Metadata
 - ID: WP-0129
 - Owner: Codex
-- Status: BACKLOG
+- Status: DONE
 - Created: 2026-03-08
 - Target milestone: Audit remediation tranche
 
@@ -39,3 +39,4 @@ Out of scope:
 ## Status updates
 
 - 2026-03-08: Created from `WP-0122` dependency and supply-chain findings.
+- 2026-03-08: Added a tracked pinned dependency manifest for bundled tools and Python packs, made mutable fallback installs opt-in via `VOXVULGI_ALLOW_UNPINNED_FALLBACK`, replaced inline third-party patch scripts with tested Rust patch helpers, and added offline payload byte/hash verification before bundle hydration.

@@ -801,13 +801,16 @@ name = "desktop"
 version = "0.1.4"
 dependencies = [
  "base64 0.22.1",
+ "hex",
  "serde",
  "serde_json",
+ "sha2",
  "sysinfo",
  "tauri",
  "tauri-build",
  "tauri-plugin-dialog",
  "tauri-plugin-opener",
+ "tempfile",
  "voxvulgi_engine",
  "zip 0.6.6",
 ]
