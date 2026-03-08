@@ -3,7 +3,7 @@
 ## Metadata
 - ID: WP-0118
 - Owner: Codex
-- Status: BACKLOG
+- Status: DONE
 - Created: 2026-03-08
 - Target milestone: Repo audit tranche
 
@@ -39,3 +39,5 @@ Out of scope:
 ## Status updates
 
 - 2026-03-08: Created as stage 1 of the multi-stage repo audit tranche.
+- 2026-03-08: Completed first-pass governance-vs-code audit with findings on contradictory consent-gating language, stale manual-smoke governance coverage, stale `WP-0098` proof references, and residual mojibake in governance docs.
+- 2026-03-08: Proof captured under `product/desktop/Build Target/tool_artifacts/wp_runs/WP-0118/20260308_162302/`.

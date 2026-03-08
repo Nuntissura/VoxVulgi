@@ -78,7 +78,7 @@ Date: 2026-03-08
 
 ## Repo Audit and Technical Debt Program (2026-03)
 
-- WP-0118: Governance, spec, and traceability audit.
+- WP-0118: Governance, spec, and traceability audit. DONE.
 - WP-0119: Static code hygiene and architecture audit.
 - WP-0120: Persistence, data safety, and artifact lifecycle audit.
 - WP-0121: Contention-tolerant performance and responsiveness audit focused on graceful degradation under heavy external CPU load.
