@@ -7,12 +7,25 @@ use std::process::Command;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct VoiceBackendStarterRecipe {
+    pub recipe_id: String,
+    pub display_name: String,
+    pub description: String,
+    pub suggested_model_dir: Option<String>,
+    pub default_entry_command: Vec<String>,
+    pub default_probe_command: Vec<String>,
+    pub default_render_command: Vec<String>,
+    pub notes: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct VoiceBackendAdapterTemplate {
     pub backend_id: String,
     pub display_name: String,
     pub expected_markers: Vec<String>,
     pub default_entry_command: Vec<String>,
     pub probe_hint: String,
+    pub starter_recipes: Vec<VoiceBackendStarterRecipe>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -84,6 +97,7 @@ pub fn adapter_templates() -> Vec<VoiceBackendAdapterTemplate> {
             default_entry_command: vec!["{python_exe}".to_string(), "webui.py".to_string()],
             probe_hint: "Point root_dir at a local CosyVoice checkout or packaged environment."
                 .to_string(),
+            starter_recipes: starter_recipes_for_backend("cosyvoice"),
         },
         VoiceBackendAdapterTemplate {
             backend_id: "seed_vc".to_string(),
@@ -92,6 +106,7 @@ pub fn adapter_templates() -> Vec<VoiceBackendAdapterTemplate> {
             default_entry_command: vec!["{python_exe}".to_string(), "app.py".to_string()],
             probe_hint: "Point root_dir at a local Seed-VC checkout with its runtime already prepared."
                 .to_string(),
+            starter_recipes: starter_recipes_for_backend("seed_vc"),
         },
         VoiceBackendAdapterTemplate {
             backend_id: "indextts2".to_string(),
@@ -100,6 +115,7 @@ pub fn adapter_templates() -> Vec<VoiceBackendAdapterTemplate> {
             default_entry_command: vec!["{python_exe}".to_string(), "infer.py".to_string()],
             probe_hint: "Point root_dir at an IndexTTS/IndexTTS2 checkout and override entry_command if needed."
                 .to_string(),
+            starter_recipes: starter_recipes_for_backend("indextts2"),
         },
         VoiceBackendAdapterTemplate {
             backend_id: "fish_speech".to_string(),
@@ -108,6 +124,7 @@ pub fn adapter_templates() -> Vec<VoiceBackendAdapterTemplate> {
             default_entry_command: vec!["{python_exe}".to_string(), "-m".to_string(), "fish_speech".to_string()],
             probe_hint: "Point root_dir at a local Fish-Speech checkout or env and set a lightweight probe command."
                 .to_string(),
+            starter_recipes: starter_recipes_for_backend("fish_speech"),
         },
         VoiceBackendAdapterTemplate {
             backend_id: "xtts_v2".to_string(),
@@ -116,8 +133,208 @@ pub fn adapter_templates() -> Vec<VoiceBackendAdapterTemplate> {
             default_entry_command: vec!["{python_exe}".to_string(), "-m".to_string(), "TTS.server.server".to_string()],
             probe_hint: "Point root_dir at a Coqui-TTS environment if you want XTTS v2 available for experiments."
                 .to_string(),
+            starter_recipes: starter_recipes_for_backend("xtts_v2"),
         },
     ]
+}
+
+fn starter_recipes_for_backend(backend_id: &str) -> Vec<VoiceBackendStarterRecipe> {
+    match normalize_backend_id(backend_id).as_str() {
+        "cosyvoice" => vec![
+            starter_recipe(
+                "cosyvoice_python_wrapper",
+                "Repo-local Python wrapper",
+                "Best default when you keep a lightweight VoxVulgi render wrapper inside the CosyVoice checkout.",
+                Some("pretrained_models"),
+                vec!["{python_exe}", "webui.py"],
+                vec!["{python_exe}", "--version"],
+                vec![
+                    "{python_exe}",
+                    "voxvulgi_cosyvoice_render.py",
+                    "--request",
+                    "{request_json}",
+                    "--manifest",
+                    "{manifest_json}",
+                    "--report",
+                    "{report_json}",
+                    "--output-dir",
+                    "{output_dir}",
+                    "--backend",
+                    "{backend_id}",
+                    "--track",
+                    "{track_id}",
+                    "--model-dir",
+                    "{model_dir}",
+                ],
+                vec![
+                    "Point root_dir at the CosyVoice checkout or packaged environment.".to_string(),
+                    "Keep the wrapper in that checkout so local imports and weights resolve naturally.".to_string(),
+                    "The wrapper must read request.json and write both manifest.json and report.json.".to_string(),
+                ],
+            ),
+        ],
+        "seed_vc" => vec![
+            starter_recipe(
+                "seed_vc_python_wrapper",
+                "Seed-VC wrapper pipeline",
+                "Good baseline when Seed-VC is used as a conversion stage driven by a small local wrapper script.",
+                Some("checkpoints"),
+                vec!["{python_exe}", "app.py"],
+                vec!["{python_exe}", "--version"],
+                vec![
+                    "{python_exe}",
+                    "voxvulgi_seed_vc_render.py",
+                    "--request",
+                    "{request_json}",
+                    "--manifest",
+                    "{manifest_json}",
+                    "--report",
+                    "{report_json}",
+                    "--output-dir",
+                    "{output_dir}",
+                    "--backend",
+                    "{backend_id}",
+                    "--track",
+                    "{track_id}",
+                    "--model-dir",
+                    "{model_dir}",
+                ],
+                vec![
+                    "Use this when the wrapper handles base TTS plus Seed-VC conversion in one local script.".to_string(),
+                    "Keep model_dir pointed at the Seed-VC checkpoints directory if your wrapper expects it.".to_string(),
+                    "This is usually strongest for identity transfer, so test it in the benchmark lab against expressive TTS candidates.".to_string(),
+                ],
+            ),
+        ],
+        "indextts2" => vec![
+            starter_recipe(
+                "indextts2_infer_wrapper",
+                "IndexTTS2 inference wrapper",
+                "Targets dubbing-style timing control with a repo-local inference wrapper.",
+                Some("checkpoints"),
+                vec!["{python_exe}", "infer.py"],
+                vec!["{python_exe}", "--version"],
+                vec![
+                    "{python_exe}",
+                    "voxvulgi_indextts2_render.py",
+                    "--request",
+                    "{request_json}",
+                    "--manifest",
+                    "{manifest_json}",
+                    "--report",
+                    "{report_json}",
+                    "--output-dir",
+                    "{output_dir}",
+                    "--backend",
+                    "{backend_id}",
+                    "--track",
+                    "{track_id}",
+                    "--model-dir",
+                    "{model_dir}",
+                ],
+                vec![
+                    "Use this when IndexTTS2 is set up as a local inference checkout rather than a web service.".to_string(),
+                    "The wrapper should keep timing-fit information from VoxVulgi's request segments when selecting durations.".to_string(),
+                ],
+            ),
+        ],
+        "fish_speech" => vec![
+            starter_recipe(
+                "fish_speech_module_wrapper",
+                "Fish-Speech module wrapper",
+                "Bootstraps a Fish-Speech checkout or virtual environment with a thin render wrapper.",
+                Some("checkpoints"),
+                vec!["{python_exe}", "-m", "fish_speech"],
+                vec!["{python_exe}", "--version"],
+                vec![
+                    "{python_exe}",
+                    "voxvulgi_fish_speech_render.py",
+                    "--request",
+                    "{request_json}",
+                    "--manifest",
+                    "{manifest_json}",
+                    "--report",
+                    "{report_json}",
+                    "--output-dir",
+                    "{output_dir}",
+                    "--backend",
+                    "{backend_id}",
+                    "--track",
+                    "{track_id}",
+                    "--model-dir",
+                    "{model_dir}",
+                ],
+                vec![
+                    "Prefer this when you want stronger long-form expressiveness experiments.".to_string(),
+                    "The wrapper should keep speaker-to-reference mapping explicit because Fish-Speech setups vary a lot by checkout.".to_string(),
+                ],
+            ),
+        ],
+        "xtts_v2" => vec![
+            starter_recipe(
+                "xtts_v2_python_wrapper",
+                "XTTS v2 wrapper",
+                "Practical starter for Coqui/XTTS-style local environments with a repo-local render wrapper.",
+                Some("tts_models"),
+                vec!["{python_exe}", "-m", "TTS.server.server"],
+                vec!["{python_exe}", "--version"],
+                vec![
+                    "{python_exe}",
+                    "voxvulgi_xtts_render.py",
+                    "--request",
+                    "{request_json}",
+                    "--manifest",
+                    "{manifest_json}",
+                    "--report",
+                    "{report_json}",
+                    "--output-dir",
+                    "{output_dir}",
+                    "--backend",
+                    "{backend_id}",
+                    "--track",
+                    "{track_id}",
+                    "--model-dir",
+                    "{model_dir}",
+                ],
+                vec![
+                    "Use XTTS v2 as a practical comparison baseline when newer research backends are unstable.".to_string(),
+                    "Keep model_dir pointed at the XTTS model root or leave it empty if your wrapper resolves models elsewhere.".to_string(),
+                ],
+            ),
+        ],
+        _ => Vec::new(),
+    }
+}
+
+fn starter_recipe(
+    recipe_id: &str,
+    display_name: &str,
+    description: &str,
+    suggested_model_dir: Option<&str>,
+    default_entry_command: Vec<&str>,
+    default_probe_command: Vec<&str>,
+    default_render_command: Vec<&str>,
+    notes: Vec<String>,
+) -> VoiceBackendStarterRecipe {
+    VoiceBackendStarterRecipe {
+        recipe_id: recipe_id.to_string(),
+        display_name: display_name.to_string(),
+        description: description.to_string(),
+        suggested_model_dir: suggested_model_dir.map(|value| value.to_string()),
+        default_entry_command: default_entry_command
+            .into_iter()
+            .map(|value| value.to_string())
+            .collect(),
+        default_probe_command: default_probe_command
+            .into_iter()
+            .map(|value| value.to_string())
+            .collect(),
+        default_render_command: default_render_command
+            .into_iter()
+            .map(|value| value.to_string())
+            .collect(),
+        notes,
+    }
 }
 
 pub fn list_voice_backend_adapters(paths: &AppPaths) -> Result<Vec<VoiceBackendAdapterDetail>> {
@@ -168,6 +385,40 @@ pub fn delete_voice_backend_adapter(paths: &AppPaths, backend_id: &str) -> Resul
     probes.retain(|value| value.backend_id != backend_id);
     save_probes(paths, &probes)?;
     Ok(())
+}
+
+pub fn apply_voice_backend_starter_recipe(
+    mut config: VoiceBackendAdapterConfig,
+    recipe_id: &str,
+) -> Result<VoiceBackendAdapterConfig> {
+    let template = template_by_backend_id(&config.backend_id)?;
+    let recipe = template
+        .starter_recipes
+        .iter()
+        .find(|value| value.recipe_id == recipe_id.trim())
+        .cloned()
+        .ok_or_else(|| {
+            EngineError::InstallFailed(format!(
+                "starter recipe not found for {}: {}",
+                template.backend_id, recipe_id
+            ))
+        })?;
+    config.backend_id = template.backend_id;
+    config.enabled = true;
+    config.entry_command = recipe.default_entry_command.clone();
+    config.probe_command = recipe.default_probe_command.clone();
+    config.render_command = recipe.default_render_command.clone();
+    if config.model_dir.as_deref().map(str::trim).unwrap_or("").is_empty() {
+        config.model_dir = recipe.suggested_model_dir.clone();
+    }
+    if config.notes.as_deref().map(str::trim).unwrap_or("").is_empty() {
+        config.notes = Some(format!(
+            "Starter recipe: {}. {}",
+            recipe.display_name, recipe.description
+        ));
+    }
+    config.updated_at_ms = now_ms();
+    Ok(config)
 }
 
 pub fn probe_voice_backend_adapter(
@@ -806,6 +1057,55 @@ mod tests {
         assert_eq!(
             resolved.current_dir.as_deref(),
             Some(dir.path().to_string_lossy().as_ref())
+        );
+    }
+
+    #[test]
+    fn starter_recipes_exist_for_research_backends() {
+        let templates = adapter_templates();
+        for backend_id in ["cosyvoice", "seed_vc", "xtts_v2"] {
+            let template = templates
+                .iter()
+                .find(|value| value.backend_id == backend_id)
+                .expect("template");
+            assert!(
+                !template.starter_recipes.is_empty(),
+                "starter recipes missing for {backend_id}"
+            );
+        }
+    }
+
+    #[test]
+    fn apply_starter_recipe_populates_commands_and_preserves_paths() {
+        let updated = apply_voice_backend_starter_recipe(
+            VoiceBackendAdapterConfig {
+                backend_id: "cosyvoice".to_string(),
+                enabled: false,
+                root_dir: Some("D:/voice/cosyvoice".to_string()),
+                python_exe: Some("D:/Python/python.exe".to_string()),
+                model_dir: None,
+                entry_command: vec![],
+                probe_command: vec![],
+                render_command: vec![],
+                notes: None,
+                updated_at_ms: 0,
+            },
+            "cosyvoice_python_wrapper",
+        )
+        .expect("apply");
+        assert!(updated.enabled);
+        assert_eq!(updated.root_dir.as_deref(), Some("D:/voice/cosyvoice"));
+        assert_eq!(updated.python_exe.as_deref(), Some("D:/Python/python.exe"));
+        assert_eq!(updated.model_dir.as_deref(), Some("pretrained_models"));
+        assert_eq!(updated.entry_command.first().map(String::as_str), Some("{python_exe}"));
+        assert_eq!(updated.probe_command.first().map(String::as_str), Some("{python_exe}"));
+        assert_eq!(updated.render_command.first().map(String::as_str), Some("{python_exe}"));
+        assert!(
+            updated
+                .notes
+                .as_deref()
+                .unwrap_or("")
+                .contains("Starter recipe")
         );
     }
 }

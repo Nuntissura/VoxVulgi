@@ -2793,6 +2793,15 @@ async fn voice_backend_adapter_upsert(
 }
 
 #[tauri::command]
+fn voice_backend_adapter_apply_starter_recipe(
+    config: voice_backend_adapters::VoiceBackendAdapterConfig,
+    recipe_id: String,
+) -> Result<voice_backend_adapters::VoiceBackendAdapterConfig, String> {
+    voice_backend_adapters::apply_voice_backend_starter_recipe(config, recipe_id.trim())
+        .map_err(|e| e.to_string())
+}
+
+#[tauri::command]
 async fn voice_backend_adapter_delete(
     state: State<'_, AppState>,
     backend_id: String,
@@ -4353,6 +4362,7 @@ pub fn run() {
             item_voice_plan_promote_recommendation,
             item_voice_plan_promote_benchmark_candidate,
             voice_backend_adapters_list,
+            voice_backend_adapter_apply_starter_recipe,
             voice_backend_adapter_upsert,
             voice_backend_adapter_delete,
             voice_backend_adapter_probe,

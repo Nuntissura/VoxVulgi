@@ -135,6 +135,18 @@ type VoiceBackendAdapterTemplate = {
   expected_markers: string[];
   default_entry_command: string[];
   probe_hint: string;
+  starter_recipes: VoiceBackendStarterRecipe[];
+};
+
+type VoiceBackendStarterRecipe = {
+  recipe_id: string;
+  display_name: string;
+  description: string;
+  suggested_model_dir: string | null;
+  default_entry_command: string[];
+  default_probe_command: string[];
+  default_render_command: string[];
+  notes: string[];
 };
 
 type VoiceBackendAdapterConfig = {
@@ -440,6 +452,9 @@ export function DiagnosticsPage() {
   const [voiceBackendAdapterDrafts, setVoiceBackendAdapterDrafts] = useState<
     Record<string, VoiceBackendAdapterConfig>
   >({});
+  const [voiceBackendRecipeSelection, setVoiceBackendRecipeSelection] = useState<Record<string, string>>(
+    {},
+  );
   const [voiceBackendAdapterBusy, setVoiceBackendAdapterBusy] = useState<string | null>(null);
   const [voiceBackendRecommendation, setVoiceBackendRecommendation] =
     useState<VoiceBackendRecommendation | null>(null);
@@ -578,6 +593,15 @@ export function DiagnosticsPage() {
           }
           return next;
         });
+        setVoiceBackendRecipeSelection((prev) => {
+          const next = { ...prev };
+          for (const detail of nextVoiceBackendAdapters) {
+            if (!next[detail.template.backend_id] && detail.template.starter_recipes.length) {
+              next[detail.template.backend_id] = detail.template.starter_recipes[0].recipe_id;
+            }
+          }
+          return next;
+        });
         setVoiceBackendRecommendation(nextVoiceBackendRecommendation);
         setIntegrity(nextIntegrity);
         setPerfTier(nextPerfTier);
@@ -686,6 +710,15 @@ export function DiagnosticsPage() {
               next[detail.template.backend_id] = detail.config
                 ? { ...detail.config }
                 : defaultAdapterConfig(detail.template);
+            }
+          }
+          return next;
+        });
+        setVoiceBackendRecipeSelection((prev) => {
+          const next = { ...prev };
+          for (const detail of nextVoiceBackendAdapters) {
+            if (!next[detail.template.backend_id] && detail.template.starter_recipes.length) {
+              next[detail.template.backend_id] = detail.template.starter_recipes[0].recipe_id;
             }
           }
           return next;
@@ -1039,6 +1072,7 @@ export function DiagnosticsPage() {
             expected_markers: [],
             default_entry_command: [],
             probe_hint: "",
+            starter_recipes: [],
           },
         );
       return {
@@ -1058,6 +1092,38 @@ export function DiagnosticsPage() {
       await invoke<VoiceBackendAdapterDetail>("voice_backend_adapter_upsert", { config: draft });
       setNotice(`Saved BYO adapter for ${backendId}.`);
       await loadToolsSection();
+    } catch (e) {
+      setError(String(e));
+    } finally {
+      setVoiceBackendAdapterBusy(null);
+    }
+  }
+
+  async function applyVoiceBackendStarterRecipe(backendId: string) {
+    const draft = voiceBackendAdapterDrafts[backendId];
+    const recipeId = voiceBackendRecipeSelection[backendId];
+    if (!draft || !recipeId) return;
+    setVoiceBackendAdapterBusy(backendId);
+    setError(null);
+    setNotice(null);
+    try {
+      const nextDraft = await invoke<VoiceBackendAdapterConfig>(
+        "voice_backend_adapter_apply_starter_recipe",
+        {
+          config: draft,
+          recipeId,
+        },
+      );
+      setVoiceBackendAdapterDrafts((prev) => ({
+        ...prev,
+        [backendId]: nextDraft,
+      }));
+      const label =
+        voiceBackendAdapters
+          .find((detail) => detail.template.backend_id === backendId)
+          ?.template.starter_recipes.find((recipe) => recipe.recipe_id === recipeId)?.display_name ??
+        recipeId;
+      setNotice(`Applied starter recipe "${label}" to ${backendId}.`);
     } catch (e) {
       setError(String(e));
     } finally {
@@ -2007,6 +2073,13 @@ export function DiagnosticsPage() {
               const backendId = detail.template.backend_id;
               const draft = voiceBackendAdapterDrafts[backendId] ?? defaultAdapterConfig(detail.template);
               const adapterBusy = voiceBackendAdapterBusy === backendId;
+              const selectedRecipeId =
+                voiceBackendRecipeSelection[backendId] ??
+                detail.template.starter_recipes[0]?.recipe_id ??
+                "";
+              const selectedRecipe =
+                detail.template.starter_recipes.find((recipe) => recipe.recipe_id === selectedRecipeId) ??
+                null;
               return (
                 <div
                   key={`adapter-${backendId}`}
@@ -2024,6 +2097,66 @@ export function DiagnosticsPage() {
                     <code>{detail.last_probe?.status ?? (detail.config ? "configured" : "not configured")}</code>
                   </div>
                   <div style={{ fontSize: 12, opacity: 0.75 }}>{detail.template.probe_hint}</div>
+                  {detail.template.starter_recipes.length ? (
+                    <div
+                      style={{
+                        border: "1px dashed #d1d5db",
+                        borderRadius: 8,
+                        padding: 10,
+                        display: "flex",
+                        flexDirection: "column",
+                        gap: 8,
+                      }}
+                    >
+                      <div className="row" style={{ justifyContent: "space-between", gap: 10 }}>
+                        <div style={{ fontWeight: 600, fontSize: 13 }}>Starter recipes</div>
+                        <button
+                          type="button"
+                          disabled={busy || adapterBusy || !selectedRecipeId}
+                          onClick={() => applyVoiceBackendStarterRecipe(backendId).catch(() => undefined)}
+                        >
+                          Apply recipe to draft
+                        </button>
+                      </div>
+                      <label style={{ display: "flex", flexDirection: "column", gap: 4 }}>
+                        <span style={{ fontSize: 12, opacity: 0.75 }}>Recipe</span>
+                        <select
+                          value={selectedRecipeId}
+                          onChange={(e) =>
+                            setVoiceBackendRecipeSelection((prev) => ({
+                              ...prev,
+                              [backendId]: e.currentTarget.value,
+                            }))
+                          }
+                        >
+                          {detail.template.starter_recipes.map((recipe) => (
+                            <option key={recipe.recipe_id} value={recipe.recipe_id}>
+                              {recipe.display_name}
+                            </option>
+                          ))}
+                        </select>
+                      </label>
+                      {selectedRecipe ? (
+                        <>
+                          <div style={{ fontSize: 12, opacity: 0.78 }}>{selectedRecipe.description}</div>
+                          <div style={{ fontSize: 12, opacity: 0.72 }}>
+                            Suggested model dir: {selectedRecipe.suggested_model_dir ?? "-"}
+                          </div>
+                          <div style={{ fontSize: 12, opacity: 0.72 }}>
+                            Probe tokens: {selectedRecipe.default_probe_command.join(" ") || "-"}
+                          </div>
+                          <div style={{ fontSize: 12, opacity: 0.72 }}>
+                            Render tokens: {selectedRecipe.default_render_command.join(" ") || "-"}
+                          </div>
+                          {selectedRecipe.notes.length ? (
+                            <div style={{ fontSize: 12, opacity: 0.72 }}>
+                              Notes: {selectedRecipe.notes.join(" | ")}
+                            </div>
+                          ) : null}
+                        </>
+                      ) : null}
+                    </div>
+                  ) : null}
                   <label style={{ display: "flex", alignItems: "center", gap: 8 }}>
                     <input
                       type="checkbox"
