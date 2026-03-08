@@ -145,6 +145,7 @@ type VoiceBackendAdapterConfig = {
   model_dir: string | null;
   entry_command: string[];
   probe_command: string[];
+  render_command: string[];
   notes: string | null;
   updated_at_ms: number;
 };
@@ -411,6 +412,7 @@ function defaultAdapterConfig(template: VoiceBackendAdapterTemplate): VoiceBacke
     model_dir: null,
     entry_command: [...template.default_entry_command],
     probe_command: [],
+    render_command: [],
     notes: null,
     updated_at_ms: 0,
   };
@@ -2140,6 +2142,24 @@ export function DiagnosticsPage() {
                     />
                   </label>
                   <label style={{ display: "flex", flexDirection: "column", gap: 4 }}>
+                    <span style={{ fontSize: 12, opacity: 0.75 }}>
+                      Render command tokens
+                    </span>
+                    <input
+                      value={draft.render_command.join(" ")}
+                      onChange={(e) =>
+                        updateAdapterDraft(backendId, (current) => ({
+                          ...current,
+                          render_command: e.currentTarget.value
+                            .split(/\s+/)
+                            .map((value) => value.trim())
+                            .filter(Boolean),
+                        }))
+                      }
+                      placeholder="{python_exe} adapter.py --request {request_json} --manifest {manifest_json} --report {report_json}"
+                    />
+                  </label>
+                  <label style={{ display: "flex", flexDirection: "column", gap: 4 }}>
                     <span style={{ fontSize: 12, opacity: 0.75 }}>Notes</span>
                     <textarea
                       value={draft.notes ?? ""}
@@ -2154,6 +2174,9 @@ export function DiagnosticsPage() {
                   </label>
                   <div style={{ fontSize: 12, opacity: 0.7 }}>
                     Expected markers: {detail.template.expected_markers.join(" | ") || "-"}
+                  </div>
+                  <div style={{ fontSize: 12, opacity: 0.7 }}>
+                    Placeholders: {"{python_exe} {root_dir} {model_dir} {request_json} {manifest_json} {report_json} {output_dir} {backend_id} {item_id} {track_id} {variant_label}"}
                   </div>
                   {detail.last_probe ? (
                     <div style={{ fontSize: 12, opacity: 0.75 }}>

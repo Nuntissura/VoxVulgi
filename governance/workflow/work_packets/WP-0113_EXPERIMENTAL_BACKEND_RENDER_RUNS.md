@@ -3,7 +3,7 @@
 ## Metadata
 - ID: WP-0113
 - Owner: Codex
-- Status: BACKLOG
+- Status: DONE
 - Created: 2026-03-08
 - Target milestone: Voice backend modernization
 
@@ -42,3 +42,4 @@ Out of scope:
 ## Status updates
 
 - 2026-03-08: Created from the voice-cloning research modernization tranche.
+- 2026-03-08: Added explicit adapter render commands, queued experimental backend render jobs, backend-aware manifest selection in mix/QC, Localization Studio run controls, Diagnostics render-command editing, and proof under `product/desktop/Build Target/tool_artifacts/wp_runs/WP-0113/20260308_144524/`.

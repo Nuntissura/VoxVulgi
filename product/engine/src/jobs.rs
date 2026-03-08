@@ -1,7 +1,8 @@
 use crate::paths::AppPaths;
 use crate::{
     asr, cmd, config, db, ffmpeg, image_batch, library, speakers, subscriptions, subtitle_tracks,
-    subtitles, tools, translate, voice_cast_packs, voice_templates, EngineError, Result,
+    subtitles, tools, translate, voice_backend_adapters, voice_cast_packs, voice_plans,
+    voice_templates, EngineError, Result,
 };
 use regex::Regex;
 use rusqlite::params;
@@ -44,6 +45,7 @@ const YT_DLP_EXPAND_TIMEOUT_SECS: u64 = 900;
 const YT_DLP_DOWNLOAD_TIMEOUT_SECS: u64 = 7200;
 const EXTERNAL_CMD_POLL_INTERVAL_MS: u64 = 200;
 const YT_DLP_BOOTSTRAP_TIMEOUT_SECS: u64 = 180;
+const EXPERIMENTAL_VOICE_BACKEND_TIMEOUT_SECS: u64 = 7200;
 #[cfg(windows)]
 const YT_DLP_WINDOWS_DOWNLOAD_URL: &str =
     "https://github.com/yt-dlp/yt-dlp/releases/latest/download/yt-dlp.exe";
@@ -115,6 +117,7 @@ pub enum JobType {
     TranslateLocal,
     DiarizeLocalV1,
     DubVoicePreservingV1,
+    ExperimentalVoiceBackendRenderV1,
     TtsPreviewPyttsx3V1,
     TtsNeuralLocalV1,
     MixDubPreviewV1,
@@ -139,6 +142,7 @@ impl JobType {
             JobType::TranslateLocal => "translate_local",
             JobType::DiarizeLocalV1 => "diarize_local_v1",
             JobType::DubVoicePreservingV1 => "dub_voice_preserving_v1",
+            JobType::ExperimentalVoiceBackendRenderV1 => "experimental_voice_backend_render_v1",
             JobType::TtsPreviewPyttsx3V1 => "tts_preview_pyttsx3_v1",
             JobType::TtsNeuralLocalV1 => "tts_neural_local_v1",
             JobType::MixDubPreviewV1 => "mix_dub_preview_v1",
@@ -163,6 +167,9 @@ impl JobType {
             "translate_local" => Some(JobType::TranslateLocal),
             "diarize_local_v1" => Some(JobType::DiarizeLocalV1),
             "dub_voice_preserving_v1" => Some(JobType::DubVoicePreservingV1),
+            "experimental_voice_backend_render_v1" => {
+                Some(JobType::ExperimentalVoiceBackendRenderV1)
+            }
             "tts_preview_pyttsx3_v1" => Some(JobType::TtsPreviewPyttsx3V1),
             "tts_neural_local_v1" => Some(JobType::TtsNeuralLocalV1),
             "mix_dub_preview_v1" => Some(JobType::MixDubPreviewV1),
@@ -274,6 +281,19 @@ struct DubVoicePreservingV1Params {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+struct ExperimentalVoiceBackendRenderV1Params {
+    item_id: String,
+    source_track_id: String,
+    backend_id: String,
+    #[serde(default)]
+    variant_label: Option<String>,
+    #[serde(default)]
+    batch_on_import: bool,
+    #[serde(default)]
+    pipeline: Option<LocalizationPipelineOptions>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 struct MixDubPreviewV1Params {
     item_id: String,
     #[serde(default)]
@@ -374,6 +394,8 @@ struct LocalizationPipelineOptions {
     #[serde(default)]
     variant_label: Option<String>,
     #[serde(default)]
+    tts_backend_id: Option<String>,
+    #[serde(default)]
     speaker_overrides: Vec<SpeakerRenderOverride>,
 }
 
@@ -449,6 +471,18 @@ struct DiarizeLocalV1Segment {
 
 #[derive(Debug, Clone, Deserialize)]
 struct TtsPreviewManifest {
+    segments: Vec<TtsPreviewManifestSegment>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+struct TtsManifestMeta {
+    #[serde(default)]
+    backend: Option<String>,
+    #[serde(default)]
+    item_id: Option<String>,
+    #[serde(default)]
+    track_id: Option<String>,
+    #[serde(default)]
     segments: Vec<TtsPreviewManifestSegment>,
 }
 
@@ -763,6 +797,48 @@ pub fn enqueue_dub_voice_preserving_v1(
     )
 }
 
+pub fn enqueue_experimental_voice_backend_render_v1(
+    paths: &AppPaths,
+    item_id: String,
+    source_track_id: String,
+    backend_id: String,
+    variant_label: Option<String>,
+    auto_pipeline: bool,
+    separation_backend: Option<String>,
+    queue_qc: bool,
+    queue_export_pack: bool,
+) -> Result<JobRow> {
+    let backend_id = backend_id.trim().to_string();
+    if backend_id.is_empty() {
+        return Err(EngineError::InstallFailed(
+            "backend_id is required for experimental render".to_string(),
+        ));
+    }
+    let params_json = serde_json::to_string(&ExperimentalVoiceBackendRenderV1Params {
+        item_id: item_id.clone(),
+        source_track_id: source_track_id.clone(),
+        backend_id: backend_id.clone(),
+        variant_label: normalize_variant_label(variant_label.as_deref()),
+        batch_on_import: false,
+        pipeline: Some(LocalizationPipelineOptions {
+            auto_pipeline,
+            source_track_id: Some(source_track_id),
+            separation_backend: normalize_separation_backend(separation_backend.as_deref()),
+            queue_export_pack,
+            queue_qc,
+            variant_label: normalize_variant_label(variant_label.as_deref()),
+            tts_backend_id: Some(backend_id),
+            speaker_overrides: Vec::new(),
+        }),
+    })?;
+    enqueue_with_type_and_item_id(
+        paths,
+        JobType::ExperimentalVoiceBackendRenderV1,
+        params_json,
+        Some(item_id),
+    )
+}
+
 pub fn enqueue_mix_dub_preview_v1(paths: &AppPaths, item_id: String) -> Result<JobRow> {
     let params_json = serde_json::to_string(&MixDubPreviewV1Params {
         item_id: item_id.clone(),
@@ -978,6 +1054,7 @@ pub fn enqueue_localization_batch_v1(
             queue_export_pack: request.queue_export_pack,
             queue_qc: request.queue_qc,
             variant_label: None,
+            tts_backend_id: Some("openvoice_v2".to_string()),
             speaker_overrides: Vec::new(),
         };
 
@@ -1104,6 +1181,7 @@ pub fn enqueue_voice_ab_preview_v1(
                 queue_export_pack: request.queue_export_pack,
                 queue_qc: request.queue_qc,
                 variant_label: Some(variant_label),
+                tts_backend_id: Some("openvoice_v2".to_string()),
                 speaker_overrides: vec![override_value],
             }),
         })?;
@@ -1705,6 +1783,11 @@ pub fn retry_job(paths: &AppPaths, job_id: &str) -> Result<JobRow> {
                 .ok()
                 .map(|p| p.item_id)
         }
+        JobType::ExperimentalVoiceBackendRenderV1 => {
+            serde_json::from_str::<ExperimentalVoiceBackendRenderV1Params>(&params_json)
+                .ok()
+                .map(|p| p.item_id)
+        }
         JobType::MixDubPreviewV1 => serde_json::from_str::<MixDubPreviewV1Params>(&params_json)
             .ok()
             .map(|p| p.item_id),
@@ -1952,25 +2035,9 @@ fn separation_background_exists(paths: &AppPaths, item_id: &str) -> bool {
 
 fn tts_manifest_exists(paths: &AppPaths, item_id: &str) -> bool {
     let item_dir = paths.derived_item_dir(item_id);
-    for manifest in [
-        item_dir
-            .join("tts_preview")
-            .join("dub_voice_preserving_v1")
-            .join("manifest.json"),
-        item_dir
-            .join("tts_preview")
-            .join("tts_neural_local_v1")
-            .join("manifest.json"),
-        item_dir
-            .join("tts_preview")
-            .join("pyttsx3_v1")
-            .join("manifest.json"),
-    ] {
-        if manifest.exists() {
-            return true;
-        }
-    }
-    false
+    list_tts_manifest_candidate_refs(&item_dir)
+        .into_iter()
+        .any(|candidate| candidate.manifest_path.exists())
 }
 
 fn mix_output_exists(paths: &AppPaths, item_id: &str) -> bool {
@@ -5142,6 +5209,10 @@ if __name__ == "__main__":
                 }
             }
         }
+        JobType::ExperimentalVoiceBackendRenderV1 => {
+            let p: ExperimentalVoiceBackendRenderV1Params = serde_json::from_str(params_json)?;
+            execute_experimental_voice_backend_render_v1(paths, job_id, p)?;
+        }
         JobType::MixDubPreviewV1 => {
             set_progress(paths, job_id, 0.05)?;
             let p: MixDubPreviewV1Params = serde_json::from_str(params_json)?;
@@ -5172,25 +5243,21 @@ if __name__ == "__main__":
                     )
                 })?;
 
-            let voice_preserving_manifest = tts_manifest_path(
-                &item_dir,
-                "dub_voice_preserving_v1",
+            let preferred_backend_id =
+                resolve_pipeline_tts_backend_preference(paths, &item.id, Some(&pipeline));
+            let manifest_candidate = select_tts_manifest_candidate(
+                paths,
+                &item.id,
+                pipeline.source_track_id.as_deref(),
                 variant_label.as_deref(),
-            );
-            let neural_manifest =
-                tts_manifest_path(&item_dir, "tts_neural_local_v1", variant_label.as_deref());
-            let pyttsx3_manifest =
-                tts_manifest_path(&item_dir, "pyttsx3_v1", variant_label.as_deref());
-
-            let manifest_path = if voice_preserving_manifest.exists() {
-                voice_preserving_manifest
-            } else if neural_manifest.exists() {
-                neural_manifest
-            } else if pyttsx3_manifest.exists() {
-                pyttsx3_manifest
-            } else {
-                neural_manifest
-            };
+                preferred_backend_id.as_deref(),
+            )?;
+            let manifest_path = manifest_candidate
+                .as_ref()
+                .map(|candidate| candidate.manifest_path.clone())
+                .unwrap_or_else(|| {
+                    tts_manifest_path(&item_dir, "tts_neural_local_v1", variant_label.as_deref())
+                });
             if !manifest_path.exists() {
                 return Err(EngineError::InstallFailed(
                     "TTS manifest not found; run TTS preview or voice-preserving dub first"
@@ -6729,62 +6796,25 @@ if __name__ == "__main__":
                 Some((seconds * 1000.0).round() as i64)
             }
 
-            #[derive(Debug, Clone, Deserialize)]
-            struct TtsManifestMeta {
-                #[serde(default)]
-                backend: Option<String>,
-                #[serde(default)]
-                track_id: Option<String>,
-                #[serde(default)]
-                segments: Vec<TtsPreviewManifestSegment>,
-            }
-
-            let item_dir = paths.derived_item_dir(&item.id);
             let mut tts_backend: Option<String> = None;
             let mut tts_manifest_file_path: Option<String> = None;
             let mut tts_duration_by_index: HashMap<u32, i64> = HashMap::new();
             let mut manifest_segments: Vec<TtsPreviewManifestSegment> = Vec::new();
 
-            let manifest_candidates = [
-                tts_manifest_path(
-                    &item_dir,
-                    "dub_voice_preserving_v1",
-                    variant_label.as_deref(),
-                ),
-                tts_manifest_path(&item_dir, "tts_neural_local_v1", variant_label.as_deref()),
-                tts_manifest_path(&item_dir, "pyttsx3_v1", variant_label.as_deref()),
-                tts_manifest_path(&item_dir, "dub_voice_preserving_v1", None),
-                tts_manifest_path(&item_dir, "tts_neural_local_v1", None),
-                tts_manifest_path(&item_dir, "pyttsx3_v1", None),
-            ];
+            let preferred_backend_id = resolve_pipeline_tts_backend_preference(paths, &item.id, None);
+            if let Some(candidate) = select_tts_manifest_candidate(
+                paths,
+                &item.id,
+                Some(&p.track_id),
+                variant_label.as_deref(),
+                preferred_backend_id.as_deref(),
+            )? {
+                tts_backend = candidate.meta.backend.clone();
+                tts_manifest_file_path =
+                    Some(candidate.manifest_path.to_string_lossy().to_string());
+                manifest_segments = candidate.meta.segments.clone();
 
-            for manifest_path in manifest_candidates {
-                if !manifest_path.exists() {
-                    continue;
-                }
-                let bytes = match std::fs::read(&manifest_path) {
-                    Ok(v) => v,
-                    Err(_) => continue,
-                };
-                let meta: TtsManifestMeta = match serde_json::from_slice(&bytes) {
-                    Ok(v) => v,
-                    Err(_) => continue,
-                };
-                if meta
-                    .track_id
-                    .as_deref()
-                    .map(|v| v.trim())
-                    .filter(|v| !v.is_empty())
-                    != Some(p.track_id.as_str())
-                {
-                    continue;
-                }
-
-                tts_backend = meta.backend.clone();
-                tts_manifest_file_path = Some(manifest_path.to_string_lossy().to_string());
-                manifest_segments = meta.segments.clone();
-
-                for seg in meta.segments {
+                for seg in candidate.meta.segments {
                     if !seg.audio_exists {
                         continue;
                     }
@@ -6809,8 +6839,6 @@ if __name__ == "__main__":
                         }
                     }
                 }
-
-                break;
             }
 
             let thresholds = QcThresholds {
@@ -10414,6 +10442,619 @@ fn tts_manifest_path(item_dir: &Path, backend_dir: &str, variant_label: Option<&
     tts_variant_dir(item_dir, backend_dir, variant_label).join("manifest.json")
 }
 
+#[derive(Debug, Clone)]
+struct TtsManifestCandidateRef {
+    backend_id: String,
+    variant_label: Option<String>,
+    manifest_path: PathBuf,
+}
+
+#[derive(Debug, Clone)]
+struct LoadedTtsManifestCandidate {
+    backend_id: String,
+    variant_label: Option<String>,
+    manifest_path: PathBuf,
+    meta: TtsManifestMeta,
+}
+
+fn canonical_tts_backend_id(raw: &str) -> String {
+    match raw.trim().to_ascii_lowercase().as_str() {
+        "openvoice_v2" | "voice_preserving_local_v1" | "dub_voice_preserving_v1" => {
+            "openvoice_v2".to_string()
+        }
+        "tts_neural_local_v1" | "kokoro" => "tts_neural_local_v1".to_string(),
+        "pyttsx3_v1" | "tts_preview_pyttsx3_v1" => "pyttsx3_v1".to_string(),
+        other => other.to_string(),
+    }
+}
+
+fn tts_backend_dir_name(raw: &str) -> String {
+    match canonical_tts_backend_id(raw).as_str() {
+        "openvoice_v2" => "dub_voice_preserving_v1".to_string(),
+        "tts_neural_local_v1" => "tts_neural_local_v1".to_string(),
+        "pyttsx3_v1" => "pyttsx3_v1".to_string(),
+        _ => raw.trim().to_ascii_lowercase(),
+    }
+}
+
+fn tts_backend_ids_match(left: &str, right: &str) -> bool {
+    canonical_tts_backend_id(left) == canonical_tts_backend_id(right)
+}
+
+fn tts_backend_priority(backend_id: &str) -> i32 {
+    match canonical_tts_backend_id(backend_id).as_str() {
+        "openvoice_v2" => 300,
+        "tts_neural_local_v1" => 200,
+        "pyttsx3_v1" => 100,
+        _ => 50,
+    }
+}
+
+fn normalize_backend_id(raw: Option<&str>) -> Option<String> {
+    raw.map(|value| value.trim())
+        .filter(|value| !value.is_empty())
+        .map(canonical_tts_backend_id)
+}
+
+fn list_tts_manifest_candidate_refs(item_dir: &Path) -> Vec<TtsManifestCandidateRef> {
+    let tts_root = item_dir.join("tts_preview");
+    let mut out: Vec<TtsManifestCandidateRef> = Vec::new();
+    let Ok(entries) = std::fs::read_dir(&tts_root) else {
+        return out;
+    };
+
+    for entry in entries.flatten() {
+        let backend_dir = entry.path();
+        if !backend_dir.is_dir() {
+            continue;
+        }
+        let Some(backend_id) = backend_dir.file_name().and_then(|value| value.to_str()) else {
+            continue;
+        };
+        out.push(TtsManifestCandidateRef {
+            backend_id: backend_id.to_string(),
+            variant_label: None,
+            manifest_path: backend_dir.join("manifest.json"),
+        });
+
+        let variants_dir = backend_dir.join("variants");
+        let Ok(variant_entries) = std::fs::read_dir(&variants_dir) else {
+            continue;
+        };
+        for variant_entry in variant_entries.flatten() {
+            let variant_dir = variant_entry.path();
+            if !variant_dir.is_dir() {
+                continue;
+            }
+            let Some(label) = variant_dir.file_name().and_then(|value| value.to_str()) else {
+                continue;
+            };
+            out.push(TtsManifestCandidateRef {
+                backend_id: backend_id.to_string(),
+                variant_label: normalize_variant_label(Some(label)),
+                manifest_path: variant_dir.join("manifest.json"),
+            });
+        }
+    }
+
+    out.sort_by(|a, b| {
+        a.backend_id
+            .cmp(&b.backend_id)
+            .then_with(|| a.variant_label.cmp(&b.variant_label))
+    });
+    out
+}
+
+fn load_tts_manifest_candidate(candidate: &TtsManifestCandidateRef) -> Option<LoadedTtsManifestCandidate> {
+    if !candidate.manifest_path.exists() {
+        return None;
+    }
+    let bytes = std::fs::read(&candidate.manifest_path).ok()?;
+    let mut meta = serde_json::from_slice::<TtsManifestMeta>(&bytes).ok()?;
+    if meta
+        .backend
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .is_none()
+    {
+        meta.backend = Some(candidate.backend_id.clone());
+    }
+    Some(LoadedTtsManifestCandidate {
+        backend_id: meta
+            .backend
+            .as_deref()
+            .map(canonical_tts_backend_id)
+            .unwrap_or_else(|| canonical_tts_backend_id(&candidate.backend_id)),
+        variant_label: candidate.variant_label.clone(),
+        manifest_path: candidate.manifest_path.clone(),
+        meta,
+    })
+}
+
+fn resolve_pipeline_tts_backend_preference(
+    paths: &AppPaths,
+    item_id: &str,
+    pipeline: Option<&LocalizationPipelineOptions>,
+) -> Option<String> {
+    normalize_backend_id(pipeline.and_then(|value| value.tts_backend_id.as_deref())).or_else(|| {
+        voice_plans::get_item_voice_plan(paths, item_id)
+            .ok()
+            .flatten()
+            .and_then(|plan| normalize_backend_id(plan.preferred_backend_id.as_deref()))
+    })
+}
+
+fn select_tts_manifest_candidate(
+    paths: &AppPaths,
+    item_id: &str,
+    track_id: Option<&str>,
+    variant_label: Option<&str>,
+    preferred_backend_id: Option<&str>,
+) -> Result<Option<LoadedTtsManifestCandidate>> {
+    let item_dir = paths.derived_item_dir(item_id);
+    let requested_track_id = normalize_non_empty(track_id).map(|value| value.to_string());
+    let requested_variant = normalize_variant_label(variant_label);
+    let preferred_backend_id = normalize_backend_id(preferred_backend_id);
+    let mut best: Option<(i32, LoadedTtsManifestCandidate)> = None;
+
+    for candidate_ref in list_tts_manifest_candidate_refs(&item_dir) {
+        if requested_variant.is_some()
+            && candidate_ref.variant_label.is_some()
+            && candidate_ref.variant_label != requested_variant
+        {
+            continue;
+        }
+        let Some(candidate) = load_tts_manifest_candidate(&candidate_ref) else {
+            continue;
+        };
+        if candidate
+            .meta
+            .item_id
+            .as_deref()
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .is_some_and(|value| value != item_id)
+        {
+            continue;
+        }
+        if let Some(track_id) = requested_track_id.as_deref() {
+            let Some(meta_track_id) = candidate
+                .meta
+                .track_id
+                .as_deref()
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
+            else {
+                continue;
+            };
+            if meta_track_id != track_id {
+                continue;
+            }
+        }
+
+        let mut score = if requested_variant.is_some() {
+            if candidate.variant_label == requested_variant {
+                200
+            } else if candidate.variant_label.is_none() {
+                60
+            } else {
+                0
+            }
+        } else if candidate.variant_label.is_none() {
+            120
+        } else {
+            20
+        };
+        if let Some(preferred_backend_id) = preferred_backend_id.as_deref() {
+            if tts_backend_ids_match(&candidate.backend_id, preferred_backend_id) {
+                score += 1000;
+            } else {
+                score -= 100;
+            }
+        } else {
+            score += tts_backend_priority(&candidate.backend_id);
+        }
+
+        match &best {
+            Some((best_score, best_candidate))
+                if *best_score > score
+                    || (*best_score == score
+                        && best_candidate.manifest_path <= candidate.manifest_path) => {}
+            _ => best = Some((score, candidate)),
+        }
+    }
+
+    Ok(best.map(|(_, candidate)| candidate))
+}
+
+fn queue_experimental_pipeline_followups(
+    paths: &AppPaths,
+    job_id: &str,
+    item_id: &str,
+    source_track_id: &str,
+    pipeline: &LocalizationPipelineOptions,
+    variant_label: Option<String>,
+) -> Result<()> {
+    if !pipeline.auto_pipeline {
+        return Ok(());
+    }
+
+    let batch_id = job_batch_id(paths, job_id).ok().flatten();
+    if separation_background_path_best_effort(paths, item_id).is_some() {
+        if !item_has_active_job(paths, item_id, JobType::MixDubPreviewV1.as_str()).unwrap_or(false)
+        {
+            let params_json = serde_json::to_string(&MixDubPreviewV1Params {
+                item_id: item_id.to_string(),
+                ducking_strength: None,
+                loudness_target_lufs: None,
+                timing_fit_enabled: None,
+                timing_fit_min_factor: None,
+                timing_fit_max_factor: None,
+                batch_on_import: false,
+                pipeline: Some(LocalizationPipelineOptions {
+                    source_track_id: Some(source_track_id.to_string()),
+                    variant_label: variant_label.clone(),
+                    tts_backend_id: pipeline.tts_backend_id.clone(),
+                    ..pipeline.clone()
+                }),
+            })?;
+            let _ = enqueue_with_type_item_and_batch_id(
+                paths,
+                JobType::MixDubPreviewV1,
+                params_json,
+                Some(item_id.to_string()),
+                batch_id,
+            )?;
+        }
+    } else {
+        log_line(
+            paths,
+            job_id,
+            "info",
+            "experimental_backend_render_waiting_for_separation",
+            serde_json::json!({
+                "item_id": item_id,
+                "source_track_id": source_track_id,
+                "variant_label": variant_label,
+                "reason": "background stem not found; run separation before auto mix/mux"
+            }),
+        )?;
+    }
+
+    Ok(())
+}
+
+fn execute_experimental_voice_backend_render_v1(
+    paths: &AppPaths,
+    job_id: &str,
+    p: ExperimentalVoiceBackendRenderV1Params,
+) -> Result<()> {
+    #[derive(Debug, Clone, Serialize)]
+    struct ExperimentalVoiceRenderRequestSegment {
+        index: u32,
+        start_ms: i64,
+        end_ms: i64,
+        speaker: Option<String>,
+        text: String,
+        out_path: String,
+        #[serde(default)]
+        tts_voice_id: Option<String>,
+        #[serde(default)]
+        tts_voice_profile_path: Option<String>,
+        #[serde(default)]
+        tts_voice_profile_paths: Vec<String>,
+        #[serde(default)]
+        style_preset: Option<String>,
+        #[serde(default)]
+        prosody_preset: Option<String>,
+        #[serde(default)]
+        pronunciation_overrides: Option<String>,
+        #[serde(default)]
+        render_mode: Option<String>,
+        #[serde(default)]
+        subtitle_prosody_mode: Option<String>,
+    }
+
+    #[derive(Debug, Clone, Serialize)]
+    struct ExperimentalVoiceRenderRequest {
+        schema_version: u32,
+        backend_id: String,
+        item_id: String,
+        track_id: String,
+        variant_label: Option<String>,
+        manifest_path: String,
+        report_path: String,
+        output_dir: String,
+        segments: Vec<ExperimentalVoiceRenderRequestSegment>,
+    }
+
+    set_progress(paths, job_id, 0.05)?;
+    let pipeline = p.pipeline.clone().unwrap_or_default();
+    let backend_id = p.backend_id.trim().to_ascii_lowercase();
+    let variant_label =
+        normalize_variant_label(p.variant_label.as_deref().or(pipeline.variant_label.as_deref()));
+
+    if backend_id.is_empty() {
+        return Err(EngineError::InstallFailed(
+            "experimental backend_id is empty".to_string(),
+        ));
+    }
+    if is_canceled(paths, job_id)? {
+        log_line(paths, job_id, "info", "job_canceled", serde_json::json!({}))?;
+        return Ok(());
+    }
+
+    log_line(
+        paths,
+        job_id,
+        "info",
+        "experimental_backend_render_begin",
+        serde_json::json!({
+            "item_id": &p.item_id,
+            "source_track_id": &p.source_track_id,
+            "backend_id": &backend_id,
+            "variant_label": variant_label.clone()
+        }),
+    )?;
+
+    let source_track = subtitle_tracks::get_track(paths, &p.source_track_id)?;
+    if source_track.item_id != p.item_id {
+        return Err(EngineError::InstallFailed(format!(
+            "experimental render item_id mismatch: params.item_id={} track.item_id={}",
+            p.item_id, source_track.item_id
+        )));
+    }
+    let doc = subtitle_tracks::load_document(paths, &p.source_track_id)?;
+    let item = library::get_item_by_id(paths, &p.item_id)?;
+    let item_dir = paths.derived_item_dir(&item.id);
+    let backend_dir = tts_backend_dir_name(&backend_id);
+    let out_dir = tts_variant_dir(&item_dir, &backend_dir, variant_label.as_deref());
+    let segments_dir = out_dir.join("segments");
+    std::fs::create_dir_all(&segments_dir)?;
+    let request_path = out_dir.join("request.json");
+    let manifest_path = out_dir.join("manifest.json");
+    let report_path = out_dir.join("report.json");
+
+    if manifest_path.exists() {
+        set_progress(paths, job_id, 1.0)?;
+        log_line(
+            paths,
+            job_id,
+            "info",
+            "experimental_backend_render_resume_skip_existing",
+            serde_json::json!({
+                "backend_id": &backend_id,
+                "manifest_path": &manifest_path,
+                "variant_label": variant_label.clone()
+            }),
+        )?;
+        queue_experimental_pipeline_followups(
+            paths,
+            job_id,
+            &item.id,
+            &source_track.id,
+            &pipeline,
+            variant_label,
+        )?;
+        return Ok(());
+    }
+
+    let mut speaker_settings_by_key = speaker_render_settings_by_key(paths, &item.id)?;
+    apply_speaker_overrides(&mut speaker_settings_by_key, &pipeline.speaker_overrides);
+
+    let request = ExperimentalVoiceRenderRequest {
+        schema_version: 1,
+        backend_id: backend_id.clone(),
+        item_id: item.id.clone(),
+        track_id: source_track.id.clone(),
+        variant_label: variant_label.clone(),
+        manifest_path: manifest_path.to_string_lossy().to_string(),
+        report_path: report_path.to_string_lossy().to_string(),
+        output_dir: out_dir.to_string_lossy().to_string(),
+        segments: doc
+            .segments
+            .iter()
+            .map(|seg| {
+                let speaker = seg
+                    .speaker
+                    .as_ref()
+                    .map(|value| value.trim().to_string())
+                    .filter(|value| !value.is_empty());
+                let render_settings = speaker
+                    .as_ref()
+                    .and_then(|key| speaker_settings_by_key.get(key))
+                    .cloned()
+                    .unwrap_or_default();
+                ExperimentalVoiceRenderRequestSegment {
+                    index: seg.index,
+                    start_ms: seg.start_ms,
+                    end_ms: seg.end_ms,
+                    speaker,
+                    text: prepare_tts_text(&seg.text, &render_settings),
+                    out_path: segments_dir
+                        .join(format!("seg_{:04}.wav", seg.index))
+                        .to_string_lossy()
+                        .to_string(),
+                    tts_voice_id: render_settings.voice_id.clone(),
+                    tts_voice_profile_path: render_settings.primary_profile_path.clone(),
+                    tts_voice_profile_paths: render_settings.profile_paths.clone(),
+                    style_preset: render_settings.style_preset.clone(),
+                    prosody_preset: render_settings.prosody_preset.clone(),
+                    pronunciation_overrides: render_settings.pronunciation_overrides.clone(),
+                    render_mode: render_settings.render_mode.clone(),
+                    subtitle_prosody_mode: render_settings.subtitle_prosody_mode.clone(),
+                }
+            })
+            .collect(),
+    };
+    std::fs::write(
+        &request_path,
+        format!("{}\n", serde_json::to_string_pretty(&request)?),
+    )?;
+    set_progress(paths, job_id, 0.12)?;
+
+    let resolved = voice_backend_adapters::resolve_voice_backend_adapter_render_command(
+        paths,
+        &backend_id,
+        &request_path,
+        &manifest_path,
+        &report_path,
+        &out_dir,
+        &item.id,
+        &source_track.id,
+        variant_label.as_deref(),
+    )?;
+    log_line(
+        paths,
+        job_id,
+        "info",
+        "experimental_backend_render_command",
+        serde_json::json!({
+            "backend_id": &backend_id,
+            "program": &resolved.program,
+            "args": &resolved.args,
+            "current_dir": &resolved.current_dir,
+            "request_path": &request_path,
+            "manifest_path": &manifest_path,
+            "report_path": &report_path
+        }),
+    )?;
+
+    let mut render_cmd = cmd::command(&resolved.program);
+    if let Some(current_dir) = resolved.current_dir.as_deref() {
+        render_cmd.current_dir(current_dir);
+    }
+    render_cmd.args(&resolved.args);
+    let output = match run_command_output_with_control(
+        paths,
+        &mut render_cmd,
+        Some(job_id),
+        EXPERIMENTAL_VOICE_BACKEND_TIMEOUT_SECS,
+    ) {
+        Ok(output) => output,
+        Err(CommandRunError::Spawn(error)) => {
+            return Err(EngineError::InstallFailed(format!(
+                "experimental backend {backend_id} could not start: {error}"
+            )))
+        }
+        Err(CommandRunError::Wait(error)) => {
+            return Err(EngineError::InstallFailed(format!(
+                "experimental backend {backend_id} failed while running: {error}"
+            )))
+        }
+        Err(CommandRunError::Canceled) => {
+            return Err(EngineError::InstallFailed(
+                "job canceled while running experimental backend".to_string(),
+            ))
+        }
+        Err(CommandRunError::TimedOut(limit)) => {
+            return Err(EngineError::InstallFailed(format!(
+                "experimental backend {backend_id} timed out after {limit}s"
+            )))
+        }
+    };
+    set_progress(paths, job_id, 0.72)?;
+
+    let stdout = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
+    if !report_path.exists() {
+        let wrapper_report = serde_json::json!({
+            "schema_version": 1,
+            "generated_at_ms": now_ms(),
+            "backend_id": &backend_id,
+            "item_id": &item.id,
+            "track_id": &source_track.id,
+            "variant_label": variant_label.clone(),
+            "request_path": request_path.to_string_lossy().to_string(),
+            "manifest_path": manifest_path.to_string_lossy().to_string(),
+            "exit_code": output.status.code(),
+            "stdout": &stdout,
+            "stderr": &stderr,
+        });
+        std::fs::write(
+            &report_path,
+            format!("{}\n", serde_json::to_string_pretty(&wrapper_report)?),
+        )?;
+    }
+
+    if !output.status.success() {
+        return Err(EngineError::InstallFailed(format!(
+            "experimental backend {backend_id} failed (code={:?}): {}",
+            output.status.code(),
+            if !stderr.is_empty() {
+                stderr
+            } else if !stdout.is_empty() {
+                stdout
+            } else {
+                "no stderr/stdout captured".to_string()
+            }
+        )));
+    }
+
+    if !manifest_path.exists() {
+        return Err(EngineError::InstallFailed(format!(
+            "experimental backend {backend_id} completed without writing manifest.json"
+        )));
+    }
+    let manifest_bytes = std::fs::read(&manifest_path)?;
+    let manifest_meta: TtsManifestMeta = serde_json::from_slice(&manifest_bytes)?;
+    let manifest_track_id = manifest_meta
+        .track_id
+        .as_deref()
+        .and_then(|value| normalize_non_empty(Some(value)));
+    if manifest_track_id.as_deref() != Some(source_track.id.as_str()) {
+        return Err(EngineError::InstallFailed(format!(
+            "experimental backend manifest track_id mismatch: expected {} got {}",
+            source_track.id,
+            manifest_track_id.unwrap_or_else(|| "(missing)".to_string())
+        )));
+    }
+
+    let rendered_segments = manifest_meta
+        .segments
+        .iter()
+        .filter(|seg| {
+            seg.audio_exists
+                && seg
+                    .audio_path
+                    .as_deref()
+                    .map(|value| Path::new(value).exists())
+                    .unwrap_or(false)
+        })
+        .count();
+    if rendered_segments == 0 {
+        return Err(EngineError::InstallFailed(format!(
+            "experimental backend {backend_id} produced no usable rendered segments"
+        )));
+    }
+
+    set_progress(paths, job_id, 0.95)?;
+    log_line(
+        paths,
+        job_id,
+        "info",
+        "experimental_backend_render_done",
+        serde_json::json!({
+            "backend_id": &backend_id,
+            "manifest_path": &manifest_path,
+            "report_path": &report_path,
+            "rendered_segments": rendered_segments,
+            "variant_label": variant_label.clone()
+        }),
+    )?;
+
+    queue_experimental_pipeline_followups(
+        paths,
+        job_id,
+        &item.id,
+        &source_track.id,
+        &pipeline,
+        variant_label,
+    )?;
+    Ok(())
+}
+
 fn normalize_localization_batch_item_ids(item_ids: Vec<String>) -> Result<Vec<String>> {
     let mut out: Vec<String> = Vec::new();
     let mut seen: HashSet<String> = HashSet::new();
@@ -11253,7 +11894,329 @@ fn now_ms() -> i64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::subtitles::{SubtitleDocument, SubtitleSegment, SUBTITLE_JSON_SCHEMA_VERSION};
     use rusqlite::params;
+    use std::path::Path;
+
+    fn seed_item_and_track(paths: &AppPaths) {
+        let conn = db::open(paths).expect("open db");
+        db::migrate(&conn).expect("migrate");
+        conn.execute(
+            "INSERT INTO library_item (id, created_at_ms, source_type, source_uri, title, media_path) VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+            params!["item-1", 1_i64, "file", "file://item-1", "Item 1", "D:/media/item1.mp4"],
+        )
+        .expect("insert item");
+
+        let doc = SubtitleDocument {
+            schema_version: SUBTITLE_JSON_SCHEMA_VERSION,
+            kind: "translated".to_string(),
+            lang: "eng".to_string(),
+            segments: vec![SubtitleSegment {
+                index: 1,
+                start_ms: 0,
+                end_ms: 1200,
+                text: "Hello world".to_string(),
+                speaker: Some("S1".to_string()),
+            }],
+        };
+        let track_path = paths
+            .derived_item_dir("item-1")
+            .join("translate")
+            .join("track.json");
+        if let Some(parent) = track_path.parent() {
+            std::fs::create_dir_all(parent).expect("track dir");
+        }
+        std::fs::write(
+            &track_path,
+            format!("{}\n", serde_json::to_string_pretty(&doc).expect("doc json")),
+        )
+        .expect("write track");
+        conn.execute(
+            "INSERT INTO subtitle_track (id, item_id, kind, lang, format, path, created_by, version) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+            params![
+                "track-1",
+                "item-1",
+                "translated",
+                "eng",
+                "ytfetch_subtitle_json_v1",
+                track_path.to_string_lossy().to_string(),
+                "test",
+                1_i64
+            ],
+        )
+        .expect("insert track");
+    }
+
+    fn write_sine_wav(path: &Path, sample_rate: u32, duration_ms: u32) {
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent).expect("wav dir");
+        }
+        let spec = hound::WavSpec {
+            channels: 1,
+            sample_rate,
+            bits_per_sample: 16,
+            sample_format: hound::SampleFormat::Int,
+        };
+        let mut writer = hound::WavWriter::create(path, spec).expect("wav create");
+        let total_samples = ((sample_rate as u64) * (duration_ms as u64) / 1000) as usize;
+        for index in 0..total_samples {
+            let t = index as f32 / sample_rate as f32;
+            let sample =
+                (0.25 * (2.0 * std::f32::consts::PI * 220.0 * t).sin() * i16::MAX as f32) as i16;
+            writer.write_sample(sample).expect("sample");
+        }
+        writer.finalize().expect("finalize");
+    }
+
+    #[test]
+    fn select_tts_manifest_candidate_prefers_requested_backend() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let paths = AppPaths::new(dir.path().to_path_buf());
+        seed_item_and_track(&paths);
+        let item_dir = paths.derived_item_dir("item-1");
+        let pyttsx3_manifest = tts_manifest_path(&item_dir, "pyttsx3_v1", None);
+        let cosy_manifest = tts_manifest_path(&item_dir, "cosyvoice", None);
+        std::fs::create_dir_all(pyttsx3_manifest.parent().expect("pyttsx3 dir"))
+            .expect("pyttsx3 dir");
+        std::fs::create_dir_all(cosy_manifest.parent().expect("cosy dir")).expect("cosy dir");
+        let pyttsx3_audio = item_dir
+            .join("tts_preview")
+            .join("pyttsx3_v1")
+            .join("segments")
+            .join("seg_0001.wav");
+        let cosy_audio = item_dir
+            .join("tts_preview")
+            .join("cosyvoice")
+            .join("segments")
+            .join("seg_0001.wav");
+        write_sine_wav(&pyttsx3_audio, 24_000, 400);
+        write_sine_wav(&cosy_audio, 24_000, 500);
+        std::fs::write(
+            &pyttsx3_manifest,
+            serde_json::json!({
+                "backend": "pyttsx3_v1",
+                "item_id": "item-1",
+                "track_id": "track-1",
+                "segments": [{
+                    "index": 1,
+                    "start_ms": 0,
+                    "end_ms": 1200,
+                    "speaker": "S1",
+                    "audio_path": pyttsx3_audio.to_string_lossy().to_string(),
+                    "audio_exists": true
+                }]
+            })
+            .to_string(),
+        )
+        .expect("write pyttsx3 manifest");
+        std::fs::write(
+            &cosy_manifest,
+            serde_json::json!({
+                "backend": "cosyvoice",
+                "item_id": "item-1",
+                "track_id": "track-1",
+                "segments": [{
+                    "index": 1,
+                    "start_ms": 0,
+                    "end_ms": 1200,
+                    "speaker": "S1",
+                    "audio_path": cosy_audio.to_string_lossy().to_string(),
+                    "audio_exists": true
+                }]
+            })
+            .to_string(),
+        )
+        .expect("write cosy manifest");
+
+        let selected = select_tts_manifest_candidate(
+            &paths,
+            "item-1",
+            Some("track-1"),
+            None,
+            Some("cosyvoice"),
+        )
+        .expect("select")
+        .expect("candidate");
+        assert_eq!(selected.backend_id, "cosyvoice");
+        assert_eq!(selected.variant_label, None);
+    }
+
+    #[test]
+    fn experimental_backend_render_job_writes_manifest_and_report() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let paths = AppPaths::new(dir.path().to_path_buf());
+        seed_item_and_track(&paths);
+        let root_dir = dir.path().join("adapter");
+        std::fs::create_dir_all(&root_dir).expect("adapter root");
+        let mock_audio = root_dir.join("mock.wav");
+        write_sine_wav(&mock_audio, 24_000, 600);
+        let script_path = if cfg!(windows) {
+            let path = root_dir.join("mock_adapter.ps1");
+            let script = r#"
+param(
+  [string]$Request,
+  [string]$Manifest,
+  [string]$Report,
+  [string]$OutputDir,
+  [string]$Backend,
+  [string]$Track,
+  [string]$MockAudio
+)
+$req = Get-Content -LiteralPath $Request -Raw | ConvertFrom-Json
+foreach ($seg in $req.segments) {
+  $outPath = [string]$seg.out_path
+  $parent = Split-Path -Parent $outPath
+  if ($parent) { New-Item -ItemType Directory -Force -Path $parent | Out-Null }
+  Copy-Item -LiteralPath $MockAudio -Destination $outPath -Force
+}
+$segments = @()
+foreach ($seg in $req.segments) {
+  $segments += @{
+    index = [int]$seg.index
+    start_ms = [int64]$seg.start_ms
+    end_ms = [int64]$seg.end_ms
+    speaker = $seg.speaker
+    audio_path = [string]$seg.out_path
+    audio_exists = $true
+  }
+}
+$manifestObj = @{
+  schema_version = 1
+  backend = $Backend
+  item_id = [string]$req.item_id
+  track_id = [string]$Track
+  segments = $segments
+}
+$manifestObj | ConvertTo-Json -Depth 6 | Set-Content -LiteralPath $Manifest
+@{ ok = $true; backend = $Backend; segment_count = $segments.Count } | ConvertTo-Json -Depth 4 | Set-Content -LiteralPath $Report
+"#;
+            std::fs::write(&path, script).expect("write ps1");
+            path
+        } else {
+            let path = root_dir.join("mock_adapter.sh");
+            let script = r#"#!/bin/sh
+REQUEST="$1"
+MANIFEST="$2"
+REPORT="$3"
+OUTPUT_DIR="$4"
+BACKEND="$5"
+TRACK="$6"
+MOCK_AUDIO="$7"
+mkdir -p "$OUTPUT_DIR/segments"
+cp "$MOCK_AUDIO" "$OUTPUT_DIR/segments/seg_0001.wav"
+AUDIO="$OUTPUT_DIR/segments/seg_0001.wav"
+cat > "$MANIFEST" <<EOF
+{
+  "schema_version": 1,
+  "backend": "$BACKEND",
+  "item_id": "item-1",
+  "track_id": "$TRACK",
+  "segments": [
+    {
+      "index": 1,
+      "start_ms": 0,
+      "end_ms": 1200,
+      "speaker": "S1",
+      "audio_path": "$AUDIO",
+      "audio_exists": true
+    }
+  ]
+}
+EOF
+cat > "$REPORT" <<EOF
+{"ok": true, "backend": "$BACKEND"}
+EOF
+"#;
+            std::fs::write(&path, script).expect("write sh");
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::PermissionsExt;
+                let mut perms = std::fs::metadata(&path).expect("meta").permissions();
+                perms.set_mode(0o755);
+                std::fs::set_permissions(&path, perms).expect("chmod");
+            }
+            path
+        };
+
+        let render_command = if cfg!(windows) {
+            vec![
+                "powershell".to_string(),
+                "-NoProfile".to_string(),
+                "-ExecutionPolicy".to_string(),
+                "Bypass".to_string(),
+                "-File".to_string(),
+                script_path.to_string_lossy().to_string(),
+                "-Request".to_string(),
+                "{request_json}".to_string(),
+                "-Manifest".to_string(),
+                "{manifest_json}".to_string(),
+                "-Report".to_string(),
+                "{report_json}".to_string(),
+                "-OutputDir".to_string(),
+                "{output_dir}".to_string(),
+                "-Backend".to_string(),
+                "{backend_id}".to_string(),
+                "-Track".to_string(),
+                "{track_id}".to_string(),
+                "-MockAudio".to_string(),
+                mock_audio.to_string_lossy().to_string(),
+            ]
+        } else {
+            vec![
+                script_path.to_string_lossy().to_string(),
+                "{request_json}".to_string(),
+                "{manifest_json}".to_string(),
+                "{report_json}".to_string(),
+                "{output_dir}".to_string(),
+                "{backend_id}".to_string(),
+                "{track_id}".to_string(),
+                mock_audio.to_string_lossy().to_string(),
+            ]
+        };
+        voice_backend_adapters::upsert_voice_backend_adapter(
+            &paths,
+            voice_backend_adapters::VoiceBackendAdapterConfig {
+                backend_id: "cosyvoice".to_string(),
+                enabled: true,
+                root_dir: Some(root_dir.to_string_lossy().to_string()),
+                python_exe: None,
+                model_dir: None,
+                entry_command: Vec::new(),
+                probe_command: Vec::new(),
+                render_command,
+                notes: Some("mock adapter".to_string()),
+                updated_at_ms: 0,
+            },
+        )
+        .expect("upsert adapter");
+
+        let job = enqueue_experimental_voice_backend_render_v1(
+            &paths,
+            "item-1".to_string(),
+            "track-1".to_string(),
+            "cosyvoice".to_string(),
+            Some("trial".to_string()),
+            false,
+            None,
+            false,
+            false,
+        )
+        .expect("enqueue job");
+        let params: ExperimentalVoiceBackendRenderV1Params =
+            serde_json::from_str(&job.params_json).expect("params");
+        execute_experimental_voice_backend_render_v1(&paths, &job.id, params).expect("execute");
+
+        let out_dir = paths
+            .derived_item_dir("item-1")
+            .join("tts_preview")
+            .join("cosyvoice")
+            .join("variants")
+            .join("trial");
+        assert!(out_dir.join("request.json").exists());
+        assert!(out_dir.join("manifest.json").exists());
+        assert!(out_dir.join("report.json").exists());
+        assert!(out_dir.join("segments").join("seg_0001.wav").exists());
+    }
 
     #[test]
     fn prepare_tts_text_applies_pronunciation_and_line_break_pacing() {

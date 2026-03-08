@@ -1349,6 +1349,75 @@ fn item_artifacts_list_v1(
             );
         }
     }
+    let tts_root = item_dir.join("tts_preview");
+    if let Ok(entries) = std::fs::read_dir(&tts_root) {
+        for entry in entries.flatten() {
+            let backend_dir = entry.path();
+            if !backend_dir.is_dir() {
+                continue;
+            }
+            let Some(backend_id) = backend_dir.file_name().and_then(|value| value.to_str()) else {
+                continue;
+            };
+            if matches!(
+                backend_id,
+                "pyttsx3_v1" | "tts_neural_local_v1" | "dub_voice_preserving_v1"
+            ) {
+                continue;
+            }
+
+            push(
+                &format!("tts_manifest_backend_{backend_id}"),
+                &format!("TTS manifest ({backend_id})"),
+                "TTS experiments",
+                backend_dir.join("manifest.json"),
+            );
+            push(
+                &format!("tts_request_backend_{backend_id}"),
+                &format!("TTS request ({backend_id})"),
+                "TTS experiments",
+                backend_dir.join("request.json"),
+            );
+            push(
+                &format!("tts_report_backend_{backend_id}"),
+                &format!("TTS report ({backend_id})"),
+                "TTS experiments",
+                backend_dir.join("report.json"),
+            );
+
+            let variants_dir = backend_dir.join("variants");
+            let Ok(variant_entries) = std::fs::read_dir(&variants_dir) else {
+                continue;
+            };
+            for variant_entry in variant_entries.flatten() {
+                let variant_path = variant_entry.path();
+                if !variant_path.is_dir() {
+                    continue;
+                }
+                let Some(label) = variant_path.file_name().and_then(|value| value.to_str()) else {
+                    continue;
+                };
+                push(
+                    &format!("tts_manifest_backend_{backend_id}_variant_{label}"),
+                    &format!("TTS manifest ({backend_id} {label})"),
+                    "TTS experiment alternates",
+                    variant_path.join("manifest.json"),
+                );
+                push(
+                    &format!("tts_request_backend_{backend_id}_variant_{label}"),
+                    &format!("TTS request ({backend_id} {label})"),
+                    "TTS experiment alternates",
+                    variant_path.join("request.json"),
+                );
+                push(
+                    &format!("tts_report_backend_{backend_id}_variant_{label}"),
+                    &format!("TTS report ({backend_id} {label})"),
+                    "TTS experiment alternates",
+                    variant_path.join("report.json"),
+                );
+            }
+        }
+    }
 
     // Dub preview
     push(
@@ -3741,6 +3810,56 @@ fn jobs_enqueue_dub_voice_preserving_v1(
 }
 
 #[tauri::command]
+fn jobs_enqueue_experimental_voice_backend_render_v1(
+    state: State<'_, AppState>,
+    item_id: Option<String>,
+    itemId: Option<String>,
+    source_track_id: Option<String>,
+    sourceTrackId: Option<String>,
+    backend_id: Option<String>,
+    backendId: Option<String>,
+    variant_label: Option<String>,
+    variantLabel: Option<String>,
+    auto_pipeline: Option<bool>,
+    autoPipeline: Option<bool>,
+    separation_backend: Option<String>,
+    separationBackend: Option<String>,
+    queue_qc: Option<bool>,
+    queueQc: Option<bool>,
+    queue_export_pack: Option<bool>,
+    queueExportPack: Option<bool>,
+) -> Result<jobs::JobRow, String> {
+    let item_id = item_id
+        .or(itemId)
+        .map(|v| v.trim().to_string())
+        .filter(|v| !v.is_empty())
+        .ok_or_else(|| "missing required key itemId".to_string())?;
+    let source_track_id = source_track_id
+        .or(sourceTrackId)
+        .map(|v| v.trim().to_string())
+        .filter(|v| !v.is_empty())
+        .ok_or_else(|| "missing required key sourceTrackId".to_string())?;
+    let backend_id = backend_id
+        .or(backendId)
+        .map(|v| v.trim().to_string())
+        .filter(|v| !v.is_empty())
+        .ok_or_else(|| "missing required key backendId".to_string())?;
+
+    jobs::enqueue_experimental_voice_backend_render_v1(
+        &state.paths,
+        item_id,
+        source_track_id,
+        backend_id,
+        variant_label.or(variantLabel),
+        auto_pipeline.or(autoPipeline).unwrap_or(true),
+        separation_backend.or(separationBackend),
+        queue_qc.or(queueQc).unwrap_or(true),
+        queue_export_pack.or(queueExportPack).unwrap_or(false),
+    )
+    .map_err(|e| e.to_string())
+}
+
+#[tauri::command]
 fn jobs_enqueue_mix_dub_preview_v1(
     state: State<'_, AppState>,
     item_id: Option<String>,
@@ -4110,6 +4229,7 @@ pub fn run() {
             jobs_enqueue_tts_preview_pyttsx3_v1,
             jobs_enqueue_tts_neural_local_v1,
             jobs_enqueue_dub_voice_preserving_v1,
+            jobs_enqueue_experimental_voice_backend_render_v1,
             jobs_enqueue_mix_dub_preview_v1,
             jobs_enqueue_mux_dub_preview_v1,
             jobs_enqueue_separate_audio_spleeter,

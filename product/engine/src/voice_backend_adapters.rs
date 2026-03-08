@@ -22,8 +22,12 @@ pub struct VoiceBackendAdapterConfig {
     pub root_dir: Option<String>,
     pub python_exe: Option<String>,
     pub model_dir: Option<String>,
+    #[serde(default)]
     pub entry_command: Vec<String>,
+    #[serde(default)]
     pub probe_command: Vec<String>,
+    #[serde(default)]
+    pub render_command: Vec<String>,
     pub notes: Option<String>,
     pub updated_at_ms: i64,
 }
@@ -52,6 +56,13 @@ pub struct VoiceBackendAdapterDetail {
     pub template: VoiceBackendAdapterTemplate,
     pub config: Option<VoiceBackendAdapterConfig>,
     pub last_probe: Option<VoiceBackendAdapterProbe>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct VoiceBackendAdapterResolvedCommand {
+    pub program: String,
+    pub args: Vec<String>,
+    pub current_dir: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -115,6 +126,19 @@ pub fn list_voice_backend_adapters(paths: &AppPaths) -> Result<Vec<VoiceBackendA
     Ok(merge_templates(configs, probes))
 }
 
+pub fn get_voice_backend_adapter_detail(
+    paths: &AppPaths,
+    backend_id: &str,
+) -> Result<VoiceBackendAdapterDetail> {
+    let backend_id = normalize_backend_id(backend_id);
+    list_voice_backend_adapters(paths)?
+        .into_iter()
+        .find(|detail| detail.template.backend_id == backend_id)
+        .ok_or_else(|| {
+            EngineError::InstallFailed(format!("unsupported BYO backend id: {backend_id}"))
+        })
+}
+
 pub fn upsert_voice_backend_adapter(
     paths: &AppPaths,
     mut config: VoiceBackendAdapterConfig,
@@ -171,6 +195,122 @@ pub fn probe_voice_backend_adapter(
         last_probe: probes
             .into_iter()
             .find(|value| value.backend_id == backend_id),
+    })
+}
+
+pub fn resolve_voice_backend_adapter_render_command(
+    paths: &AppPaths,
+    backend_id: &str,
+    request_json: &Path,
+    manifest_json: &Path,
+    report_json: &Path,
+    output_dir: &Path,
+    item_id: &str,
+    track_id: &str,
+    variant_label: Option<&str>,
+) -> Result<VoiceBackendAdapterResolvedCommand> {
+    let detail = get_voice_backend_adapter_detail(paths, backend_id)?;
+    let config = detail.config.ok_or_else(|| {
+        EngineError::InstallFailed(format!("adapter config not found: {}", detail.template.backend_id))
+    })?;
+    if !config.enabled {
+        return Err(EngineError::InstallFailed(format!(
+            "BYO adapter {} is disabled",
+            config.backend_id
+        )));
+    }
+    if config.render_command.is_empty() {
+        return Err(EngineError::InstallFailed(format!(
+            "BYO adapter {} is missing render_command tokens",
+            config.backend_id
+        )));
+    }
+
+    let root_dir = config.root_dir.as_deref().map(PathBuf::from);
+    if let Some(root_dir) = root_dir.as_ref() {
+        if !root_dir.is_dir() {
+            return Err(EngineError::InstallFailed(format!(
+                "BYO adapter {} root_dir is missing: {}",
+                config.backend_id,
+                root_dir.display()
+            )));
+        }
+    }
+    if let Some(model_dir) = config.model_dir.as_deref() {
+        let model_dir = model_dir.trim();
+        let model_dir_exists = if model_dir.is_empty() {
+            true
+        } else {
+            let model_path = PathBuf::from(model_dir);
+            model_path.exists()
+                || root_dir
+                    .as_ref()
+                    .map(|root| root.join(model_dir).exists())
+                    .unwrap_or(false)
+        };
+        if !model_dir_exists {
+            return Err(EngineError::InstallFailed(format!(
+                "BYO adapter {} model_dir is missing: {}",
+                config.backend_id, model_dir
+            )));
+        }
+    }
+
+    let program_token = config
+        .render_command
+        .first()
+        .ok_or_else(|| EngineError::InstallFailed("render_command is empty".to_string()))?;
+    let program = resolve_program_token(
+        &expand_render_token(
+            program_token,
+            root_dir.as_deref(),
+            config.python_exe.as_deref(),
+            config.model_dir.as_deref(),
+            request_json,
+            manifest_json,
+            report_json,
+            output_dir,
+            &config.backend_id,
+            item_id,
+            track_id,
+            variant_label,
+        ),
+        root_dir.as_deref(),
+    );
+    let program_string = program.to_string_lossy().trim().to_string();
+    if program_string.is_empty() {
+        return Err(EngineError::InstallFailed(format!(
+            "BYO adapter {} render command resolved to an empty program",
+            config.backend_id
+        )));
+    }
+
+    let args = config
+        .render_command
+        .iter()
+        .skip(1)
+        .map(|token| {
+            expand_render_token(
+                token,
+                root_dir.as_deref(),
+                config.python_exe.as_deref(),
+                config.model_dir.as_deref(),
+                request_json,
+                manifest_json,
+                report_json,
+                output_dir,
+                &config.backend_id,
+                item_id,
+                track_id,
+                variant_label,
+            )
+        })
+        .collect::<Vec<_>>();
+
+    Ok(VoiceBackendAdapterResolvedCommand {
+        program: program_string,
+        args,
+        current_dir: root_dir.map(|value| value.to_string_lossy().to_string()),
     })
 }
 
@@ -385,14 +525,79 @@ fn expand_token(
     python_exe: Option<&str>,
     model_dir: Option<&str>,
 ) -> String {
-    match token {
-        "{python_exe}" => python_exe.unwrap_or("python").to_string(),
-        "{root_dir}" => root_dir
-            .map(|value| value.to_string_lossy().to_string())
-            .unwrap_or_default(),
-        "{model_dir}" => model_dir.unwrap_or_default().to_string(),
-        other => other.to_string(),
+    expand_token_pairs(
+        token,
+        &[
+            ("{python_exe}", python_exe.unwrap_or("python").to_string()),
+            (
+                "{root_dir}",
+                root_dir
+                    .map(|value| value.to_string_lossy().to_string())
+                    .unwrap_or_default(),
+            ),
+            ("{model_dir}", model_dir.unwrap_or_default().to_string()),
+        ],
+    )
+}
+
+fn expand_render_token(
+    token: &str,
+    root_dir: Option<&Path>,
+    python_exe: Option<&str>,
+    model_dir: Option<&str>,
+    request_json: &Path,
+    manifest_json: &Path,
+    report_json: &Path,
+    output_dir: &Path,
+    backend_id: &str,
+    item_id: &str,
+    track_id: &str,
+    variant_label: Option<&str>,
+) -> String {
+    expand_token_pairs(
+        token,
+        &[
+            ("{python_exe}", python_exe.unwrap_or("python").to_string()),
+            (
+                "{root_dir}",
+                root_dir
+                    .map(|value| value.to_string_lossy().to_string())
+                    .unwrap_or_default(),
+            ),
+            ("{model_dir}", model_dir.unwrap_or_default().to_string()),
+            (
+                "{request_json}",
+                request_json.to_string_lossy().to_string(),
+            ),
+            (
+                "{manifest_json}",
+                manifest_json.to_string_lossy().to_string(),
+            ),
+            (
+                "{report_json}",
+                report_json.to_string_lossy().to_string(),
+            ),
+            (
+                "{output_dir}",
+                output_dir.to_string_lossy().to_string(),
+            ),
+            ("{backend_id}", backend_id.to_string()),
+            ("{item_id}", item_id.to_string()),
+            ("{track_id}", track_id.to_string()),
+            (
+                "{variant_label}",
+                variant_label.unwrap_or_default().to_string(),
+            ),
+        ],
+    )
+}
+
+fn expand_token_pairs(token: &str, replacements: &[(&str, String)]) -> String {
+    let mut out = token.to_string();
+    for (marker, value) in replacements {
+        out = out.replace(marker, value);
     }
+    out
 }
 
 fn resolve_program_token(token: &str, root_dir: Option<&Path>) -> PathBuf {
@@ -495,6 +700,7 @@ mod tests {
                 model_dir: None,
                 entry_command: vec![],
                 probe_command: vec![],
+                render_command: vec![],
                 notes: Some("test".to_string()),
                 updated_at_ms: 0,
             },
@@ -526,6 +732,7 @@ mod tests {
                 model_dir: None,
                 entry_command: vec!["{python_exe}".to_string(), "webui.py".to_string()],
                 probe_command,
+                render_command: vec![],
                 notes: None,
                 updated_at_ms: 0,
             },
@@ -533,5 +740,72 @@ mod tests {
         .expect("upsert");
         let detail = probe_voice_backend_adapter(&paths, "cosyvoice").expect("probe");
         assert_eq!(detail.last_probe.as_ref().map(|value| value.ready), Some(true));
+    }
+
+    #[test]
+    fn resolve_render_command_expands_placeholders() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let paths = AppPaths::new(dir.path().to_path_buf());
+        upsert_voice_backend_adapter(
+            &paths,
+            VoiceBackendAdapterConfig {
+                backend_id: "cosyvoice".to_string(),
+                enabled: true,
+                root_dir: Some(dir.path().to_string_lossy().to_string()),
+                python_exe: Some("python3".to_string()),
+                model_dir: Some(dir.path().join("models").to_string_lossy().to_string()),
+                entry_command: vec![],
+                probe_command: vec![],
+                render_command: vec![
+                    "{python_exe}".to_string(),
+                    "run_adapter.py".to_string(),
+                    "--request".to_string(),
+                    "{request_json}".to_string(),
+                    "--manifest".to_string(),
+                    "{manifest_json}".to_string(),
+                    "--report".to_string(),
+                    "{report_json}".to_string(),
+                    "--out".to_string(),
+                    "{output_dir}".to_string(),
+                    "--backend".to_string(),
+                    "{backend_id}".to_string(),
+                    "--item".to_string(),
+                    "{item_id}".to_string(),
+                    "--track".to_string(),
+                    "{track_id}".to_string(),
+                    "--variant".to_string(),
+                    "{variant_label}".to_string(),
+                ],
+                notes: None,
+                updated_at_ms: 0,
+            },
+        )
+        .expect("upsert");
+        std::fs::create_dir_all(dir.path().join("models")).expect("models");
+        let resolved = resolve_voice_backend_adapter_render_command(
+            &paths,
+            "cosyvoice",
+            &dir.path().join("request.json"),
+            &dir.path().join("manifest.json"),
+            &dir.path().join("report.json"),
+            &dir.path().join("render_out"),
+            "item-1",
+            "track-1",
+            Some("alt_a"),
+        )
+        .expect("resolve");
+        assert_eq!(resolved.program, "python3");
+        assert!(resolved.args.iter().any(|value| value.ends_with("request.json")));
+        assert!(resolved.args.iter().any(|value| value.ends_with("manifest.json")));
+        assert!(resolved.args.iter().any(|value| value.ends_with("report.json")));
+        assert!(resolved.args.iter().any(|value| value.ends_with("render_out")));
+        assert!(resolved.args.iter().any(|value| value == "cosyvoice"));
+        assert!(resolved.args.iter().any(|value| value == "item-1"));
+        assert!(resolved.args.iter().any(|value| value == "track-1"));
+        assert!(resolved.args.iter().any(|value| value == "alt_a"));
+        assert_eq!(
+            resolved.current_dir.as_deref(),
+            Some(dir.path().to_string_lossy().as_ref())
+        );
     }
 }

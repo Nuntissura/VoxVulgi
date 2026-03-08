@@ -82,6 +82,7 @@ type ArtifactIdentity = {
   variantLabel: string | null;
   trackId: string | null;
   muxContainer: "mp4" | "mkv" | null;
+  ttsBackendId: string | null;
   rerunSupported: boolean;
 };
 
@@ -144,6 +145,27 @@ function normalizeVariantLabel(value: string | null | undefined): string | null 
   return normalized ? normalized : null;
 }
 
+function canonicalTtsBackendId(value: string | null | undefined): string {
+  const raw = (value ?? "").trim().toLowerCase();
+  if (!raw) return "";
+  if (
+    raw === "openvoice_v2" ||
+    raw === "voice_preserving_local_v1" ||
+    raw === "dub_voice_preserving_v1"
+  ) {
+    return "openvoice_v2";
+  }
+  if (raw === "tts_neural_local_v1" || raw === "kokoro") return "tts_neural_local_v1";
+  if (raw === "pyttsx3_v1" || raw === "tts_preview_pyttsx3_v1") return "pyttsx3_v1";
+  return raw;
+}
+
+function ttsBackendIdsMatch(left: string | null | undefined, right: string | null | undefined): boolean {
+  const a = canonicalTtsBackendId(left);
+  const b = canonicalTtsBackendId(right);
+  return !!a && a === b;
+}
+
 function asRecord(value: unknown): Record<string, unknown> | null {
   return value && typeof value === "object" && !Array.isArray(value)
     ? (value as Record<string, unknown>)
@@ -175,6 +197,12 @@ function artifactVariantLabel(artifact: ArtifactInfo): string | null {
   if (byId) {
     return normalizeVariantLabel(artifact.id.slice(byId.length));
   }
+  const experimentalById = artifact.id.match(
+    /^tts_(?:manifest|request|report)_backend_(.+?)_variant_(.+)$/i,
+  );
+  if (experimentalById) {
+    return normalizeVariantLabel(experimentalById[2]);
+  }
   const name = fileNameFromPath(artifact.path);
   if (name === "export_pack_v1.zip") return null;
   if (name.startsWith("export_pack_v1_") && name.endsWith(".zip")) {
@@ -190,6 +218,21 @@ function artifactVariantLabel(artifact: ArtifactInfo): string | null {
 function artifactTrackId(artifact: ArtifactInfo): string | null {
   const qcMatch = fileNameFromPath(artifact.path).match(/^qc_report_v1_([0-9a-f-]{36})(?:_(.+))?\.json$/i);
   return qcMatch ? trimOrNull(qcMatch[1]) : null;
+}
+
+function artifactTtsBackendId(artifact: ArtifactInfo): string | null {
+  if (
+    artifact.id === "tts_voice_preserving_manifest" ||
+    artifact.id.startsWith("tts_voice_preserving_manifest_variant_")
+  ) {
+    return "openvoice_v2";
+  }
+  if (artifact.id === "tts_neural_manifest") return "tts_neural_local_v1";
+  if (artifact.id === "tts_pyttsx3_manifest") return "pyttsx3_v1";
+  const experimentalMatch = artifact.id.match(
+    /^tts_(?:manifest|request|report)_backend_(.+?)(?:_variant_.+)?$/i,
+  );
+  return experimentalMatch ? canonicalTtsBackendId(experimentalMatch[1]) : null;
 }
 
 function artifactMuxContainer(artifactId: string): "mp4" | "mkv" | null {
@@ -465,6 +508,51 @@ type VoiceBackendRecommendation = {
   fallback_backend_id: string | null;
   rationale: string[];
   warnings: string[];
+};
+
+type VoiceBackendAdapterTemplate = {
+  backend_id: string;
+  display_name: string;
+  expected_markers: string[];
+  default_entry_command: string[];
+  probe_hint: string;
+};
+
+type VoiceBackendAdapterConfig = {
+  backend_id: string;
+  enabled: boolean;
+  root_dir: string | null;
+  python_exe: string | null;
+  model_dir: string | null;
+  entry_command: string[];
+  probe_command: string[];
+  render_command: string[];
+  notes: string | null;
+  updated_at_ms: number;
+};
+
+type VoiceBackendAdapterProbe = {
+  backend_id: string;
+  ready: boolean;
+  status: string;
+  summary: string;
+  checked_at_ms: number;
+  root_exists: boolean;
+  python_exists: boolean;
+  model_dir_exists: boolean;
+  entry_exists: boolean;
+  markers_found: string[];
+  missing_markers: string[];
+  command_exit_code: number | null;
+  stdout_preview: string | null;
+  stderr_preview: string | null;
+  messages: string[];
+};
+
+type VoiceBackendAdapterDetail = {
+  template: VoiceBackendAdapterTemplate;
+  config: VoiceBackendAdapterConfig | null;
+  last_probe: VoiceBackendAdapterProbe | null;
 };
 
 type VoiceBenchmarkScoreTerm = {
@@ -949,8 +1037,23 @@ export function SubtitleEditorPage({ itemId }: { itemId: string }) {
     loudness_normalize: true,
   });
   const [voiceBackendCatalog, setVoiceBackendCatalog] = useState<VoiceBackendCatalog | null>(null);
+  const [voiceBackendAdapters, setVoiceBackendAdapters] = useState<VoiceBackendAdapterDetail[]>([]);
   const [voiceBackendRecommendation, setVoiceBackendRecommendation] =
     useState<VoiceBackendRecommendation | null>(null);
+  const [experimentalBackendId, setExperimentalBackendId] = useState("");
+  const [experimentalVariantLabel, setExperimentalVariantLabel] = useState("");
+  const [experimentalAutoPipeline, setExperimentalAutoPipeline] = useState(true);
+  const [experimentalQueueQc, setExperimentalQueueQc] = useState(true);
+  const [experimentalQueueExportPack, setExperimentalQueueExportPack] = useState(false);
+  const [experimentalRenderBusy, setExperimentalRenderBusy] = useState(false);
+  const [experimentalRenderJobId, setExperimentalRenderJobId] = useState<string | null>(null);
+  const [experimentalRenderJobStatus, setExperimentalRenderJobStatus] = useState<JobStatus | null>(
+    null,
+  );
+  const [experimentalRenderJobError, setExperimentalRenderJobError] = useState<string | null>(null);
+  const [experimentalRenderJobProgress, setExperimentalRenderJobProgress] = useState<number | null>(
+    null,
+  );
   const [voiceBenchmarkReport, setVoiceBenchmarkReport] = useState<VoiceBenchmarkReport | null>(null);
   const [voiceBenchmarkBusy, setVoiceBenchmarkBusy] = useState(false);
   const [voiceReferenceCurationReports, setVoiceReferenceCurationReports] = useState<
@@ -1248,7 +1351,7 @@ export function SubtitleEditorPage({ itemId }: { itemId: string }) {
         (max, setting) => Math.max(max, speakerProfilePaths(setting).length),
         0,
       );
-      const [nextCatalog, nextRecommendation] = await Promise.all([
+      const [nextCatalog, nextRecommendation, nextAdapters] = await Promise.all([
         invoke<VoiceBackendCatalog>("voice_backends_catalog"),
         invoke<VoiceBackendRecommendation>("voice_backends_recommend", {
           request: {
@@ -1258,10 +1361,12 @@ export function SubtitleEditorPage({ itemId }: { itemId: string }) {
             goal: voiceBackendGoal,
           },
         }),
+        invoke<VoiceBackendAdapterDetail[]>("voice_backend_adapters_list"),
       ]);
       setVoiceBackendCatalog(nextCatalog);
       setVoiceBackendRecommendation(nextRecommendation);
-      return { nextCatalog, nextRecommendation };
+      setVoiceBackendAdapters(nextAdapters);
+      return { nextCatalog, nextRecommendation, nextAdapters };
     } catch {
       return null;
     }
@@ -1545,6 +1650,50 @@ export function SubtitleEditorPage({ itemId }: { itemId: string }) {
       return (a.title ?? "").localeCompare(b.title ?? "");
     });
   }, [itemId, libraryItems]);
+
+  const experimentalReadyAdapters = useMemo(() => {
+    return voiceBackendAdapters.filter(
+      (detail) =>
+        !!detail.config?.enabled &&
+        !!detail.config?.render_command?.length &&
+        !!detail.last_probe?.ready,
+    );
+  }, [voiceBackendAdapters]);
+
+  useEffect(() => {
+    setExperimentalBackendId((prev) => {
+      if (
+        prev &&
+        voiceBackendAdapters.some((detail) => detail.template.backend_id === prev)
+      ) {
+        return prev;
+      }
+      const preferredPlanBackend = itemVoicePlan?.preferred_backend_id ?? null;
+      const preferredRecommendedBackend = voiceBackendRecommendation?.preferred_backend_id ?? null;
+      const preferredMatch =
+        voiceBackendAdapters.find((detail) =>
+          ttsBackendIdsMatch(detail.template.backend_id, preferredPlanBackend),
+        ) ??
+        voiceBackendAdapters.find((detail) =>
+          ttsBackendIdsMatch(detail.template.backend_id, preferredRecommendedBackend),
+        );
+      if (preferredMatch) return preferredMatch.template.backend_id;
+      if (experimentalReadyAdapters.length) return experimentalReadyAdapters[0].template.backend_id;
+      return voiceBackendAdapters[0]?.template.backend_id ?? "";
+    });
+  }, [
+    experimentalReadyAdapters,
+    itemVoicePlan?.preferred_backend_id,
+    voiceBackendAdapters,
+    voiceBackendRecommendation?.preferred_backend_id,
+  ]);
+
+  useEffect(() => {
+    setExperimentalVariantLabel((prev) => {
+      if (prev.trim()) return prev;
+      return itemVoicePlan?.selected_variant_label ?? normalizeVariantLabel(experimentalBackendId) ?? "";
+    });
+  }, [experimentalBackendId, itemVoicePlan?.selected_variant_label]);
 
   const latestItemJobByArtifactId = useMemo(() => {
     const map = new Map<string, JobRow>();
@@ -2489,6 +2638,41 @@ export function SubtitleEditorPage({ itemId }: { itemId: string }) {
       setError(String(e));
     } finally {
       setBusy(false);
+    }
+  }
+
+  async function enqueueExperimentalVoiceBackendRender() {
+    if (!trackId) return;
+    const backendId = experimentalBackendId.trim();
+    if (!backendId) {
+      setError("Choose an experimental backend first.");
+      return;
+    }
+    setExperimentalRenderBusy(true);
+    setError(null);
+    setNotice(null);
+    try {
+      const job = await invoke<JobRow>("jobs_enqueue_experimental_voice_backend_render_v1", {
+        itemId,
+        sourceTrackId: trackId,
+        backendId,
+        variantLabel: trimOrNull(experimentalVariantLabel),
+        autoPipeline: experimentalAutoPipeline,
+        separationBackend: separationBackend,
+        queueQc: experimentalQueueQc,
+        queueExportPack: experimentalQueueExportPack,
+      });
+      setExperimentalRenderJobId(job.id);
+      setExperimentalRenderJobStatus(job.status);
+      setExperimentalRenderJobError(job.error);
+      setExperimentalRenderJobProgress(job.progress);
+      setNotice(`Queued experimental render for ${backendId}.`);
+      refreshArtifacts().catch(() => undefined);
+      refreshItemJobs().catch(() => undefined);
+    } catch (e) {
+      setError(String(e));
+    } finally {
+      setExperimentalRenderBusy(false);
     }
   }
 
@@ -3735,6 +3919,42 @@ export function SubtitleEditorPage({ itemId }: { itemId: string }) {
   }, [dubVoicePreservingJobId]);
 
   useEffect(() => {
+    if (!experimentalRenderJobId) return;
+    let alive = true;
+    let timer: number | null = null;
+
+    async function tick() {
+      try {
+        const rows = await invoke<JobRow[]>("jobs_list", { limit: 200, offset: 0 });
+        const job = rows.find((j) => j.id === experimentalRenderJobId);
+        if (!alive || !job) return;
+        setExperimentalRenderJobStatus(job.status);
+        setExperimentalRenderJobError(job.error);
+        setExperimentalRenderJobProgress(job.progress);
+
+        if (job.status === "succeeded" || job.status === "failed" || job.status === "canceled") {
+          if (timer !== null) window.clearInterval(timer);
+          timer = null;
+          refreshArtifacts().catch(() => undefined);
+          refreshItemJobs().catch(() => undefined);
+        }
+      } catch {
+        // ignore polling errors
+      }
+    }
+
+    void tick();
+    timer = window.setInterval(() => {
+      void tick();
+    }, 1000);
+
+    return () => {
+      alive = false;
+      if (timer !== null) window.clearInterval(timer);
+    };
+  }, [experimentalRenderJobId, refreshArtifacts, refreshItemJobs]);
+
+  useEffect(() => {
     if (!qcJobId) return;
     let alive = true;
     let timer: number | null = null;
@@ -4073,6 +4293,9 @@ export function SubtitleEditorPage({ itemId }: { itemId: string }) {
     if (artifactId === "cleanup_vocals") return "clean_vocals_v1";
     if (artifactId === "tts_pyttsx3_manifest") return "tts_preview_pyttsx3_v1";
     if (artifactId === "tts_neural_manifest") return "tts_neural_local_v1";
+    if (artifactId.startsWith("tts_manifest_backend_") || artifactId.startsWith("tts_request_backend_") || artifactId.startsWith("tts_report_backend_")) {
+      return "experimental_voice_backend_render_v1";
+    }
     if (
       artifactId === "tts_voice_preserving_manifest" ||
       artifactId.startsWith("tts_voice_preserving_manifest_variant_")
@@ -4099,6 +4322,7 @@ export function SubtitleEditorPage({ itemId }: { itemId: string }) {
       variantLabel: artifactVariantLabel(artifact),
       trackId: artifactTrackId(artifact),
       muxContainer: artifactMuxContainer(artifact.id),
+      ttsBackendId: artifactTtsBackendId(artifact),
       rerunSupported:
         artifact.id.startsWith("sep_spleeter_") ||
         artifact.id.startsWith("sep_demucs_") ||
@@ -4106,6 +4330,9 @@ export function SubtitleEditorPage({ itemId }: { itemId: string }) {
         artifact.id === "tts_pyttsx3_manifest" ||
         artifact.id === "tts_neural_manifest" ||
         artifact.id === "tts_voice_preserving_manifest" ||
+        artifact.id.startsWith("tts_manifest_backend_") ||
+        artifact.id.startsWith("tts_request_backend_") ||
+        artifact.id.startsWith("tts_report_backend_") ||
         artifact.id === "dub_mix" ||
         artifact.id === "dub_speech_stem" ||
         artifact.id === "dub_mux_mp4" ||
@@ -4131,6 +4358,12 @@ export function SubtitleEditorPage({ itemId }: { itemId: string }) {
             ? "mkv"
             : "mp4"
           : null,
+      ttsBackendId:
+        job.job_type === "experimental_voice_backend_render_v1"
+          ? canonicalTtsBackendId(
+              asString(params?.backend_id) ?? asString(pipeline?.tts_backend_id) ?? null,
+            )
+          : canonicalTtsBackendId(asString(pipeline?.tts_backend_id) ?? null),
       rerunSupported: true,
     };
   }
@@ -4159,6 +4392,12 @@ export function SubtitleEditorPage({ itemId }: { itemId: string }) {
       artifactMeta.jobType === "export_pack_v1"
     ) {
       return jobMeta.variantLabel === artifactMeta.variantLabel;
+    }
+    if (artifactMeta.jobType === "experimental_voice_backend_render_v1") {
+      return (
+        jobMeta.variantLabel === artifactMeta.variantLabel &&
+        ttsBackendIdsMatch(jobMeta.ttsBackendId, artifactMeta.ttsBackendId)
+      );
     }
     return true;
   }
@@ -4234,6 +4473,37 @@ export function SubtitleEditorPage({ itemId }: { itemId: string }) {
       }
       if (artifact.id === "tts_voice_preserving_manifest") {
         await enqueueDubVoicePreservingV1();
+        return;
+      }
+      if (
+        artifact.id.startsWith("tts_manifest_backend_") ||
+        artifact.id.startsWith("tts_request_backend_") ||
+        artifact.id.startsWith("tts_report_backend_")
+      ) {
+        const backendId = artifactTtsBackendId(artifact);
+        const variantLabel = artifactVariantLabel(artifact);
+        if (!backendId) {
+          throw new Error("Experimental backend id could not be resolved for this artifact.");
+        }
+        setExperimentalBackendId(backendId);
+        if (variantLabel) {
+          setExperimentalVariantLabel(variantLabel);
+        }
+        const job = await invoke<JobRow>("jobs_enqueue_experimental_voice_backend_render_v1", {
+          itemId,
+          sourceTrackId: trackId,
+          backendId,
+          variantLabel,
+          autoPipeline: experimentalAutoPipeline,
+          separationBackend: separationBackend,
+          queueQc: experimentalQueueQc,
+          queueExportPack: experimentalQueueExportPack,
+        });
+        setExperimentalRenderJobId(job.id);
+        setExperimentalRenderJobStatus(job.status);
+        setExperimentalRenderJobError(job.error);
+        setExperimentalRenderJobProgress(job.progress);
+        setNotice(`Queued experimental render for ${backendId}.`);
         return;
       }
       if (artifact.id === "dub_mix" || artifact.id === "dub_speech_stem") {
@@ -6404,6 +6674,148 @@ export function SubtitleEditorPage({ itemId }: { itemId: string }) {
                           </div>
                         ))}
                     </div>
+                  </div>
+                ) : null}
+              </div>
+            </div>
+
+            <div style={{ marginTop: 16, display: "flex", flexDirection: "column", gap: 8 }}>
+              <div className="row" style={{ alignItems: "center", gap: 10, flexWrap: "wrap" }}>
+                <div style={{ fontSize: 12, opacity: 0.85 }}>Experimental backend runs</div>
+                <button
+                  type="button"
+                  disabled={
+                    busy ||
+                    experimentalRenderBusy ||
+                    !itemVoicePlan?.preferred_backend_id ||
+                    !voiceBackendAdapters.some((detail) =>
+                      ttsBackendIdsMatch(
+                        detail.template.backend_id,
+                        itemVoicePlan?.preferred_backend_id ?? null,
+                      ),
+                    )
+                  }
+                  onClick={() => {
+                    const match = voiceBackendAdapters.find((detail) =>
+                      ttsBackendIdsMatch(
+                        detail.template.backend_id,
+                        itemVoicePlan?.preferred_backend_id ?? null,
+                      ),
+                    );
+                    if (match) {
+                      setExperimentalBackendId(match.template.backend_id);
+                    }
+                  }}
+                >
+                  Use plan backend
+                </button>
+                <button
+                  type="button"
+                  disabled={busy || experimentalRenderBusy || !trackId || !experimentalBackendId.trim()}
+                  onClick={() => {
+                    enqueueExperimentalVoiceBackendRender().catch(() => undefined);
+                  }}
+                >
+                  Render experimental backend
+                </button>
+              </div>
+              <div style={{ fontSize: 12, opacity: 0.7 }}>
+                BYO adapters run locally against the current subtitle track and write request,
+                manifest, and report artifacts under the item. For auto mix/mux, run separation first.
+              </div>
+              <div
+                style={{
+                  border: "1px solid #e5e7eb",
+                  borderRadius: 8,
+                  padding: 10,
+                  display: "flex",
+                  flexDirection: "column",
+                  gap: 10,
+                }}
+              >
+                <label style={{ display: "flex", flexDirection: "column", gap: 6 }}>
+                  <span style={{ fontSize: 12, opacity: 0.75 }}>Backend</span>
+                  <select
+                    value={experimentalBackendId}
+                    disabled={busy || experimentalRenderBusy || !voiceBackendAdapters.length}
+                    onChange={(e) => setExperimentalBackendId(e.currentTarget.value)}
+                  >
+                    <option value="">Select BYO backend</option>
+                    {voiceBackendAdapters.map((detail) => {
+                      const renderReady =
+                        !!detail.config?.enabled &&
+                        !!detail.config?.render_command?.length &&
+                        !!detail.last_probe?.ready;
+                      return (
+                        <option key={detail.template.backend_id} value={detail.template.backend_id}>
+                          {detail.template.display_name}
+                          {renderReady ? " (ready)" : " (needs config/probe/render cmd)"}
+                        </option>
+                      );
+                    })}
+                  </select>
+                </label>
+                <label style={{ display: "flex", flexDirection: "column", gap: 6 }}>
+                  <span style={{ fontSize: 12, opacity: 0.75 }}>
+                    Variant label
+                  </span>
+                  <input
+                    value={experimentalVariantLabel}
+                    disabled={busy || experimentalRenderBusy}
+                    onChange={(e) => setExperimentalVariantLabel(e.currentTarget.value)}
+                    placeholder="cosyvoice_identity"
+                  />
+                </label>
+                <div className="row" style={{ gap: 12, flexWrap: "wrap" }}>
+                  <label style={{ display: "flex", alignItems: "center", gap: 8 }}>
+                    <input
+                      type="checkbox"
+                      checked={experimentalAutoPipeline}
+                      onChange={(e) => setExperimentalAutoPipeline(e.currentTarget.checked)}
+                    />
+                    <span>Auto mix/mux</span>
+                  </label>
+                  <label style={{ display: "flex", alignItems: "center", gap: 8 }}>
+                    <input
+                      type="checkbox"
+                      checked={experimentalQueueQc}
+                      disabled={!experimentalAutoPipeline}
+                      onChange={(e) => setExperimentalQueueQc(e.currentTarget.checked)}
+                    />
+                    <span>Queue QC</span>
+                  </label>
+                  <label style={{ display: "flex", alignItems: "center", gap: 8 }}>
+                    <input
+                      type="checkbox"
+                      checked={experimentalQueueExportPack}
+                      disabled={!experimentalAutoPipeline}
+                      onChange={(e) => setExperimentalQueueExportPack(e.currentTarget.checked)}
+                    />
+                    <span>Queue export pack</span>
+                  </label>
+                </div>
+                {experimentalBackendId ? (
+                  <div style={{ fontSize: 12, opacity: 0.75 }}>
+                    {voiceBackendAdapters.find(
+                      (detail) => detail.template.backend_id === experimentalBackendId,
+                    )?.last_probe?.summary ??
+                      "No probe summary yet for the selected backend."}
+                  </div>
+                ) : null}
+                {experimentalRenderJobId ? (
+                  <div style={{ fontSize: 12, opacity: 0.8 }}>
+                    Experimental render job <code>{experimentalRenderJobId.slice(0, 8)}</code>:{" "}
+                    {experimentalRenderJobStatus ?? "unknown"}{" "}
+                    {experimentalRenderJobProgress !== null
+                      ? `${Math.round(experimentalRenderJobProgress * 100)}%`
+                      : ""}
+                    {experimentalRenderJobError ? ` - ${experimentalRenderJobError}` : ""}
+                  </div>
+                ) : null}
+                {!experimentalReadyAdapters.length ? (
+                  <div style={{ fontSize: 12, opacity: 0.65 }}>
+                    No BYO backend is fully ready yet. Configure the adapter, add a render command,
+                    and run a successful probe in Diagnostics first.
                   </div>
                 ) : null}
               </div>
