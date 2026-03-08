@@ -2485,6 +2485,69 @@ async fn voice_benchmark_load(
 
 #[tauri::command]
 #[allow(non_snake_case)]
+async fn voice_benchmark_history_list(
+    state: State<'_, AppState>,
+    item_id: Option<String>,
+    itemId: Option<String>,
+    track_id: Option<String>,
+    trackId: Option<String>,
+    goal: Option<String>,
+) -> Result<Vec<voice_benchmarks::VoiceBenchmarkHistoryEntry>, String> {
+    let paths = state.paths.clone();
+    let item_id = item_id
+        .or(itemId)
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty())
+        .ok_or_else(|| "missing required key itemId".to_string())?;
+    let track_id = track_id
+        .or(trackId)
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty())
+        .ok_or_else(|| "missing required key trackId".to_string())?;
+    tauri::async_runtime::spawn_blocking(move || {
+        voice_benchmarks::list_voice_benchmark_history(&paths, &item_id, &track_id, goal.as_deref())
+            .map_err(|e| e.to_string())
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
+#[tauri::command]
+#[allow(non_snake_case)]
+async fn voice_benchmark_leaderboard_export(
+    state: State<'_, AppState>,
+    item_id: Option<String>,
+    itemId: Option<String>,
+    track_id: Option<String>,
+    trackId: Option<String>,
+    goal: Option<String>,
+) -> Result<voice_benchmarks::VoiceBenchmarkLeaderboardExport, String> {
+    let paths = state.paths.clone();
+    let item_id = item_id
+        .or(itemId)
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty())
+        .ok_or_else(|| "missing required key itemId".to_string())?;
+    let track_id = track_id
+        .or(trackId)
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty())
+        .ok_or_else(|| "missing required key trackId".to_string())?;
+    tauri::async_runtime::spawn_blocking(move || {
+        voice_benchmarks::export_voice_benchmark_leaderboard(
+            &paths,
+            &item_id,
+            &track_id,
+            goal.as_deref(),
+        )
+        .map_err(|e| e.to_string())
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
+#[tauri::command]
+#[allow(non_snake_case)]
 async fn voice_reference_curation_generate(
     state: State<'_, AppState>,
     item_id: Option<String>,
@@ -4278,6 +4341,8 @@ pub fn run() {
             voice_backends_catalog,
             voice_backends_recommend,
             voice_benchmark_generate,
+            voice_benchmark_history_list,
+            voice_benchmark_leaderboard_export,
             voice_benchmark_load,
             voice_reference_curation_generate,
             voice_reference_curation_load,

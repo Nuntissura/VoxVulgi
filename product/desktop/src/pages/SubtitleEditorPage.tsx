@@ -605,6 +605,50 @@ type VoiceBenchmarkReport = {
   candidates: VoiceBenchmarkCandidate[];
 };
 
+type VoiceBenchmarkHistoryEntry = {
+  generated_at_ms: number;
+  goal: string;
+  json_path: string;
+  markdown_path: string;
+  recommended_candidate_id: string | null;
+  candidate_count: number;
+  summary: string[];
+  top_candidate_display_name: string | null;
+  top_candidate_backend_id: string | null;
+  top_candidate_variant_label: string | null;
+  top_candidate_score: number | null;
+};
+
+type VoiceBenchmarkLeaderboardRow = {
+  aggregate_id: string;
+  display_name: string;
+  backend_id: string;
+  variant_label: string | null;
+  appearance_count: number;
+  win_count: number;
+  latest_generated_at_ms: number;
+  latest_score: number;
+  best_score: number;
+  average_score: number;
+  average_coverage_ratio: number;
+  average_timing_fit_ratio: number;
+};
+
+type VoiceBenchmarkLeaderboardExport = {
+  schema_version: number;
+  generated_at_ms: number;
+  item_id: string;
+  track_id: string;
+  goal: string;
+  source_report_count: number;
+  latest_report_json_path: string | null;
+  json_path: string;
+  markdown_path: string;
+  csv_path: string;
+  history: VoiceBenchmarkHistoryEntry[];
+  rows: VoiceBenchmarkLeaderboardRow[];
+};
+
 type VoiceReferenceCurationScoreTerm = {
   key: string;
   label: string;
@@ -1085,6 +1129,9 @@ export function SubtitleEditorPage({ itemId }: { itemId: string }) {
   const [experimentalBatchSummary, setExperimentalBatchSummary] =
     useState<ExperimentalBackendBatchQueueSummary | null>(null);
   const [voiceBenchmarkReport, setVoiceBenchmarkReport] = useState<VoiceBenchmarkReport | null>(null);
+  const [voiceBenchmarkHistory, setVoiceBenchmarkHistory] = useState<VoiceBenchmarkHistoryEntry[]>([]);
+  const [voiceBenchmarkLeaderboard, setVoiceBenchmarkLeaderboard] =
+    useState<VoiceBenchmarkLeaderboardExport | null>(null);
   const [voiceBenchmarkBusy, setVoiceBenchmarkBusy] = useState(false);
   const [voiceReferenceCurationReports, setVoiceReferenceCurationReports] = useState<
     Record<string, VoiceReferenceCurationReport | null>
@@ -2467,6 +2514,8 @@ export function SubtitleEditorPage({ itemId }: { itemId: string }) {
   const loadVoiceBenchmarkReport = useCallback(async () => {
     if (!trackId) {
       setVoiceBenchmarkReport(null);
+      setVoiceBenchmarkHistory([]);
+      setVoiceBenchmarkLeaderboard(null);
       return;
     }
     try {
@@ -2476,6 +2525,24 @@ export function SubtitleEditorPage({ itemId }: { itemId: string }) {
         goal: voiceBackendGoal,
       });
       setVoiceBenchmarkReport(report);
+    } catch (e) {
+      setError(String(e));
+    }
+  }, [itemId, trackId, voiceBackendGoal]);
+
+  const loadVoiceBenchmarkHistory = useCallback(async () => {
+    if (!trackId) {
+      setVoiceBenchmarkHistory([]);
+      setVoiceBenchmarkLeaderboard(null);
+      return;
+    }
+    try {
+      const history = await invoke<VoiceBenchmarkHistoryEntry[]>("voice_benchmark_history_list", {
+        itemId,
+        trackId,
+        goal: voiceBackendGoal,
+      });
+      setVoiceBenchmarkHistory(history);
     } catch (e) {
       setError(String(e));
     }
@@ -2493,7 +2560,42 @@ export function SubtitleEditorPage({ itemId }: { itemId: string }) {
         goal: voiceBackendGoal,
       });
       setVoiceBenchmarkReport(report);
+      const history = await invoke<VoiceBenchmarkHistoryEntry[]>("voice_benchmark_history_list", {
+        itemId,
+        trackId,
+        goal: voiceBackendGoal,
+      });
+      setVoiceBenchmarkHistory(history);
       setNotice("Generated voice benchmark report.");
+      refreshArtifacts().catch(() => undefined);
+    } catch (e) {
+      setError(String(e));
+    } finally {
+      setVoiceBenchmarkBusy(false);
+    }
+  }
+
+  async function exportVoiceBenchmarkLeaderboard() {
+    if (!trackId) return;
+    setVoiceBenchmarkBusy(true);
+    setError(null);
+    try {
+      const exportResult = await invoke<VoiceBenchmarkLeaderboardExport>(
+        "voice_benchmark_leaderboard_export",
+        {
+          itemId,
+          trackId,
+          goal: voiceBackendGoal,
+        },
+      );
+      setVoiceBenchmarkLeaderboard(exportResult);
+      const history = await invoke<VoiceBenchmarkHistoryEntry[]>("voice_benchmark_history_list", {
+        itemId,
+        trackId,
+        goal: voiceBackendGoal,
+      });
+      setVoiceBenchmarkHistory(history);
+      setNotice("Exported voice benchmark leaderboard.");
       refreshArtifacts().catch(() => undefined);
     } catch (e) {
       setError(String(e));
@@ -2601,7 +2703,8 @@ export function SubtitleEditorPage({ itemId }: { itemId: string }) {
 
   useEffect(() => {
     loadVoiceBenchmarkReport().catch(() => undefined);
-  }, [loadVoiceBenchmarkReport]);
+    loadVoiceBenchmarkHistory().catch(() => undefined);
+  }, [loadVoiceBenchmarkHistory, loadVoiceBenchmarkReport]);
 
   async function enqueueExportPack() {
     setBusy(true);
@@ -7060,6 +7163,24 @@ export function SubtitleEditorPage({ itemId }: { itemId: string }) {
                 </button>
                 <button
                   type="button"
+                  disabled={busy || voiceBenchmarkBusy || !trackId}
+                  onClick={() => {
+                    loadVoiceBenchmarkHistory().catch(() => undefined);
+                  }}
+                >
+                  Reload history
+                </button>
+                <button
+                  type="button"
+                  disabled={busy || voiceBenchmarkBusy || !trackId}
+                  onClick={() => {
+                    exportVoiceBenchmarkLeaderboard().catch(() => undefined);
+                  }}
+                >
+                  Export leaderboard
+                </button>
+                <button
+                  type="button"
                   disabled={busy || !voiceBenchmarkReport?.markdown_path}
                   onClick={() =>
                     openPathBestEffort(voiceBenchmarkReport?.markdown_path ?? "").catch(() => undefined)
@@ -7076,10 +7197,30 @@ export function SubtitleEditorPage({ itemId }: { itemId: string }) {
                 >
                   Reveal report
                 </button>
+                <button
+                  type="button"
+                  disabled={busy || !voiceBenchmarkLeaderboard?.markdown_path}
+                  onClick={() =>
+                    openPathBestEffort(voiceBenchmarkLeaderboard?.markdown_path ?? "").catch(() => undefined)
+                  }
+                >
+                  Open leaderboard
+                </button>
+                <button
+                  type="button"
+                  disabled={busy || !voiceBenchmarkLeaderboard?.csv_path}
+                  onClick={() =>
+                    openPathBestEffort(voiceBenchmarkLeaderboard?.csv_path ?? "").catch(() => undefined)
+                  }
+                >
+                  Open CSV
+                </button>
               </div>
               <div style={{ marginTop: 8, fontSize: 12, opacity: 0.7 }}>
                 Benchmarks rank current rendered voice candidates and variants using local timing,
-                coverage, reference health, output health, and similarity-proxy signals.
+                coverage, reference health, output health, and similarity-proxy signals. VoxVulgi
+                now archives immutable snapshots so you can compare runs over time instead of only
+                replacing the latest report.
               </div>
               {voiceBenchmarkReport ? (
                 <div
@@ -7187,6 +7328,123 @@ export function SubtitleEditorPage({ itemId }: { itemId: string }) {
                   No benchmark report saved yet for this track and goal.
                 </div>
               )}
+              <div style={{ marginTop: 10, display: "flex", flexDirection: "column", gap: 8 }}>
+                <div style={{ fontSize: 12, opacity: 0.85 }}>Compare history</div>
+                {voiceBenchmarkHistory.length ? (
+                  <div
+                    style={{
+                      border: "1px solid #e5e7eb",
+                      borderRadius: 8,
+                      padding: 10,
+                      display: "flex",
+                      flexDirection: "column",
+                      gap: 8,
+                    }}
+                  >
+                    {voiceBenchmarkHistory.slice(0, 6).map((entry, index) => {
+                      const currentTopScore = voiceBenchmarkReport?.candidates[0]?.score ?? null;
+                      const delta =
+                        currentTopScore !== null && entry.top_candidate_score !== null
+                          ? entry.top_candidate_score - currentTopScore
+                          : null;
+                      return (
+                        <div
+                          key={`benchmark-history-${entry.generated_at_ms}-${index}`}
+                          style={{
+                            border: "1px solid #e5e7eb",
+                            borderRadius: 8,
+                            padding: 10,
+                            display: "flex",
+                            flexDirection: "column",
+                            gap: 6,
+                          }}
+                        >
+                          <div className="row" style={{ justifyContent: "space-between", gap: 10 }}>
+                            <div style={{ fontWeight: 600 }}>
+                              {formatTs(entry.generated_at_ms)} /{" "}
+                              {entry.top_candidate_display_name ?? "No winner"}
+                            </div>
+                            <code>
+                              {entry.top_candidate_score === null
+                                ? "-"
+                                : entry.top_candidate_score.toFixed(1)}
+                            </code>
+                          </div>
+                          <div style={{ fontSize: 12, opacity: 0.78 }}>
+                            {entry.top_candidate_backend_id ?? "-"}
+                            {entry.top_candidate_variant_label
+                              ? ` / ${entry.top_candidate_variant_label}`
+                              : ""}
+                            {delta === null
+                              ? ""
+                              : ` / delta vs current ${delta >= 0 ? "+" : ""}${delta.toFixed(1)}`}
+                          </div>
+                          {entry.summary.length ? (
+                            <div style={{ fontSize: 12, opacity: 0.72 }}>
+                              {entry.summary.join(" ")}
+                            </div>
+                          ) : null}
+                          <div className="row" style={{ gap: 8, flexWrap: "wrap" }}>
+                            <button
+                              type="button"
+                              disabled={busy || !entry.markdown_path}
+                              onClick={() =>
+                                openPathBestEffort(entry.markdown_path).catch(() => undefined)
+                              }
+                            >
+                              Open markdown
+                            </button>
+                            <button
+                              type="button"
+                              disabled={busy || !entry.json_path}
+                              onClick={() =>
+                                revealPath(entry.json_path).catch((e) => setError(String(e)))
+                              }
+                            >
+                              Reveal snapshot
+                            </button>
+                          </div>
+                        </div>
+                      );
+                    })}
+                  </div>
+                ) : (
+                  <div style={{ fontSize: 12, opacity: 0.65 }}>
+                    No prior benchmark snapshots saved yet for this track and goal.
+                  </div>
+                )}
+                {voiceBenchmarkLeaderboard ? (
+                  <div
+                    style={{
+                      border: "1px solid #e5e7eb",
+                      borderRadius: 8,
+                      padding: 10,
+                      display: "flex",
+                      flexDirection: "column",
+                      gap: 8,
+                    }}
+                  >
+                    <div className="row" style={{ justifyContent: "space-between", gap: 10 }}>
+                      <div style={{ fontWeight: 600 }}>
+                        Leaderboard export / {voiceBenchmarkLeaderboard.rows.length} candidate row(s)
+                      </div>
+                      <code>{formatTs(voiceBenchmarkLeaderboard.generated_at_ms)}</code>
+                    </div>
+                    <div style={{ fontSize: 12, opacity: 0.75 }}>
+                      {voiceBenchmarkLeaderboard.source_report_count} report snapshot(s) aggregated.
+                    </div>
+                    {voiceBenchmarkLeaderboard.rows.slice(0, 4).map((row, index) => (
+                      <div
+                        key={`benchmark-leaderboard-${row.aggregate_id}`}
+                        style={{ fontSize: 12, opacity: 0.82 }}
+                      >
+                        #{index + 1} {row.display_name}: wins {row.win_count}, latest{" "}
+                        {row.latest_score.toFixed(1)}, avg {row.average_score.toFixed(1)}
+                      </div>
+                    ))}
+                  </div>
+                ) : null}
+              </div>
             </div>
 
             <div style={{ marginTop: 16 }}>

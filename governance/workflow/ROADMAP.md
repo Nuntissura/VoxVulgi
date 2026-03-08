@@ -72,7 +72,7 @@ Date: 2026-03-08
 ## Voice Backend Operations and Reuse (2026-03)
 
 - WP-0114: Batch experimental backend runs across one bounded item set using shared batch IDs and backend-aware queue summaries. DONE.
-- WP-0115: Benchmark leaderboard export and compare history with durable snapshot artifacts.
+- WP-0115: Benchmark leaderboard export and compare history with durable snapshot artifacts. DONE.
 - WP-0116: Backend-specific starter recipes/templates for CosyVoice, Seed-VC, XTTS-style adapters, and similar local BYO stacks.
 - WP-0117: Promote benchmark winners directly into reusable voice-template and cast-pack defaults so later items inherit proven backend choices.
 

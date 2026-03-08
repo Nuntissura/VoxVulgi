@@ -339,10 +339,10 @@ Voice benchmark lab design:
   - engine module `voice_benchmarks` discovers manifest-backed candidates per item/track,
   - it reuses existing local voice QC analysis for reference/output health and combines that with subtitle timing-fit metrics,
   - it writes durable `voice_benchmark_v1_<track>_<goal>.json` and `.md` artifacts under `derived/items/<item>/voice_benchmark/`,
-  - Localization Studio loads and displays the top benchmark candidates for the currently selected goal.
+  - Localization Studio loads and displays the top benchmark candidates for the currently selected goal,
+  - immutable snapshot copies are archived under a history folder for the same item/track/goal,
+  - leaderboard exports are written as durable JSON/Markdown/CSV artifacts built from the saved snapshot set.
 - Next operational tranche:
-  - keep the stable latest-report path while also archiving immutable benchmark snapshots under a compare-history folder,
-  - expose list/load/export commands so the UI can compare earlier runs and export leaderboard views as JSON/Markdown/CSV,
   - allow batch render flows to optionally emit or refresh benchmark artifacts over a bounded item set.
 
 Reference-curation design:

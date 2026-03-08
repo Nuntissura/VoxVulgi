@@ -3,7 +3,7 @@
 ## Metadata
 - ID: WP-0115
 - Owner: Codex
-- Status: BACKLOG
+- Status: DONE
 - Created: 2026-03-08
 - Target milestone: Voice backend modernization
 
@@ -42,3 +42,4 @@ Out of scope:
 ## Status updates
 
 - 2026-03-08: Created from the research-driven operational backend tranche.
+- 2026-03-08: Implemented immutable benchmark snapshot history, leaderboard export artifacts, Localization Studio compare history, and proof under `product/desktop/Build Target/tool_artifacts/wp_runs/WP-0115/20260308_163900/`.

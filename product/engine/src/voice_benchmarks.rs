@@ -61,6 +61,53 @@ pub struct VoiceBenchmarkReport {
     pub candidates: Vec<VoiceBenchmarkCandidate>,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct VoiceBenchmarkHistoryEntry {
+    pub generated_at_ms: i64,
+    pub goal: String,
+    pub json_path: String,
+    pub markdown_path: String,
+    pub recommended_candidate_id: Option<String>,
+    pub candidate_count: usize,
+    pub summary: Vec<String>,
+    pub top_candidate_display_name: Option<String>,
+    pub top_candidate_backend_id: Option<String>,
+    pub top_candidate_variant_label: Option<String>,
+    pub top_candidate_score: Option<f32>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct VoiceBenchmarkLeaderboardRow {
+    pub aggregate_id: String,
+    pub display_name: String,
+    pub backend_id: String,
+    pub variant_label: Option<String>,
+    pub appearance_count: usize,
+    pub win_count: usize,
+    pub latest_generated_at_ms: i64,
+    pub latest_score: f32,
+    pub best_score: f32,
+    pub average_score: f32,
+    pub average_coverage_ratio: f32,
+    pub average_timing_fit_ratio: f32,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct VoiceBenchmarkLeaderboardExport {
+    pub schema_version: u32,
+    pub generated_at_ms: i64,
+    pub item_id: String,
+    pub track_id: String,
+    pub goal: String,
+    pub source_report_count: usize,
+    pub latest_report_json_path: Option<String>,
+    pub json_path: String,
+    pub markdown_path: String,
+    pub csv_path: String,
+    pub history: Vec<VoiceBenchmarkHistoryEntry>,
+    pub rows: Vec<VoiceBenchmarkLeaderboardRow>,
+}
+
 #[derive(Debug, Clone, Deserialize)]
 struct TtsManifestMeta {
     #[serde(default)]
@@ -132,8 +179,10 @@ pub fn generate_voice_benchmark_report(
         candidates,
     };
     let json = serde_json::to_string_pretty(&report)?;
+    let markdown = render_markdown(&report);
     std::fs::write(&json_path, format!("{json}\n"))?;
-    std::fs::write(&markdown_path, render_markdown(&report))?;
+    std::fs::write(&markdown_path, &markdown)?;
+    archive_benchmark_snapshot(paths, &report, &json, &markdown)?;
     Ok(report)
 }
 
@@ -150,6 +199,69 @@ pub fn load_voice_benchmark_report(
     }
     let bytes = std::fs::read(json_path)?;
     Ok(Some(serde_json::from_slice::<VoiceBenchmarkReport>(&bytes)?))
+}
+
+pub fn list_voice_benchmark_history(
+    paths: &AppPaths,
+    item_id: &str,
+    track_id: &str,
+    goal: Option<&str>,
+) -> Result<Vec<VoiceBenchmarkHistoryEntry>> {
+    let goal = normalize_goal(goal);
+    let reports = load_benchmark_history_reports(paths, item_id, track_id, &goal)?;
+    Ok(reports
+        .into_iter()
+        .map(history_entry_from_report)
+        .collect::<Vec<_>>())
+}
+
+pub fn export_voice_benchmark_leaderboard(
+    paths: &AppPaths,
+    item_id: &str,
+    track_id: &str,
+    goal: Option<&str>,
+) -> Result<VoiceBenchmarkLeaderboardExport> {
+    let goal = normalize_goal(goal);
+    let reports = load_benchmark_history_reports(paths, item_id, track_id, &goal)?;
+    if reports.is_empty() {
+        return Err(crate::EngineError::InstallFailed(
+            "no voice benchmark history found; generate a benchmark report first".to_string(),
+        ));
+    }
+    let history = reports
+        .iter()
+        .cloned()
+        .map(|report| history_entry_from_report(report))
+        .collect::<Vec<_>>();
+    let rows = build_leaderboard_rows(&reports);
+    let (json_path, markdown_path, csv_path) =
+        leaderboard_export_paths(paths, item_id, track_id, &goal);
+    if let Some(parent) = json_path.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    let latest_report_json_path = reports
+        .first()
+        .map(|report| report.json_path.clone())
+        .filter(|value| !value.trim().is_empty());
+    let export = VoiceBenchmarkLeaderboardExport {
+        schema_version: 1,
+        generated_at_ms: now_ms(),
+        item_id: item_id.to_string(),
+        track_id: track_id.to_string(),
+        goal,
+        source_report_count: history.len(),
+        latest_report_json_path,
+        json_path: json_path.to_string_lossy().to_string(),
+        markdown_path: markdown_path.to_string_lossy().to_string(),
+        csv_path: csv_path.to_string_lossy().to_string(),
+        history,
+        rows,
+    };
+    let json = serde_json::to_string_pretty(&export)?;
+    std::fs::write(&json_path, format!("{json}\n"))?;
+    std::fs::write(&markdown_path, render_leaderboard_markdown(&export))?;
+    std::fs::write(&csv_path, render_leaderboard_csv(&export))?;
+    Ok(export)
 }
 
 fn build_candidate_reports(
@@ -652,6 +764,286 @@ fn benchmark_report_paths(
     (dir.join(format!("{stem}.json")), dir.join(format!("{stem}.md")))
 }
 
+fn benchmark_history_dir(paths: &AppPaths, item_id: &str, track_id: &str, goal: &str) -> PathBuf {
+    paths
+        .derived_item_dir(item_id)
+        .join("voice_benchmark")
+        .join("history")
+        .join(format!("{track_id}_{goal}"))
+}
+
+fn benchmark_snapshot_paths(
+    paths: &AppPaths,
+    item_id: &str,
+    track_id: &str,
+    goal: &str,
+    generated_at_ms: i64,
+) -> (PathBuf, PathBuf) {
+    let dir = benchmark_history_dir(paths, item_id, track_id, goal);
+    let stem = format!("voice_benchmark_snapshot_v1_{track_id}_{goal}_{generated_at_ms}");
+    (dir.join(format!("{stem}.json")), dir.join(format!("{stem}.md")))
+}
+
+fn leaderboard_export_paths(
+    paths: &AppPaths,
+    item_id: &str,
+    track_id: &str,
+    goal: &str,
+) -> (PathBuf, PathBuf, PathBuf) {
+    let dir = paths.derived_item_dir(item_id).join("voice_benchmark");
+    let stem = format!("voice_benchmark_leaderboard_v1_{track_id}_{goal}");
+    (
+        dir.join(format!("{stem}.json")),
+        dir.join(format!("{stem}.md")),
+        dir.join(format!("{stem}.csv")),
+    )
+}
+
+fn archive_benchmark_snapshot(
+    paths: &AppPaths,
+    report: &VoiceBenchmarkReport,
+    json: &str,
+    markdown: &str,
+) -> Result<()> {
+    let (json_path, markdown_path) = benchmark_snapshot_paths(
+        paths,
+        &report.item_id,
+        &report.track_id,
+        &report.goal,
+        report.generated_at_ms,
+    );
+    if let Some(parent) = json_path.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    std::fs::write(&json_path, format!("{json}\n"))?;
+    std::fs::write(&markdown_path, markdown)?;
+    Ok(())
+}
+
+fn load_benchmark_history_reports(
+    paths: &AppPaths,
+    item_id: &str,
+    track_id: &str,
+    goal: &str,
+) -> Result<Vec<VoiceBenchmarkReport>> {
+    let history_dir = benchmark_history_dir(paths, item_id, track_id, goal);
+    let mut reports: Vec<VoiceBenchmarkReport> = Vec::new();
+    if history_dir.exists() {
+        for entry in std::fs::read_dir(&history_dir)?.flatten() {
+            let path = entry.path();
+            if !path.is_file() || path.extension().and_then(|value| value.to_str()) != Some("json") {
+                continue;
+            }
+            let bytes = match std::fs::read(&path) {
+                Ok(value) => value,
+                Err(_) => continue,
+            };
+            let report = match serde_json::from_slice::<VoiceBenchmarkReport>(&bytes) {
+                Ok(value) => value,
+                Err(_) => continue,
+            };
+            if report.item_id == item_id && report.track_id == track_id && report.goal == goal {
+                reports.push(report);
+            }
+        }
+    }
+    if reports.is_empty() {
+        if let Some(report) = load_voice_benchmark_report(paths, item_id, track_id, Some(goal))? {
+            reports.push(report);
+        }
+    }
+    reports.sort_by(|a, b| b.generated_at_ms.cmp(&a.generated_at_ms));
+    Ok(reports)
+}
+
+fn history_entry_from_report(report: VoiceBenchmarkReport) -> VoiceBenchmarkHistoryEntry {
+    let top = report.candidates.first();
+    VoiceBenchmarkHistoryEntry {
+        generated_at_ms: report.generated_at_ms,
+        goal: report.goal,
+        json_path: report.json_path,
+        markdown_path: report.markdown_path,
+        recommended_candidate_id: report.recommended_candidate_id,
+        candidate_count: report.candidate_count,
+        summary: report.summary,
+        top_candidate_display_name: top.map(|value| value.display_name.clone()),
+        top_candidate_backend_id: top.map(|value| value.backend_id.clone()),
+        top_candidate_variant_label: top.and_then(|value| value.variant_label.clone()),
+        top_candidate_score: top.map(|value| value.score),
+    }
+}
+
+#[derive(Debug, Clone)]
+struct LeaderboardAccumulator {
+    aggregate_id: String,
+    display_name: String,
+    backend_id: String,
+    variant_label: Option<String>,
+    appearance_count: usize,
+    win_count: usize,
+    latest_generated_at_ms: i64,
+    latest_score: f32,
+    best_score: f32,
+    total_score: f32,
+    total_coverage_ratio: f32,
+    total_timing_fit_ratio: f32,
+}
+
+fn build_leaderboard_rows(reports: &[VoiceBenchmarkReport]) -> Vec<VoiceBenchmarkLeaderboardRow> {
+    let mut by_candidate: HashMap<String, LeaderboardAccumulator> = HashMap::new();
+    for report in reports {
+        let winner_key = report
+            .candidates
+            .first()
+            .map(|candidate| aggregate_candidate_key(&candidate.backend_id, candidate.variant_label.as_deref()));
+        for candidate in &report.candidates {
+            let key = aggregate_candidate_key(&candidate.backend_id, candidate.variant_label.as_deref());
+            let entry = by_candidate.entry(key.clone()).or_insert_with(|| LeaderboardAccumulator {
+                aggregate_id: key.clone(),
+                display_name: candidate.display_name.clone(),
+                backend_id: candidate.backend_id.clone(),
+                variant_label: candidate.variant_label.clone(),
+                appearance_count: 0,
+                win_count: 0,
+                latest_generated_at_ms: report.generated_at_ms,
+                latest_score: candidate.score,
+                best_score: candidate.score,
+                total_score: 0.0,
+                total_coverage_ratio: 0.0,
+                total_timing_fit_ratio: 0.0,
+            });
+            entry.appearance_count += 1;
+            if winner_key.as_deref() == Some(key.as_str()) {
+                entry.win_count += 1;
+            }
+            if report.generated_at_ms >= entry.latest_generated_at_ms {
+                entry.latest_generated_at_ms = report.generated_at_ms;
+                entry.latest_score = candidate.score;
+                entry.display_name = candidate.display_name.clone();
+                entry.backend_id = candidate.backend_id.clone();
+                entry.variant_label = candidate.variant_label.clone();
+            }
+            entry.best_score = entry.best_score.max(candidate.score);
+            entry.total_score += candidate.score;
+            entry.total_coverage_ratio += candidate.coverage_ratio;
+            entry.total_timing_fit_ratio += candidate.timing_fit_ratio;
+        }
+    }
+
+    let mut rows = by_candidate
+        .into_values()
+        .map(|value| VoiceBenchmarkLeaderboardRow {
+            aggregate_id: value.aggregate_id,
+            display_name: value.display_name,
+            backend_id: value.backend_id,
+            variant_label: value.variant_label,
+            appearance_count: value.appearance_count,
+            win_count: value.win_count,
+            latest_generated_at_ms: value.latest_generated_at_ms,
+            latest_score: value.latest_score,
+            best_score: value.best_score,
+            average_score: value.total_score / value.appearance_count.max(1) as f32,
+            average_coverage_ratio: value.total_coverage_ratio / value.appearance_count.max(1) as f32,
+            average_timing_fit_ratio: value.total_timing_fit_ratio / value.appearance_count.max(1) as f32,
+        })
+        .collect::<Vec<_>>();
+    rows.sort_by(|a, b| {
+        b.win_count
+            .cmp(&a.win_count)
+            .then_with(|| {
+                b.latest_score
+                    .partial_cmp(&a.latest_score)
+                    .unwrap_or(std::cmp::Ordering::Equal)
+            })
+            .then_with(|| {
+                b.average_score
+                    .partial_cmp(&a.average_score)
+                    .unwrap_or(std::cmp::Ordering::Equal)
+            })
+            .then_with(|| a.display_name.cmp(&b.display_name))
+    });
+    rows
+}
+
+fn aggregate_candidate_key(backend_id: &str, variant_label: Option<&str>) -> String {
+    candidate_id(backend_id, variant_label)
+}
+
+fn render_leaderboard_markdown(export: &VoiceBenchmarkLeaderboardExport) -> String {
+    let mut out = String::new();
+    out.push_str("# Voice Benchmark Leaderboard\n\n");
+    out.push_str(&format!(
+        "- Item: `{}`\n- Track: `{}`\n- Goal: `{}`\n- Source reports: `{}`\n- Generated: `{}`\n\n",
+        export.item_id, export.track_id, export.goal, export.source_report_count, export.generated_at_ms
+    ));
+    out.push_str(
+        "| Rank | Candidate | Wins | Appearances | Latest | Best | Avg | Coverage | Timing |\n| --- | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: |\n",
+    );
+    for (index, row) in export.rows.iter().enumerate() {
+        out.push_str(&format!(
+            "| {} | {} | {} | {} | {:.1} | {:.1} | {:.1} | {:.0}% | {:.0}% |\n",
+            index + 1,
+            row.display_name,
+            row.win_count,
+            row.appearance_count,
+            row.latest_score,
+            row.best_score,
+            row.average_score,
+            row.average_coverage_ratio * 100.0,
+            row.average_timing_fit_ratio * 100.0
+        ));
+    }
+    if !export.history.is_empty() {
+        out.push_str("\n## Compare History\n\n");
+        for entry in &export.history {
+            out.push_str(&format!(
+                "- `{}` winner: `{}` score `{}` ({})\n",
+                entry.generated_at_ms,
+                entry.top_candidate_display_name.as_deref().unwrap_or("-"),
+                entry
+                    .top_candidate_score
+                    .map(|value| format!("{value:.1}"))
+                    .unwrap_or_else(|| "-".to_string()),
+                entry.top_candidate_backend_id.as_deref().unwrap_or("-")
+            ));
+        }
+    }
+    out
+}
+
+fn render_leaderboard_csv(export: &VoiceBenchmarkLeaderboardExport) -> String {
+    let mut out = String::from(
+        "rank,aggregate_id,display_name,backend_id,variant_label,wins,appearances,latest_score,best_score,average_score,average_coverage_ratio,average_timing_fit_ratio,latest_generated_at_ms\n",
+    );
+    for (index, row) in export.rows.iter().enumerate() {
+        out.push_str(&format!(
+            "{},{},{},{},{},{},{},{:.3},{:.3},{:.3},{:.6},{:.6},{}\n",
+            index + 1,
+            csv_escape(&row.aggregate_id),
+            csv_escape(&row.display_name),
+            csv_escape(&row.backend_id),
+            csv_escape(row.variant_label.as_deref().unwrap_or("")),
+            row.win_count,
+            row.appearance_count,
+            row.latest_score,
+            row.best_score,
+            row.average_score,
+            row.average_coverage_ratio,
+            row.average_timing_fit_ratio,
+            row.latest_generated_at_ms
+        ));
+    }
+    out
+}
+
+fn csv_escape(value: &str) -> String {
+    if value.contains(',') || value.contains('"') || value.contains('\n') {
+        format!("\"{}\"", value.replace('"', "\"\""))
+    } else {
+        value.to_string()
+    }
+}
+
 fn manifest_path(item_dir: &Path, backend_dir: &str, variant_label: Option<&str>) -> PathBuf {
     tts_variant_dir(item_dir, backend_dir, variant_label).join("manifest.json")
 }
@@ -894,6 +1286,7 @@ mod tests {
     use crate::db;
     use crate::subtitles::{SubtitleDocument, SubtitleSegment, SUBTITLE_JSON_SCHEMA_VERSION};
     use rusqlite::params;
+    use std::time::Duration;
 
     #[test]
     fn discover_manifest_candidates_reads_base_and_variant_manifests() {
@@ -1017,6 +1410,130 @@ mod tests {
         assert_eq!(report.candidate_count, 1);
         assert!(Path::new(&report.json_path).exists());
         assert!(Path::new(&report.markdown_path).exists());
+        let history =
+            list_voice_benchmark_history(&paths, "item-1", "track-1", Some("balanced"))
+                .expect("history");
+        assert_eq!(history.len(), 1);
+        assert!(Path::new(&history[0].json_path).exists());
+        assert!(Path::new(&history[0].markdown_path).exists());
+    }
+
+    #[test]
+    fn export_voice_benchmark_leaderboard_writes_json_markdown_and_csv() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let paths = AppPaths::new(dir.path().to_path_buf());
+        if std::process::Command::new(paths.ffmpeg_cmd())
+            .arg("-version")
+            .output()
+            .is_err()
+        {
+            return;
+        }
+        db::ensure_schema(&paths).expect("schema");
+        seed_item_and_track(&paths);
+
+        let item_dir = paths.derived_item_dir("item-1");
+        let base_dir = item_dir.join("tts_preview").join("dub_voice_preserving_v1");
+        let variant_dir = base_dir.join("variants").join("alt_a");
+        std::fs::create_dir_all(&variant_dir).expect("variant dir");
+        let base_audio = base_dir.join("seg_0001.wav");
+        let variant_audio = variant_dir.join("seg_0001.wav");
+        write_sine_wav(&base_audio, 16_000, 900);
+        write_sine_wav(&variant_audio, 16_000, 1100);
+        let base_manifest = serde_json::json!({
+            "backend": "dub_voice_preserving_v1",
+            "track_id": "track-1",
+            "segments": [{
+                "index": 1,
+                "start_ms": 0,
+                "end_ms": 1200,
+                "speaker": "S1",
+                "audio_path": base_audio.to_string_lossy().to_string(),
+                "audio_exists": true
+            }]
+        });
+        let variant_manifest = serde_json::json!({
+            "backend": "dub_voice_preserving_v1",
+            "track_id": "track-1",
+            "segments": [{
+                "index": 1,
+                "start_ms": 0,
+                "end_ms": 1200,
+                "speaker": "S1",
+                "audio_path": variant_audio.to_string_lossy().to_string(),
+                "audio_exists": true
+            }]
+        });
+        std::fs::write(
+            base_dir.join("manifest.json"),
+            format!("{}\n", serde_json::to_string_pretty(&base_manifest).expect("base manifest")),
+        )
+        .expect("write base manifest");
+        std::fs::write(
+            variant_dir.join("manifest.json"),
+            format!(
+                "{}\n",
+                serde_json::to_string_pretty(&variant_manifest).expect("variant manifest")
+            ),
+        )
+        .expect("write variant manifest");
+        std::fs::write(
+            base_dir.join("tts_voice_preserving_report.json"),
+            "{\n  \"segments_total\": 1,\n  \"segments_base_ok\": 1,\n  \"segments_converted_ok\": 1\n}\n",
+        )
+        .expect("write base report");
+        std::fs::write(
+            variant_dir.join("tts_voice_preserving_report_alt_a.json"),
+            "{\n  \"segments_total\": 1,\n  \"segments_base_ok\": 1,\n  \"segments_converted_ok\": 1\n}\n",
+        )
+        .expect("write variant report");
+
+        let reference_path = paths.base_dir.join("refs").join("speaker.wav");
+        if let Some(parent) = reference_path.parent() {
+            std::fs::create_dir_all(parent).expect("refs dir");
+        }
+        write_sine_wav(&reference_path, 16_000, 1300);
+        crate::speakers::upsert_item_speaker_setting(
+            &paths,
+            "item-1",
+            "S1",
+            Some("Speaker 1".to_string()),
+            None,
+            None,
+            Some(reference_path.to_string_lossy().to_string()),
+            Some(vec![reference_path.to_string_lossy().to_string()]),
+            None,
+            None,
+            None,
+            None,
+            None,
+        )
+        .expect("speaker");
+
+        let first =
+            generate_voice_benchmark_report(&paths, "item-1", "track-1", Some("balanced"))
+                .expect("first report");
+        std::thread::sleep(Duration::from_millis(2));
+        let second =
+            generate_voice_benchmark_report(&paths, "item-1", "track-1", Some("balanced"))
+                .expect("second report");
+
+        let export =
+            export_voice_benchmark_leaderboard(&paths, "item-1", "track-1", Some("balanced"))
+                .expect("export");
+        assert!(Path::new(&export.json_path).exists());
+        assert!(Path::new(&export.markdown_path).exists());
+        assert!(Path::new(&export.csv_path).exists());
+        assert!(export.source_report_count >= 2);
+        assert!(export.rows.len() >= 2);
+        assert_eq!(
+            export.latest_report_json_path.as_deref(),
+            Some(second.json_path.as_str())
+        );
+        assert!(export
+            .history
+            .iter()
+            .any(|entry| entry.generated_at_ms == first.generated_at_ms));
     }
 
     fn sample_candidate(
