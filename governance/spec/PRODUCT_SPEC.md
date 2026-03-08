@@ -180,13 +180,17 @@ Initial language focus: **Korean + Japanese → English**.
 - Backend-comparison additions:
   - Localization Studio should include a benchmark lab that ranks current outputs and variants for an item,
   - benchmark reports should explain timing fit, coverage, reference health, silence/clipping/noise issues, and similarity proxies,
-  - backend selection changes should be evidence-driven through durable report artifacts instead of implicit replacement of the shipped default.
+  - backend selection changes should be evidence-driven through durable report artifacts instead of implicit replacement of the shipped default,
+  - benchmark and recommendation outcomes should be promotable into an explicit item-scoped voice plan instead of living only as transient UI state,
+  - operators should be able to run configured experimental BYO backends into standard VoxVulgi manifests for real side-by-side comparison,
+  - reference bundles should be rankable and promotable so the app helps choose the best subset/order of multi-reference clips.
 
 Current implementation status:
 
 - Localization Studio surfaces batch dubbing, A/B speaker previews, export stems/alternates visibility, voice memory, character libraries, and reference cleanup controls.
 - Localization Studio now also generates goal-aware voice benchmark reports, stores them as durable JSON/Markdown artifacts, and surfaces the top-ranked candidates with explainable metric breakdowns.
 - Diagnostics now exposes a local-only BYO backend registry where operators can save, probe, and remove experimental backend adapters without bundling or auto-installing those stacks.
+- The next implementation tranche should turn these advisory surfaces into execution workflow by adding item voice plans, reference-bundle curation, and experimental backend render runs.
 - Export packs include speech stems and alternate dubbed variants when available.
 - Artifact-browser actions must remain variant-aware:
   - rerun, status, and log links for A/B/alternate artifacts must target the matching variant/track/container instead of falling back to the base artifact state,
@@ -213,7 +217,10 @@ Current implementation status:
   - deeper reuse/reporting workflows on top of the now-implemented memory/character libraries,
   - a backend-catalog and recommendation system for voice cloning and dubbing,
   - explicit BYO adapter support for experimental local backends,
-  - benchmark-driven promotion of future managed backends.
+  - benchmark-driven promotion of future managed backends,
+  - item-scoped backend plans that persist operator decisions,
+  - ranked reference-bundle curation and promotion,
+  - experimental backend execution against real subtitle tracks via explicit local adapters.
 
 ## 7) UX Principles
 
