@@ -57,3 +57,12 @@ This changelog tracks desktop installer builds produced by `governance/scripts/b
   - `product/desktop/Build Target/Current/release/bundle/nsis/VoxVulgi_0.1.4_x64-setup.exe`
   - `product/desktop/Build Target/Current/release/bundle/msi/VoxVulgi_0.1.4_x64_en-US.msi`
 - Notes: Installer build after voice workflow remediation hardening on 2026-03-07.
+
+## 0.1.5 - 2026-03-08T19:48:51Z
+- Work Packets: `WP-0129`, `WP-0130`
+- Commit: `eb54fd6`
+- Offline Bundle ID: `offline_full_win64_20260308_191916`
+- Artifacts:
+  - `product/desktop/Build Target/Current/release/bundle/nsis/VoxVulgi_0.1.5_x64-setup.exe`
+  - `product/desktop/Build Target/Current/release/bundle/msi/VoxVulgi_0.1.5_x64_en-US.msi`
+- Notes: Desktop target build via build_desktop_target.ps1.

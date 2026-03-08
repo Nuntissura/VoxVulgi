@@ -1963,8 +1963,7 @@ revision = "{revision}"
 base_dir = r"{models_dir}"
 os.makedirs(base_dir, exist_ok=True)
 
-files = [
-{files_json}
+files = {files_json}
 
 downloaded = []
 for entry in files:
