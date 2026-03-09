@@ -105,7 +105,7 @@ Date: 2026-03-09
 - WP-0136: Media Library list mode and container semantics. DONE 2026-03-09.
 - WP-0137: Shell move affordance and panel-scroll polish. DONE 2026-03-09.
 - WP-0138: Model inventory clarity and required/optional labeling. DONE 2026-03-09.
-- WP-0139: Repo-to-spec crosscheck and governance reconciliation. LAST.
+- WP-0139: Repo-to-spec crosscheck and governance reconciliation. DONE 2026-03-09. LAST.
 
 ## Phase 0 - Decisions (1-2 days)
 
