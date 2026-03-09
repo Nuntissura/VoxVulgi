@@ -77,6 +77,7 @@ struct BundleModelsInfo {
 #[derive(Debug, Clone, Serialize)]
 struct BundleModelRow {
     id: String,
+    name: String,
     task: String,
     source_lang: Option<String>,
     target_lang: Option<String>,
@@ -85,6 +86,11 @@ struct BundleModelRow {
     installed: bool,
     expected_bytes: u64,
     installed_bytes: u64,
+    role: crate::models::ModelInventoryRole,
+    delivery: crate::models::ModelInventoryDelivery,
+    expected_installed: bool,
+    operator_summary: String,
+    features: Vec<String>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -388,6 +394,7 @@ fn export_models_inventory(inventory: ModelInventory) -> BundleModelsInfo {
             .into_iter()
             .map(|m| BundleModelRow {
                 id: m.id,
+                name: m.name,
                 task: m.task,
                 source_lang: m.source_lang,
                 target_lang: m.target_lang,
@@ -396,6 +403,11 @@ fn export_models_inventory(inventory: ModelInventory) -> BundleModelsInfo {
                 installed: m.installed,
                 expected_bytes: m.expected_bytes,
                 installed_bytes: m.installed_bytes,
+                role: m.role,
+                delivery: m.delivery,
+                expected_installed: m.expected_installed,
+                operator_summary: m.operator_summary,
+                features: m.features,
             })
             .collect(),
     }

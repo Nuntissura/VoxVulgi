@@ -3,7 +3,7 @@
   "models": [
     {
       "id": "demo-ja-asr",
-      "name": "Demo JA ASR (placeholder)",
+      "name": "Demo JA ASR placeholder (demo/test only)",
       "task": "asr",
       "source_lang": "ja",
       "target_lang": null,

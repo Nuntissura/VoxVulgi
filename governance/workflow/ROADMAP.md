@@ -104,7 +104,7 @@ Date: 2026-03-09
 - WP-0135: Diagnostics loading UX and full state snapshot.
 - WP-0136: Media Library list mode and container semantics.
 - WP-0137: Shell move affordance and panel-scroll polish.
-- WP-0138: Model inventory clarity and required/optional labeling.
+- WP-0138: Model inventory clarity and required/optional labeling. DONE 2026-03-09.
 - WP-0139: Repo-to-spec crosscheck and governance reconciliation. LAST.
 
 ## Phase 0 - Decisions (1-2 days)

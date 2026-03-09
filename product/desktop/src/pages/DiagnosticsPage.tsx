@@ -199,6 +199,11 @@ type ModelInventoryItem = {
   expected_bytes: number;
   installed_bytes: number;
   install_dir: string;
+  role: "required" | "optional" | "demo";
+  delivery: "offline_hydrated" | "manual_install" | "bundled_resource";
+  expected_installed: boolean;
+  operator_summary: string;
+  features: string[];
 };
 
 type ModelInventory = {
@@ -438,6 +443,46 @@ function formatTs(ms: number | null): string {
   } catch {
     return String(ms);
   }
+}
+
+function formatModelRole(role: ModelInventoryItem["role"]): string {
+  switch (role) {
+    case "required":
+      return "Required runtime";
+    case "optional":
+      return "Optional";
+    case "demo":
+      return "Demo / test";
+    default:
+      return role;
+  }
+}
+
+function formatModelDelivery(delivery: ModelInventoryItem["delivery"]): string {
+  switch (delivery) {
+    case "offline_hydrated":
+      return "Offline bundle / first-launch hydration";
+    case "manual_install":
+      return "Manual install";
+    case "bundled_resource":
+      return "Bundled resource";
+    default:
+      return delivery;
+  }
+}
+
+function modelInstallActionLabel(model: ModelInventoryItem): string {
+  if (model.role === "demo") {
+    return model.installed ? "Reinstall demo asset" : "Install demo asset";
+  }
+  return model.installed ? "Reinstall" : "Install";
+}
+
+function modelExpectedStateLabel(model: ModelInventoryItem): string {
+  if (model.expected_installed) {
+    return "Should already be present";
+  }
+  return "Manual / optional";
 }
 
 function shortId(value: string): string {
@@ -871,10 +916,16 @@ export function DiagnosticsPage({ visible = true }: { visible?: boolean }) {
     };
   }, [loadBuildSection, loadJobsSection, loadPhase2Section, loadStorageSection, loadToolsSection, loadTraceSection]);
 
-  const demoModel = useMemo(
-    () => inventory?.models.find((m) => m.id === "demo-ja-asr") ?? null,
-    [inventory],
-  );
+  const modelGroups = useMemo(() => {
+    const models = inventory?.models ?? [];
+    return {
+      required: models.filter((model) => model.role === "required"),
+      optional: models.filter((model) => model.role === "optional"),
+      demo: models.filter((model) => model.role === "demo"),
+    };
+  }, [inventory]);
+
+  const demoModel = modelGroups.demo[0] ?? null;
 
   const activeStartupPhase =
     startup?.phases.find((phase) => phase.id === startup.active_phase_id) ??
@@ -3145,6 +3196,11 @@ export function DiagnosticsPage({ visible = true }: { visible?: boolean }) {
 
       <div className="card">
         <h2>Models (local-first)</h2>
+        <div style={{ color: "#4b5563" }}>
+          Required runtime models should already be hydrated by the installer/offline bundle.
+          Demo/test assets are optional and are not needed for real subtitle generation or
+          translation.
+        </div>
         <div className="kv">
           <div className="k">Models dir</div>
           <div className="v">{inventory?.models_dir ?? "-"}</div>
@@ -3155,34 +3211,55 @@ export function DiagnosticsPage({ visible = true }: { visible?: boolean }) {
             {inventory ? formatBytes(inventory.total_installed_bytes) : "-"}
           </div>
         </div>
+        <div className="kv">
+          <div className="k">Required runtime ready</div>
+          <div className="v">
+            {inventory
+              ? `${modelGroups.required.filter((model) => model.installed).length}/${modelGroups.required.length}`
+              : "-"}
+          </div>
+        </div>
+        <div className="kv">
+          <div className="k">Optional + demo installed</div>
+          <div className="v">
+            {inventory
+              ? `${[...modelGroups.optional, ...modelGroups.demo].filter((model) => model.installed).length}`
+              : "-"}
+          </div>
+        </div>
 
         <div className="row">
-          <button type="button" disabled={busy} onClick={installDemo}>
-            {demoModel?.installed ? "Reinstall demo model" : "Install demo model"}
-          </button>
           <button type="button" disabled={busy} onClick={() => refresh()}>
             Refresh
           </button>
         </div>
 
+        <div style={{ marginTop: 16, fontWeight: 600 }}>Required runtime models</div>
         <div className="table-wrap">
           <table>
             <thead>
               <tr>
                 <th>ID</th>
+                <th>Role</th>
+                <th>Delivery</th>
+                <th>Expected</th>
                 <th>Task</th>
                 <th>Lang</th>
                 <th>Version</th>
                 <th>Installed</th>
                 <th>Size</th>
+                <th>Notes</th>
                 <th>Actions</th>
               </tr>
             </thead>
             <tbody>
-              {inventory?.models?.length ? (
-                inventory.models.map((m) => (
+              {modelGroups.required.length ? (
+                modelGroups.required.map((m) => (
                   <tr key={m.id}>
                     <td>{m.id}</td>
+                    <td>{formatModelRole(m.role)}</td>
+                    <td>{formatModelDelivery(m.delivery)}</td>
+                    <td>{modelExpectedStateLabel(m)}</td>
                     <td>{m.task}</td>
                     <td>
                       {m.source_lang}
@@ -3194,24 +3271,127 @@ export function DiagnosticsPage({ visible = true }: { visible?: boolean }) {
                       {formatBytes(m.installed ? m.installed_bytes : m.expected_bytes)}
                     </td>
                     <td>
+                      <div>{m.operator_summary}</div>
+                      {m.features.length ? (
+                        <div style={{ color: "#4b5563", fontSize: 12, marginTop: 4 }}>
+                          Used by: {m.features.join(", ")}
+                        </div>
+                      ) : null}
+                    </td>
+                    <td>
                       <button
                         type="button"
                         disabled={busy}
                         onClick={() => installModel(m.id)}
                       >
-                        {m.installed ? "Reinstall" : "Install"}
+                        {modelInstallActionLabel(m)}
                       </button>
                     </td>
                   </tr>
                 ))
               ) : (
                 <tr>
-                  <td colSpan={7}>No models found.</td>
+                  <td colSpan={11}>No required runtime models found.</td>
                 </tr>
               )}
             </tbody>
           </table>
         </div>
+
+        {modelGroups.optional.length ? (
+          <>
+            <div style={{ marginTop: 16, fontWeight: 600 }}>Optional models</div>
+            <div className="table-wrap">
+              <table>
+                <thead>
+                  <tr>
+                    <th>ID</th>
+                    <th>Role</th>
+                    <th>Delivery</th>
+                    <th>Expected</th>
+                    <th>Task</th>
+                    <th>Lang</th>
+                    <th>Version</th>
+                    <th>Installed</th>
+                    <th>Size</th>
+                    <th>Notes</th>
+                    <th>Actions</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {modelGroups.optional.map((m) => (
+                    <tr key={m.id}>
+                      <td>{m.id}</td>
+                      <td>{formatModelRole(m.role)}</td>
+                      <td>{formatModelDelivery(m.delivery)}</td>
+                      <td>{modelExpectedStateLabel(m)}</td>
+                      <td>{m.task}</td>
+                      <td>
+                        {m.source_lang}
+                        {m.target_lang ? ` -> ${m.target_lang}` : ""}
+                      </td>
+                      <td>{m.version}</td>
+                      <td>{m.installed ? "yes" : "no"}</td>
+                      <td>{formatBytes(m.installed ? m.installed_bytes : m.expected_bytes)}</td>
+                      <td>
+                        <div>{m.operator_summary}</div>
+                        {m.features.length ? (
+                          <div style={{ color: "#4b5563", fontSize: 12, marginTop: 4 }}>
+                            Used by: {m.features.join(", ")}
+                          </div>
+                        ) : null}
+                      </td>
+                      <td>
+                        <button type="button" disabled={busy} onClick={() => installModel(m.id)}>
+                          {modelInstallActionLabel(m)}
+                        </button>
+                      </td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          </>
+        ) : null}
+
+        {demoModel ? (
+          <div
+            style={{
+              marginTop: 16,
+              padding: 14,
+              borderRadius: 12,
+              border: "1px solid rgba(255,255,255,0.12)",
+              background: "rgba(255,255,255,0.03)",
+            }}
+          >
+            <div style={{ fontWeight: 600 }}>Demo / test assets</div>
+            <div style={{ color: "#4b5563", marginTop: 6 }}>
+              These assets exist only for diagnostics or placeholder testing. They are not required
+              for real ASR or translation workflows.
+            </div>
+            <div className="kv">
+              <div className="k">Demo asset</div>
+              <div className="v">{demoModel.name}</div>
+            </div>
+            <div className="kv">
+              <div className="k">Delivery</div>
+              <div className="v">{formatModelDelivery(demoModel.delivery)}</div>
+            </div>
+            <div className="kv">
+              <div className="k">Installed</div>
+              <div className="v">{demoModel.installed ? "yes" : "no"}</div>
+            </div>
+            <div className="kv">
+              <div className="k">Why it exists</div>
+              <div className="v">{demoModel.operator_summary}</div>
+            </div>
+            <div className="row" style={{ flexWrap: "wrap" }}>
+              <button type="button" disabled={busy} onClick={installDemo}>
+                {modelInstallActionLabel(demoModel)}
+              </button>
+            </div>
+          </div>
+        ) : null}
       </div>
     </section>
   );

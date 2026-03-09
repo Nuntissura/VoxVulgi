@@ -49,6 +49,22 @@ pub struct ModelInventory {
     pub models: Vec<ModelInventoryItem>,
 }
 
+#[derive(Debug, Clone, Copy, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum ModelInventoryRole {
+    Required,
+    Optional,
+    Demo,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum ModelInventoryDelivery {
+    OfflineHydrated,
+    ManualInstall,
+    BundledResource,
+}
+
 #[derive(Debug, Clone, Serialize)]
 pub struct ModelInventoryItem {
     pub id: String,
@@ -62,6 +78,11 @@ pub struct ModelInventoryItem {
     pub expected_bytes: u64,
     pub installed_bytes: u64,
     pub install_dir: String,
+    pub role: ModelInventoryRole,
+    pub delivery: ModelInventoryDelivery,
+    pub expected_installed: bool,
+    pub operator_summary: String,
+    pub features: Vec<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -98,6 +119,7 @@ impl ModelStore {
         for model in &manifest.models {
             let expected_bytes: u64 = model.files.iter().map(|f| f.size_bytes).sum();
             let install_dir = self.paths.model_install_dir(&model.id, &model.version);
+            let meta = model_inventory_meta(&model.id);
 
             let (installed, installed_bytes) = match self.verify_model(model) {
                 Ok(_) => {
@@ -120,6 +142,11 @@ impl ModelStore {
                 expected_bytes,
                 installed_bytes,
                 install_dir: install_dir.to_string_lossy().to_string(),
+                role: meta.role,
+                delivery: meta.delivery,
+                expected_installed: meta.expected_installed,
+                operator_summary: meta.operator_summary.to_string(),
+                features: meta.features.iter().map(|value| value.to_string()).collect(),
             });
         }
 
@@ -190,6 +217,44 @@ impl ModelStore {
     pub fn installed_file_path(&self, model_id: &str, relative_path: &str) -> Result<PathBuf> {
         let root = self.installed_model_dir(model_id)?;
         Ok(root.join(relative_path))
+    }
+}
+
+#[derive(Debug, Clone, Copy)]
+struct ModelInventoryMeta {
+    role: ModelInventoryRole,
+    delivery: ModelInventoryDelivery,
+    expected_installed: bool,
+    operator_summary: &'static str,
+    features: &'static [&'static str],
+}
+
+fn model_inventory_meta(model_id: &str) -> ModelInventoryMeta {
+    match model_id {
+        "whispercpp-tiny" => ModelInventoryMeta {
+            role: ModelInventoryRole::Required,
+            delivery: ModelInventoryDelivery::OfflineHydrated,
+            expected_installed: true,
+            operator_summary:
+                "Core local ASR runtime for subtitle generation and translation. The installer/offline bundle is expected to hydrate this automatically.",
+            features: &["Localization Studio ASR", "JA/KO to EN translation"],
+        },
+        "demo-ja-asr" => ModelInventoryMeta {
+            role: ModelInventoryRole::Demo,
+            delivery: ModelInventoryDelivery::BundledResource,
+            expected_installed: false,
+            operator_summary:
+                "Placeholder/demo asset only. It is not required for real subtitle generation or translation.",
+            features: &["Diagnostics demo install"],
+        },
+        _ => ModelInventoryMeta {
+            role: ModelInventoryRole::Optional,
+            delivery: ModelInventoryDelivery::ManualInstall,
+            expected_installed: false,
+            operator_summary:
+                "Managed model. Install only when the matching workflow explicitly requires it.",
+            features: &[],
+        },
     }
 }
 
@@ -350,5 +415,42 @@ mod tests {
 
         store.install_bundled_model("demo-ja-asr").expect("install");
         store.verify_model_by_id("demo-ja-asr").expect("verify");
+    }
+
+    #[test]
+    fn inventory_marks_required_and_demo_models_explicitly() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let paths = AppPaths::new(dir.path().to_path_buf());
+        let store = ModelStore::new(paths);
+
+        let inventory = store.inventory().expect("inventory");
+        let whisper = inventory
+            .models
+            .iter()
+            .find(|model| model.id == "whispercpp-tiny")
+            .expect("whisper model");
+        assert_eq!(whisper.role, ModelInventoryRole::Required);
+        assert_eq!(whisper.delivery, ModelInventoryDelivery::OfflineHydrated);
+        assert!(whisper.expected_installed);
+        assert!(
+            whisper
+                .operator_summary
+                .contains("Core local ASR runtime"),
+            "required model summary should explain the runtime role"
+        );
+
+        let demo = inventory
+            .models
+            .iter()
+            .find(|model| model.id == "demo-ja-asr")
+            .expect("demo model");
+        assert_eq!(demo.role, ModelInventoryRole::Demo);
+        assert_eq!(demo.delivery, ModelInventoryDelivery::BundledResource);
+        assert!(!demo.expected_installed);
+        assert!(
+            demo.operator_summary
+                .contains("Placeholder/demo asset"),
+            "demo model summary should explain that it is non-required"
+        );
     }
 }
