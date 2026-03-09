@@ -3,7 +3,7 @@
 ## Metadata
 - ID: WP-0136
 - Owner: Codex
-- Status: BACKLOG
+- Status: DONE
 - Created: 2026-03-09
 - Target milestone: Installer smoke remediation tranche
 
@@ -39,3 +39,4 @@ Out of scope:
 ## Status updates
 
 - 2026-03-09: Created from installer smoke findings `ST-012`, `ST-014`, and `ST-015`.
+- 2026-03-09: Implemented a list-first Media Library view with explicit provider/container semantics, preserved a secondary card view, and kept dense archive browsing inside a panel-local scrolling surface. Proof: `product/desktop/Build Target/tool_artifacts/wp_runs/WP-0136/20260309_093904/`.

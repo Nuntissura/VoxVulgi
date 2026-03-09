@@ -92,6 +92,8 @@ Initial language focus: **Korean + Japanese → English**.
   - grouped browsing by source container such as playlist/subscription/folder,
   - media-type filters such as video and image,
   - a list-first mode suited to very large archives,
+  - cards remain available as a secondary view, but list view is the default for large archives,
+  - rows should surface provider, container type, container label, source reference, codecs, and file path without forcing the operator to open a detail view,
   - explicit container semantics so operators can tell whether a row/group represents a playlist, subscription, folder, or single imported file.
 - Default archive/output media policy:
   - video workflows should prefer MP4 by default wherever the local toolchain can merge or remux cleanly,

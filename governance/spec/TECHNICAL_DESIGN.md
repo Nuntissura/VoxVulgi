@@ -157,6 +157,11 @@ Core tables (suggested):
   - `library_item_container`:
     - `item_id`, `container_id`
 
+- Current Media Library UX should remain list-first for large archives even before the normalized
+  `library_container` tables exist. Until those tables are introduced, the frontend may infer
+  provider and container semantics from source URI plus storage-relative path segments so operators
+  can still distinguish playlist/subscription/folder/single-file rows.
+
 - Legacy reconciliation reports are written as local JSON artifacts under the app-managed derived tree so large/NAS-backed archive analysis remains read-only and inspectable.
 
 Additional tables (planned; large-subscription UX hardening):

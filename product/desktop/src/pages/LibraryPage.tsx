@@ -133,24 +133,102 @@ function isInstagramLibraryItem(item: LibraryItem): boolean {
   return haystack.includes("instagram") || haystack.includes("cdninstagram");
 }
 
-function deriveContainerLabel(item: LibraryItem, downloadRoot: string): string {
-  const sourceParent = parentPath(item.media_path);
-  if (!sourceParent) {
-    return fileName(item.media_path) || "Uncategorized";
+type LibraryContainerMeta = {
+  providerLabel: string;
+  containerKind: "subscription" | "playlist" | "folder" | "single_file";
+  containerKindLabel: string;
+  containerLabel: string;
+  groupKey: string;
+  groupLabel: string;
+};
+
+function inferProviderLabel(item: LibraryItem): string {
+  const sourceUri = (item.source_uri ?? "").toLowerCase();
+  const sourceType = (item.source_type ?? "").toLowerCase();
+  const mediaPath = (item.media_path ?? "").toLowerCase();
+  if (sourceUri.includes("youtube.com") || sourceUri.includes("youtu.be") || sourceType.includes("youtube")) {
+    return "YouTube";
   }
-  const normalizedRoot = (downloadRoot ?? "").trim().toLowerCase().replace(/[\\/]+$/, "");
+  if (sourceUri.includes("instagram.com") || sourceType.includes("instagram") || mediaPath.includes("\\instagram\\") || mediaPath.includes("/instagram/")) {
+    return "Instagram";
+  }
+  if (sourceUri.includes("pinterest.") || sourceType.includes("pinterest")) {
+    return "Pinterest";
+  }
+  if (sourceType.includes("import") || sourceType.includes("local")) {
+    return "Local import";
+  }
+  return sourceType || "Local file";
+}
+
+function relativeContainerParts(mediaPath: string, downloadRoot: string): string[] {
+  const sourceParent = parentPath(mediaPath);
+  if (!sourceParent) return [];
+  const normalizedRoot = (downloadRoot ?? "").trim().replace(/[\\/]+$/, "");
+  if (!normalizedRoot) {
+    return sourceParent.split(/[\\/]+/).filter(Boolean);
+  }
+  const normalizedRootLower = normalizedRoot.toLowerCase();
   const normalizedParent = sourceParent.toLowerCase();
-  if (normalizedRoot && normalizedParent.startsWith(normalizedRoot)) {
-    const relative = sourceParent
-      .slice(downloadRoot.trim().replace(/[\\/]+$/, "").length)
-      .replace(/^[\\/]+/, "");
-    const relativeParts = relative.split(/[\\/]+/).filter(Boolean);
-    if (relativeParts.length) {
-      return relativeParts.slice(0, Math.min(3, relativeParts.length)).join(" / ");
-    }
+  if (normalizedParent.startsWith(normalizedRootLower)) {
+    const relative = sourceParent.slice(normalizedRoot.length).replace(/^[\\/]+/, "");
+    return relative.split(/[\\/]+/).filter(Boolean);
   }
-  const parentParts = sourceParent.split(/[\\/]+/).filter(Boolean);
-  return parentParts.slice(Math.max(0, parentParts.length - 2)).join(" / ");
+  return sourceParent.split(/[\\/]+/).filter(Boolean);
+}
+
+function deriveLibraryContainerMeta(item: LibraryItem, downloadRoot: string): LibraryContainerMeta {
+  const sourceUri = (item.source_uri ?? "").trim().toLowerCase();
+  const relativeParts = relativeContainerParts(item.media_path, downloadRoot);
+  const lowerParts = relativeParts.map((part) => part.toLowerCase());
+  const providerLabel = inferProviderLabel(item);
+
+  let containerKind: LibraryContainerMeta["containerKind"] = "single_file";
+  let containerKindLabel = "Single file";
+  let containerLabel = fileName(item.media_path) || item.title || "Uncategorized";
+
+  const subscriptionsIndex = lowerParts.findIndex((part) => part === "subscriptions");
+  const playlistsIndex = lowerParts.findIndex((part) => part === "playlists");
+  const videoIndex = lowerParts.findIndex((part) => part === "video");
+  const instagramIndex = lowerParts.findIndex((part) => part === "instagram");
+  const imagesIndex = lowerParts.findIndex((part) => part === "images");
+
+  if (
+    sourceUri.includes("list=") ||
+    sourceUri.includes("/playlist") ||
+    playlistsIndex >= 0
+  ) {
+    containerKind = "playlist";
+    containerKindLabel = "Playlist";
+    const fromPath = playlistsIndex >= 0 ? relativeParts.slice(playlistsIndex + 1) : relativeParts;
+    containerLabel = fromPath.slice(0, 2).join(" / ") || item.title || "Playlist";
+  } else if (
+    subscriptionsIndex >= 0 ||
+    /youtube\.com\/(@|channel\/|c\/|user\/)/.test(sourceUri) ||
+    /instagram\.com\/[^/?#]+\/?$/.test(sourceUri)
+  ) {
+    containerKind = "subscription";
+    containerKindLabel = "Subscription";
+    const fromPath = subscriptionsIndex >= 0 ? relativeParts.slice(subscriptionsIndex + 1) : relativeParts;
+    containerLabel = fromPath.slice(0, 2).join(" / ") || item.title || "Subscription";
+  } else if (relativeParts.length > 1) {
+    containerKind = "folder";
+    containerKindLabel = "Folder";
+    const offset = videoIndex >= 0 ? videoIndex + 1 : instagramIndex >= 0 ? instagramIndex + 1 : imagesIndex >= 0 ? imagesIndex + 1 : 0;
+    containerLabel =
+      relativeParts.slice(offset, Math.min(relativeParts.length, offset + 3)).join(" / ") ||
+      relativeParts.slice(Math.max(0, relativeParts.length - 2)).join(" / ");
+  }
+
+  const normalizedLabel = containerLabel || "Uncategorized";
+  return {
+    providerLabel,
+    containerKind,
+    containerKindLabel,
+    containerLabel: normalizedLabel,
+    groupKey: `${containerKind}:${normalizedLabel}`,
+    groupLabel: `${containerKindLabel}: ${normalizedLabel}`,
+  };
 }
 
 type LibraryPageProps = {
@@ -604,9 +682,13 @@ export function LibraryPage({ onOpenEditor, mode = "all" }: LibraryPageProps) {
     if (raw === "video" || raw === "image" || raw === "audio" || raw === "other") return raw;
     return "all";
   });
-  const [mediaLibraryGroupMode, setMediaLibraryGroupMode] = useState<"flat" | "folder">(() => {
+  const [mediaLibraryGroupMode, setMediaLibraryGroupMode] = useState<"flat" | "container">(() => {
     const raw = safeLocalStorageGet("voxvulgi.v1.library.media_group_mode");
-    return raw === "flat" ? raw : "folder";
+    return raw === "flat" ? raw : "container";
+  });
+  const [mediaLibraryViewMode, setMediaLibraryViewMode] = useState<"list" | "cards">(() => {
+    const raw = safeLocalStorageGet("voxvulgi.v1.library.media_view_mode");
+    return raw === "cards" ? raw : "list";
   });
   const { status: downloadDir } = useSharedDownloadDirStatus();
   const parsedUrlCount = useMemo(
@@ -715,34 +797,51 @@ export function LibraryPage({ onOpenEditor, mode = "all" }: LibraryPageProps) {
       return haystack.includes(needle);
     });
   }, [items, mediaLibrarySearch, mediaLibraryTypeFilter]);
+  const mediaLibraryRows = useMemo(
+    () =>
+      filteredMediaItems.map((item) => ({
+        item,
+        mediaKind: inferMediaKind(item),
+        containerMeta: deriveLibraryContainerMeta(item, effectiveDownloadRoot),
+      })),
+    [effectiveDownloadRoot, filteredMediaItems],
+  );
   const groupedMediaItems = useMemo(() => {
     if (mediaLibraryGroupMode === "flat") {
       return [
         {
           key: "all_media",
           label: "All loaded media",
-          items: filteredMediaItems,
+          items: mediaLibraryRows,
         },
       ];
     }
-    const groups = new Map<string, LibraryItem[]>();
-    for (const item of filteredMediaItems) {
-      const label = deriveContainerLabel(item, effectiveDownloadRoot) || "Uncategorized";
-      const existing = groups.get(label);
+    const groups = new Map<
+      string,
+      {
+        label: string;
+        items: typeof mediaLibraryRows;
+      }
+    >();
+    for (const row of mediaLibraryRows) {
+      const existing = groups.get(row.containerMeta.groupKey);
       if (existing) {
-        existing.push(item);
+        existing.items.push(row);
       } else {
-        groups.set(label, [item]);
+        groups.set(row.containerMeta.groupKey, {
+          label: row.containerMeta.groupLabel,
+          items: [row],
+        });
       }
     }
     return Array.from(groups.entries())
-      .sort((a, b) => a[0].localeCompare(b[0]))
-      .map(([label, groupItems]) => ({
-        key: label,
-        label,
-        items: groupItems,
+      .sort((a, b) => a[1].label.localeCompare(b[1].label))
+      .map(([key, value]) => ({
+        key,
+        label: value.label,
+        items: value.items,
       }));
-  }, [effectiveDownloadRoot, filteredMediaItems, mediaLibraryGroupMode]);
+  }, [mediaLibraryGroupMode, mediaLibraryRows]);
   const recentInstagramItems = useMemo(
     () => items.filter((item) => isInstagramLibraryItem(item)).slice(0, 10),
     [items],
@@ -1132,6 +1231,10 @@ export function LibraryPage({ onOpenEditor, mode = "all" }: LibraryPageProps) {
   useEffect(() => {
     safeLocalStorageSet("voxvulgi.v1.library.media_group_mode", mediaLibraryGroupMode);
   }, [mediaLibraryGroupMode]);
+
+  useEffect(() => {
+    safeLocalStorageSet("voxvulgi.v1.library.media_view_mode", mediaLibraryViewMode);
+  }, [mediaLibraryViewMode]);
 
   async function importFile() {
     setBusy(true);
@@ -3696,172 +3799,327 @@ export function LibraryPage({ onOpenEditor, mode = "all" }: LibraryPageProps) {
 
       {showMediaLibrary ? (
         <div className="card">
-        <h2>Media library items</h2>
-        <div style={{ color: "#4b5563", marginTop: 6 }}>
-          Browse imported/downloaded media and launch localization actions. Outputs/artifacts are
-          stored under the app-data folder (open Diagnostics -&gt; App data dir, or use the Outputs
-          button).
-        </div>
-        <div className="row">
-          <label style={{ display: "flex", alignItems: "center", gap: 8, flex: 1, minWidth: 260 }}>
-            <span>Filter</span>
-            <input
-              value={mediaLibrarySearch}
-              disabled={busy}
-              onChange={(e) => setMediaLibrarySearch(e.currentTarget.value)}
-              placeholder="Search title, path, codec, source..."
-              style={{ width: "100%" }}
-            />
-          </label>
-          <label style={{ display: "flex", alignItems: "center", gap: 8 }}>
-            <span>Type</span>
-            <select
-              value={mediaLibraryTypeFilter}
-              disabled={busy}
-              onChange={(e) =>
-                setMediaLibraryTypeFilter(
-                  e.currentTarget.value as typeof mediaLibraryTypeFilter,
-                )
-              }
-            >
-              <option value="all">All</option>
-              <option value="video">Video</option>
-              <option value="image">Image</option>
-              <option value="audio">Audio</option>
-              <option value="other">Other</option>
-            </select>
-          </label>
-          <label style={{ display: "flex", alignItems: "center", gap: 8 }}>
-            <span>Group by</span>
-            <select
-              value={mediaLibraryGroupMode}
-              disabled={busy}
-              onChange={(e) =>
-                setMediaLibraryGroupMode(e.currentTarget.value as typeof mediaLibraryGroupMode)
-              }
-            >
-              <option value="folder">Folder / source path</option>
-              <option value="flat">Flat list</option>
-            </select>
-          </label>
-        </div>
-        <div
-          className="table-wrap"
-          style={{ maxHeight: libraryViewportHeight, overflowY: "auto", padding: 14 }}
-          onScroll={handleItemsScroll}
-        >
-          {filteredMediaItems.length ? (
-            <div style={{ display: "grid", gap: 18 }}>
-              {groupedMediaItems.map((group) => (
-                <section key={group.key} style={{ display: "grid", gap: 10 }}>
-                  <div
-                    style={{
-                      display: "flex",
-                      justifyContent: "space-between",
-                      gap: 12,
-                      alignItems: "baseline",
-                    }}
-                  >
-                    <h3 style={{ margin: 0, fontSize: "0.96rem", letterSpacing: "0.04em" }}>{group.label}</h3>
-                    <div style={{ color: "#4b5563", fontSize: 12 }}>
-                      {group.items.length} item{group.items.length === 1 ? "" : "s"}
+          <h2>Media library items</h2>
+          <div style={{ color: "#4b5563", marginTop: 6 }}>
+            Browse imported/downloaded media and launch localization actions. The default view is a
+            full-width archive list with explicit container semantics so large subscription,
+            playlist, folder, and loose-file libraries are easier to understand.
+          </div>
+          <div className="row">
+            <label style={{ display: "flex", alignItems: "center", gap: 8, flex: 1, minWidth: 260 }}>
+              <span>Filter</span>
+              <input
+                value={mediaLibrarySearch}
+                disabled={busy}
+                onChange={(e) => setMediaLibrarySearch(e.currentTarget.value)}
+                placeholder="Search title, path, codec, source..."
+                style={{ width: "100%" }}
+              />
+            </label>
+            <label style={{ display: "flex", alignItems: "center", gap: 8 }}>
+              <span>Type</span>
+              <select
+                value={mediaLibraryTypeFilter}
+                disabled={busy}
+                onChange={(e) =>
+                  setMediaLibraryTypeFilter(
+                    e.currentTarget.value as typeof mediaLibraryTypeFilter,
+                  )
+                }
+              >
+                <option value="all">All</option>
+                <option value="video">Video</option>
+                <option value="image">Image</option>
+                <option value="audio">Audio</option>
+                <option value="other">Other</option>
+              </select>
+            </label>
+            <label style={{ display: "flex", alignItems: "center", gap: 8 }}>
+              <span>View</span>
+              <select
+                value={mediaLibraryViewMode}
+                disabled={busy}
+                onChange={(e) =>
+                  setMediaLibraryViewMode(e.currentTarget.value as typeof mediaLibraryViewMode)
+                }
+              >
+                <option value="list">Archive list</option>
+                <option value="cards">Cards</option>
+              </select>
+            </label>
+            <label style={{ display: "flex", alignItems: "center", gap: 8 }}>
+              <span>Group by</span>
+              <select
+                value={mediaLibraryGroupMode}
+                disabled={busy}
+                onChange={(e) =>
+                  setMediaLibraryGroupMode(e.currentTarget.value as typeof mediaLibraryGroupMode)
+                }
+              >
+                <option value="container">Container / folder</option>
+                <option value="flat">Flat list</option>
+              </select>
+            </label>
+          </div>
+          <div
+            className="table-wrap"
+            style={{ maxHeight: libraryViewportHeight, overflowY: "auto", padding: 14 }}
+            onScroll={handleItemsScroll}
+          >
+            {mediaLibraryRows.length ? (
+              <div style={{ display: "grid", gap: 18 }}>
+                {groupedMediaItems.map((group) => (
+                  <section key={group.key} style={{ display: "grid", gap: 10 }}>
+                    <div
+                      style={{
+                        display: "flex",
+                        justifyContent: "space-between",
+                        gap: 12,
+                        alignItems: "baseline",
+                      }}
+                    >
+                      <h3 style={{ margin: 0, fontSize: "0.96rem", letterSpacing: "0.04em" }}>
+                        {group.label}
+                      </h3>
+                      <div style={{ color: "#4b5563", fontSize: 12 }}>
+                        {group.items.length} item{group.items.length === 1 ? "" : "s"}
+                      </div>
                     </div>
-                  </div>
-                  <div
-                    style={{
-                      display: "grid",
-                      gap: 12,
-                      gridTemplateColumns: "repeat(auto-fill, minmax(270px, 1fr))",
-                    }}
-                  >
-                    {group.items.map((item) => (
-                      <article
-                        key={item.id}
+                    {mediaLibraryViewMode === "list" ? (
+                      <div style={{ display: "grid", gap: 10 }}>
+                        {group.items.map((row) => {
+                          const item = row.item;
+                          return (
+                            <article
+                              key={item.id}
+                              style={{
+                                display: "grid",
+                                gap: 10,
+                                padding: 12,
+                                borderRadius: 8,
+                                border: "1px solid rgba(126, 145, 167, 0.3)",
+                                background:
+                                  "linear-gradient(154deg, #edf2f7 0%, #dce3eb 54%, #c9d2dc 100%)",
+                              }}
+                            >
+                              <div
+                                style={{
+                                  display: "flex",
+                                  gap: 12,
+                                  alignItems: "flex-start",
+                                  flexWrap: "wrap",
+                                }}
+                              >
+                                <ThumbnailPreview
+                                  itemId={item.id}
+                                  path={item.thumbnail_path}
+                                  width={96}
+                                  height={54}
+                                />
+                                <div
+                                  style={{
+                                    minWidth: 280,
+                                    flex: "1 1 420px",
+                                    display: "grid",
+                                    gap: 4,
+                                  }}
+                                >
+                                  <strong style={{ lineHeight: 1.2 }}>{item.title}</strong>
+                                  <div style={{ color: "#4b5563", fontSize: 12 }}>
+                                    {row.mediaKind.toUpperCase()} · {formatDuration(item.duration_ms)} ·{' '}
+                                    {row.containerMeta.providerLabel}
+                                  </div>
+                                  <div style={{ color: "#4b5563", fontSize: 12 }}>
+                                    Container type: {row.containerMeta.containerKindLabel}
+                                  </div>
+                                  <div style={{ color: "#334155", fontSize: 12 }}>
+                                    Container: {row.containerMeta.containerLabel}
+                                  </div>
+                                  <div
+                                    style={{
+                                      color: "#4b5563",
+                                      fontSize: 12,
+                                      wordBreak: "break-word",
+                                    }}
+                                  >
+                                    Source: {item.source_uri || item.source_type || "-"}
+                                  </div>
+                                </div>
+                                <div
+                                  style={{
+                                    minWidth: 220,
+                                    flex: "0 1 260px",
+                                    display: "grid",
+                                    gap: 4,
+                                  }}
+                                >
+                                  <div style={{ color: "#334155", fontSize: 12 }}>
+                                    Resolution: {item.width && item.height ? `${item.width}x${item.height}` : "-"}
+                                  </div>
+                                  <div style={{ color: "#334155", fontSize: 12 }}>
+                                    Video codec: {item.video_codec || "-"}
+                                  </div>
+                                  <div style={{ color: "#334155", fontSize: 12 }}>
+                                    Audio codec: {item.audio_codec || "-"}
+                                  </div>
+                                  <div style={{ color: "#334155", fontSize: 12 }}>
+                                    Added: {new Date(item.created_at_ms).toLocaleString()}
+                                  </div>
+                                </div>
+                              </div>
+                              <div
+                                style={{
+                                  fontSize: 12,
+                                  color: "#334155",
+                                  lineHeight: 1.35,
+                                  wordBreak: "break-word",
+                                }}
+                              >
+                                {item.media_path}
+                              </div>
+                              <div className="row" style={{ marginTop: 0 }}>
+                                <button type="button" disabled={busy} onClick={() => runAsr(item.id)}>
+                                  ASR
+                                </button>
+                                <button type="button" disabled={busy} onClick={() => runSeparation(item.id)}>
+                                  Separate
+                                </button>
+                                <button type="button" disabled={busy} onClick={() => runMixDubPreview(item.id)}>
+                                  Mix dub
+                                </button>
+                                <button type="button" disabled={busy} onClick={() => runMuxDubPreview(item.id)}>
+                                  Mux MP4
+                                </button>
+                                <button
+                                  type="button"
+                                  disabled={busy || !onOpenEditor}
+                                  onClick={() => onOpenEditor?.(item.id)}
+                                >
+                                  Edit subs
+                                </button>
+                                <button type="button" disabled={busy} onClick={() => openMediaFile(item)}>
+                                  Open file
+                                </button>
+                                <button type="button" disabled={busy} onClick={() => revealMediaFile(item)}>
+                                  Open folder
+                                </button>
+                                <button type="button" disabled={busy} onClick={() => openItemOutputs(item.id)}>
+                                  Working files
+                                </button>
+                              </div>
+                            </article>
+                          );
+                        })}
+                      </div>
+                    ) : (
+                      <div
                         style={{
                           display: "grid",
-                          gap: 10,
-                          padding: 12,
-                          borderRadius: 8,
-                          border: "1px solid rgba(126, 145, 167, 0.3)",
-                          background: "linear-gradient(154deg, #edf2f7 0%, #dce3eb 54%, #c9d2dc 100%)",
+                          gap: 12,
+                          gridTemplateColumns: "repeat(auto-fill, minmax(270px, 1fr))",
                         }}
                       >
-                        <div style={{ display: "flex", gap: 12, alignItems: "flex-start" }}>
-                          <ThumbnailPreview itemId={item.id} path={item.thumbnail_path} />
-                          <div style={{ minWidth: 0, display: "grid", gap: 4 }}>
-                            <strong style={{ lineHeight: 1.2 }}>{item.title}</strong>
-                            <div style={{ color: "#4b5563", fontSize: 12 }}>
-                              {inferMediaKind(item).toUpperCase()} · {formatDuration(item.duration_ms)}
-                            </div>
-                            <div style={{ color: "#4b5563", fontSize: 12 }}>
-                              {item.width && item.height ? `${item.width}x${item.height}` : "-"}
-                              {item.video_codec ? ` · ${item.video_codec}` : ""}
-                              {item.audio_codec ? ` · ${item.audio_codec}` : ""}
-                            </div>
-                          </div>
-                        </div>
-                        <div
-                          style={{
-                            fontSize: 12,
-                            color: "#334155",
-                            lineHeight: 1.35,
-                            wordBreak: "break-word",
-                          }}
-                        >
-                          {item.media_path}
-                        </div>
-                        <div className="row" style={{ marginTop: 0 }}>
-                          <button type="button" disabled={busy} onClick={() => runAsr(item.id)}>
-                            ASR
-                          </button>
-                          <button type="button" disabled={busy} onClick={() => runSeparation(item.id)}>
-                            Separate
-                          </button>
-                          <button type="button" disabled={busy} onClick={() => runMixDubPreview(item.id)}>
-                            Mix dub
-                          </button>
-                          <button type="button" disabled={busy} onClick={() => runMuxDubPreview(item.id)}>
-                            Mux MP4
-                          </button>
-                          <button
-                            type="button"
-                            disabled={busy || !onOpenEditor}
-                            onClick={() => onOpenEditor?.(item.id)}
-                          >
-                            Edit subs
-                          </button>
-                          <button type="button" disabled={busy} onClick={() => openMediaFile(item)}>
-                            Open file
-                          </button>
-                          <button type="button" disabled={busy} onClick={() => revealMediaFile(item)}>
-                            Open folder
-                          </button>
-                          <button type="button" disabled={busy} onClick={() => openItemOutputs(item.id)}>
-                            Working files
-                          </button>
-                        </div>
-                      </article>
-                    ))}
-                  </div>
-                </section>
-              ))}
-            </div>
-          ) : (
-            <div style={{ color: "#4b5563" }}>No items matched the current filter.</div>
-          )}
-        </div>
-        <div className="row">
-          <div style={{ color: "#4b5563" }}>
-            Loaded {items.length} item{items.length === 1 ? "" : "s"}.
-            Showing {filteredMediaItems.length} after filters.
-            {itemsHasMore ? " (more available)" : ""}.
+                        {group.items.map((row) => {
+                          const item = row.item;
+                          return (
+                            <article
+                              key={item.id}
+                              style={{
+                                display: "grid",
+                                gap: 10,
+                                padding: 12,
+                                borderRadius: 8,
+                                border: "1px solid rgba(126, 145, 167, 0.3)",
+                                background:
+                                  "linear-gradient(154deg, #edf2f7 0%, #dce3eb 54%, #c9d2dc 100%)",
+                              }}
+                            >
+                              <div style={{ display: "flex", gap: 12, alignItems: "flex-start" }}>
+                                <ThumbnailPreview itemId={item.id} path={item.thumbnail_path} />
+                                <div style={{ minWidth: 0, display: "grid", gap: 4 }}>
+                                  <strong style={{ lineHeight: 1.2 }}>{item.title}</strong>
+                                  <div style={{ color: "#4b5563", fontSize: 12 }}>
+                                    {row.mediaKind.toUpperCase()} · {formatDuration(item.duration_ms)}
+                                  </div>
+                                  <div style={{ color: "#4b5563", fontSize: 12 }}>
+                                    {row.containerMeta.containerKindLabel}: {row.containerMeta.containerLabel}
+                                  </div>
+                                  <div style={{ color: "#4b5563", fontSize: 12 }}>
+                                    {item.width && item.height ? `${item.width}x${item.height}` : "-"}
+                                    {item.video_codec ? ` · ${item.video_codec}` : ""}
+                                    {item.audio_codec ? ` · ${item.audio_codec}` : ""}
+                                  </div>
+                                </div>
+                              </div>
+                              <div
+                                style={{
+                                  fontSize: 12,
+                                  color: "#334155",
+                                  lineHeight: 1.35,
+                                  wordBreak: "break-word",
+                                }}
+                              >
+                                {item.media_path}
+                              </div>
+                              <div className="row" style={{ marginTop: 0 }}>
+                                <button type="button" disabled={busy} onClick={() => runAsr(item.id)}>
+                                  ASR
+                                </button>
+                                <button type="button" disabled={busy} onClick={() => runSeparation(item.id)}>
+                                  Separate
+                                </button>
+                                <button type="button" disabled={busy} onClick={() => runMixDubPreview(item.id)}>
+                                  Mix dub
+                                </button>
+                                <button type="button" disabled={busy} onClick={() => runMuxDubPreview(item.id)}>
+                                  Mux MP4
+                                </button>
+                                <button
+                                  type="button"
+                                  disabled={busy || !onOpenEditor}
+                                  onClick={() => onOpenEditor?.(item.id)}
+                                >
+                                  Edit subs
+                                </button>
+                                <button type="button" disabled={busy} onClick={() => openMediaFile(item)}>
+                                  Open file
+                                </button>
+                                <button type="button" disabled={busy} onClick={() => revealMediaFile(item)}>
+                                  Open folder
+                                </button>
+                                <button type="button" disabled={busy} onClick={() => openItemOutputs(item.id)}>
+                                  Working files
+                                </button>
+                              </div>
+                            </article>
+                          );
+                        })}
+                      </div>
+                    )}
+                  </section>
+                ))}
+              </div>
+            ) : (
+              <div style={{ color: "#4b5563" }}>No items matched the current filter.</div>
+            )}
           </div>
-          <button type="button" disabled={busy || itemsLoadingMore || !itemsHasMore} onClick={loadMoreItems}>
-            {itemsLoadingMore ? "Loading..." : "Load more"}
-          </button>
-        </div>
+          <div className="row">
+            <div style={{ color: "#4b5563" }}>
+              Loaded {items.length} item{items.length === 1 ? "" : "s"}.
+              Showing {filteredMediaItems.length} after filters.
+              {itemsHasMore ? " (more available)" : ""}.
+            </div>
+            <button
+              type="button"
+              disabled={busy || itemsLoadingMore || !itemsHasMore}
+              onClick={loadMoreItems}
+            >
+              {itemsLoadingMore ? "Loading..." : "Load more"}
+            </button>
+          </div>
         </div>
       ) : null}
     </section>
   );
 }
+
