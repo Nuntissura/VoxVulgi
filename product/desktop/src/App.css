@@ -184,11 +184,6 @@ code {
     0 0 0 1px rgba(255, 255, 255, 0.38) inset,
     inset 0 1px 0 rgba(255, 255, 255, 0.78),
     inset 0 -1px 0 rgba(115, 124, 135, 0.44);
-  cursor: grab;
-}
-
-.topbar:active {
-  cursor: grabbing;
 }
 
 .topbar-main {
@@ -199,6 +194,13 @@ code {
   width: 100%;
 }
 
+.topbar-leading {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  min-width: 0;
+}
+
 .brand {
   font-size: clamp(0.94rem, 0.9rem + 0.33vw, 1.12rem);
   font-family: var(--font-panel);
@@ -207,6 +209,28 @@ code {
   letter-spacing: 0.07em;
   line-height: 1.05;
   color: #1a2028;
+}
+
+.move-handle {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+  white-space: nowrap;
+  cursor: grab;
+}
+
+.move-handle:active {
+  cursor: grabbing;
+}
+
+.move-handle-glyph {
+  display: inline-block;
+  letter-spacing: 0.04em;
+  color: #516275;
+  font-family: "JetBrains Mono", "Cascadia Mono", "Consolas", monospace;
+  font-size: 0.78rem;
+  line-height: 1;
 }
 
 .topbar-actions {
@@ -467,6 +491,8 @@ input[type="checkbox"] {
 .table-wrap {
   margin-top: 12px;
   overflow: auto;
+  overscroll-behavior: contain;
+  scrollbar-gutter: stable both-edges;
   border-radius: var(--panel-radius);
   border: 1px solid var(--panel-border);
   background: linear-gradient(154deg, #e8edf2 0%, #d7dde5 54%, #c4ccd5 100%);
@@ -474,6 +500,39 @@ input[type="checkbox"] {
     0 0 0 1px rgba(255, 255, 255, 0.32) inset,
     inset 0 1px 0 rgba(255, 255, 255, 0.74),
     inset 0 -1px 0 rgba(116, 126, 137, 0.42);
+}
+
+.panel-scroll-hint {
+  margin-top: 8px;
+  color: #4b5563;
+  font-size: 0.83rem;
+}
+
+.table-wrap-wide table {
+  min-width: 1180px;
+}
+
+.table-wrap-sticky-actions th:last-child,
+.table-wrap-sticky-actions td:last-child {
+  position: sticky;
+  right: 0;
+}
+
+.table-wrap-sticky-actions th:last-child {
+  z-index: 2;
+  background: linear-gradient(154deg, #eff3f7 0%, #dce2e9 56%, #c9d0da 100%);
+  box-shadow: -1px 0 0 rgba(126, 145, 167, 0.26);
+}
+
+.table-wrap-sticky-actions td:last-child {
+  background: linear-gradient(154deg, #e8edf2 0%, #d7dde5 54%, #c4ccd5 100%);
+  box-shadow:
+    -1px 0 0 rgba(126, 145, 167, 0.26),
+    -10px 0 14px rgba(215, 221, 229, 0.92);
+}
+
+.table-wrap-sticky-actions td:last-child .row {
+  flex-wrap: nowrap;
 }
 
 table {
@@ -612,6 +671,11 @@ img {
   .topbar-main {
     flex-direction: column;
     align-items: flex-start;
+  }
+
+  .topbar-leading {
+    width: 100%;
+    justify-content: space-between;
   }
 
   .topbar-actions {

@@ -3178,7 +3178,11 @@ export function LibraryPage({ onOpenEditor, mode = "all" }: LibraryPageProps) {
           Saved subscriptions: {subscriptions.length}
           {subscriptionGroupFilterId ? ` (filtered: ${groupNameById.get(subscriptionGroupFilterId) ?? "group"})` : ""}
         </div>
-        <div className="table-wrap">
+        <div className="panel-scroll-hint">
+          This table scrolls inside the panel when the archive metadata is wider than the window.
+          Actions stay pinned on the right.
+        </div>
+        <div className="table-wrap table-wrap-wide table-wrap-sticky-actions">
           <table>
             <thead>
               <tr>
@@ -3200,7 +3204,9 @@ export function LibraryPage({ onOpenEditor, mode = "all" }: LibraryPageProps) {
                 visibleSubscriptions.map((sub) => (
                   <tr key={sub.id}>
                     <td>{sub.title}</td>
-                    <td style={{ maxWidth: 360 }}>{sub.source_url}</td>
+                    <td style={{ minWidth: 260, maxWidth: 360, wordBreak: "break-word" }}>
+                      {sub.source_url}
+                    </td>
                     <td>{sub.folder_map}</td>
                     <td>
                       {sub.group_ids.length
@@ -3229,7 +3235,7 @@ export function LibraryPage({ onOpenEditor, mode = "all" }: LibraryPageProps) {
                       {sub.consecutive_failures > 0 ? ` (${sub.consecutive_failures} fail)` : ""}
                     </td>
                     <td>
-                      <div className="row" style={{ marginTop: 0 }}>
+                      <div className="row" style={{ marginTop: 0, flexWrap: "nowrap" }}>
                         <button type="button" disabled={busy} onClick={() => editSubscription(sub)}>
                           Edit
                         </button>
@@ -3478,7 +3484,11 @@ export function LibraryPage({ onOpenEditor, mode = "all" }: LibraryPageProps) {
           {" "}
           <code>{defaultInstagramSubscriptionDownloadsDir || "instagram/subscriptions"}</code>
         </div>
-        <div className="table-wrap">
+        <div className="panel-scroll-hint">
+          This table scrolls inside the panel when the saved columns outgrow the visible width.
+          Actions stay pinned on the right.
+        </div>
+        <div className="table-wrap table-wrap-wide table-wrap-sticky-actions">
           <table>
             <thead>
               <tr>
@@ -3497,14 +3507,16 @@ export function LibraryPage({ onOpenEditor, mode = "all" }: LibraryPageProps) {
                 instagramSubscriptions.map((sub) => (
                   <tr key={sub.id}>
                     <td>{sub.title}</td>
-                    <td style={{ maxWidth: 360 }}>{sub.source_url}</td>
+                    <td style={{ minWidth: 260, maxWidth: 360, wordBreak: "break-word" }}>
+                      {sub.source_url}
+                    </td>
                     <td>{sub.folder_map}</td>
                     <td>{sub.auth_session_configured ? "saved" : "-"}</td>
                     <td>{sub.active ? "yes" : "no"}</td>
                     <td>{sub.refresh_interval_minutes}</td>
                     <td>{sub.last_queued_at_ms ? new Date(sub.last_queued_at_ms).toLocaleString() : "-"}</td>
                     <td>
-                      <div className="row" style={{ marginTop: 0 }}>
+                      <div className="row" style={{ marginTop: 0, flexWrap: "nowrap" }}>
                         <button
                           type="button"
                           disabled={busy}

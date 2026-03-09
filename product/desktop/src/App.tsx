@@ -92,15 +92,6 @@ function parseStoredPage(raw: string | null): AppPage {
   }
 }
 
-function isDragExemptTarget(target: EventTarget | null): boolean {
-  if (!(target instanceof Element)) return false;
-  return Boolean(
-    target.closest(
-      "button,input,select,textarea,option,label,a,video,[contenteditable='true'],[data-no-drag]",
-    ),
-  );
-}
-
 function LocalizationStudioHome({
   onOpenVideoArchiver,
   onOpenMediaLibrary,
@@ -399,20 +390,33 @@ function App() {
 
   return (
     <div className="app-shell">
-      <header
-        className="topbar"
-        onPointerDown={(e) => {
-          if (e.button !== 0) return;
-          if (isDragExemptTarget(e.target)) return;
-          void startWindowDrag();
-        }}
-        onDoubleClick={(e) => {
-          if (isDragExemptTarget(e.target)) return;
-          void toggleMaximizeWindow();
-        }}
-      >
+      <header className="topbar">
         <div className="topbar-main">
-          <div className="brand">VoxVulgi</div>
+          <div className="topbar-leading">
+            <button
+              type="button"
+              className="move-handle"
+              title="Move window"
+              aria-label="Move window"
+              onPointerDown={(e) => {
+                if (e.button !== 0) return;
+                e.preventDefault();
+                e.stopPropagation();
+                void startWindowDrag();
+              }}
+              onDoubleClick={(e) => {
+                e.preventDefault();
+                e.stopPropagation();
+                void toggleMaximizeWindow();
+              }}
+            >
+              <span className="move-handle-glyph" aria-hidden="true">
+                ::::::
+              </span>
+              <span>Move window</span>
+            </button>
+            <div className="brand">VoxVulgi</div>
+          </div>
           <div className="topbar-actions">
             {startupBusy ? (
               <button

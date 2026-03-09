@@ -562,6 +562,7 @@ Subscription export JSON shape (v1):
 - Corner-resize affordances should have a clear reachable hitbox inside the practical app bounds.
 - App movement should use an explicit move affordance or clearly bounded drag region so operators can distinguish shell movement from content interaction.
 - Dense archive panes should prefer panel-local scrolling/list behavior over clipped actions or invisible controls.
+- Where a dense table cannot fit at practical widths, the panel scroll surface should stay local to that card/pane and action columns should remain visible without forcing the operator to guess where controls went.
 
 ## 7) Testing Strategy
 

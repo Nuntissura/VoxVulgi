@@ -368,7 +368,8 @@ Current implementation status:
 ### 8.1.6 Desktop shell ergonomics requirement
 
 - Corner resizing must have an obvious reachable hitbox.
-- Dragging the app should be limited to background chrome so text selection and scrollbars still work inside content areas.
+- Dragging the app should use an explicit shell move affordance or tightly bounded chrome handle so text selection and scrollbars still work inside content areas.
+- Dense per-panel tables should keep their own scroll surface and should keep critical actions visible when horizontal scrolling is required.
 
 ### 8.1.7 Installer and uninstall clarity requirement
 
