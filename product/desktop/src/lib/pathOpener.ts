@@ -1,6 +1,11 @@
 import { invoke } from "@tauri-apps/api/core";
 
 type RevealMethod = "shell_open_path" | "shell_reveal_path" | "shell_open_parent_dir";
+export type ShellPathStatus = {
+  path: string;
+  exists: boolean;
+  is_dir: boolean;
+};
 
 function normalizePath(path: string): string {
   return (path ?? "").trim();
@@ -48,4 +53,12 @@ export async function copyPathToClipboard(path: string): Promise<boolean> {
   } catch {
     return false;
   }
+}
+
+export async function loadPathStatuses(paths: string[]): Promise<ShellPathStatus[]> {
+  const normalized = Array.from(
+    new Set(paths.map((value) => normalizePath(value)).filter((value) => value.length > 0)),
+  );
+  if (!normalized.length) return [];
+  return invoke<ShellPathStatus[]>("shell_paths_status", { paths: normalized });
 }

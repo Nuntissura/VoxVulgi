@@ -3,7 +3,7 @@
 ## Metadata
 - ID: WP-0134
 - Owner: Codex
-- Status: BACKLOG
+- Status: DONE
 - Created: 2026-03-09
 - Target milestone: Installer smoke remediation tranche
 
@@ -40,3 +40,4 @@ Out of scope:
 ## Status updates
 
 - 2026-03-09: Created from installer smoke findings `ST-007` and `ST-016`.
+- 2026-03-09: Implemented a dedicated `Localization Library` browser with grouped source/working/deliverable entries, explicit open/reveal/copy-path actions, and proof under `product/desktop/Build Target/tool_artifacts/wp_runs/WP-0134/20260309_060801/`.

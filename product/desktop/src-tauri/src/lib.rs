@@ -258,6 +258,13 @@ struct ShellPathResult {
 }
 
 #[derive(Debug, Clone, serde::Serialize)]
+struct ShellPathStatus {
+    path: String,
+    exists: bool,
+    is_dir: bool,
+}
+
+#[derive(Debug, Clone, serde::Serialize)]
 struct SafeModeStatus {
     enabled: bool,
     persisted_enabled: bool,
@@ -1118,6 +1125,26 @@ mod tests {
         assert_eq!(video.override_dir.as_deref(), Some(override_dir.to_string_lossy().as_ref()));
         assert_eq!(video.current_dir, override_dir.to_string_lossy());
     }
+
+    #[test]
+    fn shell_paths_status_reports_missing_and_existing_paths() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let existing = dir.path().join("exists.txt");
+        std::fs::write(&existing, "ok").expect("write existing");
+        let missing = dir.path().join("missing.txt");
+
+        let rows = shell_paths_status(vec![
+            existing.to_string_lossy().to_string(),
+            missing.to_string_lossy().to_string(),
+        ])
+        .expect("status rows");
+
+        assert_eq!(rows.len(), 2);
+        assert!(rows[0].exists);
+        assert!(!rows[0].is_dir);
+        assert!(!rows[1].exists);
+        assert!(!rows[1].is_dir);
+    }
 }
 
 fn ensure_media_output_layout(root: &std::path::Path) -> Result<(), String> {
@@ -1246,6 +1273,23 @@ fn normalize_existing_shell_path(path: String, label: &str) -> Result<std::path:
     Ok(normalized)
 }
 
+fn normalize_shell_path(path: String, label: &str) -> Result<std::path::PathBuf, String> {
+    let trimmed = path.trim();
+    if trimmed.is_empty() {
+        return Err(format!("{label} is empty"));
+    }
+    if trimmed.contains('\0') {
+        return Err(format!("{label} contains invalid characters"));
+    }
+    let mut target = std::path::PathBuf::from(trimmed);
+    if !target.is_absolute() {
+        target = std::env::current_dir()
+            .map_err(|e| e.to_string())?
+            .join(target);
+    }
+    Ok(target.canonicalize().unwrap_or(target))
+}
+
 fn run_shell_command(command: &mut std::process::Command, action: &str) -> Result<(), String> {
     let status = command.status().map_err(|e| format!("{action}: {e}"))?;
     if !status.success() {
@@ -1316,6 +1360,25 @@ fn shell_reveal_target(path: &std::path::Path) -> Result<(), String> {
         command.arg(parent.as_os_str());
         return run_shell_command(&mut command, "reveal path");
     }
+}
+
+#[tauri::command]
+fn shell_paths_status(paths: Vec<String>) -> Result<Vec<ShellPathStatus>, String> {
+    let mut rows = Vec::with_capacity(paths.len());
+    for path in paths {
+        let normalized = normalize_shell_path(path, "Path")?;
+        let meta = std::fs::metadata(&normalized);
+        let (exists, is_dir) = match meta {
+            Ok(value) => (true, value.is_dir()),
+            Err(_) => (false, false),
+        };
+        rows.push(ShellPathStatus {
+            path: normalized.to_string_lossy().to_string(),
+            exists,
+            is_dir,
+        });
+    }
+    Ok(rows)
 }
 
 #[tauri::command]
@@ -5168,6 +5231,7 @@ pub fn run() {
             subtitles_list_tracks,
             subtitles_load_track,
             subtitles_save_new_version,
+            shell_paths_status,
             shell_open_parent_dir,
             shell_open_path,
             shell_reveal_path,

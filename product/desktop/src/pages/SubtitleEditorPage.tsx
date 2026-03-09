@@ -14,7 +14,14 @@ import {
   ttsBackendIdsMatch,
   type ArtifactInfo,
 } from "../lib/localizationRuntime";
-import { copyPathToClipboard, openPathBestEffort, revealPath } from "../lib/pathOpener";
+import {
+  copyPathToClipboard,
+  loadPathStatuses,
+  openParentDirBestEffort,
+  openPathBestEffort,
+  revealPath,
+  type ShellPathStatus,
+} from "../lib/pathOpener";
 import { safeLocalStorageGet, safeLocalStorageSet } from "../lib/persist";
 import { featureRootStatus, useSharedDownloadDirStatus } from "../lib/sharedDownloadDir";
 
@@ -86,6 +93,15 @@ type ExportedFile = {
   file_bytes: number;
 };
 
+type LocalizationOutputEntry = {
+  id: string;
+  group: "Source" | "Working" | "Deliverables";
+  title: string;
+  path: string;
+  kind: "file" | "dir";
+  status_hint: string;
+};
+
 function sanitizeFilename(raw: string): string {
   const cleaned = raw.replace(/[<>:"/\\|?*]/g, "").trim();
   return cleaned || "voxvulgi-output";
@@ -131,6 +147,22 @@ function uniquePaths(paths: Array<string | null | undefined>): string[] {
     next.push(value);
   }
   return next;
+}
+
+function localizationOutputStatusLabel(
+  entry: LocalizationOutputEntry,
+  status: ShellPathStatus | undefined,
+): string {
+  if (status?.exists) {
+    return entry.kind === "dir" ? "ready folder" : "available";
+  }
+  if (entry.group === "Deliverables") {
+    return "planned / not exported yet";
+  }
+  if (entry.group === "Working") {
+    return "not generated yet";
+  }
+  return "missing";
 }
 
 function speakerProfilePaths(setting: {
@@ -841,6 +873,7 @@ export function SubtitleEditorPage({ itemId, visible = true }: { itemId: string;
   const [error, setError] = useState<string | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
   const [outputs, setOutputs] = useState<ItemOutputs | null>(null);
+  const [outputPathStatuses, setOutputPathStatuses] = useState<Record<string, ShellPathStatus>>({});
   const [artifacts, setArtifacts] = useState<ArtifactInfo[]>([]);
   const [artifactsBusy, setArtifactsBusy] = useState(false);
   const [itemJobs, setItemJobs] = useState<JobRow[]>([]);
@@ -2119,15 +2152,15 @@ export function SubtitleEditorPage({ itemId, visible = true }: { itemId: string;
     return sanitizeFilename(item?.title ?? "voxvulgi-output");
   }, [item?.media_path, item?.title]);
   const exportFolderStem = useMemo(() => sanitizeFilename(sourceBaseStem), [sourceBaseStem]);
-  const effectiveDownloadRoot = useMemo(() => {
+  const effectiveLocalizationRoot = useMemo(() => {
     const current = localizationRootStatus?.current_dir?.trim() ?? "";
     if (current) return current;
     return localizationRootStatus?.default_dir?.trim() ?? "";
   }, [localizationRootStatus]);
   const defaultLocalizationExportDir = useMemo(() => {
-    if (!effectiveDownloadRoot) return "";
-    return joinPath(effectiveDownloadRoot, "localization", "en", exportFolderStem);
-  }, [effectiveDownloadRoot, exportFolderStem]);
+    if (!effectiveLocalizationRoot) return "";
+    return joinPath(effectiveLocalizationRoot, exportFolderStem);
+  }, [effectiveLocalizationRoot, exportFolderStem]);
 
   function getPreferredMuxExportExt(): "mp4" | "mkv" {
     if (exportDubContainer === "mp4" || exportDubContainer === "mkv") {
@@ -2183,6 +2216,217 @@ export function SubtitleEditorPage({ itemId, visible = true }: { itemId: string;
     outputs?.mux_dub_preview_v1_mkv_exists,
   ]);
 
+  const localizationOutputEntries = useMemo<LocalizationOutputEntry[]>(() => {
+    const next: LocalizationOutputEntry[] = [];
+    const push = (entry: LocalizationOutputEntry | null) => {
+      if (!entry) return;
+      const path = entry.path.trim();
+      if (!path) return;
+      next.push({ ...entry, path });
+    };
+    push(
+      item?.media_path
+        ? {
+            id: "source-media",
+            group: "Source",
+            title: "Source video",
+            path: item.media_path,
+            kind: "file",
+            status_hint: "Original media selected in Localization Studio.",
+          }
+        : null,
+    );
+    push(
+      currentTrack?.path
+        ? {
+            id: "active-track",
+            group: "Source",
+            title: "Active subtitle track",
+            path: currentTrack.path,
+            kind: "file",
+            status_hint: "Current track loaded in the editor.",
+          }
+        : null,
+    );
+    push(
+      outputs?.derived_item_dir
+        ? {
+            id: "working-root",
+            group: "Working",
+            title: "Working files folder",
+            path: outputs.derived_item_dir,
+            kind: "dir",
+            status_hint: "App-managed item workspace and reproducible job outputs.",
+          }
+        : null,
+    );
+    push(
+      outputs?.dub_preview_dir
+        ? {
+            id: "working-dub-folder",
+            group: "Working",
+            title: "Dub preview folder",
+            path: outputs.dub_preview_dir,
+            kind: "dir",
+            status_hint: "Contains mix/mux preview assets.",
+          }
+        : null,
+    );
+    push(
+      outputs?.mix_dub_preview_v1_wav_path
+        ? {
+            id: "working-dub-audio",
+            group: "Working",
+            title: "Dub audio (WAV)",
+            path: outputs.mix_dub_preview_v1_wav_path,
+            kind: "file",
+            status_hint: "Standalone dubbed speech mix before mux.",
+          }
+        : null,
+    );
+    push(
+      outputs?.mux_dub_preview_v1_mp4_path
+        ? {
+            id: "working-preview-mp4",
+            group: "Working",
+            title: "Preview video (MP4)",
+            path: outputs.mux_dub_preview_v1_mp4_path,
+            kind: "file",
+            status_hint: "Working mux preview with dubbed audio embedded.",
+          }
+        : null,
+    );
+    push(
+      outputs?.mux_dub_preview_v1_mkv_path
+        ? {
+            id: "working-preview-mkv",
+            group: "Working",
+            title: "Preview video (MKV)",
+            path: outputs.mux_dub_preview_v1_mkv_path,
+            kind: "file",
+            status_hint: "Alternate working mux preview container.",
+          }
+        : null,
+    );
+    push(
+      outputs?.export_pack_v1_zip_path
+        ? {
+            id: "working-export-pack",
+            group: "Working",
+            title: "Export pack (ZIP)",
+            path: outputs.export_pack_v1_zip_path,
+            kind: "file",
+            status_hint: "Packaged working/export bundle from the export-pack job.",
+          }
+        : null,
+    );
+    push(
+      effectiveExportDirPreview
+        ? {
+            id: "deliverable-folder",
+            group: "Deliverables",
+            title: "Resolved export folder",
+            path: effectiveExportDirPreview,
+            kind: "dir",
+            status_hint: exportUseCustomDir
+              ? "Current custom deliverables folder."
+              : "Default deliverables folder under the localization feature root.",
+          }
+        : null,
+    );
+    push(
+      exportSrtPreviewPath
+        ? {
+            id: "deliverable-srt",
+            group: "Deliverables",
+            title: "Subtitle export (SRT)",
+            path: exportSrtPreviewPath,
+            kind: "file",
+            status_hint: "Predictable SRT deliverable path.",
+          }
+        : null,
+    );
+    push(
+      exportVttPreviewPath
+        ? {
+            id: "deliverable-vtt",
+            group: "Deliverables",
+            title: "Subtitle export (VTT)",
+            path: exportVttPreviewPath,
+            kind: "file",
+            status_hint: "Predictable VTT deliverable path.",
+          }
+        : null,
+    );
+    push(
+      exportDubPreviewPath
+        ? {
+            id: "deliverable-dub",
+            group: "Deliverables",
+            title: "Dubbed preview export",
+            path: exportDubPreviewPath,
+            kind: "file",
+            status_hint: "Predictable dubbed video deliverable path.",
+          }
+        : null,
+    );
+    return next;
+  }, [
+    currentTrack?.path,
+    effectiveExportDirPreview,
+    exportDubPreviewPath,
+    exportSrtPreviewPath,
+    exportUseCustomDir,
+    exportVttPreviewPath,
+    item?.media_path,
+    outputs?.derived_item_dir,
+    outputs?.dub_preview_dir,
+    outputs?.export_pack_v1_zip_path,
+    outputs?.mix_dub_preview_v1_wav_path,
+    outputs?.mux_dub_preview_v1_mkv_path,
+    outputs?.mux_dub_preview_v1_mp4_path,
+  ]);
+
+  const refreshLocalizationOutputStatuses = useCallback(async () => {
+    const requested = localizationOutputEntries.map((entry) => entry.path);
+    if (!requested.length) {
+      setOutputPathStatuses({});
+      return {};
+    }
+    const rows = await loadPathStatuses(requested);
+    const next: Record<string, ShellPathStatus> = {};
+    rows.forEach((row, index) => {
+      const requestedPath = requested[index]?.trim() ?? "";
+      if (requestedPath) {
+        next[requestedPath] = row;
+      }
+      next[row.path] = row;
+    });
+    setOutputPathStatuses(next);
+    return next;
+  }, [localizationOutputEntries]);
+
+  const localizationOutputSections = useMemo(() => {
+    return [
+      {
+        title: "Source",
+        rows: localizationOutputEntries.filter((entry) => entry.group === "Source"),
+      },
+      {
+        title: "Working",
+        rows: localizationOutputEntries.filter((entry) => entry.group === "Working"),
+      },
+      {
+        title: "Deliverables",
+        rows: localizationOutputEntries.filter((entry) => entry.group === "Deliverables"),
+      },
+    ];
+  }, [localizationOutputEntries]);
+
+  useEffect(() => {
+    refreshLocalizationOutputStatuses().catch(() => undefined);
+  }, [refreshLocalizationOutputStatuses]);
+
   function logDiagnosticsEvent(
     event: string,
     details: Record<string, unknown> = {},
@@ -2197,6 +2441,45 @@ export function SubtitleEditorPage({ itemId, visible = true }: { itemId: string;
       },
       level,
     );
+  }
+
+  async function openLocalizationOutputPath(entry: LocalizationOutputEntry) {
+    const status = outputPathStatuses[entry.path.trim()];
+    if (!status?.exists) {
+      setError(`${entry.title} is not available yet.`);
+      return;
+    }
+    setError(null);
+    setNotice(null);
+    try {
+      const opened = await openPathBestEffort(entry.path);
+      setNotice(
+        opened.method === "shell_open_path"
+          ? `Opened ${entry.title}: ${opened.path}`
+          : `Revealed ${entry.title}: ${opened.path}`,
+      );
+    } catch (e) {
+      setError(String(e));
+    }
+  }
+
+  async function revealLocalizationOutputPath(entry: LocalizationOutputEntry) {
+    const status = outputPathStatuses[entry.path.trim()];
+    if (!status?.exists) {
+      setError(`${entry.title} is not available yet.`);
+      return;
+    }
+    setError(null);
+    try {
+      await revealPath(entry.path);
+    } catch (e) {
+      setError(String(e));
+    }
+  }
+
+  async function copyLocalizationOutputPath(entry: LocalizationOutputEntry) {
+    const ok = await copyPathToClipboard(entry.path);
+    setNotice(ok ? `Copied path: ${entry.path}` : `Copy path failed: ${entry.path}`);
   }
 
   async function revealSelectedTrack() {
@@ -4167,6 +4450,7 @@ export function SubtitleEditorPage({ itemId, visible = true }: { itemId: string;
 
       const count = created.length;
       setNotice(`Exported ${count} file${count === 1 ? "" : "s"} to ${outDir}`);
+      await refreshLocalizationOutputStatuses().catch(() => undefined);
       if (created.length) {
         try {
           await revealPath(created[0]);
@@ -4193,6 +4477,7 @@ export function SubtitleEditorPage({ itemId, visible = true }: { itemId: string;
     try {
       await invoke("subtitles_export_doc_srt", { doc, outPath: out });
       setNotice(`Exported SRT: ${out}`);
+      await refreshLocalizationOutputStatuses().catch(() => undefined);
     } catch (e) {
       setError(String(e));
     } finally {
@@ -4211,6 +4496,7 @@ export function SubtitleEditorPage({ itemId, visible = true }: { itemId: string;
     try {
       await invoke("subtitles_export_doc_vtt", { doc, outPath: out });
       setNotice(`Exported VTT: ${out}`);
+      await refreshLocalizationOutputStatuses().catch(() => undefined);
     } catch (e) {
       setError(String(e));
     } finally {
@@ -4257,11 +4543,16 @@ export function SubtitleEditorPage({ itemId, visible = true }: { itemId: string;
     setNotice(null);
     try {
       const target = resolveExportDir();
-      const opened = await openPathBestEffort(target);
+      const status = outputPathStatuses[target.trim()];
+      const opened = status?.exists
+        ? await openPathBestEffort(target)
+        : await openParentDirBestEffort(target);
       setNotice(
         opened.method === "shell_open_path"
           ? `Export folder: ${opened.path}`
-          : `Export folder revealed in file explorer: ${opened.path}`,
+          : status?.exists
+            ? `Export folder revealed in file explorer: ${opened.path}`
+            : `Export folder not created yet; opened parent folder: ${opened.path}`,
       );
     } catch (e) {
       setError(String(e));
@@ -4378,6 +4669,7 @@ export function SubtitleEditorPage({ itemId, visible = true }: { itemId: string;
         outPath: out,
       });
       setNotice(`Exported preview: ${result.out_path}`);
+      await refreshLocalizationOutputStatuses().catch(() => undefined);
       try {
         await revealPath(result.out_path);
       } catch {
@@ -4538,6 +4830,95 @@ export function SubtitleEditorPage({ itemId, visible = true }: { itemId: string;
       </div>
 
       <div className="card">
+        <h2>Localization Library</h2>
+        <div style={{ color: "#4b5563" }}>
+          One place for the source video, current working artifacts, and predictable deliverable
+          paths. Working files stay in app-data; deliverables export to the resolved localization
+          output folder.
+        </div>
+        <div className="row" style={{ marginTop: 10, flexWrap: "wrap" }}>
+          <button type="button" disabled={busy || !item?.media_path} onClick={openSourceFile}>
+            Open source video
+          </button>
+          <button type="button" disabled={busy || !outputs?.derived_item_dir} onClick={openOutputsFolder}>
+            Open working folder
+          </button>
+          <button type="button" disabled={busy || !effectiveExportDirPreview} onClick={openExportFolder}>
+            Open deliverables folder
+          </button>
+          <button type="button" disabled={busy} onClick={() => refreshLocalizationOutputStatuses().catch((e) => setError(String(e)))}>
+            Refresh library
+          </button>
+        </div>
+
+        {localizationOutputSections.map((section) => (
+          <div key={section.title} style={{ marginTop: 18 }}>
+            <div style={{ fontWeight: 600, marginBottom: 8 }}>{section.title}</div>
+            <div className="table-wrap">
+              <table>
+                <thead>
+                  <tr>
+                    <th>Item</th>
+                    <th>Status</th>
+                    <th>Path</th>
+                    <th>Notes</th>
+                    <th>Actions</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {section.rows.length ? (
+                    section.rows.map((entry) => {
+                      const status = outputPathStatuses[entry.path.trim()];
+                      const exists = status?.exists ?? false;
+                      return (
+                        <tr key={entry.id}>
+                          <td>{entry.title}</td>
+                          <td>{localizationOutputStatusLabel(entry, status)}</td>
+                          <td>
+                            <code>{entry.path}</code>
+                          </td>
+                          <td>{entry.status_hint}</td>
+                          <td>
+                            <div className="row" style={{ marginTop: 0, flexWrap: "wrap" }}>
+                              <button
+                                type="button"
+                                disabled={busy || !exists}
+                                onClick={() => openLocalizationOutputPath(entry)}
+                              >
+                                Open
+                              </button>
+                              <button
+                                type="button"
+                                disabled={busy || !exists}
+                                onClick={() => revealLocalizationOutputPath(entry)}
+                              >
+                                Reveal
+                              </button>
+                              <button
+                                type="button"
+                                disabled={busy}
+                                onClick={() => copyLocalizationOutputPath(entry)}
+                              >
+                                Copy path
+                              </button>
+                            </div>
+                          </td>
+                        </tr>
+                      );
+                    })
+                  ) : (
+                    <tr>
+                      <td colSpan={5}>No {section.title.toLowerCase()} entries yet.</td>
+                    </tr>
+                  )}
+                </tbody>
+              </table>
+            </div>
+          </div>
+        ))}
+      </div>
+
+      <div className="card">
         <h2>First Dub Guide</h2>
         <div style={{ color: "#4b5563" }}>
           Recommended order for a first Japanese/Korean to English dubbed preview:
@@ -4595,8 +4976,8 @@ export function SubtitleEditorPage({ itemId, visible = true }: { itemId: string;
           </button>
         </div>
         <div className="kv">
-          <div className="k">Main download folder</div>
-          <div className="v">{effectiveDownloadRoot || "-"}</div>
+          <div className="k">Localization feature root</div>
+          <div className="v">{effectiveLocalizationRoot || "-"}</div>
         </div>
         <div className="kv">
           <div className="k">Resolved export folder</div>
@@ -4763,7 +5144,11 @@ export function SubtitleEditorPage({ itemId, visible = true }: { itemId: string;
             type="button"
             disabled={busy}
             onClick={() =>
-              Promise.all([refreshOutputs(), refreshArtifacts()]).catch((e) => setError(String(e)))
+              Promise.all([
+                refreshOutputs(),
+                refreshArtifacts(),
+                refreshLocalizationOutputStatuses(),
+              ]).catch((e) => setError(String(e)))
             }
           >
             Refresh outputs
