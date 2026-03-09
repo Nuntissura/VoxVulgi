@@ -281,6 +281,97 @@ struct DiagnosticsTraceDirStatus {
 }
 
 #[derive(Debug, Clone, serde::Serialize)]
+struct DiagnosticsKeyCount {
+    key: String,
+    count: u64,
+}
+
+#[derive(Debug, Clone, serde::Serialize)]
+struct DiagnosticsRecentJobFailure {
+    id: String,
+    job_type: String,
+    item_id: Option<String>,
+    created_at_ms: i64,
+    error: String,
+}
+
+#[derive(Debug, Clone, serde::Serialize)]
+struct DiagnosticsJobQueueSnapshot {
+    total: u64,
+    queued: u64,
+    running: u64,
+    succeeded: u64,
+    failed: u64,
+    canceled: u64,
+    active_batch_count: u64,
+    recent_failures: Vec<DiagnosticsRecentJobFailure>,
+}
+
+#[derive(Debug, Clone, serde::Serialize)]
+struct DiagnosticsLibrarySnapshot {
+    total_items: u64,
+    by_source_type: Vec<DiagnosticsKeyCount>,
+    by_provider: Vec<DiagnosticsKeyCount>,
+    subtitle_track_count: u64,
+    translated_en_track_count: u64,
+    item_speaker_count: u64,
+    item_voice_plan_count: u64,
+    voice_template_count: u64,
+    voice_cast_pack_count: u64,
+    voice_library_profile_count: u64,
+    youtube_subscription_count: u64,
+    instagram_subscription_count: u64,
+}
+
+#[derive(Debug, Clone, serde::Serialize)]
+struct DiagnosticsFeatureHealthRow {
+    feature: String,
+    status: String,
+    detail: String,
+}
+
+#[derive(Debug, Clone, serde::Serialize)]
+struct DiagnosticsAppStateSnapshot {
+    generated_at_ms: i64,
+    app: DiagnosticsInfo,
+    startup: StartupStatus,
+    download_roots: DownloadDirStatus,
+    diagnostics_trace_dir: DiagnosticsTraceDirStatus,
+    ffmpeg: tools::FfmpegToolsStatus,
+    ytdlp: tools::YtDlpToolsStatus,
+    python: tools::PythonToolchainStatus,
+    portable_python: tools::PortablePythonStatus,
+    spleeter: tools::SpleeterPackStatus,
+    demucs: tools::DemucsPackStatus,
+    diarization: tools::DiarizationPackStatus,
+    tts_preview: tools::TtsPreviewPackStatus,
+    tts_neural_local_v1: tools::TtsNeuralLocalV1PackStatus,
+    tts_voice_preserving_local_v1: tools::TtsVoicePreservingLocalV1PackStatus,
+    voice_backend_catalog: voice_backends::VoiceBackendCatalog,
+    voice_backend_recommendation: voice_backends::VoiceBackendRecommendation,
+    voice_backend_adapter_count: usize,
+    models: voxvulgi_engine::models::ModelInventory,
+    performance_tier: tools::PerformanceTierStatus,
+    batch_on_import_rules: config::BatchOnImportRules,
+    optional_diarization_backend: config::OptionalDiarizationBackendStatus,
+    storage: diagnostics::StorageBreakdown,
+    thumbnail_cache: library::ThumbnailCacheStatus,
+    jobs: DiagnosticsJobQueueSnapshot,
+    library: DiagnosticsLibrarySnapshot,
+    recent_trace: Vec<DiagnosticsTraceEntry>,
+    feature_health: Vec<DiagnosticsFeatureHealthRow>,
+}
+
+#[derive(Debug, Clone, serde::Serialize)]
+struct DiagnosticsAppStateSnapshotExport {
+    generated_at_ms: i64,
+    json_path: String,
+    markdown_path: String,
+    json_bytes: u64,
+    markdown_bytes: u64,
+}
+
+#[derive(Debug, Clone, serde::Serialize)]
 struct DiagnosticsTraceClearSummary {
     removed_entries: usize,
     removed_bytes: u64,
@@ -1145,6 +1236,72 @@ mod tests {
         assert!(!rows[1].exists);
         assert!(!rows[1].is_dir);
     }
+
+    #[test]
+    fn diagnostics_app_state_snapshot_export_writes_json_and_markdown() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let paths = AppPaths::new(dir.path().to_path_buf());
+        paths.ensure_dirs().expect("ensure dirs");
+        db::ensure_schema(&paths).expect("ensure schema");
+
+        let startup = StartupStatus {
+            offline_bundle_state: "ready".to_string(),
+            offline_bundle_started_at_ms: Some(1),
+            offline_bundle_finished_at_ms: Some(2),
+            offline_bundle_error: None,
+            progress_pct: 1.0,
+            active_phase_id: None,
+            phases: vec![
+                StartupPhase {
+                    id: "app_dirs".to_string(),
+                    label: "App data + output layout".to_string(),
+                    state: "ready".to_string(),
+                    started_at_ms: Some(1),
+                    finished_at_ms: Some(2),
+                    error: None,
+                },
+                StartupPhase {
+                    id: "offline_bundle".to_string(),
+                    label: "Offline bundle hydration".to_string(),
+                    state: "ready".to_string(),
+                    started_at_ms: Some(1),
+                    finished_at_ms: Some(2),
+                    error: None,
+                },
+            ],
+        };
+
+        let snapshot = build_diagnostics_app_state_snapshot(
+            &paths,
+            "VoxVulgi".to_string(),
+            "0.1.5".to_string(),
+            startup,
+        )
+        .expect("snapshot");
+        let export = write_diagnostics_app_state_snapshot_exports(
+            &snapshot,
+            &dir.path().join("support").join("app-state"),
+        )
+        .expect("export");
+
+        let json_text = std::fs::read_to_string(&export.json_path).expect("json");
+        let markdown_text = std::fs::read_to_string(&export.markdown_path).expect("markdown");
+        assert!(json_text.contains("\"feature_health\""));
+        assert!(markdown_text.contains("# VoxVulgi app-state snapshot"));
+        assert!(markdown_text.contains("## Feature health"));
+
+        if let Ok(proof_dir) = std::env::var("VOXVULGI_WP0135_PROOF_DIR") {
+            let proof_dir = std::path::PathBuf::from(proof_dir);
+            std::fs::create_dir_all(&proof_dir).expect("create proof dir");
+            std::fs::copy(&export.json_path, proof_dir.join("sample_app_state_snapshot.json"))
+                .expect("copy json proof");
+            std::fs::copy(
+                &export.markdown_path,
+                proof_dir.join("sample_app_state_snapshot.md"),
+            )
+            .expect("copy markdown proof");
+        }
+    }
 }
 
 fn ensure_media_output_layout(root: &std::path::Path) -> Result<(), String> {
@@ -1499,6 +1656,469 @@ fn clear_dir_entries_with_bytes(
     Ok(DiagnosticsTraceClearSummary {
         removed_entries,
         removed_bytes,
+    })
+}
+
+fn diagnostics_count_value(conn: &rusqlite::Connection, sql: &str) -> Result<u64, String> {
+    conn.query_row(sql, [], |row| row.get::<_, i64>(0))
+        .map(|value| value.max(0) as u64)
+        .map_err(|e| e.to_string())
+}
+
+fn diagnostics_key_counts(
+    conn: &rusqlite::Connection,
+    sql: &str,
+) -> Result<Vec<DiagnosticsKeyCount>, String> {
+    let mut stmt = conn.prepare(sql).map_err(|e| e.to_string())?;
+    let rows = stmt
+        .query_map([], |row| {
+            let key: Option<String> = row.get(0)?;
+            let count: i64 = row.get(1)?;
+            Ok(DiagnosticsKeyCount {
+                key: key
+                    .map(|value| value.trim().to_string())
+                    .filter(|value| !value.is_empty())
+                    .unwrap_or_else(|| "(unknown)".to_string()),
+                count: count.max(0) as u64,
+            })
+        })
+        .map_err(|e| e.to_string())?;
+    let mut out = Vec::new();
+    for row in rows {
+        out.push(row.map_err(|e| e.to_string())?);
+    }
+    Ok(out)
+}
+
+fn build_job_queue_snapshot(paths: &AppPaths) -> Result<DiagnosticsJobQueueSnapshot, String> {
+    let conn = db::open(paths).map_err(|e| e.to_string())?;
+    db::migrate(&conn).map_err(|e| e.to_string())?;
+    let total = diagnostics_count_value(&conn, "SELECT COUNT(*) FROM job")?;
+    let queued = diagnostics_count_value(&conn, "SELECT COUNT(*) FROM job WHERE status='queued'")?;
+    let running = diagnostics_count_value(&conn, "SELECT COUNT(*) FROM job WHERE status='running'")?;
+    let succeeded =
+        diagnostics_count_value(&conn, "SELECT COUNT(*) FROM job WHERE status='succeeded'")?;
+    let failed = diagnostics_count_value(&conn, "SELECT COUNT(*) FROM job WHERE status='failed'")?;
+    let canceled =
+        diagnostics_count_value(&conn, "SELECT COUNT(*) FROM job WHERE status='canceled'")?;
+    let active_batch_count = diagnostics_count_value(
+        &conn,
+        "SELECT COUNT(DISTINCT batch_id) FROM job WHERE batch_id IS NOT NULL AND TRIM(batch_id) <> '' AND status IN ('queued','running')",
+    )?;
+
+    let mut stmt = conn
+        .prepare(
+            "SELECT id, type, item_id, created_at_ms, COALESCE(error, '') \
+             FROM job WHERE status='failed' ORDER BY created_at_ms DESC LIMIT 10",
+        )
+        .map_err(|e| e.to_string())?;
+    let failures = stmt
+        .query_map([], |row| {
+            Ok(DiagnosticsRecentJobFailure {
+                id: row.get(0)?,
+                job_type: row.get(1)?,
+                item_id: row.get(2)?,
+                created_at_ms: row.get::<_, i64>(3)?,
+                error: row.get::<_, String>(4)?,
+            })
+        })
+        .map_err(|e| e.to_string())?;
+    let mut recent_failures = Vec::new();
+    for row in failures {
+        recent_failures.push(row.map_err(|e| e.to_string())?);
+    }
+
+    Ok(DiagnosticsJobQueueSnapshot {
+        total,
+        queued,
+        running,
+        succeeded,
+        failed,
+        canceled,
+        active_batch_count,
+        recent_failures,
+    })
+}
+
+fn build_library_snapshot(paths: &AppPaths) -> Result<DiagnosticsLibrarySnapshot, String> {
+    let conn = db::open(paths).map_err(|e| e.to_string())?;
+    db::migrate(&conn).map_err(|e| e.to_string())?;
+
+    Ok(DiagnosticsLibrarySnapshot {
+        total_items: diagnostics_count_value(&conn, "SELECT COUNT(*) FROM library_item")?,
+        by_source_type: diagnostics_key_counts(
+            &conn,
+            "SELECT source_type, COUNT(*) FROM library_item GROUP BY source_type ORDER BY COUNT(*) DESC, source_type ASC",
+        )?,
+        by_provider: diagnostics_key_counts(
+            &conn,
+            "SELECT provider, COUNT(*) FROM ingest_provenance GROUP BY provider ORDER BY COUNT(*) DESC, provider ASC",
+        )?,
+        subtitle_track_count: diagnostics_count_value(&conn, "SELECT COUNT(*) FROM subtitle_track")?,
+        translated_en_track_count: diagnostics_count_value(
+            &conn,
+            "SELECT COUNT(*) FROM subtitle_track WHERE kind='translated' AND lang='en'",
+        )?,
+        item_speaker_count: diagnostics_count_value(&conn, "SELECT COUNT(*) FROM item_speaker")?,
+        item_voice_plan_count: diagnostics_count_value(&conn, "SELECT COUNT(*) FROM item_voice_plan")?,
+        voice_template_count: diagnostics_count_value(&conn, "SELECT COUNT(*) FROM voice_template")?,
+        voice_cast_pack_count: diagnostics_count_value(&conn, "SELECT COUNT(*) FROM voice_cast_pack")?,
+        voice_library_profile_count: voice_library::list_voice_library_profiles(paths, None)
+            .map(|rows| rows.len() as u64)
+            .map_err(|e| e.to_string())?,
+        youtube_subscription_count: subscriptions::list_youtube_subscriptions(paths)
+            .map(|rows| rows.len() as u64)
+            .map_err(|e| e.to_string())?,
+        instagram_subscription_count: instagram_subscriptions::list_instagram_subscriptions(paths)
+            .map(|rows| rows.len() as u64)
+            .map_err(|e| e.to_string())?,
+    })
+}
+
+fn build_feature_health_rows(
+    startup: &StartupStatus,
+    ffmpeg: &tools::FfmpegToolsStatus,
+    ytdlp: &tools::YtDlpToolsStatus,
+    python: &tools::PythonToolchainStatus,
+    neural: &tools::TtsNeuralLocalV1PackStatus,
+    voice_preserving: &tools::TtsVoicePreservingLocalV1PackStatus,
+    models: &voxvulgi_engine::models::ModelInventory,
+    trace_dir: &DiagnosticsTraceDirStatus,
+    jobs: &DiagnosticsJobQueueSnapshot,
+) -> Vec<DiagnosticsFeatureHealthRow> {
+    let whisper_ready = models
+        .models
+        .iter()
+        .any(|model| model.id == "whispercpp-tiny" && model.installed);
+    let startup_blocked = startup
+        .phases
+        .iter()
+        .any(|phase| matches!(phase.state.as_str(), "pending" | "running"));
+
+    vec![
+        DiagnosticsFeatureHealthRow {
+            feature: "Startup hydration".to_string(),
+            status: if startup_blocked {
+                format!("loading {}%", (startup.progress_pct * 100.0).round())
+            } else if startup.offline_bundle_state == "error" {
+                "error".to_string()
+            } else {
+                "ready".to_string()
+            },
+            detail: startup
+                .phases
+                .iter()
+                .find(|phase| phase.id == startup.active_phase_id.clone().unwrap_or_default())
+                .map(|phase| phase.label.clone())
+                .unwrap_or_else(|| startup.offline_bundle_state.clone()),
+        },
+        DiagnosticsFeatureHealthRow {
+            feature: "Video/Instagram archivers".to_string(),
+            status: if ffmpeg.installed && ytdlp.available {
+                "ready".to_string()
+            } else if startup_blocked {
+                "loading".to_string()
+            } else {
+                "blocked".to_string()
+            },
+            detail: format!(
+                "FFmpeg={} / yt-dlp={}",
+                if ffmpeg.installed { "ready" } else { "missing" },
+                if ytdlp.available { "ready" } else { "missing" }
+            ),
+        },
+        DiagnosticsFeatureHealthRow {
+            feature: "Localization core".to_string(),
+            status: if ffmpeg.installed && whisper_ready {
+                "ready".to_string()
+            } else if startup_blocked {
+                "loading".to_string()
+            } else {
+                "blocked".to_string()
+            },
+            detail: format!(
+                "FFmpeg={} / Whisper.cpp={}",
+                if ffmpeg.installed { "ready" } else { "missing" },
+                if whisper_ready { "ready" } else { "missing" }
+            ),
+        },
+        DiagnosticsFeatureHealthRow {
+            feature: "Voice-preserving dubbing".to_string(),
+            status: if python.venv_exists && neural.installed && voice_preserving.installed {
+                "ready".to_string()
+            } else if startup_blocked {
+                "loading".to_string()
+            } else {
+                "partial".to_string()
+            },
+            detail: format!(
+                "Python venv={} / neural pack={} / voice pack={}",
+                if python.venv_exists { "ready" } else { "missing" },
+                if neural.installed { "ready" } else { "missing" },
+                if voice_preserving.installed {
+                    "ready"
+                } else {
+                    "missing"
+                }
+            ),
+        },
+        DiagnosticsFeatureHealthRow {
+            feature: "Diagnostics trace".to_string(),
+            status: if trace_dir.exists {
+                "ready".to_string()
+            } else {
+                "blocked".to_string()
+            },
+            detail: trace_dir.current_dir.clone(),
+        },
+        DiagnosticsFeatureHealthRow {
+            feature: "Job engine".to_string(),
+            status: if jobs.running > 0 {
+                "busy".to_string()
+            } else {
+                "ready".to_string()
+            },
+            detail: format!(
+                "{} queued / {} running / {} failed",
+                jobs.queued, jobs.running, jobs.failed
+            ),
+        },
+    ]
+}
+
+fn render_diagnostics_app_state_snapshot_markdown(
+    snapshot: &DiagnosticsAppStateSnapshot,
+) -> String {
+    let mut md = String::new();
+    md.push_str("# VoxVulgi app-state snapshot\n\n");
+    md.push_str(&format!(
+        "- Generated: `{}`\n- App: `{} {}`\n- Engine: `{}`\n\n",
+        snapshot.generated_at_ms, snapshot.app.app_name, snapshot.app.app_version, snapshot.app.engine_version
+    ));
+
+    md.push_str("## Startup\n\n");
+    md.push_str(&format!(
+        "- Offline bundle: `{}`\n- Progress: `{:.0}%`\n- Active phase: `{}`\n\n",
+        snapshot.startup.offline_bundle_state,
+        snapshot.startup.progress_pct * 100.0,
+        snapshot
+            .startup
+            .active_phase_id
+            .clone()
+            .unwrap_or_else(|| "-".to_string())
+    ));
+
+    md.push_str("## Feature health\n\n");
+    for row in &snapshot.feature_health {
+        md.push_str(&format!(
+            "- **{}**: `{}` - {}\n",
+            row.feature, row.status, row.detail
+        ));
+    }
+    md.push('\n');
+
+    md.push_str("## Roots\n\n");
+    md.push_str(&format!(
+        "- App data: `{}`\n- DB: `{}`\n- Download root: `{}`\n- Diagnostics trace: `{}`\n\n",
+        snapshot.app.app_data_dir,
+        snapshot.app.db_path,
+        snapshot.download_roots.current_dir,
+        snapshot.diagnostics_trace_dir.current_dir
+    ));
+    for root in &snapshot.download_roots.feature_roots {
+        md.push_str(&format!("- {}: `{}`\n", root.label, root.current_dir));
+    }
+    md.push('\n');
+
+    md.push_str("## Library and jobs\n\n");
+    md.push_str(&format!(
+        "- Library items: `{}`\n- Subtitle tracks: `{}` (`{}` translated/en)\n- Voice templates: `{}`\n- Cast packs: `{}`\n- Voice library profiles: `{}`\n- YouTube subscriptions: `{}`\n- Instagram subscriptions: `{}`\n- Jobs: total `{}`, queued `{}`, running `{}`, failed `{}`\n\n",
+        snapshot.library.total_items,
+        snapshot.library.subtitle_track_count,
+        snapshot.library.translated_en_track_count,
+        snapshot.library.voice_template_count,
+        snapshot.library.voice_cast_pack_count,
+        snapshot.library.voice_library_profile_count,
+        snapshot.library.youtube_subscription_count,
+        snapshot.library.instagram_subscription_count,
+        snapshot.jobs.total,
+        snapshot.jobs.queued,
+        snapshot.jobs.running,
+        snapshot.jobs.failed
+    ));
+
+    if !snapshot.jobs.recent_failures.is_empty() {
+        md.push_str("## Recent failures\n\n");
+        for failure in &snapshot.jobs.recent_failures {
+            md.push_str(&format!(
+                "- `{}` / `{}` / item `{}`\n  - {}\n",
+                failure.id,
+                failure.job_type,
+                failure.item_id.clone().unwrap_or_else(|| "-".to_string()),
+                failure.error
+            ));
+        }
+        md.push('\n');
+    }
+
+    md
+}
+
+fn write_diagnostics_app_state_snapshot_exports(
+    snapshot: &DiagnosticsAppStateSnapshot,
+    out_path: &std::path::Path,
+) -> Result<DiagnosticsAppStateSnapshotExport, String> {
+    let mut json_path = out_path.to_path_buf();
+    let has_json_extension = json_path
+        .extension()
+        .and_then(|value| value.to_str())
+        .map(|value| value.eq_ignore_ascii_case("json"))
+        .unwrap_or(false);
+    if !has_json_extension {
+        json_path.set_extension("json");
+    }
+    if let Some(parent) = json_path.parent() {
+        std::fs::create_dir_all(parent).map_err(|e| {
+            format!(
+                "failed to create snapshot export dir {}: {e}",
+                parent.to_string_lossy()
+            )
+        })?;
+    }
+    let markdown_path = json_path.with_extension("md");
+    let json_bytes = serde_json::to_vec_pretty(snapshot).map_err(|e| e.to_string())?;
+    let mut json_payload = json_bytes;
+    json_payload.push(b'\n');
+    std::fs::write(&json_path, &json_payload).map_err(|e| {
+        format!(
+            "failed to write snapshot json {}: {e}",
+            json_path.to_string_lossy()
+        )
+    })?;
+    let markdown = render_diagnostics_app_state_snapshot_markdown(snapshot);
+    std::fs::write(&markdown_path, markdown.as_bytes()).map_err(|e| {
+        format!(
+            "failed to write snapshot markdown {}: {e}",
+            markdown_path.to_string_lossy()
+        )
+    })?;
+    let markdown_bytes = std::fs::metadata(&markdown_path)
+        .map(|meta| meta.len())
+        .unwrap_or(markdown.len() as u64);
+    Ok(DiagnosticsAppStateSnapshotExport {
+        generated_at_ms: snapshot.generated_at_ms,
+        json_path: json_path.to_string_lossy().to_string(),
+        markdown_path: markdown_path.to_string_lossy().to_string(),
+        json_bytes: json_payload.len() as u64,
+        markdown_bytes,
+    })
+}
+
+fn build_diagnostics_app_state_snapshot(
+    paths: &AppPaths,
+    app_name: String,
+    app_version: String,
+    startup: StartupStatus,
+) -> Result<DiagnosticsAppStateSnapshot, String> {
+    let app = DiagnosticsInfo {
+        app_data_dir: paths.base_dir.to_string_lossy().to_string(),
+        db_path: paths
+            .db_dir()
+            .join("app.sqlite")
+            .to_string_lossy()
+            .to_string(),
+        app_name,
+        app_version,
+        engine_version: diagnostics::engine_version().to_string(),
+    };
+    let download_roots = build_download_dir_status(paths)?;
+    let diagnostics_trace_dir = build_diagnostics_trace_dir_status(paths)?;
+    let ffmpeg = tools::ffmpeg_tools_status(paths);
+    let ytdlp = tools::ytdlp_tools_status(paths);
+    let python = tools::python_toolchain_status(paths);
+    let portable_python = tools::portable_python_status(paths);
+    let spleeter = tools::spleeter_pack_status(paths);
+    let demucs = tools::demucs_pack_status(paths);
+    let diarization = tools::diarization_pack_status(paths);
+    let tts_preview = tools::tts_preview_pack_status(paths);
+    let tts_neural_local_v1 = tools::tts_neural_local_v1_pack_status(paths);
+    let tts_voice_preserving_local_v1 = tools::tts_voice_preserving_local_v1_pack_status(paths);
+    let voice_backend_catalog = voice_backends::backend_catalog(paths);
+    let voice_backend_recommendation =
+        voice_backends::recommend_backend(paths, Default::default());
+    let voice_backend_adapter_count = voice_backend_adapters::list_voice_backend_adapters(paths)
+        .map(|rows| rows.len())
+        .unwrap_or(0);
+    let models = ModelStore::new(paths.clone())
+        .inventory()
+        .map_err(|e| e.to_string())?;
+    let performance_tier = tools::performance_tier_status(paths);
+    let batch_on_import_rules =
+        config::load_batch_on_import_rules(paths).map_err(|e| e.to_string())?;
+    let optional_diarization_backend =
+        config::load_optional_diarization_backend_status(paths).map_err(|e| e.to_string())?;
+    let storage = diagnostics::storage_breakdown(paths).map_err(|e| e.to_string())?;
+    let thumbnail_cache = library::thumbnail_cache_status(paths).map_err(|e| e.to_string())?;
+    let jobs = build_job_queue_snapshot(paths)?;
+    let library = build_library_snapshot(paths)?;
+    let recent_trace = read_recent_diagnostics_trace_entries(paths, 40)?;
+    let feature_health = build_feature_health_rows(
+        &startup,
+        &ffmpeg,
+        &ytdlp,
+        &python,
+        &tts_neural_local_v1,
+        &tts_voice_preserving_local_v1,
+        &models,
+        &diagnostics_trace_dir,
+        &jobs,
+    );
+
+    Ok(DiagnosticsAppStateSnapshot {
+        generated_at_ms: now_epoch_ms_i64(),
+        app,
+        startup,
+        download_roots,
+        diagnostics_trace_dir,
+        ffmpeg,
+        ytdlp,
+        python,
+        portable_python,
+        spleeter,
+        demucs,
+        diarization,
+        tts_preview,
+        tts_neural_local_v1,
+        tts_voice_preserving_local_v1,
+        voice_backend_catalog,
+        voice_backend_recommendation,
+        voice_backend_adapter_count,
+        models,
+        performance_tier,
+        batch_on_import_rules,
+        optional_diarization_backend,
+        storage,
+        thumbnail_cache,
+        jobs,
+        library,
+        recent_trace,
+        feature_health,
+    })
+}
+
+fn current_startup_status(state: &AppState) -> Result<StartupStatus, String> {
+    let startup = state
+        .startup
+        .lock()
+        .map_err(|_| "startup status lock poisoned".to_string())?;
+    Ok(StartupStatus {
+        offline_bundle_state: startup.offline_bundle_state.clone(),
+        offline_bundle_started_at_ms: startup.offline_bundle_started_at_ms,
+        offline_bundle_finished_at_ms: startup.offline_bundle_finished_at_ms,
+        offline_bundle_error: startup.offline_bundle_error.clone(),
+        progress_pct: startup.progress_pct,
+        active_phase_id: startup.active_phase_id.clone(),
+        phases: startup.phases.clone(),
     })
 }
 
@@ -2553,19 +3173,51 @@ fn safe_mode_status(state: State<'_, AppState>) -> Result<SafeModeStatus, String
 
 #[tauri::command]
 fn startup_status(state: State<'_, AppState>) -> Result<StartupStatus, String> {
-    let startup = state
-        .startup
-        .lock()
-        .map_err(|_| "startup status lock poisoned".to_string())?;
-    Ok(StartupStatus {
-        offline_bundle_state: startup.offline_bundle_state.clone(),
-        offline_bundle_started_at_ms: startup.offline_bundle_started_at_ms,
-        offline_bundle_finished_at_ms: startup.offline_bundle_finished_at_ms,
-        offline_bundle_error: startup.offline_bundle_error.clone(),
-        progress_pct: startup.progress_pct,
-        active_phase_id: startup.active_phase_id.clone(),
-        phases: startup.phases.clone(),
+    current_startup_status(&state)
+}
+
+#[tauri::command]
+async fn diagnostics_app_state_snapshot(
+    app: tauri::AppHandle,
+    state: State<'_, AppState>,
+) -> Result<DiagnosticsAppStateSnapshot, String> {
+    let package = app.package_info();
+    let app_name = package.name.to_string();
+    let app_version = package.version.to_string();
+    let paths = state.paths.clone();
+    let startup = current_startup_status(&state)?;
+
+    tauri::async_runtime::spawn_blocking(move || {
+        build_diagnostics_app_state_snapshot(&paths, app_name, app_version, startup)
     })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
+#[tauri::command]
+async fn diagnostics_export_app_state_snapshot(
+    app: tauri::AppHandle,
+    state: State<'_, AppState>,
+    out_path: String,
+) -> Result<DiagnosticsAppStateSnapshotExport, String> {
+    let out_path = out_path.trim().to_string();
+    if out_path.is_empty() {
+        return Err("out_path is empty".to_string());
+    }
+
+    let package = app.package_info();
+    let app_name = package.name.to_string();
+    let app_version = package.version.to_string();
+    let paths = state.paths.clone();
+    let startup = current_startup_status(&state)?;
+
+    tauri::async_runtime::spawn_blocking(move || {
+        let snapshot =
+            build_diagnostics_app_state_snapshot(&paths, app_name, app_version, startup)?;
+        write_diagnostics_app_state_snapshot_exports(&snapshot, &std::path::PathBuf::from(out_path))
+    })
+    .await
+    .map_err(|e| e.to_string())?
 }
 
 #[tauri::command]
@@ -5078,6 +5730,8 @@ pub fn run() {
             diagnostics_thumbnail_cache_clear,
             diagnostics_thumbnail_cache_status,
             diagnostics_export_bundle,
+            diagnostics_app_state_snapshot,
+            diagnostics_export_app_state_snapshot,
             diagnostics_generate_licensing_report,
             diagnostics_storage_breakdown,
             item_outputs,

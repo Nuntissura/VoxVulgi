@@ -3,7 +3,7 @@
 ## Metadata
 - ID: WP-0135
 - Owner: Codex
-- Status: BACKLOG
+- Status: DONE
 - Created: 2026-03-09
 - Target milestone: Installer smoke remediation tranche
 
@@ -39,3 +39,4 @@ Out of scope:
 ## Status updates
 
 - 2026-03-09: Created from installer smoke findings `ST-023` and the follow-up diagnostics-state request.
+- 2026-03-09: Implemented shell-visible startup loading details with explicit percentage/phase table, a Diagnostics app-state snapshot generator/exporter (JSON + Markdown), and section-level Diagnostics progress with a concrete support/LLM handoff surface. Verified via desktop build + Tauri tests with snapshot export coverage.

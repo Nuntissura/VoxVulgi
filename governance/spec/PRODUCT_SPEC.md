@@ -130,12 +130,14 @@ Initial language focus: **Korean + Japanese → English**.
 - Startup and performance diagnostics:
   - show a meaningful startup progress bar or phase list while heavyweight background initialization is in flight,
   - show numeric progress or percentages where the app can derive them,
+  - provide an obvious shell-level loading-details surface that operators can open while the app is still usable, including current percentage and per-phase state,
   - when a feature is temporarily blocked because dependencies are still hydrating, the UI should explain that state explicitly near the action and surface the current loading progress,
   - capture deterministic local traces for startup phases, pane activation, resource usage, and major failures,
   - explain tool state in operator terms such as bundled, hydrated, installed, loaded, and ready,
   - suspend recurring pane-local polling and heartbeats when the page or app is not active so the UI degrades gracefully under heavy external CPU load.
 - Diagnostics state export:
   - diagnostics should be able to export a coherent local snapshot of current app state, including roots, tool/model state, queue health, and major feature readiness,
+  - the snapshot export should include both structured JSON and an operator-readable Markdown summary,
   - the snapshot should be readable both by operators and by support/LLM analysis workflows.
 - Supply-chain and reproducibility requirements:
   - bundled dependency inputs must be tracked in a pinned manifest rather than scattered mutable constants,

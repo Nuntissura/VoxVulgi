@@ -416,6 +416,107 @@ type StartupStatus = {
   phases: StartupPhase[];
 };
 
+type DiagnosticsKeyCount = {
+  key: string;
+  count: number;
+};
+
+type DiagnosticsRecentJobFailure = {
+  id: string;
+  item_id: string | null;
+  job_type: string;
+  error: string;
+  created_at_ms: number | null;
+};
+
+type DiagnosticsJobQueueSnapshot = {
+  total: number;
+  queued: number;
+  running: number;
+  succeeded: number;
+  failed: number;
+  canceled: number;
+  active_batch_count: number;
+  recent_failures: DiagnosticsRecentJobFailure[];
+};
+
+type DiagnosticsLibrarySnapshot = {
+  total_items: number;
+  by_source_type: DiagnosticsKeyCount[];
+  by_provider: DiagnosticsKeyCount[];
+  subtitle_track_count: number;
+  translated_en_track_count: number;
+  item_speaker_count: number;
+  item_voice_plan_count: number;
+  voice_template_count: number;
+  voice_cast_pack_count: number;
+  voice_library_profile_count: number;
+  youtube_subscription_count: number;
+  instagram_subscription_count: number;
+};
+
+type DiagnosticsFeatureHealthRow = {
+  feature: string;
+  status: string;
+  detail: string;
+};
+
+type FeatureStorageRootStatus = {
+  key: string;
+  label: string;
+  current_dir: string;
+  default_dir: string;
+  override_dir: string | null;
+  exists: boolean;
+};
+
+type DownloadDirStatus = {
+  current_dir: string;
+  default_dir: string;
+  exists: boolean;
+  using_default: boolean;
+  feature_roots: FeatureStorageRootStatus[];
+};
+
+type DiagnosticsAppStateSnapshot = {
+  generated_at_ms: number;
+  app: DiagnosticsInfo;
+  startup: StartupStatus;
+  download_roots: DownloadDirStatus;
+  diagnostics_trace_dir: DiagnosticsTraceDirStatus;
+  ffmpeg: FfmpegToolsStatus;
+  ytdlp: YtDlpToolsStatus;
+  python: PythonToolchainStatus;
+  portable_python: PortablePythonStatus;
+  spleeter: SpleeterPackStatus;
+  demucs: DemucsPackStatus;
+  diarization: DiarizationPackStatus;
+  tts_preview: TtsPreviewPackStatus;
+  tts_neural_local_v1: TtsNeuralLocalV1PackStatus;
+  tts_voice_preserving_local_v1: TtsVoicePreservingLocalV1PackStatus;
+  voice_backend_catalog: VoiceBackendCatalog;
+  voice_backend_recommendation: VoiceBackendRecommendation;
+  voice_backend_adapter_count: number;
+  models: ModelInventory;
+  performance_tier: PerformanceTierStatus;
+  batch_on_import_rules: BatchOnImportRules;
+  optional_diarization_backend: OptionalDiarizationBackendStatus;
+  storage: StorageBreakdown;
+  thumbnail_cache: ThumbnailCacheStatus;
+  jobs: DiagnosticsJobQueueSnapshot;
+  library: DiagnosticsLibrarySnapshot;
+  recent_trace: DiagnosticsTraceEntry[];
+  feature_health: DiagnosticsFeatureHealthRow[];
+};
+
+type DiagnosticsAppStateSnapshotExport = {
+  generated_at_ms: number;
+  json_path: string;
+  markdown_path: string;
+  json_bytes: number;
+  markdown_bytes: number;
+};
+
 type DiagnosticsSectionKey = "build" | "tools" | "phase2" | "storage" | "jobs" | "trace";
 type DiagnosticsSectionState = "idle" | "loading" | "ready" | "failed";
 type DiagnosticsSectionStatus = {
@@ -565,10 +666,14 @@ export function DiagnosticsPage({ visible = true }: { visible?: boolean }) {
   const [diagnosticsTraceDir, setDiagnosticsTraceDir] =
     useState<DiagnosticsTraceDirStatus | null>(null);
   const [recentTrace, setRecentTrace] = useState<DiagnosticsTraceEntry[]>([]);
+  const [appStateSnapshot, setAppStateSnapshot] = useState<DiagnosticsAppStateSnapshot | null>(null);
+  const [appStateExport, setAppStateExport] =
+    useState<DiagnosticsAppStateSnapshotExport | null>(null);
   const [jobs, setJobs] = useState<JobRow[]>([]);
   const [error, setError] = useState<string | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
+  const [snapshotBusy, setSnapshotBusy] = useState(false);
   const [sectionStatus, setSectionStatus] = useState<Record<DiagnosticsSectionKey, DiagnosticsSectionStatus>>({
     build: { state: "idle", error: null },
     tools: { state: "idle", error: null },
@@ -931,6 +1036,21 @@ export function DiagnosticsPage({ visible = true }: { visible?: boolean }) {
     startup?.phases.find((phase) => phase.id === startup.active_phase_id) ??
     startup?.phases.find((phase) => phase.state === "running" || phase.state === "pending") ??
     null;
+
+  const sectionProgress = useMemo(() => {
+    const entries = Object.values(sectionStatus);
+    const total = entries.length || 1;
+    const ready = entries.filter((entry) => entry.state === "ready").length;
+    const loading = entries.filter((entry) => entry.state === "loading").length;
+    const failed = entries.filter((entry) => entry.state === "failed").length;
+    return {
+      total,
+      ready,
+      loading,
+      failed,
+      progressPct: Math.min(1, (ready + loading * 0.35) / total),
+    };
+  }, [sectionStatus]);
 
   const toolLifecycleRows = useMemo(
     () => [
@@ -1726,6 +1846,56 @@ export function DiagnosticsPage({ visible = true }: { visible?: boolean }) {
     }
   }
 
+  async function generateAppStateSnapshot() {
+    setSnapshotBusy(true);
+    setError(null);
+    setNotice(null);
+    try {
+      const snapshot = await invoke<DiagnosticsAppStateSnapshot>("diagnostics_app_state_snapshot");
+      setAppStateSnapshot(snapshot);
+      setNotice(
+        `Generated app-state snapshot at ${formatTs(snapshot.generated_at_ms)} with ${snapshot.feature_health.length} feature health rows.`,
+      );
+    } catch (e) {
+      setError(String(e));
+    } finally {
+      setSnapshotBusy(false);
+    }
+  }
+
+  async function exportAppStateSnapshot() {
+    const stamp = new Date().toISOString().replace(/[:.]/g, "-");
+    const outPath = await save({
+      title: "Export app-state snapshot",
+      defaultPath: `voxvulgi-app-state-${stamp}.json`,
+      filters: [{ name: "JSON", extensions: ["json"] }],
+    });
+    if (!outPath) return;
+
+    setSnapshotBusy(true);
+    setError(null);
+    setNotice(null);
+    try {
+      const result = await invoke<DiagnosticsAppStateSnapshotExport>(
+        "diagnostics_export_app_state_snapshot",
+        { outPath },
+      );
+      setAppStateExport(result);
+      setNotice(
+        `Exported app-state snapshot JSON (${formatBytes(result.json_bytes)}) and Markdown (${formatBytes(result.markdown_bytes)}).`,
+      );
+      try {
+        await revealFilesystemPath(result.json_path);
+      } catch {
+        // Ignore reveal errors.
+      }
+    } catch (e) {
+      setError(String(e));
+    } finally {
+      setSnapshotBusy(false);
+    }
+  }
+
   async function copyFailure(job: JobRow) {
     setError(null);
     try {
@@ -1764,7 +1934,35 @@ export function DiagnosticsPage({ visible = true }: { visible?: boolean }) {
       <div className="card">
         <h2>Loading status</h2>
         <div style={{ color: "#4b5563", marginBottom: 8 }}>
-          Diagnostics sections load independently so this page stays responsive.
+          Diagnostics sections load independently so this page stays responsive. If a feature is
+          still hydrating, use the app-state snapshot below to see which dependency is blocking it.
+        </div>
+        <div style={{ marginBottom: 10 }}>
+          <div
+            aria-hidden="true"
+            style={{
+              height: 10,
+              width: "100%",
+              borderRadius: 999,
+              background: "rgba(82, 94, 112, 0.18)",
+              overflow: "hidden",
+            }}
+          >
+            <div
+              style={{
+                height: "100%",
+                width: `${Math.max(8, Math.round(sectionProgress.progressPct * 100))}%`,
+                borderRadius: 999,
+                background:
+                  "linear-gradient(90deg, rgba(78,114,148,0.92), rgba(59,81,105,0.94))",
+              }}
+            />
+          </div>
+        </div>
+        <div style={{ color: "#4b5563", marginBottom: 8 }}>
+          Diagnostics ready: {sectionProgress.ready}/{sectionProgress.total}. Loading:{" "}
+          {sectionProgress.loading}. Failed: {sectionProgress.failed}. Startup hydration:{" "}
+          {startup ? `${Math.round((startup.progress_pct ?? 0) * 100)}%` : "-"}.
         </div>
         <div className="table-wrap">
           <table>
@@ -1888,6 +2086,129 @@ export function DiagnosticsPage({ visible = true }: { visible?: boolean }) {
             Refresh
           </button>
         </div>
+      </div>
+
+      <div className="card">
+        <h2>App state snapshot</h2>
+        <div style={{ color: "#4b5563", marginBottom: 8 }}>
+          Point-in-time local export for operator handoff and LLM analysis. This collects startup,
+          roots, tool state, library/job counts, recent trace rows, and feature-health summaries in
+          one coherent snapshot.
+        </div>
+        <div className="row" style={{ flexWrap: "wrap" }}>
+          <button type="button" disabled={busy || snapshotBusy} onClick={generateAppStateSnapshot}>
+            {snapshotBusy ? "Generating..." : "Generate snapshot"}
+          </button>
+          <button type="button" disabled={busy || snapshotBusy} onClick={exportAppStateSnapshot}>
+            Export snapshot (JSON + MD)
+          </button>
+          <button
+            type="button"
+            disabled={busy || !appStateExport?.json_path}
+            onClick={() => revealPath(appStateExport?.json_path ?? "")}
+          >
+            Reveal JSON
+          </button>
+          <button
+            type="button"
+            disabled={busy || !appStateExport?.markdown_path}
+            onClick={() => revealPath(appStateExport?.markdown_path ?? "")}
+          >
+            Reveal Markdown
+          </button>
+        </div>
+        <div className="kv">
+          <div className="k">Last generated</div>
+          <div className="v">
+            {appStateSnapshot ? formatTs(appStateSnapshot.generated_at_ms) : "Not generated in this session"}
+          </div>
+        </div>
+        <div className="kv">
+          <div className="k">Last exported JSON</div>
+          <div className="v">{appStateExport?.json_path ?? "-"}</div>
+        </div>
+        <div className="kv">
+          <div className="k">Last exported Markdown</div>
+          <div className="v">{appStateExport?.markdown_path ?? "-"}</div>
+        </div>
+        {appStateSnapshot ? (
+          <>
+            <div className="kv">
+              <div className="k">Startup</div>
+              <div className="v">
+                {appStateSnapshot.startup.offline_bundle_state} /{" "}
+                {Math.round((appStateSnapshot.startup.progress_pct ?? 0) * 100)}%
+              </div>
+            </div>
+            <div className="kv">
+              <div className="k">Roots</div>
+              <div className="v">
+                Download root: {appStateSnapshot.download_roots.current_dir}
+              </div>
+            </div>
+            <div className="kv">
+              <div className="k">Library + jobs</div>
+              <div className="v">
+                {appStateSnapshot.library.total_items} library items,{" "}
+                {appStateSnapshot.jobs.total} jobs, {appStateSnapshot.jobs.failed} failed
+              </div>
+            </div>
+            <div className="kv">
+              <div className="k">Voice strategy</div>
+              <div className="v">
+                Default backend: {appStateSnapshot.voice_backend_catalog.default_backend_id};{" "}
+                recommended: {appStateSnapshot.voice_backend_recommendation.preferred_backend_id};{" "}
+                BYO adapters: {appStateSnapshot.voice_backend_adapter_count}
+              </div>
+            </div>
+            <div className="table-wrap" style={{ marginTop: 10 }}>
+              <table>
+                <thead>
+                  <tr>
+                    <th>Feature</th>
+                    <th>Status</th>
+                    <th>Detail</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {appStateSnapshot.feature_health.map((row) => (
+                    <tr key={row.feature}>
+                      <td>{row.feature}</td>
+                      <td>{row.status}</td>
+                      <td>{row.detail}</td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+            {appStateSnapshot.jobs.recent_failures.length ? (
+              <div className="table-wrap" style={{ marginTop: 10 }}>
+                <table>
+                  <thead>
+                    <tr>
+                      <th>Recent failure</th>
+                      <th>Type</th>
+                      <th>Finished</th>
+                      <th>Error</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {appStateSnapshot.jobs.recent_failures.slice(0, 8).map((failure) => (
+                      <tr key={failure.id}>
+                        <td title={failure.id}>
+                          <code>{shortId(failure.id)}</code>
+                        </td>
+                        <td>{failure.job_type}</td>
+                        <td>{formatTs(failure.created_at_ms)}</td>
+                        <td>{failure.error}</td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            ) : null}
+          </>
+        ) : null}
       </div>
 
       <div className="card">

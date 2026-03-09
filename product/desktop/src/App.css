@@ -228,6 +228,13 @@ code {
   align-items: center;
 }
 
+.startup-pill {
+  min-width: 112px;
+  border-color: rgba(75, 94, 116, 0.56);
+  background: linear-gradient(154deg, #eef2f6 0%, #dbe2ea 100%);
+  white-space: nowrap;
+}
+
 .win-btn {
   min-width: 34px;
   padding: 7px 0;
@@ -257,6 +264,24 @@ code {
 
 .page-frame[hidden] {
   display: none !important;
+}
+
+.shell-overlay {
+  position: absolute;
+  inset: 0;
+  z-index: 8;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 18px;
+  background: rgba(20, 26, 33, 0.28);
+}
+
+.shell-modal {
+  width: min(880px, calc(100% - 24px));
+  max-height: calc(100% - 30px);
+  overflow: auto;
+  margin: 0;
 }
 
 .card {

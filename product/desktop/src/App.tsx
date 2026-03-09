@@ -202,6 +202,7 @@ function App() {
   const [editorItemId, setEditorItemId] = useState<string | null>(null);
   const [safeMode, setSafeMode] = useState<SafeModeStatus | null>(null);
   const [startup, setStartup] = useState<StartupStatus | null>(null);
+  const [startupDetailsOpen, setStartupDetailsOpen] = useState(false);
   const desktopActivity = useDesktopActivity();
 
   useEffect(() => {
@@ -389,6 +390,12 @@ function App() {
     startup?.phases.find((phase) => phase.id === startup.active_phase_id) ??
     startup?.phases.find((phase) => phase.state === "running" || phase.state === "pending") ??
     null;
+  const startupResolvedCount = startup
+    ? startup.phases.filter((phase) => phase.state === "ready" || phase.state === "skipped" || phase.state === "error")
+        .length
+    : 0;
+  const startupPhaseCount = startup?.phases.length ?? 0;
+  const startupPctLabel = startup ? `${Math.round((startup.progress_pct ?? 0) * 100)}%` : "-";
 
   return (
     <div className="app-shell">
@@ -407,6 +414,17 @@ function App() {
         <div className="topbar-main">
           <div className="brand">VoxVulgi</div>
           <div className="topbar-actions">
+            {startupBusy ? (
+              <button
+                type="button"
+                className="startup-pill"
+                data-no-drag="true"
+                onClick={() => setStartupDetailsOpen(true)}
+                title="Show startup loading details"
+              >
+                Loading {startupPctLabel}
+              </button>
+            ) : null}
             <nav className="nav" data-no-drag="true">
               <button
                 className={page === "localization" ? "active" : ""}
@@ -509,6 +527,9 @@ function App() {
           <div className="card">
             <strong>Startup tasks in progress.</strong> The app stays usable while background
             initialization finishes.
+            <div style={{ marginTop: 8, color: "#4b5563" }}>
+              {startupPctLabel} complete. {startupResolvedCount}/{startupPhaseCount} phases resolved.
+            </div>
             <div style={{ marginTop: 10 }}>
               <div
                 aria-hidden="true"
@@ -535,6 +556,14 @@ function App() {
               {startupActivePhase
                 ? `Current phase: ${startupActivePhase.label}`
                 : "Finalizing startup state."}
+            </div>
+            <div className="row">
+              <button type="button" onClick={() => setStartupDetailsOpen(true)}>
+                Loading details
+              </button>
+              <button type="button" onClick={() => switchPage("diagnostics")}>
+                Open Diagnostics
+              </button>
             </div>
             <div className="table-wrap" style={{ marginTop: 10 }}>
               <table>
@@ -575,6 +604,90 @@ function App() {
           </div>
         </Suspense>
       </main>
+      {startupDetailsOpen ? (
+        <div
+          className="shell-overlay"
+          data-no-drag="true"
+          onClick={() => setStartupDetailsOpen(false)}
+        >
+          <div
+            className="shell-modal card"
+            data-no-drag="true"
+            onClick={(e) => e.stopPropagation()}
+          >
+            <h2>Startup loading details</h2>
+            <div style={{ color: "#4b5563", marginBottom: 10 }}>
+              Use this when a feature looks blocked while local tools/models are still hydrating.
+            </div>
+            <div className="kv">
+              <div className="k">Overall progress</div>
+              <div className="v">{startupPctLabel}</div>
+            </div>
+            <div className="kv">
+              <div className="k">Active phase</div>
+              <div className="v">{startupActivePhase?.label ?? "-"}</div>
+            </div>
+            <div className="kv">
+              <div className="k">Hydration state</div>
+              <div className="v">{startup?.offline_bundle_state ?? "-"}</div>
+            </div>
+            <div style={{ marginTop: 10 }}>
+              <div
+                aria-hidden="true"
+                style={{
+                  height: 10,
+                  width: "100%",
+                  borderRadius: 999,
+                  background: "rgba(82, 94, 112, 0.18)",
+                  overflow: "hidden",
+                }}
+              >
+                <div
+                  style={{
+                    height: "100%",
+                    width: `${Math.max(8, Math.round((startup?.progress_pct ?? 0) * 100))}%`,
+                    borderRadius: 999,
+                    background:
+                      "linear-gradient(90deg, rgba(78,114,148,0.92), rgba(59,81,105,0.94))",
+                  }}
+                />
+              </div>
+            </div>
+            <div className="table-wrap" style={{ marginTop: 12 }}>
+              <table>
+                <thead>
+                  <tr>
+                    <th>Phase</th>
+                    <th>Status</th>
+                    <th>Started</th>
+                    <th>Finished</th>
+                    <th>Error</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {(startup?.phases ?? []).map((phase) => (
+                    <tr key={`startup-modal-${phase.id}`}>
+                      <td>{phase.label}</td>
+                      <td>{phase.state}</td>
+                      <td>{phase.started_at_ms ? new Date(phase.started_at_ms).toLocaleTimeString() : "-"}</td>
+                      <td>{phase.finished_at_ms ? new Date(phase.finished_at_ms).toLocaleTimeString() : "-"}</td>
+                      <td>{phase.error ?? "-"}</td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+            <div className="row">
+              <button type="button" onClick={() => switchPage("diagnostics")}>
+                Open Diagnostics
+              </button>
+              <button type="button" onClick={() => setStartupDetailsOpen(false)}>
+                Close
+              </button>
+            </div>
+          </div>
+        </div>
+      ) : null}
       <div
         className="resize-handle resize-handle-se"
         data-no-drag="true"

@@ -548,6 +548,8 @@ Subscription export JSON shape (v1):
   - installed,
   - loaded,
   - ready.
+- Diagnostics should also be able to assemble one coherent app-state snapshot spanning startup state, storage roots, tool/model readiness, queue/library counts, recent trace rows, and feature-health summaries.
+- Snapshot exports should emit both JSON and Markdown from the same captured state so support handoff and LLM analysis use the same underlying point-in-time record.
 
 ### 6.5 Desktop shell interaction rules
 
