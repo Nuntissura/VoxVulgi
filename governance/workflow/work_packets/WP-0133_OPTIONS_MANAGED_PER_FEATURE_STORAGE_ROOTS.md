@@ -3,7 +3,7 @@
 ## Metadata
 - ID: WP-0133
 - Owner: Codex
-- Status: BACKLOG
+- Status: DONE
 - Created: 2026-03-09
 - Target milestone: Installer smoke remediation tranche
 
@@ -40,3 +40,5 @@ Out of scope:
 ## Status updates
 
 - 2026-03-09: Created from installer smoke findings `ST-003`, `ST-007`, and `ST-009`.
+- 2026-03-09: Implemented per-feature root overrides for Video Archiver, Instagram Archiver, Image Archive, and Localization Studio exports, all managed from Options with the old base root retained as migration-safe fallback.
+- 2026-03-09: Verified with `cargo test -q --manifest-path product\engine\Cargo.toml`, `cargo test -q --manifest-path product\desktop\src-tauri\Cargo.toml`, and `npm -C product\desktop run build`; proof in `product/desktop/Build Target/tool_artifacts/wp_runs/WP-0133/20260309_055158/`.

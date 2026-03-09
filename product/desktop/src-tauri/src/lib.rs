@@ -238,6 +238,17 @@ struct DownloadDirStatus {
     default_dir: String,
     exists: bool,
     using_default: bool,
+    feature_roots: Vec<FeatureStorageRootStatus>,
+}
+
+#[derive(Debug, Clone, serde::Serialize)]
+struct FeatureStorageRootStatus {
+    key: String,
+    label: String,
+    current_dir: String,
+    default_dir: String,
+    override_dir: Option<String>,
+    exists: bool,
 }
 
 #[derive(Debug, Clone, serde::Serialize)]
@@ -983,6 +994,7 @@ fn apply_offline_bundle_if_present(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use voxvulgi_engine::{config, paths::AppPaths};
 
     #[test]
     fn verify_offline_payload_integrity_accepts_matching_bytes_and_hash() {
@@ -1049,12 +1061,104 @@ mod tests {
         assert_eq!(value["mux_container"], "mp4");
         assert_eq!(value["tts_backend_id"], "openvoice_v2");
     }
+
+    #[test]
+    fn build_download_dir_status_includes_feature_defaults_from_base_root() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let paths = AppPaths::new(dir.path().to_path_buf());
+        paths
+            .set_download_dir_override(&dir.path().join("storage"))
+            .expect("set base root");
+
+        let status = build_download_dir_status(&paths).expect("status");
+        let video = status
+            .feature_roots
+            .iter()
+            .find(|root| root.key == "video")
+            .expect("video root");
+        let localization = status
+            .feature_roots
+            .iter()
+            .find(|root| root.key == "localization")
+            .expect("localization root");
+
+        assert!(video.current_dir.ends_with("storage\\video") || video.current_dir.ends_with("storage/video"));
+        assert!(
+            localization.current_dir.ends_with("storage\\localization\\en")
+                || localization.current_dir.ends_with("storage/localization/en")
+        );
+    }
+
+    #[test]
+    fn build_download_dir_status_prefers_feature_overrides() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let paths = AppPaths::new(dir.path().to_path_buf());
+        paths
+            .set_download_dir_override(&dir.path().join("storage"))
+            .expect("set base root");
+        let override_dir = dir.path().join("video_override");
+        std::fs::create_dir_all(&override_dir).expect("create override");
+        config::save_feature_storage_roots_config(
+            &paths,
+            &config::FeatureStorageRootsConfig {
+                video_root: Some(override_dir.to_string_lossy().to_string()),
+                instagram_root: None,
+                image_root: None,
+                localization_root: None,
+            },
+        )
+        .expect("save overrides");
+
+        let status = build_download_dir_status(&paths).expect("status");
+        let video = status
+            .feature_roots
+            .iter()
+            .find(|root| root.key == "video")
+            .expect("video root");
+        assert_eq!(video.override_dir.as_deref(), Some(override_dir.to_string_lossy().as_ref()));
+        assert_eq!(video.current_dir, override_dir.to_string_lossy());
+    }
 }
 
 fn ensure_media_output_layout(root: &std::path::Path) -> Result<(), String> {
     std::fs::create_dir_all(root).map_err(|e| e.to_string())?;
     for sub in ["video", "instagram", "images", "localization"] {
         std::fs::create_dir_all(root.join(sub)).map_err(|e| e.to_string())?;
+    }
+    Ok(())
+}
+
+fn feature_root_default_dir(base_root: &std::path::Path, key: &str) -> std::path::PathBuf {
+    match key {
+        "video" => base_root.join("video"),
+        "instagram" => base_root.join("instagram"),
+        "images" => base_root.join("images"),
+        "localization" => base_root.join("localization").join("en"),
+        _ => base_root.to_path_buf(),
+    }
+}
+
+fn feature_root_label(key: &str) -> &'static str {
+    match key {
+        "video" => "Video Archiver",
+        "instagram" => "Instagram Archiver",
+        "images" => "Image Archive",
+        "localization" => "Localization Studio exports",
+        _ => "Feature",
+    }
+}
+
+fn set_feature_root_override(
+    roots: &mut config::FeatureStorageRootsConfig,
+    feature: &str,
+    value: Option<String>,
+) -> Result<(), String> {
+    match feature {
+        "video" => roots.video_root = value,
+        "instagram" => roots.instagram_root = value,
+        "images" => roots.image_root = value,
+        "localization" => roots.localization_root = value,
+        _ => return Err(format!("unknown storage feature: {feature}")),
     }
     Ok(())
 }
@@ -1081,12 +1185,40 @@ fn build_download_dir_status(paths: &AppPaths) -> Result<DownloadDirStatus, Stri
         ensure_media_output_layout(&current_dir)?;
     }
     let exists = current_dir.exists() && current_dir.is_dir();
+    let feature_roots_config = config::load_feature_storage_roots_config(paths).map_err(|e| e.to_string())?;
+    let feature_roots = [
+        ("video", feature_roots_config.video_root.clone()),
+        ("instagram", feature_roots_config.instagram_root.clone()),
+        ("images", feature_roots_config.image_root.clone()),
+        ("localization", feature_roots_config.localization_root.clone()),
+    ]
+    .into_iter()
+    .map(|(key, override_value)| {
+        let default_feature_dir = feature_root_default_dir(&current_dir, key);
+        let current_feature_dir = override_value
+            .as_deref()
+            .map(std::path::PathBuf::from)
+            .unwrap_or_else(|| default_feature_dir.clone());
+        if current_feature_dir.exists() && current_feature_dir.is_dir() {
+            std::fs::create_dir_all(&current_feature_dir).map_err(|e| e.to_string())?;
+        }
+        Ok(FeatureStorageRootStatus {
+            key: key.to_string(),
+            label: feature_root_label(key).to_string(),
+            current_dir: current_feature_dir.to_string_lossy().to_string(),
+            default_dir: default_feature_dir.to_string_lossy().to_string(),
+            override_dir: override_value,
+            exists: current_feature_dir.exists() && current_feature_dir.is_dir(),
+        })
+    })
+    .collect::<Result<Vec<_>, String>>()?;
 
     Ok(DownloadDirStatus {
         current_dir: current_dir.to_string_lossy().to_string(),
         default_dir: default_dir.to_string_lossy().to_string(),
         exists,
         using_default: override_dir.is_none(),
+        feature_roots,
     })
 }
 
@@ -2450,6 +2582,77 @@ fn downloads_dir_use_default(
         .paths
         .clear_download_dir_override()
         .map_err(|e| e.to_string())?;
+    build_download_dir_status(&state.paths)
+}
+
+#[tauri::command]
+fn downloads_feature_root_set(
+    state: State<'_, AppState>,
+    feature: String,
+    path: String,
+    create_if_missing: bool,
+) -> Result<DownloadDirStatus, String> {
+    let feature = feature.trim().to_string();
+    if feature.is_empty() {
+        return Err("feature is empty".to_string());
+    }
+
+    let mut dir = std::path::PathBuf::from(path.trim());
+    if dir.as_os_str().is_empty() {
+        return Err("folder path is empty".to_string());
+    }
+    if !dir.is_absolute() {
+        dir = std::env::current_dir()
+            .map_err(|e| e.to_string())?
+            .join(dir);
+    }
+
+    if create_if_missing {
+        std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
+    }
+    if !dir.exists() {
+        return Err(format!("folder does not exist: {}", dir.to_string_lossy()));
+    }
+    if !dir.is_dir() {
+        return Err(format!("path is not a folder: {}", dir.to_string_lossy()));
+    }
+
+    let normalized = dir.canonicalize().unwrap_or(dir);
+    let mut roots = config::load_feature_storage_roots_config(&state.paths).map_err(|e| e.to_string())?;
+    set_feature_root_override(
+        &mut roots,
+        &feature,
+        Some(normalized.to_string_lossy().to_string()),
+    )?;
+    config::save_feature_storage_roots_config(&state.paths, &roots).map_err(|e| e.to_string())?;
+    build_download_dir_status(&state.paths)
+}
+
+#[tauri::command]
+fn downloads_feature_root_use_default(
+    state: State<'_, AppState>,
+    feature: String,
+    create_if_missing: bool,
+) -> Result<DownloadDirStatus, String> {
+    let feature = feature.trim().to_string();
+    if feature.is_empty() {
+        return Err("feature is empty".to_string());
+    }
+    let mut roots = config::load_feature_storage_roots_config(&state.paths).map_err(|e| e.to_string())?;
+    set_feature_root_override(&mut roots, &feature, None)?;
+    config::save_feature_storage_roots_config(&state.paths, &roots).map_err(|e| e.to_string())?;
+
+    if create_if_missing {
+        let status = build_download_dir_status(&state.paths)?;
+        let target = status
+            .feature_roots
+            .into_iter()
+            .find(|root| root.key == feature)
+            .ok_or_else(|| format!("unknown storage feature: {feature}"))?;
+        let dir = std::path::PathBuf::from(target.current_dir);
+        std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
+    }
+
     build_download_dir_status(&state.paths)
 }
 
@@ -4831,6 +5034,8 @@ pub fn run() {
             downloads_dir_set,
             downloads_dir_status,
             downloads_dir_use_default,
+            downloads_feature_root_set,
+            downloads_feature_root_use_default,
             config_batch_on_import_get,
             config_batch_on_import_set,
             config_diarization_optional_clear_token,

@@ -4,6 +4,7 @@ import { confirm, open, save } from "@tauri-apps/plugin-dialog";
 import { copyPathToClipboard, openPathBestEffort, revealPath } from "../lib/pathOpener";
 import { safeLocalStorageGet, safeLocalStorageSet } from "../lib/persist";
 import {
+  featureRootStatus,
   refreshSharedDownloadDirStatus,
   useSharedDownloadDirStatus,
 } from "../lib/sharedDownloadDir";
@@ -379,7 +380,7 @@ type YoutubeSubscriptionsImport4kvdpStateSummary = {
   group_names: string[];
 };
 
-export function LibraryPage({ onOpenEditor, mode = "all", onOpenOptions }: LibraryPageProps) {
+export function LibraryPage({ onOpenEditor, mode = "all" }: LibraryPageProps) {
   const maxBatchUrls = 1500;
   const maxInstagramBatchUrls = 1500;
   const maxImageBatchUrls = 1500;
@@ -607,8 +608,7 @@ export function LibraryPage({ onOpenEditor, mode = "all", onOpenOptions }: Libra
     const raw = safeLocalStorageGet("voxvulgi.v1.library.media_group_mode");
     return raw === "flat" ? raw : "folder";
   });
-  const { status: downloadDir, loading: downloadDirLoading, hydrated: downloadDirHydrated } =
-    useSharedDownloadDirStatus();
+  const { status: downloadDir } = useSharedDownloadDirStatus();
   const parsedUrlCount = useMemo(
     () =>
       urlBatchText
@@ -662,34 +662,37 @@ export function LibraryPage({ onOpenEditor, mode = "all", onOpenOptions }: Libra
     () => instagramSubscriptions.filter((sub) => sub.active).length,
     [instagramSubscriptions],
   );
+  const videoRootStatus = useMemo(() => featureRootStatus(downloadDir, "video"), [downloadDir]);
+  const instagramRootStatus = useMemo(
+    () => featureRootStatus(downloadDir, "instagram"),
+    [downloadDir],
+  );
+  const imageRootStatus = useMemo(() => featureRootStatus(downloadDir, "images"), [downloadDir]);
   const effectiveDownloadRoot = useMemo(() => {
     const current = downloadDir?.current_dir?.trim() ?? "";
     if (current) return current;
     return downloadDir?.default_dir?.trim() ?? "";
   }, [downloadDir]);
   const defaultVideoDownloadsDir = useMemo(
-    () => joinPath(effectiveDownloadRoot, "video"),
-    [effectiveDownloadRoot],
+    () => videoRootStatus?.current_dir?.trim() || videoRootStatus?.default_dir?.trim() || "",
+    [videoRootStatus],
   );
   const defaultSubscriptionDownloadsDir = useMemo(
-    () => joinPath(effectiveDownloadRoot, "video", "subscriptions"),
-    [effectiveDownloadRoot],
+    () => joinPath(defaultVideoDownloadsDir, "subscriptions"),
+    [defaultVideoDownloadsDir],
   );
   const defaultInstagramDownloadsDir = useMemo(
-    () => joinPath(effectiveDownloadRoot, "instagram"),
-    [effectiveDownloadRoot],
+    () =>
+      instagramRootStatus?.current_dir?.trim() || instagramRootStatus?.default_dir?.trim() || "",
+    [instagramRootStatus],
   );
   const defaultInstagramSubscriptionDownloadsDir = useMemo(
-    () => joinPath(effectiveDownloadRoot, "instagram", "subscriptions"),
-    [effectiveDownloadRoot],
+    () => joinPath(defaultInstagramDownloadsDir, "subscriptions"),
+    [defaultInstagramDownloadsDir],
   );
   const defaultImageDownloadsDir = useMemo(
-    () => joinPath(effectiveDownloadRoot, "images"),
-    [effectiveDownloadRoot],
-  );
-  const defaultLocalizationExportsDir = useMemo(
-    () => joinPath(effectiveDownloadRoot, "localization", "en"),
-    [effectiveDownloadRoot],
+    () => imageRootStatus?.current_dir?.trim() || imageRootStatus?.default_dir?.trim() || "",
+    [imageRootStatus],
   );
   const filteredMediaItems = useMemo(() => {
     const needle = mediaLibrarySearch.trim().toLowerCase();
@@ -1304,9 +1307,10 @@ export function LibraryPage({ onOpenEditor, mode = "all", onOpenOptions }: Libra
         throw new Error(`Too many URLs. Maximum ${maxBatchUrls}.`);
       }
       const effectiveStatus = downloadDir ?? (await refreshSharedDownloadDirStatus());
-      if (!effectiveStatus?.exists && !urlBatchOutputDir.trim()) {
+      const featureStatus = featureRootStatus(effectiveStatus, "video");
+      if (!featureStatus?.exists && !urlBatchOutputDir.trim()) {
         throw new Error(
-          "Shared download root is missing. Open Options to choose an existing folder, use the default folder, or set a video output folder here.",
+          "Video Archiver root is missing. Open Options to choose an existing folder, use the default path, or set a batch output override here.",
         );
       }
 
@@ -1344,9 +1348,10 @@ export function LibraryPage({ onOpenEditor, mode = "all", onOpenOptions }: Libra
         throw new Error(`Too many Instagram URLs. Maximum ${maxInstagramBatchUrls}.`);
       }
       const effectiveStatus = downloadDir ?? (await refreshSharedDownloadDirStatus());
-      if (!effectiveStatus?.exists && !instagramBatchOutputDir.trim()) {
+      const featureStatus = featureRootStatus(effectiveStatus, "instagram");
+      if (!featureStatus?.exists && !instagramBatchOutputDir.trim()) {
         throw new Error(
-          "Shared download root is missing. Open Options to choose an existing folder or select an Instagram output folder here.",
+          "Instagram Archiver root is missing. Open Options to choose an existing folder or set an Instagram batch output override here.",
         );
       }
 
@@ -1373,9 +1378,10 @@ export function LibraryPage({ onOpenEditor, mode = "all", onOpenOptions }: Libra
     setNotice(null);
     try {
       const effectiveStatus = downloadDir ?? (await refreshSharedDownloadDirStatus());
-      if (!effectiveStatus?.exists && !imageBatchOutputDir.trim()) {
+      const featureStatus = featureRootStatus(effectiveStatus, "images");
+      if (!featureStatus?.exists && !imageBatchOutputDir.trim()) {
         throw new Error(
-          "Shared download root is missing. Open Options to choose an existing folder, use the default folder, or set an image output folder here.",
+          "Image Archive root is missing. Open Options to choose an existing folder, use the default path, or set an image batch output override here.",
         );
       }
 
@@ -1430,9 +1436,10 @@ export function LibraryPage({ onOpenEditor, mode = "all", onOpenOptions }: Libra
     setNotice(null);
     try {
       const effectiveStatus = downloadDir ?? (await refreshSharedDownloadDirStatus());
-      if (!effectiveStatus?.exists && !pinterestBatchOutputDir.trim()) {
+      const featureStatus = featureRootStatus(effectiveStatus, "images");
+      if (!featureStatus?.exists && !pinterestBatchOutputDir.trim()) {
         throw new Error(
-          "Shared download root is missing. Open Options to choose an existing folder, use the default folder, or set a Pinterest output folder here.",
+          "Image Archive root is missing. Open Options to choose an existing folder, use the default path, or set a Pinterest output override here.",
         );
       }
 
@@ -2265,78 +2272,6 @@ export function LibraryPage({ onOpenEditor, mode = "all", onOpenOptions }: Libra
         </div>
       ) : null}
 
-      {(showVideoIngest || showInstagramArchive || showImageArchive) ? (
-        <div className="card">
-          <h2>Shared storage root</h2>
-          <div style={{ color: "#4b5563", marginTop: 6 }}>
-            The shared download and export root now lives in <strong>Options</strong> so archive
-            windows and Localization Studio all use the same folder without resetting on pane
-            switches.
-          </div>
-          <div className="kv">
-            <div className="k">Current root</div>
-            <div className="v">{effectiveDownloadRoot || "-"}</div>
-          </div>
-          <div className="kv">
-            <div className="k">Status</div>
-            <div className="v">
-              {!downloadDirHydrated || downloadDirLoading
-                ? "checking..."
-                : downloadDir?.exists
-                  ? "ready"
-                  : "missing"}
-              {downloadDir ? (downloadDir.using_default ? " (default)" : " (custom)") : ""}
-            </div>
-          </div>
-          {!downloadDirLoading && downloadDirHydrated && downloadDir && !downloadDir.exists ? (
-            <div className="error">
-              Shared download root is unavailable. Open Options to choose a valid folder.
-            </div>
-          ) : null}
-          <div className="row">
-            <button
-              type="button"
-              disabled={busy || !effectiveDownloadRoot}
-              onClick={() => openPathBestEffort(effectiveDownloadRoot).catch((e) => setError(String(e)))}
-            >
-              Open root
-            </button>
-            {onOpenOptions ? (
-              <button type="button" disabled={busy} onClick={onOpenOptions}>
-                Open Options
-              </button>
-            ) : null}
-          </div>
-          <div style={{ color: "#4b5563", marginTop: 10 }}>
-            Default app-managed export map under this root:
-          </div>
-          <div className="kv">
-            <div className="k">Video / playlists</div>
-            <div className="v">{defaultVideoDownloadsDir || "-"}</div>
-          </div>
-          <div className="kv">
-            <div className="k">Subscriptions</div>
-            <div className="v">{defaultSubscriptionDownloadsDir || "-"}</div>
-          </div>
-          <div className="kv">
-            <div className="k">Instagram archive</div>
-            <div className="v">{defaultInstagramDownloadsDir || "-"}</div>
-          </div>
-          <div className="kv">
-            <div className="k">Instagram subscriptions</div>
-            <div className="v">{defaultInstagramSubscriptionDownloadsDir || "-"}</div>
-          </div>
-          <div className="kv">
-            <div className="k">Forum / image archive</div>
-            <div className="v">{defaultImageDownloadsDir || "-"}</div>
-          </div>
-          <div className="kv">
-            <div className="k">Localization exports</div>
-            <div className="v">{defaultLocalizationExportsDir || "-"}</div>
-          </div>
-        </div>
-      ) : null}
-
       {showVideoIngest ? (
         <div className="card">
         <h2>Legacy archive reconciliation (read-only)</h2>
@@ -2636,9 +2571,13 @@ export function LibraryPage({ onOpenEditor, mode = "all", onOpenOptions }: Libra
           rows={4}
           style={{ width: "100%", boxSizing: "border-box", resize: "vertical" }}
         />
+        <div style={{ color: "#4b5563", marginTop: 8 }}>
+          Effective Video Archiver root: <code>{defaultVideoDownloadsDir || "-"}</code>. Change it
+          in <strong>Options</strong>; the folder field below is only a per-batch override.
+        </div>
         <div className="row">
           <label style={{ display: "flex", alignItems: "center", gap: 8, flex: 1 }}>
-            <span>Output folder</span>
+            <span>Batch output override</span>
             <input
               value={urlBatchOutputDir}
               disabled={busy}
@@ -2940,6 +2879,10 @@ export function LibraryPage({ onOpenEditor, mode = "all", onOpenOptions }: Libra
           its own folder and can set its own refresh interval. Loaded subscriptions come from the
           local DB and stay available when you switch panes/windows.
         </div>
+        <div style={{ color: "#4b5563", marginBottom: 8 }}>
+          Effective YouTube subscription root: <code>{defaultSubscriptionDownloadsDir || "-"}</code>.
+          Change the durable root in <strong>Options</strong>; the field below is only a per-subscription override.
+        </div>
         <div className="row">
           <label style={{ display: "flex", alignItems: "center", gap: 8, flex: 1 }}>
             <span>Title</span>
@@ -2995,7 +2938,7 @@ export function LibraryPage({ onOpenEditor, mode = "all", onOpenOptions }: Libra
             />
           </label>
           <label style={{ display: "flex", alignItems: "center", gap: 8, flex: 1 }}>
-            <span>Output override</span>
+            <span>Subscription output override</span>
             <input
               value={subscriptionOutputDirOverride}
               disabled={busy}
@@ -3519,6 +3462,10 @@ export function LibraryPage({ onOpenEditor, mode = "all", onOpenOptions }: Libra
           rows={4}
           style={{ width: "100%", boxSizing: "border-box", resize: "vertical" }}
         />
+        <div style={{ color: "#4b5563", marginTop: 8 }}>
+          Effective Instagram Archiver root: <code>{defaultInstagramDownloadsDir || "-"}</code>.
+          Change it in <strong>Options</strong>; the folder field below is only a per-batch override.
+        </div>
         <div className="row">
           <label style={{ display: "grid", gap: 6, flex: 1 }}>
             <span>Session / cookies</span>
@@ -3548,7 +3495,7 @@ export function LibraryPage({ onOpenEditor, mode = "all", onOpenOptions }: Libra
         </div>
         <div className="row">
           <label style={{ display: "flex", alignItems: "center", gap: 8, flex: 1 }}>
-            <span>Output folder</span>
+            <span>Batch output override</span>
             <input
               value={instagramBatchOutputDir}
               disabled={busy}
@@ -3592,9 +3539,13 @@ export function LibraryPage({ onOpenEditor, mode = "all", onOpenOptions }: Libra
           rows={4}
           style={{ width: "100%", boxSizing: "border-box", resize: "vertical" }}
         />
+        <div style={{ color: "#4b5563", marginTop: 8 }}>
+          Effective Image Archive root: <code>{defaultImageDownloadsDir || "-"}</code>. Change it
+          in <strong>Options</strong>; the folder field below is only a per-batch override.
+        </div>
         <div className="row">
           <label style={{ display: "flex", alignItems: "center", gap: 8, flex: 1 }}>
-            <span>Output folder</span>
+            <span>Batch output override</span>
             <input
               value={pinterestBatchOutputDir}
               disabled={busy}
@@ -3632,6 +3583,10 @@ export function LibraryPage({ onOpenEditor, mode = "all", onOpenOptions }: Libra
           monitor progress. If the site requires login, paste your browser session cookie below.
           If output folder is empty, each job is saved to a new folder under `images`. JPEG is
           preferred where alternate encodings are available without forcing destructive transcoding.
+        </div>
+        <div style={{ color: "#4b5563", marginBottom: 8 }}>
+          Effective Image Archive root: <code>{defaultImageDownloadsDir || "-"}</code>. Change it
+          in <strong>Options</strong>; the folder field below is only a per-batch override.
         </div>
         <textarea
           value={imageBatchUrlsText}
@@ -3699,7 +3654,7 @@ export function LibraryPage({ onOpenEditor, mode = "all", onOpenOptions }: Libra
         </div>
         <div className="row">
           <label style={{ display: "flex", alignItems: "center", gap: 8, flex: 1 }}>
-            <span>Output folder</span>
+            <span>Batch output override</span>
             <input
               value={imageBatchOutputDir}
               disabled={busy}

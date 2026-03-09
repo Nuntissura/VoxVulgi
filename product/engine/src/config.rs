@@ -88,6 +88,64 @@ pub fn save_safe_mode_config(paths: &AppPaths, config: &SafeModeConfig) -> Resul
     Ok(())
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct FeatureStorageRootsConfig {
+    #[serde(default)]
+    pub video_root: Option<String>,
+    #[serde(default)]
+    pub instagram_root: Option<String>,
+    #[serde(default)]
+    pub image_root: Option<String>,
+    #[serde(default)]
+    pub localization_root: Option<String>,
+}
+
+pub fn load_feature_storage_roots_config(paths: &AppPaths) -> Result<FeatureStorageRootsConfig> {
+    let path = paths.feature_storage_roots_config_path();
+    if !path.exists() {
+        return Ok(FeatureStorageRootsConfig::default());
+    }
+    let bytes = std::fs::read(&path)?;
+    let parsed: FeatureStorageRootsConfig = serde_json::from_slice(&bytes).map_err(|e| {
+        EngineError::InstallFailed(format!(
+            "failed to parse feature storage roots at {}: {e}",
+            path.to_string_lossy()
+        ))
+    })?;
+    Ok(normalize_feature_storage_roots_config(parsed))
+}
+
+pub fn save_feature_storage_roots_config(
+    paths: &AppPaths,
+    config: &FeatureStorageRootsConfig,
+) -> Result<()> {
+    let normalized = normalize_feature_storage_roots_config(config.clone());
+    let path = paths.feature_storage_roots_config_path();
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    let json = serde_json::to_string_pretty(&normalized)?;
+    let text = format!("{json}\n");
+    persistence::atomic_write_text(&path, &text)?;
+    Ok(())
+}
+
+fn normalize_feature_storage_roots_config(
+    mut config: FeatureStorageRootsConfig,
+) -> FeatureStorageRootsConfig {
+    config.video_root = normalize_optional_path(config.video_root);
+    config.instagram_root = normalize_optional_path(config.instagram_root);
+    config.image_root = normalize_optional_path(config.image_root);
+    config.localization_root = normalize_optional_path(config.localization_root);
+    config
+}
+
+fn normalize_optional_path(value: Option<String>) -> Option<String> {
+    value
+        .map(|raw| raw.trim().to_string())
+        .filter(|raw| !raw.is_empty())
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct DownloadPreset {
     pub id: String,

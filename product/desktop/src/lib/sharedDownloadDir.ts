@@ -6,6 +6,18 @@ export type DownloadDirStatus = {
   default_dir: string;
   exists: boolean;
   using_default: boolean;
+  feature_roots: FeatureRootStatus[];
+};
+
+export type FeatureRootKey = "video" | "instagram" | "images" | "localization";
+
+export type FeatureRootStatus = {
+  key: FeatureRootKey;
+  label: string;
+  current_dir: string;
+  default_dir: string;
+  override_dir: string | null;
+  exists: boolean;
 };
 
 type DownloadDirSnapshot = {
@@ -102,6 +114,34 @@ export async function setSharedDownloadDir(path: string): Promise<DownloadDirSta
   }
 }
 
+export async function setFeatureDownloadDir(
+  feature: FeatureRootKey,
+  path: string,
+): Promise<DownloadDirStatus> {
+  setSnapshot({ loading: true, error: null });
+  try {
+    const status = await invoke<DownloadDirStatus>("downloads_feature_root_set", {
+      feature,
+      path,
+      createIfMissing: true,
+    });
+    setSnapshot({
+      status,
+      loading: false,
+      hydrated: true,
+      error: null,
+    });
+    return status;
+  } catch (error) {
+    setSnapshot({
+      loading: false,
+      hydrated: true,
+      error: String(error),
+    });
+    throw error;
+  }
+}
+
 export async function useDefaultSharedDownloadDir(): Promise<DownloadDirStatus> {
   setSnapshot({ loading: true, error: null });
   try {
@@ -123,6 +163,39 @@ export async function useDefaultSharedDownloadDir(): Promise<DownloadDirStatus> 
     });
     throw error;
   }
+}
+
+export async function useDefaultFeatureDownloadDir(
+  feature: FeatureRootKey,
+): Promise<DownloadDirStatus> {
+  setSnapshot({ loading: true, error: null });
+  try {
+    const status = await invoke<DownloadDirStatus>("downloads_feature_root_use_default", {
+      feature,
+      createIfMissing: true,
+    });
+    setSnapshot({
+      status,
+      loading: false,
+      hydrated: true,
+      error: null,
+    });
+    return status;
+  } catch (error) {
+    setSnapshot({
+      loading: false,
+      hydrated: true,
+      error: String(error),
+    });
+    throw error;
+  }
+}
+
+export function featureRootStatus(
+  status: DownloadDirStatus | null,
+  feature: FeatureRootKey,
+): FeatureRootStatus | null {
+  return status?.feature_roots.find((root) => root.key === feature) ?? null;
 }
 
 export function useSharedDownloadDirStatus(): DownloadDirSnapshot {

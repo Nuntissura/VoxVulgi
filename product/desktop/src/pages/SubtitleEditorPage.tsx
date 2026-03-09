@@ -16,7 +16,7 @@ import {
 } from "../lib/localizationRuntime";
 import { copyPathToClipboard, openPathBestEffort, revealPath } from "../lib/pathOpener";
 import { safeLocalStorageGet, safeLocalStorageSet } from "../lib/persist";
-import { useSharedDownloadDirStatus } from "../lib/sharedDownloadDir";
+import { featureRootStatus, useSharedDownloadDirStatus } from "../lib/sharedDownloadDir";
 
 type LibraryItem = {
   id: string;
@@ -845,6 +845,7 @@ export function SubtitleEditorPage({ itemId, visible = true }: { itemId: string;
   const [artifactsBusy, setArtifactsBusy] = useState(false);
   const [itemJobs, setItemJobs] = useState<JobRow[]>([]);
   const { status: downloadDir } = useSharedDownloadDirStatus();
+  const localizationRootStatus = featureRootStatus(downloadDir, "localization");
   const [asrLang, setAsrLang] = useState<"auto" | "ja" | "ko">(() => {
     const raw = safeLocalStorageGet("voxvulgi.v1.settings.asr_lang");
     if (raw === "ja" || raw === "ko") return raw;
@@ -2119,10 +2120,10 @@ export function SubtitleEditorPage({ itemId, visible = true }: { itemId: string;
   }, [item?.media_path, item?.title]);
   const exportFolderStem = useMemo(() => sanitizeFilename(sourceBaseStem), [sourceBaseStem]);
   const effectiveDownloadRoot = useMemo(() => {
-    const current = downloadDir?.current_dir?.trim() ?? "";
+    const current = localizationRootStatus?.current_dir?.trim() ?? "";
     if (current) return current;
-    return downloadDir?.default_dir?.trim() ?? "";
-  }, [downloadDir]);
+    return localizationRootStatus?.default_dir?.trim() ?? "";
+  }, [localizationRootStatus]);
   const defaultLocalizationExportDir = useMemo(() => {
     if (!effectiveDownloadRoot) return "";
     return joinPath(effectiveDownloadRoot, "localization", "en", exportFolderStem);

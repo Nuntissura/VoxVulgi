@@ -322,6 +322,10 @@ impl AppPaths {
         self.config_dir().join("download_presets.json")
     }
 
+    pub fn feature_storage_roots_config_path(&self) -> PathBuf {
+        self.config_dir().join("feature_storage_roots.json")
+    }
+
     pub fn diarization_optional_backend_config_path(&self) -> PathBuf {
         self.config_dir().join("diarization_optional_backend.json")
     }
