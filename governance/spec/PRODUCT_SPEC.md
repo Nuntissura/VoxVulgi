@@ -176,6 +176,7 @@ Initial language focus: **Korean + Japanese → English**.
 
 - Separate vocals vs background (best-effort source separation).
 - Generate English speech per segment and mix back with background.
+- If a separated background stem is unavailable or separation fails, `Mix dub` should degrade gracefully by mixing against the source-media audio with explicit operator-visible fallback messaging instead of dead-ending the workflow.
 - Provide mix controls:
   - ducking, loudness normalization, fade, noise reduction (optional).
 - Current dubbing-quality controls:
@@ -270,6 +271,7 @@ Current implementation status:
 - Safe defaults: no voice cloning by default.
 - Voice and dubbing controls remain operator-directed; VoxVulgi should not add content-judgment or censorship workflows as part of these features.
 - Discoverable: operator-critical controls must be visible in the workflow where they are needed rather than buried behind long scroll chains or hidden state gates.
+- Localization Studio should surface a workflow/readiness summary that makes current track readiness, runtime readiness, and the main backend/benchmark/QC/artifact sections obvious before the operator starts deeper dubbing steps.
 - Ergonomic: dense archive/workflow panes should provide clear scrolling behavior and an explicit app-move affordance that does not conflict with text selection or scrollbar use.
 
 ## 8) Key UX Screens

@@ -2407,6 +2407,20 @@ fn separation_background_exists(paths: &AppPaths, item_id: &str) -> bool {
     separation_background_path_best_effort(paths, item_id).is_some()
 }
 
+fn mix_background_audio_source(
+    paths: &AppPaths,
+    item: &library::LibraryItem,
+) -> Option<(PathBuf, bool)> {
+    if let Some(background) = separation_background_path_best_effort(paths, &item.id) {
+        return Some((background, false));
+    }
+    let media_path = PathBuf::from(&item.media_path);
+    if media_path.exists() {
+        return Some((media_path, true));
+    }
+    None
+}
+
 fn tts_manifest_exists(paths: &AppPaths, item_id: &str) -> bool {
     let item_dir = paths.derived_item_dir(item_id);
     list_tts_manifest_candidate_refs(&item_dir)
@@ -5619,13 +5633,28 @@ if __name__ == "__main__":
             let item = library::get_item_by_id(paths, &p.item_id)?;
             let item_dir = paths.derived_item_dir(&item.id);
 
-            let background_path = separation_background_path_best_effort(paths, &item.id)
-                .ok_or_else(|| {
+            let (background_path, used_source_audio_fallback) =
+                mix_background_audio_source(paths, &item).ok_or_else(|| {
                     EngineError::InstallFailed(
-                        "background stem not found; run Separate first (Spleeter or Demucs)"
+                        "No mixable audio source found. Run Separate first, or confirm the source media path still exists."
                             .to_string(),
                     )
                 })?;
+            let background_mode = if used_source_audio_fallback {
+                "source_audio_fallback"
+            } else {
+                "separated_background"
+            };
+            log_line(
+                paths,
+                job_id,
+                "info",
+                "mix_dub_preview_background_source",
+                serde_json::json!({
+                    "path": &background_path,
+                    "mode": background_mode
+                }),
+            )?;
 
             let preferred_backend_id =
                 resolve_pipeline_tts_backend_preference(paths, &item.id, Some(&pipeline));
@@ -5755,16 +5784,44 @@ if __name__ == "__main__":
                 inputs.push((seg.clone(), audio_path));
             }
 
-            // If there is no TTS audio, output just the background stem.
+            // If there is no TTS audio, output just the selected audio source.
             if inputs.is_empty() {
-                std::fs::copy(&background_path, &final_path)?;
+                let output = cmd::command(paths.ffmpeg_cmd())
+                    .args(["-nostdin", "-y"])
+                    .arg("-i")
+                    .arg(&background_path)
+                    .args(["-vn", "-c:a", "pcm_s16le", "-ar", "44100", "-ac", "2"])
+                    .arg(&final_path)
+                    .output()
+                    .map_err(|e| match e.kind() {
+                        std::io::ErrorKind::NotFound => EngineError::ExternalToolMissing {
+                            tool: "ffmpeg".to_string(),
+                        },
+                        _ => EngineError::Io(e),
+                    })?;
+                if !output.status.success() {
+                    return Err(EngineError::ExternalToolFailed {
+                        tool: "ffmpeg".to_string(),
+                        code: output.status.code(),
+                        stderr: String::from_utf8_lossy(&output.stderr).trim().to_string(),
+                    });
+                }
                 set_progress(paths, job_id, 1.0)?;
                 log_line(
                     paths,
                     job_id,
                     "info",
                     "mix_dub_preview_done",
-                    serde_json::json!({ "out_path": &final_path, "overlays": 0, "mode": "background_only" }),
+                    serde_json::json!({
+                        "out_path": &final_path,
+                        "overlays": 0,
+                        "mode": if used_source_audio_fallback {
+                            "source_audio_only"
+                        } else {
+                            "background_only"
+                        },
+                        "background_mode": background_mode
+                    }),
                 )?;
                 return Ok(());
             }
@@ -6141,6 +6198,7 @@ if __name__ == "__main__":
                     "out_path": &final_path,
                     "overlays": inputs.len(),
                     "mode": if used_legacy { "legacy_fallback" } else { "single_pass" },
+                    "background_mode": background_mode,
                     "ducking_strength": ducking_strength,
                     "loudness_target_lufs": loudness_target_lufs,
                     "timing_fit_enabled": timing_fit_enabled,
@@ -11390,7 +11448,11 @@ fn queue_experimental_pipeline_followups(
     }
 
     let batch_id = job_batch_id(paths, job_id).ok().flatten();
-    if separation_background_path_best_effort(paths, item_id).is_some() {
+    let has_mix_source = library::get_item_by_id(paths, item_id)
+        .ok()
+        .and_then(|item| mix_background_audio_source(paths, &item))
+        .is_some();
+    if has_mix_source {
         if !item_has_active_job(paths, item_id, JobType::MixDubPreviewV1.as_str()).unwrap_or(false)
         {
             let params_json = serde_json::to_string(&MixDubPreviewV1Params {
@@ -11426,7 +11488,7 @@ fn queue_experimental_pipeline_followups(
                 "item_id": item_id,
                 "source_track_id": source_track_id,
                 "variant_label": variant_label,
-                "reason": "background stem not found; run separation before auto mix/mux"
+                "reason": "background stem and source audio not found; mix/mux cannot continue"
             }),
         )?;
     }

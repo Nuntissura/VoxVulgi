@@ -93,6 +93,29 @@ type ExportedFile = {
   file_bytes: number;
 };
 
+type FfmpegToolsStatus = {
+  ffmpeg_version: string | null;
+  ffprobe_version: string | null;
+};
+
+type TtsNeuralLocalV1PackStatus = {
+  installed: boolean;
+  package_version: string | null;
+};
+
+type TtsVoicePreservingLocalV1PackStatus = {
+  installed: boolean;
+  openvoice_version: string | null;
+  cosyvoice_version: string | null;
+};
+
+type DiagnosticsModelInventory = {
+  models: Array<{
+    id: string;
+    installed: boolean;
+  }>;
+};
+
 type LocalizationOutputEntry = {
   id: string;
   group: "Source" | "Working" | "Deliverables";
@@ -859,6 +882,20 @@ function pickLatestTrack(
   return candidates[0] ?? null;
 }
 
+function preferredLocalizationTrack(tracks: SubtitleTrackRow[]): SubtitleTrackRow | null {
+  return (
+    pickLatestTrack(tracks, (track) => track.kind === "translated" && track.lang === "en") ??
+    pickLatestTrack(tracks, (track) => track.kind === "translated") ??
+    pickLatestTrack(tracks, (track) => track.kind === "source") ??
+    tracks[0] ??
+    null
+  );
+}
+
+function isEnglishLocalizationTrack(track: SubtitleTrackRow | null): boolean {
+  return Boolean(track && track.kind === "translated" && track.lang === "en");
+}
+
 export function SubtitleEditorPage({ itemId, visible = true }: { itemId: string; visible?: boolean }) {
   const pageActive = usePageActivity(visible);
   const videoRef = useRef<HTMLVideoElement | null>(null);
@@ -874,6 +911,11 @@ export function SubtitleEditorPage({ itemId, visible = true }: { itemId: string;
   const [notice, setNotice] = useState<string | null>(null);
   const [outputs, setOutputs] = useState<ItemOutputs | null>(null);
   const [outputPathStatuses, setOutputPathStatuses] = useState<Record<string, ShellPathStatus>>({});
+  const [ffmpegStatus, setFfmpegStatus] = useState<FfmpegToolsStatus | null>(null);
+  const [neuralPackStatus, setNeuralPackStatus] = useState<TtsNeuralLocalV1PackStatus | null>(null);
+  const [voicePreservingPackStatus, setVoicePreservingPackStatus] =
+    useState<TtsVoicePreservingLocalV1PackStatus | null>(null);
+  const [modelInventory, setModelInventory] = useState<DiagnosticsModelInventory | null>(null);
   const [artifacts, setArtifacts] = useState<ArtifactInfo[]>([]);
   const [artifactsBusy, setArtifactsBusy] = useState(false);
   const [itemJobs, setItemJobs] = useState<JobRow[]>([]);
@@ -1345,6 +1387,25 @@ export function SubtitleEditorPage({ itemId, visible = true }: { itemId: string;
     return next;
   }, [itemId]);
 
+  const refreshLocalizationReadiness = useCallback(async () => {
+    const [nextFfmpeg, nextNeuralPack, nextVoicePreservingPack, nextModels] = await Promise.all([
+      invoke<FfmpegToolsStatus>("tools_ffmpeg_status"),
+      invoke<TtsNeuralLocalV1PackStatus>("tools_tts_neural_local_v1_status"),
+      invoke<TtsVoicePreservingLocalV1PackStatus>("tools_tts_voice_preserving_local_v1_status"),
+      invoke<DiagnosticsModelInventory>("models_inventory"),
+    ]);
+    setFfmpegStatus(nextFfmpeg);
+    setNeuralPackStatus(nextNeuralPack);
+    setVoicePreservingPackStatus(nextVoicePreservingPack);
+    setModelInventory(nextModels);
+    return {
+      ffmpeg: nextFfmpeg,
+      neural: nextNeuralPack,
+      voicePreserving: nextVoicePreservingPack,
+      models: nextModels,
+    };
+  }, []);
+
   const refreshArtifacts = useCallback(async () => {
     setError(null);
     setArtifactsBusy(true);
@@ -1432,6 +1493,7 @@ export function SubtitleEditorPage({ itemId, visible = true }: { itemId: string;
     Promise.all([
       invoke<LibraryItem>("library_get", { itemId }),
       refreshTracks(),
+      refreshLocalizationReadiness(),
       refreshSpeakerSettings(),
       refreshVoiceTemplates(),
       refreshVoiceCastPacks(),
@@ -1447,10 +1509,8 @@ export function SubtitleEditorPage({ itemId, visible = true }: { itemId: string;
     ])
       .then(([nextItem, nextTracks]) => {
         setItem(nextItem);
-        if (nextTracks.length) {
-          const preferred =
-            nextTracks.find((t) => t.kind === "source" && t.format === "ytfetch_subtitle_json_v1") ??
-            nextTracks[0];
+        const preferred = preferredLocalizationTrack(nextTracks);
+        if (preferred) {
           loadTrack(preferred.id).catch((e) => setError(String(e)));
         }
       })
@@ -1459,6 +1519,7 @@ export function SubtitleEditorPage({ itemId, visible = true }: { itemId: string;
   }, [
     itemId,
     refreshTracks,
+    refreshLocalizationReadiness,
     refreshSpeakerSettings,
     refreshVoiceTemplates,
     refreshVoiceCastPacks,
@@ -1503,10 +1564,19 @@ export function SubtitleEditorPage({ itemId, visible = true }: { itemId: string;
     [tracks, trackId],
   );
 
+  const translatedEnglishTrack = useMemo(
+    () => pickLatestTrack(tracks, (track) => track.kind === "translated" && track.lang === "en"),
+    [tracks],
+  );
+
   const speakerSettingsByKey = useMemo(() => {
     const m = new Map<string, ItemSpeakerSetting>();
     for (const s of speakerSettings) m.set(s.speaker_key, s);
     return m;
+  }, [speakerSettings]);
+
+  const speakerReferenceCount = useMemo(() => {
+    return speakerSettings.reduce((sum, setting) => sum + speakerProfilePaths(setting).length, 0);
   }, [speakerSettings]);
 
   const selectedTemplateReferencesBySpeaker = useMemo(() => {
@@ -2427,6 +2497,62 @@ export function SubtitleEditorPage({ itemId, visible = true }: { itemId: string;
     refreshLocalizationOutputStatuses().catch(() => undefined);
   }, [refreshLocalizationOutputStatuses]);
 
+  const localizationReadinessRows = useMemo(() => {
+    const whisperInstalled = Boolean(
+      modelInventory?.models.some((model) => model.id === "whispercpp-tiny" && model.installed),
+    );
+    const ffmpegReady = Boolean(ffmpegStatus?.ffmpeg_version && ffmpegStatus?.ffprobe_version);
+    return [
+      {
+        title: "Source item",
+        ready: Boolean(item?.media_path),
+        detail: item?.media_path ? "Loaded" : "No media loaded",
+      },
+      {
+        title: "ASR runtime",
+        ready: ffmpegReady && whisperInstalled,
+        detail: ffmpegReady && whisperInstalled
+          ? "FFmpeg + Whisper.cpp ready"
+          : "Need FFmpeg and bundled Whisper.cpp runtime",
+      },
+      {
+        title: "Dub target track",
+        ready: isEnglishLocalizationTrack(currentTrack),
+        detail: isEnglishLocalizationTrack(currentTrack)
+          ? `${currentTrack?.kind}/${currentTrack?.lang} v${currentTrack?.version}`
+          : translatedEnglishTrack
+            ? `Current track is ${currentTrack?.kind ?? "none"}/${currentTrack?.lang ?? "-"}; English track available`
+            : "Run Translate -> EN first",
+      },
+      {
+        title: "Voice dubbing runtime",
+        ready: ffmpegReady && Boolean(neuralPackStatus?.installed) && Boolean(voicePreservingPackStatus?.installed),
+        detail:
+          ffmpegReady && neuralPackStatus?.installed && voicePreservingPackStatus?.installed
+            ? "FFmpeg + Kokoro + OpenVoice ready"
+            : "Need FFmpeg, Neural TTS pack, and Voice-preserving pack",
+      },
+      {
+        title: "Speaker references",
+        ready: speakerReferenceCount > 0,
+        detail:
+          speakerReferenceCount > 0
+            ? `${speakerReferenceCount} reference clip(s) configured`
+            : "No speaker references yet; dubbing will fall back to base voice output",
+      },
+    ];
+  }, [
+    currentTrack,
+    ffmpegStatus?.ffmpeg_version,
+    ffmpegStatus?.ffprobe_version,
+    item?.media_path,
+    modelInventory?.models,
+    neuralPackStatus?.installed,
+    speakerReferenceCount,
+    translatedEnglishTrack,
+    voicePreservingPackStatus?.installed,
+  ]);
+
   function logDiagnosticsEvent(
     event: string,
     details: Record<string, unknown> = {},
@@ -2441,6 +2567,28 @@ export function SubtitleEditorPage({ itemId, visible = true }: { itemId: string;
       },
       level,
     );
+  }
+
+  function scrollToLocalizationSection(sectionId: string) {
+    const target = document.getElementById(sectionId);
+    target?.scrollIntoView({ behavior: "smooth", block: "start" });
+  }
+
+  async function ensureEnglishLocalizationTrackSelected() {
+    if (isEnglishLocalizationTrack(currentTrack) && currentTrack) {
+      return currentTrack.id;
+    }
+    const preferred = preferredLocalizationTrack(tracks);
+    if (!preferred || preferred.kind !== "translated" || preferred.lang !== "en") {
+      throw new Error(
+        "Load source subtitles and run Translate -> EN first. Dubbing, benchmarking, and backend runs expect an English translated track.",
+      );
+    }
+    if (preferred.id !== trackId) {
+      await loadTrack(preferred.id);
+      setNotice(`Switched to translated/en track v${preferred.version} for dubbing.`);
+    }
+    return preferred.id;
   }
 
   async function openLocalizationOutputPath(entry: LocalizationOutputEntry) {
@@ -2746,15 +2894,16 @@ export function SubtitleEditorPage({ itemId, visible = true }: { itemId: string;
     setError(null);
     setNotice(null);
     try {
+      const targetTrackId = await ensureEnglishLocalizationTrackSelected();
       const report = await invoke<VoiceBenchmarkReport>("voice_benchmark_generate", {
         itemId,
-        trackId,
+        trackId: targetTrackId,
         goal: voiceBackendGoal,
       });
       setVoiceBenchmarkReport(report);
       const history = await invoke<VoiceBenchmarkHistoryEntry[]>("voice_benchmark_history_list", {
         itemId,
-        trackId,
+        trackId: targetTrackId,
         goal: voiceBackendGoal,
       });
       setVoiceBenchmarkHistory(history);
@@ -2772,18 +2921,19 @@ export function SubtitleEditorPage({ itemId, visible = true }: { itemId: string;
     setVoiceBenchmarkBusy(true);
     setError(null);
     try {
+      const targetTrackId = await ensureEnglishLocalizationTrackSelected();
       const exportResult = await invoke<VoiceBenchmarkLeaderboardExport>(
         "voice_benchmark_leaderboard_export",
         {
           itemId,
-          trackId,
+          trackId: targetTrackId,
           goal: voiceBackendGoal,
         },
       );
       setVoiceBenchmarkLeaderboard(exportResult);
       const history = await invoke<VoiceBenchmarkHistoryEntry[]>("voice_benchmark_history_list", {
         itemId,
-        trackId,
+        trackId: targetTrackId,
         goal: voiceBackendGoal,
       });
       setVoiceBenchmarkHistory(history);
@@ -2877,9 +3027,10 @@ export function SubtitleEditorPage({ itemId, visible = true }: { itemId: string;
     setError(null);
     setItemVoicePlanBusy(true);
     try {
+      const targetTrackId = await ensureEnglishLocalizationTrackSelected();
       const plan = await invoke<ItemVoicePlan>("item_voice_plan_promote_benchmark_candidate", {
         itemId,
-        trackId,
+        trackId: targetTrackId,
         goal: voiceBackendGoal,
         candidateId,
       });
@@ -2919,9 +3070,10 @@ export function SubtitleEditorPage({ itemId, visible = true }: { itemId: string;
     setError(null);
     setNotice(null);
     try {
+      const targetTrackId = await ensureEnglishLocalizationTrackSelected();
       const job = await invoke<JobRow>("jobs_enqueue_tts_preview_pyttsx3_v1", {
         itemId,
-        sourceTrackId: trackId,
+        sourceTrackId: targetTrackId,
       });
       setTtsJobId(job.id);
       setTtsJobStatus(job.status);
@@ -2940,9 +3092,10 @@ export function SubtitleEditorPage({ itemId, visible = true }: { itemId: string;
     setError(null);
     setNotice(null);
     try {
+      const targetTrackId = await ensureEnglishLocalizationTrackSelected();
       const job = await invoke<JobRow>("jobs_enqueue_tts_neural_local_v1", {
         itemId,
-        sourceTrackId: trackId,
+        sourceTrackId: targetTrackId,
       });
       setTtsNeuralLocalV1JobId(job.id);
       setTtsNeuralLocalV1JobStatus(job.status);
@@ -2962,9 +3115,10 @@ export function SubtitleEditorPage({ itemId, visible = true }: { itemId: string;
     setNotice(null);
     logDiagnosticsEvent("localization.enqueue_dub_voice_preserving");
     try {
+      const targetTrackId = await ensureEnglishLocalizationTrackSelected();
       const job = await invoke<JobRow>("jobs_enqueue_dub_voice_preserving_v1", {
         itemId,
-        sourceTrackId: trackId,
+        sourceTrackId: targetTrackId,
       });
       setDubVoicePreservingJobId(job.id);
       setDubVoicePreservingJobStatus(job.status);
@@ -2993,9 +3147,10 @@ export function SubtitleEditorPage({ itemId, visible = true }: { itemId: string;
     setError(null);
     setNotice(null);
     try {
+      const targetTrackId = await ensureEnglishLocalizationTrackSelected();
       const job = await invoke<JobRow>("jobs_enqueue_experimental_voice_backend_render_v1", {
         itemId,
-        sourceTrackId: trackId,
+        sourceTrackId: targetTrackId,
         backendId,
         variantLabel: trimOrNull(experimentalVariantLabel),
         autoPipeline: experimentalAutoPipeline,
@@ -4073,10 +4228,11 @@ export function SubtitleEditorPage({ itemId, visible = true }: { itemId: string;
     setError(null);
     setAbPreviewBusy(true);
     try {
+      const targetTrackId = await ensureEnglishLocalizationTrackSelected();
       const summary = await invoke<VoiceAbPreviewQueueSummary>("jobs_enqueue_voice_ab_preview_v1", {
         request: {
           item_id: itemId,
-          source_track_id: trackId,
+          source_track_id: targetTrackId,
           speaker_key: abSpeakerKey,
           separation_backend: separationBackend,
           queue_qc: true,
@@ -4330,12 +4486,34 @@ export function SubtitleEditorPage({ itemId, visible = true }: { itemId: string;
 
         applyJobState(translateJobId, setTranslateJobStatus, setTranslateJobError, setTranslateJobProgress, (job) => {
           if (job.status === "succeeded") {
-            refreshTracks().catch(() => undefined);
+            refreshTracks()
+              .then((nextTracks) => {
+                const preferred = preferredLocalizationTrack(nextTracks);
+                if (preferred && !dirty) {
+                  loadTrack(preferred.id).catch(() => undefined);
+                } else if (preferred && trackId !== preferred.id) {
+                  setNotice(
+                    `Translated track ${preferred.kind}/${preferred.lang} v${preferred.version} is ready. Save current edits, then switch to continue dubbing.`,
+                  );
+                }
+              })
+              .catch(() => undefined);
           }
         });
         applyJobState(diarizeJobId, setDiarizeJobStatus, setDiarizeJobError, setDiarizeJobProgress, (job) => {
           if (job.status === "succeeded") {
-            refreshTracks().catch(() => undefined);
+            refreshTracks()
+              .then((nextTracks) => {
+                const preferred = preferredLocalizationTrack(nextTracks);
+                if (preferred && !dirty) {
+                  loadTrack(preferred.id).catch(() => undefined);
+                } else if (preferred && trackId !== preferred.id) {
+                  setNotice(
+                    `Updated track ${preferred.kind}/${preferred.lang} v${preferred.version} is ready. Save current edits, then switch to continue dubbing.`,
+                  );
+                }
+              })
+              .catch(() => undefined);
           }
         });
         applyJobState(ttsJobId, setTtsJobStatus, setTtsJobError, setTtsJobProgress);
@@ -4919,6 +5097,76 @@ export function SubtitleEditorPage({ itemId, visible = true }: { itemId: string;
       </div>
 
       <div className="card">
+        <h2>Workflow Map</h2>
+        <div style={{ color: "#4b5563" }}>
+          Localization Studio expects an English translated track for dubbing, benchmarking, and
+          backend comparison. Use this card to confirm runtime readiness and jump to the main
+          working sections quickly.
+        </div>
+        <div style={{ marginTop: 12, display: "flex", flexDirection: "column", gap: 8 }}>
+          {localizationReadinessRows.map((row) => (
+            <div
+              key={row.title}
+              style={{
+                border: "1px solid rgba(255,255,255,0.12)",
+                borderRadius: 10,
+                padding: "10px 12px",
+                display: "flex",
+                justifyContent: "space-between",
+                gap: 12,
+                alignItems: "center",
+                flexWrap: "wrap",
+              }}
+            >
+              <div>
+                <div style={{ fontWeight: 600 }}>{row.title}</div>
+                <div style={{ fontSize: 12, opacity: 0.75 }}>{row.detail}</div>
+              </div>
+              <div style={{ fontSize: 12, fontWeight: 600, color: row.ready ? "#166534" : "#92400e" }}>
+                {row.ready ? "Ready" : "Needs attention"}
+              </div>
+            </div>
+          ))}
+        </div>
+        <div className="row" style={{ marginTop: 12, flexWrap: "wrap" }}>
+          <button type="button" disabled={busy} onClick={() => scrollToLocalizationSection("loc-track")}>
+            Tracks and core jobs
+          </button>
+          <button type="button" disabled={busy} onClick={() => scrollToLocalizationSection("loc-backends")}>
+            Backend strategy
+          </button>
+          <button type="button" disabled={busy} onClick={() => scrollToLocalizationSection("loc-benchmark")}>
+            Benchmark lab
+          </button>
+          <button type="button" disabled={busy} onClick={() => scrollToLocalizationSection("loc-batch")}>
+            Batch dubbing
+          </button>
+          <button type="button" disabled={busy} onClick={() => scrollToLocalizationSection("loc-ab")}>
+            A/B preview
+          </button>
+          <button type="button" disabled={busy} onClick={() => scrollToLocalizationSection("loc-qc")}>
+            QC report
+          </button>
+          <button type="button" disabled={busy} onClick={() => scrollToLocalizationSection("loc-artifacts")}>
+            Artifacts
+          </button>
+          <button type="button" disabled={busy} onClick={() => refreshLocalizationReadiness().catch((e) => setError(String(e)))}>
+            Refresh readiness
+          </button>
+          <button
+            type="button"
+            disabled={busy || !translatedEnglishTrack || isEnglishLocalizationTrack(currentTrack)}
+            onClick={() => {
+              if (!translatedEnglishTrack) return;
+              loadTrack(translatedEnglishTrack.id).catch((e) => setError(String(e)));
+            }}
+          >
+            Use translated EN track
+          </button>
+        </div>
+      </div>
+
+      <div className="card">
         <h2>First Dub Guide</h2>
         <div style={{ color: "#4b5563" }}>
           Recommended order for a first Japanese/Korean to English dubbed preview:
@@ -4930,7 +5178,12 @@ export function SubtitleEditorPage({ itemId, visible = true }: { itemId: string;
           <li>Open <strong>Diagnostics</strong> and verify FFmpeg plus the Phase 2 dubbing packs are installed.</li>
           <li>Assign a short clean reference clip per speaker, then save it as a <strong>Reusable voice template</strong> if you want to reuse the same cast on later episodes.</li>
           <li>Run <strong>Dub voice-preserving (local)</strong> for the English voice-cloned dub, or use one of the TTS preview jobs first.</li>
-          <li>Run <strong>Separate</strong>, then <strong>Mix dub</strong>, then <strong>Mux preview</strong>.</li>
+          <li>
+            Run <strong>Separate</strong> for the cleanest background preservation, then{" "}
+            <strong>Mix dub</strong>, then <strong>Mux preview</strong>. If separation fails or is
+            unavailable, <strong>Mix dub</strong> now falls back to the source media audio so you
+            can still produce a preview MP4.
+          </li>
           <li>Use the Outputs card below to export the final SRT/VTT and MP4 into the app export folder.</li>
         </ol>
       </div>
@@ -5156,7 +5409,7 @@ export function SubtitleEditorPage({ itemId, visible = true }: { itemId: string;
         </div>
       </div>
 
-      <div className="card">
+      <div className="card" id="loc-track">
         <h2>Track</h2>
         <div className="row">
           <select
@@ -6982,7 +7235,7 @@ export function SubtitleEditorPage({ itemId, visible = true }: { itemId: string;
                 </label>
               </div>
 
-              <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
+              <div id="loc-backends" style={{ display: "flex", flexDirection: "column", gap: 8 }}>
                 <div className="row" style={{ alignItems: "center", gap: 10, flexWrap: "wrap" }}>
                   <div style={{ fontSize: 12, opacity: 0.85 }}>Voice backend strategy</div>
                   <select
@@ -7151,7 +7404,9 @@ export function SubtitleEditorPage({ itemId, visible = true }: { itemId: string;
               </div>
               <div style={{ fontSize: 12, opacity: 0.7 }}>
                 BYO adapters run locally against the current subtitle track and write request,
-                manifest, and report artifacts under the item. For auto mix/mux, run separation first.
+                manifest, and report artifacts under the item. Separation still gives the cleanest
+                background preservation, but auto mix/mux can now fall back to source audio when
+                no background stem is available.
               </div>
               <div
                 style={{
@@ -7367,7 +7622,7 @@ export function SubtitleEditorPage({ itemId, visible = true }: { itemId: string;
               </div>
             </div>
 
-            <div style={{ marginTop: 16 }}>
+            <div id="loc-benchmark" style={{ marginTop: 16 }}>
               <div className="row" style={{ alignItems: "center", gap: 10, flexWrap: "wrap" }}>
                 <div style={{ fontSize: 12, opacity: 0.85 }}>Voice benchmark lab</div>
                 <button
@@ -7696,7 +7951,7 @@ export function SubtitleEditorPage({ itemId, visible = true }: { itemId: string;
               </div>
             </div>
 
-            <div style={{ marginTop: 16 }}>
+            <div id="loc-batch" style={{ marginTop: 16 }}>
               <div className="row" style={{ alignItems: "center", gap: 10, flexWrap: "wrap" }}>
                 <div style={{ fontSize: 12, opacity: 0.85 }}>Batch dubbing</div>
                 <button
@@ -7792,7 +8047,7 @@ export function SubtitleEditorPage({ itemId, visible = true }: { itemId: string;
               ) : null}
             </div>
 
-            <div style={{ marginTop: 16 }}>
+            <div id="loc-ab" style={{ marginTop: 16 }}>
               <div className="row" style={{ alignItems: "center", gap: 10, flexWrap: "wrap" }}>
                 <div style={{ fontSize: 12, opacity: 0.85 }}>A/B voice preview</div>
                 <div style={{ fontSize: 12, opacity: 0.6 }}>
@@ -7946,7 +8201,7 @@ export function SubtitleEditorPage({ itemId, visible = true }: { itemId: string;
         ) : null}
       </div>
 
-      <div className="card">
+      <div className="card" id="loc-qc">
         <h2>QC report</h2>
         <div style={{ color: "#4b5563" }}>
           Flags subtitle and voice issues: CPS, long lines, overlaps, timing mismatches, silent clips,
@@ -8131,7 +8386,7 @@ export function SubtitleEditorPage({ itemId, visible = true }: { itemId: string;
         )}
       </div>
 
-      <div className="card">
+      <div className="card" id="loc-artifacts">
         <h2>Artifacts</h2>
         <div style={{ color: "#4b5563" }}>
           Derived outputs for this item (stems, manifests, previews, QC, exports).

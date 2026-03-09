@@ -277,12 +277,13 @@ Baseline approach (recommended to ship safely):
 Phase 2 preview implementation notes (current):
 
 - TTS preview: `tts_preview_pyttsx3_v1` renders per-segment wavs + a manifest (system TTS; quality varies by OS).
-- Mix preview: `mix_dub_preview_v1` overlays TTS segments onto the separation background stem into a single wav.
+- Mix preview: `mix_dub_preview_v1` overlays TTS segments onto the separation background stem into a single wav, but falls back to the source-media audio when no background stem is available so preview generation does not hard-fail under separation/runtime contention.
 - Mux preview: `mux_dub_preview_v1` muxes the preview dub audio onto the original media into an MP4.
 - User-facing exports are separated from working artifacts:
   - working artifacts remain under `derived/items/<item_id>/...`
   - exported deliverables default to `<download_root>/localization/en/<media-stem>/`
   - the separate dubbed audio track remains the working `mix_dub_preview_v1.wav`; the exported/muxed MP4 embeds that dubbed audio into video
+- Localization Studio should auto-prefer the latest translated English track for dubbing, benchmarking, experimental backend runs, and A/B preview actions, and should surface a compact workflow/readiness map so operators can see track/runtime state before queueing jobs.
 
 Voice-preserving approach (core feature):
 

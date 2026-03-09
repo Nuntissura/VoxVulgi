@@ -3,7 +3,7 @@
 ## Metadata
 - ID: WP-0131
 - Owner: Codex
-- Status: BACKLOG
+- Status: DONE
 - Created: 2026-03-09
 - Target milestone: Installer smoke remediation tranche
 
@@ -40,3 +40,5 @@ Out of scope:
 ## Status updates
 
 - 2026-03-09: Created from installer smoke findings `ST-007`, `ST-008`, `ST-024`, `ST-027`, `ST-028`, and `ST-029`.
+- 2026-03-09: Repaired Localization Studio to prefer translated English tracks for dubbing/benchmark actions, added a workflow/readiness map plus quick jumps to buried operator surfaces, and changed mix preview to fall back to source-media audio when separation is unavailable so preview generation does not hard-fail.
+- 2026-03-09: Verified with engine and Tauri test/build passes plus a dedicated `wp0131_localization_smoke` proof run under `product/desktop/Build Target/tool_artifacts/wp_runs/WP-0131/20260309_061734/`, producing a non-silent dubbed MP4.
