@@ -1,6 +1,6 @@
 # VoxVulgi - Technical Design (Rebuild; Cross-Platform; Local-First)
 
-Date: 2026-03-08  
+Date: 2026-03-09  
 Status: Draft (implementation-oriented; adjusts as we pick stack).
 
 ## 1) Proposed Architecture (Recommended)
@@ -47,6 +47,7 @@ Design goals:
 - Do not write derived outputs next to the source media path by default; exporting is explicit and user-directed.
 - Default user-facing exports should land under the configured download root in predictable app-managed folders (for example `localization/en/<media-stem>/` for Localization Studio deliverables).
 - The shared download/export root should be configured once from a global Options surface, not duplicated as pane-local state.
+- The single-root model should evolve into durable per-feature roots managed from Options, with feature panes showing resolved effective paths only.
 - Selecting an existing valid root should hydrate expected app-managed folders and index known existing archive folders instead of briefly treating the root as missing.
 - Allow "clear cache" without touching library media.
 - Generic job-history cleanup must never remove item-scoped deliverables or user-selected output folders unless the operator explicitly opts into those output-folder classes.
@@ -58,6 +59,7 @@ Design goals:
 - Config, override, adapter-store, and secret writes should use atomic temp-file-plus-replace helpers instead of direct in-place writes.
 - Recurring UI polling should use shared non-overlapping visibility-aware loops, and mounted-but-hidden pages must suspend background refresh until active again.
 - Localization Studio artifact/runtime contracts should be serialized from Rust as typed metadata (`kind`, job type, variant, backend, container, rerun class) and consumed from shared frontend modules rather than reconstructed ad hoc from artifact IDs and filenames.
+- Localization Studio should provide a dedicated outputs browser/library layer that groups source media, working artifacts, and exported deliverables for the active item instead of relying only on scattered path fields/buttons.
 - Explicit consent mechanisms must not be implemented.
 - Anti-abuse controls must not be included.
 - These features must not appear in development or the final product. Users must comply with all local regulations.
@@ -77,6 +79,7 @@ Implementation notes (desktop):
 - Bundled toolchain inputs should be tracked in a single pinned dependency manifest (`product/engine/resources/tooling/pinned_dependency_manifest.json`) so release provenance is reproducible and inspectable.
 - Mutable unpinned recovery installs remain available only behind an explicit local opt-in environment variable; release preparation must succeed without depending on them.
 - Third-party package patching should live in small tested Rust helper modules instead of large inline runtime patch scripts embedded in installer code paths.
+- Diagnostics should distinguish required, optional, demo/test, bundled, hydrated, and manually installable dependencies so the operator inventory matches the real runtime contract.
 
 ### 2.1.1 Installer maintenance mode clarity
 
@@ -142,7 +145,11 @@ Core tables (suggested):
   - `source_url` is unique (merge key for import/upsert)
 - `instagram_subscription`:
   - `id`, `title`, `source_url`, `folder_map`, `output_dir_override`, `active`,
-    `refresh_interval_minutes`, `last_queued_at_ms`, `created_at_ms`, `updated_at_ms`
+  `refresh_interval_minutes`, `last_queued_at_ms`, `created_at_ms`, `updated_at_ms`
+- Authenticated session material:
+  - one-shot jobs and saved subscription rows should be able to reference explicit operator-managed session inputs,
+  - accepted import forms should include raw cookie headers, Netscape cookie files, browser-export JSON cookie blobs, and explicit cookie-file paths,
+  - secrets must remain redacted in logs and excluded from durable `job.params_json`.
 - Planned archive-expansion tables:
   - `library_container`:
     - `id`, `kind` (`playlist`, `subscription`, `folder`, `channel`, or similar),
@@ -194,6 +201,7 @@ Local-first note:
 - Default to offline operation (no network required after models are installed).
 - Support optional cloud providers behind an interface, gated by explicit user opt-in and clear "what we send" disclosure.
 - Model downloads (if any) must be integrity-checked (hash/signature) and visible in Diagnostics.
+- Diagnostics and startup surfaces should expose numeric progress where practical and should provide richer state snapshots for support and LLM-assisted analysis.
 
 ### 5.1 Import
 
@@ -423,6 +431,7 @@ Design goal: keep downloading isolated behind a provider interface.
 MVP UX + safety requirements:
 
 - Any use of authentication helpers (user-supplied cookie header, `--cookies-from-browser`) must be explicitly user-initiated and disclosed in the UI.
+- Browser-export JSON cookie blobs and Netscape cookie files should be normalized into yt-dlp-compatible cookie files inside app-managed short-lived paths rather than assumed to already be in the correct format.
 - Full installers may ship with bundled external tools. If the app bootstraps or downloads tools at runtime (e.g., slim installers), it must be explicitly user-initiated and disclosed.
 - Logs must redact tokens/cookies and avoid storing secrets in durable job params; prefer short-lived files or OS keychain.
 
@@ -543,6 +552,8 @@ Subscription export JSON shape (v1):
 
 - Drag-region behavior should be restricted to the intended chrome/background layer and must not swallow normal content interaction.
 - Corner-resize affordances should have a clear reachable hitbox inside the practical app bounds.
+- App movement should use an explicit move affordance or clearly bounded drag region so operators can distinguish shell movement from content interaction.
+- Dense archive panes should prefer panel-local scrolling/list behavior over clipped actions or invisible controls.
 
 ## 7) Testing Strategy
 

@@ -1,6 +1,6 @@
 # VoxVulgi — Task Board
 
-Last updated: 2026-03-08
+Last updated: 2026-03-09
 
 This is the single source of truth for work status.
 
@@ -144,3 +144,12 @@ This is the single source of truth for work status.
 | WP-0128 | Localization surface decomposition and typed runtime contracts | DONE | Codex | Localization runtime contracts are now typed end to end: item-artifact metadata is serialized from Tauri with explicit kind/job/backend/container/rerun identity, the frontend consumes that through a shared localization runtime module, and `SubtitleEditorPage` no longer reconstructs artifact matching/rerun behavior from filename heuristics inline; proof in `product/desktop/Build Target/tool_artifacts/wp_runs/WP-0128/20260308_203600/`. |
 | WP-0129 | Reproducible offline bundle and vendor patch hardening | DONE | Codex | Added tracked pinned dependency manifest, opt-in mutable fallback policy, tested Rust vendor patches, and offline payload hash verification; proof in `product/desktop/Build Target/tool_artifacts/wp_runs/WP-0129/20260308_222300/`. |
 | WP-0130 | Proof standardization and frontend/Tauri regression harness | DONE | Codex | Added repo-wide proof policy, proof-summary template, frontend shared-runtime contract tests, and Tauri artifact/offline-hydration bridge coverage; proof in `product/desktop/Build Target/tool_artifacts/wp_runs/WP-0130/20260308_231800/`. |
+| WP-0131 | Localization Studio end-to-end audit and repair | BACKLOG | Codex | New installer smoke shows Localization Studio is still failing as a real operator workflow; audit the full chain and repair the in-app path before calling the feature healthy. |
+| WP-0132 | Authenticated archiver sessions and cookie imports | BACKLOG | Codex | Add real session handling for YouTube/Instagram archive flows, including browser-export JSON cookies, cookie files, and safer fallback behavior. |
+| WP-0133 | Options-managed per-feature storage roots | BACKLOG | Codex | Replace the remaining shared-root duplication with per-feature persistent roots configured only from Options and reflected consistently in feature panes. |
+| WP-0134 | Localization outputs library and source/artifact navigation | BACKLOG | Codex | Add a dedicated outputs browser for Localization Studio so operators can find source video, working artifacts, and deliverables quickly. |
+| WP-0135 | Diagnostics loading UX and full state snapshot | BACKLOG | Codex | Add clearer loading percentages, blocked-feature feedback, and a richer diagnostics snapshot for support and LLM analysis. |
+| WP-0136 | Media Library list mode and container semantics | BACKLOG | Codex | Rework large-library browsing toward list-first archive UX with explicit subscription/playlist/folder/file semantics and practical width behavior. |
+| WP-0137 | Shell move affordance and panel-scroll polish | BACKLOG | Codex | Clarify how the window is moved and improve panel-local scrolling without reintroducing drag-anywhere interference. |
+| WP-0138 | Model inventory clarity and required/optional labeling | BACKLOG | Codex | Make Diagnostics model/tool inventory explicit about required, optional, demo/test, bundled, and hydrated states. |
+| WP-0139 | Repo-to-spec crosscheck and governance reconciliation | BACKLOG | Codex | Final packet: crosscheck repo behavior against spec/governance after this tranche and reconcile any remaining mismatches. |

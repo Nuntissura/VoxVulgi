@@ -1,6 +1,6 @@
 # VoxVulgi — Product Spec (Rebuild; Cross-Platform; Local-First)
 
-Date: 2026-03-08  
+Date: 2026-03-09  
 Status: Draft (assumptions noted; intended as the starting point for implementation planning).
 
 ## 1) Framing / Constraints
@@ -49,8 +49,10 @@ Initial language focus: **Korean + Japanese → English**.
   - queue refresh for one subscription or all active subscriptions,
   - keep loaded subscriptions stable across pane switches and window focus changes.
 - Shared storage-root behavior:
-  - the operator configures one shared download/export root from a global Options surface,
-  - the chosen root must persist across startup, updates, and window switches,
+  - the operator configures persistent roots from a global Options surface rather than pane-local blocks,
+  - roots may be set per feature/export class (for example Video Archiver, Instagram Archiver, Image Archive, and Localization exports),
+  - feature panes should show the resolved effective path but should not own or duplicate the root-configuration card,
+  - configured roots must persist across startup, updates, and window switches,
   - selecting a valid root should create expected app-managed folders when absent and index or hydrate existing folders when already present.
 - Add subscription export/import:
   - export all subscriptions to JSON (portable backup/migration file),
@@ -58,7 +60,13 @@ Initial language focus: **Korean + Japanese → English**.
   - no subscription deletion on import unless explicitly requested by the user.
 - Video workflow split:
   - Localization Studio should include a lightweight video-ingest block for local import/refresh and ASR language selection (`auto` plus explicit language choices),
-  - the separate archive window should focus on URL ingest, presets/templates, subscription groups, and subscriptions.
+  - the separate archive window should focus on URL ingest, presets/templates, subscription groups, and subscriptions,
+  - archive windows should not duplicate Localization Studio ingest controls or global storage-root configuration blocks.
+- Authenticated archive-session support:
+  - login-required YouTube and Instagram workflows must support explicit operator-provided session material,
+  - accepted operator inputs should include raw cookie headers, Netscape cookie files, browser-export JSON cookie blobs, and explicit cookie-file paths,
+  - authenticated-session inputs must be reusable across one-shot batches and saved subscriptions where the operator chooses,
+  - browser-profile cookie fallback must remain explicit, optional, and clearly disclosed when used.
 - Instagram archive additions:
   - support saved recurring Instagram archive targets with an interval-based refresh model,
   - show the last 10 archived pictures/stories/reels with uncropped thumbnail framing.
@@ -82,7 +90,9 @@ Initial language focus: **Korean + Japanese → English**.
   - filters (language, status, date, source),
   - collections/playlists,
   - grouped browsing by source container such as playlist/subscription/folder,
-  - media-type filters such as video and image.
+  - media-type filters such as video and image,
+  - a list-first mode suited to very large archives,
+  - explicit container semantics so operators can tell whether a row/group represents a playlist, subscription, folder, or single imported file.
 - Default archive/output media policy:
   - video workflows should prefer MP4 by default wherever the local toolchain can merge or remux cleanly,
   - image workflows should prefer JPEG defaults where the provider/toolchain offers multiple encodings without destructive tradeoffs.
@@ -119,9 +129,14 @@ Initial language focus: **Korean + Japanese → English**.
   - last job errors with copy/export.
 - Startup and performance diagnostics:
   - show a meaningful startup progress bar or phase list while heavyweight background initialization is in flight,
+  - show numeric progress or percentages where the app can derive them,
+  - when a feature is temporarily blocked because dependencies are still hydrating, the UI should explain that state explicitly near the action and surface the current loading progress,
   - capture deterministic local traces for startup phases, pane activation, resource usage, and major failures,
   - explain tool state in operator terms such as bundled, hydrated, installed, loaded, and ready,
   - suspend recurring pane-local polling and heartbeats when the page or app is not active so the UI degrades gracefully under heavy external CPU load.
+- Diagnostics state export:
+  - diagnostics should be able to export a coherent local snapshot of current app state, including roots, tool/model state, queue health, and major feature readiness,
+  - the snapshot should be readable both by operators and by support/LLM analysis workflows.
 - Supply-chain and reproducibility requirements:
   - bundled dependency inputs must be tracked in a pinned manifest rather than scattered mutable constants,
   - mutable unpinned fallback installs must be disabled by default and only run through an explicit local operator/developer opt-in,
@@ -182,6 +197,9 @@ Initial language focus: **Korean + Japanese → English**.
   - dubbed audio track (WAV/AAC),
   - muxed video with new audio track (MP4/MKV),
   - subtitles as sidecar or burned-in.
+- Localization output discoverability:
+  - Localization Studio should expose a dedicated outputs browser or library view that groups source media, working artifacts, and exported deliverables for the current item,
+  - operators should be able to open or reveal source video, working artifact folders, dubbed outputs, subtitle exports, and export folders from one obvious surface.
 - Planned export/review additions:
   - A/B preview variants before committing to a final voice choice,
   - batch dubbing across item sets or seasons,
@@ -251,6 +269,8 @@ Current implementation status:
 - Offline by default: no background network egress. Windows "full" installers bundle required local tools/models for Phase 1+2 and bootstrap them into app-data on first launch, so the core pipeline can run fully offline without manual pack installs.
 - Safe defaults: no voice cloning by default.
 - Voice and dubbing controls remain operator-directed; VoxVulgi should not add content-judgment or censorship workflows as part of these features.
+- Discoverable: operator-critical controls must be visible in the workflow where they are needed rather than buried behind long scroll chains or hidden state gates.
+- Ergonomic: dense archive/workflow panes should provide clear scrolling behavior and an explicit app-move affordance that does not conflict with text selection or scrollbar use.
 
 ## 8) Key UX Screens
 

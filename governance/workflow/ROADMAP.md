@@ -1,6 +1,6 @@
 # VoxVulgi - Roadmap / Backlog (Draft)
 
-Date: 2026-03-08
+Date: 2026-03-09
 
 ## Immediate Track - Stabilization + IA Refresh (2026-03)
 
@@ -94,6 +94,18 @@ Date: 2026-03-08
 - WP-0128: Localization surface decomposition and typed runtime contracts. DONE.
 - WP-0129: Reproducible offline bundle and vendor patch hardening. DONE.
 - WP-0130: Proof standardization and frontend/Tauri regression harness. DONE.
+
+## Installer Smoke Debt Remediation Tranche (2026-03)
+
+- WP-0131: Localization Studio end-to-end audit and repair.
+- WP-0132: Authenticated archiver sessions and cookie imports.
+- WP-0133: Options-managed per-feature storage roots.
+- WP-0134: Localization outputs library and source/artifact navigation.
+- WP-0135: Diagnostics loading UX and full state snapshot.
+- WP-0136: Media Library list mode and container semantics.
+- WP-0137: Shell move affordance and panel-scroll polish.
+- WP-0138: Model inventory clarity and required/optional labeling.
+- WP-0139: Repo-to-spec crosscheck and governance reconciliation. LAST.
 
 ## Phase 0 - Decisions (1-2 days)
 
