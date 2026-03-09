@@ -98,7 +98,7 @@ Date: 2026-03-09
 ## Installer Smoke Debt Remediation Tranche (2026-03)
 
 - WP-0131: Localization Studio end-to-end audit and repair.
-- WP-0132: Authenticated archiver sessions and cookie imports.
+- WP-0132: Authenticated archiver sessions and cookie imports. DONE 2026-03-09.
 - WP-0133: Options-managed per-feature storage roots.
 - WP-0134: Localization outputs library and source/artifact navigation.
 - WP-0135: Diagnostics loading UX and full state snapshot.

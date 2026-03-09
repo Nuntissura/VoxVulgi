@@ -1451,6 +1451,7 @@ pub fn enqueue_youtube_subscription_refresh_v1(
     subscription_id: String,
     output_dir: Option<String>,
     batch_id: Option<String>,
+    auth_cookie: Option<String>,
 ) -> Result<JobRow> {
     let trimmed = subscription_id.trim();
     if trimmed.is_empty() {
@@ -1458,19 +1459,30 @@ pub fn enqueue_youtube_subscription_refresh_v1(
             "subscription id is empty".to_string(),
         ));
     }
+    let auth_cookie = normalize_auth_cookie(auth_cookie)?;
     let output_dir = normalize_output_dir(output_dir);
     let params_json = serde_json::to_string(&YoutubeSubscriptionRefreshV1Params {
         subscription_id: trimmed.to_string(),
         max_items: None,
         output_dir,
     })?;
-    enqueue_with_type_item_and_batch_id(
+    let job = enqueue_with_type_item_and_batch_id(
         paths,
         JobType::YoutubeSubscriptionRefreshV1,
         params_json,
         None,
         batch_id.or_else(|| Some(Uuid::new_v4().to_string())),
-    )
+    )?;
+
+    if let Some(cookie) = auth_cookie.as_deref() {
+        if let Err(err) = write_job_cookie_secret(paths, &job.id, cookie) {
+            let _ = delete_job_by_id(paths, &job.id);
+            remove_job_cookie_secret(paths, &job.id);
+            return Err(err);
+        }
+    }
+
+    Ok(job)
 }
 
 fn enqueue_download_direct_url_batch_raw_with_subscription(
@@ -1484,7 +1496,7 @@ fn enqueue_download_direct_url_batch_raw_with_subscription(
     batch_id: Option<String>,
     subscription_id: Option<String>,
 ) -> Result<Vec<JobRow>> {
-    let auth_cookie = normalize_auth_cookie(auth_cookie);
+    let auth_cookie = normalize_auth_cookie(auth_cookie)?;
     let output_dir = normalize_output_dir(output_dir);
     let use_browser_cookies = use_browser_cookies.unwrap_or(false);
     let urls = normalize_direct_urls(urls)?;
@@ -1556,7 +1568,7 @@ pub fn enqueue_download_instagram_batch(
     output_dir: Option<String>,
     use_browser_cookies: Option<bool>,
 ) -> Result<Vec<JobRow>> {
-    let auth_cookie = normalize_auth_cookie(auth_cookie);
+    let auth_cookie = normalize_auth_cookie(auth_cookie)?;
     let output_dir = normalize_output_dir(output_dir);
     let use_browser_cookies = use_browser_cookies.unwrap_or(false);
     let normalized_urls = normalize_direct_urls(urls)?;
@@ -2635,8 +2647,11 @@ fn execute_job(paths: &AppPaths, job_id: &str, type_str: &str, params_json: &str
             let subscription_id = p.subscription_id.clone();
             let url = normalize_direct_url(&p.url)?;
             let provider = effective_download_provider(&p.provider, &url);
-            let auth_cookie = read_job_cookie_secret(paths, job_id)
-                .or_else(|| normalize_auth_cookie(p.auth_cookie));
+            let auth_cookie = if let Some(secret) = read_job_cookie_secret(paths, job_id) {
+                Some(secret)
+            } else {
+                normalize_auth_cookie(p.auth_cookie)?
+            };
             remove_job_cookie_secret(paths, job_id);
             let mut output_dir = normalize_output_dir(p.output_dir);
             let output_subdir = normalize_output_subdir(p.output_subdir);
@@ -2731,9 +2746,11 @@ fn execute_job(paths: &AppPaths, job_id: &str, type_str: &str, params_json: &str
         JobType::YoutubeSubscriptionRefreshV1 => {
             set_progress(paths, job_id, 0.05)?;
             let p: YoutubeSubscriptionRefreshV1Params = serde_json::from_str(params_json)?;
+            let auth_cookie = read_job_cookie_secret(paths, job_id);
 
             if is_canceled(paths, job_id)? {
                 log_line(paths, job_id, "info", "job_canceled", serde_json::json!({}))?;
+                remove_job_cookie_secret(paths, job_id);
                 return Ok(());
             }
 
@@ -2769,8 +2786,11 @@ fn execute_job(paths: &AppPaths, job_id: &str, type_str: &str, params_json: &str
                     paths,
                     &sub.source_url,
                     max_items,
-                    None,
-                    use_browser_cookies_for_url(&sub.source_url, sub.use_browser_cookies),
+                    auth_cookie.as_deref(),
+                    use_browser_cookies_for_url(
+                        &sub.source_url,
+                        sub.use_browser_cookies && auth_cookie.is_none(),
+                    ),
                 )?;
                 set_progress(paths, job_id, 0.40)?;
 
@@ -2813,9 +2833,9 @@ fn execute_job(paths: &AppPaths, job_id: &str, type_str: &str, params_json: &str
                     paths,
                     new_urls,
                     Some(DOWNLOAD_PROVIDER_YOUTUBE_YT_DLP.to_string()),
-                    None,
+                    auth_cookie.clone(),
                     Some(output_dir.to_string_lossy().to_string()),
-                    Some(sub.use_browser_cookies),
+                    Some(sub.use_browser_cookies && auth_cookie.is_none()),
                     sub.preset_id.clone(),
                     Some(job_id.to_string()),
                     Some(sub.id.clone()),
@@ -2838,12 +2858,14 @@ fn execute_job(paths: &AppPaths, job_id: &str, type_str: &str, params_json: &str
 
             match refresh_result {
                 Ok(()) => {
+                    remove_job_cookie_secret(paths, job_id);
                     let _ = subscriptions::record_subscription_refresh_success(
                         paths,
                         &p.subscription_id,
                     );
                 }
                 Err(err) => {
+                    remove_job_cookie_secret(paths, job_id);
                     let _ = subscriptions::record_subscription_refresh_failure(
                         paths,
                         &p.subscription_id,
@@ -8645,31 +8667,105 @@ fn normalize_direct_urls(inputs: Vec<String>) -> Result<Vec<String>> {
     Ok(output)
 }
 
-fn normalize_auth_cookie(value: Option<String>) -> Option<String> {
+pub(crate) fn normalize_auth_cookie(value: Option<String>) -> Result<Option<String>> {
     let raw = value.unwrap_or_default();
     let trimmed = raw.trim();
     if trimmed.is_empty() {
-        return None;
+        return Ok(None);
     }
 
     if let Some(from_json) = cookie_json_to_header(trimmed) {
-        return Some(from_json);
+        return Ok(Some(from_json));
+    }
+
+    if let Some(from_netscape) = netscape_cookie_text_to_header(trimmed) {
+        return Ok(Some(from_netscape));
     }
 
     let path = Path::new(trimmed);
     if path.exists() && path.is_file() {
-        if let Ok(contents) = std::fs::read_to_string(path) {
-            if let Some(from_json) = cookie_json_to_header(&contents) {
-                return Some(from_json);
-            }
-            let from_file = contents.trim();
-            if !from_file.is_empty() {
-                return Some(from_file.to_string());
-            }
-        }
+        let contents = std::fs::read_to_string(path)?;
+        let normalized = normalize_auth_cookie(Some(contents))?;
+        let normalized = normalized.ok_or_else(|| {
+            EngineError::InstallFailed(format!(
+                "cookie file was empty: {}",
+                path.to_string_lossy()
+            ))
+        })?;
+        return Ok(Some(normalized));
     }
 
-    Some(trimmed.to_string())
+    if looks_like_cookie_file_path(trimmed) {
+        return Err(EngineError::InstallFailed(format!(
+            "cookie file path does not exist: {}",
+            trimmed
+        )));
+    }
+
+    if parse_cookie_header_pairs(trimmed).is_empty() {
+        return Err(EngineError::InstallFailed(
+            "session input must be a cookie header, browser-export JSON, Netscape cookie text, or an existing cookie-file path".to_string(),
+        ));
+    }
+
+    Ok(Some(trimmed.to_string()))
+}
+
+fn looks_like_cookie_file_path(value: &str) -> bool {
+    if value.contains('\n') || value.contains('\r') {
+        return false;
+    }
+
+    let bytes = value.as_bytes();
+    if value.starts_with("\\\\") || value.starts_with('/') {
+        return true;
+    }
+    if bytes.len() >= 3
+        && bytes[1] == b':'
+        && bytes[0].is_ascii_alphabetic()
+        && (bytes[2] == b'\\' || bytes[2] == b'/')
+    {
+        return true;
+    }
+
+    let lower = value.to_ascii_lowercase();
+    [".json", ".txt", ".cookie", ".cookies"]
+        .iter()
+        .any(|suffix| lower.ends_with(suffix))
+}
+
+fn cookie_pairs_to_header(pairs: &[(String, String)]) -> Option<String> {
+    if pairs.is_empty() {
+        return None;
+    }
+    Some(
+        pairs.iter()
+            .map(|(name, value)| format!("{name}={value}"))
+            .collect::<Vec<_>>()
+            .join("; "),
+    )
+}
+
+fn netscape_cookie_text_to_header(raw_text: &str) -> Option<String> {
+    let mut pairs: Vec<(String, String)> = Vec::new();
+    for line in raw_text.lines() {
+        let trimmed = line.trim();
+        if trimmed.is_empty() || trimmed.starts_with('#') {
+            continue;
+        }
+        let parts: Vec<&str> = trimmed.split('\t').collect();
+        if parts.len() < 7 {
+            continue;
+        }
+        let name = parts[5].trim();
+        let value = parts[6].trim();
+        if name.is_empty() || name.contains(' ') || name.contains('\t') {
+            continue;
+        }
+        pairs.push((name.to_string(), value.to_string()));
+    }
+
+    cookie_pairs_to_header(&pairs)
 }
 
 fn normalize_output_subdir(value: Option<String>) -> Option<String> {
@@ -8874,13 +8970,7 @@ fn cookie_json_to_header(raw_json: &str) -> Option<String> {
     }
     dedup_pairs.reverse();
 
-    Some(
-        dedup_pairs
-            .into_iter()
-            .map(|(name, value)| format!("{name}={value}"))
-            .collect::<Vec<_>>()
-            .join("; "),
-    )
+    cookie_pairs_to_header(&dedup_pairs)
 }
 
 fn strip_range_query_params(raw_url: &str) -> String {
@@ -10809,14 +10899,12 @@ fn download_yt_dlp_url_to_library(
     Ok(downloaded)
 }
 
-fn write_job_cookie_secret(paths: &AppPaths, job_id: &str, cookie_header: &str) -> Result<()> {
-    let cookie_header = cookie_header.trim();
-    if cookie_header.is_empty() {
+pub(crate) fn write_auth_cookie_secret_path(path: &Path, cookie_input: &str) -> Result<()> {
+    let cookie_header = normalize_auth_cookie(Some(cookie_input.to_string()))?;
+    let Some(cookie_header) = cookie_header.as_deref() else {
+        remove_auth_cookie_secret_path(path);
         return Ok(());
-    }
-
-    paths.ensure_dirs()?;
-    let path = paths.job_cookie_secret_path(job_id);
+    };
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent)?;
     }
@@ -10826,8 +10914,7 @@ fn write_job_cookie_secret(paths: &AppPaths, job_id: &str, cookie_header: &str) 
     Ok(())
 }
 
-fn read_job_cookie_secret(paths: &AppPaths, job_id: &str) -> Option<String> {
-    let path = paths.job_cookie_secret_path(job_id);
+pub(crate) fn read_auth_cookie_secret_path(path: &Path) -> Option<String> {
     let contents = std::fs::read_to_string(path).ok()?;
     let trimmed = contents.trim();
     if trimmed.is_empty() {
@@ -10837,9 +10924,21 @@ fn read_job_cookie_secret(paths: &AppPaths, job_id: &str) -> Option<String> {
     }
 }
 
-fn remove_job_cookie_secret(paths: &AppPaths, job_id: &str) {
-    let path = paths.job_cookie_secret_path(job_id);
+pub(crate) fn remove_auth_cookie_secret_path(path: &Path) {
     let _ = std::fs::remove_file(path);
+}
+
+fn write_job_cookie_secret(paths: &AppPaths, job_id: &str, cookie_header: &str) -> Result<()> {
+    paths.ensure_dirs()?;
+    write_auth_cookie_secret_path(&paths.job_cookie_secret_path(job_id), cookie_header)
+}
+
+fn read_job_cookie_secret(paths: &AppPaths, job_id: &str) -> Option<String> {
+    read_auth_cookie_secret_path(&paths.job_cookie_secret_path(job_id))
+}
+
+fn remove_job_cookie_secret(paths: &AppPaths, job_id: &str) {
+    remove_auth_cookie_secret_path(&paths.job_cookie_secret_path(job_id));
 }
 
 fn delete_job_by_id(paths: &AppPaths, job_id: &str) -> Result<()> {
@@ -13210,8 +13309,30 @@ EOF
             r#"[{"name":"sessionid","value":"abc"},{"name":"csrftoken","value":"xyz"}]"#
                 .to_string(),
         ))
-        .expect("cookie");
+        .expect("cookie")
+        .expect("normalized cookie");
         assert_eq!(cookie, "sessionid=abc; csrftoken=xyz");
+    }
+
+    #[test]
+    fn normalize_auth_cookie_accepts_netscape_cookie_text() {
+        let cookie = normalize_auth_cookie(Some(
+            "# Netscape HTTP Cookie File\n.instagram.com\tTRUE\t/\tTRUE\t2147483647\tsessionid\tabc123\n"
+                .to_string(),
+        ))
+        .expect("cookie")
+        .expect("normalized cookie");
+        assert_eq!(cookie, "sessionid=abc123");
+    }
+
+    #[test]
+    fn normalize_auth_cookie_rejects_missing_cookie_file_path() {
+        let err = normalize_auth_cookie(Some("C:\\missing\\cookies.json".to_string()))
+            .expect_err("missing cookie path should fail");
+        assert!(
+            err.to_string().contains("cookie file path does not exist"),
+            "unexpected error: {err}"
+        );
     }
 
     #[test]

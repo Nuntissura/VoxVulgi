@@ -19,6 +19,7 @@ pub struct InstagramSubscriptionRow {
     pub folder_map: String,
     pub output_dir_override: Option<String>,
     pub use_browser_cookies: bool,
+    pub auth_session_configured: bool,
     pub active: bool,
     pub refresh_interval_minutes: i64,
     pub last_queued_at_ms: Option<i64>,
@@ -34,6 +35,10 @@ pub struct InstagramSubscriptionUpsert {
     pub folder_map: Option<String>,
     pub output_dir_override: Option<String>,
     pub use_browser_cookies: bool,
+    #[serde(default)]
+    pub auth_session_input: Option<String>,
+    #[serde(default)]
+    pub clear_auth_session: bool,
     pub active: bool,
     pub refresh_interval_minutes: Option<i64>,
 }
@@ -63,7 +68,7 @@ ORDER BY active DESC, updated_at_ms DESC, created_at_ms DESC
     let rows = stmt
         .query_map([], row_to_subscription)?
         .collect::<rusqlite::Result<Vec<_>>>()?;
-    Ok(rows)
+    Ok(hydrate_auth_session_flags(paths, rows))
 }
 
 pub fn upsert_instagram_subscription(
@@ -148,15 +153,24 @@ ON CONFLICT(source_url) DO UPDATE SET
         )?;
     }
 
-    subscription_by_source_url_conn(&conn, &normalized.source_url)?.ok_or_else(|| {
+    let mut row = subscription_by_source_url_conn(&conn, &normalized.source_url)?.ok_or_else(|| {
         EngineError::InstallFailed("failed to load saved Instagram subscription".to_string())
-    })
+    })?;
+    sync_auth_session_secret(
+        paths,
+        row.id.as_str(),
+        normalized.auth_session_input.as_deref(),
+        normalized.clear_auth_session,
+    )?;
+    row.auth_session_configured = instagram_subscription_has_auth_session(paths, &row.id);
+    Ok(row)
 }
 
 pub fn delete_instagram_subscription(paths: &AppPaths, id: &str) -> Result<()> {
     let conn = db::open(paths)?;
     db::migrate(&conn)?;
     conn.execute("DELETE FROM instagram_subscription WHERE id = ?1", [id])?;
+    jobs::remove_auth_cookie_secret_path(&paths.instagram_subscription_cookie_secret_path(id));
     Ok(())
 }
 
@@ -210,10 +224,13 @@ fn queue_subscription_internal(
     let output_dir = instagram_subscription_output_dir(paths, sub)?
         .to_string_lossy()
         .to_string();
+    let auth_cookie = jobs::read_auth_cookie_secret_path(
+        &paths.instagram_subscription_cookie_secret_path(&sub.id),
+    );
     let queued = jobs::enqueue_download_instagram_batch(
         paths,
         vec![sub.source_url.clone()],
-        None,
+        auth_cookie,
         Some(output_dir),
         Some(sub.use_browser_cookies),
     )?;
@@ -240,6 +257,37 @@ fn is_subscription_due(sub: &InstagramSubscriptionRow, now_ms_value: i64) -> boo
     now_ms_value.saturating_sub(last_queued) >= interval_ms
 }
 
+fn hydrate_auth_session_flags(
+    paths: &AppPaths,
+    mut rows: Vec<InstagramSubscriptionRow>,
+) -> Vec<InstagramSubscriptionRow> {
+    for row in rows.iter_mut() {
+        row.auth_session_configured = instagram_subscription_has_auth_session(paths, &row.id);
+    }
+    rows
+}
+
+fn instagram_subscription_has_auth_session(paths: &AppPaths, subscription_id: &str) -> bool {
+    paths
+        .instagram_subscription_cookie_secret_path(subscription_id)
+        .exists()
+}
+
+fn sync_auth_session_secret(
+    paths: &AppPaths,
+    subscription_id: &str,
+    auth_session_input: Option<&str>,
+    clear_auth_session: bool,
+) -> Result<()> {
+    let secret_path = paths.instagram_subscription_cookie_secret_path(subscription_id);
+    if let Some(value) = auth_session_input.map(str::trim).filter(|value| !value.is_empty()) {
+        jobs::write_auth_cookie_secret_path(&secret_path, value)?;
+    } else if clear_auth_session {
+        jobs::remove_auth_cookie_secret_path(&secret_path);
+    }
+    Ok(())
+}
+
 fn normalize_upsert(
     req: InstagramSubscriptionUpsert,
 ) -> Result<NormalizedInstagramSubscriptionInput> {
@@ -262,6 +310,8 @@ fn normalize_upsert(
         folder_map,
         output_dir_override: normalize_output_dir(req.output_dir_override),
         use_browser_cookies: req.use_browser_cookies,
+        auth_session_input: jobs::normalize_auth_cookie(req.auth_session_input)?,
+        clear_auth_session: req.clear_auth_session,
         active: req.active,
         refresh_interval_minutes: normalize_refresh_interval_minutes(req.refresh_interval_minutes),
     })
@@ -365,6 +415,7 @@ fn row_to_subscription(row: &rusqlite::Row<'_>) -> rusqlite::Result<InstagramSub
         folder_map: row.get(3)?,
         output_dir_override: row.get(4)?,
         use_browser_cookies: i64_to_bool(row.get::<_, i64>(5)?),
+        auth_session_configured: false,
         active: i64_to_bool(row.get::<_, i64>(6)?),
         refresh_interval_minutes: row.get(7)?,
         last_queued_at_ms: row.get(8)?,
@@ -454,6 +505,8 @@ struct NormalizedInstagramSubscriptionInput {
     folder_map: String,
     output_dir_override: Option<String>,
     use_browser_cookies: bool,
+    auth_session_input: Option<String>,
+    clear_auth_session: bool,
     active: bool,
     refresh_interval_minutes: i64,
 }
@@ -480,6 +533,8 @@ mod tests {
                 folder_map: Some("example_profile".to_string()),
                 output_dir_override: None,
                 use_browser_cookies: true,
+                auth_session_input: None,
+                clear_auth_session: false,
                 active: true,
                 refresh_interval_minutes: Some(60),
             },
@@ -510,5 +565,41 @@ mod tests {
                 && output_dir.contains("example_profile"),
             "expected instagram subscription folder in output_dir, got {output_dir}"
         );
+    }
+
+    #[test]
+    fn upsert_saved_auth_session_persists_secret_and_attaches_to_jobs() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let paths = AppPaths::new(dir.path().to_path_buf());
+        crate::db::ensure_schema(&paths).expect("schema");
+
+        let sub = upsert_instagram_subscription(
+            &paths,
+            InstagramSubscriptionUpsert {
+                id: None,
+                title: "Auth profile".to_string(),
+                source_url: "https://www.instagram.com/authprofile/".to_string(),
+                folder_map: Some("authprofile".to_string()),
+                output_dir_override: None,
+                use_browser_cookies: false,
+                auth_session_input: Some("sessionid=abc123".to_string()),
+                clear_auth_session: false,
+                active: true,
+                refresh_interval_minutes: Some(60),
+            },
+        )
+        .expect("upsert");
+
+        assert!(sub.auth_session_configured, "saved auth session should be surfaced");
+        let stored = jobs::read_auth_cookie_secret_path(
+            &paths.instagram_subscription_cookie_secret_path(&sub.id),
+        )
+        .expect("subscription auth secret");
+        assert_eq!(stored, "sessionid=abc123");
+
+        let queued = queue_instagram_subscription(&paths, &sub.id).expect("queue");
+        let job_secret = jobs::read_auth_cookie_secret_path(&paths.job_cookie_secret_path(&queued[0].id))
+            .expect("job auth secret");
+        assert_eq!(job_secret, "sessionid=abc123");
     }
 }

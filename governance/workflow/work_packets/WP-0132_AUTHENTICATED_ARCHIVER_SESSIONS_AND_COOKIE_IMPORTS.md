@@ -3,7 +3,7 @@
 ## Metadata
 - ID: WP-0132
 - Owner: Codex
-- Status: BACKLOG
+- Status: DONE
 - Created: 2026-03-09
 - Target milestone: Installer smoke remediation tranche
 
@@ -40,3 +40,5 @@ Out of scope:
 ## Status updates
 
 - 2026-03-09: Created from installer smoke findings `ST-010` and `ST-011`.
+- 2026-03-09: Implemented explicit session inputs for Video URL batch plus YouTube/Instagram subscriptions, added JSON/Netscape/file-path cookie normalization, and moved saved subscription sessions into app-managed secret sidecars instead of SQLite.
+- 2026-03-09: Verified with `cargo test -q --manifest-path product\engine\Cargo.toml`, `cargo test -q --manifest-path product\desktop\src-tauri\Cargo.toml`, and `npm -C product\desktop run build`; proof in `product/desktop/Build Target/tool_artifacts/wp_runs/WP-0132/20260309_054028/`.

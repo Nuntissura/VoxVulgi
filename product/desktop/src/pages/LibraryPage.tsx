@@ -194,6 +194,7 @@ type YoutubeSubscriptionRow = {
   folder_map: string;
   output_dir_override: string | null;
   use_browser_cookies: boolean;
+  auth_session_configured: boolean;
   active: boolean;
   preset_id: string | null;
   group_ids: string[];
@@ -213,6 +214,8 @@ type YoutubeSubscriptionUpsert = {
   folder_map: string | null;
   output_dir_override: string | null;
   use_browser_cookies: boolean;
+  auth_session_input?: string | null;
+  clear_auth_session?: boolean;
   active: boolean;
   preset_id: string | null;
   group_ids: string[];
@@ -254,6 +257,7 @@ type InstagramSubscriptionRow = {
   folder_map: string;
   output_dir_override: string | null;
   use_browser_cookies: boolean;
+  auth_session_configured: boolean;
   active: boolean;
   refresh_interval_minutes: number;
   last_queued_at_ms: number | null;
@@ -268,6 +272,8 @@ type InstagramSubscriptionUpsert = {
   folder_map: string | null;
   output_dir_override: string | null;
   use_browser_cookies: boolean;
+  auth_session_input?: string | null;
+  clear_auth_session?: boolean;
   active: boolean;
   refresh_interval_minutes: number | null;
 };
@@ -417,6 +423,7 @@ export function LibraryPage({ onOpenEditor, mode = "all", onOpenOptions }: Libra
     return "auto";
   });
   const [urlBatchText, setUrlBatchText] = useState("");
+  const [urlBatchAuthCookie, setUrlBatchAuthCookie] = useState("");
   const [urlBatchOutputDir, setUrlBatchOutputDir] = useState(() => {
     return safeLocalStorageGet("voxvulgi.v1.library.url_batch_output_dir") ?? "";
   });
@@ -455,6 +462,12 @@ export function LibraryPage({ onOpenEditor, mode = "all", onOpenOptions }: Libra
         ) === "1"
       );
     });
+  const [instagramSubscriptionAuthSessionInput, setInstagramSubscriptionAuthSessionInput] =
+    useState("");
+  const [instagramSubscriptionClearAuthSession, setInstagramSubscriptionClearAuthSession] =
+    useState(false);
+  const [instagramSubscriptionAuthSessionConfigured, setInstagramSubscriptionAuthSessionConfigured] =
+    useState(false);
   const [instagramSubscriptionActive, setInstagramSubscriptionActive] = useState(() => {
     const raw = safeLocalStorageGet("voxvulgi.v1.library.instagram_subscription_active");
     return raw === null ? true : raw === "1";
@@ -516,6 +529,9 @@ export function LibraryPage({ onOpenEditor, mode = "all", onOpenOptions }: Libra
   const [subscriptionUseBrowserCookies, setSubscriptionUseBrowserCookies] = useState(() => {
     return safeLocalStorageGet("voxvulgi.v1.library.youtube_subscription_use_browser_cookies") === "1";
   });
+  const [subscriptionAuthSessionInput, setSubscriptionAuthSessionInput] = useState("");
+  const [subscriptionClearAuthSession, setSubscriptionClearAuthSession] = useState(false);
+  const [subscriptionAuthSessionConfigured, setSubscriptionAuthSessionConfigured] = useState(false);
   const [subscriptionActive, setSubscriptionActive] = useState(() => {
     const raw = safeLocalStorageGet("voxvulgi.v1.library.youtube_subscription_active");
     return raw === null ? true : raw === "1";
@@ -1296,11 +1312,13 @@ export function LibraryPage({ onOpenEditor, mode = "all", onOpenOptions }: Libra
 
       const queued = await invoke<Array<{ id: string }>>("jobs_enqueue_download_batch", {
         urls,
+        authCookie: urlBatchAuthCookie.trim() || null,
         outputDir: urlBatchOutputDir.trim() || null,
         useBrowserCookies: urlBatchUseBrowserCookies,
         presetId: urlBatchPresetId.trim() || null,
       });
       setUrlBatchText("");
+      setUrlBatchAuthCookie("");
       setNotice(`Queued ${queued.length} download job${queued.length === 1 ? "" : "s"}.`);
       await refresh();
     } catch (e) {
@@ -1462,6 +1480,9 @@ export function LibraryPage({ onOpenEditor, mode = "all", onOpenOptions }: Libra
     setSubscriptionFolderMap("");
     setSubscriptionOutputDirOverride("");
     setSubscriptionUseBrowserCookies(false);
+    setSubscriptionAuthSessionInput("");
+    setSubscriptionClearAuthSession(false);
+    setSubscriptionAuthSessionConfigured(false);
     setSubscriptionActive(true);
     setSubscriptionPresetId("");
     setSubscriptionGroupIds([]);
@@ -1475,6 +1496,9 @@ export function LibraryPage({ onOpenEditor, mode = "all", onOpenOptions }: Libra
     setSubscriptionFolderMap(sub.folder_map);
     setSubscriptionOutputDirOverride(sub.output_dir_override ?? "");
     setSubscriptionUseBrowserCookies(sub.use_browser_cookies);
+    setSubscriptionAuthSessionInput("");
+    setSubscriptionClearAuthSession(false);
+    setSubscriptionAuthSessionConfigured(sub.auth_session_configured);
     setSubscriptionActive(sub.active);
     setSubscriptionPresetId(sub.preset_id ?? "");
     setSubscriptionGroupIds(sub.group_ids ?? []);
@@ -1493,6 +1517,8 @@ export function LibraryPage({ onOpenEditor, mode = "all", onOpenOptions }: Libra
         folder_map: subscriptionFolderMap.trim() || null,
         output_dir_override: subscriptionOutputDirOverride.trim() || null,
         use_browser_cookies: subscriptionUseBrowserCookies,
+        auth_session_input: subscriptionAuthSessionInput.trim() || null,
+        clear_auth_session: subscriptionClearAuthSession,
         active: subscriptionActive,
         preset_id: subscriptionPresetId.trim() || null,
         group_ids: subscriptionGroupIds,
@@ -1600,6 +1626,9 @@ export function LibraryPage({ onOpenEditor, mode = "all", onOpenOptions }: Libra
     setInstagramSubscriptionFolderMap("");
     setInstagramSubscriptionOutputDirOverride("");
     setInstagramSubscriptionUseBrowserCookies(false);
+    setInstagramSubscriptionAuthSessionInput("");
+    setInstagramSubscriptionClearAuthSession(false);
+    setInstagramSubscriptionAuthSessionConfigured(false);
     setInstagramSubscriptionActive(true);
     setInstagramSubscriptionRefreshIntervalMinutes(180);
   }
@@ -1611,6 +1640,9 @@ export function LibraryPage({ onOpenEditor, mode = "all", onOpenOptions }: Libra
     setInstagramSubscriptionFolderMap(sub.folder_map);
     setInstagramSubscriptionOutputDirOverride(sub.output_dir_override ?? "");
     setInstagramSubscriptionUseBrowserCookies(sub.use_browser_cookies);
+    setInstagramSubscriptionAuthSessionInput("");
+    setInstagramSubscriptionClearAuthSession(false);
+    setInstagramSubscriptionAuthSessionConfigured(sub.auth_session_configured);
     setInstagramSubscriptionActive(sub.active);
     setInstagramSubscriptionRefreshIntervalMinutes(sub.refresh_interval_minutes);
   }
@@ -1627,6 +1659,8 @@ export function LibraryPage({ onOpenEditor, mode = "all", onOpenOptions }: Libra
         folder_map: instagramSubscriptionFolderMap.trim() || null,
         output_dir_override: instagramSubscriptionOutputDirOverride.trim() || null,
         use_browser_cookies: instagramSubscriptionUseBrowserCookies,
+        auth_session_input: instagramSubscriptionAuthSessionInput.trim() || null,
+        clear_auth_session: instagramSubscriptionClearAuthSession,
         active: instagramSubscriptionActive,
         refresh_interval_minutes: Math.max(
           minSubscriptionRefreshIntervalMinutes,
@@ -2589,7 +2623,8 @@ export function LibraryPage({ onOpenEditor, mode = "all", onOpenOptions }: Libra
           Paste many links at once (direct media URLs or YouTube video/playlist/channel links).
           Maximum {maxBatchUrls} videos per submission. If output folder is empty, each job is
           saved under <code>{defaultVideoDownloadsDir || "video"}</code>. VoxVulgi now treats MP4
-          as the default archive target when yt-dlp can merge/remux cleanly.
+          as the default archive target when yt-dlp can merge/remux cleanly. For login-required
+          sources, explicit session input takes precedence over browser-cookie fallback.
         </div>
         <textarea
           value={urlBatchText}
@@ -2615,6 +2650,20 @@ export function LibraryPage({ onOpenEditor, mode = "all", onOpenOptions }: Libra
           <button type="button" disabled={busy} onClick={chooseVideoOutputDir}>
             Choose folder
           </button>
+        </div>
+        <div style={{ display: "grid", gap: 6, marginTop: 10 }}>
+          <span>Session / cookies</span>
+          <textarea
+            value={urlBatchAuthCookie}
+            onChange={(e) => setUrlBatchAuthCookie(e.currentTarget.value)}
+            disabled={busy}
+            placeholder="Cookie header, browser-export JSON, Netscape cookie text, or path to an existing cookie file"
+            rows={3}
+            style={{ width: "100%", boxSizing: "border-box", resize: "vertical" }}
+          />
+          <div style={{ color: "#4b5563" }}>
+            Use this for sign-in-required downloads instead of relying on locked Chrome cookies.
+          </div>
         </div>
         <div className="row">
           <label style={{ display: "flex", alignItems: "center", gap: 8 }}>
@@ -2913,6 +2962,27 @@ export function LibraryPage({ onOpenEditor, mode = "all", onOpenOptions }: Libra
             />
           </label>
         </div>
+        <div style={{ display: "grid", gap: 6, marginTop: 10 }}>
+          <span>Saved session / cookies</span>
+          <textarea
+            value={subscriptionAuthSessionInput}
+            disabled={busy}
+            onChange={(e) => {
+              setSubscriptionAuthSessionInput(e.currentTarget.value);
+              if (e.currentTarget.value.trim()) {
+                setSubscriptionClearAuthSession(false);
+              }
+            }}
+            placeholder="Cookie header, browser-export JSON, Netscape cookie text, or path to an existing cookie file"
+            rows={3}
+            style={{ width: "100%", boxSizing: "border-box", resize: "vertical" }}
+          />
+          <div style={{ color: "#4b5563" }}>
+            {subscriptionAuthSessionConfigured
+              ? "A saved session is already configured. Leave this blank to keep it, paste a new value to replace it, or clear it below."
+              : "Optional. Save a session once and reuse it for recurring login-required refreshes."}
+          </div>
+        </div>
         <div className="row">
           <label style={{ display: "flex", alignItems: "center", gap: 8, flex: 1 }}>
             <span>Folder map</span>
@@ -2947,6 +3017,15 @@ export function LibraryPage({ onOpenEditor, mode = "all", onOpenOptions }: Libra
               onChange={(e) => setSubscriptionUseBrowserCookies(e.currentTarget.checked)}
             />
             <span>Use browser cookies (Chrome)</span>
+          </label>
+          <label style={{ display: "flex", alignItems: "center", gap: 8 }}>
+            <input
+              type="checkbox"
+              checked={subscriptionClearAuthSession}
+              disabled={busy || (!subscriptionAuthSessionConfigured && !subscriptionAuthSessionInput.trim())}
+              onChange={(e) => setSubscriptionClearAuthSession(e.currentTarget.checked)}
+            />
+            <span>Clear saved session on save</span>
           </label>
           <label style={{ display: "flex", alignItems: "center", gap: 8 }}>
             <input
@@ -3061,6 +3140,7 @@ export function LibraryPage({ onOpenEditor, mode = "all", onOpenOptions }: Libra
                 <th>URL</th>
                 <th>Folder map</th>
                 <th>Groups</th>
+                <th>Session</th>
                 <th>Active</th>
                 <th>Preset</th>
                 <th>Interval (min)</th>
@@ -3081,6 +3161,7 @@ export function LibraryPage({ onOpenEditor, mode = "all", onOpenOptions }: Libra
                         ? sub.group_ids.map((id) => groupNameById.get(id) ?? id).join(", ")
                         : "-"}
                     </td>
+                    <td>{sub.auth_session_configured ? "saved" : "-"}</td>
                     <td>{sub.active ? "yes" : "no"}</td>
                     <td>
                       {sub.preset_id
@@ -3132,7 +3213,7 @@ export function LibraryPage({ onOpenEditor, mode = "all", onOpenOptions }: Libra
                 ))
               ) : (
                 <tr>
-                  <td colSpan={10}>No subscriptions yet.</td>
+                  <td colSpan={11}>No subscriptions yet.</td>
                 </tr>
               )}
             </tbody>
@@ -3203,7 +3284,8 @@ export function LibraryPage({ onOpenEditor, mode = "all", onOpenOptions }: Libra
         <h2>Instagram subscriptions</h2>
         <div style={{ color: "#4b5563", marginBottom: 8 }}>
           Save recurring Instagram archive targets with their own folder map and refresh interval.
-          Queue due active runs uses the saved interval against the last queued time.
+          Queue due active runs uses the saved interval against the last queued time. Explicit
+          session input takes precedence over browser-cookie fallback.
         </div>
         <div className="row">
           <label style={{ display: "flex", alignItems: "center", gap: 8, flex: 1 }}>
@@ -3226,6 +3308,27 @@ export function LibraryPage({ onOpenEditor, mode = "all", onOpenOptions }: Libra
               style={{ width: "100%" }}
             />
           </label>
+        </div>
+        <div style={{ display: "grid", gap: 6, marginTop: 10 }}>
+          <span>Saved session / cookies</span>
+          <textarea
+            value={instagramSubscriptionAuthSessionInput}
+            disabled={busy}
+            onChange={(e) => {
+              setInstagramSubscriptionAuthSessionInput(e.currentTarget.value);
+              if (e.currentTarget.value.trim()) {
+                setInstagramSubscriptionClearAuthSession(false);
+              }
+            }}
+            placeholder="Cookie header, browser-export JSON, Netscape cookie text, or path to an existing cookie file"
+            rows={3}
+            style={{ width: "100%", boxSizing: "border-box", resize: "vertical" }}
+          />
+          <div style={{ color: "#4b5563" }}>
+            {instagramSubscriptionAuthSessionConfigured
+              ? "A saved session is already configured. Leave this blank to keep it, paste a new value to replace it, or clear it below."
+              : "Optional. Save a session once and reuse it for recurring login-required Instagram downloads."}
+          </div>
         </div>
         <div className="row">
           <label style={{ display: "flex", alignItems: "center", gap: 8, flex: 1 }}>
@@ -3263,6 +3366,19 @@ export function LibraryPage({ onOpenEditor, mode = "all", onOpenOptions }: Libra
               }
             />
             <span>Use browser cookies (Chrome)</span>
+          </label>
+          <label style={{ display: "flex", alignItems: "center", gap: 8 }}>
+            <input
+              type="checkbox"
+              checked={instagramSubscriptionClearAuthSession}
+              disabled={
+                busy ||
+                (!instagramSubscriptionAuthSessionConfigured &&
+                  !instagramSubscriptionAuthSessionInput.trim())
+              }
+              onChange={(e) => setInstagramSubscriptionClearAuthSession(e.currentTarget.checked)}
+            />
+            <span>Clear saved session on save</span>
           </label>
           <label style={{ display: "flex", alignItems: "center", gap: 8 }}>
             <input
@@ -3323,6 +3439,7 @@ export function LibraryPage({ onOpenEditor, mode = "all", onOpenOptions }: Libra
                 <th>Title</th>
                 <th>URL</th>
                 <th>Folder map</th>
+                <th>Session</th>
                 <th>Active</th>
                 <th>Interval (min)</th>
                 <th>Last queued</th>
@@ -3336,6 +3453,7 @@ export function LibraryPage({ onOpenEditor, mode = "all", onOpenOptions }: Libra
                     <td>{sub.title}</td>
                     <td style={{ maxWidth: 360 }}>{sub.source_url}</td>
                     <td>{sub.folder_map}</td>
+                    <td>{sub.auth_session_configured ? "saved" : "-"}</td>
                     <td>{sub.active ? "yes" : "no"}</td>
                     <td>{sub.refresh_interval_minutes}</td>
                     <td>{sub.last_queued_at_ms ? new Date(sub.last_queued_at_ms).toLocaleString() : "-"}</td>
@@ -3375,7 +3493,7 @@ export function LibraryPage({ onOpenEditor, mode = "all", onOpenOptions }: Libra
                 ))
               ) : (
                 <tr>
-                  <td colSpan={7}>No Instagram subscriptions yet.</td>
+                  <td colSpan={8}>No Instagram subscriptions yet.</td>
                 </tr>
               )}
             </tbody>
@@ -3390,7 +3508,8 @@ export function LibraryPage({ onOpenEditor, mode = "all", onOpenOptions }: Libra
         <div style={{ color: "#4b5563", marginBottom: 8 }}>
           Paste Instagram post/reel/profile links. Use your session cookie for private content.
           Output folder is optional; if left empty, each job is saved to a new folder under
-          `instagram` in the main download folder.
+          `instagram` in the main download folder. Explicit session input accepts a cookie
+          header, browser-export JSON, Netscape cookie text, or a cookie-file path.
         </div>
         <textarea
           value={instagramBatchText}
@@ -3401,14 +3520,15 @@ export function LibraryPage({ onOpenEditor, mode = "all", onOpenOptions }: Libra
           style={{ width: "100%", boxSizing: "border-box", resize: "vertical" }}
         />
         <div className="row">
-          <label style={{ display: "flex", alignItems: "center", gap: 8, flex: 1 }}>
-            <span>Session cookie</span>
-            <input
+          <label style={{ display: "grid", gap: 6, flex: 1 }}>
+            <span>Session / cookies</span>
+            <textarea
               value={instagramBatchAuthCookie}
               disabled={busy}
               onChange={(e) => setInstagramBatchAuthCookie(e.currentTarget.value)}
-              placeholder="cookie header, JSON, or path to cookie JSON file"
-              style={{ width: "100%" }}
+              placeholder="Cookie header, browser-export JSON, Netscape cookie text, or path to an existing cookie file"
+              rows={3}
+              style={{ width: "100%", boxSizing: "border-box", resize: "vertical" }}
             />
           </label>
         </div>

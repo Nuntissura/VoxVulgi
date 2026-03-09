@@ -112,6 +112,28 @@ impl AppPaths {
         self.job_secrets_dir().join(format!("{job_id}.cookie.txt"))
     }
 
+    pub fn subscription_secrets_dir(&self) -> PathBuf {
+        self.secrets_dir().join("subscriptions")
+    }
+
+    pub fn youtube_subscription_secrets_dir(&self) -> PathBuf {
+        self.subscription_secrets_dir().join("youtube")
+    }
+
+    pub fn instagram_subscription_secrets_dir(&self) -> PathBuf {
+        self.subscription_secrets_dir().join("instagram")
+    }
+
+    pub fn youtube_subscription_cookie_secret_path(&self, subscription_id: &str) -> PathBuf {
+        self.youtube_subscription_secrets_dir()
+            .join(format!("{subscription_id}.cookie.txt"))
+    }
+
+    pub fn instagram_subscription_cookie_secret_path(&self, subscription_id: &str) -> PathBuf {
+        self.instagram_subscription_secrets_dir()
+            .join(format!("{subscription_id}.cookie.txt"))
+    }
+
     pub fn download_dir_override_path(&self) -> PathBuf {
         self.config_dir().join("download_dir.txt")
     }
