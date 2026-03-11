@@ -67,6 +67,12 @@ Var UpdateMode
 Var NoShortcutMode
 Var WixMode
 Var OldMainBinaryName
+Var MaintenanceAction
+Var MaintenanceOptionUpdate
+Var MaintenanceOptionReinstallKeep
+Var MaintenanceOptionFullReinstall
+Var MaintenanceOptionUninstallKeep
+Var MaintenanceOptionFullUninstall
 
 Name "${PRODUCTNAME}"
 BrandingText "${COPYRIGHT}"
@@ -160,7 +166,6 @@ VIAddVersionKey "ProductVersion" "${VERSION}"
 ; 4. Custom page to ask user if he wants to reinstall/uninstall
 ;    only if a previous installation was detected
 Page custom PageMaintenanceModeInfo PageLeaveMaintenanceModeInfo
-Var ReinstallPageCheck
 Page custom PageReinstall PageLeaveReinstall
 Function PageMaintenanceModeInfo
   ; Detect previous WiX installation if it exists.
@@ -192,13 +197,17 @@ Function PageMaintenanceModeInfo
   nsDialogs::Create 1018
   Pop $R4
   ${IfThen} $(^RTL) = 1 ${|} nsDialogs::SetRTL $(^RTL) ${|}
-  !insertmacro MUI_HEADER_TEXT "Maintenance options" "Read this once before choosing the action"
+  !insertmacro MUI_HEADER_TEXT "Maintenance options" "Read this before choosing the action"
 
-  ${NSD_CreateLabel} 0 0 100% 18u "Update/Repair: keeps the current installation and app data."
+  ${NSD_CreateLabel} 0 0 100% 16u "$(maintenanceExplainUpdate)"
   Pop $R0
-  ${NSD_CreateLabel} 0 22u 100% 18u "Full reinstall: uninstalls first, then installs a fresh copy."
+  ${NSD_CreateLabel} 0 18u 100% 24u "$(maintenanceExplainReinstallKeep)"
   Pop $R0
-  ${NSD_CreateLabel} 0 44u 100% 28u "Uninstall: removes installed app files. App data under %APPDATA% is kept unless you explicitly select delete app data."
+  ${NSD_CreateLabel} 0 42u 100% 24u "$(maintenanceExplainFullReinstall)"
+  Pop $R0
+  ${NSD_CreateLabel} 0 66u 100% 24u "$(maintenanceExplainUninstallKeep)"
+  Pop $R0
+  ${NSD_CreateLabel} 0 90u 100% 24u "$(maintenanceExplainFullUninstall)"
   Pop $R0
   nsDialogs::Show
 FunctionEnd
@@ -238,8 +247,8 @@ Function PageReinstall
   ReadRegStr $R1 SHCTX "${UNINSTKEY}" "UninstallString"
   ${IfThen} "$R0$R1" == "" ${|} Abort ${|}
 
-  ; Compare this installar version with the existing installation
-  ; and modify the messages presented to the user accordingly
+  ; Compare this installer version with the existing installation
+  ; and modify the explanatory text accordingly.
   compare_version:
   StrCpy $R4 "$(older)"
   ${If} $WixMode = 1
@@ -251,30 +260,26 @@ Function PageReinstall
 
   nsis_tauri_utils::SemverCompare "${VERSION}" $R0
   Pop $R0
-  ; Reinstalling the same version
   ${If} $R0 = 0
     StrCpy $R1 "$(alreadyInstalledLong)"
-    StrCpy $R2 "$(addOrReinstall)"
-    StrCpy $R3 "$(uninstallApp)"
     !insertmacro MUI_HEADER_TEXT "$(alreadyInstalled)" "$(chooseMaintenanceOption)"
-  ; Upgrading
   ${ElseIf} $R0 = 1
     StrCpy $R1 "$(olderOrUnknownVersionInstalled)"
-    StrCpy $R2 "$(uninstallBeforeInstalling)"
-    StrCpy $R3 "$(dontUninstall)"
     !insertmacro MUI_HEADER_TEXT "$(alreadyInstalled)" "$(choowHowToInstall)"
-  ; Downgrading
   ${ElseIf} $R0 = -1
     StrCpy $R1 "$(newerVersionInstalled)"
-    StrCpy $R2 "$(uninstallBeforeInstalling)"
-    !if "${ALLOWDOWNGRADES}" == "true"
-      StrCpy $R3 "$(dontUninstall)"
-    !else
-      StrCpy $R3 "$(dontUninstallDowngrade)"
-    !endif
     !insertmacro MUI_HEADER_TEXT "$(alreadyInstalled)" "$(choowHowToInstall)"
   ${Else}
     Abort
+  ${EndIf}
+
+  ${If} $MaintenanceAction == ""
+    StrCpy $MaintenanceAction "update"
+    !if "${ALLOWDOWNGRADES}" == "false"
+      ${If} $R0 = -1
+        StrCpy $MaintenanceAction "reinstall_keep"
+      ${EndIf}
+    !endif
   ${EndIf}
 
   ; Skip showing the page if passive
@@ -293,74 +298,97 @@ Function PageReinstall
     ${NSD_CreateLabel} 0 0 100% 24u $R1
     Pop $R1
 
-    ${NSD_CreateRadioButton} 30u 50u -30u 8u $R2
-    Pop $R2
-    ${NSD_OnClick} $R2 PageReinstallUpdateSelection
+    ${NSD_CreateRadioButton} 20u 38u -20u 10u "$(maintenanceActionUpdate)"
+    Pop $MaintenanceOptionUpdate
+    ${NSD_OnClick} $MaintenanceOptionUpdate PageReinstallUpdateSelection
 
-    ${NSD_CreateRadioButton} 30u 70u -30u 8u $R3
-    Pop $R3
-    ; Disable this radio button if downgrading and downgrades are disabled
+    ${NSD_CreateRadioButton} 20u 58u -20u 10u "$(maintenanceActionReinstallKeep)"
+    Pop $MaintenanceOptionReinstallKeep
+    ${NSD_OnClick} $MaintenanceOptionReinstallKeep PageReinstallUpdateSelection
+
+    ${NSD_CreateRadioButton} 20u 78u -20u 10u "$(maintenanceActionFullReinstall)"
+    Pop $MaintenanceOptionFullReinstall
+    ${NSD_OnClick} $MaintenanceOptionFullReinstall PageReinstallUpdateSelection
+
+    ${NSD_CreateRadioButton} 20u 98u -20u 10u "$(maintenanceActionUninstallKeep)"
+    Pop $MaintenanceOptionUninstallKeep
+    ${NSD_OnClick} $MaintenanceOptionUninstallKeep PageReinstallUpdateSelection
+
+    ${NSD_CreateRadioButton} 20u 118u -20u 10u "$(maintenanceActionFullUninstall)"
+    Pop $MaintenanceOptionFullUninstall
+    ${NSD_OnClick} $MaintenanceOptionFullUninstall PageReinstallUpdateSelection
+
     !if "${ALLOWDOWNGRADES}" == "false"
-      ${IfThen} $R0 = -1 ${|} EnableWindow $R3 0 ${|}
+      ${IfThen} $R0 = -1 ${|} EnableWindow $MaintenanceOptionUpdate 0 ${|}
     !endif
-    ${NSD_OnClick} $R3 PageReinstallUpdateSelection
 
-    ; Check the first radio button if this the first time
-    ; we enter this page or if the second button wasn't
-    ; selected the last time we were on this page
-    ${If} $ReinstallPageCheck <> 2
-      SendMessage $R2 ${BM_SETCHECK} ${BST_CHECKED} 0
+    ${If} $MaintenanceAction == "reinstall_keep"
+      SendMessage $MaintenanceOptionReinstallKeep ${BM_SETCHECK} ${BST_CHECKED} 0
+      ${NSD_SetFocus} $MaintenanceOptionReinstallKeep
+    ${ElseIf} $MaintenanceAction == "full_reinstall"
+      SendMessage $MaintenanceOptionFullReinstall ${BM_SETCHECK} ${BST_CHECKED} 0
+      ${NSD_SetFocus} $MaintenanceOptionFullReinstall
+    ${ElseIf} $MaintenanceAction == "uninstall_keep"
+      SendMessage $MaintenanceOptionUninstallKeep ${BM_SETCHECK} ${BST_CHECKED} 0
+      ${NSD_SetFocus} $MaintenanceOptionUninstallKeep
+    ${ElseIf} $MaintenanceAction == "full_uninstall"
+      SendMessage $MaintenanceOptionFullUninstall ${BM_SETCHECK} ${BST_CHECKED} 0
+      ${NSD_SetFocus} $MaintenanceOptionFullUninstall
     ${Else}
-      SendMessage $R3 ${BM_SETCHECK} ${BST_CHECKED} 0
+      SendMessage $MaintenanceOptionUpdate ${BM_SETCHECK} ${BST_CHECKED} 0
+      ${NSD_SetFocus} $MaintenanceOptionUpdate
     ${EndIf}
 
-    ${NSD_SetFocus} $R2
     nsDialogs::Show
   ${EndIf}
 FunctionEnd
 Function PageReinstallUpdateSelection
-  ${NSD_GetState} $R2 $R1
+  ${NSD_GetState} $MaintenanceOptionUpdate $R1
   ${If} $R1 == ${BST_CHECKED}
-    StrCpy $ReinstallPageCheck 1
-  ${Else}
-    StrCpy $ReinstallPageCheck 2
+    StrCpy $MaintenanceAction "update"
+    Return
   ${EndIf}
+  ${NSD_GetState} $MaintenanceOptionReinstallKeep $R1
+  ${If} $R1 == ${BST_CHECKED}
+    StrCpy $MaintenanceAction "reinstall_keep"
+    Return
+  ${EndIf}
+  ${NSD_GetState} $MaintenanceOptionFullReinstall $R1
+  ${If} $R1 == ${BST_CHECKED}
+    StrCpy $MaintenanceAction "full_reinstall"
+    Return
+  ${EndIf}
+  ${NSD_GetState} $MaintenanceOptionUninstallKeep $R1
+  ${If} $R1 == ${BST_CHECKED}
+    StrCpy $MaintenanceAction "uninstall_keep"
+    Return
+  ${EndIf}
+  ${NSD_GetState} $MaintenanceOptionFullUninstall $R1
+  ${If} $R1 == ${BST_CHECKED}
+    StrCpy $MaintenanceAction "full_uninstall"
+    Return
+  ${EndIf}
+  StrCpy $MaintenanceAction "update"
 FunctionEnd
 Function PageLeaveReinstall
-  ${NSD_GetState} $R2 $R1
+  ${If} $PassiveMode <> 1
+    Call PageReinstallUpdateSelection
+  ${EndIf}
 
   ; If migrating from Wix, always uninstall
   ${If} $WixMode = 1
+    StrCpy $MaintenanceAction "reinstall_keep"
     Goto reinst_uninstall
   ${EndIf}
 
   ; In update mode, always proceeds without uninstalling
   ${If} $UpdateMode = 1
+    StrCpy $MaintenanceAction "update"
     Goto reinst_done
   ${EndIf}
 
-  ; $R0 holds whether same(0)/upgrading(1)/downgrading(-1) version
-  ; $R1 holds the radio buttons state:
-  ;   1 => first choice was selected
-  ;   0 => second choice was selected
-  ${If} $R0 = 0 ; Same version, proceed
-    ${If} $R1 = 1              ; User chose to add/reinstall
-      Goto reinst_done
-    ${Else}                    ; User chose to uninstall
-      Goto reinst_uninstall
-    ${EndIf}
-  ${ElseIf} $R0 = 1 ; Upgrading
-    ${If} $R1 = 1              ; User chose to uninstall
-      Goto reinst_uninstall
-    ${Else}
-      Goto reinst_done         ; User chose NOT to uninstall
-    ${EndIf}
-  ${ElseIf} $R0 = -1 ; Downgrading
-    ${If} $R1 = 1              ; User chose to uninstall
-      Goto reinst_uninstall
-    ${Else}
-      Goto reinst_done         ; User chose NOT to uninstall
-    ${EndIf}
+  ${If} $MaintenanceAction == "update"
+    Goto reinst_done
   ${EndIf}
 
   reinst_uninstall:
@@ -373,9 +401,17 @@ Function PageLeaveReinstall
     ${Else}
       ReadRegStr $4 SHCTX "${MANUPRODUCTKEY}" ""
       ReadRegStr $R1 SHCTX "${UNINSTKEY}" "UninstallString"
-      ${IfThen} $UpdateMode = 1 ${|} StrCpy $R1 "$R1 /UPDATE" ${|} ; append /UPDATE
-      ${IfThen} $PassiveMode = 1 ${|} StrCpy $R1 "$R1 /P" ${|} ; append /P
-      StrCpy $R1 "$R1 _?=$4" ; append uninstall directory
+      StrCpy $R5 ""
+      ${If} $MaintenanceAction == "reinstall_keep"
+      ${OrIf} $MaintenanceAction == "full_reinstall"
+        StrCpy $R5 "$R5 /UPDATE"
+      ${EndIf}
+      ${If} $MaintenanceAction == "full_reinstall"
+      ${OrIf} $MaintenanceAction == "full_uninstall"
+        StrCpy $R5 "$R5 /DELETEAPPDATA"
+      ${EndIf}
+      ${IfThen} $PassiveMode = 1 ${|} StrCpy $R5 "$R5 /P" ${|}
+      StrCpy $R1 "$R1$R5 _?=$4"
       ExecWait '$R1' $0
     ${EndIf}
 
@@ -399,6 +435,11 @@ Function PageLeaveReinstall
       ; Other erros? show generic error message and return to select un/reinstall page
       MessageBox MB_ICONEXCLAMATION "$(unableToUninstall)"
       Abort
+    ${EndIf}
+
+    ${If} $MaintenanceAction == "uninstall_keep"
+    ${OrIf} $MaintenanceAction == "full_uninstall"
+      Quit
     ${EndIf}
   reinst_done:
 FunctionEnd
@@ -473,6 +514,9 @@ Function un.ConfirmShow ; Add add a `Delete app data` check box
   Pop $DeleteAppDataCheckbox
   SendMessage $HWNDPARENT ${WM_GETFONT} 0 0 $1
   SendMessage $DeleteAppDataCheckbox ${WM_SETFONT} $1 1
+  ${If} $DeleteAppDataCheckboxState = 1
+    SendMessage $DeleteAppDataCheckbox ${BM_SETCHECK} ${BST_CHECKED} 0
+  ${EndIf}
 FunctionEnd
 !define MUI_PAGE_CUSTOMFUNCTION_LEAVE un.ConfirmLeave
 Function un.ConfirmLeave
@@ -789,6 +833,11 @@ Function un.onInit
   ${GetOptions} $CMDLINE "/UPDATE" $UpdateMode
   ${IfNot} ${Errors}
     StrCpy $UpdateMode 1
+  ${EndIf}
+
+  ${GetOptions} $CMDLINE "/DELETEAPPDATA" $0
+  ${IfNot} ${Errors}
+    StrCpy $DeleteAppDataCheckboxState 1
   ${EndIf}
 FunctionEnd
 

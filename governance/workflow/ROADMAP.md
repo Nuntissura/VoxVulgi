@@ -113,7 +113,7 @@ Date: 2026-03-11
 
 ## Installer Standards Refresh (2026-03)
 
-- WP-0141: Replace the overloaded maintenance choices with an explicit five-action installer standard, update the explainer page, and package a new versioned installer build. IN PROGRESS.
+- WP-0141: Replace the overloaded maintenance choices with an explicit five-action installer standard, update the explainer page, and package a new versioned installer build. DONE 2026-03-11.
 
 ## Phase 0 - Decisions (1-2 days)
 

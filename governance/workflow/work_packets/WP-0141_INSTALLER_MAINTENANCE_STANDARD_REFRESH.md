@@ -3,7 +3,7 @@
 ## Metadata
 - ID: WP-0141
 - Owner: Codex
-- Status: IN_PROGRESS
+- Status: DONE
 - Created: 2026-03-11
 - Target milestone: Installer standards refresh
 
@@ -49,3 +49,8 @@ Out of scope:
 ## Status updates
 
 - 2026-03-11: Created from operator feedback requesting a clearer installer maintenance standard with explicit keep-vs-full uninstall/reinstall actions and stronger governance backing.
+- 2026-03-11: Replaced the version-dependent two-choice NSIS maintenance mapping with five explicit actions (`Update`, `Reinstall (keep preferences and options)`, `Full reinstall`, `Uninstall (keep preferences and options)`, `Full uninstall`) and wired full actions to pass `/DELETEAPPDATA`.
+- 2026-03-11: Built desktop target `0.1.6` with the managed build script. Installer outputs:
+  - `product/desktop/build_target/Current/release/bundle/nsis/VoxVulgi_0.1.6_x64-setup.exe`
+  - `product/desktop/build_target/Current/release/bundle/msi/VoxVulgi_0.1.6_x64_en-US.msi`
+- 2026-03-11: Verification passed with `cargo test -q --manifest-path product/desktop/src-tauri/Cargo.toml`, `git diff --check`, and `powershell -ExecutionPolicy Bypass -File governance/scripts/build_desktop_target.ps1 -WorkPackets WP-0141 -BuildNotes "Installer maintenance standard refresh."`
