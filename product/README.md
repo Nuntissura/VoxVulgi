@@ -23,8 +23,8 @@ From `product/desktop/`:
 - Build with managed target folder: `npm run build:desktop:target`
 - Default build refreshes the bundled offline payload (Phase 1 + Phase 2 dependencies) before packaging installers.
 - Optional fast rebuild without refreshing payload: `npm run build:desktop:target:no-prep`
-- Build artifacts are written to `Build Target/Current`
-- Previous builds are archived to `Build Target/Old versions`
+- Build artifacts are written to `build_target/Current`
+- Previous builds are archived to `build_target/old_versions`
 
 ## Runtime deps (FFmpeg + models)
 

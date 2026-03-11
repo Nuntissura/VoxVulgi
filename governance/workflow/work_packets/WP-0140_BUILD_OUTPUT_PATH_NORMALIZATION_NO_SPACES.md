@@ -3,7 +3,7 @@
 ## Metadata
 - ID: WP-0140
 - Owner: Codex
-- Status: IN_PROGRESS
+- Status: DONE
 - Created: 2026-03-11
 - Target milestone: Repo tooling path normalization
 
@@ -17,7 +17,7 @@
 In scope:
 
 - Canonical path migration from `product/desktop/Build Target` to `product/desktop/build_target`.
-- Canonical archive path migration from `product/desktop/build_target/Old versions` to `product/desktop/build_target/old_versions`.
+- Canonical archive path migration from legacy `product/desktop/Build Target/Old versions` to `product/desktop/build_target/old_versions`.
 - Governance/rules updates so the no-space contract is documented as the repo standard for managed build-output paths.
 - Script and ignore-rule updates so build logs, archived releases, cleanup flows, and proof bundles continue to work.
 - Safe on-disk migration of the existing ignored build-output folder.
@@ -44,3 +44,4 @@ Out of scope:
 ## Status updates
 
 - 2026-03-11: Created from operator feedback requesting a repo-wide no-spaces build-output policy and explicit protection against breaking tests/scripts/checks/artifact creation.
+- 2026-03-11: Completed. Canonical desktop build-output paths now use `product/desktop/build_target` and `old_versions`, the ignored on-disk folder was migrated safely, and build/cleanup/proof docs plus scripts were updated without breaking verification flows. Proof: `product/desktop/build_target/tool_artifacts/wp_runs/WP-0140/20260311_135422/`.

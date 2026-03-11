@@ -26,7 +26,7 @@ lerna-debug.log*
 **/target_*/
 
 # Managed desktop build outputs
-product/desktop/Build Target/
+product/desktop/build_target/
 
 # Offline bundle artifacts (generated locally; very large)
 product/desktop/src-tauri/offline/payload.zip

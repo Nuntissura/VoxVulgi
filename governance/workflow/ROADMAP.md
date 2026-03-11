@@ -109,7 +109,7 @@ Date: 2026-03-11
 
 ## Repo Tooling Path Normalization (2026-03)
 
-- WP-0140: Rename the managed desktop build-output contract to no-space paths (`product/desktop/build_target`, `old_versions`), keep proof/build scripts/checks working, and migrate the on-disk folder safely. IN PROGRESS.
+- WP-0140: Rename the managed desktop build-output contract to no-space paths (`product/desktop/build_target`, `old_versions`), keep proof/build scripts/checks working, and migrate the on-disk folder safely. DONE 2026-03-11.
 
 ## Phase 0 - Decisions (1-2 days)
 

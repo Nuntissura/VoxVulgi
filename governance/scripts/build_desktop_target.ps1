@@ -9,6 +9,7 @@ param(
 )
 
 $ErrorActionPreference = "Stop"
+. (Join-Path $PSScriptRoot 'desktop_build_target_paths.ps1')
 
 function Step([string]$Message) {
   Write-Host ""
@@ -160,8 +161,8 @@ function Append-BuildChangelogEntry(
     "- Commit: ``$commit``",
     "- Offline Bundle ID: ``$offlineBundleId``",
     "- Artifacts:",
-    "  - ``product/desktop/Build Target/Current/release/bundle/nsis/VoxVulgi_${Version}_x64-setup.exe``",
-    "  - ``product/desktop/Build Target/Current/release/bundle/msi/VoxVulgi_${Version}_x64_en-US.msi``",
+    "  - ``product/desktop/build_target/Current/release/bundle/nsis/VoxVulgi_${Version}_x64-setup.exe``",
+    "  - ``product/desktop/build_target/Current/release/bundle/msi/VoxVulgi_${Version}_x64_en-US.msi``",
     "- Notes: $notesText"
   ) -join "`n"
 
@@ -169,11 +170,12 @@ function Append-BuildChangelogEntry(
 }
 
 $repoRoot = (Resolve-Path (Join-Path $PSScriptRoot '..\..')).Path
-$desktopDir = Join-Path $repoRoot 'product\desktop'
-$buildRoot = Join-Path $desktopDir "Build Target"
-$currentDir = Join-Path $buildRoot "Current"
-$oldVersionsDir = Join-Path $buildRoot "Old versions"
-$logsDir = Join-Path $buildRoot "logs"
+$buildPaths = Initialize-DesktopBuildTargetLayout -RepoRoot $repoRoot -MigrateLegacy
+$desktopDir = $buildPaths.DesktopDir
+$buildRoot = $buildPaths.BuildRoot
+$currentDir = $buildPaths.CurrentDir
+$oldVersionsDir = $buildPaths.OldVersionsDir
+$logsDir = $buildPaths.LogsDir
 
 $tauriConfPath = Join-Path $repoRoot 'product\desktop\src-tauri\tauri.conf.json'
 $packageJsonPath = Join-Path $repoRoot 'product\desktop\package.json'
@@ -217,7 +219,6 @@ $logFile = Join-Path $logsDir ("build_desktop_target_{0}_{1}.log" -f $buildStamp
 
 try {
   Step "Repo root: $repoRoot"
-  New-Item -ItemType Directory -Force -Path $buildRoot, $currentDir, $oldVersionsDir, $logsDir | Out-Null
 
   Step "Build log file: $logFile"
   try {

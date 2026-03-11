@@ -5,6 +5,7 @@ param(
 )
 
 $ErrorActionPreference = "Stop"
+. (Join-Path $PSScriptRoot 'desktop_build_target_paths.ps1')
 
 function Step([string]$Message) {
   Write-Host ""
@@ -12,6 +13,7 @@ function Step([string]$Message) {
 }
 
 $repoRoot = (Resolve-Path (Join-Path $PSScriptRoot '..\..')).Path
+$buildPaths = Get-DesktopBuildTargetPaths -RepoRoot $repoRoot
 $targets = New-Object System.Collections.Generic.List[string]
 
 $engineRoot = Join-Path $repoRoot 'product\engine'
@@ -33,9 +35,9 @@ Get-ChildItem -Path $repoRoot -Directory -Filter 'tmp_*' -ErrorAction SilentlyCo
   ForEach-Object { $targets.Add($_.FullName) }
 
 if ($IncludeBuildTarget) {
-  $targets.Add((Join-Path $desktopRoot 'Build Target\Current'))
+  $targets.Add($buildPaths.CurrentDir)
   if ($PruneOldBuilds) {
-    $targets.Add((Join-Path $desktopRoot 'Build Target\Old versions'))
+    $targets.Add($buildPaths.OldVersionsDir)
   }
 }
 
@@ -52,8 +54,8 @@ foreach ($target in $normalizedTargets) {
 if (-not $Force) {
   Write-Host ""
   Write-Host "Dry run only. Re-run with -Force to delete these paths."
-  Write-Host "Optional: add -IncludeBuildTarget to clean Build Target\Current too."
-  Write-Host "Optional: add -PruneOldBuilds (with -IncludeBuildTarget) to also clean Old versions."
+  Write-Host "Optional: add -IncludeBuildTarget to clean build_target\\Current too."
+  Write-Host "Optional: add -PruneOldBuilds (with -IncludeBuildTarget) to also clean old_versions."
   exit 0
 }
 
