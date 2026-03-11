@@ -374,11 +374,19 @@ Current implementation status:
 ### 8.1.7 Installer and uninstall clarity requirement
 
 - Setup/maintenance UI must clearly present:
-  - Update/Repair in place,
-  - Full reinstall (uninstall then install),
-  - Uninstall.
-- For existing installs, show a short explainer page before maintenance choice so operators see one-line outcomes for each mode.
-- Uninstall flow must explicitly indicate that app-data lives under `%APPDATA%\com.voxvulgi.voxvulgi` and is only removed when the operator chooses delete-app-data.
+  - `Update`,
+  - `Reinstall (keep preferences and options)`,
+  - `Full reinstall`,
+  - `Uninstall (keep preferences and options)`,
+  - `Full uninstall`.
+- `Update` keeps the current installation in place and preserves preferences/options.
+- `Reinstall (keep preferences and options)` uninstalls installed program files, then installs again while preserving preferences/options.
+- `Full reinstall` removes installed program files plus preferences/options, then installs again.
+- `Uninstall (keep preferences and options)` removes installed program files only.
+- `Full uninstall` removes installed program files plus preferences/options.
+- For existing installs, show a short explainer page before maintenance choice so operators see one-line outcomes for each mode and understand the keep-vs-full distinction.
+- Installer and uninstall copy must explicitly indicate that preferences/options live under `%APPDATA%\com.voxvulgi.voxvulgi` and are only removed by the full actions.
+- Every shipped desktop installer build must increment the desktop semantic version.
 
 ## 9) Top 20 ROI backlog (next additions)
 

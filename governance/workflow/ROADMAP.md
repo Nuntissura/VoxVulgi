@@ -111,6 +111,10 @@ Date: 2026-03-11
 
 - WP-0140: Rename the managed desktop build-output contract to no-space paths (`product/desktop/build_target`, `old_versions`), keep proof/build scripts/checks working, and migrate the on-disk folder safely. DONE 2026-03-11.
 
+## Installer Standards Refresh (2026-03)
+
+- WP-0141: Replace the overloaded maintenance choices with an explicit five-action installer standard, update the explainer page, and package a new versioned installer build. IN PROGRESS.
+
 ## Phase 0 - Decisions (1-2 days)
 
 - Pick stack: Tauri/Rust + Python workers (recommended) vs Qt vs Electron.

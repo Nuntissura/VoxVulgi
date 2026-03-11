@@ -65,9 +65,13 @@ Pick the first real implementation WP from `governance/workflow/ROADMAP.md` and 
 ## 8) Installer mode policy (Windows)
 
 - Use and preserve these maintenance labels in installer UX/copy:
-  - `Update/Repair`
+  - `Update`
+  - `Reinstall (keep preferences and options)`
   - `Full reinstall`
-  - `Uninstall`
+  - `Uninstall (keep preferences and options)`
+  - `Full uninstall`
+- Keep the keep-vs-full distinction explicit in the installer explainer page.
+- Every managed desktop installer build must increment semantic version.
 - Canonical source of truth:
   - `governance/spec/PRODUCT_SPEC.md` (installer clarity requirement)
   - `governance/spec/TECHNICAL_DESIGN.md` (installer maintenance mode implementation policy)

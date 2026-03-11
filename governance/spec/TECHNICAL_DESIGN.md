@@ -85,16 +85,21 @@ Implementation notes (desktop):
 
 Windows NSIS installer UX must explicitly communicate maintenance outcomes:
 
-- **Update/Repair in place**: keeps current install and user app-data.
-- **Full reinstall**: uninstalls first, then installs.
-- **Uninstall**: removes installed app files.
+- **Update**: installs this version over the current install and preserves preferences/options.
+- **Reinstall (keep preferences and options)**: uninstalls installed program files, then installs again while preserving preferences/options.
+- **Full reinstall**: uninstalls installed program files and removes preferences/options before installing again.
+- **Uninstall (keep preferences and options)**: removes installed program files only.
+- **Full uninstall**: removes installed program files plus preferences/options.
 
-User app-data under `%APPDATA%\com.voxvulgi.voxvulgi` is retained by default unless the installer's delete-app-data option is explicitly selected by the operator.
+Preferences/options under `%APPDATA%\com.voxvulgi.voxvulgi` are retained by default unless the operator explicitly chooses one of the full actions.
 
 Implementation note:
 
 - Custom NSIS language strings are defined in `product/desktop/src-tauri/installer/languages/English.nsh` and wired in `tauri.conf.json`.
 - Custom NSIS template is defined in `product/desktop/src-tauri/installer/templates/installer.nsi` and inserts a short explainer page before maintenance option selection when an existing installation is detected.
+- The maintenance selector should use explicit action modes rather than version-dependent reinterpretation of two radio buttons.
+- Uninstall-only actions should exit after uninstall completes instead of flowing forward into installation pages.
+- Desktop installer packaging remains versioned monotonically: each managed desktop target build increments semantic version.
 
 ## 3) Data Model (SQLite)
 

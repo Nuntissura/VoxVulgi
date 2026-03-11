@@ -17,11 +17,14 @@
 ## Installer Maintenance Mode Policy
 
 - Preserve these exact installer maintenance labels:
-  - `Update/Repair`
+  - `Update`
+  - `Reinstall (keep preferences and options)`
   - `Full reinstall`
-  - `Uninstall`
+  - `Uninstall (keep preferences and options)`
+  - `Full uninstall`
 - Keep existing-install flow clear: show the pre-maintenance explainer before maintenance selection.
-- Keep app-data behavior explicit: `%APPDATA%\\com.voxvulgi.voxvulgi` is retained unless delete-app-data is explicitly chosen.
+- Keep app-data behavior explicit: `%APPDATA%\\com.voxvulgi.voxvulgi` is retained by the keep-actions and only removed by the full actions.
+- Every managed desktop installer build must increment semantic version.
 - If wording semantics need to change, update canonical policy docs first:
   - `governance/spec/PRODUCT_SPEC.md`
   - `governance/spec/TECHNICAL_DESIGN.md`
