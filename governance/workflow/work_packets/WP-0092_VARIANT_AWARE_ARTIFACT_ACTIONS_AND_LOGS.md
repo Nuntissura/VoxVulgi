@@ -42,4 +42,4 @@ Out of scope:
 ## Status updates
 
 - 2026-03-06: Created from remediation review after static scan found base-only rerun/log plumbing in the artifact browser.
-- 2026-03-06: Completed. Artifact reruns now reuse the matching prior job params via `jobs_retry`, item-scoped job metadata powers variant-aware status/log routing, and unsupported artifact rows no longer expose misleading rerun behavior. Proof: `product/desktop/Build Target/tool_artifacts/wp_runs/WP-0092/20260306_213944/summary.md`.
+- 2026-03-06: Completed. Artifact reruns now reuse the matching prior job params via `jobs_retry`, item-scoped job metadata powers variant-aware status/log routing, and unsupported artifact rows no longer expose misleading rerun behavior. Proof: `product/desktop/build_target/tool_artifacts/wp_runs/WP-0092/20260306_213944/summary.md`.

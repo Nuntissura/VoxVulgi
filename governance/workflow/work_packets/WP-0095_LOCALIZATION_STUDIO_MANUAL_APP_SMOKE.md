@@ -41,7 +41,7 @@ Out of scope:
 - Batch selection remains stable when paging through and selecting more than 500 library items in the app.
 - A benchmark run can be generated and inspected in-app, with the visible ranking matching the durable report artifacts.
 - Item voice-plan promotion, experimental backend runs, compare-history snapshots, starter-recipe application, and benchmark-winner promotion all have one exercised manual path with operator-facing notes.
-- A proof summary is written under `product/desktop/Build Target/tool_artifacts/wp_runs/WP-0095/` with the exact scenarios exercised, evidence paths, and any follow-up defects.
+- A proof summary is written under `product/desktop/build_target/tool_artifacts/wp_runs/WP-0095/` with the exact scenarios exercised, evidence paths, and any follow-up defects.
 - If smoke defects are found, they are tracked as explicit follow-up work packets before fixes are claimed complete.
 
 ## Test / verification plan

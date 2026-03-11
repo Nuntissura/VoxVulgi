@@ -64,4 +64,4 @@ Out of scope:
 
 - 2026-03-06: Created for reusable voice-clone/template reuse after WP-0074/WP-0075 stabilized the localization output and voice-preserving runtime baseline.
 - 2026-03-06: Implemented app-managed reusable voice-template storage in SQLite/app data, added template create/get/list/apply/delete Tauri commands, and extended Localization Studio with save/apply/delete/reveal controls plus explicit current-speaker -> template-speaker mapping.
-- 2026-03-06: Verified with `cargo test` in `product/engine`, `cargo test` in `product/desktop/src-tauri`, and `npm -C product/desktop run build`. Proof artifacts were written under `product/desktop/Build Target/tool_artifacts/wp_runs/WP-0076/20260306_132316/`, including `summary.md`, `engine_cargo_test.log`, `tauri_cargo_test.log`, and `desktop_build.log`.
+- 2026-03-06: Verified with `cargo test` in `product/engine`, `cargo test` in `product/desktop/src-tauri`, and `npm -C product/desktop run build`. Proof artifacts were written under `product/desktop/build_target/tool_artifacts/wp_runs/WP-0076/20260306_132316/`, including `summary.md`, `engine_cargo_test.log`, `tauri_cargo_test.log`, and `desktop_build.log`.

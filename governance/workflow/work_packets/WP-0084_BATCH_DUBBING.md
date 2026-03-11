@@ -40,4 +40,4 @@ Out of scope:
 ## Status updates
 
 - 2026-03-06: Created to extend template reuse from single-item workflow to season-scale throughput.
-- 2026-03-06: Completed. Localization Studio can now select many library items, optionally apply the currently chosen template/cast pack heuristically, and queue localization batches with QC/export follow-ons. Proof: `product/desktop/Build Target/tool_artifacts/wp_runs/WP-0084/20260306_204301/summary.md`.
+- 2026-03-06: Completed. Localization Studio can now select many library items, optionally apply the currently chosen template/cast pack heuristically, and queue localization batches with QC/export follow-ons. Proof: `product/desktop/build_target/tool_artifacts/wp_runs/WP-0084/20260306_204301/summary.md`.

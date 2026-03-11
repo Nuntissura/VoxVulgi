@@ -40,4 +40,4 @@ Out of scope:
 ## Status updates
 
 - 2026-03-06: Created as a follow-up to explicit template mapping introduced in WP-0076.
-- 2026-03-06: Implemented non-destructive template and cast-pack auto-suggestions using speaker-key/display-name heuristics with operator override before apply; verified via desktop `npm run build`, desktop Tauri `cargo test`, and proof bundle `product/desktop/Build Target/tool_artifacts/wp_runs/WP-0079/20260306_172806/`.
+- 2026-03-06: Implemented non-destructive template and cast-pack auto-suggestions using speaker-key/display-name heuristics with operator override before apply; verified via desktop `npm run build`, desktop Tauri `cargo test`, and proof bundle `product/desktop/build_target/tool_artifacts/wp_runs/WP-0079/20260306_172806/`.

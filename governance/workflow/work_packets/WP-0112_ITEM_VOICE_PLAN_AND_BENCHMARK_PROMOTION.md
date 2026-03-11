@@ -42,4 +42,4 @@ Out of scope:
 ## Status updates
 
 - 2026-03-08: Created from the voice-cloning research modernization tranche.
-- 2026-03-08: Implemented durable item voice plans, recommendation/benchmark promotion actions, and Localization Studio plan editing; proof in `product/desktop/Build Target/tool_artifacts/wp_runs/WP-0112/20260308_141931/`.
+- 2026-03-08: Implemented durable item voice plans, recommendation/benchmark promotion actions, and Localization Studio plan editing; proof in `product/desktop/build_target/tool_artifacts/wp_runs/WP-0112/20260308_141931/`.

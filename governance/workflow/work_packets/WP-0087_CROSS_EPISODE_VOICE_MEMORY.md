@@ -40,4 +40,4 @@ Out of scope:
 ## Status updates
 
 - 2026-03-06: Created as the long-horizon consistency layer above cast packs and templates.
-- 2026-03-06: Completed. Added reusable `memory` profiles in the app-managed voice library with copied refs, suggestions, apply/fork/delete flows, and item speaker linkage. Proof: `product/desktop/Build Target/tool_artifacts/wp_runs/WP-0087/20260306_204301/summary.md`.
+- 2026-03-06: Completed. Added reusable `memory` profiles in the app-managed voice library with copied refs, suggestions, apply/fork/delete flows, and item speaker linkage. Proof: `product/desktop/build_target/tool_artifacts/wp_runs/WP-0087/20260306_204301/summary.md`.

@@ -1,17 +1,18 @@
 # Repo Agent Notes
 
-## Desktop Build Target Policy
+## Desktop Build Output Policy
 
 - For desktop release builds, use `governance/scripts/build_desktop_target.ps1` (or `npm run build:desktop:target` from `product/desktop`).
 - Desktop installer builds must refresh the bundled offline payload so Phase 1 + Phase 2 dependencies are included in the installer resources.
 - Every desktop target build must increment the desktop semantic version.
 - Every desktop target build must append an entry to `governance/release/BUILD_CHANGELOG.md` with included Work Packet IDs.
+- Managed desktop build-output folders and filenames we control must not use spaces; prefer `snake_case`.
 - Build logs for each desktop target build must be written under:
-  - `product/desktop/Build Target/logs`
+  - `product/desktop/build_target/logs`
 - Build outputs must go under:
-  - `product/desktop/Build Target/Current`
+  - `product/desktop/build_target/Current`
 - Previous build outputs must be archived under:
-  - `product/desktop/Build Target/Old versions`
+  - `product/desktop/build_target/old_versions`
 
 ## Installer Maintenance Mode Policy
 
@@ -33,7 +34,7 @@
 ## Proof Standard Policy
 
 - A WP is not `DONE` unless it satisfies `governance/workflow/PROOF_STANDARD.md`.
-- New proof bundles should include `summary.md` under `product/desktop/Build Target/tool_artifacts/wp_runs/<WP-ID>/...`.
+- New proof bundles should include `summary.md` under `product/desktop/build_target/tool_artifacts/wp_runs/<WP-ID>/...`.
 - Build-only verification is not sufficient for UI/operator-heavy packets when the proof standard requires app-boundary or manual evidence.
 
 ## Diagnostics Trace Folder Policy

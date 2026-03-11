@@ -41,4 +41,4 @@ Out of scope:
 ## Status updates
 
 - 2026-03-06: Created from post-WP-0076 voice-cloning expansion backlog.
-- 2026-03-06: Implemented cast-pack persistence plus Localization Studio create/rename/delete/apply flows above reusable templates; verified via engine `cargo test`, desktop Tauri `cargo test`, desktop `npm run build`, and proof bundle `product/desktop/Build Target/tool_artifacts/wp_runs/WP-0077/20260306_172806/`.
+- 2026-03-06: Implemented cast-pack persistence plus Localization Studio create/rename/delete/apply flows above reusable templates; verified via engine `cargo test`, desktop Tauri `cargo test`, desktop `npm run build`, and proof bundle `product/desktop/build_target/tool_artifacts/wp_runs/WP-0077/20260306_172806/`.

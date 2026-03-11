@@ -42,4 +42,4 @@ Out of scope:
 ## Status updates
 
 - 2026-03-08: Created from the voice-cloning research modernization tranche.
-- 2026-03-08: Implemented `voice_reference_curation` report generation/apply flows, Localization Studio curation controls, artifact-browser discovery, and verification proof under `product/desktop/Build Target/tool_artifacts/wp_runs/WP-0111/20260308_141031/`.
+- 2026-03-08: Implemented `voice_reference_curation` report generation/apply flows, Localization Studio curation controls, artifact-browser discovery, and verification proof under `product/desktop/build_target/tool_artifacts/wp_runs/WP-0111/20260308_141031/`.

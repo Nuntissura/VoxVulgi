@@ -27,7 +27,7 @@ Out of scope:
 
 ## Acceptance criteria
 
-- A durable audit report exists under `product/desktop/Build Target/tool_artifacts/wp_runs/WP-0119/`.
+- A durable audit report exists under `product/desktop/build_target/tool_artifacts/wp_runs/WP-0119/`.
 - Findings are grouped by severity and domain with code references.
 - The report highlights likely refactor slices instead of only isolated issues.
 
@@ -39,4 +39,4 @@ Out of scope:
 ## Status updates
 
 - 2026-03-08: Created as stage 2 of the multi-stage repo audit tranche.
-- 2026-03-08: Completed static code hygiene and architecture audit. Proof captured under `product/desktop/Build Target/tool_artifacts/wp_runs/WP-0119/20260308_162651/`.
+- 2026-03-08: Completed static code hygiene and architecture audit. Proof captured under `product/desktop/build_target/tool_artifacts/wp_runs/WP-0119/20260308_162651/`.

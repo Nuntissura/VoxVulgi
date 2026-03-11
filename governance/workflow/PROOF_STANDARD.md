@@ -10,7 +10,7 @@ This document defines what qualifies a Work Packet for `DONE`.
 A WP may be marked `DONE` only when all of the following are true:
 
 - The shipped behavior matches the WP scope and acceptance criteria.
-- A proof bundle exists under `product/desktop/Build Target/tool_artifacts/wp_runs/<WP-ID>/...`.
+- A proof bundle exists under `product/desktop/build_target/tool_artifacts/wp_runs/<WP-ID>/...`.
 - The proof bundle includes a human-readable `summary.md`.
 - The exact verification commands or executed scenarios are recorded in the summary or a companion `evidence.json`.
 - Any required automated checks have passed on the final state.

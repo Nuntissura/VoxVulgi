@@ -38,4 +38,4 @@ Out of scope:
 ## Status updates
 
 - 2026-03-09: Created as the required final packet for the installer smoke remediation tranche.
-- 2026-03-09: Final crosscheck completed. Localization/voice, archiver/library, and Diagnostics/shell surfaces are aligned with current spec/design. Reconciled one canonical governance drift by updating the stale `WP-0066` task-board summary to `Video Archiver` / `Instagram Archiver`. `WP-0095` remains explicitly queued as the human-run manual smoke packet. Proof: `product/desktop/Build Target/tool_artifacts/wp_runs/WP-0139/20260309_194223/`.
+- 2026-03-09: Final crosscheck completed. Localization/voice, archiver/library, and Diagnostics/shell surfaces are aligned with current spec/design. Reconciled one canonical governance drift by updating the stale `WP-0066` task-board summary to `Video Archiver` / `Instagram Archiver`. `WP-0095` remains explicitly queued as the human-run manual smoke packet. Proof: `product/desktop/build_target/tool_artifacts/wp_runs/WP-0139/20260309_194223/`.

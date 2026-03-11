@@ -42,4 +42,4 @@ Out of scope:
 ## Status updates
 
 - 2026-03-06: Created from remediation review after finding destructive single-reference cleanup behavior and cleanup-folder key collisions.
-- 2026-03-06: Completed. Cleanup now uses collision-safe speaker storage with legacy-read compatibility, multi-reference speakers can choose a cleanup source, and applying a cleaned ref keeps the broader reference set intact. Proof: `product/desktop/Build Target/tool_artifacts/wp_runs/WP-0093/20260306_213944/summary.md`.
+- 2026-03-06: Completed. Cleanup now uses collision-safe speaker storage with legacy-read compatibility, multi-reference speakers can choose a cleanup source, and applying a cleaned ref keeps the broader reference set intact. Proof: `product/desktop/build_target/tool_artifacts/wp_runs/WP-0093/20260306_213944/summary.md`.

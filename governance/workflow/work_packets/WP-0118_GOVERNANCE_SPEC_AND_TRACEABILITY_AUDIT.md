@@ -27,7 +27,7 @@ Out of scope:
 
 ## Acceptance criteria
 
-- Audit findings are captured in a durable report under `product/desktop/Build Target/tool_artifacts/wp_runs/WP-0118/`.
+- Audit findings are captured in a durable report under `product/desktop/build_target/tool_artifacts/wp_runs/WP-0118/`.
 - The report distinguishes governance drift from implementation defects.
 - Every finding has severity, file references, and a proposed remediation direction.
 
@@ -40,4 +40,4 @@ Out of scope:
 
 - 2026-03-08: Created as stage 1 of the multi-stage repo audit tranche.
 - 2026-03-08: Completed first-pass governance-vs-code audit with findings on contradictory consent-gating language, stale manual-smoke governance coverage, stale `WP-0098` proof references, and residual mojibake in governance docs.
-- 2026-03-08: Proof captured under `product/desktop/Build Target/tool_artifacts/wp_runs/WP-0118/20260308_162302/`.
+- 2026-03-08: Proof captured under `product/desktop/build_target/tool_artifacts/wp_runs/WP-0118/20260308_162302/`.

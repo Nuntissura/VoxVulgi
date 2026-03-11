@@ -41,4 +41,4 @@ Out of scope:
 
 - 2026-03-06: Created to improve naturalness using data already present in subtitle tracks.
 - 2026-03-06: Initial groundwork landed through line-break and punctuation shaping inside TTS text preparation, but explicit operator toggles/review remain open.
-- 2026-03-06: Completed. Subtitle-aware pacing is now operator-controlled through per-speaker, template, and profile settings and flows through preview plus voice-preserving jobs. Proof: `product/desktop/Build Target/tool_artifacts/wp_runs/WP-0090/20260306_204301/summary.md`.
+- 2026-03-06: Completed. Subtitle-aware pacing is now operator-controlled through per-speaker, template, and profile settings and flows through preview plus voice-preserving jobs. Proof: `product/desktop/build_target/tool_artifacts/wp_runs/WP-0090/20260306_204301/summary.md`.

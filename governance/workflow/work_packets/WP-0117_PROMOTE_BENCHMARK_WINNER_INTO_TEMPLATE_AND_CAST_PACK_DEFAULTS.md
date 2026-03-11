@@ -43,4 +43,4 @@ Out of scope:
 
 - 2026-03-08: Created from the research-driven operational backend tranche.
 - 2026-03-08: Implemented durable backend-default metadata on reusable voice templates and cast packs, added direct benchmark-winner promotion from Localization Studio into the selected reusable asset, and let apply flows optionally seed the destination item voice plan from that saved default.
-- 2026-03-08: Verified with `cargo test -q --manifest-path product/engine/Cargo.toml`, `cargo test -q --manifest-path product/desktop/src-tauri/Cargo.toml`, and `npm run build` in `product/desktop`; proof in `product/desktop/Build Target/tool_artifacts/wp_runs/WP-0117/20260308_161136/`.
+- 2026-03-08: Verified with `cargo test -q --manifest-path product/engine/Cargo.toml`, `cargo test -q --manifest-path product/desktop/src-tauri/Cargo.toml`, and `npm run build` in `product/desktop`; proof in `product/desktop/build_target/tool_artifacts/wp_runs/WP-0117/20260308_161136/`.

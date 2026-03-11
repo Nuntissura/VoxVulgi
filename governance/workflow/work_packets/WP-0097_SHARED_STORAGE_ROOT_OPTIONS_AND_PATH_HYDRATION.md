@@ -43,4 +43,4 @@ Out of scope:
 ## Status updates
 
 - 2026-03-07: Created from operator feedback on missing-folder flicker, path persistence, and the need for a single global storage-root control surface.
-- 2026-03-07: Implemented shared download/export root management in a new Options window, replaced pane-local root ownership with a shared frontend hydration store, and updated Library/Localization to consume the same status source. Verified with `npm run build`, `cargo test -q` in `product/desktop/src-tauri`, and `cargo test -q` in `product/engine`. Proof: `product/desktop/Build Target/tool_artifacts/wp_runs/WP-0097/20260307_033244/summary.md`.
+- 2026-03-07: Implemented shared download/export root management in a new Options window, replaced pane-local root ownership with a shared frontend hydration store, and updated Library/Localization to consume the same status source. Verified with `npm run build`, `cargo test -q` in `product/desktop/src-tauri`, and `cargo test -q` in `product/engine`. Proof: `product/desktop/build_target/tool_artifacts/wp_runs/WP-0097/20260307_033244/summary.md`.

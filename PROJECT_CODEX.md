@@ -59,7 +59,8 @@ Pick the first real implementation WP from `governance/workflow/ROADMAP.md` and 
   - increment the desktop semantic version,
   - append an entry in `governance/release/BUILD_CHANGELOG.md`,
   - list included Work Packet IDs in that entry,
-  - write a build log file under `product/desktop/Build Target/logs`.
+  - write a build log file under `product/desktop/build_target/logs`.
+- Managed desktop build-output folders and filenames we control should avoid spaces; prefer `snake_case` such as `build_target` and `old_versions`.
 
 ## 8) Installer mode policy (Windows)
 

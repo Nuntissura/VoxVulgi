@@ -28,7 +28,7 @@ Out of scope:
 
 ## Acceptance criteria
 
-- A durable audit report exists under `product/desktop/Build Target/tool_artifacts/wp_runs/WP-0120/`.
+- A durable audit report exists under `product/desktop/build_target/tool_artifacts/wp_runs/WP-0120/`.
 - Findings identify any destructive or ambiguous persistence behavior.
 - Cleanup/retention gaps and lifecycle ambiguities are documented with remediation proposals.
 
@@ -40,4 +40,4 @@ Out of scope:
 ## Status updates
 
 - 2026-03-08: Created as stage 3 of the multi-stage repo audit tranche.
-- 2026-03-08: Completed persistence, data safety, and artifact lifecycle audit. Proof captured under `product/desktop/Build Target/tool_artifacts/wp_runs/WP-0120/20260308_163100/`.
+- 2026-03-08: Completed persistence, data safety, and artifact lifecycle audit. Proof captured under `product/desktop/build_target/tool_artifacts/wp_runs/WP-0120/20260308_163100/`.

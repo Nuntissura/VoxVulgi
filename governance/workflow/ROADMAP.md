@@ -1,6 +1,6 @@
 # VoxVulgi - Roadmap / Backlog (Draft)
 
-Date: 2026-03-09
+Date: 2026-03-11
 
 ## Immediate Track - Stabilization + IA Refresh (2026-03)
 
@@ -106,6 +106,10 @@ Date: 2026-03-09
 - WP-0137: Shell move affordance and panel-scroll polish. DONE 2026-03-09.
 - WP-0138: Model inventory clarity and required/optional labeling. DONE 2026-03-09.
 - WP-0139: Repo-to-spec crosscheck and governance reconciliation. DONE 2026-03-09. LAST.
+
+## Repo Tooling Path Normalization (2026-03)
+
+- WP-0140: Rename the managed desktop build-output contract to no-space paths (`product/desktop/build_target`, `old_versions`), keep proof/build scripts/checks working, and migrate the on-disk folder safely. IN PROGRESS.
 
 ## Phase 0 - Decisions (1-2 days)
 

@@ -31,7 +31,7 @@ Out of scope:
 - External/custom output directories require explicit separate opt-in before deletion.
 - Item-derived artifact classes and retention policy are documented and implemented.
 - Cleanup summaries surface failed deletions clearly.
-- Proof is captured under `product/desktop/Build Target/tool_artifacts/wp_runs/WP-0125/20260308_183800/`.
+- Proof is captured under `product/desktop/build_target/tool_artifacts/wp_runs/WP-0125/20260308_183800/`.
 
 ## Test / verification plan
 

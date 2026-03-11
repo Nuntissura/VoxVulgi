@@ -30,7 +30,7 @@ Out of scope:
 - Canonical governance files no longer contradict the current spec stance.
 - `WP-0095` reflects the real current operator surfaces that need manual smoke coverage.
 - Stale proof references and mojibake are removed from canonical governance docs.
-- Proof is captured under `product/desktop/Build Target/tool_artifacts/wp_runs/WP-0124/20260308_164400/`.
+- Proof is captured under `product/desktop/build_target/tool_artifacts/wp_runs/WP-0124/20260308_164400/`.
 
 ## Test / verification plan
 

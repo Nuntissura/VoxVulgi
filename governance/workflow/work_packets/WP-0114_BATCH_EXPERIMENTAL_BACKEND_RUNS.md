@@ -42,4 +42,4 @@ Out of scope:
 ## Status updates
 
 - 2026-03-08: Created from the research-driven operational backend tranche.
-- 2026-03-08: Implemented bounded experimental backend batch queueing, Localization Studio backend-matrix controls, and proof under `product/desktop/Build Target/tool_artifacts/wp_runs/WP-0114/20260308_161900/`.
+- 2026-03-08: Implemented bounded experimental backend batch queueing, Localization Studio backend-matrix controls, and proof under `product/desktop/build_target/tool_artifacts/wp_runs/WP-0114/20260308_161900/`.

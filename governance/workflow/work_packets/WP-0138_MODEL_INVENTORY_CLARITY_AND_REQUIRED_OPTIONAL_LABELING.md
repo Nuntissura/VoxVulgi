@@ -38,4 +38,4 @@ Out of scope:
 ## Status updates
 
 - 2026-03-09: Created from installer smoke findings around the confusing Models panel.
-- 2026-03-09: Implemented explicit role/delivery/expected-install model metadata, separated required runtime models from demo/test assets in Diagnostics, and wrote proof under `product/desktop/Build Target/tool_artifacts/wp_runs/WP-0138/20260309_060022/`.
+- 2026-03-09: Implemented explicit role/delivery/expected-install model metadata, separated required runtime models from demo/test assets in Diagnostics, and wrote proof under `product/desktop/build_target/tool_artifacts/wp_runs/WP-0138/20260309_060022/`.

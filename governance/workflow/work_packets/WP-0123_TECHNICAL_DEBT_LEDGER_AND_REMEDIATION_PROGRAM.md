@@ -26,7 +26,7 @@ Out of scope:
 
 ## Acceptance criteria
 
-- A durable debt ledger exists under `product/desktop/Build Target/tool_artifacts/wp_runs/WP-0123/`.
+- A durable debt ledger exists under `product/desktop/build_target/tool_artifacts/wp_runs/WP-0123/`.
 - Findings are deduplicated and grouped into actionable remediation tranches.
 - Task board and roadmap are updated to reflect the proposed remediation program.
 
@@ -38,4 +38,4 @@ Out of scope:
 ## Status updates
 
 - 2026-03-08: Created as stage 6 of the multi-stage repo audit tranche.
-- 2026-03-08: Consolidated `WP-0118` to `WP-0122` into a prioritized debt ledger and queued remediation packets `WP-0124` to `WP-0130`. Proof captured under `product/desktop/Build Target/tool_artifacts/wp_runs/WP-0123/20260308_163900/`.
+- 2026-03-08: Consolidated `WP-0118` to `WP-0122` into a prioritized debt ledger and queued remediation packets `WP-0124` to `WP-0130`. Proof captured under `product/desktop/build_target/tool_artifacts/wp_runs/WP-0123/20260308_163900/`.

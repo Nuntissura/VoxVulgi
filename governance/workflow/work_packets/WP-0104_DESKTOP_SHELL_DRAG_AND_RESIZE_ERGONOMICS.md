@@ -39,4 +39,4 @@ Out of scope:
 ## Status updates
 
 - 2026-03-07: Created from operator feedback on drag-anywhere interference and the undersized corner resize affordance.
-- 2026-03-07: Implemented chrome-only dragging plus a larger in-surface bottom-right resize handle so text selection and scrollbars are not treated as drag regions. Verified with `npm run build`, `cargo test -q` in `product/desktop/src-tauri`, and `cargo test -q` in `product/engine`. Proof: `product/desktop/Build Target/tool_artifacts/wp_runs/WP-0104/20260307_033244/summary.md`.
+- 2026-03-07: Implemented chrome-only dragging plus a larger in-surface bottom-right resize handle so text selection and scrollbars are not treated as drag regions. Verified with `npm run build`, `cargo test -q` in `product/desktop/src-tauri`, and `cargo test -q` in `product/engine`. Proof: `product/desktop/build_target/tool_artifacts/wp_runs/WP-0104/20260307_033244/summary.md`.

@@ -40,4 +40,4 @@ Out of scope:
 ## Status updates
 
 - 2026-03-06: Created after repeated need for faster reference/output quality feedback.
-- 2026-03-06: Completed. QC reports now include voice-reference and dubbed-output analysis (silence, clipping, noise, and weak-similarity heuristics) plus Localization Studio rendering. Proof: `product/desktop/Build Target/tool_artifacts/wp_runs/WP-0083/20260306_204301/summary.md`.
+- 2026-03-06: Completed. QC reports now include voice-reference and dubbed-output analysis (silence, clipping, noise, and weak-similarity heuristics) plus Localization Studio rendering. Proof: `product/desktop/build_target/tool_artifacts/wp_runs/WP-0083/20260306_204301/summary.md`.

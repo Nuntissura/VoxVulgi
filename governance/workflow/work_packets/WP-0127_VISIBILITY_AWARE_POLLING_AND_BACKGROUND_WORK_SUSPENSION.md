@@ -39,4 +39,4 @@ Out of scope:
 ## Status updates
 
 - 2026-03-08: Created from `WP-0121` contention-tolerant performance findings.
-- 2026-03-08: Completed. Added shared visibility-aware non-overlapping polling helpers, gated app/page timers on active visibility, refreshed Jobs on return, and collapsed Localization Studio job-status polling into one loop. Proof: `product/desktop/Build Target/tool_artifacts/wp_runs/WP-0127/20260308_201100/`.
+- 2026-03-08: Completed. Added shared visibility-aware non-overlapping polling helpers, gated app/page timers on active visibility, refreshed Jobs on return, and collapsed Localization Studio job-status polling into one loop. Proof: `product/desktop/build_target/tool_artifacts/wp_runs/WP-0127/20260308_201100/`.

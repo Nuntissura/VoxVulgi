@@ -16,8 +16,8 @@ This changelog tracks desktop installer builds produced by `governance/scripts/b
 - Commit: `<short-sha>`
 - Offline Bundle ID: `<bundle-id>`
 - Artifacts:
-  - `product/desktop/Build Target/Current/release/bundle/nsis/VoxVulgi_<version>_x64-setup.exe`
-  - `product/desktop/Build Target/Current/release/bundle/msi/VoxVulgi_<version>_x64_en-US.msi`
+  - `product/desktop/build_target/Current/release/bundle/nsis/VoxVulgi_<version>_x64-setup.exe`
+  - `product/desktop/build_target/Current/release/bundle/msi/VoxVulgi_<version>_x64_en-US.msi`
 - Notes: `<freeform summary>`
 
 ## Historical Baseline
@@ -27,8 +27,8 @@ This changelog tracks desktop installer builds produced by `governance/scripts/b
 - Commit: `a289631`
 - Offline Bundle ID: `offline_full_win64_20260301_232842`
 - Artifacts:
-  - `product/desktop/Build Target/Current/release/bundle/nsis/VoxVulgi_0.1.0_x64-setup.exe`
-  - `product/desktop/Build Target/Current/release/bundle/msi/VoxVulgi_0.1.0_x64_en-US.msi`
+  - `product/desktop/build_target/Current/release/bundle/nsis/VoxVulgi_0.1.0_x64-setup.exe`
+  - `product/desktop/build_target/Current/release/bundle/msi/VoxVulgi_0.1.0_x64_en-US.msi`
 - Notes: Baseline build before automated build changelog/version policy enforcement.
 
 ## 0.1.2 - 2026-03-03T06:41:59Z
@@ -36,8 +36,8 @@ This changelog tracks desktop installer builds produced by `governance/scripts/b
 - Commit: `47fd7a6`
 - Offline Bundle ID: `offline_full_win64_20260303_061326`
 - Artifacts:
-  - `product/desktop/Build Target/Current/release/bundle/nsis/VoxVulgi_0.1.2_x64-setup.exe`
-  - `product/desktop/Build Target/Current/release/bundle/msi/VoxVulgi_0.1.2_x64_en-US.msi`
+  - `product/desktop/build_target/Current/release/bundle/nsis/VoxVulgi_0.1.2_x64-setup.exe`
+  - `product/desktop/build_target/Current/release/bundle/msi/VoxVulgi_0.1.2_x64_en-US.msi`
 - Notes: Installer UX clarity: explicit Update/Repair vs Full reinstall vs Uninstall wording; app-data deletion text clarified.
 
 ## 0.1.3 - 2026-03-03T19:39:46Z
@@ -45,8 +45,8 @@ This changelog tracks desktop installer builds produced by `governance/scripts/b
 - Commit: `74904a5`
 - Offline Bundle ID: `offline_full_win64_20260303_191450`
 - Artifacts:
-  - `product/desktop/Build Target/Current/release/bundle/nsis/VoxVulgi_0.1.3_x64-setup.exe`
-  - `product/desktop/Build Target/Current/release/bundle/msi/VoxVulgi_0.1.3_x64_en-US.msi`
+  - `product/desktop/build_target/Current/release/bundle/nsis/VoxVulgi_0.1.3_x64-setup.exe`
+  - `product/desktop/build_target/Current/release/bundle/msi/VoxVulgi_0.1.3_x64_en-US.msi`
 - Notes: Installer pre-maintenance explainer page before maintenance action selection (Update/Repair, Full reinstall, Uninstall).
 
 ## 0.1.4 - 2026-03-07T00:27:49Z
@@ -54,8 +54,8 @@ This changelog tracks desktop installer builds produced by `governance/scripts/b
 - Commit: `06db8ea`
 - Offline Bundle ID: `offline_full_win64_20260306_235943`
 - Artifacts:
-  - `product/desktop/Build Target/Current/release/bundle/nsis/VoxVulgi_0.1.4_x64-setup.exe`
-  - `product/desktop/Build Target/Current/release/bundle/msi/VoxVulgi_0.1.4_x64_en-US.msi`
+  - `product/desktop/build_target/Current/release/bundle/nsis/VoxVulgi_0.1.4_x64-setup.exe`
+  - `product/desktop/build_target/Current/release/bundle/msi/VoxVulgi_0.1.4_x64_en-US.msi`
 - Notes: Installer build after voice workflow remediation hardening on 2026-03-07.
 
 ## 0.1.5 - 2026-03-08T19:48:51Z
@@ -63,6 +63,6 @@ This changelog tracks desktop installer builds produced by `governance/scripts/b
 - Commit: `eb54fd6`
 - Offline Bundle ID: `offline_full_win64_20260308_191916`
 - Artifacts:
-  - `product/desktop/Build Target/Current/release/bundle/nsis/VoxVulgi_0.1.5_x64-setup.exe`
-  - `product/desktop/Build Target/Current/release/bundle/msi/VoxVulgi_0.1.5_x64_en-US.msi`
+  - `product/desktop/build_target/Current/release/bundle/nsis/VoxVulgi_0.1.5_x64-setup.exe`
+  - `product/desktop/build_target/Current/release/bundle/msi/VoxVulgi_0.1.5_x64_en-US.msi`
 - Notes: Desktop target build via build_desktop_target.ps1.

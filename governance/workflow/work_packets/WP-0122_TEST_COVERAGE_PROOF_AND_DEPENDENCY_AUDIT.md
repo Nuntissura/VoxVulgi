@@ -27,7 +27,7 @@ Out of scope:
 
 ## Acceptance criteria
 
-- A durable audit report exists under `product/desktop/Build Target/tool_artifacts/wp_runs/WP-0122/`.
+- A durable audit report exists under `product/desktop/build_target/tool_artifacts/wp_runs/WP-0122/`.
 - Findings identify critical test/proof blind spots and risky dependency areas.
 - The report proposes concrete follow-up WPs or remediation groups.
 
@@ -39,4 +39,4 @@ Out of scope:
 ## Status updates
 
 - 2026-03-08: Created as stage 5 of the multi-stage repo audit tranche.
-- 2026-03-08: Completed test coverage, proof, and dependency audit. Proof captured under `product/desktop/Build Target/tool_artifacts/wp_runs/WP-0122/20260308_163515/`.
+- 2026-03-08: Completed test coverage, proof, and dependency audit. Proof captured under `product/desktop/build_target/tool_artifacts/wp_runs/WP-0122/20260308_163515/`.

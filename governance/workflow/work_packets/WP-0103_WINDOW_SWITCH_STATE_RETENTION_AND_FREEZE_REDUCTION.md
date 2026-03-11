@@ -39,4 +39,4 @@ Out of scope:
 ## Status updates
 
 - 2026-03-07: Created from operator feedback that window switching still reloads content and freezes the app in normal use.
-- 2026-03-07: Implemented keep-mounted visited pages in the desktop shell so revisiting windows reuses state instead of remounting page trees and rerunning mount-time fetches. Verified with `npm run build`, `cargo test -q` in `product/desktop/src-tauri`, and `cargo test -q` in `product/engine`. Proof: `product/desktop/Build Target/tool_artifacts/wp_runs/WP-0103/20260307_033244/summary.md`.
+- 2026-03-07: Implemented keep-mounted visited pages in the desktop shell so revisiting windows reuses state instead of remounting page trees and rerunning mount-time fetches. Verified with `npm run build`, `cargo test -q` in `product/desktop/src-tauri`, and `cargo test -q` in `product/engine`. Proof: `product/desktop/build_target/tool_artifacts/wp_runs/WP-0103/20260307_033244/summary.md`.

@@ -38,4 +38,4 @@ Out of scope:
 ## Status updates
 
 - 2026-03-09: Created from installer smoke findings around move/drag/background semantics and per-panel scrolling.
-- 2026-03-09: Implemented an explicit `Move window` shell handle, removed the ambiguous whole-topbar drag behavior, and upgraded dense subscription tables to keep scrolling local to the panel with pinned action columns. Proof: `product/desktop/Build Target/tool_artifacts/wp_runs/WP-0137/20260309_164659/`.
+- 2026-03-09: Implemented an explicit `Move window` shell handle, removed the ambiguous whole-topbar drag behavior, and upgraded dense subscription tables to keep scrolling local to the panel with pinned action columns. Proof: `product/desktop/build_target/tool_artifacts/wp_runs/WP-0137/20260309_164659/`.

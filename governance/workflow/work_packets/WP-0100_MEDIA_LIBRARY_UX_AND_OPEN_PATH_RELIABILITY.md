@@ -41,4 +41,4 @@ Out of scope:
 ## Status updates
 
 - 2026-03-07: Created from operator feedback on D-drive file opening failures, oversized staggered cards, and the need for grouped browsing in large libraries.
-- 2026-03-07: Implemented grouped Media Library cards with under-card actions, search/type filters, and backend shell-path opening for reliable file access on secondary drives. Verified with `npm run build`, `cargo test -q` in `product/desktop/src-tauri`, and `cargo test -q` in `product/engine`. Proof: `product/desktop/Build Target/tool_artifacts/wp_runs/WP-0100/20260307_033244/summary.md`.
+- 2026-03-07: Implemented grouped Media Library cards with under-card actions, search/type filters, and backend shell-path opening for reliable file access on secondary drives. Verified with `npm run build`, `cargo test -q` in `product/desktop/src-tauri`, and `cargo test -q` in `product/engine`. Proof: `product/desktop/build_target/tool_artifacts/wp_runs/WP-0100/20260307_033244/summary.md`.

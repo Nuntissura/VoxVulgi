@@ -42,4 +42,4 @@ Out of scope:
 ## Status updates
 
 - 2026-03-08: Created from the research-driven operational backend tranche.
-- 2026-03-08: Implemented typed starter recipes for known OSS backends, Diagnostics recipe-apply controls, and proof under `product/desktop/Build Target/tool_artifacts/wp_runs/WP-0116/20260308_171300/`.
+- 2026-03-08: Implemented typed starter recipes for known OSS backends, Diagnostics recipe-apply controls, and proof under `product/desktop/build_target/tool_artifacts/wp_runs/WP-0116/20260308_171300/`.

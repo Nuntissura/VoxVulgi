@@ -39,4 +39,4 @@ Out of scope:
 ## Status updates
 
 - 2026-03-08: Created from `WP-0119` and `WP-0120` persistence findings.
-- 2026-03-08: Completed. DB migration now applies explicit transactional steps via `PRAGMA user_version`, and config/override/adapter-store/secret writes now use shared atomic local persistence helpers. Proof: `product/desktop/Build Target/tool_artifacts/wp_runs/WP-0126/20260308_191900/`.
+- 2026-03-08: Completed. DB migration now applies explicit transactional steps via `PRAGMA user_version`, and config/override/adapter-store/secret writes now use shared atomic local persistence helpers. Proof: `product/desktop/build_target/tool_artifacts/wp_runs/WP-0126/20260308_191900/`.

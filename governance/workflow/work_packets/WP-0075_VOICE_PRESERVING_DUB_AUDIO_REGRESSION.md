@@ -33,7 +33,7 @@ Out of scope:
 - `dub_voice_preserving_v1` produces real non-silent speech segments for a valid translated/diarized track when the pack is installed.
 - When base speech generation fails, the job fails loudly instead of succeeding with silent placeholders.
 - The manual smoke/example validation fails if the dubbed output contains no usable speech audio.
-- Fresh smoke artifacts under `product/desktop/Build Target/tool_artifacts/wp_runs/WP-0075/` show a successful dubbed-audio run on the sample clip.
+- Fresh smoke artifacts under `product/desktop/build_target/tool_artifacts/wp_runs/WP-0075/` show a successful dubbed-audio run on the sample clip.
 
 ## Test / verification plan
 
@@ -43,7 +43,7 @@ Out of scope:
 
 ## Status updates
 
-- 2026-03-06: Created after manual smoke on `Test material\[4K] Queen is here 😍 Miyeon so cute 💕 (ENG SUB).mp4` exposed that `dub_voice_preserving_v1` succeeded while writing silent 0.2s WAV placeholders.
+- 2026-03-06: Created after manual smoke on `Test material\[4K] Queen is here ðŸ˜ Miyeon so cute ðŸ’• (ENG SUB).mp4` exposed that `dub_voice_preserving_v1` succeeded while writing silent 0.2s WAV placeholders.
 - 2026-03-06: Root cause narrowed to three issues in the voice-preserving path: the Kokoro base-TTS call did not supply a concrete fallback voice for current pack behavior, the embedded chunk parser did not understand current `KPipeline.Result` objects (`audio` / `output.audio`), and the exception path wrote silent placeholder WAVs that still let the job report success.
 - 2026-03-06: Hardened the runtime and installer:
   - voice-preserving and neural Kokoro calls now use a deterministic fallback voice (`af_heart`),
@@ -52,4 +52,4 @@ Out of scope:
   - `dub_voice_preserving_v1` now fails when zero usable output segments were generated,
   - the WP-0029 smoke example now checks the report and rejects silent first-segment output,
   - neural/voice-preserving pack install now requires a real Kokoro warmup into the app-managed offline cache before reporting installed.
-- 2026-03-06: Verified with `cargo test` in `product/engine` and a clean-room successful `cargo run --example wp0029_smoke` on the Queen sample after deleting the smoke base directory (`tmp_smoke_wp0029`). Proof artifacts were written under `product/desktop/Build Target/tool_artifacts/wp_runs/WP-0075/manual_smoke_queen/`, including deliverables (`queen_dub_preview.mp4`, `queen_dub_preview.wav`, `queen_en.srt`, `queen_en.vtt`), `voice_preserving_manifest.json`, `tts_voice_preserving_report.json`, `voice_preserving_job_log.jsonl`, `ffprobe_mux_preview.json`, `audio_stats.json`, and `smoke_summary.md`.
+- 2026-03-06: Verified with `cargo test` in `product/engine` and a clean-room successful `cargo run --example wp0029_smoke` on the Queen sample after deleting the smoke base directory (`tmp_smoke_wp0029`). Proof artifacts were written under `product/desktop/build_target/tool_artifacts/wp_runs/WP-0075/manual_smoke_queen/`, including deliverables (`queen_dub_preview.mp4`, `queen_dub_preview.wav`, `queen_en.srt`, `queen_en.vtt`), `voice_preserving_manifest.json`, `tts_voice_preserving_report.json`, `voice_preserving_job_log.jsonl`, `ffprobe_mux_preview.json`, `audio_stats.json`, and `smoke_summary.md`.
