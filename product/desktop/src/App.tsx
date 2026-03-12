@@ -510,7 +510,12 @@ function App() {
             }}
             onOpenOptions={() => switchPage("options")}
           />
-          <SubtitleEditorPage key={editorItemId} itemId={editorItemId} visible={page === "localization"} />
+          <SubtitleEditorPage
+            key={editorItemId}
+            itemId={editorItemId}
+            visible={page === "localization"}
+            onOpenDiagnostics={() => switchPage("diagnostics")}
+          />
         </>
       ) : (
         <LocalizationStudioHome

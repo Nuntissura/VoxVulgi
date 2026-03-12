@@ -3,7 +3,7 @@
 ## Metadata
 - ID: WP-0144
 - Owner: Codex
-- Status: BACKLOG
+- Status: IN_PROGRESS
 - Created: 2026-03-12
 - Target milestone: Post-0.1.6 smoke regression recovery
 
@@ -40,3 +40,4 @@ Out of scope:
 ## Status updates
 
 - 2026-03-12: Created from smoke finding `ST-013`.
+- 2026-03-12: Cut the shared import-control gate so Media Library keeps the import/ASR block but Video Archiver no longer renders the Localization Studio ingest controls; awaiting operator smoke on the cleaned archive surface.

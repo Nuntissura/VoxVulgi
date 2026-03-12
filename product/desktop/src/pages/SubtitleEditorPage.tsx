@@ -907,7 +907,15 @@ function isEnglishLocalizationTrack(track: SubtitleTrackRow | null): boolean {
   return Boolean(track && track.kind === "translated" && track.lang === "en");
 }
 
-export function SubtitleEditorPage({ itemId, visible = true }: { itemId: string; visible?: boolean }) {
+export function SubtitleEditorPage({
+  itemId,
+  visible = true,
+  onOpenDiagnostics,
+}: {
+  itemId: string;
+  visible?: boolean;
+  onOpenDiagnostics?: () => void;
+}) {
   const pageActive = usePageActivity(visible);
   const videoRef = useRef<HTMLVideoElement | null>(null);
   const textRefs = useRef<Record<number, HTMLTextAreaElement | null>>({});
@@ -2693,6 +2701,93 @@ export function SubtitleEditorPage({ itemId, visible = true }: { itemId: string;
     voicePlanMissingSpeakers,
     voicePreservingPackStatus?.installed,
   ]);
+
+  const advancedLocalizationRows = useMemo(
+    () => [
+      {
+        id: "voice-plan",
+        title: "Voice plan and reusable voices",
+        ready: speakersInTrack.length > 0 && voicePlanMissingSpeakers.length === 0,
+        detail:
+          !translatedEnglishTrack
+            ? "Translate into English first, then label speakers."
+            : !speakersInTrack.length
+              ? "Run diarization so the reusable voice/template tools know which speakers to map."
+              : voicePlanMissingSpeakers.length
+                ? `Still missing speaker setup for: ${voicePlanMissingSpeakers.join(", ")}.`
+                : "Ready to assign saved templates, cast packs, and per-speaker render settings.",
+        buttons: [
+          { label: "Open voice plan", sectionId: "loc-voice-plan" },
+        ],
+      },
+      {
+        id: "backends",
+        title: "Backend strategy and experimental runs",
+        ready: Boolean(trackId),
+        detail: trackId
+          ? `${experimentalReadyAdapters.length} experimental backend adapter(s) are render-ready. Diagnostics is where adapter config, probe results, and render commands live.`
+          : "Load a subtitle track first to compare managed and experimental backends.",
+        buttons: [
+          { label: "Backend strategy", sectionId: "loc-backends" },
+          { label: "Open Diagnostics", action: onOpenDiagnostics },
+        ],
+      },
+      {
+        id: "benchmark",
+        title: "Benchmark lab and winner promotion",
+        ready: Boolean(trackId),
+        detail:
+          !trackId
+            ? "Load a subtitle track first."
+            : voiceBenchmarkReport
+              ? `Latest report compares ${voiceBenchmarkReport.candidate_count} candidate(s). Promotion buttons live in each candidate row for item plans, templates, and cast packs.`
+              : "Generate a benchmark report to unlock visible winner-promotion actions for plans, templates, and cast packs.",
+        buttons: [
+          { label: "Benchmark lab", sectionId: "loc-benchmark" },
+        ],
+      },
+      {
+        id: "batch",
+        title: "Batch dubbing and A/B preview",
+        ready: Boolean(trackId) && batchLibraryItems.length > 0,
+        detail:
+          !trackId
+            ? "Load a subtitle track first."
+            : `${batchSelectedItemIds.length} item(s) are currently selected for batch work. A/B preview is per-speaker; batch dubbing reuses the voice plan, template, and cast-pack choices above.`,
+        buttons: [
+          { label: "Batch dubbing", sectionId: "loc-batch" },
+          { label: "A/B preview", sectionId: "loc-ab" },
+        ],
+      },
+      {
+        id: "qc-artifacts",
+        title: "QC, reruns, and artifacts",
+        ready: Boolean(trackId),
+        detail:
+          !trackId
+            ? "Load a subtitle track first."
+            : qcReport
+              ? `QC report loaded with ${qcReport.summary?.issues_total ?? (Array.isArray(qcReport.issues) ? qcReport.issues.length : 0)} issue(s). Artifact reruns and logs stay in the Artifacts section.`
+              : "Generate QC to inspect timing, silence, and reference warnings. Artifact reruns, variants, manifests, and deliverables live in Artifacts.",
+        buttons: [
+          { label: "QC report", sectionId: "loc-qc" },
+          { label: "Artifacts", sectionId: "loc-artifacts" },
+        ],
+      },
+    ],
+    [
+      batchLibraryItems.length,
+      batchSelectedItemIds.length,
+      experimentalReadyAdapters.length,
+      onOpenDiagnostics,
+      qcReport,
+      speakersInTrack.length,
+      trackId,
+      translatedEnglishTrack,
+      voiceBenchmarkReport,
+      voicePlanMissingSpeakers,
+    ],
+  );
 
   function logDiagnosticsEvent(
     event: string,
@@ -5332,6 +5427,9 @@ export function SubtitleEditorPage({ itemId, visible = true }: { itemId: string;
           <button type="button" disabled={busy} onClick={() => scrollToLocalizationSection("loc-benchmark")}>
             Benchmark lab
           </button>
+          <button type="button" disabled={busy} onClick={() => scrollToLocalizationSection("loc-advanced")}>
+            Advanced tools
+          </button>
           <button type="button" disabled={busy} onClick={() => scrollToLocalizationSection("loc-batch")}>
             Batch dubbing
           </button>
@@ -5424,6 +5522,70 @@ export function SubtitleEditorPage({ itemId, visible = true }: { itemId: string;
               ))}
             </tbody>
           </table>
+        </div>
+      </div>
+
+      <div className="card" id="loc-advanced">
+        <h2>Advanced Tools</h2>
+        <div style={{ color: "#4b5563" }}>
+          These are the advanced localization surfaces that were easy to miss in the long page
+          flow. Use this index to jump directly to backend strategy, benchmarking, batch dubbing,
+          A/B preview, QC, and artifacts once the current item is open.
+        </div>
+        <div style={{ marginTop: 12, display: "flex", flexDirection: "column", gap: 10 }}>
+          {advancedLocalizationRows.map((row) => (
+            <div
+              key={row.id}
+              style={{
+                border: "1px solid #e5e7eb",
+                borderRadius: 10,
+                padding: "10px 12px",
+                display: "flex",
+                flexDirection: "column",
+                gap: 8,
+              }}
+            >
+              <div
+                style={{
+                  display: "flex",
+                  justifyContent: "space-between",
+                  gap: 12,
+                  alignItems: "center",
+                  flexWrap: "wrap",
+                }}
+              >
+                <div style={{ fontWeight: 600 }}>{row.title}</div>
+                <div
+                  style={{
+                    fontSize: 12,
+                    fontWeight: 600,
+                    color: row.ready ? "#166534" : "#92400e",
+                  }}
+                >
+                  {row.ready ? "Ready" : "Needs setup"}
+                </div>
+              </div>
+              <div style={{ fontSize: 12, opacity: 0.75 }}>{row.detail}</div>
+              <div className="row" style={{ marginTop: 0, flexWrap: "wrap" }}>
+                {row.buttons.map((button) => (
+                  <button
+                    key={`${row.id}-${button.label}`}
+                    type="button"
+                    disabled={busy || (!button.sectionId && !button.action)}
+                    onClick={() => {
+                      if (button.sectionId) {
+                        scrollToLocalizationSection(button.sectionId);
+                        return;
+                      }
+                      button.action?.();
+                    }}
+                  >
+                    {button.label}
+                  </button>
+                ))}
+              </div>
+            </div>
+          ))}
         </div>
       </div>
 
@@ -7628,6 +7790,13 @@ export function SubtitleEditorPage({ itemId, visible = true }: { itemId: string;
                 <div style={{ fontSize: 12, opacity: 0.85 }}>Experimental backend runs</div>
                 <button
                   type="button"
+                  disabled={busy || !onOpenDiagnostics}
+                  onClick={() => onOpenDiagnostics?.()}
+                >
+                  Open Diagnostics adapters
+                </button>
+                <button
+                  type="button"
                   disabled={
                     busy ||
                     experimentalRenderBusy ||
@@ -7964,6 +8133,10 @@ export function SubtitleEditorPage({ itemId, visible = true }: { itemId: string;
                 coverage, reference health, output health, and similarity-proxy signals. VoxVulgi
                 now archives immutable snapshots so you can compare runs over time instead of only
                 replacing the latest report.
+              </div>
+              <div style={{ marginTop: 6, fontSize: 12, opacity: 0.75 }}>
+                Promotion actions appear inside each candidate row below once a report exists:
+                item voice plan, selected voice template, and selected cast pack.
               </div>
               {voiceBenchmarkReport ? (
                 <div

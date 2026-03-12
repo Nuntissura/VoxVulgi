@@ -471,7 +471,7 @@ export function LibraryPage({ onOpenEditor, mode = "all" }: LibraryPageProps) {
   const showInstagramArchive = mode === "all" || mode === "instagram_archive";
   const showImageArchive = mode === "all" || mode === "image_archive";
   const showMediaLibrary = mode === "all" || mode === "media_library";
-  const showImportControls = showVideoIngest || showMediaLibrary;
+  const showImportControls = showMediaLibrary;
   const title =
     mode === "video_ingest"
       ? "Video Archiver"

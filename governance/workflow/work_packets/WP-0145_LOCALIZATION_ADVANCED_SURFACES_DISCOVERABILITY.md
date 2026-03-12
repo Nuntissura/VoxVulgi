@@ -3,7 +3,7 @@
 ## Metadata
 - ID: WP-0145
 - Owner: Codex
-- Status: BACKLOG
+- Status: IN_PROGRESS
 - Created: 2026-03-12
 - Target milestone: Post-0.1.6 smoke regression recovery
 
@@ -40,3 +40,4 @@ Out of scope:
 ## Status updates
 
 - 2026-03-12: Created from smoke findings `ST-035`, `ST-036`, `ST-037`, `ST-038`, `ST-039`, and `ST-040`.
+- 2026-03-12: Added an explicit Advanced Tools index near the top of Localization Studio, wired direct jumps into backend strategy, benchmarking, batch dubbing, A/B preview, QC, and artifacts, and exposed a direct Diagnostics handoff for experimental backend adapter setup; awaiting operator smoke on the revised path.
