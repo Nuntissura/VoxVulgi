@@ -3,7 +3,7 @@
 ## Metadata
 - ID: WP-0152
 - Owner: Codex
-- Status: BACKLOG
+- Status: DONE
 - Created: 2026-03-12
 - Target milestone: Post-0.1.6 localization-first recovery
 
@@ -43,3 +43,5 @@ Out of scope:
 ## Status updates
 
 - 2026-03-12: Created from `WP-0151` research findings as the next practical localization recovery step.
+- 2026-03-12: Implemented item-scoped generated speaker-reference bundles in the engine/Tauri/frontend path, plus apply-as-append/replace flows inside Localization Studio.
+- 2026-03-12: Verified with the staged `wp0150_localization_run_smoke` on the Queen sample after switching the smoke harness from manual reference injection to the new assisted-reference path.

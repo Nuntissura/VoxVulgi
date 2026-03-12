@@ -24,6 +24,7 @@ pub mod voice_backend_adapters;
 pub mod voice_backends;
 pub mod voice_benchmarks;
 pub mod voice_cast_packs;
+pub mod voice_reference_candidates;
 pub mod voice_cleanup;
 pub mod voice_library;
 pub mod voice_plans;

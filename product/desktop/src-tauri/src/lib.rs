@@ -12,8 +12,8 @@ use voxvulgi_engine::paths::AppPaths;
 use voxvulgi_engine::{
     config, db, diagnostics, instagram_subscriptions, jobs, library, speakers, subscriptions,
     subtitle_tracks, subtitles, tools, voice_backend_adapters, voice_backends, voice_benchmarks,
-    voice_cast_packs, voice_cleanup, voice_library, voice_plans, voice_reference_curation,
-    voice_templates,
+    voice_cast_packs, voice_cleanup, voice_library, voice_plans, voice_reference_candidates,
+    voice_reference_curation, voice_templates,
 };
 
 #[derive(Debug, Clone, serde::Deserialize)]
@@ -4050,6 +4050,78 @@ async fn voice_reference_curation_apply(
 
 #[tauri::command]
 #[allow(non_snake_case)]
+async fn voice_reference_candidates_generate(
+    state: State<'_, AppState>,
+    request: voice_reference_candidates::VoiceReferenceCandidateGenerationRequest,
+) -> Result<voice_reference_candidates::VoiceReferenceCandidateReport, String> {
+    let paths = state.paths.clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        voice_reference_candidates::generate_reference_candidates(&paths, request)
+            .map_err(|e| e.to_string())
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
+#[tauri::command]
+#[allow(non_snake_case)]
+async fn voice_reference_candidates_load(
+    state: State<'_, AppState>,
+    item_id: Option<String>,
+    itemId: Option<String>,
+    speaker_key: Option<String>,
+    speakerKey: Option<String>,
+) -> Result<Option<voice_reference_candidates::VoiceReferenceCandidateReport>, String> {
+    let paths = state.paths.clone();
+    let item_id = item_id
+        .or(itemId)
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty())
+        .ok_or_else(|| "missing required key itemId".to_string())?;
+    let speaker_key = speaker_key
+        .or(speakerKey)
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty());
+    tauri::async_runtime::spawn_blocking(move || {
+        voice_reference_candidates::load_reference_candidates(&paths, &item_id, speaker_key.as_deref())
+            .map_err(|e| e.to_string())
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
+#[tauri::command]
+#[allow(non_snake_case)]
+async fn voice_reference_candidates_apply(
+    state: State<'_, AppState>,
+    item_id: Option<String>,
+    itemId: Option<String>,
+    speaker_key: Option<String>,
+    speakerKey: Option<String>,
+    mode: Option<String>,
+) -> Result<speakers::ItemSpeakerSetting, String> {
+    let paths = state.paths.clone();
+    let item_id = item_id
+        .or(itemId)
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty())
+        .ok_or_else(|| "missing required key itemId".to_string())?;
+    let speaker_key = speaker_key
+        .or(speakerKey)
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty())
+        .ok_or_else(|| "missing required key speakerKey".to_string())?;
+    let mode = mode.unwrap_or_else(|| "append".to_string());
+    tauri::async_runtime::spawn_blocking(move || {
+        voice_reference_candidates::apply_reference_candidate(&paths, &item_id, &speaker_key, &mode)
+            .map_err(|e| e.to_string())
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
+#[tauri::command]
+#[allow(non_snake_case)]
 async fn item_voice_plan_get(
     state: State<'_, AppState>,
     item_id: Option<String>,
@@ -5885,6 +5957,9 @@ pub fn run() {
             voice_reference_curation_generate,
             voice_reference_curation_load,
             voice_reference_curation_apply,
+            voice_reference_candidates_generate,
+            voice_reference_candidates_load,
+            voice_reference_candidates_apply,
             item_voice_plan_get,
             item_voice_plan_upsert,
             item_voice_plan_delete,

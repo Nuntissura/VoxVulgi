@@ -340,6 +340,10 @@ Voice-preserving approach (core feature):
   - reference cleanup storage must use collision-safe speaker keys and stay backward-compatible with previously written cleanup manifests,
   - applying cleaned references must support non-destructive multi-reference reuse,
   - batch dubbing item selection must page through the full library and keep selections stable without hidden caps.
+- Current implementation now also includes item-scoped generated speaker-reference bundles:
+  - candidate clips are extracted from diarized source-media spans,
+  - the candidate bundle is stored under the current item's managed voice-reference area,
+  - the operator can apply it as append-or-replace into the current speaker settings before continuing the staged localization run.
 - Voice-backend modernization strategy:
   - keep the current OpenVoice V2 + Kokoro path as the managed default until benchmark evidence supports a change,
   - add a built-in backend catalog with descriptors for managed and experimental candidates,

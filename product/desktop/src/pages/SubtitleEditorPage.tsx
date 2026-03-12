@@ -378,6 +378,37 @@ type VoiceReferenceCleanupRecord = {
   created_at_ms: number;
 };
 
+type VoiceReferenceCandidateClip = {
+  segment_index: number;
+  start_ms: number;
+  end_ms: number;
+  duration_ms: number;
+  text_preview: string;
+  clip_path: string;
+  clip_exists: boolean;
+};
+
+type VoiceReferenceCandidateBundle = {
+  speaker_key: string;
+  candidate_path: string;
+  candidate_exists: boolean;
+  json_path: string;
+  clip_count: number;
+  total_duration_ms: number;
+  warnings: string[];
+  notes: string[];
+  clips: VoiceReferenceCandidateClip[];
+};
+
+type VoiceReferenceCandidateReport = {
+  schema_version: number;
+  generated_at_ms: number;
+  item_id: string;
+  track_id: string;
+  source_media_path: string;
+  bundles: VoiceReferenceCandidateBundle[];
+};
+
 type SpeakerRenderOverride = {
   speaker_key: string;
   tts_voice_id: string | null;
@@ -1144,6 +1175,11 @@ export function SubtitleEditorPage({
   const [voiceReferenceCurationReports, setVoiceReferenceCurationReports] = useState<
     Record<string, VoiceReferenceCurationReport | null>
   >({});
+  const [voiceReferenceCandidateBundles, setVoiceReferenceCandidateBundles] = useState<
+    Record<string, VoiceReferenceCandidateBundle | null>
+  >({});
+  const [voiceReferenceCandidateBusyKey, setVoiceReferenceCandidateBusyKey] =
+    useState<string | null>(null);
   const [voiceReferenceCurationBusyKey, setVoiceReferenceCurationBusyKey] =
     useState<string | null>(null);
   const [itemVoicePlan, setItemVoicePlan] = useState<ItemVoicePlan | null>(null);
@@ -1334,6 +1370,35 @@ export function SubtitleEditorPage({
     setSpeakerSettings(next);
     return next;
   }, [itemId]);
+
+  const loadVoiceReferenceCandidates = useCallback(
+    async (speakerKey?: string) => {
+      try {
+        const report = await invoke<VoiceReferenceCandidateReport | null>(
+          "voice_reference_candidates_load",
+          {
+            itemId,
+            speakerKey: trimOrNull(speakerKey),
+          },
+        );
+        if (!speakerKey) {
+          const next: Record<string, VoiceReferenceCandidateBundle | null> = {};
+          for (const bundle of report?.bundles ?? []) {
+            next[bundle.speaker_key] = bundle;
+          }
+          setVoiceReferenceCandidateBundles(next);
+        } else {
+          const bundle =
+            report?.bundles.find((value) => value.speaker_key === speakerKey) ?? null;
+          setVoiceReferenceCandidateBundles((prev) => ({ ...prev, [speakerKey]: bundle }));
+        }
+        return report;
+      } catch {
+        return null;
+      }
+    },
+    [itemId],
+  );
 
   const refreshVoiceTemplates = useCallback(async () => {
     const next = await invoke<VoiceTemplate[]>("voice_templates_list");
@@ -1527,6 +1592,7 @@ export function SubtitleEditorPage({
       refreshVoiceBackendStrategy(),
       refreshItemVoicePlan(),
       refreshLibraryItems(),
+      loadVoiceReferenceCandidates(),
       refreshOutputs(),
       refreshArtifacts(),
       refreshItemJobs(),
@@ -1553,6 +1619,7 @@ export function SubtitleEditorPage({
     refreshVoiceBackendStrategy,
     refreshItemVoicePlan,
     refreshLibraryItems,
+    loadVoiceReferenceCandidates,
     refreshOutputs,
     refreshArtifacts,
     refreshItemJobs,
@@ -4189,6 +4256,74 @@ export function SubtitleEditorPage({
     }
   }
 
+  async function generateVoiceReferenceCandidates(
+    speakerKey?: string,
+    missingOnly = false,
+  ) {
+    setError(null);
+    setVoiceReferenceCandidateBusyKey(speakerKey ?? "__all__");
+    try {
+      const targetTrackId = await ensureEnglishLocalizationTrackSelected();
+      const report = await invoke<VoiceReferenceCandidateReport>(
+        "voice_reference_candidates_generate",
+        {
+          request: {
+            item_id: itemId,
+            track_id: targetTrackId,
+            speaker_key: trimOrNull(speakerKey),
+            missing_only: missingOnly,
+          },
+        },
+      );
+      const next: Record<string, VoiceReferenceCandidateBundle | null> = {};
+      for (const bundle of report.bundles ?? []) {
+        next[bundle.speaker_key] = bundle;
+      }
+      setVoiceReferenceCandidateBundles((prev) =>
+        speakerKey ? { ...prev, ...next } : next,
+      );
+      const generatedCount = report.bundles.filter((bundle) => bundle.candidate_exists).length;
+      setNotice(
+        generatedCount
+          ? `Generated ${generatedCount} source-based speaker reference candidate${generatedCount === 1 ? "" : "s"}. Review and apply them in the voice plan.`
+          : "No usable source segments were found for generated speaker references.",
+      );
+      scrollToLocalizationSection("loc-voice-plan");
+      return report;
+    } catch (e) {
+      setError(String(e));
+      return null;
+    } finally {
+      setVoiceReferenceCandidateBusyKey(null);
+    }
+  }
+
+  async function applyVoiceReferenceCandidate(
+    speakerKey: string,
+    mode: "append" | "replace",
+  ) {
+    setError(null);
+    setVoiceReferenceCandidateBusyKey(speakerKey);
+    try {
+      await invoke<ItemSpeakerSetting>("voice_reference_candidates_apply", {
+        itemId,
+        speakerKey,
+        mode,
+      });
+      await refreshSpeakerSettings();
+      await loadVoiceReferenceCandidates(speakerKey);
+      setNotice(
+        mode === "replace"
+          ? `Applied generated reference for ${speakerKey} and replaced the current refs.`
+          : `Applied generated reference for ${speakerKey} and kept the current refs.`,
+      );
+    } catch (e) {
+      setError(String(e));
+    } finally {
+      setVoiceReferenceCandidateBusyKey(null);
+    }
+  }
+
   async function createVoiceLibraryFromSpeaker(kind: "memory" | "character", speakerKey: string) {
     const name = (kind === "memory" ? memoryProfileName : characterProfileName).trim();
     if (!name) {
@@ -5469,6 +5604,20 @@ export function SubtitleEditorPage({
           <button type="button" disabled={busy || localizationRunBusy} onClick={enqueueLocalizationRun}>
             Start / continue localization run
           </button>
+          <button
+            type="button"
+            disabled={
+              busy ||
+              localizationRunBusy ||
+              voiceReferenceCandidateBusyKey === "__all__" ||
+              !translatedEnglishTrack
+            }
+            onClick={() => {
+              generateVoiceReferenceCandidates(undefined, true).catch(() => undefined);
+            }}
+          >
+            Generate missing speaker refs
+          </button>
           <label style={{ display: "flex", alignItems: "center", gap: 8 }}>
             <input
               type="checkbox"
@@ -6228,7 +6377,8 @@ export function SubtitleEditorPage({
               <div className="row" style={{ alignItems: "center", gap: 10, flexWrap: "wrap" }}>
                 <div style={{ fontSize: 12, opacity: 0.85 }}>Voice profiles (voice-preserving)</div>
                 <div style={{ fontSize: 12, opacity: 0.6 }}>
-                  Pick a short reference clip per speaker (WAV recommended).
+                  Pick a short reference clip per speaker, or generate a first-pass candidate from
+                  the current source media after diarization.
                 </div>
               </div>
               <div className="row" style={{ marginTop: 8, alignItems: "center", gap: 10, flexWrap: "wrap" }}>
@@ -6284,6 +6434,7 @@ export function SubtitleEditorPage({
                     const setting = speakerSettingsByKey.get(speakerKey) ?? null;
                     const profilePaths = speakerProfilePaths(setting);
                     const primaryProfilePath = profilePaths[0] ?? "";
+                    const generatedCandidate = voiceReferenceCandidateBundles[speakerKey] ?? null;
                     const cleanupSourcePath =
                       trimOrNull(cleanupSourceBySpeaker[speakerKey]) ?? primaryProfilePath;
                     const profileLabel = profilePaths.length
@@ -6312,6 +6463,71 @@ export function SubtitleEditorPage({
                             Active refs: {profilePaths.map((path) => fileNameFromPath(path)).join(" | ")}
                           </div>
                         ) : null}
+                        {generatedCandidate ? (
+                          <div
+                            style={{
+                              border: "1px solid #e5e7eb",
+                              borderRadius: 8,
+                              padding: 8,
+                              display: "flex",
+                              flexDirection: "column",
+                              gap: 6,
+                            }}
+                          >
+                            <div className="row" style={{ alignItems: "center", gap: 8, flexWrap: "wrap" }}>
+                              <div style={{ fontSize: 12, opacity: 0.85 }}>Generated source ref</div>
+                              <button
+                                type="button"
+                                disabled={busy || !generatedCandidate.candidate_exists}
+                                onClick={() =>
+                                  openPathBestEffort(generatedCandidate.candidate_path).catch(
+                                    () => undefined,
+                                  )
+                                }
+                              >
+                                Open audio
+                              </button>
+                              <button
+                                type="button"
+                                disabled={busy || !generatedCandidate.candidate_exists}
+                                onClick={() =>
+                                  revealPath(generatedCandidate.candidate_path).catch((e) =>
+                                    setError(String(e)),
+                                  )
+                                }
+                              >
+                                Reveal
+                              </button>
+                            </div>
+                            <div style={{ fontSize: 12, opacity: 0.75 }}>
+                              {generatedCandidate.clip_count} clip(s),{" "}
+                              {Math.round(generatedCandidate.total_duration_ms / 100) / 10}s total
+                              {" | "}
+                              {fileNameFromPath(generatedCandidate.candidate_path) || "-"}
+                            </div>
+                            {generatedCandidate.notes.length ? (
+                              <div style={{ fontSize: 12, opacity: 0.75 }}>
+                                {generatedCandidate.notes.join(" ")}
+                              </div>
+                            ) : null}
+                            {generatedCandidate.warnings.length ? (
+                              <div style={{ fontSize: 12, opacity: 0.75 }}>
+                                Warnings: {generatedCandidate.warnings.join(" | ")}
+                              </div>
+                            ) : null}
+                            {generatedCandidate.clips.length ? (
+                              <div style={{ fontSize: 12, opacity: 0.75 }}>
+                                Source clips:{" "}
+                                {generatedCandidate.clips
+                                  .map(
+                                    (clip) =>
+                                      `#${clip.segment_index} ${Math.round(clip.duration_ms / 100) / 10}s`,
+                                  )
+                                  .join(" | ")}
+                              </div>
+                            ) : null}
+                          </div>
+                        ) : null}
                         {setting?.voice_profile_id ? (
                           <div style={{ fontSize: 12, opacity: 0.65 }}>
                             Applied library profile: <code>{setting.voice_profile_id}</code>
@@ -6337,6 +6553,52 @@ export function SubtitleEditorPage({
                             </select>
                           </label>
                         ) : null}
+                        <button
+                          type="button"
+                          disabled={voiceReferenceCandidateBusyKey === speakerKey}
+                          onClick={() => {
+                            generateVoiceReferenceCandidates(speakerKey).catch(() => undefined);
+                          }}
+                        >
+                          Generate ref from source
+                        </button>
+                        <button
+                          type="button"
+                          disabled={voiceReferenceCandidateBusyKey === speakerKey}
+                          onClick={() => {
+                            loadVoiceReferenceCandidates(speakerKey).catch(() => undefined);
+                          }}
+                        >
+                          Reload generated ref
+                        </button>
+                        <button
+                          type="button"
+                          disabled={
+                            voiceReferenceCandidateBusyKey === speakerKey ||
+                            !generatedCandidate?.candidate_exists
+                          }
+                          onClick={() => {
+                            applyVoiceReferenceCandidate(speakerKey, "append").catch(
+                              () => undefined,
+                            );
+                          }}
+                        >
+                          Apply generated ref
+                        </button>
+                        <button
+                          type="button"
+                          disabled={
+                            voiceReferenceCandidateBusyKey === speakerKey ||
+                            !generatedCandidate?.candidate_exists
+                          }
+                          onClick={() => {
+                            applyVoiceReferenceCandidate(speakerKey, "replace").catch(
+                              () => undefined,
+                            );
+                          }}
+                        >
+                          Replace with generated ref
+                        </button>
                         <button
                           type="button"
                           disabled={speakerSettingsBusy}

@@ -46,3 +46,4 @@ Out of scope:
 - 2026-03-12: Added an explicit `Start / continue localization run` surface in Localization Studio, stage-level run visibility, recent-item handoff from the Localization home surface, and visible localization root / deliverables-folder context in both the home surface and the current-item editor.
 - 2026-03-12: Tightened the staged run contract so the orchestrator now treats speaker labels and speaker/reference readiness as real checkpoints instead of silently skipping them.
 - 2026-03-12: Runtime research now confirms the remaining first-dub gap is speaker-reference acquisition; follow-on implementation is queued under `WP-0152` so this packet can focus on current-item handoff, visible progress, and output discoverability instead of another speculative backend swap.
+- 2026-03-12: `WP-0152` is now complete, so the remaining closeout here is the operator-facing handoff/progress/output visibility layer rather than the speaker-reference bridge itself.

@@ -7,7 +7,9 @@ use hound::{SampleFormat, WavReader};
 use serde::Serialize;
 use voxvulgi_engine::models::ModelStore;
 use voxvulgi_engine::paths::AppPaths;
-use voxvulgi_engine::{db, jobs, library, speakers, subtitle_tracks, tools, EngineError, Result};
+use voxvulgi_engine::{
+    db, jobs, library, subtitle_tracks, tools, voice_reference_candidates, EngineError, Result,
+};
 
 fn repo_root_from_engine_dir(engine_dir: &Path) -> PathBuf {
     engine_dir.join("..").join("..")
@@ -175,28 +177,6 @@ fn speaker_keys_for_track(paths: &AppPaths, track_id: &str) -> Result<Vec<String
     Ok(speakers)
 }
 
-fn extract_reference_wav(paths: &AppPaths, media_path: &Path, item_id: &str) -> Result<PathBuf> {
-    let ref_dir = paths.derived_item_dir(item_id).join("voice_profiles");
-    std::fs::create_dir_all(&ref_dir)?;
-    let ref_wav = ref_dir.join("ref_10s.wav");
-    let output = voxvulgi_engine::cmd::command(paths.ffmpeg_cmd())
-        .args(["-nostdin", "-y"])
-        .arg("-i")
-        .arg(media_path)
-        .args(["-vn", "-ac", "1", "-ar", "16000", "-t", "10"])
-        .arg(&ref_wav)
-        .output()
-        .map_err(|e| EngineError::InstallFailed(format!("ffmpeg extract ref failed: {e}")))?;
-    if !output.status.success() {
-        return Err(EngineError::InstallFailed(format!(
-            "ffmpeg extract ref failed (code={:?}): {}",
-            output.status.code(),
-            String::from_utf8_lossy(&output.stderr).trim()
-        )));
-    }
-    Ok(ref_wav)
-}
-
 #[derive(Serialize)]
 struct ProofSummary {
     item_id: String,
@@ -292,23 +272,25 @@ fn main() -> Result<()> {
         ));
     }
 
-    let ref_wav = extract_reference_wav(&paths, &canonical_media, &item.id)?;
+    let generated_refs = voice_reference_candidates::generate_reference_candidates(
+        &paths,
+        voice_reference_candidates::VoiceReferenceCandidateGenerationRequest {
+            item_id: item.id.clone(),
+            track_id: Some(translated_track.id.clone()),
+            speaker_key: None,
+            missing_only: false,
+        },
+    )?;
+    if generated_refs.bundles.len() != speaker_keys.len() {
+        return Err(EngineError::InstallFailed(format!(
+            "expected {} generated speaker reference bundle(s), got {}",
+            speaker_keys.len(),
+            generated_refs.bundles.len()
+        )));
+    }
     for speaker_key in &speaker_keys {
-        let _ = speakers::upsert_item_speaker_setting(
-            &paths,
-            &item.id,
-            speaker_key,
-            None,
-            None,
-            None,
-            Some(ref_wav.to_string_lossy().to_string()),
-            Some(vec![ref_wav.to_string_lossy().to_string()]),
-            None,
-            None,
-            None,
-            Some("clone".to_string()),
-            None,
-        )?;
+        let _ =
+            voice_reference_candidates::apply_reference_candidate(&paths, &item.id, speaker_key, "replace")?;
     }
 
     let second_run = jobs::enqueue_localization_run_v1(
