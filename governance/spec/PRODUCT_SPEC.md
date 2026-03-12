@@ -195,6 +195,7 @@ Initial language focus: **Korean + Japanese → English**.
 - The explicit `Start / continue localization run` action should advance automatically only until the next real operator checkpoint.
   - If speaker labels are missing, it should queue diarization rather than jumping straight into dubbing.
   - If speaker labels exist but the voice plan is incomplete, it should pause at the speaker/reference stage and tell the operator which speakers still need references or Standard TTS routing.
+  - Localization Studio should also provide an assisted bridge out of that checkpoint by letting operators generate candidate speaker-reference bundles from the current source media after diarization, review/apply them, and then continue the staged run without manual file hunting.
 - Direct speech-to-speech research systems may inform future R&D and benchmark lanes, but they should not replace the default shipped operator path until they meet the same packaging, inspectability, and operator-control standard as the staged cascade.
 - Provide mix controls:
   - ducking, loudness normalization, fade, noise reduction (optional).
@@ -296,6 +297,9 @@ Current implementation status:
 - Discoverable: operator-critical controls must be visible in the workflow where they are needed rather than buried behind long scroll chains or hidden state gates.
 - Localization Studio should surface a workflow/readiness summary that makes current track readiness, runtime readiness, and the main backend/benchmark/QC/artifact sections obvious before the operator starts deeper dubbing steps.
 - Localization Studio should not require a confusing bounce through Media Library just to understand current source, active run, or output state after import; the current item handoff and its output path should remain obvious inside Localization Studio.
+- Localization Studio should make the speaker-reference checkpoint survivable for first-run operators:
+  - when the run pauses for missing references, the app should surface a direct path to generate or apply reference candidates from the current media,
+  - the operator should not need to leave the current item flow just to build a first voice-cloned dub preview.
 - Ergonomic: dense archive/workflow panes should provide clear scrolling behavior and an explicit app-move affordance that does not conflict with text selection or scrollbar use.
 
 ## 8) Key UX Screens

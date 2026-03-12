@@ -126,6 +126,8 @@ Date: 2026-03-12
 - WP-0146: Repair the current broken move-window affordance without re-breaking selection, scrolling, or resize behavior. IN_PROGRESS.
 - WP-0147: Reconcile existing per-subscription archive folders and queue only missing media so migrated NAS-backed subscriptions can continue where they left off. BACKLOG.
 - WP-0148: Repair the frameless shell so maximize/fullscreen sizing matches the visible app surface and no invisible native window area blocks adjacent apps. IN_PROGRESS.
+- WP-0151: Document the current localization runtime failure and convert it into a research-backed reference-acquisition strategy instead of another blind backend swap. DONE.
+- WP-0152: Add assisted speaker-reference extraction from the current source media so the staged localization run can bridge the voice-plan checkpoint into a first real dubbed preview. BACKLOG.
 - WP-0095: Re-run the manual app smoke after the regression tranche lands. BLOCKED until the above packets are closed.
 
 ## Phase 0 - Decisions (1-2 days)

@@ -308,6 +308,11 @@ Phase 2 preview implementation notes (current):
   - translated English tracks without speaker labels should continue to diarization first,
   - translated English tracks with missing cloned-speaker references should stop at the voice-plan checkpoint with explicit missing-speaker notes,
   - once the voice plan is ready, dubbing can continue through mix and mux.
+- The voice-plan checkpoint should expose an assisted reference-acquisition lane:
+  - use diarized subtitle spans and source media audio to build candidate per-speaker reference bundles,
+  - keep those candidates in item-managed voice-reference storage,
+  - require explicit operator apply before they become active references,
+  - preserve any existing manual multi-reference state unless the operator chooses to replace it.
 - Direct speech-to-speech systems (for example SeamlessExpressive-, Translatotron-, or TransVIP-style families) are useful research references, but they should remain future R&D or benchmark lanes rather than the default shipped path until they satisfy local packaging, operator-control, and artifact-inspection requirements at the same level as the staged cascade.
 
 Voice-preserving approach (core feature):
