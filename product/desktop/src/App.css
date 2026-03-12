@@ -60,9 +60,24 @@ body {
 
 #root {
   display: flex;
-  justify-content: center;
   align-items: stretch;
+  justify-content: stretch;
+  padding: 0;
+}
+
+.shell-host {
+  width: 100%;
+  height: 100%;
+  display: flex;
+  align-items: stretch;
+  justify-content: center;
   padding: 8px;
+  transition: padding 140ms ease;
+}
+
+.shell-host-maximized,
+.shell-host-fullscreen {
+  padding: 0;
 }
 
 h1 {
@@ -123,6 +138,27 @@ code {
     inset 0 1px 0 rgba(255, 255, 255, 0.92),
     inset 0 -1px 0 rgba(108, 117, 128, 0.5),
     0 30px 52px rgba(18, 22, 28, 0.34);
+}
+
+.app-shell-maximized,
+.app-shell-fullscreen {
+  width: 100%;
+  max-width: none;
+  min-height: 100%;
+  border-radius: 0;
+  border-left: 0;
+  border-right: 0;
+}
+
+.app-shell-maximized::before,
+.app-shell-fullscreen::before {
+  inset: 0;
+  border-radius: 0;
+}
+
+.app-shell-maximized::after,
+.app-shell-fullscreen::after {
+  border-radius: 0;
 }
 
 .app-shell::before {
@@ -187,9 +223,9 @@ code {
 }
 
 .topbar-main {
-  display: flex;
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr) auto;
   align-items: center;
-  justify-content: space-between;
   gap: 12px;
   width: 100%;
 }
@@ -233,17 +269,31 @@ code {
   line-height: 1;
 }
 
-.topbar-actions {
+.topbar-center {
   display: flex;
   align-items: center;
   gap: 10px;
-  flex-wrap: wrap;
+  min-width: 0;
+}
+
+.topbar-center .nav {
+  flex: 1 1 auto;
+}
+
+.topbar-chrome {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 8px;
+  justify-self: end;
+  min-width: max-content;
 }
 
 .nav {
   display: flex;
   flex-wrap: wrap;
   gap: 8px;
+  min-width: 0;
 }
 
 .window-controls {
@@ -664,23 +714,37 @@ img {
     padding: 8px;
   }
 
+  .shell-host {
+    padding: 6px;
+  }
+
+  .shell-host-maximized,
+  .shell-host-fullscreen {
+    padding: 0;
+  }
+
   .topbar {
     padding: 10px;
   }
 
   .topbar-main {
-    flex-direction: column;
-    align-items: flex-start;
+    grid-template-columns: 1fr;
+    align-items: stretch;
   }
 
   .topbar-leading {
     width: 100%;
-    justify-content: space-between;
   }
 
-  .topbar-actions {
+  .topbar-center {
     width: 100%;
     justify-content: space-between;
+    flex-wrap: wrap;
+  }
+
+  .topbar-chrome {
+    width: 100%;
+    justify-content: flex-end;
   }
 
   .content {

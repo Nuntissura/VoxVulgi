@@ -3,7 +3,7 @@
 ## Metadata
 - ID: WP-0148
 - Owner: Codex
-- Status: BACKLOG
+- Status: IN_PROGRESS
 - Created: 2026-03-12
 - Target milestone: Post-0.1.6 smoke regression recovery
 
@@ -45,3 +45,4 @@ Out of scope:
 
 - 2026-03-12: Created from operator feedback that the frameless shell still occupies an invisible bounding box, breaking maximize/fullscreen correctness and blocking interaction with adjacent apps.
 - 2026-03-12: Expanded from operator screenshot feedback that the shell-control cluster also drifts away from the intended top-right position.
+- 2026-03-12: Added frontend shell-window mode tracking so maximized/fullscreen states switch the visible shell from centered floating chassis mode to edge-aligned full-surface mode; awaiting operator side-by-side validation against the invisible-click-block regression.

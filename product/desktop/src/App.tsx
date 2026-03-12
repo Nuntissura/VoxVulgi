@@ -82,6 +82,7 @@ type HomeLibraryItem = {
 };
 
 type ResizeDirection = "East" | "North" | "NorthEast" | "NorthWest" | "South" | "SouthEast" | "SouthWest" | "West";
+type ShellWindowMode = "floating" | "maximized" | "fullscreen";
 
 const ACTIVE_PAGE_KEY = "voxvulgi.v1.shell.active_page";
 
@@ -327,6 +328,7 @@ function LocalizationStudioHome({
 
 function App() {
   const initialPage = parseStoredPage(safeLocalStorageGet(ACTIVE_PAGE_KEY));
+  const currentWindow = useMemo(() => getCurrentWindow(), []);
   const [page, setPage] = useState<AppPage>(initialPage);
   const [visitedPages, setVisitedPages] = useState<Record<AppPage, boolean>>(() => ({
     [initialPage]: true,
@@ -335,13 +337,53 @@ function App() {
   const [safeMode, setSafeMode] = useState<SafeModeStatus | null>(null);
   const [startup, setStartup] = useState<StartupStatus | null>(null);
   const [startupDetailsOpen, setStartupDetailsOpen] = useState(false);
+  const [shellWindowMode, setShellWindowMode] = useState<ShellWindowMode>("floating");
   const desktopActivity = useDesktopActivity();
+
+  const refreshShellWindowMode = useCallback(async () => {
+    try {
+      const [isFullscreen, isMaximized] = await Promise.all([
+        currentWindow.isFullscreen(),
+        currentWindow.isMaximized(),
+      ]);
+      setShellWindowMode(isFullscreen ? "fullscreen" : isMaximized ? "maximized" : "floating");
+    } catch {
+      // Ignore shell window state read errors.
+    }
+  }, [currentWindow]);
 
   useEffect(() => {
     invoke<SafeModeStatus>("safe_mode_status")
       .then((status) => setSafeMode(status))
       .catch(() => undefined);
   }, []);
+
+  useEffect(() => {
+    let disposed = false;
+    const unlistenFns: Array<() => void> = [];
+    const scheduleRefresh = () => {
+      if (disposed) return;
+      void refreshShellWindowMode();
+    };
+
+    void refreshShellWindowMode();
+
+    void (async () => {
+      try {
+        unlistenFns.push(await currentWindow.onResized(scheduleRefresh));
+        unlistenFns.push(await currentWindow.onScaleChanged(scheduleRefresh));
+      } catch {
+        // Ignore window listener registration errors.
+      }
+    })();
+
+    return () => {
+      disposed = true;
+      for (const unlisten of unlistenFns) {
+        unlisten();
+      }
+    };
+  }, [currentWindow, refreshShellWindowMode]);
 
   useEffect(() => {
     safeLocalStorageSet(ACTIVE_PAGE_KEY, page);
@@ -393,15 +435,19 @@ function App() {
 
   async function startWindowDrag() {
     try {
-      await getCurrentWindow().startDragging();
+      await currentWindow.startDragging();
     } catch {
-      // Ignore window API errors.
+      try {
+        await invoke("window_start_drag");
+      } catch {
+        // Ignore window API errors.
+      }
     }
   }
 
   async function startWindowResize(direction: ResizeDirection) {
     try {
-      await getCurrentWindow().startResizeDragging(direction);
+      await currentWindow.startResizeDragging(direction);
     } catch {
       // Ignore window API errors.
     }
@@ -418,6 +464,7 @@ function App() {
   async function toggleMaximizeWindow() {
     try {
       await invoke("window_toggle_maximize");
+      await refreshShellWindowMode();
     } catch {
       // Ignore window API errors.
     }
@@ -540,124 +587,127 @@ function App() {
   const startupPctLabel = startup ? `${Math.round((startup.progress_pct ?? 0) * 100)}%` : "-";
 
   return (
-    <div className="app-shell">
-      <header className="topbar">
-        <div className="topbar-main">
-          <div className="topbar-leading">
-            <button
-              type="button"
-              className="move-handle"
-              title="Move window"
-              aria-label="Move window"
-              onPointerDown={(e) => {
-                if (e.button !== 0) return;
-                e.preventDefault();
-                e.stopPropagation();
-                void startWindowDrag();
-              }}
-              onDoubleClick={(e) => {
-                e.preventDefault();
-                e.stopPropagation();
-                void toggleMaximizeWindow();
-              }}
-            >
-              <span className="move-handle-glyph" aria-hidden="true">
-                ::::::
-              </span>
-              <span>Move window</span>
-            </button>
-            <div className="brand">VoxVulgi</div>
-          </div>
-          <div className="topbar-actions">
-            {startupBusy ? (
+    <div className={`shell-host shell-host-${shellWindowMode}`}>
+      <div className={`app-shell app-shell-${shellWindowMode}`}>
+        <header className="topbar">
+          <div className="topbar-main">
+            <div className="topbar-leading">
+              <div className="brand">VoxVulgi</div>
+            </div>
+            <div className="topbar-center">
+              {startupBusy ? (
+                <button
+                  type="button"
+                  className="startup-pill"
+                  data-no-drag="true"
+                  onClick={() => setStartupDetailsOpen(true)}
+                  title="Show startup loading details"
+                >
+                  Loading {startupPctLabel}
+                </button>
+              ) : null}
+              <nav className="nav" data-no-drag="true">
+                <button
+                  className={page === "localization" ? "active" : ""}
+                  onClick={() => switchPage("localization")}
+                  type="button"
+                >
+                  Localization Studio
+                </button>
+                <button
+                  className={page === "video_ingest" ? "active" : ""}
+                  onClick={() => switchPage("video_ingest")}
+                  type="button"
+                >
+                  Video Archiver
+                </button>
+                <button
+                  className={page === "instagram_archive" ? "active" : ""}
+                  onClick={() => switchPage("instagram_archive")}
+                  type="button"
+                >
+                  Instagram Archiver
+                </button>
+                <button
+                  className={page === "image_archive" ? "active" : ""}
+                  onClick={() => switchPage("image_archive")}
+                  type="button"
+                >
+                  Image Archive
+                </button>
+                <button
+                  className={page === "media_library" ? "active" : ""}
+                  onClick={() => switchPage("media_library")}
+                  type="button"
+                >
+                  Media Library
+                </button>
+                <button
+                  className={page === "jobs" ? "active" : ""}
+                  onClick={() => switchPage("jobs")}
+                  type="button"
+                >
+                  Jobs/Queue
+                </button>
+                <button
+                  className={page === "diagnostics" ? "active" : ""}
+                  onClick={() => switchPage("diagnostics")}
+                  type="button"
+                >
+                  Diagnostics
+                </button>
+                <button
+                  className={page === "options" ? "active" : ""}
+                  onClick={() => switchPage("options")}
+                  type="button"
+                >
+                  Options
+                </button>
+              </nav>
+            </div>
+            <div className="topbar-chrome">
               <button
                 type="button"
-                className="startup-pill"
-                data-no-drag="true"
-                onClick={() => setStartupDetailsOpen(true)}
-                title="Show startup loading details"
+                className="move-handle"
+                data-tauri-drag-region
+                title="Move window"
+                aria-label="Move window"
+                onMouseDown={(e) => {
+                  if (e.button !== 0) return;
+                  e.stopPropagation();
+                  void startWindowDrag();
+                }}
+                onDoubleClick={(e) => {
+                  e.preventDefault();
+                  e.stopPropagation();
+                  void toggleMaximizeWindow();
+                }}
               >
-                Loading {startupPctLabel}
+                <span className="move-handle-glyph" aria-hidden="true">
+                  ::::::
+                </span>
+                <span>Move window</span>
               </button>
-            ) : null}
-            <nav className="nav" data-no-drag="true">
-              <button
-                className={page === "localization" ? "active" : ""}
-                onClick={() => switchPage("localization")}
-                type="button"
-              >
-                Localization Studio
-              </button>
-              <button
-                className={page === "video_ingest" ? "active" : ""}
-                onClick={() => switchPage("video_ingest")}
-                type="button"
-              >
-                Video Archiver
-              </button>
-              <button
-                className={page === "instagram_archive" ? "active" : ""}
-                onClick={() => switchPage("instagram_archive")}
-                type="button"
-              >
-                Instagram Archiver
-              </button>
-              <button
-                className={page === "image_archive" ? "active" : ""}
-                onClick={() => switchPage("image_archive")}
-                type="button"
-              >
-                Image Archive
-              </button>
-              <button
-                className={page === "media_library" ? "active" : ""}
-                onClick={() => switchPage("media_library")}
-                type="button"
-              >
-                Media Library
-              </button>
-              <button
-                className={page === "jobs" ? "active" : ""}
-                onClick={() => switchPage("jobs")}
-                type="button"
-              >
-                Jobs/Queue
-              </button>
-              <button
-                className={page === "diagnostics" ? "active" : ""}
-                onClick={() => switchPage("diagnostics")}
-                type="button"
-              >
-                Diagnostics
-              </button>
-              <button
-                className={page === "options" ? "active" : ""}
-                onClick={() => switchPage("options")}
-                type="button"
-              >
-                Options
-              </button>
-            </nav>
-            <div className="window-controls" data-no-drag="true">
-              <button className="win-btn" type="button" onClick={minimizeWindow} title="Minimize">
-                &#x2212;
-              </button>
-              <button
-                className="win-btn"
-                type="button"
-                onClick={toggleMaximizeWindow}
-                title="Maximize / Restore"
-              >
-                &#x25A1;
-              </button>
-              <button className="win-btn danger" type="button" onClick={closeWindow} title="Close">
-                &#x2715;
-              </button>
+              <div className="window-controls" data-no-drag="true">
+                <button className="win-btn" type="button" onClick={minimizeWindow} title="Minimize">
+                  &#x2212;
+                </button>
+                <button
+                  className="win-btn"
+                  type="button"
+                  onClick={toggleMaximizeWindow}
+                  title="Maximize / Restore"
+                >
+                  &#x25A1;
+                </button>
+                <button className="win-btn danger" type="button" onClick={closeWindow} title="Close">
+                  &#x2715;
+                </button>
+              </div>
             </div>
           </div>
-        </div>
-      </header>
-      <main className="content" data-no-drag="true">
+        </header>
+        <main className="content" data-no-drag="true">
         {safeMode?.enabled ? (
           <div className="card">
             <strong>Safe Mode is ON.</strong> Startup auto-refresh is disabled and background jobs
@@ -758,18 +808,18 @@ function App() {
             ))}
           </div>
         </Suspense>
-      </main>
-      {startupDetailsOpen ? (
-        <div
-          className="shell-overlay"
-          data-no-drag="true"
-          onClick={() => setStartupDetailsOpen(false)}
-        >
+        </main>
+        {startupDetailsOpen ? (
           <div
-            className="shell-modal card"
+            className="shell-overlay"
             data-no-drag="true"
-            onClick={(e) => e.stopPropagation()}
+            onClick={() => setStartupDetailsOpen(false)}
           >
+            <div
+              className="shell-modal card"
+              data-no-drag="true"
+              onClick={(e) => e.stopPropagation()}
+            >
             <h2>Startup loading details</h2>
             <div style={{ color: "#4b5563", marginBottom: 10 }}>
               Use this when a feature looks blocked while local tools/models are still hydrating.
@@ -840,19 +890,24 @@ function App() {
                 Close
               </button>
             </div>
+            </div>
           </div>
-        </div>
-      ) : null}
-      <div
-        className="resize-handle resize-handle-se"
-        data-no-drag="true"
-        onPointerDown={(e) => {
-          if (e.button !== 0) return;
-          e.preventDefault();
-          e.stopPropagation();
-          void startWindowResize("SouthEast");
-        }}
-      />
+        ) : null}
+        {shellWindowMode === "floating" ? (
+          <div
+            className="resize-handle resize-handle-se"
+            data-no-drag="true"
+            onPointerDown={(e) => {
+              if (e.button !== 0) return;
+              e.preventDefault();
+              e.stopPropagation();
+              void startWindowResize("SouthEast");
+            }}
+            title="Resize window"
+            aria-hidden="true"
+          />
+        ) : null}
+      </div>
     </div>
   );
 }

@@ -3,7 +3,7 @@
 ## Metadata
 - ID: WP-0146
 - Owner: Codex
-- Status: BACKLOG
+- Status: IN_PROGRESS
 - Created: 2026-03-12
 - Target milestone: Post-0.1.6 smoke regression recovery
 
@@ -42,3 +42,4 @@ Out of scope:
 
 - 2026-03-12: Created from smoke finding `ST-051`.
 - 2026-03-12: Expanded from operator screenshot feedback that the move affordance and window controls drifted away from the intended top-right chrome cluster.
+- 2026-03-12: Restored the move affordance to the top-right chrome cluster, added explicit shell-window mode tracking, and switched the handle to a Tauri drag-region plus direct drag-call hybrid pending operator smoke confirmation.

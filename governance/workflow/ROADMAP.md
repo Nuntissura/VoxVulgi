@@ -123,9 +123,9 @@ Date: 2026-03-12
 - WP-0150: Add installer-state localization runtime proof hardening so the core dub flow is not considered fixed without visible source/artifact/export evidence. DONE.
 - WP-0144: Remove leftover Localization Studio controls from Video Archiver and restore the intended archive-only IA boundary. BACKLOG.
 - WP-0145: Make benchmark, backend, QC, rerun, cleanup, and batch-dubbing surfaces discoverable enough for normal operator use. BACKLOG.
-- WP-0146: Repair the current broken move-window affordance without re-breaking selection, scrolling, or resize behavior. BACKLOG.
+- WP-0146: Repair the current broken move-window affordance without re-breaking selection, scrolling, or resize behavior. IN_PROGRESS.
 - WP-0147: Reconcile existing per-subscription archive folders and queue only missing media so migrated NAS-backed subscriptions can continue where they left off. BACKLOG.
-- WP-0148: Repair the frameless shell so maximize/fullscreen sizing matches the visible app surface and no invisible native window area blocks adjacent apps. BACKLOG.
+- WP-0148: Repair the frameless shell so maximize/fullscreen sizing matches the visible app surface and no invisible native window area blocks adjacent apps. IN_PROGRESS.
 - WP-0095: Re-run the manual app smoke after the regression tranche lands. BLOCKED until the above packets are closed.
 
 ## Phase 0 - Decisions (1-2 days)
