@@ -990,15 +990,15 @@ function App() {
               </nav>
             </div>
             <div className="topbar-chrome">
-              <button
-                type="button"
+              <div
                 className="move-handle"
-                data-tauri-drag-region
                 title="Move window"
                 aria-label="Move window"
-                draggable={false}
-                onPointerDown={(e) => {
-                  if (e.pointerType === "mouse" && e.button !== 0) return;
+                role="button"
+                tabIndex={0}
+                onMouseDown={(e) => {
+                  if (e.buttons !== 1) return;
+                  e.preventDefault();
                   e.stopPropagation();
                   void startWindowDrag();
                 }}
@@ -1007,13 +1007,19 @@ function App() {
                   e.stopPropagation();
                   void toggleMaximizeWindow();
                 }}
+                onKeyDown={(e) => {
+                  if (e.key === "Enter" || e.key === " ") {
+                    e.preventDefault();
+                    void toggleMaximizeWindow();
+                  }
+                }}
               >
-                <span className="move-handle-glyph" data-tauri-drag-region aria-hidden="true">
+                <span className="move-handle-glyph" aria-hidden="true">
                   ::::::
                 </span>
-                <span data-tauri-drag-region>Move window</span>
-              </button>
-              <div className="window-controls" data-no-drag="true">
+                <span>Move window</span>
+              </div>
+              <div className="window-controls" data-no-drag="true" data-tauri-drag-region="false">
                 <button className="win-btn" type="button" onClick={minimizeWindow} title="Minimize">
                   &#x2212;
                 </button>
