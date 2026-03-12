@@ -1180,10 +1180,17 @@ mod tests {
             .find(|root| root.key == "localization")
             .expect("localization root");
 
-        assert!(video.current_dir.ends_with("storage\\video") || video.current_dir.ends_with("storage/video"));
         assert!(
-            localization.current_dir.ends_with("storage\\localization\\en")
-                || localization.current_dir.ends_with("storage/localization/en")
+            video.current_dir.ends_with("storage\\video")
+                || video.current_dir.ends_with("storage/video")
+        );
+        assert!(
+            localization
+                .current_dir
+                .ends_with("storage\\localization\\en")
+                || localization
+                    .current_dir
+                    .ends_with("storage/localization/en")
         );
     }
 
@@ -1213,7 +1220,10 @@ mod tests {
             .iter()
             .find(|root| root.key == "video")
             .expect("video root");
-        assert_eq!(video.override_dir.as_deref(), Some(override_dir.to_string_lossy().as_ref()));
+        assert_eq!(
+            video.override_dir.as_deref(),
+            Some(override_dir.to_string_lossy().as_ref())
+        );
         assert_eq!(video.current_dir, override_dir.to_string_lossy());
     }
 
@@ -1293,8 +1303,11 @@ mod tests {
         if let Ok(proof_dir) = std::env::var("VOXVULGI_WP0135_PROOF_DIR") {
             let proof_dir = std::path::PathBuf::from(proof_dir);
             std::fs::create_dir_all(&proof_dir).expect("create proof dir");
-            std::fs::copy(&export.json_path, proof_dir.join("sample_app_state_snapshot.json"))
-                .expect("copy json proof");
+            std::fs::copy(
+                &export.json_path,
+                proof_dir.join("sample_app_state_snapshot.json"),
+            )
+            .expect("copy json proof");
             std::fs::copy(
                 &export.markdown_path,
                 proof_dir.join("sample_app_state_snapshot.md"),
@@ -1369,12 +1382,16 @@ fn build_download_dir_status(paths: &AppPaths) -> Result<DownloadDirStatus, Stri
         ensure_media_output_layout(&current_dir)?;
     }
     let exists = current_dir.exists() && current_dir.is_dir();
-    let feature_roots_config = config::load_feature_storage_roots_config(paths).map_err(|e| e.to_string())?;
+    let feature_roots_config =
+        config::load_feature_storage_roots_config(paths).map_err(|e| e.to_string())?;
     let feature_roots = [
         ("video", feature_roots_config.video_root.clone()),
         ("instagram", feature_roots_config.instagram_root.clone()),
         ("images", feature_roots_config.image_root.clone()),
-        ("localization", feature_roots_config.localization_root.clone()),
+        (
+            "localization",
+            feature_roots_config.localization_root.clone(),
+        ),
     ]
     .into_iter()
     .map(|(key, override_value)| {
@@ -1695,7 +1712,8 @@ fn build_job_queue_snapshot(paths: &AppPaths) -> Result<DiagnosticsJobQueueSnaps
     db::migrate(&conn).map_err(|e| e.to_string())?;
     let total = diagnostics_count_value(&conn, "SELECT COUNT(*) FROM job")?;
     let queued = diagnostics_count_value(&conn, "SELECT COUNT(*) FROM job WHERE status='queued'")?;
-    let running = diagnostics_count_value(&conn, "SELECT COUNT(*) FROM job WHERE status='running'")?;
+    let running =
+        diagnostics_count_value(&conn, "SELECT COUNT(*) FROM job WHERE status='running'")?;
     let succeeded =
         diagnostics_count_value(&conn, "SELECT COUNT(*) FROM job WHERE status='succeeded'")?;
     let failed = diagnostics_count_value(&conn, "SELECT COUNT(*) FROM job WHERE status='failed'")?;
@@ -1853,7 +1871,11 @@ fn build_feature_health_rows(
             },
             detail: format!(
                 "Python venv={} / neural pack={} / voice pack={}",
-                if python.venv_exists { "ready" } else { "missing" },
+                if python.venv_exists {
+                    "ready"
+                } else {
+                    "missing"
+                },
                 if neural.installed { "ready" } else { "missing" },
                 if voice_preserving.installed {
                     "ready"
@@ -1893,7 +1915,10 @@ fn render_diagnostics_app_state_snapshot_markdown(
     md.push_str("# VoxVulgi app-state snapshot\n\n");
     md.push_str(&format!(
         "- Generated: `{}`\n- App: `{} {}`\n- Engine: `{}`\n\n",
-        snapshot.generated_at_ms, snapshot.app.app_name, snapshot.app.app_version, snapshot.app.engine_version
+        snapshot.generated_at_ms,
+        snapshot.app.app_name,
+        snapshot.app.app_version,
+        snapshot.app.engine_version
     ));
 
     md.push_str("## Startup\n\n");
@@ -2044,8 +2069,7 @@ fn build_diagnostics_app_state_snapshot(
     let tts_neural_local_v1 = tools::tts_neural_local_v1_pack_status(paths);
     let tts_voice_preserving_local_v1 = tools::tts_voice_preserving_local_v1_pack_status(paths);
     let voice_backend_catalog = voice_backends::backend_catalog(paths);
-    let voice_backend_recommendation =
-        voice_backends::recommend_backend(paths, Default::default());
+    let voice_backend_recommendation = voice_backends::recommend_backend(paths, Default::default());
     let voice_backend_adapter_count = voice_backend_adapters::list_voice_backend_adapters(paths)
         .map(|rows| rows.len())
         .unwrap_or(0);
@@ -3333,7 +3357,8 @@ fn downloads_feature_root_set(
     }
 
     let normalized = dir.canonicalize().unwrap_or(dir);
-    let mut roots = config::load_feature_storage_roots_config(&state.paths).map_err(|e| e.to_string())?;
+    let mut roots =
+        config::load_feature_storage_roots_config(&state.paths).map_err(|e| e.to_string())?;
     set_feature_root_override(
         &mut roots,
         &feature,
@@ -3353,7 +3378,8 @@ fn downloads_feature_root_use_default(
     if feature.is_empty() {
         return Err("feature is empty".to_string());
     }
-    let mut roots = config::load_feature_storage_roots_config(&state.paths).map_err(|e| e.to_string())?;
+    let mut roots =
+        config::load_feature_storage_roots_config(&state.paths).map_err(|e| e.to_string())?;
     set_feature_root_override(&mut roots, &feature, None)?;
     config::save_feature_storage_roots_config(&state.paths, &roots).map_err(|e| e.to_string())?;
 
@@ -5540,6 +5566,14 @@ fn jobs_enqueue_localization_batch_v1(
 }
 
 #[tauri::command]
+fn jobs_enqueue_localization_run_v1(
+    state: State<'_, AppState>,
+    request: jobs::LocalizationRunRequest,
+) -> Result<jobs::LocalizationRunQueueSummary, String> {
+    jobs::enqueue_localization_run_v1(&state.paths, request).map_err(|e| e.to_string())
+}
+
+#[tauri::command]
 fn jobs_enqueue_voice_ab_preview_v1(
     state: State<'_, AppState>,
     request: jobs::VoiceAbPreviewRequest,
@@ -5811,6 +5845,7 @@ pub fn run() {
             jobs_enqueue_qc_report_v1,
             jobs_enqueue_export_pack_v1,
             jobs_enqueue_localization_batch_v1,
+            jobs_enqueue_localization_run_v1,
             jobs_enqueue_voice_ab_preview_v1,
             jobs_enqueue_translate_local,
             jobs_cleanup_preview,

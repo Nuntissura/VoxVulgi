@@ -192,6 +192,9 @@ Initial language focus: **Korean + Japanese → English**.
   - background-aware mix,
   - MP4 mux/export,
   - explicit review of outputs.
+- The explicit `Start / continue localization run` action should advance automatically only until the next real operator checkpoint.
+  - If speaker labels are missing, it should queue diarization rather than jumping straight into dubbing.
+  - If speaker labels exist but the voice plan is incomplete, it should pause at the speaker/reference stage and tell the operator which speakers still need references or Standard TTS routing.
 - Direct speech-to-speech research systems may inform future R&D and benchmark lanes, but they should not replace the default shipped operator path until they meet the same packaging, inspectability, and operator-control standard as the staged cascade.
 - Provide mix controls:
   - ducking, loudness normalization, fade, noise reduction (optional).

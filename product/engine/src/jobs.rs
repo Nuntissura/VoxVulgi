@@ -1,8 +1,8 @@
 use crate::paths::AppPaths;
 use crate::{
-    asr, cmd, config, db, ffmpeg, image_batch, library, persistence, speakers, subscriptions, subtitle_tracks,
-    subtitles, tools, translate, voice_backend_adapters, voice_cast_packs, voice_plans,
-    voice_templates, EngineError, Result,
+    asr, cmd, config, db, ffmpeg, image_batch, library, persistence, speakers, subscriptions,
+    subtitle_tracks, subtitles, tools, translate, voice_backend_adapters, voice_cast_packs,
+    voice_plans, voice_templates, EngineError, Result,
 };
 use regex::Regex;
 use rusqlite::params;
@@ -282,6 +282,8 @@ struct AsrLocalParams {
     model_id: String,
     #[serde(default)]
     batch_on_import: bool,
+    #[serde(default)]
+    pipeline: Option<LocalizationPipelineOptions>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -303,6 +305,8 @@ struct DiarizeLocalV1Params {
     backend: Option<String>,
     #[serde(default)]
     batch_on_import: bool,
+    #[serde(default)]
+    pipeline: Option<LocalizationPipelineOptions>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -477,6 +481,46 @@ pub struct LocalizationBatchQueueSummary {
     pub batch_id: String,
     pub queued_jobs_total: usize,
     pub items: Vec<LocalizationBatchItemResult>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct LocalizationRunRequest {
+    pub item_id: String,
+    pub asr_lang: Option<String>,
+    pub separation_backend: Option<String>,
+    #[serde(default)]
+    pub queue_export_pack: bool,
+    #[serde(default)]
+    pub queue_qc: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct LocalizationRunQueueSummary {
+    pub batch_id: String,
+    pub item_id: String,
+    pub title: String,
+    pub stage: String,
+    pub source_track_id: Option<String>,
+    pub translated_track_id: Option<String>,
+    pub queued_jobs: Vec<JobRow>,
+    pub notes: Vec<String>,
+}
+
+#[derive(Debug, Clone)]
+struct LocalizationContinuationOutcome {
+    stage: String,
+    source_track_id: Option<String>,
+    translated_track_id: Option<String>,
+    queued_jobs: Vec<JobRow>,
+    notes: Vec<String>,
+}
+
+#[derive(Debug, Clone)]
+enum LocalizationNextStageDecision {
+    Translate,
+    Diarize,
+    VoicePlanBlocked { missing_speakers: Vec<String> },
+    Dub,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -774,6 +818,7 @@ pub fn enqueue_asr_local(
         lang,
         model_id,
         batch_on_import: false,
+        pipeline: None,
     })?;
 
     enqueue_with_type_and_item_id(paths, JobType::AsrLocal, params_json, Some(item_id))
@@ -806,6 +851,7 @@ pub fn enqueue_diarize_local_v1(
         source_track_id,
         backend: None,
         batch_on_import: false,
+        pipeline: None,
     })?;
 
     enqueue_with_type_and_item_id(paths, JobType::DiarizeLocalV1, params_json, Some(item_id))
@@ -825,6 +871,7 @@ pub fn enqueue_diarize_local_v1_with_backend(
         source_track_id,
         backend,
         batch_on_import: false,
+        pipeline: None,
     })?;
 
     enqueue_with_type_and_item_id(paths, JobType::DiarizeLocalV1, params_json, Some(item_id))
@@ -1153,11 +1200,7 @@ pub fn enqueue_localization_batch_v1(
             } else {
                 applied_mapping_count += mappings.len();
                 let _ = voice_cast_packs::apply_voice_cast_pack_to_item(
-                    paths,
-                    &item_id,
-                    pack_id,
-                    &mappings,
-                    true,
+                    paths, &item_id, pack_id, &mappings, true,
                 )?;
             }
         }
@@ -1173,60 +1216,16 @@ pub fn enqueue_localization_batch_v1(
             speaker_overrides: Vec::new(),
         };
 
-        let mut queued_jobs: Vec<JobRow> = Vec::new();
-        if track.kind == "translated" || normalize_lang_tag(Some(&track.lang)) == Some("eng") {
-            let dub_params = serde_json::to_string(&DubVoicePreservingV1Params {
-                item_id: item_id.clone(),
-                source_track_id: track.id.clone(),
-                batch_on_import: false,
-                pipeline: Some(pipeline.clone()),
-            })?;
-            queued_jobs.push(enqueue_with_type_item_and_batch_id(
-                paths,
-                JobType::DubVoicePreservingV1,
-                dub_params,
-                Some(item_id.clone()),
-                Some(batch_id.clone()),
-            )?);
-            let sep_job_type = if separation_backend.as_deref() == Some("demucs") {
-                JobType::SeparateAudioDemucsV1
-            } else {
-                JobType::SeparateAudioSpleeter
-            };
-            let sep_params = match sep_job_type {
-                JobType::SeparateAudioDemucsV1 => {
-                    serde_json::to_string(&SeparateAudioDemucsV1Params {
-                        item_id: item_id.clone(),
-                        batch_on_import: false,
-                    })?
-                }
-                _ => serde_json::to_string(&SeparateAudioSpleeterParams {
-                    item_id: item_id.clone(),
-                    batch_on_import: false,
-                })?,
-            };
-            queued_jobs.push(enqueue_with_type_item_and_batch_id(
-                paths,
-                sep_job_type,
-                sep_params,
-                Some(item_id.clone()),
-                Some(batch_id.clone()),
-            )?);
-        } else {
-            let params_json = serde_json::to_string(&TranslateLocalParams {
-                item_id: item_id.clone(),
-                source_track_id: track.id.clone(),
-                model_id: "whispercpp-tiny".to_string(),
-                batch_on_import: false,
-                pipeline: Some(pipeline.clone()),
-            })?;
-            queued_jobs.push(enqueue_with_type_item_and_batch_id(
-                paths,
-                JobType::TranslateLocal,
-                params_json,
-                Some(item_id.clone()),
-                Some(batch_id.clone()),
-            )?);
+        let outcome = queue_localization_continuation_from_track(
+            paths,
+            &item,
+            &track,
+            pipeline.clone(),
+            Some(batch_id.clone()),
+        )?;
+        let queued_jobs = outcome.queued_jobs;
+        if queued_jobs.is_empty() && !outcome.notes.is_empty() {
+            warnings.extend(outcome.notes);
         }
 
         items.push(LocalizationBatchItemResult {
@@ -1244,6 +1243,299 @@ pub fn enqueue_localization_batch_v1(
         batch_id,
         queued_jobs_total,
         items,
+    })
+}
+
+fn track_speaker_keys(paths: &AppPaths, track_id: &str) -> Result<Vec<String>> {
+    let doc = subtitle_tracks::load_document(paths, track_id)?;
+    let mut speakers = doc
+        .segments
+        .iter()
+        .filter_map(|segment| segment.speaker.as_ref())
+        .map(|speaker| speaker.trim().to_string())
+        .filter(|speaker| !speaker.is_empty())
+        .collect::<Vec<_>>();
+    speakers.sort();
+    speakers.dedup();
+    Ok(speakers)
+}
+
+fn missing_voice_plan_speakers(
+    paths: &AppPaths,
+    item_id: &str,
+    track_id: &str,
+) -> Result<Vec<String>> {
+    let speakers = track_speaker_keys(paths, track_id)?;
+    if speakers.is_empty() {
+        return Ok(Vec::new());
+    }
+
+    let settings = speaker_render_settings_by_key(paths, item_id)?;
+    let mut missing = Vec::new();
+    for speaker_key in speakers {
+        let setting = settings.get(&speaker_key).cloned().unwrap_or_default();
+        if setting.render_mode.as_deref() == Some("standard_tts") {
+            continue;
+        }
+        let has_profile = !setting.profile_paths.is_empty()
+            || setting
+                .primary_profile_path
+                .as_deref()
+                .map(str::trim)
+                .is_some_and(|value| !value.is_empty());
+        if !has_profile {
+            missing.push(speaker_key);
+        }
+    }
+    Ok(missing)
+}
+
+fn decide_localization_next_stage(
+    paths: &AppPaths,
+    item_id: &str,
+    track: &subtitle_tracks::SubtitleTrackRow,
+) -> Result<LocalizationNextStageDecision> {
+    if track.kind == "source" {
+        return Ok(LocalizationNextStageDecision::Translate);
+    }
+
+    if track.kind == "translated" && normalize_lang_tag(Some(&track.lang)) == Some("eng") {
+        let speakers = track_speaker_keys(paths, &track.id)?;
+        if speakers.is_empty() {
+            return Ok(LocalizationNextStageDecision::Diarize);
+        }
+        let missing = missing_voice_plan_speakers(paths, item_id, &track.id)?;
+        if !missing.is_empty() {
+            return Ok(LocalizationNextStageDecision::VoicePlanBlocked {
+                missing_speakers: missing,
+            });
+        }
+        return Ok(LocalizationNextStageDecision::Dub);
+    }
+
+    Ok(LocalizationNextStageDecision::Translate)
+}
+
+fn queue_localization_continuation_from_track(
+    paths: &AppPaths,
+    item: &library::LibraryItem,
+    track: &subtitle_tracks::SubtitleTrackRow,
+    pipeline: LocalizationPipelineOptions,
+    batch_id: Option<String>,
+) -> Result<LocalizationContinuationOutcome> {
+    let source_track_id = if track.kind == "source" {
+        Some(track.id.clone())
+    } else {
+        latest_source_track(paths, &item.id)?.map(|value| value.id)
+    };
+    let translated_track_id =
+        if track.kind == "translated" && normalize_lang_tag(Some(&track.lang)) == Some("eng") {
+            Some(track.id.clone())
+        } else {
+            latest_translated_english_track(paths, &item.id)?.map(|value| value.id)
+        };
+
+    match decide_localization_next_stage(paths, &item.id, track)? {
+        LocalizationNextStageDecision::Translate => {
+            let params_json = serde_json::to_string(&TranslateLocalParams {
+                item_id: item.id.clone(),
+                source_track_id: track.id.clone(),
+                model_id: "whispercpp-tiny".to_string(),
+                batch_on_import: false,
+                pipeline: Some(LocalizationPipelineOptions {
+                    source_track_id: Some(track.id.clone()),
+                    ..pipeline
+                }),
+            })?;
+            let queued_job = enqueue_with_type_item_and_batch_id(
+                paths,
+                JobType::TranslateLocal,
+                params_json,
+                Some(item.id.clone()),
+                batch_id,
+            )?;
+            Ok(LocalizationContinuationOutcome {
+                stage: "translate".to_string(),
+                source_track_id: Some(track.id.clone()),
+                translated_track_id,
+                queued_jobs: vec![queued_job],
+                notes: vec![
+                    "No translated English track was available, so VoxVulgi queued translation first."
+                        .to_string(),
+                ],
+            })
+        }
+        LocalizationNextStageDecision::Diarize => {
+            let params_json = serde_json::to_string(&DiarizeLocalV1Params {
+                item_id: item.id.clone(),
+                source_track_id: track.id.clone(),
+                backend: None,
+                batch_on_import: false,
+                pipeline: Some(LocalizationPipelineOptions {
+                    source_track_id: Some(track.id.clone()),
+                    ..pipeline
+                }),
+            })?;
+            let queued_job = enqueue_with_type_item_and_batch_id(
+                paths,
+                JobType::DiarizeLocalV1,
+                params_json,
+                Some(item.id.clone()),
+                batch_id,
+            )?;
+            Ok(LocalizationContinuationOutcome {
+                stage: "diarize".to_string(),
+                source_track_id,
+                translated_track_id: Some(track.id.clone()),
+                queued_jobs: vec![queued_job],
+                notes: vec![
+                    "The translated English track has no speaker labels yet, so VoxVulgi queued diarization before voice planning."
+                        .to_string(),
+                ],
+            })
+        }
+        LocalizationNextStageDecision::VoicePlanBlocked { missing_speakers } => Ok(
+            LocalizationContinuationOutcome {
+                stage: "voice_plan".to_string(),
+                source_track_id,
+                translated_track_id: Some(track.id.clone()),
+                queued_jobs: Vec::new(),
+                notes: vec![format!(
+                    "Voice-preserving dubbing is waiting for speaker references or Standard TTS routing for: {}.",
+                    missing_speakers.join(", ")
+                )],
+            },
+        ),
+        LocalizationNextStageDecision::Dub => {
+            let params_json = serde_json::to_string(&DubVoicePreservingV1Params {
+                item_id: item.id.clone(),
+                source_track_id: track.id.clone(),
+                batch_on_import: false,
+                pipeline: Some(LocalizationPipelineOptions {
+                    source_track_id: Some(track.id.clone()),
+                    ..pipeline
+                }),
+            })?;
+            let queued_job = enqueue_with_type_item_and_batch_id(
+                paths,
+                JobType::DubVoicePreservingV1,
+                params_json,
+                Some(item.id.clone()),
+                batch_id,
+            )?;
+            Ok(LocalizationContinuationOutcome {
+                stage: "dub".to_string(),
+                source_track_id,
+                translated_track_id: Some(track.id.clone()),
+                queued_jobs: vec![queued_job],
+                notes: vec![
+                    "Translated English track and speaker voice plan are ready, so VoxVulgi queued the dubbing pipeline."
+                        .to_string(),
+                    "Mix will use a separated background when available, otherwise it will fall back to the source-audio review path."
+                        .to_string(),
+                ],
+            })
+        }
+    }
+}
+
+pub fn enqueue_localization_run_v1(
+    paths: &AppPaths,
+    request: LocalizationRunRequest,
+) -> Result<LocalizationRunQueueSummary> {
+    let item_id = request.item_id.trim().to_string();
+    if item_id.is_empty() {
+        return Err(EngineError::InstallFailed(
+            "item_id is required".to_string(),
+        ));
+    }
+    let item = library::get_item_by_id(paths, &item_id)?;
+    let batch_id = Uuid::new_v4().to_string();
+    let source_track = latest_source_track(paths, &item_id)?;
+    let translated_track = latest_translated_english_track(paths, &item_id)?;
+    let lang = request
+        .asr_lang
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty() && *value != "auto")
+        .map(|value| value.to_string());
+    let pipeline = LocalizationPipelineOptions {
+        auto_pipeline: true,
+        source_track_id: translated_track
+            .as_ref()
+            .map(|track| track.id.clone())
+            .or_else(|| source_track.as_ref().map(|track| track.id.clone())),
+        separation_backend: normalize_separation_backend(request.separation_backend.as_deref()),
+        queue_export_pack: request.queue_export_pack,
+        queue_qc: request.queue_qc,
+        variant_label: None,
+        tts_backend_id: Some("openvoice_v2".to_string()),
+        speaker_overrides: Vec::new(),
+    };
+
+    if let Some(track) = translated_track.clone() {
+        let outcome = queue_localization_continuation_from_track(
+            paths,
+            &item,
+            &track,
+            pipeline.clone(),
+            Some(batch_id.clone()),
+        )?;
+        return Ok(LocalizationRunQueueSummary {
+            batch_id,
+            item_id,
+            title: item.title,
+            stage: outcome.stage,
+            source_track_id: outcome.source_track_id,
+            translated_track_id: outcome.translated_track_id,
+            queued_jobs: outcome.queued_jobs,
+            notes: outcome.notes,
+        });
+    }
+
+    if let Some(track) = source_track.clone() {
+        let outcome = queue_localization_continuation_from_track(
+            paths,
+            &item,
+            &track,
+            pipeline.clone(),
+            Some(batch_id.clone()),
+        )?;
+        return Ok(LocalizationRunQueueSummary {
+            batch_id,
+            item_id,
+            title: item.title,
+            stage: outcome.stage,
+            source_track_id: outcome.source_track_id,
+            translated_track_id: outcome.translated_track_id,
+            queued_jobs: outcome.queued_jobs,
+            notes: outcome.notes,
+        });
+    }
+
+    let params_json = serde_json::to_string(&AsrLocalParams {
+        item_id: item_id.clone(),
+        lang,
+        model_id: "whispercpp-tiny".to_string(),
+        batch_on_import: false,
+        pipeline: Some(pipeline),
+    })?;
+    let queued_job = enqueue_with_type_item_and_batch_id(
+        paths,
+        JobType::AsrLocal,
+        params_json,
+        Some(item_id.clone()),
+        Some(batch_id.clone()),
+    )?;
+    Ok(LocalizationRunQueueSummary {
+        batch_id,
+        item_id,
+        title: item.title,
+        stage: "asr".to_string(),
+        source_track_id: None,
+        translated_track_id: None,
+        queued_jobs: vec![queued_job],
+        notes: vec!["No subtitle track was available, so VoxVulgi queued ASR first.".to_string()],
     })
 }
 
@@ -1948,7 +2240,10 @@ pub fn item_artifact_retention_policy() -> ItemArtifactRetentionPolicy {
     }
 }
 
-pub fn flush_jobs_cache(paths: &AppPaths, options: Option<JobCleanupOptions>) -> Result<JobCleanupSummary> {
+pub fn flush_jobs_cache(
+    paths: &AppPaths,
+    options: Option<JobCleanupOptions>,
+) -> Result<JobCleanupSummary> {
     let plan = build_job_cleanup_plan(paths)?;
     let options = options.unwrap_or_default();
     let mut failed_paths: Vec<JobCleanupFailure> = Vec::new();
@@ -2644,6 +2939,7 @@ fn execute_job(paths: &AppPaths, job_id: &str, type_str: &str, params_json: &str
                         lang: None,
                         model_id: "whispercpp-tiny".to_string(),
                         batch_on_import: true,
+                        pipeline: None,
                     })?;
                     let _ = enqueue_with_type_item_and_batch_id(
                         paths,
@@ -3117,6 +3413,7 @@ INSERT INTO subtitle_track (
                             source_track_id: track_id.clone(),
                             backend: None,
                             batch_on_import: true,
+                            pipeline: None,
                         })?;
                         let _ = enqueue_with_type_item_and_batch_id(
                             paths,
@@ -3145,6 +3442,34 @@ INSERT INTO subtitle_track (
                             params_json,
                             Some(item.id.clone()),
                             batch_id.clone(),
+                        )?;
+                    }
+                }
+            } else {
+                let pipeline = p.pipeline.clone().unwrap_or_default();
+                if pipeline.auto_pipeline {
+                    let batch_id = job_batch_id(paths, job_id).ok().flatten();
+                    let inserted_track = subtitle_tracks::get_track(paths, &track_id)?;
+                    let outcome = queue_localization_continuation_from_track(
+                        paths,
+                        &item,
+                        &inserted_track,
+                        LocalizationPipelineOptions {
+                            source_track_id: Some(track_id.clone()),
+                            ..pipeline
+                        },
+                        batch_id,
+                    )?;
+                    if outcome.queued_jobs.is_empty() && !outcome.notes.is_empty() {
+                        log_line(
+                            paths,
+                            job_id,
+                            "info",
+                            "localization_pipeline_waiting",
+                            serde_json::json!({
+                                "stage": outcome.stage,
+                                "notes": outcome.notes,
+                            }),
                         )?;
                     }
                 }
@@ -3316,56 +3641,27 @@ INSERT INTO subtitle_track (
             let pipeline = p.pipeline.clone().unwrap_or_default();
             if pipeline.auto_pipeline {
                 let batch_id = job_batch_id(paths, job_id).ok().flatten();
-                let next_pipeline = LocalizationPipelineOptions {
-                    source_track_id: Some(track_id.clone()),
-                    ..pipeline.clone()
-                };
-
-                if !item_has_active_job(paths, &item.id, JobType::DubVoicePreservingV1.as_str())
-                    .unwrap_or(false)
-                {
-                    let params_json = serde_json::to_string(&DubVoicePreservingV1Params {
-                        item_id: item.id.clone(),
-                        source_track_id: track_id.clone(),
-                        batch_on_import: false,
-                        pipeline: Some(next_pipeline.clone()),
-                    })?;
-                    let _ = enqueue_with_type_item_and_batch_id(
+                let inserted_track = subtitle_tracks::get_track(paths, &track_id)?;
+                let outcome = queue_localization_continuation_from_track(
+                    paths,
+                    &item,
+                    &inserted_track,
+                    LocalizationPipelineOptions {
+                        source_track_id: Some(track_id.clone()),
+                        ..pipeline.clone()
+                    },
+                    batch_id.clone(),
+                )?;
+                if outcome.queued_jobs.is_empty() && !outcome.notes.is_empty() {
+                    log_line(
                         paths,
-                        JobType::DubVoicePreservingV1,
-                        params_json,
-                        Some(item.id.clone()),
-                        batch_id.clone(),
-                    )?;
-                }
-
-                let sep_job_type = if next_pipeline.separation_backend.as_deref() == Some("demucs")
-                {
-                    JobType::SeparateAudioDemucsV1
-                } else {
-                    JobType::SeparateAudioSpleeter
-                };
-                if !item_has_active_job(paths, &item.id, sep_job_type.as_str()).unwrap_or(false)
-                    && separation_background_path_best_effort(paths, &item.id).is_none()
-                {
-                    let params_json = match sep_job_type {
-                        JobType::SeparateAudioDemucsV1 => {
-                            serde_json::to_string(&SeparateAudioDemucsV1Params {
-                                item_id: item.id.clone(),
-                                batch_on_import: false,
-                            })?
-                        }
-                        _ => serde_json::to_string(&SeparateAudioSpleeterParams {
-                            item_id: item.id.clone(),
-                            batch_on_import: false,
-                        })?,
-                    };
-                    let _ = enqueue_with_type_item_and_batch_id(
-                        paths,
-                        sep_job_type,
-                        params_json,
-                        Some(item.id.clone()),
-                        batch_id.clone(),
+                        job_id,
+                        "info",
+                        "localization_pipeline_waiting",
+                        serde_json::json!({
+                            "stage": outcome.stage,
+                            "notes": outcome.notes,
+                        }),
                     )?;
                 }
             } else if p.batch_on_import {
@@ -3962,6 +4258,34 @@ INSERT INTO subtitle_track (
                     "segments": diar.segments.len(),
                 }),
             )?;
+
+            let pipeline = p.pipeline.clone().unwrap_or_default();
+            if pipeline.auto_pipeline {
+                let batch_id = job_batch_id(paths, job_id).ok().flatten();
+                let inserted_track = subtitle_tracks::get_track(paths, &track_id)?;
+                let outcome = queue_localization_continuation_from_track(
+                    paths,
+                    &item,
+                    &inserted_track,
+                    LocalizationPipelineOptions {
+                        source_track_id: Some(track_id.clone()),
+                        ..pipeline
+                    },
+                    batch_id,
+                )?;
+                if outcome.queued_jobs.is_empty() && !outcome.notes.is_empty() {
+                    log_line(
+                        paths,
+                        job_id,
+                        "info",
+                        "localization_pipeline_waiting",
+                        serde_json::json!({
+                            "stage": outcome.stage,
+                            "notes": outcome.notes,
+                        }),
+                    )?;
+                }
+            }
         }
         JobType::TtsPreviewPyttsx3V1 => {
             set_progress(paths, job_id, 0.05)?;
@@ -5550,60 +5874,30 @@ if __name__ == "__main__":
 
             if pipeline.auto_pipeline {
                 let batch_id = job_batch_id(paths, job_id).ok().flatten();
-                if separation_background_path_best_effort(paths, &item.id).is_some() {
-                    if !item_has_active_job(paths, &item.id, JobType::MixDubPreviewV1.as_str())
-                        .unwrap_or(false)
-                    {
-                        let params_json = serde_json::to_string(&MixDubPreviewV1Params {
-                            item_id: item.id.clone(),
-                            ducking_strength: None,
-                            loudness_target_lufs: None,
-                            timing_fit_enabled: None,
-                            timing_fit_min_factor: None,
-                            timing_fit_max_factor: None,
-                            batch_on_import: false,
-                            pipeline: Some(LocalizationPipelineOptions {
-                                source_track_id: Some(source_track.id.clone()),
-                                variant_label: variant_label.clone(),
-                                ..pipeline.clone()
-                            }),
-                        })?;
-                        let _ = enqueue_with_type_item_and_batch_id(
-                            paths,
-                            JobType::MixDubPreviewV1,
-                            params_json,
-                            Some(item.id.clone()),
-                            batch_id.clone(),
-                        )?;
-                    }
-                } else {
-                    let sep_job_type = if pipeline.separation_backend.as_deref() == Some("demucs") {
-                        JobType::SeparateAudioDemucsV1
-                    } else {
-                        JobType::SeparateAudioSpleeter
-                    };
-                    if !item_has_active_job(paths, &item.id, sep_job_type.as_str()).unwrap_or(false)
-                    {
-                        let params_json = match sep_job_type {
-                            JobType::SeparateAudioDemucsV1 => {
-                                serde_json::to_string(&SeparateAudioDemucsV1Params {
-                                    item_id: item.id.clone(),
-                                    batch_on_import: false,
-                                })?
-                            }
-                            _ => serde_json::to_string(&SeparateAudioSpleeterParams {
-                                item_id: item.id.clone(),
-                                batch_on_import: false,
-                            })?,
-                        };
-                        let _ = enqueue_with_type_item_and_batch_id(
-                            paths,
-                            sep_job_type,
-                            params_json,
-                            Some(item.id.clone()),
-                            batch_id.clone(),
-                        )?;
-                    }
+                if !item_has_active_job(paths, &item.id, JobType::MixDubPreviewV1.as_str())
+                    .unwrap_or(false)
+                {
+                    let params_json = serde_json::to_string(&MixDubPreviewV1Params {
+                        item_id: item.id.clone(),
+                        ducking_strength: None,
+                        loudness_target_lufs: None,
+                        timing_fit_enabled: None,
+                        timing_fit_min_factor: None,
+                        timing_fit_max_factor: None,
+                        batch_on_import: false,
+                        pipeline: Some(LocalizationPipelineOptions {
+                            source_track_id: Some(source_track.id.clone()),
+                            variant_label: variant_label.clone(),
+                            ..pipeline.clone()
+                        }),
+                    })?;
+                    let _ = enqueue_with_type_item_and_batch_id(
+                        paths,
+                        JobType::MixDubPreviewV1,
+                        params_json,
+                        Some(item.id.clone()),
+                        batch_id.clone(),
+                    )?;
                 }
             }
         }
@@ -7243,7 +7537,8 @@ if __name__ == "__main__":
             let mut tts_duration_by_index: HashMap<u32, i64> = HashMap::new();
             let mut manifest_segments: Vec<TtsPreviewManifestSegment> = Vec::new();
 
-            let preferred_backend_id = resolve_pipeline_tts_backend_preference(paths, &item.id, None);
+            let preferred_backend_id =
+                resolve_pipeline_tts_backend_preference(paths, &item.id, None);
             if let Some(candidate) = select_tts_manifest_candidate(
                 paths,
                 &item.id,
@@ -8370,7 +8665,9 @@ fn collect_output_dir_targets(
 
     upsert_cleanup_output_target(
         out,
-        download_root.join(DEFAULT_IMAGES_OUTPUT_SUBDIR).join(subdir),
+        download_root
+            .join(DEFAULT_IMAGES_OUTPUT_SUBDIR)
+            .join(subdir),
         CleanupOutputDirClass::Managed,
         job_id,
     );
@@ -8745,10 +9042,7 @@ pub(crate) fn normalize_auth_cookie(value: Option<String>) -> Result<Option<Stri
         let contents = std::fs::read_to_string(path)?;
         let normalized = normalize_auth_cookie(Some(contents))?;
         let normalized = normalized.ok_or_else(|| {
-            EngineError::InstallFailed(format!(
-                "cookie file was empty: {}",
-                path.to_string_lossy()
-            ))
+            EngineError::InstallFailed(format!("cookie file was empty: {}", path.to_string_lossy()))
         })?;
         return Ok(Some(normalized));
     }
@@ -8797,7 +9091,8 @@ fn cookie_pairs_to_header(pairs: &[(String, String)]) -> Option<String> {
         return None;
     }
     Some(
-        pairs.iter()
+        pairs
+            .iter()
             .map(|(name, value)| format!("{name}={value}"))
             .collect::<Vec<_>>()
             .join("; "),
@@ -11312,7 +11607,9 @@ fn list_tts_manifest_candidate_refs(item_dir: &Path) -> Vec<TtsManifestCandidate
     out
 }
 
-fn load_tts_manifest_candidate(candidate: &TtsManifestCandidateRef) -> Option<LoadedTtsManifestCandidate> {
+fn load_tts_manifest_candidate(
+    candidate: &TtsManifestCandidateRef,
+) -> Option<LoadedTtsManifestCandidate> {
     if !candidate.manifest_path.exists() {
         return None;
     }
@@ -11543,8 +11840,11 @@ fn execute_experimental_voice_backend_render_v1(
     set_progress(paths, job_id, 0.05)?;
     let pipeline = p.pipeline.clone().unwrap_or_default();
     let backend_id = p.backend_id.trim().to_ascii_lowercase();
-    let variant_label =
-        normalize_variant_label(p.variant_label.as_deref().or(pipeline.variant_label.as_deref()));
+    let variant_label = normalize_variant_label(
+        p.variant_label
+            .as_deref()
+            .or(pipeline.variant_label.as_deref()),
+    );
 
     if backend_id.is_empty() {
         return Err(EngineError::InstallFailed(
@@ -11890,7 +12190,11 @@ fn resolve_experimental_backend_batch_targets(
     for backend_id in backend_ids {
         let detail = voice_backend_adapters::get_voice_backend_adapter_detail(paths, backend_id)?;
         let backend_id = detail.template.backend_id.clone();
-        let render_ready = detail.config.as_ref().map(|value| value.enabled).unwrap_or(false)
+        let render_ready = detail
+            .config
+            .as_ref()
+            .map(|value| value.enabled)
+            .unwrap_or(false)
             && detail
                 .config
                 .as_ref()
@@ -11946,6 +12250,30 @@ fn select_localization_batch_track(
     Ok(tracks
         .into_iter()
         .filter(|track| track.kind == "source")
+        .max_by_key(|track| track.version))
+}
+
+fn latest_source_track(
+    paths: &AppPaths,
+    item_id: &str,
+) -> Result<Option<subtitle_tracks::SubtitleTrackRow>> {
+    let tracks = subtitle_tracks::list_tracks(paths, item_id)?;
+    Ok(tracks
+        .into_iter()
+        .filter(|track| track.kind == "source")
+        .max_by_key(|track| track.version))
+}
+
+fn latest_translated_english_track(
+    paths: &AppPaths,
+    item_id: &str,
+) -> Result<Option<subtitle_tracks::SubtitleTrackRow>> {
+    let tracks = subtitle_tracks::list_tracks(paths, item_id)?;
+    Ok(tracks
+        .into_iter()
+        .filter(|track| {
+            track.kind == "translated" && normalize_lang_tag(Some(&track.lang)) == Some("eng")
+        })
         .max_by_key(|track| track.version))
 }
 
@@ -12757,12 +13085,7 @@ mod tests {
         seed_item_and_track_named(paths, "item-1", "track-1", "Item 1");
     }
 
-    fn seed_item_and_track_named(
-        paths: &AppPaths,
-        item_id: &str,
-        track_id: &str,
-        title: &str,
-    ) {
+    fn seed_item_only(paths: &AppPaths, item_id: &str, title: &str) {
         let conn = db::open(paths).expect("open db");
         db::migrate(&conn).expect("migrate");
         conn.execute(
@@ -12777,45 +13100,66 @@ mod tests {
             ],
         )
         .expect("insert item");
+    }
 
+    fn seed_subtitle_track_named(
+        paths: &AppPaths,
+        item_id: &str,
+        track_id: &str,
+        kind: &str,
+        lang: &str,
+        version: i64,
+        speakers: &[&str],
+    ) {
         let doc = SubtitleDocument {
             schema_version: SUBTITLE_JSON_SCHEMA_VERSION,
-            kind: "translated".to_string(),
-            lang: "eng".to_string(),
+            kind: kind.to_string(),
+            lang: lang.to_string(),
             segments: vec![SubtitleSegment {
                 index: 1,
                 start_ms: 0,
                 end_ms: 1200,
                 text: "Hello world".to_string(),
-                speaker: Some("S1".to_string()),
+                speaker: speakers.first().map(|value| value.to_string()),
             }],
         };
         let track_path = paths
             .derived_item_dir(item_id)
-            .join("translate")
-            .join("track.json");
+            .join(kind)
+            .join(format!("{track_id}.json"));
         if let Some(parent) = track_path.parent() {
             std::fs::create_dir_all(parent).expect("track dir");
         }
         std::fs::write(
             &track_path,
-            format!("{}\n", serde_json::to_string_pretty(&doc).expect("doc json")),
+            format!(
+                "{}\n",
+                serde_json::to_string_pretty(&doc).expect("doc json")
+            ),
         )
         .expect("write track");
+
+        let conn = db::open(paths).expect("open db");
+        db::migrate(&conn).expect("migrate");
         conn.execute(
             "INSERT INTO subtitle_track (id, item_id, kind, lang, format, path, created_by, version) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
             params![
                 track_id,
                 item_id,
-                "translated",
-                "eng",
+                kind,
+                lang,
                 "ytfetch_subtitle_json_v1",
                 track_path.to_string_lossy().to_string(),
                 "test",
-                1_i64
+                version
             ],
         )
         .expect("insert track");
+    }
+
+    fn seed_item_and_track_named(paths: &AppPaths, item_id: &str, track_id: &str, title: &str) {
+        seed_item_only(paths, item_id, title);
+        seed_subtitle_track_named(paths, item_id, track_id, "translated", "eng", 1, &["S1"]);
     }
 
     fn write_sine_wav(path: &Path, sample_rate: u32, duration_ms: u32) {
@@ -12837,6 +13181,145 @@ mod tests {
             writer.write_sample(sample).expect("sample");
         }
         writer.finalize().expect("finalize");
+    }
+
+    #[test]
+    fn enqueue_localization_run_v1_queues_asr_when_no_tracks_exist() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let paths = AppPaths::new(dir.path().to_path_buf());
+        seed_item_only(&paths, "item-1", "Item 1");
+
+        let summary = enqueue_localization_run_v1(
+            &paths,
+            LocalizationRunRequest {
+                item_id: "item-1".to_string(),
+                asr_lang: Some("ko".to_string()),
+                separation_backend: Some("demucs".to_string()),
+                queue_export_pack: true,
+                queue_qc: true,
+            },
+        )
+        .expect("queue");
+
+        assert_eq!(summary.stage, "asr");
+        assert_eq!(summary.queued_jobs.len(), 1);
+        assert_eq!(summary.queued_jobs[0].job_type, "asr_local");
+        let params: AsrLocalParams =
+            serde_json::from_str(&summary.queued_jobs[0].params_json).expect("params");
+        assert_eq!(params.lang.as_deref(), Some("ko"));
+        let pipeline = params.pipeline.expect("pipeline");
+        assert!(pipeline.auto_pipeline);
+        assert_eq!(pipeline.separation_backend.as_deref(), Some("demucs"));
+        assert!(pipeline.queue_qc);
+        assert!(pipeline.queue_export_pack);
+    }
+
+    #[test]
+    fn enqueue_localization_run_v1_queues_diarize_for_english_track_without_speakers() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let paths = AppPaths::new(dir.path().to_path_buf());
+        seed_item_only(&paths, "item-1", "Item 1");
+        seed_subtitle_track_named(&paths, "item-1", "track-en", "translated", "eng", 1, &[]);
+
+        let summary = enqueue_localization_run_v1(
+            &paths,
+            LocalizationRunRequest {
+                item_id: "item-1".to_string(),
+                asr_lang: Some("ko".to_string()),
+                separation_backend: None,
+                queue_export_pack: false,
+                queue_qc: false,
+            },
+        )
+        .expect("queue");
+
+        assert_eq!(summary.stage, "diarize");
+        assert_eq!(summary.queued_jobs.len(), 1);
+        assert_eq!(summary.queued_jobs[0].job_type, "diarize_local_v1");
+    }
+
+    #[test]
+    fn enqueue_localization_run_v1_stops_for_missing_voice_plan() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let paths = AppPaths::new(dir.path().to_path_buf());
+        seed_item_only(&paths, "item-1", "Item 1");
+        seed_subtitle_track_named(
+            &paths,
+            "item-1",
+            "track-en",
+            "translated",
+            "eng",
+            1,
+            &["S1"],
+        );
+
+        let summary = enqueue_localization_run_v1(
+            &paths,
+            LocalizationRunRequest {
+                item_id: "item-1".to_string(),
+                asr_lang: Some("ko".to_string()),
+                separation_backend: None,
+                queue_export_pack: false,
+                queue_qc: false,
+            },
+        )
+        .expect("queue");
+
+        assert_eq!(summary.stage, "voice_plan");
+        assert!(summary.queued_jobs.is_empty());
+        assert!(
+            summary.notes.iter().any(|note| note.contains("S1")),
+            "expected missing speaker note, got {:?}",
+            summary.notes
+        );
+    }
+
+    #[test]
+    fn enqueue_localization_run_v1_queues_dub_when_voice_plan_is_ready() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let paths = AppPaths::new(dir.path().to_path_buf());
+        seed_item_only(&paths, "item-1", "Item 1");
+        seed_subtitle_track_named(
+            &paths,
+            "item-1",
+            "track-en",
+            "translated",
+            "eng",
+            1,
+            &["S1"],
+        );
+        speakers::upsert_item_speaker_setting(
+            &paths,
+            "item-1",
+            "S1",
+            None,
+            None,
+            None,
+            None,
+            Some(vec!["D:/refs/s1.wav".to_string()]),
+            None,
+            None,
+            None,
+            Some("clone".to_string()),
+            None,
+        )
+        .expect("speaker");
+
+        let summary = enqueue_localization_run_v1(
+            &paths,
+            LocalizationRunRequest {
+                item_id: "item-1".to_string(),
+                asr_lang: Some("ko".to_string()),
+                separation_backend: None,
+                queue_export_pack: false,
+                queue_qc: true,
+            },
+        )
+        .expect("queue");
+
+        assert_eq!(summary.stage, "dub");
+        assert_eq!(summary.queued_jobs.len(), 1);
+        assert_eq!(summary.queued_jobs[0].job_type, "dub_voice_preserving_v1");
     }
 
     #[test]
@@ -13100,7 +13583,11 @@ EOF
         let probe_command = if cfg!(windows) {
             vec!["cmd".to_string(), "/C".to_string(), "echo ok".to_string()]
         } else {
-            vec!["/bin/sh".to_string(), "-c".to_string(), "echo ok".to_string()]
+            vec![
+                "/bin/sh".to_string(),
+                "-c".to_string(),
+                "echo ok".to_string(),
+            ]
         };
         voice_backend_adapters::upsert_voice_backend_adapter(
             &paths,
@@ -13148,7 +13635,11 @@ EOF
             let params: ExperimentalVoiceBackendRenderV1Params =
                 serde_json::from_str(&job.params_json).expect("params");
             assert_eq!(params.backend_id, "cosyvoice");
-            assert!(params.variant_label.as_deref().unwrap_or("").starts_with("batch_"));
+            assert!(params
+                .variant_label
+                .as_deref()
+                .unwrap_or("")
+                .starts_with("batch_"));
         }
     }
 
@@ -13675,7 +14166,12 @@ EOF
         db::migrate(&conn).expect("migrate");
         conn.execute(
             "UPDATE job SET status=?1, finished_at_ms=?2, error=?3 WHERE id=?4",
-            params![JobStatus::Failed.as_str(), now_ms(), "forced", &external_job.id],
+            params![
+                JobStatus::Failed.as_str(),
+                now_ms(),
+                "forced",
+                &external_job.id
+            ],
         )
         .expect("mark failed");
 
@@ -13725,7 +14221,9 @@ EOF
         )
         .expect("mark failed");
 
-        let managed_dir = downloads.join(DEFAULT_IMAGES_OUTPUT_SUBDIR).join("broken_target");
+        let managed_dir = downloads
+            .join(DEFAULT_IMAGES_OUTPUT_SUBDIR)
+            .join("broken_target");
         std::fs::create_dir_all(managed_dir.parent().expect("managed parent")).expect("parent dir");
         std::fs::write(&managed_dir, "not-a-dir").expect("write blocking file");
 

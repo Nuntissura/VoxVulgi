@@ -117,10 +117,10 @@ Date: 2026-03-12
 
 ## Post-0.1.6 Smoke Regression Recovery (2026-03)
 
-- WP-0149: Research-ground the shipped localization pipeline and define the stage-explicit contract before more localization implementation. BACKLOG.
+- WP-0149: Research-ground the shipped localization pipeline and define the stage-explicit contract before more localization implementation. DONE.
 - WP-0142: Recover public and authenticated YouTube/Instagram downloader paths on installer state and make explicit session input authoritative. BACKLOG.
-- WP-0143: Restore Localization Studio as a visible source-to-output workflow with explicit start/progress/output handling, current-item handoff clarity, and discoverable source/artifact/export actions. BACKLOG.
-- WP-0150: Add installer-state localization runtime proof hardening so the core dub flow is not considered fixed without visible source/artifact/export evidence. BACKLOG.
+- WP-0143: Restore Localization Studio as a visible source-to-output workflow with explicit start/progress/output handling, current-item handoff clarity, and discoverable source/artifact/export actions. IN_PROGRESS.
+- WP-0150: Add installer-state localization runtime proof hardening so the core dub flow is not considered fixed without visible source/artifact/export evidence. DONE.
 - WP-0144: Remove leftover Localization Studio controls from Video Archiver and restore the intended archive-only IA boundary. BACKLOG.
 - WP-0145: Make benchmark, backend, QC, rerun, cleanup, and batch-dubbing surfaces discoverable enough for normal operator use. BACKLOG.
 - WP-0146: Repair the current broken move-window affordance without re-breaking selection, scrolling, or resize behavior. BACKLOG.

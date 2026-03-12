@@ -3,7 +3,7 @@
 ## Metadata
 - ID: WP-0150
 - Owner: Codex
-- Status: BACKLOG
+- Status: DONE
 - Created: 2026-03-12
 - Target milestone: Post-0.1.6 localization-first recovery
 
@@ -44,3 +44,4 @@ Out of scope:
 ## Status updates
 
 - 2026-03-12: Created after smoke feedback showed that sub-step proofs were insufficient for the core localization workflow.
+- 2026-03-12: Completed. Added `product/engine/examples/wp0150_localization_run_smoke.rs` and captured a staged installer-state-equivalent proof under `product/desktop/build_target/tool_artifacts/wp_runs/WP-0150/20260312_023121/`, showing first-run ASR->Translate->Diarize, an explicit speaker/reference checkpoint, and second-run Dub->Mix->Mux->QC after speaker references were assigned.

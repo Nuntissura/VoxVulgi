@@ -3,7 +3,7 @@
 ## Metadata
 - ID: WP-0149
 - Owner: Codex
-- Status: BACKLOG
+- Status: DONE
 - Created: 2026-03-12
 - Target milestone: Post-0.1.6 localization-first recovery
 
@@ -40,3 +40,4 @@ Out of scope:
 ## Status updates
 
 - 2026-03-12: Created to enforce research-first localization recovery instead of another speculative implementation pass.
+- 2026-03-12: Completed. Research artifacts were added under `governance/research/localization_pipeline_20260312/`, spec/design were updated to the staged-cascade contract, and follow-on packets `WP-0143` and `WP-0150` were grounded on that contract.

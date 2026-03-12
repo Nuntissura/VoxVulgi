@@ -689,6 +689,17 @@ type LocalizationBatchQueueSummary = {
   items: LocalizationBatchItemResult[];
 };
 
+type LocalizationRunQueueSummary = {
+  batch_id: string;
+  item_id: string;
+  title: string;
+  stage: "asr" | "translate" | "diarize" | "voice_plan" | "dub" | string;
+  source_track_id: string | null;
+  translated_track_id: string | null;
+  queued_jobs: JobRow[];
+  notes: string[];
+};
+
 type ExperimentalBackendBatchRequest = {
   item_ids: string[];
   backend_ids: string[];
@@ -940,6 +951,11 @@ export function SubtitleEditorPage({ itemId, visible = true }: { itemId: string;
   const [translateJobStatus, setTranslateJobStatus] = useState<JobStatus | null>(null);
   const [translateJobError, setTranslateJobError] = useState<string | null>(null);
   const [translateJobProgress, setTranslateJobProgress] = useState<number | null>(null);
+  const [localizationRunBusy, setLocalizationRunBusy] = useState(false);
+  const [localizationRunSummary, setLocalizationRunSummary] =
+    useState<LocalizationRunQueueSummary | null>(null);
+  const [localizationRunQueueQc, setLocalizationRunQueueQc] = useState(true);
+  const [localizationRunQueueExportPack, setLocalizationRunQueueExportPack] = useState(false);
   const [diarizeJobId, setDiarizeJobId] = useState<string | null>(null);
   const [diarizeJobStatus, setDiarizeJobStatus] = useState<JobStatus | null>(null);
   const [diarizeJobError, setDiarizeJobError] = useState<string | null>(null);
@@ -1598,6 +1614,16 @@ export function SubtitleEditorPage({ itemId, visible = true }: { itemId: string;
     return Array.from(set).sort();
   }, [doc]);
 
+  const voicePlanMissingSpeakers = useMemo(() => {
+    return speakersInTrack.filter((speakerKey) => {
+      const setting = speakerSettingsByKey.get(speakerKey) ?? null;
+      if ((setting?.render_mode ?? "") === "standard_tts") {
+        return false;
+      }
+      return speakerProfilePaths(setting).length === 0;
+    });
+  }, [speakerSettingsByKey, speakersInTrack]);
+
   useEffect(() => {
     setSpeakerNameDrafts((prev) => {
       let changed = false;
@@ -1811,6 +1837,115 @@ export function SubtitleEditorPage({ itemId, visible = true }: { itemId: string;
     }
     return map;
   }, [artifacts, itemJobs]);
+
+  const latestItemJobByType = useMemo(() => {
+    const map = new Map<string, JobRow>();
+    const sortedJobs = [...itemJobs].sort((a, b) => (b.created_at_ms ?? 0) - (a.created_at_ms ?? 0));
+    for (const job of sortedJobs) {
+      if (!map.has(job.job_type)) {
+        map.set(job.job_type, job);
+      }
+    }
+    return map;
+  }, [itemJobs]);
+
+  const localizationRunStages = useMemo(() => {
+    const stageJob = (jobType: string) => latestItemJobByType.get(jobType) ?? null;
+    return [
+      {
+        id: "asr",
+        title: "ASR",
+        ready: tracks.some((track) => track.kind === "source"),
+        detail:
+          stageJob("asr_local")?.status === "running"
+            ? `Running ${Math.round((stageJob("asr_local")?.progress ?? 0) * 100)}%`
+            : stageJob("asr_local")
+              ? `Last job: ${stageJob("asr_local")?.status ?? "unknown"}`
+              : "Create the source subtitle track from media audio.",
+      },
+      {
+        id: "translate",
+        title: "Translate -> EN",
+        ready: !!translatedEnglishTrack,
+        detail:
+          stageJob("translate_local")?.status === "running"
+            ? `Running ${Math.round((stageJob("translate_local")?.progress ?? 0) * 100)}%`
+            : stageJob("translate_local")
+              ? `Last job: ${stageJob("translate_local")?.status ?? "unknown"}`
+              : "Produce the English subtitle track used for dubbing and benchmarking.",
+      },
+      {
+        id: "diarize",
+        title: "Speaker labels",
+        ready: speakersInTrack.length > 0,
+        detail:
+          stageJob("diarize_local_v1")?.status === "running"
+            ? `Running ${Math.round((stageJob("diarize_local_v1")?.progress ?? 0) * 100)}%`
+            : stageJob("diarize_local_v1")
+              ? `Last job: ${stageJob("diarize_local_v1")?.status ?? "unknown"}`
+              : "Label speakers on the English track before voice planning.",
+      },
+      {
+        id: "voice_plan",
+        title: "Speaker / references",
+        ready: speakersInTrack.length > 0 && voicePlanMissingSpeakers.length === 0,
+        detail:
+          !translatedEnglishTrack
+            ? "Create the English translated track first."
+            : !speakersInTrack.length
+              ? "Run diarization, then assign voice references or Standard TTS per speaker."
+              : voicePlanMissingSpeakers.length
+                ? `Still missing voice setup for: ${voicePlanMissingSpeakers.join(", ")}`
+                : "Speaker routing is ready for voice-preserving dubbing.",
+      },
+      {
+        id: "dub",
+        title: "Dub speech generation",
+        ready: artifacts.some(
+          (artifact) =>
+            artifact.exists &&
+            (artifact.id === "tts_voice_preserving_manifest" ||
+              artifact.id.startsWith("tts_voice_preserving_manifest_variant_")),
+        ),
+        detail:
+          stageJob("dub_voice_preserving_v1")?.status === "running"
+            ? `Running ${Math.round((stageJob("dub_voice_preserving_v1")?.progress ?? 0) * 100)}%`
+            : stageJob("dub_voice_preserving_v1")
+              ? `Last job: ${stageJob("dub_voice_preserving_v1")?.status ?? "unknown"}`
+              : "Render the English dub segments with the managed or selected backend.",
+      },
+      {
+        id: "mix",
+        title: "Mix dub",
+        ready: !!outputs?.mix_dub_preview_v1_wav_exists,
+        detail:
+          stageJob("mix_dub_preview_v1")?.status === "running"
+            ? `Running ${Math.round((stageJob("mix_dub_preview_v1")?.progress ?? 0) * 100)}%`
+            : stageJob("mix_dub_preview_v1")
+              ? `Last job: ${stageJob("mix_dub_preview_v1")?.status ?? "unknown"}`
+              : "Create the dubbed audio mix against the best available background path.",
+      },
+      {
+        id: "mux",
+        title: "Mux MP4",
+        ready: !!outputs?.mux_dub_preview_v1_mp4_exists,
+        detail:
+          stageJob("mux_dub_preview_v1")?.status === "running"
+            ? `Running ${Math.round((stageJob("mux_dub_preview_v1")?.progress ?? 0) * 100)}%`
+            : stageJob("mux_dub_preview_v1")
+              ? `Last job: ${stageJob("mux_dub_preview_v1")?.status ?? "unknown"}`
+              : "Produce the preview MP4 deliverable for review/export.",
+      },
+    ];
+  }, [
+    artifacts,
+    latestItemJobByType,
+    outputs,
+    speakersInTrack.length,
+    tracks,
+    translatedEnglishTrack,
+    voicePlanMissingSpeakers,
+  ]);
 
   useEffect(() => {
     if (audioPreviewPath.trim()) return;
@@ -2533,12 +2668,16 @@ export function SubtitleEditorPage({ itemId, visible = true }: { itemId: string;
             : "Need FFmpeg, Neural TTS pack, and Voice-preserving pack",
       },
       {
-        title: "Speaker references",
-        ready: speakerReferenceCount > 0,
+        title: "Speaker / voice plan",
+        ready: speakersInTrack.length > 0 && voicePlanMissingSpeakers.length === 0,
         detail:
-          speakerReferenceCount > 0
-            ? `${speakerReferenceCount} reference clip(s) configured`
-            : "No speaker references yet; dubbing will fall back to base voice output",
+          !translatedEnglishTrack
+            ? "Create the English translated track first"
+            : !speakersInTrack.length
+              ? "Run diarization on the English track, then review speaker routing"
+              : voicePlanMissingSpeakers.length
+                ? `Configure references or Standard TTS for: ${voicePlanMissingSpeakers.join(", ")}`
+                : `${speakerReferenceCount} reference clip(s) configured and speaker routing is ready`,
       },
     ];
   }, [
@@ -2549,7 +2688,9 @@ export function SubtitleEditorPage({ itemId, visible = true }: { itemId: string;
     modelInventory?.models,
     neuralPackStatus?.installed,
     speakerReferenceCount,
+    speakersInTrack.length,
     translatedEnglishTrack,
+    voicePlanMissingSpeakers,
     voicePreservingPackStatus?.installed,
   ]);
 
@@ -2670,6 +2811,47 @@ export function SubtitleEditorPage({ itemId, visible = true }: { itemId: string;
       setError(String(e));
     } finally {
       setBusy(false);
+    }
+  }
+
+  async function enqueueLocalizationRun() {
+    setLocalizationRunBusy(true);
+    setError(null);
+    setNotice(null);
+    logDiagnosticsEvent("localization.enqueue_localization_run", {
+      asr_lang: asrLang,
+      separation_backend: separationBackend,
+      queue_qc: localizationRunQueueQc,
+      queue_export_pack: localizationRunQueueExportPack,
+    });
+    try {
+      const summary = await invoke<LocalizationRunQueueSummary>("jobs_enqueue_localization_run_v1", {
+        request: {
+          item_id: itemId,
+          asr_lang: asrLang,
+          separation_backend: separationBackend,
+          queue_qc: localizationRunQueueQc,
+          queue_export_pack: localizationRunQueueExportPack,
+        },
+      });
+      setLocalizationRunSummary(summary);
+      setNotice(
+        summary.queued_jobs.length
+          ? `Queued localization run at stage ${summary.stage}. ${summary.queued_jobs.length} job(s) added to batch ${summary.batch_id}.`
+          : `Localization run is waiting at stage ${summary.stage}. ${summary.notes[0] ?? "No new jobs were queued."}`,
+      );
+      if (summary.stage === "voice_plan" || summary.stage === "diarize") {
+        scrollToLocalizationSection("loc-voice-plan");
+      }
+      refreshItemJobs().catch(() => undefined);
+      refreshTracks().catch(() => undefined);
+      refreshArtifacts().catch(() => undefined);
+      refreshOutputs().catch(() => undefined);
+    } catch (e) {
+      logDiagnosticsEvent("localization.enqueue_localization_run.failed", { error: String(e) }, "error");
+      setError(String(e));
+    } finally {
+      setLocalizationRunBusy(false);
     }
   }
 
@@ -5014,6 +5196,14 @@ export function SubtitleEditorPage({ itemId, visible = true }: { itemId: string;
           paths. Working files stay in app-data; deliverables export to the resolved localization
           output folder.
         </div>
+        <div className="kv" style={{ marginTop: 10 }}>
+          <div className="k">Localization root</div>
+          <div className="v">{localizationRootStatus?.current_dir ?? "-"}</div>
+        </div>
+        <div className="kv">
+          <div className="k">Resolved deliverables folder</div>
+          <div className="v">{effectiveExportDirPreview || "-"}</div>
+        </div>
         <div className="row" style={{ marginTop: 10, flexWrap: "wrap" }}>
           <button type="button" disabled={busy || !item?.media_path} onClick={openSourceFile}>
             Open source video
@@ -5100,8 +5290,9 @@ export function SubtitleEditorPage({ itemId, visible = true }: { itemId: string;
         <h2>Workflow Map</h2>
         <div style={{ color: "#4b5563" }}>
           Localization Studio expects an English translated track for dubbing, benchmarking, and
-          backend comparison. Use this card to confirm runtime readiness and jump to the main
-          working sections quickly.
+          backend comparison. The shipped run contract is staged: ASR, Translate -&gt; EN, speaker
+          labels, speaker/reference planning, dub, mix, and mux. Use this card to confirm readiness
+          and jump to the main working sections quickly.
         </div>
         <div style={{ marginTop: 12, display: "flex", flexDirection: "column", gap: 8 }}>
           {localizationReadinessRows.map((row) => (
@@ -5131,6 +5322,9 @@ export function SubtitleEditorPage({ itemId, visible = true }: { itemId: string;
         <div className="row" style={{ marginTop: 12, flexWrap: "wrap" }}>
           <button type="button" disabled={busy} onClick={() => scrollToLocalizationSection("loc-track")}>
             Tracks and core jobs
+          </button>
+          <button type="button" disabled={busy} onClick={() => scrollToLocalizationSection("loc-voice-plan")}>
+            Speaker / voice plan
           </button>
           <button type="button" disabled={busy} onClick={() => scrollToLocalizationSection("loc-backends")}>
             Backend strategy
@@ -5163,6 +5357,73 @@ export function SubtitleEditorPage({ itemId, visible = true }: { itemId: string;
           >
             Use translated EN track
           </button>
+        </div>
+      </div>
+
+      <div className="card">
+        <h2>Localization Run</h2>
+        <div style={{ color: "#4b5563" }}>
+          Configure the current item first, then start or continue the full localization run from
+          this card. VoxVulgi decides the next missing stage automatically: ASR, Translate -&gt; EN,
+          speaker labels, speaker/reference planning, or the dubbing pipeline.
+        </div>
+        <div className="row" style={{ marginTop: 10, flexWrap: "wrap", alignItems: "center" }}>
+          <button type="button" disabled={busy || localizationRunBusy} onClick={enqueueLocalizationRun}>
+            Start / continue localization run
+          </button>
+          <label style={{ display: "flex", alignItems: "center", gap: 8 }}>
+            <input
+              type="checkbox"
+              checked={localizationRunQueueQc}
+              disabled={busy || localizationRunBusy}
+              onChange={(e) => setLocalizationRunQueueQc(e.currentTarget.checked)}
+            />
+            <span>Queue QC</span>
+          </label>
+          <label style={{ display: "flex", alignItems: "center", gap: 8 }}>
+            <input
+              type="checkbox"
+              checked={localizationRunQueueExportPack}
+              disabled={busy || localizationRunBusy}
+              onChange={(e) => setLocalizationRunQueueExportPack(e.currentTarget.checked)}
+            />
+            <span>Queue export pack</span>
+          </label>
+          <span style={{ fontSize: 12, opacity: 0.75 }}>
+            Current export root: <code>{localizationRootStatus?.current_dir ?? "-"}</code>
+          </span>
+        </div>
+        {localizationRunSummary ? (
+          <div style={{ marginTop: 10, fontSize: 12, opacity: 0.85 }}>
+            Batch <code>{localizationRunSummary.batch_id}</code> queued from stage{" "}
+            <strong>{localizationRunSummary.stage}</strong>.
+            {localizationRunSummary.notes.length ? ` ${localizationRunSummary.notes[0]}` : ""}
+          </div>
+        ) : (
+          <div style={{ marginTop: 10, fontSize: 12, opacity: 0.75 }}>
+            This is the explicit run contract for Localization Studio. Use it instead of guessing
+            which manual stage button needs to be pressed next.
+          </div>
+        )}
+        <div className="table-wrap" style={{ marginTop: 12 }}>
+          <table>
+            <thead>
+              <tr>
+                <th>Stage</th>
+                <th>State</th>
+                <th>Detail</th>
+              </tr>
+            </thead>
+            <tbody>
+              {localizationRunStages.map((stage) => (
+                <tr key={stage.id}>
+                  <td>{stage.title}</td>
+                  <td>{stage.ready ? "Ready" : "Pending"}</td>
+                  <td>{stage.detail}</td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
         </div>
       </div>
 
@@ -5801,7 +6062,7 @@ export function SubtitleEditorPage({ itemId, visible = true }: { itemId: string;
               </div>
             ) : null}
 
-            <div style={{ marginTop: 16 }}>
+            <div id="loc-voice-plan" style={{ marginTop: 16 }}>
               <div className="row" style={{ alignItems: "center", gap: 10, flexWrap: "wrap" }}>
                 <div style={{ fontSize: 12, opacity: 0.85 }}>Voice profiles (voice-preserving)</div>
                 <div style={{ fontSize: 12, opacity: 0.6 }}>

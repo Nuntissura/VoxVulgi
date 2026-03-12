@@ -1,10 +1,11 @@
-import { Suspense, lazy, type ReactNode, useEffect, useMemo, useState } from "react";
+import { Suspense, lazy, type ReactNode, useCallback, useEffect, useMemo, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import { open } from "@tauri-apps/plugin-dialog";
 import "./App.css";
 import { useDesktopActivity, usePollingLoop } from "./lib/activity";
 import { diagnosticsTrace } from "./lib/diagnosticsTrace";
+import { featureRootStatus, useSharedDownloadDirStatus } from "./lib/sharedDownloadDir";
 import { safeLocalStorageGet, safeLocalStorageSet } from "./lib/persist";
 
 const DiagnosticsPage = lazy(async () => {
@@ -72,6 +73,14 @@ type StartupStatus = {
   phases: StartupPhase[];
 };
 
+type HomeLibraryItem = {
+  id: string;
+  created_at_ms: number;
+  source_type: string;
+  title: string;
+  media_path: string;
+};
+
 type ResizeDirection = "East" | "North" | "NorthEast" | "NorthWest" | "South" | "SouthEast" | "SouthWest" | "West";
 
 const ACTIVE_PAGE_KEY = "voxvulgi.v1.shell.active_page";
@@ -95,24 +104,72 @@ function parseStoredPage(raw: string | null): AppPage {
 function LocalizationStudioHome({
   onOpenVideoArchiver,
   onOpenMediaLibrary,
+  onOpenEditor,
+  onOpenOptions,
   compact = false,
 }: {
   onOpenVideoArchiver: () => void;
   onOpenMediaLibrary: () => void;
+  onOpenEditor: (itemId: string) => void;
+  onOpenOptions: () => void;
   compact?: boolean;
 }) {
   const [busy, setBusy] = useState(false);
   const [notice, setNotice] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const [recentItems, setRecentItems] = useState<HomeLibraryItem[]>([]);
+  const [recentItemsBusy, setRecentItemsBusy] = useState(false);
+  const [pendingImportPath, setPendingImportPath] = useState<string | null>(null);
   const [asrLang, setAsrLang] = useState<AsrLang>(() => {
     const raw = safeLocalStorageGet("voxvulgi.v1.settings.asr_lang");
     if (raw === "ja" || raw === "ko") return raw;
     return "auto";
   });
+  const { status: downloadDir } = useSharedDownloadDirStatus();
+  const localizationRoot = featureRootStatus(downloadDir, "localization");
 
   useEffect(() => {
     safeLocalStorageSet("voxvulgi.v1.settings.asr_lang", asrLang);
   }, [asrLang]);
+
+  const refreshRecentItems = useCallback(async () => {
+    setRecentItemsBusy(true);
+    try {
+      const items = await invoke<HomeLibraryItem[]>("library_list", { limit: 12, offset: 0 });
+      setRecentItems(items ?? []);
+      return items ?? [];
+    } catch (e) {
+      setError(String(e));
+      return [];
+    } finally {
+      setRecentItemsBusy(false);
+    }
+  }, []);
+
+  useEffect(() => {
+    void refreshRecentItems();
+  }, [refreshRecentItems]);
+
+  usePollingLoop(
+    async () => {
+      if (!pendingImportPath) return;
+      const items = await refreshRecentItems();
+      const normalizedPending = pendingImportPath.trim().toLowerCase();
+      const match = items.find(
+        (item) => item.media_path.trim().toLowerCase() === normalizedPending,
+      );
+      if (match) {
+        setPendingImportPath(null);
+        setNotice(`Import completed. Opening "${match.title || "New item"}" in Localization Studio.`);
+        onOpenEditor(match.id);
+      }
+    },
+    {
+      enabled: !!pendingImportPath,
+      intervalMs: 1800,
+      initialDelayMs: 1200,
+    },
+  );
 
   async function importLocalMedia() {
     setBusy(true);
@@ -126,8 +183,9 @@ function LocalizationStudioHome({
       });
       if (!selected || typeof selected !== "string") return;
       await invoke("jobs_enqueue_import_local", { path: selected });
+      setPendingImportPath(selected);
       setNotice(
-        "Queued local import. Open Media Library or Jobs after import completes, then use Edit subs to bring the item into Localization Studio.",
+        "Queued local import. VoxVulgi will refresh recent items here; once the import finishes you can open the item directly in Localization Studio.",
       );
       void diagnosticsTrace("localization_home_import_queued", {
         path: selected,
@@ -156,6 +214,13 @@ function LocalizationStudioHome({
           Import or refresh the source media for subtitle and dubbing work. The ASR language choice
           here is stored and reused by quick ASR actions elsewhere in the app.
         </div>
+        <div className="kv" style={{ marginTop: 10 }}>
+          <div className="k">Localization export root</div>
+          <div className="v">
+            {localizationRoot?.current_dir ?? "Loading localization root..."}
+            {!localizationRoot?.exists ? " (currently unavailable)" : ""}
+          </div>
+        </div>
         <div className="row">
           <button type="button" disabled={busy} onClick={() => importLocalMedia().catch(() => undefined)}>
             Import local media
@@ -165,6 +230,9 @@ function LocalizationStudioHome({
           </button>
           <button type="button" disabled={busy} onClick={onOpenMediaLibrary}>
             Open Media Library
+          </button>
+          <button type="button" disabled={busy} onClick={onOpenOptions}>
+            Open Options
           </button>
           <label style={{ display: "flex", alignItems: "center", gap: 8 }}>
             <span>ASR lang</span>
@@ -179,6 +247,79 @@ function LocalizationStudioHome({
             </select>
           </label>
         </div>
+        {!compact ? (
+          <div style={{ marginTop: 14, display: "flex", flexDirection: "column", gap: 10 }}>
+            <div className="row" style={{ marginTop: 0, alignItems: "center", justifyContent: "space-between" }}>
+              <div style={{ fontWeight: 600 }}>Recent media for Localization Studio</div>
+              <button
+                type="button"
+                disabled={busy || recentItemsBusy}
+                onClick={() => {
+                  void refreshRecentItems();
+                }}
+              >
+                Refresh recent items
+              </button>
+            </div>
+            <div style={{ fontSize: 12, opacity: 0.75 }}>
+              This removes the confusing Media Library bounce for normal localization work. Import,
+              confirm the item appears here, then open it directly in Localization Studio.
+            </div>
+            <div
+              style={{
+                border: "1px solid #e5e7eb",
+                borderRadius: 8,
+                maxHeight: 240,
+                overflow: "auto",
+              }}
+            >
+              <table>
+                <thead>
+                  <tr>
+                    <th>Title</th>
+                    <th>Source</th>
+                    <th>Path</th>
+                    <th>Actions</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {recentItems.length ? (
+                    recentItems.map((item) => {
+                      const isPending = pendingImportPath
+                        ? item.media_path.trim().toLowerCase() === pendingImportPath.trim().toLowerCase()
+                        : false;
+                      return (
+                        <tr key={item.id}>
+                          <td>{item.title || "-"}</td>
+                          <td>{item.source_type || "-"}</td>
+                          <td style={{ maxWidth: 420 }}>{item.media_path}</td>
+                          <td>
+                            <div className="row" style={{ marginTop: 0 }}>
+                              <button type="button" disabled={busy} onClick={() => onOpenEditor(item.id)}>
+                                Open in Localization Studio
+                              </button>
+                              {isPending ? (
+                                <span style={{ fontSize: 12, opacity: 0.75 }}>Imported now</span>
+                              ) : null}
+                            </div>
+                          </td>
+                        </tr>
+                      );
+                    })
+                  ) : (
+                    <tr>
+                      <td colSpan={4}>
+                        {recentItemsBusy
+                          ? "Loading recent items..."
+                          : "No recent media yet. Import a local file or use Media Library."}
+                      </td>
+                    </tr>
+                  )}
+                </tbody>
+              </table>
+            </div>
+          </div>
+        ) : null}
       </div>
     </>
   );
@@ -316,6 +457,11 @@ function App() {
             compact
             onOpenVideoArchiver={() => switchPage("video_ingest")}
             onOpenMediaLibrary={() => switchPage("media_library")}
+            onOpenEditor={(nextItemId) => {
+              setEditorItemId(nextItemId);
+              switchPage("localization", { item_id: nextItemId });
+            }}
+            onOpenOptions={() => switchPage("options")}
           />
           <SubtitleEditorPage key={editorItemId} itemId={editorItemId} visible={page === "localization"} />
         </>
@@ -323,6 +469,11 @@ function App() {
         <LocalizationStudioHome
           onOpenVideoArchiver={() => switchPage("video_ingest")}
           onOpenMediaLibrary={() => switchPage("media_library")}
+          onOpenEditor={(nextItemId) => {
+            setEditorItemId(nextItemId);
+            switchPage("localization", { item_id: nextItemId });
+          }}
+          onOpenOptions={() => switchPage("options")}
         />
       ),
       video_ingest: (

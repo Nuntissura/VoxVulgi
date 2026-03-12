@@ -304,6 +304,10 @@ Phase 2 preview implementation notes (current):
   - mix artifact,
   - muxed MP4 artifact,
   - deliverable/export surface.
+- The localization-run orchestrator should use one shared next-stage decision point instead of scattered ad hoc follow-on queues.
+  - translated English tracks without speaker labels should continue to diarization first,
+  - translated English tracks with missing cloned-speaker references should stop at the voice-plan checkpoint with explicit missing-speaker notes,
+  - once the voice plan is ready, dubbing can continue through mix and mux.
 - Direct speech-to-speech systems (for example SeamlessExpressive-, Translatotron-, or TransVIP-style families) are useful research references, but they should remain future R&D or benchmark lanes rather than the default shipped path until they satisfy local packaging, operator-control, and artifact-inspection requirements at the same level as the staged cascade.
 
 Voice-preserving approach (core feature):
