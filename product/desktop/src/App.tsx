@@ -3,8 +3,9 @@ import { invoke } from "@tauri-apps/api/core";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import { open } from "@tauri-apps/plugin-dialog";
 import "./App.css";
-import { useDesktopActivity, usePollingLoop } from "./lib/activity";
+import { useDesktopActivity, usePageActivity, usePollingLoop } from "./lib/activity";
 import { diagnosticsTrace } from "./lib/diagnosticsTrace";
+import { openPathBestEffort, revealPath } from "./lib/pathOpener";
 import { featureRootStatus, useSharedDownloadDirStatus } from "./lib/sharedDownloadDir";
 import { safeLocalStorageGet, safeLocalStorageSet } from "./lib/persist";
 
@@ -81,6 +82,31 @@ type HomeLibraryItem = {
   media_path: string;
 };
 
+type HomeJobRow = {
+  job_type: string;
+  status: "queued" | "running" | "succeeded" | "failed" | "canceled";
+  progress: number;
+  error: string | null;
+  created_at_ms?: number;
+};
+
+type HomeItemOutputs = {
+  derived_item_dir: string;
+  mix_dub_preview_v1_wav_path: string;
+  mix_dub_preview_v1_wav_exists: boolean;
+  mux_dub_preview_v1_mp4_path: string;
+  mux_dub_preview_v1_mp4_exists: boolean;
+};
+
+type RecentLocalizationItemStatus = {
+  item_id: string;
+  summary: string;
+  detail: string;
+  running: boolean;
+  working_dir: string;
+  preview_mp4_path: string | null;
+};
+
 type ResizeDirection = "East" | "North" | "NorthEast" | "NorthWest" | "South" | "SouthEast" | "SouthWest" | "West";
 type ShellWindowMode = "floating" | "maximized" | "fullscreen";
 
@@ -102,24 +128,106 @@ function parseStoredPage(raw: string | null): AppPage {
   }
 }
 
+function normalizePathForMatch(raw: string | null | undefined): string {
+  return (raw ?? "").trim().replace(/\//g, "\\").toLowerCase();
+}
+
+function fileNameFromPath(raw: string | null | undefined): string {
+  const value = (raw ?? "").trim();
+  if (!value) return "";
+  const idx = Math.max(value.lastIndexOf("\\"), value.lastIndexOf("/"));
+  return idx >= 0 ? value.slice(idx + 1) : value;
+}
+
+function summarizeRecentLocalizationItem(
+  outputs: HomeItemOutputs | null,
+  jobs: HomeJobRow[],
+): RecentLocalizationItemStatus {
+  const runningJob =
+    jobs.find((job) => job.status === "running") ??
+    jobs.find((job) => job.status === "queued") ??
+    null;
+  const failedJob =
+    jobs.find((job) => job.status === "failed") ??
+    null;
+  const latestJob =
+    jobs.find((job) => job.status === "succeeded" || job.status === "canceled") ??
+    jobs[0] ??
+    null;
+  if (outputs?.mux_dub_preview_v1_mp4_exists) {
+    return {
+      item_id: "",
+      summary: "Preview MP4 ready",
+      detail: outputs.mux_dub_preview_v1_mp4_path,
+      running: false,
+      working_dir: outputs.derived_item_dir,
+      preview_mp4_path: outputs.mux_dub_preview_v1_mp4_path,
+    };
+  }
+  if (runningJob) {
+    return {
+      item_id: "",
+      summary: `${runningJob.job_type} ${Math.round((runningJob.progress ?? 0) * 100)}%`,
+      detail: runningJob.status === "queued" ? "Queued" : "Running",
+      running: true,
+      working_dir: outputs?.derived_item_dir ?? "",
+      preview_mp4_path: null,
+    };
+  }
+  if (failedJob) {
+    return {
+      item_id: "",
+      summary: `Last failed: ${failedJob.job_type}`,
+      detail: failedJob.error ?? "No error detail recorded.",
+      running: false,
+      working_dir: outputs?.derived_item_dir ?? "",
+      preview_mp4_path: null,
+    };
+  }
+  if (latestJob) {
+    return {
+      item_id: "",
+      summary: `Last job: ${latestJob.job_type}`,
+      detail: latestJob.status,
+      running: false,
+      working_dir: outputs?.derived_item_dir ?? "",
+      preview_mp4_path: null,
+    };
+  }
+  return {
+    item_id: "",
+    summary: "Imported / not started",
+    detail: "Open the item to start the staged localization run.",
+    running: false,
+    working_dir: outputs?.derived_item_dir ?? "",
+    preview_mp4_path: null,
+  };
+}
+
 function LocalizationStudioHome({
   onOpenVideoArchiver,
   onOpenMediaLibrary,
   onOpenEditor,
   onOpenOptions,
   compact = false,
+  visible = true,
 }: {
   onOpenVideoArchiver: () => void;
   onOpenMediaLibrary: () => void;
   onOpenEditor: (itemId: string) => void;
   onOpenOptions: () => void;
   compact?: boolean;
+  visible?: boolean;
 }) {
+  const pageActive = usePageActivity(visible);
   const [busy, setBusy] = useState(false);
   const [notice, setNotice] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [recentItems, setRecentItems] = useState<HomeLibraryItem[]>([]);
   const [recentItemsBusy, setRecentItemsBusy] = useState(false);
+  const [recentItemStatuses, setRecentItemStatuses] = useState<
+    Record<string, RecentLocalizationItemStatus>
+  >({});
   const [pendingImportPath, setPendingImportPath] = useState<string | null>(null);
   const [asrLang, setAsrLang] = useState<AsrLang>(() => {
     const raw = safeLocalStorageGet("voxvulgi.v1.settings.asr_lang");
@@ -147,18 +255,78 @@ function LocalizationStudioHome({
     }
   }, []);
 
+  const refreshRecentItemStatuses = useCallback(async (items: HomeLibraryItem[]) => {
+    const pairs = await Promise.all(
+      items.map(async (item) => {
+        try {
+          const [outputs, jobs] = await Promise.all([
+            invoke<HomeItemOutputs>("item_outputs", { itemId: item.id }),
+            invoke<HomeJobRow[]>("jobs_list_for_item", { itemId: item.id, limit: 40, offset: 0 }),
+          ]);
+          const summary = summarizeRecentLocalizationItem(
+            outputs ?? null,
+            [...(jobs ?? [])].sort(
+              (a, b) => (b.created_at_ms ?? 0) - (a.created_at_ms ?? 0),
+            ),
+          );
+          return [
+            item.id,
+            {
+              ...summary,
+              item_id: item.id,
+            } satisfies RecentLocalizationItemStatus,
+          ] as const;
+        } catch {
+          return [
+            item.id,
+            {
+              item_id: item.id,
+              summary: "Status unavailable",
+              detail: "Refresh the item inside Localization Studio for current stage/output state.",
+              running: false,
+              working_dir: "",
+              preview_mp4_path: null,
+            } satisfies RecentLocalizationItemStatus,
+          ] as const;
+        }
+      }),
+    );
+    setRecentItemStatuses(Object.fromEntries(pairs));
+  }, []);
+
   useEffect(() => {
-    void refreshRecentItems();
-  }, [refreshRecentItems]);
+    void refreshRecentItems().then((items) => {
+      void refreshRecentItemStatuses(items);
+    });
+  }, [refreshRecentItems, refreshRecentItemStatuses]);
+
+  usePollingLoop(
+    async () => {
+      const items = await refreshRecentItems();
+      await refreshRecentItemStatuses(items);
+    },
+    {
+      enabled:
+        pageActive &&
+        (Boolean(pendingImportPath) ||
+          Object.values(recentItemStatuses).some((status) => status.running)),
+      intervalMs: 2500,
+      initialDelayMs: 1500,
+    },
+  );
 
   usePollingLoop(
     async () => {
       if (!pendingImportPath) return;
       const items = await refreshRecentItems();
+      await refreshRecentItemStatuses(items);
       const normalizedPending = pendingImportPath.trim().toLowerCase();
-      const match = items.find(
-        (item) => item.media_path.trim().toLowerCase() === normalizedPending,
-      );
+      const pendingFileName = fileNameFromPath(pendingImportPath).toLowerCase();
+      const match =
+        items.find((item) => normalizePathForMatch(item.media_path) === normalizedPending) ??
+        items
+          .filter((item) => fileNameFromPath(item.media_path).toLowerCase() === pendingFileName)
+          .sort((a, b) => (b.created_at_ms ?? 0) - (a.created_at_ms ?? 0))[0];
       if (match) {
         setPendingImportPath(null);
         setNotice(`Import completed. Opening "${match.title || "New item"}" in Localization Studio.`);
@@ -279,6 +447,7 @@ function LocalizationStudioHome({
                   <tr>
                     <th>Title</th>
                     <th>Source</th>
+                    <th>Localization</th>
                     <th>Path</th>
                     <th>Actions</th>
                   </tr>
@@ -286,18 +455,55 @@ function LocalizationStudioHome({
                 <tbody>
                   {recentItems.length ? (
                     recentItems.map((item) => {
+                      const status = recentItemStatuses[item.id];
                       const isPending = pendingImportPath
-                        ? item.media_path.trim().toLowerCase() === pendingImportPath.trim().toLowerCase()
+                        ? normalizePathForMatch(item.media_path) ===
+                            normalizePathForMatch(pendingImportPath) ||
+                          fileNameFromPath(item.media_path).toLowerCase() ===
+                            fileNameFromPath(pendingImportPath).toLowerCase()
                         : false;
                       return (
                         <tr key={item.id}>
                           <td>{item.title || "-"}</td>
                           <td>{item.source_type || "-"}</td>
+                          <td style={{ maxWidth: 260 }}>
+                            <div>{status?.summary ?? "-"}</div>
+                            <div style={{ fontSize: 12, opacity: 0.75 }}>{status?.detail ?? "-"}</div>
+                          </td>
                           <td style={{ maxWidth: 420 }}>{item.media_path}</td>
                           <td>
-                            <div className="row" style={{ marginTop: 0 }}>
+                            <div className="row" style={{ marginTop: 0, flexWrap: "wrap" }}>
                               <button type="button" disabled={busy} onClick={() => onOpenEditor(item.id)}>
                                 Open in Localization Studio
+                              </button>
+                              <button
+                                type="button"
+                                disabled={busy || !item.media_path}
+                                onClick={() => {
+                                  openPathBestEffort(item.media_path).catch(() => undefined);
+                                }}
+                              >
+                                Open source
+                              </button>
+                              <button
+                                type="button"
+                                disabled={busy || !status?.working_dir}
+                                onClick={() => {
+                                  revealPath(status?.working_dir ?? "").catch(() => undefined);
+                                }}
+                              >
+                                Open working folder
+                              </button>
+                              <button
+                                type="button"
+                                disabled={busy || !status?.preview_mp4_path}
+                                onClick={() => {
+                                  openPathBestEffort(status?.preview_mp4_path ?? "").catch(
+                                    () => undefined,
+                                  );
+                                }}
+                              >
+                                Open preview MP4
                               </button>
                               {isPending ? (
                                 <span style={{ fontSize: 12, opacity: 0.75 }}>Imported now</span>
@@ -309,7 +515,7 @@ function LocalizationStudioHome({
                     })
                   ) : (
                     <tr>
-                      <td colSpan={4}>
+                      <td colSpan={5}>
                         {recentItemsBusy
                           ? "Loading recent items..."
                           : "No recent media yet. Import a local file or use Media Library."}
@@ -502,6 +708,7 @@ function App() {
         <>
           <LocalizationStudioHome
             compact
+            visible={page === "localization"}
             onOpenVideoArchiver={() => switchPage("video_ingest")}
             onOpenMediaLibrary={() => switchPage("media_library")}
             onOpenEditor={(nextItemId) => {
@@ -519,6 +726,7 @@ function App() {
         </>
       ) : (
         <LocalizationStudioHome
+          visible={page === "localization"}
           onOpenVideoArchiver={() => switchPage("video_ingest")}
           onOpenMediaLibrary={() => switchPage("media_library")}
           onOpenEditor={(nextItemId) => {
