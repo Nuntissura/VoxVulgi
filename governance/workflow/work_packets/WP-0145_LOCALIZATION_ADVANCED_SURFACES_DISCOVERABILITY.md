@@ -41,3 +41,4 @@ Out of scope:
 
 - 2026-03-12: Created from smoke findings `ST-035`, `ST-036`, `ST-037`, `ST-038`, `ST-039`, and `ST-040`.
 - 2026-03-12: Added an explicit Advanced Tools index near the top of Localization Studio, wired direct jumps into backend strategy, benchmarking, batch dubbing, A/B preview, QC, and artifacts, and exposed a direct Diagnostics handoff for experimental backend adapter setup; awaiting operator smoke on the revised path.
+- 2026-03-12: Added direct home-surface actions that reopen the current item straight into `Advanced Tools`, `Localization Library`, or `Localization Run`, so the advanced sections are now reachable from the first operator surface instead of only after manual scrolling through the editor. Proof: `product/desktop/build_target/tool_artifacts/wp_runs/WP-0143/20260312_052059/`.

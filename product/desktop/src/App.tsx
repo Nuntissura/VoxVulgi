@@ -107,6 +107,25 @@ type RecentLocalizationItemStatus = {
   preview_mp4_path: string | null;
 };
 
+type LocalizationSectionId =
+  | "loc-library"
+  | "loc-run"
+  | "loc-advanced"
+  | "loc-track"
+  | "loc-voice-plan"
+  | "loc-backends"
+  | "loc-benchmark"
+  | "loc-batch"
+  | "loc-ab"
+  | "loc-qc"
+  | "loc-artifacts";
+
+type LocalizationNavRequest = {
+  itemId: string;
+  sectionId: LocalizationSectionId | null;
+  nonce: number;
+};
+
 type ResizeDirection = "East" | "North" | "NorthEast" | "NorthWest" | "South" | "SouthEast" | "SouthWest" | "West";
 type ShellWindowMode = "floating" | "maximized" | "fullscreen";
 
@@ -208,14 +227,18 @@ function LocalizationStudioHome({
   onOpenVideoArchiver,
   onOpenMediaLibrary,
   onOpenEditor,
+  onOpenEditorSection,
   onOpenOptions,
+  currentEditorItemId = null,
   compact = false,
   visible = true,
 }: {
   onOpenVideoArchiver: () => void;
   onOpenMediaLibrary: () => void;
   onOpenEditor: (itemId: string) => void;
+  onOpenEditorSection: (itemId: string, sectionId: LocalizationSectionId | null) => void;
   onOpenOptions: () => void;
+  currentEditorItemId?: string | null;
   compact?: boolean;
   visible?: boolean;
 }) {
@@ -367,6 +390,11 @@ function LocalizationStudioHome({
     }
   }
 
+  const currentEditorStatus = currentEditorItemId ? recentItemStatuses[currentEditorItemId] ?? null : null;
+  const currentEditorItem = currentEditorItemId
+    ? recentItems.find((item) => item.id === currentEditorItemId) ?? null
+    : null;
+
   return (
     <>
       {error ? <div className="error">{error}</div> : null}
@@ -416,6 +444,49 @@ function LocalizationStudioHome({
             </select>
           </label>
         </div>
+        {compact && currentEditorItemId ? (
+          <div
+            style={{
+              marginTop: 12,
+              paddingTop: 12,
+              borderTop: "1px solid rgba(82, 94, 112, 0.18)",
+              display: "flex",
+              flexDirection: "column",
+              gap: 8,
+            }}
+          >
+            <div style={{ fontWeight: 600 }}>
+              Current localization item: {currentEditorItem?.title || "Open below"}
+            </div>
+            <div style={{ fontSize: 12, opacity: 0.75 }}>
+              {currentEditorStatus?.summary ??
+                "Use the jump actions to land directly on run controls, outputs, or advanced tools."}
+            </div>
+            <div className="row" style={{ marginTop: 0, flexWrap: "wrap" }}>
+              <button
+                type="button"
+                disabled={busy}
+                onClick={() => onOpenEditorSection(currentEditorItemId, "loc-run")}
+              >
+                Jump to run controls
+              </button>
+              <button
+                type="button"
+                disabled={busy}
+                onClick={() => onOpenEditorSection(currentEditorItemId, "loc-library")}
+              >
+                Jump to outputs library
+              </button>
+              <button
+                type="button"
+                disabled={busy}
+                onClick={() => onOpenEditorSection(currentEditorItemId, "loc-advanced")}
+              >
+                Jump to advanced tools
+              </button>
+            </div>
+          </div>
+        ) : null}
         {!compact ? (
           <div style={{ marginTop: 14, display: "flex", flexDirection: "column", gap: 10 }}>
             <div className="row" style={{ marginTop: 0, alignItems: "center", justifyContent: "space-between" }}>
@@ -475,6 +546,27 @@ function LocalizationStudioHome({
                             <div className="row" style={{ marginTop: 0, flexWrap: "wrap" }}>
                               <button type="button" disabled={busy} onClick={() => onOpenEditor(item.id)}>
                                 Open in Localization Studio
+                              </button>
+                              <button
+                                type="button"
+                                disabled={busy}
+                                onClick={() => onOpenEditorSection(item.id, "loc-run")}
+                              >
+                                Open run controls
+                              </button>
+                              <button
+                                type="button"
+                                disabled={busy}
+                                onClick={() => onOpenEditorSection(item.id, "loc-library")}
+                              >
+                                Open outputs
+                              </button>
+                              <button
+                                type="button"
+                                disabled={busy}
+                                onClick={() => onOpenEditorSection(item.id, "loc-advanced")}
+                              >
+                                Open advanced tools
                               </button>
                               <button
                                 type="button"
@@ -540,6 +632,7 @@ function App() {
     [initialPage]: true,
   } as Record<AppPage, boolean>));
   const [editorItemId, setEditorItemId] = useState<string | null>(null);
+  const [localizationNavRequest, setLocalizationNavRequest] = useState<LocalizationNavRequest | null>(null);
   const [safeMode, setSafeMode] = useState<SafeModeStatus | null>(null);
   const [startup, setStartup] = useState<StartupStatus | null>(null);
   const [startupDetailsOpen, setStartupDetailsOpen] = useState(false);
@@ -702,6 +795,19 @@ function App() {
     void diagnosticsTrace("panel_switch", { page: next, ...(details ?? {}) });
   }
 
+  function openLocalizationItem(itemId: string, sectionId: LocalizationSectionId | null = null) {
+    setEditorItemId(itemId);
+    setLocalizationNavRequest({
+      itemId,
+      sectionId,
+      nonce: Date.now(),
+    });
+    switchPage("localization", {
+      item_id: itemId,
+      section_id: sectionId ?? "editor",
+    });
+  }
+
   const contentByPage = useMemo<Record<AppPage, ReactNode>>(
     () => ({
       localization: editorItemId ? (
@@ -711,17 +817,28 @@ function App() {
             visible={page === "localization"}
             onOpenVideoArchiver={() => switchPage("video_ingest")}
             onOpenMediaLibrary={() => switchPage("media_library")}
-            onOpenEditor={(nextItemId) => {
-              setEditorItemId(nextItemId);
-              switchPage("localization", { item_id: nextItemId });
-            }}
+            onOpenEditor={(nextItemId) => openLocalizationItem(nextItemId)}
+            onOpenEditorSection={(nextItemId, sectionId) =>
+              openLocalizationItem(nextItemId, sectionId)
+            }
             onOpenOptions={() => switchPage("options")}
+            currentEditorItemId={editorItemId}
           />
           <SubtitleEditorPage
             key={editorItemId}
             itemId={editorItemId}
             visible={page === "localization"}
             onOpenDiagnostics={() => switchPage("diagnostics")}
+            navigationRequest={
+              localizationNavRequest && localizationNavRequest.itemId === editorItemId
+                ? localizationNavRequest
+                : null
+            }
+            onNavigationConsumed={(nonce) => {
+              setLocalizationNavRequest((prev) =>
+                prev && prev.nonce === nonce ? null : prev,
+              );
+            }}
           />
         </>
       ) : (
@@ -729,10 +846,10 @@ function App() {
           visible={page === "localization"}
           onOpenVideoArchiver={() => switchPage("video_ingest")}
           onOpenMediaLibrary={() => switchPage("media_library")}
-          onOpenEditor={(nextItemId) => {
-            setEditorItemId(nextItemId);
-            switchPage("localization", { item_id: nextItemId });
-          }}
+          onOpenEditor={(nextItemId) => openLocalizationItem(nextItemId)}
+          onOpenEditorSection={(nextItemId, sectionId) =>
+            openLocalizationItem(nextItemId, sectionId)
+          }
           onOpenOptions={() => switchPage("options")}
         />
       ),
@@ -740,10 +857,7 @@ function App() {
         <LibraryPage
           mode="video_ingest"
           visible={page === "video_ingest"}
-          onOpenEditor={(itemId) => {
-            setEditorItemId(itemId);
-            switchPage("localization", { item_id: itemId });
-          }}
+          onOpenEditor={(itemId) => openLocalizationItem(itemId)}
           onOpenOptions={() => switchPage("options")}
         />
       ),
@@ -765,10 +879,7 @@ function App() {
         <LibraryPage
           mode="media_library"
           visible={page === "media_library"}
-          onOpenEditor={(itemId) => {
-            setEditorItemId(itemId);
-            switchPage("localization", { item_id: itemId });
-          }}
+          onOpenEditor={(itemId) => openLocalizationItem(itemId)}
           onOpenOptions={() => switchPage("options")}
         />
       ),
@@ -776,7 +887,7 @@ function App() {
       diagnostics: <DiagnosticsPage visible={page === "diagnostics"} />,
       options: <OptionsPage />,
     }),
-    [editorItemId, page],
+    [editorItemId, localizationNavRequest, page],
   );
 
   const visitedPageList = useMemo(

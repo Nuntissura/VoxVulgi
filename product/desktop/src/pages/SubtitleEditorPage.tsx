@@ -125,6 +125,12 @@ type LocalizationOutputEntry = {
   status_hint: string;
 };
 
+type LocalizationNavRequest = {
+  itemId: string;
+  sectionId: string | null;
+  nonce: number;
+};
+
 function sanitizeFilename(raw: string): string {
   const cleaned = raw.replace(/[<>:"/\\|?*]/g, "").trim();
   return cleaned || "voxvulgi-output";
@@ -942,12 +948,17 @@ export function SubtitleEditorPage({
   itemId,
   visible = true,
   onOpenDiagnostics,
+  navigationRequest,
+  onNavigationConsumed,
 }: {
   itemId: string;
   visible?: boolean;
   onOpenDiagnostics?: () => void;
+  navigationRequest?: LocalizationNavRequest | null;
+  onNavigationConsumed?: (nonce: number) => void;
 }) {
   const pageActive = usePageActivity(visible);
+  const rootSectionRef = useRef<HTMLElement | null>(null);
   const videoRef = useRef<HTMLVideoElement | null>(null);
   const textRefs = useRef<Record<number, HTMLTextAreaElement | null>>({});
 
@@ -2876,6 +2887,20 @@ export function SubtitleEditorPage({
     const target = document.getElementById(sectionId);
     target?.scrollIntoView({ behavior: "smooth", block: "start" });
   }
+
+  useEffect(() => {
+    if (!visible || !itemId) return;
+    const request = navigationRequest;
+    const frame = window.requestAnimationFrame(() => {
+      const target =
+        request?.sectionId != null ? document.getElementById(request.sectionId) : rootSectionRef.current;
+      target?.scrollIntoView({ behavior: "smooth", block: "start" });
+      if (request) {
+        onNavigationConsumed?.(request.nonce);
+      }
+    });
+    return () => window.cancelAnimationFrame(frame);
+  }, [itemId, navigationRequest, onNavigationConsumed, visible]);
 
   async function ensureEnglishLocalizationTrackSelected() {
     if (isEnglishLocalizationTrack(currentTrack) && currentTrack) {
@@ -5391,13 +5416,13 @@ export function SubtitleEditorPage({
   }
 
   return (
-    <section>
+    <section ref={rootSectionRef}>
       <h1>Localization Studio</h1>
 
       {error ? <div className="error">{error}</div> : null}
       {notice ? <div className="card">{notice}</div> : null}
 
-      <div className="card">
+      <div className="card" id="loc-library">
         <h2>Item</h2>
         <div className="kv">
           <div className="k">Title</div>
@@ -5550,6 +5575,9 @@ export function SubtitleEditorPage({
           ))}
         </div>
         <div className="row" style={{ marginTop: 12, flexWrap: "wrap" }}>
+          <button type="button" disabled={busy} onClick={() => scrollToLocalizationSection("loc-library")}>
+            Outputs library
+          </button>
           <button type="button" disabled={busy} onClick={() => scrollToLocalizationSection("loc-track")}>
             Tracks and core jobs
           </button>
@@ -5593,7 +5621,7 @@ export function SubtitleEditorPage({
         </div>
       </div>
 
-      <div className="card">
+      <div className="card" id="loc-run">
         <h2>Localization Run</h2>
         <div style={{ color: "#4b5563" }}>
           Configure the current item first, then start or continue the full localization run from
