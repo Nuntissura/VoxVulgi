@@ -46,3 +46,4 @@ Out of scope:
 - 2026-03-12: Created from operator feedback that the frameless shell still occupies an invisible bounding box, breaking maximize/fullscreen correctness and blocking interaction with adjacent apps.
 - 2026-03-12: Expanded from operator screenshot feedback that the shell-control cluster also drifts away from the intended top-right position.
 - 2026-03-12: Added frontend shell-window mode tracking so maximized/fullscreen states switch the visible shell from centered floating chassis mode to edge-aligned full-surface mode; awaiting operator side-by-side validation against the invisible-click-block regression.
+- 2026-03-12: Removed inherited maximized/fullscreen shell padding and border/shadow chrome that left a transparent blocked rim inside the native window, and kept the top-right chrome cluster anchored through a two-row responsive shell layout. Proof: `product/desktop/build_target/tool_artifacts/wp_runs/WP-0148/20260312_044237/`.

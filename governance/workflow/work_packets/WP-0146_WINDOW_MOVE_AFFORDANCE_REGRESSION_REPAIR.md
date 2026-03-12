@@ -43,3 +43,4 @@ Out of scope:
 - 2026-03-12: Created from smoke finding `ST-051`.
 - 2026-03-12: Expanded from operator screenshot feedback that the move affordance and window controls drifted away from the intended top-right chrome cluster.
 - 2026-03-12: Restored the move affordance to the top-right chrome cluster, added explicit shell-window mode tracking, and switched the handle to a Tauri drag-region plus direct drag-call hybrid pending operator smoke confirmation.
+- 2026-03-12: Hardened the move handle hit path by keeping drag-region markers on the handle children, using direct pointer-down drag start on the explicit handle, and pinning the chrome cluster into the top-right grid area even on narrower layouts. Proof: `product/desktop/build_target/tool_artifacts/wp_runs/WP-0146/20260312_044237/`.

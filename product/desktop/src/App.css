@@ -145,9 +145,10 @@ code {
   width: 100%;
   max-width: none;
   min-height: 100%;
+  padding: 0;
   border-radius: 0;
-  border-left: 0;
-  border-right: 0;
+  border: 0;
+  box-shadow: none;
 }
 
 .app-shell-maximized::before,
@@ -225,12 +226,14 @@ code {
 .topbar-main {
   display: grid;
   grid-template-columns: auto minmax(0, 1fr) auto;
+  grid-template-areas: "leading center chrome";
   align-items: center;
   gap: 12px;
   width: 100%;
 }
 
 .topbar-leading {
+  grid-area: leading;
   display: flex;
   align-items: center;
   gap: 10px;
@@ -254,6 +257,8 @@ code {
   min-width: 0;
   white-space: nowrap;
   cursor: grab;
+  user-select: none;
+  -webkit-user-select: none;
 }
 
 .move-handle:active {
@@ -270,6 +275,7 @@ code {
 }
 
 .topbar-center {
+  grid-area: center;
   display: flex;
   align-items: center;
   gap: 10px;
@@ -281,6 +287,7 @@ code {
 }
 
 .topbar-chrome {
+  grid-area: chrome;
   display: flex;
   align-items: center;
   justify-content: flex-end;
@@ -728,22 +735,25 @@ img {
   }
 
   .topbar-main {
-    grid-template-columns: 1fr;
+    grid-template-columns: minmax(0, 1fr) auto;
+    grid-template-areas:
+      "leading chrome"
+      "center center";
     align-items: stretch;
   }
 
   .topbar-leading {
-    width: 100%;
+    width: auto;
   }
 
   .topbar-center {
     width: 100%;
-    justify-content: space-between;
+    justify-content: flex-start;
     flex-wrap: wrap;
   }
 
   .topbar-chrome {
-    width: 100%;
+    width: auto;
     justify-content: flex-end;
   }
 

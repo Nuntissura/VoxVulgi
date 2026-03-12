@@ -885,8 +885,9 @@ function App() {
                 data-tauri-drag-region
                 title="Move window"
                 aria-label="Move window"
-                onMouseDown={(e) => {
-                  if (e.button !== 0) return;
+                draggable={false}
+                onPointerDown={(e) => {
+                  if (e.pointerType === "mouse" && e.button !== 0) return;
                   e.stopPropagation();
                   void startWindowDrag();
                 }}
@@ -896,10 +897,10 @@ function App() {
                   void toggleMaximizeWindow();
                 }}
               >
-                <span className="move-handle-glyph" aria-hidden="true">
+                <span className="move-handle-glyph" data-tauri-drag-region aria-hidden="true">
                   ::::::
                 </span>
-                <span>Move window</span>
+                <span data-tauri-drag-region>Move window</span>
               </button>
               <div className="window-controls" data-no-drag="true">
                 <button className="win-btn" type="button" onClick={minimizeWindow} title="Minimize">
