@@ -3,7 +3,7 @@
 ## Metadata
 - ID: WP-0142
 - Owner: Codex
-- Status: BACKLOG
+- Status: IN_PROGRESS
 - Created: 2026-03-12
 - Target milestone: Post-0.1.6 smoke regression recovery
 
@@ -43,3 +43,4 @@ Out of scope:
 ## Status updates
 
 - 2026-03-12: Created from smoke findings `ST-015`, `ST-017`, `ST-018`, `ST-024`, and `ST-025`.
+- 2026-03-12: First runtime-hardening slice implemented: YouTube yt-dlp runs now prefer conservative documented player clients, queue failures now append clearer locked-cookie / YouTube 403 / Instagram extractor hints, and the multi-executable failure summary now suppresses irrelevant `python3` Microsoft Store alias noise and duplicate fallback errors. Full installer-state auth and Instagram recovery remain open.

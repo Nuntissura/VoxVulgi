@@ -1810,13 +1810,41 @@ fn enqueue_download_direct_url_batch_raw_with_subscription(
         .filter(|v| !v.is_empty())
         .unwrap_or_else(|| DOWNLOAD_PROVIDER_DIRECT_HTTP.to_string());
     let preset = resolve_download_preset(paths, preset_id.as_deref())?;
-    let batch_id = batch_id.or_else(|| Some(Uuid::new_v4().to_string()));
-    let mut jobs: Vec<JobRow> = Vec::with_capacity(urls.len());
-    for url in urls {
-        let provider = effective_download_provider(&provider_hint, &url);
-        let params_json = serde_json::to_string(&DownloadDirectUrlParams {
+    let targets = urls
+        .into_iter()
+        .map(|url| DownloadTarget {
+            provider: effective_download_provider(&provider_hint, &url),
             url,
-            provider: provider.to_string(),
+        })
+        .collect::<Vec<_>>();
+    enqueue_download_targets_batch_with_subscription(
+        paths,
+        targets,
+        auth_cookie,
+        output_dir,
+        use_browser_cookies,
+        &preset,
+        batch_id,
+        subscription_id,
+    )
+}
+
+fn enqueue_download_targets_batch_with_subscription(
+    paths: &AppPaths,
+    targets: Vec<DownloadTarget>,
+    auth_cookie: Option<String>,
+    output_dir: Option<String>,
+    use_browser_cookies: bool,
+    preset: &config::DownloadPreset,
+    batch_id: Option<String>,
+    subscription_id: Option<String>,
+) -> Result<Vec<JobRow>> {
+    let batch_id = batch_id.or_else(|| Some(Uuid::new_v4().to_string()));
+    let mut jobs: Vec<JobRow> = Vec::with_capacity(targets.len());
+    for target in targets {
+        let params_json = serde_json::to_string(&DownloadDirectUrlParams {
+            url: target.url,
+            provider: target.provider.to_string(),
             auth_cookie: None,
             output_subdir: None,
             output_dir: output_dir.clone(),
@@ -9654,6 +9682,146 @@ fn use_browser_cookies_for_url(url: &str, requested: bool) -> bool {
     requested
 }
 
+fn yt_dlp_youtube_player_clients(auth_cookie_present: bool) -> Option<&'static str> {
+    if auth_cookie_present {
+        // Prefer the auth-compatible clients yt-dlp documents without falling back to the more
+        // fragile default web client in installer-state runs.
+        Some("tv_downgraded,web_safari")
+    } else {
+        Some("android_sdkless,web_safari")
+    }
+}
+
+fn append_yt_dlp_runtime_args(
+    args: &mut Vec<String>,
+    url: &str,
+    auth_cookie_present: bool,
+) {
+    if !is_youtube_url(url) {
+        return;
+    }
+    let Some(clients) = yt_dlp_youtube_player_clients(auth_cookie_present) else {
+        return;
+    };
+    args.push("--extractor-args".to_string());
+    args.push(format!("youtube:player_client={clients}"));
+}
+
+fn yt_dlp_failure_hint(
+    url: &str,
+    error_text: &str,
+    using_browser_cookies: bool,
+    auth_cookie_present: bool,
+) -> Option<String> {
+    let lower = error_text.to_ascii_lowercase();
+    if lower.contains("could not copy chrome cookie database") {
+        return Some(
+            "Browser-cookie access failed because Chrome's cookie database was locked. Turn off browser cookies for this run or close Chrome and retry.".to_string(),
+        );
+    }
+    if is_youtube_url(url) && lower.contains("http error 403") {
+        let auth_hint = if auth_cookie_present {
+            " VoxVulgi already preferred auth-safe YouTube clients for this run."
+        } else {
+            " VoxVulgi already preferred conservative public YouTube clients for this run."
+        };
+        return Some(format!(
+            "YouTube rejected the selected client/format with HTTP 403.{auth_hint} If this persists for the same URL, refresh the bundled yt-dlp runtime, and note that recent yt-dlp YouTube extraction can also require an external JavaScript runtime such as Deno or Node on PATH. Only add an explicit session if the video truly requires sign-in."
+        ));
+    }
+    if is_instagram_url(url) && lower.contains("unable to extract data") {
+        let auth_note = if auth_cookie_present || using_browser_cookies {
+            " Explicit session input is still the preferred path for profile/post expansion."
+        } else {
+            " Many Instagram profile/post URLs require an explicit exported session."
+        };
+        return Some(format!(
+            "Instagram's extractor returned no usable media data for this URL.{auth_note}"
+        ));
+    }
+    None
+}
+
+fn yt_dlp_failure_program_detail(line: &str) -> &str {
+    line.split_once(": ").map(|(_, detail)| detail).unwrap_or(line)
+}
+
+fn yt_dlp_failure_priority(line: &str) -> u8 {
+    if line.contains("\\yt-dlp.exe failed") || line.contains("/yt-dlp failed") {
+        0
+    } else if line.starts_with("yt-dlp failed") {
+        1
+    } else if line.starts_with("python failed") {
+        2
+    } else if line.starts_with("python3 failed") {
+        3
+    } else {
+        4
+    }
+}
+
+fn summarize_yt_dlp_failures(failures: &[String]) -> String {
+    let mut ordered = failures.to_vec();
+    ordered.sort_by(|left, right| {
+        yt_dlp_failure_priority(left)
+            .cmp(&yt_dlp_failure_priority(right))
+            .then_with(|| left.cmp(right))
+    });
+
+    let bundled_detail = ordered
+        .iter()
+        .find(|line| {
+            line.contains("\\yt-dlp.exe failed")
+                || line.contains("/yt-dlp failed")
+                || line.starts_with("yt-dlp failed")
+        })
+        .map(|line| yt_dlp_failure_program_detail(line).trim().to_string());
+
+    let mut filtered: Vec<String> = Vec::new();
+    let mut seen_details: HashSet<String> = HashSet::new();
+
+    for line in ordered {
+        if line.starts_with("python3 failed")
+            && line.contains("Python was not found; run without arguments to install from the Microsoft Store")
+        {
+            continue;
+        }
+        let detail = yt_dlp_failure_program_detail(&line).trim().to_string();
+        if let Some(bundled_detail) = bundled_detail.as_deref() {
+            if (line.starts_with("python failed") || line.starts_with("python3 failed"))
+                && detail == bundled_detail
+            {
+                continue;
+            }
+        }
+        if !seen_details.insert(detail) {
+            continue;
+        }
+        filtered.push(line);
+    }
+
+    if filtered.is_empty() {
+        failures.join(" | ")
+    } else {
+        filtered.join(" | ")
+    }
+}
+
+fn augment_yt_dlp_error(
+    url: &str,
+    err: EngineError,
+    using_browser_cookies: bool,
+    auth_cookie_present: bool,
+) -> EngineError {
+    let base = err.to_string();
+    if let Some(hint) = yt_dlp_failure_hint(url, &base, using_browser_cookies, auth_cookie_present)
+    {
+        EngineError::InstallFailed(format!("{base} Hint: {hint}"))
+    } else {
+        err
+    }
+}
+
 #[derive(Debug)]
 enum CommandRunError {
     Spawn(std::io::Error),
@@ -9847,7 +10015,7 @@ fn run_yt_dlp(
     if !failures.is_empty() {
         return Err(EngineError::InstallFailed(format!(
             "yt-dlp failed with all available executables: {}",
-            failures.join(" | ")
+            summarize_yt_dlp_failures(&failures)
         )));
     }
 
@@ -9890,6 +10058,7 @@ fn expand_yt_dlp_urls(
             using_cookie_file = true;
         }
     }
+    let auth_cookie_present = using_cookie_file;
 
     let mut using_browser_cookies = false;
     if use_browser_cookies && !using_cookie_file {
@@ -9897,6 +10066,7 @@ fn expand_yt_dlp_urls(
         args.push("chrome".to_string());
         using_browser_cookies = true;
     }
+    append_yt_dlp_runtime_args(&mut args, url, auth_cookie_present);
 
     let output_res = match run_yt_dlp(paths, &args, None, YT_DLP_EXPAND_TIMEOUT_SECS) {
         Ok(output) => Ok(output),
@@ -9921,7 +10091,9 @@ fn expand_yt_dlp_urls(
     if let Some(path) = cookie_file_path {
         let _ = std::fs::remove_file(path);
     }
-    let output = output_res?;
+    let output = output_res.map_err(|err| {
+        augment_yt_dlp_error(url, err, using_browser_cookies, auth_cookie_present)
+    })?;
     let mut seen: HashSet<String> = HashSet::new();
     let mut urls: Vec<String> = Vec::new();
     for line in String::from_utf8_lossy(&output.stdout).lines() {
@@ -11181,6 +11353,7 @@ fn download_yt_dlp_url_to_library(
             using_cookie_file = true;
         }
     }
+    let auth_cookie_present = using_cookie_file;
 
     let mut using_browser_cookies = false;
     if use_browser_cookies_for_url(url, use_browser_cookies) && !using_cookie_file {
@@ -11188,6 +11361,7 @@ fn download_yt_dlp_url_to_library(
         args.push("chrome".to_string());
         using_browser_cookies = true;
     }
+    append_yt_dlp_runtime_args(&mut args, url, auth_cookie_present);
 
     let output_res = match run_yt_dlp(paths, &args, Some(job_id), YT_DLP_DOWNLOAD_TIMEOUT_SECS) {
         Ok(output) => Ok(output),
@@ -11217,7 +11391,9 @@ fn download_yt_dlp_url_to_library(
     if let Some(path) = cookie_file_path {
         let _ = std::fs::remove_file(path);
     }
-    let output = output_res?;
+    let output = output_res.map_err(|err| {
+        augment_yt_dlp_error(url, err, using_browser_cookies, auth_cookie_present)
+    })?;
     let downloaded = String::from_utf8_lossy(&output.stdout)
         .lines()
         .map(str::trim)
@@ -13886,6 +14062,56 @@ EOF
             err.to_string().contains("cookie file path does not exist"),
             "unexpected error: {err}"
         );
+    }
+
+    #[test]
+    fn youtube_player_clients_prefer_conservative_public_clients() {
+        assert_eq!(
+            yt_dlp_youtube_player_clients(false),
+            Some("android_sdkless,web_safari")
+        );
+        assert_eq!(
+            yt_dlp_youtube_player_clients(true),
+            Some("tv_downgraded,web_safari")
+        );
+    }
+
+    #[test]
+    fn yt_dlp_failure_hint_flags_locked_browser_cookie_db() {
+        let hint = yt_dlp_failure_hint(
+            "https://www.instagram.com/example/",
+            "ERROR: Could not copy Chrome cookie database.",
+            true,
+            false,
+        )
+        .expect("hint");
+        assert!(hint.contains("cookie database was locked"), "unexpected hint: {hint}");
+    }
+
+    #[test]
+    fn yt_dlp_failure_hint_flags_youtube_403() {
+        let hint = yt_dlp_failure_hint(
+            "https://www.youtube.com/watch?v=abc123",
+            "ERROR: unable to download video data: HTTP Error 403: Forbidden",
+            false,
+            false,
+        )
+        .expect("hint");
+        assert!(hint.contains("HTTP 403"), "unexpected hint: {hint}");
+        assert!(
+            hint.contains("conservative public YouTube clients"),
+            "unexpected hint: {hint}"
+        );
+        assert!(hint.contains("JavaScript runtime"), "unexpected hint: {hint}");
+    }
+
+    #[test]
+    fn summarize_yt_dlp_failures_drops_python_store_noise_and_duplicate_details() {
+        let bundled = r"C:\Users\Example\AppData\Roaming\com.voxvulgi.voxvulgi\tools\yt-dlp\yt-dlp.exe failed (code=Some(1)): ERROR: unable to download video data: HTTP Error 403: Forbidden".to_string();
+        let python = "python failed (code=Some(1)): ERROR: unable to download video data: HTTP Error 403: Forbidden".to_string();
+        let python3 = "python3 failed (code=Some(9009)): Python was not found; run without arguments to install from the Microsoft Store, or disable this shortcut from Settings > Apps > Advanced app settings > App execution aliases.".to_string();
+        let summary = summarize_yt_dlp_failures(&[python3, python, bundled.clone()]);
+        assert_eq!(summary, bundled);
     }
 
     #[test]
