@@ -3,7 +3,7 @@
 ## Metadata
 - ID: WP-0095
 - Owner: Codex
-- Status: BACKLOG
+- Status: BLOCKED
 - Created: 2026-03-07
 - Target milestone: Phase 3 voice-workflow hardening
 
@@ -54,3 +54,4 @@ Out of scope:
 
 - 2026-03-07: Created from the post-remediation next-step recommendation to add real app-level proof for `WP-0092` to `WP-0094`.
 - 2026-03-08: Scope expanded by `WP-0124` so the manual smoke also covers the current benchmark, voice-plan, experimental-backend, compare-history, recipe, and benchmark-promotion surfaces added after the original remediation tranche.
+- 2026-03-12: Blocked by post-0.1.6 smoke regressions now queued in `WP-0142` to `WP-0148`; manual closeout should resume after those packets land.

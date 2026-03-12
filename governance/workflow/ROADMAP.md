@@ -115,6 +115,17 @@ Date: 2026-03-11
 
 - WP-0141: Replace the overloaded maintenance choices with an explicit five-action installer standard, update the explainer page, and package a new versioned installer build. DONE 2026-03-11.
 
+## Post-0.1.6 Smoke Regression Recovery (2026-03)
+
+- WP-0142: Recover public and authenticated YouTube/Instagram downloader paths on installer state and make explicit session input authoritative. BACKLOG.
+- WP-0143: Restore Localization Studio as a visible source-to-output workflow with explicit start/progress/output handling and discoverable source/artifact/export actions. BACKLOG.
+- WP-0144: Remove leftover Localization Studio controls from Video Archiver and restore the intended archive-only IA boundary. BACKLOG.
+- WP-0145: Make benchmark, backend, QC, rerun, cleanup, and batch-dubbing surfaces discoverable enough for normal operator use. BACKLOG.
+- WP-0146: Repair the current broken move-window affordance without re-breaking selection, scrolling, or resize behavior. BACKLOG.
+- WP-0147: Reconcile existing per-subscription archive folders and queue only missing media so migrated NAS-backed subscriptions can continue where they left off. BACKLOG.
+- WP-0148: Repair the frameless shell so maximize/fullscreen sizing matches the visible app surface and no invisible native window area blocks adjacent apps. BACKLOG.
+- WP-0095: Re-run the manual app smoke after the regression tranche lands. BLOCKED until the above packets are closed.
+
 ## Phase 0 - Decisions (1-2 days)
 
 - Pick stack: Tauri/Rust + Python workers (recommended) vs Qt vs Electron.

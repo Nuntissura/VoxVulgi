@@ -45,6 +45,7 @@ Initial language focus: **Korean + Japanese → English**.
 - Add YouTube subscription management:
   - save persistent subscriptions (channel/playlist/video feed URLs),
   - define a folder map per subscription so each subscription writes into its own mapped folder,
+  - preserve the current mapped folder for an existing subscription and reconcile already-downloaded items where practical before queueing fresh downloads,
   - set a per-subscription refresh interval (minutes) that can be edited in the Library UI,
   - queue refresh for one subscription or all active subscriptions,
   - keep loaded subscriptions stable across pane switches and window focus changes.
@@ -369,6 +370,7 @@ Current implementation status:
 
 - Corner resizing must have an obvious reachable hitbox.
 - Dragging the app should use an explicit shell move affordance or tightly bounded chrome handle so text selection and scrollbars still work inside content areas.
+- Frameless maximize/fullscreen behavior must align the actual usable native window bounds with the visible app surface; no invisible window region should block interaction with adjacent visible applications.
 - Dense per-panel tables should keep their own scroll surface and should keep critical actions visible when horizontal scrolling is required.
 
 ### 8.1.7 Installer and uninstall clarity requirement

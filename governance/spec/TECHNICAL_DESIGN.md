@@ -469,6 +469,7 @@ Phase 1 extension status (2026-02-25):
 - Queueing a subscription expands its URL(s) through the existing provider pipeline and applies subscription-specific output mapping:
   - default mapped path: `downloads/video/subscriptions/<folder_map>/`
   - optional absolute output override per subscription (`output_dir_override`)
+- For subscriptions that already point at an existing archive folder, refresh logic should reconcile already-downloaded items against that folder and seed/refresh dedupe state where practical before queueing new media.
 - Added JSON export/import for subscription portability:
   - export path is user selected in desktop UI,
   - import uses URL-keyed upsert (`source_url`) and keeps existing rows not present in the import file.
@@ -566,6 +567,7 @@ Subscription export JSON shape (v1):
 - Drag-region behavior should be restricted to the intended chrome/background layer and must not swallow normal content interaction.
 - Corner-resize affordances should have a clear reachable hitbox inside the practical app bounds.
 - App movement should use an explicit move affordance or clearly bounded drag region so operators can distinguish shell movement from content interaction.
+- Frameless maximize/fullscreen handling must keep the native desktop window bounds synchronized with the visible surface so no invisible blocked area sits over neighboring apps in side-by-side layouts.
 - Dense archive panes should prefer panel-local scrolling/list behavior over clipped actions or invisible controls.
 - Where a dense table cannot fit at practical widths, the panel scroll surface should stay local to that card/pane and action columns should remain visible without forcing the operator to guess where controls went.
 
