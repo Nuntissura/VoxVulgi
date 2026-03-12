@@ -27,6 +27,8 @@ Rules:
 - Don't mix unrelated work in one WP.
 - If scope changes, update the WP first, then code.
 - `DONE` requires a proof bundle and verification that meets `governance/workflow/PROOF_STANDARD.md`.
+- Do not vibecode medium- or high-difficulty technical implementations.
+- For medium- or high-difficulty technical work, research the current code path and relevant primary sources first, then translate that into governed implementation scope before coding.
 
 ## 3) Where decisions live
 

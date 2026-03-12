@@ -19,6 +19,7 @@ In scope:
 - Diagnose the current mismatch between the visible frameless app surface and the underlying native window bounds.
 - Repair maximize/fullscreen sizing so the visible app truly matches the usable window surface.
 - Ensure no invisible native window area continues blocking clicks on adjacent visible applications in side-by-side layouts.
+- Keep the frameless top-right chrome cluster anchored correctly when restored/maximized so native bounds changes do not displace shell controls.
 - Preserve the existing frameless/no-OS-border design direction while correcting interaction bounds.
 
 Out of scope:
@@ -31,6 +32,7 @@ Out of scope:
 - Maximizing the app produces a true edge-aligned usable surface instead of only stretching in one dimension.
 - No invisible portion of the native window blocks clicks on other visible applications beside or behind VoxVulgi.
 - Frameless presentation remains intact after the bounds fix.
+- The move affordance and window control cluster remain in the intended top-right location in restored and maximized states.
 - The fix works together with move, resize, text selection, and scroll interactions.
 
 ## Test / verification plan
@@ -42,3 +44,4 @@ Out of scope:
 ## Status updates
 
 - 2026-03-12: Created from operator feedback that the frameless shell still occupies an invisible bounding box, breaking maximize/fullscreen correctness and blocking interaction with adjacent apps.
+- 2026-03-12: Expanded from operator screenshot feedback that the shell-control cluster also drifts away from the intended top-right position.

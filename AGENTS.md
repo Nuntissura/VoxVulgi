@@ -40,6 +40,16 @@
 - New proof bundles should include `summary.md` under `product/desktop/build_target/tool_artifacts/wp_runs/<WP-ID>/...`.
 - Build-only verification is not sufficient for UI/operator-heavy packets when the proof standard requires app-boundary or manual evidence.
 
+## Research-First Implementation Policy
+
+- Do not vibecode medium- or high-difficulty technical implementations.
+- For medium- or high-difficulty technical work, research first:
+  - inspect the current repo/code path,
+  - inspect the current spec/design intent,
+  - consult primary-source documentation, papers, or official vendor/project references when the solution space is uncertain or fast-moving.
+- Convert that research into explicit governance before implementation when scope, architecture, or runtime behavior changes.
+- Do not ship speculative integrations or architecture changes based only on plausible-sounding patterns; implementation must be grounded in repo evidence plus researched technical constraints.
+
 ## Diagnostics Trace Folder Policy
 
 - Default folder: `%APPDATA%\\com.voxvulgi.voxvulgi\\diagnostics\\traces`.

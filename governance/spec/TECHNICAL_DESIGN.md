@@ -294,6 +294,17 @@ Phase 2 preview implementation notes (current):
   - exported deliverables default to `<download_root>/localization/en/<media-stem>/`
   - the separate dubbed audio track remains the working `mix_dub_preview_v1.wav`; the exported/muxed MP4 embeds that dubbed audio into video
 - Localization Studio should auto-prefer the latest translated English track for dubbing, benchmarking, experimental backend runs, and A/B preview actions, and should surface a compact workflow/readiness map so operators can see track/runtime state before queueing jobs.
+- The shipped localization path should stay stage-explicit and inspectable:
+  - source import/select,
+  - subtitle/ASR readiness,
+  - translated-track readiness,
+  - speaker/reference readiness,
+  - generated speech artifacts,
+  - voice-preserved or experimental-backend artifacts,
+  - mix artifact,
+  - muxed MP4 artifact,
+  - deliverable/export surface.
+- Direct speech-to-speech systems (for example SeamlessExpressive-, Translatotron-, or TransVIP-style families) are useful research references, but they should remain future R&D or benchmark lanes rather than the default shipped path until they satisfy local packaging, operator-control, and artifact-inspection requirements at the same level as the staged cascade.
 
 Voice-preserving approach (core feature):
 
@@ -335,9 +346,20 @@ Voice-preserving approach (core feature):
   - add reusable template/cast-pack backend defaults so benchmark winners can be carried forward beyond one item.
 - Dubbing-control expansion remains operator-directed; the app should not add content-judgment or censorship workflows as part of these features.
 
+Operator-flow implementation requirements:
+
+- Localization Studio should expose one explicit localization-run contract instead of relying on implicit background starts after import alone.
+- If the UI supports auto-queueing from import, it must still show:
+  - what will run,
+  - which stage is active,
+  - what prerequisites are still missing,
+  - where the resulting outputs will appear.
+- Item handoff from import -> current localization item should be visible inside Localization Studio rather than hidden behind a separate Media Library navigation step.
+
 R&D plan: see `governance/spec/VOICE_PRESERVING_DUBBING_RD_PLAN.md`.
 Tooling landscape research: see `governance/spec/VOICE_DUBBING_TOOLING_LANDSCAPE_2026.md`.
 Research refresh corpus: see `governance/research/voice_cloning_20260308/`.
+Localization pipeline refresh corpus: see `governance/research/localization_pipeline_20260312/`.
 
 Voice-backend catalog design:
 
@@ -567,6 +589,7 @@ Subscription export JSON shape (v1):
 - Drag-region behavior should be restricted to the intended chrome/background layer and must not swallow normal content interaction.
 - Corner-resize affordances should have a clear reachable hitbox inside the practical app bounds.
 - App movement should use an explicit move affordance or clearly bounded drag region so operators can distinguish shell movement from content interaction.
+- The shell move affordance and native window controls should be rendered as one top-right chrome cluster so frameless-shell layout changes do not split or relocate core window actions.
 - Frameless maximize/fullscreen handling must keep the native desktop window bounds synchronized with the visible surface so no invisible blocked area sits over neighboring apps in side-by-side layouts.
 - Dense archive panes should prefer panel-local scrolling/list behavior over clipped actions or invisible controls.
 - Where a dense table cannot fit at practical widths, the panel scroll surface should stay local to that card/pane and action columns should remain visible without forcing the operator to guess where controls went.

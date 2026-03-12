@@ -182,6 +182,17 @@ Initial language focus: **Korean + Japanese → English**.
 - Separate vocals vs background (best-effort source separation).
 - Generate English speech per segment and mix back with background.
 - If a separated background stem is unavailable or separation fails, `Mix dub` should degrade gracefully by mixing against the source-media audio with explicit operator-visible fallback messaging instead of dead-ending the workflow.
+- The shipped Localization Studio path should remain a staged cascade, not a direct speech-to-speech black box:
+  - source media,
+  - subtitle/ASR track,
+  - translated English track,
+  - speaker/reference state,
+  - target speech generation,
+  - optional voice-preserving conversion or experimental backend render,
+  - background-aware mix,
+  - MP4 mux/export,
+  - explicit review of outputs.
+- Direct speech-to-speech research systems may inform future R&D and benchmark lanes, but they should not replace the default shipped operator path until they meet the same packaging, inspectability, and operator-control standard as the staged cascade.
 - Provide mix controls:
   - ducking, loudness normalization, fade, noise reduction (optional).
 - Current dubbing-quality controls:
@@ -203,6 +214,10 @@ Initial language focus: **Korean + Japanese → English**.
   - dubbed audio track (WAV/AAC),
   - muxed video with new audio track (MP4/MKV),
   - subtitles as sidecar or burned-in.
+- Localization Studio must make the run contract explicit before work starts:
+  - operators should be able to set options before the localization run begins,
+  - the app should expose an explicit start action or an equally explicit pre-start review/confirm contract,
+  - once started, each active item should expose stage-level progress rather than only a generic background queue presence.
 - Localization output discoverability:
   - Localization Studio should expose a dedicated outputs browser or library view that groups source media, working artifacts, and exported deliverables for the current item,
   - operators should be able to open or reveal source video, working artifact folders, dubbed outputs, subtitle exports, and export folders from one obvious surface.
@@ -277,6 +292,7 @@ Current implementation status:
 - Voice and dubbing controls remain operator-directed; VoxVulgi should not add content-judgment or censorship workflows as part of these features.
 - Discoverable: operator-critical controls must be visible in the workflow where they are needed rather than buried behind long scroll chains or hidden state gates.
 - Localization Studio should surface a workflow/readiness summary that makes current track readiness, runtime readiness, and the main backend/benchmark/QC/artifact sections obvious before the operator starts deeper dubbing steps.
+- Localization Studio should not require a confusing bounce through Media Library just to understand current source, active run, or output state after import; the current item handoff and its output path should remain obvious inside Localization Studio.
 - Ergonomic: dense archive/workflow panes should provide clear scrolling behavior and an explicit app-move affordance that does not conflict with text selection or scrollbar use.
 
 ## 8) Key UX Screens
@@ -370,6 +386,7 @@ Current implementation status:
 
 - Corner resizing must have an obvious reachable hitbox.
 - Dragging the app should use an explicit shell move affordance or tightly bounded chrome handle so text selection and scrollbars still work inside content areas.
+- The explicit move affordance and the minimize/maximize/close controls must stay grouped together in the top-right shell chrome rather than drifting into the content area or opposite side of the window.
 - Frameless maximize/fullscreen behavior must align the actual usable native window bounds with the visible app surface; no invisible window region should block interaction with adjacent visible applications.
 - Dense per-panel tables should keep their own scroll surface and should keep critical actions visible when horizontal scrolling is required.
 

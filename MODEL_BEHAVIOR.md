@@ -35,6 +35,9 @@ This file defines how an AI coding agent should behave when working in this repo
 - Treat `product/` as product implementation only (code, assets, build scripts).
 - If a requested change is ambiguous or risky, pause and ask for clarification.
 - Prefer small, reviewable diffs.
+- Do not vibecode medium- or high-difficulty technical implementations.
+- For medium- or high-difficulty technical work, do research first: inspect the existing repo path, inspect relevant spec/design sections, and use primary sources when the implementation approach is technically uncertain or rapidly evolving.
+- Do not treat "sounds right" as sufficient technical justification for architecture, model, pipeline, performance, or integration changes.
 
 ## 4) Stack direction (current)
 

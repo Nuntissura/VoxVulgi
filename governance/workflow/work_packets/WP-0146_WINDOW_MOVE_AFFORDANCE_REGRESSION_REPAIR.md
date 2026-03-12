@@ -18,6 +18,7 @@ In scope:
 
 - Diagnose the current shell move wiring in the desktop window chrome.
 - Repair move behavior for normal operator use.
+- Restore the intended chrome layout so the move affordance and window controls live together in the top-right shell cluster.
 - Preserve the previous fixes that kept text selection, scrollbars, and resize interactions working.
 
 Out of scope:
@@ -27,6 +28,7 @@ Out of scope:
 ## Acceptance criteria
 
 - The app can be moved reliably with the intended affordance.
+- The move affordance is grouped with the minimize/maximize/close controls in the intended top-right chrome cluster rather than drifting to another area of the shell.
 - Text selection, panel scrolling, and corner resize behavior remain intact after the repair.
 - No hidden background drag-region regression reappears.
 
@@ -39,3 +41,4 @@ Out of scope:
 ## Status updates
 
 - 2026-03-12: Created from smoke finding `ST-051`.
+- 2026-03-12: Expanded from operator screenshot feedback that the move affordance and window controls drifted away from the intended top-right chrome cluster.
