@@ -339,6 +339,7 @@ struct DiagnosticsAppStateSnapshot {
     diagnostics_trace_dir: DiagnosticsTraceDirStatus,
     ffmpeg: tools::FfmpegToolsStatus,
     ytdlp: tools::YtDlpToolsStatus,
+    js_runtime: tools::JsRuntimeToolsStatus,
     python: tools::PythonToolchainStatus,
     portable_python: tools::PortablePythonStatus,
     spleeter: tools::SpleeterPackStatus,
@@ -1797,6 +1798,7 @@ fn build_feature_health_rows(
     startup: &StartupStatus,
     ffmpeg: &tools::FfmpegToolsStatus,
     ytdlp: &tools::YtDlpToolsStatus,
+    js_runtime: &tools::JsRuntimeToolsStatus,
     python: &tools::PythonToolchainStatus,
     neural: &tools::TtsNeuralLocalV1PackStatus,
     voice_preserving: &tools::TtsVoicePreservingLocalV1PackStatus,
@@ -1832,17 +1834,22 @@ fn build_feature_health_rows(
         },
         DiagnosticsFeatureHealthRow {
             feature: "Video/Instagram archivers".to_string(),
-            status: if ffmpeg.installed && ytdlp.available {
+            status: if ffmpeg.installed && ytdlp.available && js_runtime.available {
                 "ready".to_string()
             } else if startup_blocked {
                 "loading".to_string()
             } else {
-                "blocked".to_string()
+                "partial".to_string()
             },
             detail: format!(
-                "FFmpeg={} / yt-dlp={}",
+                "FFmpeg={} / yt-dlp={} / JS runtime={}",
                 if ffmpeg.installed { "ready" } else { "missing" },
-                if ytdlp.available { "ready" } else { "missing" }
+                if ytdlp.available { "ready" } else { "missing" },
+                if js_runtime.available {
+                    "ready"
+                } else {
+                    "missing"
+                }
             ),
         },
         DiagnosticsFeatureHealthRow {
@@ -2060,6 +2067,7 @@ fn build_diagnostics_app_state_snapshot(
     let diagnostics_trace_dir = build_diagnostics_trace_dir_status(paths)?;
     let ffmpeg = tools::ffmpeg_tools_status(paths);
     let ytdlp = tools::ytdlp_tools_status(paths);
+    let js_runtime = tools::js_runtime_tools_status(paths);
     let python = tools::python_toolchain_status(paths);
     let portable_python = tools::portable_python_status(paths);
     let spleeter = tools::spleeter_pack_status(paths);
@@ -2090,6 +2098,7 @@ fn build_diagnostics_app_state_snapshot(
         &startup,
         &ffmpeg,
         &ytdlp,
+        &js_runtime,
         &python,
         &tts_neural_local_v1,
         &tts_voice_preserving_local_v1,
@@ -2106,6 +2115,7 @@ fn build_diagnostics_app_state_snapshot(
         diagnostics_trace_dir,
         ffmpeg,
         ytdlp,
+        js_runtime,
         python,
         portable_python,
         spleeter,
@@ -3618,6 +3628,23 @@ fn tools_ytdlp_install(state: State<'_, AppState>) -> Result<tools::YtDlpToolsSt
 }
 
 #[tauri::command]
+async fn tools_js_runtime_status(
+    state: State<'_, AppState>,
+) -> Result<tools::JsRuntimeToolsStatus, String> {
+    let paths = state.paths.clone();
+    tauri::async_runtime::spawn_blocking(move || Ok(tools::js_runtime_tools_status(&paths)))
+        .await
+        .map_err(|e| e.to_string())?
+}
+
+#[tauri::command]
+fn tools_js_runtime_install(
+    state: State<'_, AppState>,
+) -> Result<tools::JsRuntimeToolsStatus, String> {
+    tools::install_js_runtime_tools(&state.paths).map_err(|e| e.to_string())
+}
+
+#[tauri::command]
 async fn tools_python_status(
     state: State<'_, AppState>,
 ) -> Result<tools::PythonToolchainStatus, String> {
@@ -4083,8 +4110,12 @@ async fn voice_reference_candidates_load(
         .map(|value| value.trim().to_string())
         .filter(|value| !value.is_empty());
     tauri::async_runtime::spawn_blocking(move || {
-        voice_reference_candidates::load_reference_candidates(&paths, &item_id, speaker_key.as_deref())
-            .map_err(|e| e.to_string())
+        voice_reference_candidates::load_reference_candidates(
+            &paths,
+            &item_id,
+            speaker_key.as_deref(),
+        )
+        .map_err(|e| e.to_string())
     })
     .await
     .map_err(|e| e.to_string())?
@@ -6001,6 +6032,8 @@ pub fn run() {
             shell_reveal_path,
             tools_ffmpeg_install,
             tools_ffmpeg_status,
+            tools_js_runtime_install,
+            tools_js_runtime_status,
             tools_python_install,
             tools_python_status,
             tools_python_portable_install,

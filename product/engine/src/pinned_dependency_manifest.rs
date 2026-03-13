@@ -8,6 +8,7 @@ pub struct PinnedDependencyManifest {
     pub allow_unpinned_fallback_env: String,
     pub yt_dlp_windows: YtDlpWindowsPin,
     pub portable_python_windows: PortablePythonWindowsPin,
+    pub deno_windows: DenoWindowsPin,
     pub spleeter: SpleeterPins,
     pub demucs: SingleSpecPin,
     pub diarization: PythonPackageSet,
@@ -30,6 +31,15 @@ pub struct PortablePythonWindowsPin {
     pub version: String,
     pub url: String,
     pub sha256_hex: String,
+    pub source_label: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DenoWindowsPin {
+    pub version: String,
+    pub url: String,
+    pub sha256_hex: String,
+    pub file_bytes: u64,
     pub source_label: String,
 }
 
@@ -139,6 +149,7 @@ mod tests {
         );
         assert_eq!(manifest.yt_dlp_windows.version, "2026.03.03");
         assert_eq!(manifest.portable_python_windows.version, "3.11.9");
+        assert_eq!(manifest.deno_windows.version, "2.7.5");
         assert_eq!(
             manifest
                 .tts_voice_preserving_local_v1

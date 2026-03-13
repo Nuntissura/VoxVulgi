@@ -66,7 +66,7 @@ Design goals:
 
 ### 2.1 Windows "full" installer (bundled dependencies)
 
-To minimize setup friction and support offline use, the Windows "full" installer bundles the core local toolchain for Phase 1 + Phase 2 (FFmpeg/ffprobe, yt-dlp, whisper model(s), portable Python + venv, and Phase 2 packs/models).
+To minimize setup friction and support offline use, the Windows "full" installer bundles the core local toolchain for Phase 1 + Phase 2 (FFmpeg/ffprobe, yt-dlp, a supported JavaScript runtime for yt-dlp's current extractor path, whisper model(s), portable Python + venv, and Phase 2 packs/models).
 
 Implementation notes (desktop):
 
@@ -487,6 +487,10 @@ Phase 1 implementation status (2026-02-22):
   - `direct_http_v1` for direct media asset URLs (strict http/https),
   - `youtube_yt_dlp_v1` for YouTube and other webpage video links (yt-dlp expand + download).
 - yt-dlp is bundled in Windows full installers; Diagnostics can install it if missing (network egress is user-initiated; jobs do not auto-download tools during execution).
+- A supported JavaScript runtime is part of the downloader toolchain, not an optional afterthought:
+  - prefer a bundled/pinned Deno runtime for installer-state reliability,
+  - surface JS-runtime readiness in Diagnostics alongside yt-dlp,
+  - when a runtime is available, prefer yt-dlp's documented default YouTube client strategy instead of forcing brittle custom `player_client` overrides.
 - Default download presets should prefer MP4-compatible format selection, and yt-dlp execution should request MP4 merge/remux where supported so final containers are predictable by default.
 - Image/archive providers should prefer JPEG defaults when multiple equivalent encodings are available and JPEG is the practical archive target; avoid surprising WebM-first or similarly unsuitable defaults.
 - Instagram batch ingest expands instagram.com URLs (posts/reels/stories/profiles) into direct media asset URLs where possible, then downloads via `direct_http_v1` into `downloads/instagram/` by default (optional session cookie header for private content).

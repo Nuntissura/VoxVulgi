@@ -28,6 +28,22 @@ type YtDlpToolsStatus = {
   ytdlp_version: string | null;
 };
 
+type JsRuntimeToolsStatus = {
+  available: boolean;
+  preferred_runtime: string;
+  preferred_path: string;
+  preferred_version: string | null;
+  bundled_deno_installed: boolean;
+  bundled_deno_path: string;
+  bundled_deno_version: string | null;
+  deno_on_path: boolean;
+  deno_path: string;
+  deno_version: string | null;
+  node_on_path: boolean;
+  node_path: string;
+  node_version: string | null;
+};
+
 type PythonToolchainStatus = {
   base_available: boolean;
   base_program: string;
@@ -486,6 +502,7 @@ type DiagnosticsAppStateSnapshot = {
   diagnostics_trace_dir: DiagnosticsTraceDirStatus;
   ffmpeg: FfmpegToolsStatus;
   ytdlp: YtDlpToolsStatus;
+  js_runtime: JsRuntimeToolsStatus;
   python: PythonToolchainStatus;
   portable_python: PortablePythonStatus;
   spleeter: SpleeterPackStatus;
@@ -627,6 +644,7 @@ export function DiagnosticsPage({ visible = true }: { visible?: boolean }) {
   const [inventory, setInventory] = useState<ModelInventory | null>(null);
   const [ffmpeg, setFfmpeg] = useState<FfmpegToolsStatus | null>(null);
   const [ytdlp, setYtdlp] = useState<YtDlpToolsStatus | null>(null);
+  const [jsRuntime, setJsRuntime] = useState<JsRuntimeToolsStatus | null>(null);
   const [python, setPython] = useState<PythonToolchainStatus | null>(null);
   const [portablePython, setPortablePython] = useState<PortablePythonStatus | null>(null);
   const [phase2Plan, setPhase2Plan] = useState<Phase2PackPlanItem[] | null>(null);
@@ -708,6 +726,7 @@ export function DiagnosticsPage({ visible = true }: { visible?: boolean }) {
         nextInventory,
         nextFfmpeg,
         nextYtdlp,
+        nextJsRuntime,
         nextPython,
         nextPortablePython,
         nextPhase2Plan,
@@ -738,6 +757,7 @@ export function DiagnosticsPage({ visible = true }: { visible?: boolean }) {
         invoke<ModelInventory>("models_inventory"),
         invoke<FfmpegToolsStatus>("tools_ffmpeg_status"),
         invoke<YtDlpToolsStatus>("tools_ytdlp_status"),
+        invoke<JsRuntimeToolsStatus>("tools_js_runtime_status"),
         invoke<PythonToolchainStatus>("tools_python_status"),
         invoke<PortablePythonStatus>("tools_python_portable_status"),
         invoke<Phase2PackPlanItem[]>("tools_phase2_packs_install_plan"),
@@ -769,6 +789,7 @@ export function DiagnosticsPage({ visible = true }: { visible?: boolean }) {
         setInventory(nextInventory);
         setFfmpeg(nextFfmpeg);
         setYtdlp(nextYtdlp);
+        setJsRuntime(nextJsRuntime);
         setPython(nextPython);
         setPortablePython(nextPortablePython);
         setPhase2Plan(nextPhase2Plan);
@@ -860,6 +881,7 @@ export function DiagnosticsPage({ visible = true }: { visible?: boolean }) {
       const [
         nextFfmpeg,
         nextYtdlp,
+        nextJsRuntime,
         nextPython,
         nextPortablePython,
         nextSpleeter,
@@ -876,6 +898,7 @@ export function DiagnosticsPage({ visible = true }: { visible?: boolean }) {
       ] = await Promise.all([
         invoke<FfmpegToolsStatus>("tools_ffmpeg_status"),
         invoke<YtDlpToolsStatus>("tools_ytdlp_status"),
+        invoke<JsRuntimeToolsStatus>("tools_js_runtime_status"),
         invoke<PythonToolchainStatus>("tools_python_status"),
         invoke<PortablePythonStatus>("tools_python_portable_status"),
         invoke<SpleeterPackStatus>("tools_spleeter_status"),
@@ -893,6 +916,7 @@ export function DiagnosticsPage({ visible = true }: { visible?: boolean }) {
       startTransition(() => {
         setFfmpeg(nextFfmpeg);
         setYtdlp(nextYtdlp);
+        setJsRuntime(nextJsRuntime);
         setPython(nextPython);
         setPortablePython(nextPortablePython);
         setSpleeter(nextSpleeter);
@@ -1074,6 +1098,14 @@ export function DiagnosticsPage({ visible = true }: { visible?: boolean }) {
           : "not available",
       },
       {
+        name: "JS runtime for yt-dlp",
+        state: jsRuntime?.available
+          ? jsRuntime.bundled_deno_installed
+            ? "bundled and available now"
+            : `available from ${jsRuntime.preferred_runtime || "local"} runtime path`
+          : "not available",
+      },
+      {
         name: "Portable Python",
         state: portablePython?.installed ? "hydrated locally" : "not hydrated",
       },
@@ -1086,7 +1118,7 @@ export function DiagnosticsPage({ visible = true }: { visible?: boolean }) {
         state: ttsVoicePreservingLocalV1?.installed ? "installed and ready" : "optional / not installed",
       },
     ],
-    [portablePython?.installed, python?.venv_exists, startup?.offline_bundle_state, ttsVoicePreservingLocalV1?.installed, ytdlp?.available, ytdlp?.bundled_installed],
+    [jsRuntime?.available, jsRuntime?.bundled_deno_installed, jsRuntime?.preferred_runtime, portablePython?.installed, python?.venv_exists, startup?.offline_bundle_state, ttsVoicePreservingLocalV1?.installed, ytdlp?.available, ytdlp?.bundled_installed],
   );
 
   const recentFailures = useMemo(() => {
@@ -1157,6 +1189,20 @@ export function DiagnosticsPage({ visible = true }: { visible?: boolean }) {
     setNotice("Installing yt-dlp. This may take a minute.");
     try {
       await invoke<YtDlpToolsStatus>("tools_ytdlp_install");
+      await refresh();
+    } catch (e) {
+      setError(String(e));
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function installJsRuntime() {
+    setBusy(true);
+    setError(null);
+    setNotice("Installing bundled Deno JavaScript runtime for yt-dlp.");
+    try {
+      await invoke<JsRuntimeToolsStatus>("tools_js_runtime_install");
       await refresh();
     } catch (e) {
       setError(String(e));
@@ -2338,7 +2384,38 @@ export function DiagnosticsPage({ visible = true }: { visible?: boolean }) {
           <div className="k">Downloader privacy</div>
           <div className="v">
             yt-dlp downloads only when you click Install. Browser cookies are opt-in in Library.
+            Install the bundled Deno runtime for current YouTube extraction support.
           </div>
+        </div>
+        <div className="kv">
+          <div className="k">JS runtime for yt-dlp</div>
+          <div className="v">{jsRuntime?.available ? "available" : "not available"}</div>
+        </div>
+        <div className="kv">
+          <div className="k">Preferred runtime</div>
+          <div className="v">
+            {jsRuntime?.preferred_runtime
+              ? `${jsRuntime.preferred_runtime} ${jsRuntime.preferred_version ?? ""}`.trim()
+              : "-"}
+          </div>
+        </div>
+        <div className="kv">
+          <div className="k">Preferred runtime path</div>
+          <div className="v">{jsRuntime?.preferred_path ?? "-"}</div>
+        </div>
+        <div className="kv">
+          <div className="k">Bundled Deno</div>
+          <div className="v">
+            {jsRuntime?.bundled_deno_installed ? "installed" : "not installed"}
+          </div>
+        </div>
+        <div className="kv">
+          <div className="k">Bundled Deno path</div>
+          <div className="v">{jsRuntime?.bundled_deno_path ?? "-"}</div>
+        </div>
+        <div className="kv">
+          <div className="k">Bundled Deno version</div>
+          <div className="v">{jsRuntime?.bundled_deno_version ?? "-"}</div>
         </div>
 
         <div className="kv">
@@ -2839,6 +2916,13 @@ export function DiagnosticsPage({ visible = true }: { visible?: boolean }) {
             onClick={installYtdlp}
           >
             Install yt-dlp
+          </button>
+          <button
+            type="button"
+            disabled={busy || !!jsRuntime?.bundled_deno_installed}
+            onClick={installJsRuntime}
+          >
+            Install Deno JS runtime
           </button>
           <button
             type="button"

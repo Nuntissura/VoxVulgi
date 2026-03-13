@@ -68,6 +68,31 @@ pub struct YtDlpToolsStatus {
     pub ytdlp_version: Option<String>,
 }
 
+#[derive(Debug, Clone, Serialize)]
+pub struct JsRuntimeToolsStatus {
+    pub available: bool,
+    pub preferred_runtime: String,
+    pub preferred_path: String,
+    pub preferred_version: Option<String>,
+    pub bundled_deno_installed: bool,
+    pub bundled_deno_path: String,
+    pub bundled_deno_version: Option<String>,
+    pub deno_on_path: bool,
+    pub deno_path: String,
+    pub deno_version: Option<String>,
+    pub node_on_path: bool,
+    pub node_path: String,
+    pub node_version: Option<String>,
+}
+
+#[derive(Debug, Clone)]
+struct ResolvedJsRuntime {
+    runtime_id: &'static str,
+    spec: String,
+    path: String,
+    version: String,
+}
+
 pub fn ytdlp_tools_status(paths: &AppPaths) -> YtDlpToolsStatus {
     let bundled = bundled_ytdlp_path(paths);
     let bundled_installed = bundled.exists();
@@ -181,6 +206,202 @@ fn bundled_ytdlp_path(paths: &AppPaths) -> std::path::PathBuf {
         path.set_extension("exe");
     }
     path
+}
+
+fn bundled_deno_path(paths: &AppPaths) -> std::path::PathBuf {
+    paths.deno_exe()
+}
+
+fn resolve_js_runtime_candidate(
+    runtime_id: &'static str,
+    candidate: std::path::PathBuf,
+    prefer_explicit_path: bool,
+) -> Option<ResolvedJsRuntime> {
+    let version = tool_version_first_line_with_arg(&candidate, "--version")?;
+    let spec = if prefer_explicit_path || candidate.is_absolute() {
+        format!("{runtime_id}:{}", candidate.to_string_lossy())
+    } else {
+        runtime_id.to_string()
+    };
+    Some(ResolvedJsRuntime {
+        runtime_id,
+        spec,
+        path: candidate.to_string_lossy().to_string(),
+        version,
+    })
+}
+
+fn preferred_ytdlp_js_runtime(paths: &AppPaths) -> Option<ResolvedJsRuntime> {
+    let bundled_deno = bundled_deno_path(paths);
+    if bundled_deno.exists() {
+        if let Some(runtime) = resolve_js_runtime_candidate("deno", bundled_deno, true) {
+            return Some(runtime);
+        }
+    }
+
+    if let Some(runtime) =
+        resolve_js_runtime_candidate("deno", std::path::PathBuf::from("deno"), false)
+    {
+        return Some(runtime);
+    }
+
+    resolve_js_runtime_candidate("node", std::path::PathBuf::from("node"), false)
+}
+
+pub fn preferred_ytdlp_js_runtime_arg(paths: &AppPaths) -> Option<String> {
+    preferred_ytdlp_js_runtime(paths).map(|runtime| runtime.spec)
+}
+
+pub fn js_runtime_tools_status(paths: &AppPaths) -> JsRuntimeToolsStatus {
+    let bundled_deno = bundled_deno_path(paths);
+    let bundled_deno_version = if bundled_deno.exists() {
+        tool_version_first_line_with_arg(&bundled_deno, "--version")
+    } else {
+        None
+    };
+
+    let deno_resolution =
+        resolve_js_runtime_candidate("deno", std::path::PathBuf::from("deno"), false);
+    let node_resolution =
+        resolve_js_runtime_candidate("node", std::path::PathBuf::from("node"), false);
+    let preferred = preferred_ytdlp_js_runtime(paths);
+
+    JsRuntimeToolsStatus {
+        available: preferred.is_some(),
+        preferred_runtime: preferred
+            .as_ref()
+            .map(|runtime| runtime.runtime_id.to_string())
+            .unwrap_or_default(),
+        preferred_path: preferred
+            .as_ref()
+            .map(|runtime| runtime.path.clone())
+            .unwrap_or_default(),
+        preferred_version: preferred.as_ref().map(|runtime| runtime.version.clone()),
+        bundled_deno_installed: bundled_deno.exists() && bundled_deno_version.is_some(),
+        bundled_deno_path: bundled_deno.to_string_lossy().to_string(),
+        bundled_deno_version,
+        deno_on_path: deno_resolution.is_some(),
+        deno_path: deno_resolution
+            .as_ref()
+            .map(|runtime| runtime.path.clone())
+            .unwrap_or_default(),
+        deno_version: deno_resolution
+            .as_ref()
+            .map(|runtime| runtime.version.clone()),
+        node_on_path: node_resolution.is_some(),
+        node_path: node_resolution
+            .as_ref()
+            .map(|runtime| runtime.path.clone())
+            .unwrap_or_default(),
+        node_version: node_resolution
+            .as_ref()
+            .map(|runtime| runtime.version.clone()),
+    }
+}
+
+pub fn install_js_runtime_tools(paths: &AppPaths) -> Result<JsRuntimeToolsStatus> {
+    #[cfg(not(windows))]
+    {
+        let _ = paths;
+        return Err(EngineError::InstallFailed(
+            "automatic Deno install is only supported on Windows for now".to_string(),
+        ));
+    }
+
+    #[cfg(windows)]
+    {
+        let pin = &pinned_dependency_manifest::manifest().deno_windows;
+
+        paths.ensure_dirs()?;
+        let install_dir = paths.deno_dir();
+        std::fs::create_dir_all(&install_dir)?;
+
+        let marker = install_dir.join(".probe");
+        if marker.exists() {
+            let status = js_runtime_tools_status(paths);
+            if status.bundled_deno_installed {
+                return Ok(status);
+            }
+        }
+
+        if install_dir.exists() {
+            let _ = std::fs::remove_dir_all(&install_dir);
+        }
+        std::fs::create_dir_all(&install_dir)?;
+
+        let download_tmp = install_dir.join(format!("deno-{}.zip.download", pin.version));
+        let download_final = install_dir.join(format!("deno-{}.zip", pin.version));
+
+        let resp = ureq::get(&pin.url)
+            .call()
+            .map_err(|e| EngineError::InstallFailed(format!("Deno download failed: {e}")))?;
+        let status = resp.status();
+        if status.as_u16() >= 400 {
+            return Err(EngineError::InstallFailed(format!(
+                "Deno download failed (status={status})"
+            )));
+        }
+
+        {
+            let mut reader = resp.into_body().into_reader();
+            let mut file = std::fs::File::create(&download_tmp)?;
+            std::io::copy(&mut reader, &mut file)?;
+            file.flush()?;
+        }
+
+        let downloaded_size = std::fs::metadata(&download_tmp)
+            .map(|m| m.len())
+            .unwrap_or(0);
+        if downloaded_size != pin.file_bytes {
+            let _ = std::fs::remove_file(&download_tmp);
+            return Err(EngineError::SizeMismatch {
+                path: download_tmp.clone(),
+                expected: pin.file_bytes,
+                actual: downloaded_size,
+            });
+        }
+
+        let expected = hex::decode(&pin.sha256_hex)
+            .map_err(|e| EngineError::InstallFailed(format!("invalid Deno sha256 pin: {e}")))?;
+        let got = sha256_file(&download_tmp)?;
+        if got != expected {
+            let actual = hex::encode_upper(got);
+            let _ = std::fs::remove_file(&download_tmp);
+            return Err(EngineError::HashMismatch {
+                path: download_tmp.clone(),
+                expected: pin.sha256_hex.clone(),
+                actual,
+            });
+        }
+
+        if download_final.exists() {
+            let _ = std::fs::remove_file(&download_final);
+        }
+        if std::fs::rename(&download_tmp, &download_final).is_err() {
+            std::fs::copy(&download_tmp, &download_final)?;
+            let _ = std::fs::remove_file(&download_tmp);
+        }
+
+        extract_zip_strip_prefix(&download_final, &install_dir, "")?;
+
+        let exe = paths.deno_exe();
+        let version = tool_version_first_line_with_arg(&exe, "--version").ok_or_else(|| {
+            EngineError::InstallFailed("Deno is not usable after install".to_string())
+        })?;
+        crate::persistence::atomic_write_text(
+            &marker,
+            format!(
+                "OK\nversion={}\nsource={}\nsha256={}\n",
+                version.trim(),
+                pin.source_label,
+                pin.sha256_hex
+            )
+            .as_str(),
+        )?;
+
+        let _ = generate_pack_integrity_manifest(paths);
+        Ok(js_runtime_tools_status(paths))
+    }
 }
 
 fn unpinned_fallback_disabled_error(context: &str, pinned_err: &EngineError) -> EngineError {

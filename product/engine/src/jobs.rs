@@ -9682,29 +9682,42 @@ fn use_browser_cookies_for_url(url: &str, requested: bool) -> bool {
     requested
 }
 
-fn yt_dlp_youtube_player_clients(auth_cookie_present: bool) -> Option<&'static str> {
+fn yt_dlp_youtube_player_clients(
+    auth_cookie_present: bool,
+    js_runtime_available: bool,
+) -> Option<&'static str> {
+    if js_runtime_available {
+        // When a JavaScript runtime is available, let yt-dlp use its documented defaults.
+        return None;
+    }
     if auth_cookie_present {
-        // Prefer the auth-compatible clients yt-dlp documents without falling back to the more
-        // fragile default web client in installer-state runs.
-        Some("tv_downgraded,web_safari")
+        Some("tv_downgraded,web_safari,web")
     } else {
-        Some("android_sdkless,web_safari")
+        Some("android_sdkless,web_safari,web")
     }
 }
 
 fn append_yt_dlp_runtime_args(
+    paths: &AppPaths,
     args: &mut Vec<String>,
     url: &str,
     auth_cookie_present: bool,
-) {
+) -> bool {
     if !is_youtube_url(url) {
-        return;
+        return false;
     }
-    let Some(clients) = yt_dlp_youtube_player_clients(auth_cookie_present) else {
-        return;
+    let js_runtime = tools::preferred_ytdlp_js_runtime_arg(paths);
+    if let Some(spec) = js_runtime.as_ref() {
+        args.push("--js-runtimes".to_string());
+        args.push(spec.clone());
+    }
+    let Some(clients) = yt_dlp_youtube_player_clients(auth_cookie_present, js_runtime.is_some())
+    else {
+        return js_runtime.is_some();
     };
     args.push("--extractor-args".to_string());
     args.push(format!("youtube:player_client={clients}"));
+    js_runtime.is_some()
 }
 
 fn yt_dlp_failure_hint(
@@ -9712,6 +9725,7 @@ fn yt_dlp_failure_hint(
     error_text: &str,
     using_browser_cookies: bool,
     auth_cookie_present: bool,
+    js_runtime_available: bool,
 ) -> Option<String> {
     let lower = error_text.to_ascii_lowercase();
     if lower.contains("could not copy chrome cookie database") {
@@ -9719,14 +9733,29 @@ fn yt_dlp_failure_hint(
             "Browser-cookie access failed because Chrome's cookie database was locked. Turn off browser cookies for this run or close Chrome and retry.".to_string(),
         );
     }
+    if is_youtube_url(url) && lower.contains("the page needs to be reloaded") {
+        let runtime_hint = if js_runtime_available {
+            " VoxVulgi already supplied a JavaScript runtime for this run, so retrying after a bundled yt-dlp refresh is the next safe step."
+        } else {
+            " Install the bundled Deno JavaScript runtime in Diagnostics and retry so yt-dlp can evaluate YouTube's current extraction scripts."
+        };
+        return Some(format!(
+            "YouTube's extractor asked for a page reload instead of returning playable media.{runtime_hint}"
+        ));
+    }
     if is_youtube_url(url) && lower.contains("http error 403") {
         let auth_hint = if auth_cookie_present {
             " VoxVulgi already preferred auth-safe YouTube clients for this run."
         } else {
             " VoxVulgi already preferred conservative public YouTube clients for this run."
         };
+        let runtime_hint = if js_runtime_available {
+            " VoxVulgi also supplied a JavaScript runtime."
+        } else {
+            " If this is a public video, install the bundled Deno JavaScript runtime and retry before adding session material."
+        };
         return Some(format!(
-            "YouTube rejected the selected client/format with HTTP 403.{auth_hint} If this persists for the same URL, refresh the bundled yt-dlp runtime, and note that recent yt-dlp YouTube extraction can also require an external JavaScript runtime such as Deno or Node on PATH. Only add an explicit session if the video truly requires sign-in."
+            "YouTube rejected the selected client/format with HTTP 403.{auth_hint}{runtime_hint} If this persists for the same URL, refresh the bundled yt-dlp runtime. Only add an explicit session if the video truly requires sign-in."
         ));
     }
     if is_instagram_url(url) && lower.contains("unable to extract data") {
@@ -9743,7 +9772,9 @@ fn yt_dlp_failure_hint(
 }
 
 fn yt_dlp_failure_program_detail(line: &str) -> &str {
-    line.split_once(": ").map(|(_, detail)| detail).unwrap_or(line)
+    line.split_once(": ")
+        .map(|(_, detail)| detail)
+        .unwrap_or(line)
 }
 
 fn yt_dlp_failure_priority(line: &str) -> u8 {
@@ -9782,7 +9813,9 @@ fn summarize_yt_dlp_failures(failures: &[String]) -> String {
 
     for line in ordered {
         if line.starts_with("python3 failed")
-            && line.contains("Python was not found; run without arguments to install from the Microsoft Store")
+            && line.contains(
+                "Python was not found; run without arguments to install from the Microsoft Store",
+            )
         {
             continue;
         }
@@ -9812,10 +9845,16 @@ fn augment_yt_dlp_error(
     err: EngineError,
     using_browser_cookies: bool,
     auth_cookie_present: bool,
+    js_runtime_available: bool,
 ) -> EngineError {
     let base = err.to_string();
-    if let Some(hint) = yt_dlp_failure_hint(url, &base, using_browser_cookies, auth_cookie_present)
-    {
+    if let Some(hint) = yt_dlp_failure_hint(
+        url,
+        &base,
+        using_browser_cookies,
+        auth_cookie_present,
+        js_runtime_available,
+    ) {
         EngineError::InstallFailed(format!("{base} Hint: {hint}"))
     } else {
         err
@@ -10066,7 +10105,8 @@ fn expand_yt_dlp_urls(
         args.push("chrome".to_string());
         using_browser_cookies = true;
     }
-    append_yt_dlp_runtime_args(&mut args, url, auth_cookie_present);
+    let js_runtime_available =
+        append_yt_dlp_runtime_args(paths, &mut args, url, auth_cookie_present);
 
     let output_res = match run_yt_dlp(paths, &args, None, YT_DLP_EXPAND_TIMEOUT_SECS) {
         Ok(output) => Ok(output),
@@ -10092,7 +10132,13 @@ fn expand_yt_dlp_urls(
         let _ = std::fs::remove_file(path);
     }
     let output = output_res.map_err(|err| {
-        augment_yt_dlp_error(url, err, using_browser_cookies, auth_cookie_present)
+        augment_yt_dlp_error(
+            url,
+            err,
+            using_browser_cookies,
+            auth_cookie_present,
+            js_runtime_available,
+        )
     })?;
     let mut seen: HashSet<String> = HashSet::new();
     let mut urls: Vec<String> = Vec::new();
@@ -11361,7 +11407,8 @@ fn download_yt_dlp_url_to_library(
         args.push("chrome".to_string());
         using_browser_cookies = true;
     }
-    append_yt_dlp_runtime_args(&mut args, url, auth_cookie_present);
+    let js_runtime_available =
+        append_yt_dlp_runtime_args(paths, &mut args, url, auth_cookie_present);
 
     let output_res = match run_yt_dlp(paths, &args, Some(job_id), YT_DLP_DOWNLOAD_TIMEOUT_SECS) {
         Ok(output) => Ok(output),
@@ -11392,7 +11439,13 @@ fn download_yt_dlp_url_to_library(
         let _ = std::fs::remove_file(path);
     }
     let output = output_res.map_err(|err| {
-        augment_yt_dlp_error(url, err, using_browser_cookies, auth_cookie_present)
+        augment_yt_dlp_error(
+            url,
+            err,
+            using_browser_cookies,
+            auth_cookie_present,
+            js_runtime_available,
+        )
     })?;
     let downloaded = String::from_utf8_lossy(&output.stdout)
         .lines()
@@ -14067,13 +14120,14 @@ EOF
     #[test]
     fn youtube_player_clients_prefer_conservative_public_clients() {
         assert_eq!(
-            yt_dlp_youtube_player_clients(false),
-            Some("android_sdkless,web_safari")
+            yt_dlp_youtube_player_clients(false, false),
+            Some("android_sdkless,web_safari,web")
         );
         assert_eq!(
-            yt_dlp_youtube_player_clients(true),
-            Some("tv_downgraded,web_safari")
+            yt_dlp_youtube_player_clients(true, false),
+            Some("tv_downgraded,web_safari,web")
         );
+        assert_eq!(yt_dlp_youtube_player_clients(false, true), None);
     }
 
     #[test]
@@ -14083,9 +14137,13 @@ EOF
             "ERROR: Could not copy Chrome cookie database.",
             true,
             false,
+            false,
         )
         .expect("hint");
-        assert!(hint.contains("cookie database was locked"), "unexpected hint: {hint}");
+        assert!(
+            hint.contains("cookie database was locked"),
+            "unexpected hint: {hint}"
+        );
     }
 
     #[test]
@@ -14095,6 +14153,7 @@ EOF
             "ERROR: unable to download video data: HTTP Error 403: Forbidden",
             false,
             false,
+            false,
         )
         .expect("hint");
         assert!(hint.contains("HTTP 403"), "unexpected hint: {hint}");
@@ -14102,7 +14161,26 @@ EOF
             hint.contains("conservative public YouTube clients"),
             "unexpected hint: {hint}"
         );
-        assert!(hint.contains("JavaScript runtime"), "unexpected hint: {hint}");
+        assert!(
+            hint.contains("Deno JavaScript runtime"),
+            "unexpected hint: {hint}"
+        );
+    }
+
+    #[test]
+    fn yt_dlp_failure_hint_flags_youtube_reload_runtime_need() {
+        let hint = yt_dlp_failure_hint(
+            "https://www.youtube.com/watch?v=abc123",
+            "ERROR: [youtube] abc123: The page needs to be reloaded.",
+            false,
+            false,
+            false,
+        )
+        .expect("hint");
+        assert!(
+            hint.contains("Install the bundled Deno JavaScript runtime"),
+            "unexpected hint: {hint}"
+        );
     }
 
     #[test]

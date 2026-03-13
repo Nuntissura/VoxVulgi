@@ -93,6 +93,20 @@ fn run() -> Result<()> {
         } else {
             println!("yt-dlp already installed (bundled).");
         }
+
+        let js_runtime = tools::js_runtime_tools_status(&paths);
+        if !js_runtime.bundled_deno_installed {
+            println!("installing Deno JS runtime...");
+            let next = tools::install_js_runtime_tools(&paths)?;
+            if !next.bundled_deno_installed {
+                return Err(EngineError::InstallFailed(
+                    "Deno JS runtime install did not result in bundled_deno_installed=true"
+                        .to_string(),
+                ));
+            }
+        } else {
+            println!("Deno JS runtime already installed (bundled).");
+        }
     }
 
     // Phase 2: Portable Python + venv + packs.

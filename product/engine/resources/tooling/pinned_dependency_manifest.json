@@ -14,6 +14,13 @@
     "sha256_hex": "9283876D58C017E0E846F95B490DA3BCA0FC0A6EE1134B2870677CFB7EEC3C67",
     "source_label": "nuget:python"
   },
+  "deno_windows": {
+    "version": "2.7.5",
+    "url": "https://github.com/denoland/deno/releases/download/v2.7.5/deno-x86_64-pc-windows-msvc.zip",
+    "sha256_hex": "0BF523E2909DA9BFC56100461CD70A1287AE247E6C63B390C52605941D370DD1",
+    "file_bytes": 48556258,
+    "source_label": "github:denoland/deno"
+  },
   "spleeter": {
     "bootstrap_packages": [
       "numpy==1.26.4",

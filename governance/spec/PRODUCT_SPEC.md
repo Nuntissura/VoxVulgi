@@ -39,7 +39,7 @@ Initial language focus: **Korean + Japanese → English**.
 - Import local video/audio files.
 - Downloading: provider layer + batch URL ingest:
   - direct HTTP/HTTPS media URLs (strict schemes; best-effort),
-  - YouTube (and many webpage video links) via `yt-dlp` (local tool),
+  - YouTube (and many webpage video links) via `yt-dlp`, with a supported local JavaScript runtime available when current upstream extraction requires it,
   - Instagram batch ingest (posts/reels/stories/profiles) that expands into media targets (optional session cookie header for private content),
   - provenance captured per ingest (provider + source URL).
 - Add YouTube subscription management:

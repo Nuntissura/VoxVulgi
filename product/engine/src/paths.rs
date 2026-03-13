@@ -290,6 +290,22 @@ impl AppPaths {
         self.tools_dir().join("python")
     }
 
+    pub fn js_runtime_dir(&self) -> PathBuf {
+        self.tools_dir().join("js_runtime")
+    }
+
+    pub fn deno_dir(&self) -> PathBuf {
+        self.js_runtime_dir().join("deno")
+    }
+
+    pub fn deno_exe(&self) -> PathBuf {
+        let mut path = self.deno_dir().join("deno");
+        if cfg!(windows) {
+            path.set_extension("exe");
+        }
+        path
+    }
+
     pub fn python_portable_dir(&self) -> PathBuf {
         self.python_toolchain_dir().join("portable")
     }
