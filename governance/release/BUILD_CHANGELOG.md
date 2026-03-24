@@ -75,3 +75,12 @@ This changelog tracks desktop installer builds produced by `governance/scripts/b
   - `product/desktop/build_target/Current/release/bundle/nsis/VoxVulgi_0.1.6_x64-setup.exe`
   - `product/desktop/build_target/Current/release/bundle/msi/VoxVulgi_0.1.6_x64_en-US.msi`
 - Notes: Installer maintenance standard refresh.
+
+## 0.1.7 - 2026-03-23T02:46:26Z
+- Work Packets: `WP-0143`, `WP-0145`, `WP-0146`, `WP-0148`, `WP-0153`, `WP-0154`
+- Commit: `6e9dede`
+- Offline Bundle ID: `offline_full_win64_20260323_021717`
+- Artifacts:
+  - `product/desktop/build_target/Current/release/bundle/nsis/VoxVulgi_0.1.7_x64-setup.exe`
+  - `product/desktop/build_target/Current/release/bundle/msi/VoxVulgi_0.1.7_x64_en-US.msi`
+- Notes: Installer build for Localization first-screen recovery, shell drag/resize repair, and compact startup/recovery chrome.

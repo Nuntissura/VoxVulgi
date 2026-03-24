@@ -1,6 +1,6 @@
 # VoxVulgi - Roadmap / Backlog (Draft)
 
-Date: 2026-03-12
+Date: 2026-03-22
 
 ## Immediate Track - Stabilization + IA Refresh (2026-03)
 
@@ -123,6 +123,8 @@ Date: 2026-03-12
 - WP-0150: Add installer-state localization runtime proof hardening so the core dub flow is not considered fixed without visible source/artifact/export evidence. DONE.
 - WP-0144: Remove leftover Localization Studio controls from Video Archiver and restore the intended archive-only IA boundary. IN_PROGRESS.
 - WP-0145: Make benchmark, backend, QC, rerun, cleanup, and batch-dubbing surfaces discoverable enough for normal operator use. IN_PROGRESS.
+- WP-0153: Tighten the Localization Studio first-screen contract so the home surface explicitly prioritizes current item, next step, latest output, and demoted startup/recovery chrome. DONE 2026-03-22.
+- WP-0154: Demote startup/recovery chrome and add an explicit `Now / Next / Last Output` orientation layer so Localization Studio visually owns the default workspace. IN_PROGRESS; compact shell-status and first-screen orientation are implemented, pending live operator validation.
 - WP-0146: Repair the current broken move-window affordance without re-breaking selection, scrolling, or resize behavior. IN_PROGRESS.
 - WP-0147: Reconcile existing per-subscription archive folders and queue only missing media so migrated NAS-backed subscriptions can continue where they left off. BACKLOG.
 - WP-0148: Repair the frameless shell so maximize/fullscreen sizing matches the visible app surface and no invisible native window area blocks adjacent apps. IN_PROGRESS; explicit full-surface sizing and top-right chrome anchoring are in place, awaiting operator side-by-side validation.

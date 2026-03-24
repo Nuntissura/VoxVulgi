@@ -7,6 +7,7 @@ use std::sync::{
 use std::time::Duration;
 use sysinfo::{ProcessesToUpdate, System};
 use tauri::{Manager, State};
+use tauri_runtime::ResizeDirection as TauriResizeDirection;
 use voxvulgi_engine::models::ModelStore;
 use voxvulgi_engine::paths::AppPaths;
 use voxvulgi_engine::{
@@ -3184,6 +3185,28 @@ fn window_start_drag(window: tauri::Window) -> Result<(), String> {
     window.start_dragging().map_err(|e| e.to_string())
 }
 
+fn parse_window_resize_direction(direction: &str) -> Result<TauriResizeDirection, String> {
+    match direction {
+        "East" => Ok(TauriResizeDirection::East),
+        "North" => Ok(TauriResizeDirection::North),
+        "NorthEast" => Ok(TauriResizeDirection::NorthEast),
+        "NorthWest" => Ok(TauriResizeDirection::NorthWest),
+        "South" => Ok(TauriResizeDirection::South),
+        "SouthEast" => Ok(TauriResizeDirection::SouthEast),
+        "SouthWest" => Ok(TauriResizeDirection::SouthWest),
+        "West" => Ok(TauriResizeDirection::West),
+        _ => Err(format!("unsupported resize direction: {direction}")),
+    }
+}
+
+#[tauri::command]
+fn window_start_resize_drag(window: tauri::Window, direction: String) -> Result<(), String> {
+    let direction = parse_window_resize_direction(&direction)?;
+    window
+        .start_resize_dragging(direction)
+        .map_err(|e| e.to_string())
+}
+
 fn build_safe_mode_status(state: &AppState) -> Result<SafeModeStatus, String> {
     let persisted_enabled = config::load_safe_mode_config(&state.paths)
         .map(|value| value.enabled)
@@ -6061,6 +6084,7 @@ pub fn run() {
             window_close,
             window_minimize,
             window_start_drag,
+            window_start_resize_drag,
             window_toggle_maximize
         ])
         .run(tauri::generate_context!())

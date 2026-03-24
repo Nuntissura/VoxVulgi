@@ -368,6 +368,8 @@ Operator-flow implementation requirements:
   - what prerequisites are still missing,
   - where the resulting outputs will appear.
 - Item handoff from import -> current localization item should be visible inside Localization Studio rather than hidden behind a separate Media Library navigation step.
+- The Localization home surface should expose a compact first-screen orientation layer that makes the current item, recommended next action, and latest preview or deliverable path obvious without a second navigation hop.
+- Non-blocking startup/recovery state should use compact shell-level status affordances when the app is otherwise usable; expanded cards or modal detail views should be reserved for Safe Mode, active startup failure, or explicit operator request for details.
 
 R&D plan: see `governance/spec/VOICE_PRESERVING_DUBBING_RD_PLAN.md`.
 Tooling landscape research: see `governance/spec/VOICE_DUBBING_TOOLING_LANDSCAPE_2026.md`.

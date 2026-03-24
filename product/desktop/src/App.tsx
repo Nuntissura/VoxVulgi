@@ -107,6 +107,13 @@ type RecentLocalizationItemStatus = {
   preview_mp4_path: string | null;
 };
 
+type LocalizationHomeNextAction = {
+  title: string;
+  detail: string;
+  actionLabel: string;
+  sectionId: LocalizationSectionId | null;
+};
+
 type LocalizationSectionId =
   | "loc-library"
   | "loc-run"
@@ -130,6 +137,119 @@ type ResizeDirection = "East" | "North" | "NorthEast" | "NorthWest" | "South" | 
 type ShellWindowMode = "floating" | "maximized" | "fullscreen";
 
 const ACTIVE_PAGE_KEY = "voxvulgi.v1.shell.active_page";
+const SHELL_MODE_TOLERANCE_PX = 20;
+const LOCALIZATION_HOME_STAGES = [
+  {
+    title: "Import or pick media",
+    detail: "Bring a local source file in, or reopen a recent item from the Localization queue.",
+  },
+  {
+    title: "Captions and translation",
+    detail: "Run ASR, then produce the English track that later dubbing and benchmarking use.",
+  },
+  {
+    title: "Speakers and references",
+    detail: "Label speakers, generate missing reference candidates, and confirm voice-plan readiness.",
+  },
+  {
+    title: "Dub, mix, and mux",
+    detail: "Render the dub, preserve background audio, and produce the preview MP4 deliverable.",
+  },
+  {
+    title: "Review and export",
+    detail: "Inspect outputs, QC, artifacts, and export paths without leaving Localization Studio.",
+  },
+] as const;
+const FLOATING_RESIZE_HANDLES: Array<{
+  direction: ResizeDirection;
+  className: string;
+  title: string;
+}> = [
+  { direction: "North", className: "resize-handle-n", title: "Resize window from top edge" },
+  { direction: "NorthEast", className: "resize-handle-ne", title: "Resize window from top-right corner" },
+  { direction: "East", className: "resize-handle-e", title: "Resize window from right edge" },
+  { direction: "SouthEast", className: "resize-handle-se", title: "Resize window from bottom-right corner" },
+  { direction: "South", className: "resize-handle-s", title: "Resize window from bottom edge" },
+  { direction: "SouthWest", className: "resize-handle-sw", title: "Resize window from bottom-left corner" },
+  { direction: "West", className: "resize-handle-w", title: "Resize window from left edge" },
+  { direction: "NorthWest", className: "resize-handle-nw", title: "Resize window from top-left corner" },
+];
+
+function inferViewportShellMode(): ShellWindowMode {
+  if (typeof window === "undefined") {
+    return "floating";
+  }
+  const viewportWidth = window.innerWidth;
+  const viewportHeight = window.innerHeight;
+  const widthNearAvailable =
+    Math.abs(viewportWidth - window.screen.availWidth) <= SHELL_MODE_TOLERANCE_PX ||
+    Math.abs(viewportWidth - window.screen.width) <= SHELL_MODE_TOLERANCE_PX;
+  const heightNearAvailable =
+    Math.abs(viewportHeight - window.screen.availHeight) <= SHELL_MODE_TOLERANCE_PX ||
+    Math.abs(viewportHeight - window.screen.height) <= SHELL_MODE_TOLERANCE_PX;
+  return widthNearAvailable && heightNearAvailable ? "maximized" : "floating";
+}
+
+function localizationHomeStateLabel(status: RecentLocalizationItemStatus | null | undefined): string {
+  if (!status) return "Loading";
+  if (status.running) return "Running";
+  if (status.preview_mp4_path) return "Preview ready";
+  if (status.summary === "Imported / not started") return "Ready to start";
+  return "Needs next step";
+}
+
+function localizationHomeStateTone(
+  status: RecentLocalizationItemStatus | null | undefined,
+): "running" | "ready" | "pending" {
+  if (status?.running) return "running";
+  if (status?.preview_mp4_path) return "ready";
+  return "pending";
+}
+
+function localizationHomeNextAction(
+  status: RecentLocalizationItemStatus | null | undefined,
+): LocalizationHomeNextAction {
+  if (status?.preview_mp4_path) {
+    return {
+      title: "Review the latest deliverable",
+      detail: "A preview MP4 is ready. Open outputs, review the result, and continue into QC or export if needed.",
+      actionLabel: "Open outputs",
+      sectionId: "loc-library",
+    };
+  }
+  if (status?.running) {
+    return {
+      title: "Track the active run",
+      detail: `${status.summary}. Use the run surface to watch the current stage and respond to checkpoints.`,
+      actionLabel: "Open run controls",
+      sectionId: "loc-run",
+    };
+  }
+  if ((status?.summary ?? "").startsWith("Last failed")) {
+    return {
+      title: "Repair the current run",
+      detail:
+        status?.detail ||
+        "Open the run surface to inspect the failed stage and continue from the current checkpoint.",
+      actionLabel: "Open run controls",
+      sectionId: "loc-run",
+    };
+  }
+  if (status?.summary === "Imported / not started") {
+    return {
+      title: "Start the staged localization run",
+      detail: "Review the run contract, confirm the staged path, and start captions and translation for the current item.",
+      actionLabel: "Open run contract",
+      sectionId: "loc-run",
+    };
+  }
+  return {
+    title: "Continue the current item",
+    detail: "Use the current item to continue the staged path through outputs, QC, and advanced tools.",
+    actionLabel: "Open current item",
+    sectionId: null,
+  };
+}
 
 function parseStoredPage(raw: string | null): AppPage {
   switch (raw) {
@@ -394,232 +514,674 @@ function LocalizationStudioHome({
   const currentEditorItem = currentEditorItemId
     ? recentItems.find((item) => item.id === currentEditorItemId) ?? null
     : null;
+  const prioritizedRecentItems = useMemo(
+    () => [...recentItems].sort((a, b) => (b.created_at_ms ?? 0) - (a.created_at_ms ?? 0)),
+    [recentItems],
+  );
+  const recentHomeItems = useMemo(() => prioritizedRecentItems.slice(0, 6), [prioritizedRecentItems]);
+  const currentHomeItem = currentEditorItem ?? prioritizedRecentItems[0] ?? null;
+  const currentHomeStatus = currentHomeItem ? recentItemStatuses[currentHomeItem.id] ?? null : null;
+  const latestPreviewItem =
+    prioritizedRecentItems.find((item) => Boolean(recentItemStatuses[item.id]?.preview_mp4_path)) ??
+    null;
+  const latestPreviewStatus = latestPreviewItem
+    ? recentItemStatuses[latestPreviewItem.id] ?? null
+    : null;
+  const runningCount = prioritizedRecentItems.filter((item) => recentItemStatuses[item.id]?.running).length;
+  const previewReadyCount = prioritizedRecentItems.filter(
+    (item) => Boolean(recentItemStatuses[item.id]?.preview_mp4_path),
+  ).length;
+  const needsNextStepCount = prioritizedRecentItems.filter((item) => {
+    const status = recentItemStatuses[item.id];
+    return Boolean(status) && !status.running && !status.preview_mp4_path;
+  }).length;
+  const nextAction = pendingImportPath
+    ? {
+        title: "Wait for import handoff",
+        detail: `Queued import for ${fileNameFromPath(pendingImportPath)}. VoxVulgi will reopen it here when the item is ready.`,
+        actionLabel: "Refresh recent items",
+        sectionId: null,
+      }
+    : localizationHomeNextAction(currentHomeStatus);
 
   return (
     <>
       {error ? <div className="error">{error}</div> : null}
       {notice ? <div className="card">{notice}</div> : null}
-      {!compact ? (
-        <div className="card">
-          <strong>Localization Studio is ready.</strong> Start here when the goal is subtitles,
-          translation, or voice-preserving dubbing rather than long-term archiving.
-        </div>
-      ) : null}
-      <div className="card">
-        <h2 style={{ marginTop: 0 }}>Video ingest</h2>
-        <div style={{ color: "#4b5563", marginTop: 6 }}>
-          Import or refresh the source media for subtitle and dubbing work. The ASR language choice
-          here is stored and reused by quick ASR actions elsewhere in the app.
-        </div>
-        <div className="kv" style={{ marginTop: 10 }}>
-          <div className="k">Localization export root</div>
-          <div className="v">
-            {localizationRoot?.current_dir ?? "Loading localization root..."}
-            {!localizationRoot?.exists ? " (currently unavailable)" : ""}
+      {compact ? (
+        <div className="card loc-home-card">
+          <div className="loc-home-eyebrow">Current Localization</div>
+          <h2 style={{ marginTop: 0 }}>Continue current item</h2>
+          <div className="loc-home-support">
+            Keep the current item, outputs, and advanced tools obvious while the editor stays open
+            below.
           </div>
-        </div>
-        <div className="row">
-          <button type="button" disabled={busy} onClick={() => importLocalMedia().catch(() => undefined)}>
-            Import local media
-          </button>
-          <button type="button" disabled={busy} onClick={onOpenVideoArchiver}>
-            Open Video Archiver
-          </button>
-          <button type="button" disabled={busy} onClick={onOpenMediaLibrary}>
-            Open Media Library
-          </button>
-          <button type="button" disabled={busy} onClick={onOpenOptions}>
-            Open Options
-          </button>
-          <label style={{ display: "flex", alignItems: "center", gap: 8 }}>
-            <span>ASR lang</span>
-            <select
-              value={asrLang}
-              disabled={busy}
-              onChange={(e) => setAsrLang(e.currentTarget.value as AsrLang)}
-            >
-              <option value="auto">auto</option>
-              <option value="ja">ja</option>
-              <option value="ko">ko</option>
-            </select>
-          </label>
-        </div>
-        {compact && currentEditorItemId ? (
-          <div
-            style={{
-              marginTop: 12,
-              paddingTop: 12,
-              borderTop: "1px solid rgba(82, 94, 112, 0.18)",
-              display: "flex",
-              flexDirection: "column",
-              gap: 8,
-            }}
-          >
-            <div style={{ fontWeight: 600 }}>
-              Current localization item: {currentEditorItem?.title || "Open below"}
+          <div className="kv" style={{ marginTop: 10 }}>
+            <div className="k">Localization export root</div>
+            <div className="v">
+              {localizationRoot?.current_dir ?? "Loading localization root..."}
+              {!localizationRoot?.exists ? " (currently unavailable)" : ""}
             </div>
-            <div style={{ fontSize: 12, opacity: 0.75 }}>
-              {currentEditorStatus?.summary ??
-                "Use the jump actions to land directly on run controls, outputs, or advanced tools."}
+          </div>
+          <div className="row">
+            <button type="button" disabled={busy} onClick={() => importLocalMedia().catch(() => undefined)}>
+              Import local media
+            </button>
+            <button type="button" disabled={busy} onClick={onOpenVideoArchiver}>
+              Open Video Archiver
+            </button>
+            <button type="button" disabled={busy} onClick={onOpenMediaLibrary}>
+              Open Media Library
+            </button>
+            <button type="button" disabled={busy} onClick={onOpenOptions}>
+              Open Options
+            </button>
+            <label style={{ display: "flex", alignItems: "center", gap: 8 }}>
+              <span>ASR lang</span>
+              <select
+                value={asrLang}
+                disabled={busy}
+                onChange={(e) => setAsrLang(e.currentTarget.value as AsrLang)}
+              >
+                <option value="auto">auto</option>
+                <option value="ja">ja</option>
+                <option value="ko">ko</option>
+              </select>
+            </label>
+          </div>
+          {currentEditorItemId ? (
+            <div className="loc-home-item-card" style={{ marginTop: 12 }}>
+              <div className="loc-home-item-header">
+                <div>
+                  <div className="loc-home-item-title">
+                    {currentEditorItem?.title || "Current localization item"}
+                  </div>
+                  <div className="loc-home-item-subtle">
+                    {currentEditorStatus?.summary ?? "Open below and continue the staged run."}
+                  </div>
+                </div>
+                <span
+                  className={`loc-home-pill loc-home-pill-${localizationHomeStateTone(
+                    currentEditorStatus,
+                  )}`}
+                >
+                  {localizationHomeStateLabel(currentEditorStatus)}
+                </span>
+              </div>
+              <div className="loc-home-support">
+                {currentEditorStatus?.detail ??
+                  "Use the jump actions to land directly on run controls, outputs, or advanced tools."}
+              </div>
+              <div className="row" style={{ marginTop: 0, flexWrap: "wrap" }}>
+                <button
+                  type="button"
+                  disabled={busy}
+                  onClick={() => onOpenEditorSection(currentEditorItemId, "loc-run")}
+                >
+                  Jump to run controls
+                </button>
+                <button
+                  type="button"
+                  disabled={busy}
+                  onClick={() => onOpenEditorSection(currentEditorItemId, "loc-library")}
+                >
+                  Jump to outputs library
+                </button>
+                <button
+                  type="button"
+                  disabled={busy}
+                  onClick={() => onOpenEditorSection(currentEditorItemId, "loc-advanced")}
+                >
+                  Jump to advanced tools
+                </button>
+              </div>
+            </div>
+          ) : null}
+        </div>
+      ) : (
+        <>
+          <div className="card loc-home-hero">
+            <div className="loc-home-eyebrow">Main Workflow</div>
+            <div className="loc-home-hero-top">
+              <div>
+                <h2 style={{ marginTop: 0, marginBottom: 8 }}>Localization Studio</h2>
+                <div className="loc-home-support">
+                  The main source-to-output workspace for captions, translation, voice planning,
+                  dubbing, mix/mux, and deliverable review. Import is only the first step, not the
+                  whole feature.
+                </div>
+              </div>
+              <div className="loc-home-summary-grid">
+                <div className="loc-home-summary-card">
+                  <div className="loc-home-summary-label">Recent items</div>
+                  <div className="loc-home-summary-value">{prioritizedRecentItems.length}</div>
+                </div>
+                <div className="loc-home-summary-card">
+                  <div className="loc-home-summary-label">Runs active</div>
+                  <div className="loc-home-summary-value">{runningCount}</div>
+                </div>
+                <div className="loc-home-summary-card">
+                  <div className="loc-home-summary-label">Previews ready</div>
+                  <div className="loc-home-summary-value">{previewReadyCount}</div>
+                </div>
+                <div className="loc-home-summary-card">
+                  <div className="loc-home-summary-label">Need next step</div>
+                  <div className="loc-home-summary-value">{needsNextStepCount}</div>
+                </div>
+              </div>
             </div>
             <div className="row" style={{ marginTop: 0, flexWrap: "wrap" }}>
               <button
                 type="button"
-                disabled={busy}
-                onClick={() => onOpenEditorSection(currentEditorItemId, "loc-run")}
+                disabled={busy || !currentHomeItem}
+                onClick={() => currentHomeItem && onOpenEditor(currentHomeItem.id)}
               >
-                Jump to run controls
+                Continue current item
               </button>
-              <button
-                type="button"
-                disabled={busy}
-                onClick={() => onOpenEditorSection(currentEditorItemId, "loc-library")}
-              >
-                Jump to outputs library
+              <button type="button" disabled={busy} onClick={() => importLocalMedia().catch(() => undefined)}>
+                Import local media
               </button>
-              <button
-                type="button"
-                disabled={busy}
-                onClick={() => onOpenEditorSection(currentEditorItemId, "loc-advanced")}
-              >
-                Jump to advanced tools
+              <button type="button" disabled={busy} onClick={onOpenMediaLibrary}>
+                Open Media Library
+              </button>
+              <button type="button" disabled={busy} onClick={onOpenVideoArchiver}>
+                Open Video Archiver
               </button>
             </div>
           </div>
-        ) : null}
-        {!compact ? (
-          <div style={{ marginTop: 14, display: "flex", flexDirection: "column", gap: 10 }}>
-            <div className="row" style={{ marginTop: 0, alignItems: "center", justifyContent: "space-between" }}>
-              <div style={{ fontWeight: 600 }}>Recent media for Localization Studio</div>
-              <button
-                type="button"
-                disabled={busy || recentItemsBusy}
-                onClick={() => {
-                  void refreshRecentItems();
-                }}
-              >
-                Refresh recent items
-              </button>
+          <div className="loc-home-orientation-grid">
+            <div className="card loc-home-focus-card">
+              <div className="loc-home-eyebrow">Now</div>
+              <h3 className="loc-home-focus-title">
+                {currentHomeItem?.title || "No current localization item"}
+              </h3>
+              <div className="loc-home-support">
+                {currentHomeItem
+                  ? currentHomeStatus?.summary ?? "Loading current item status..."
+                  : "Import local media or reopen an item from Media Library to establish the current working item."}
+              </div>
+              <div className="loc-home-focus-detail">
+                {currentHomeItem
+                  ? currentHomeStatus?.detail ??
+                    "Open the current item to continue the staged localization workflow."
+                  : "Localization Studio should keep the current working item obvious from the first screen."}
+              </div>
+              {currentHomeItem ? (
+                <>
+                  <div className="loc-home-path">
+                    <code>{currentHomeItem.media_path}</code>
+                  </div>
+                  <div className="row" style={{ marginTop: 0, flexWrap: "wrap" }}>
+                    <button
+                      type="button"
+                      disabled={busy}
+                      onClick={() => onOpenEditor(currentHomeItem.id)}
+                    >
+                      Open current item
+                    </button>
+                    <button
+                      type="button"
+                      disabled={busy}
+                      onClick={() => onOpenEditorSection(currentHomeItem.id, "loc-run")}
+                    >
+                      Run controls
+                    </button>
+                  </div>
+                </>
+              ) : (
+                <div className="row" style={{ marginTop: 0, flexWrap: "wrap" }}>
+                  <button
+                    type="button"
+                    disabled={busy}
+                    onClick={() => importLocalMedia().catch(() => undefined)}
+                  >
+                    Import local media
+                  </button>
+                  <button type="button" disabled={busy} onClick={onOpenMediaLibrary}>
+                    Open Media Library
+                  </button>
+                </div>
+              )}
             </div>
-            <div style={{ fontSize: 12, opacity: 0.75 }}>
-              This removes the confusing Media Library bounce for normal localization work. Import,
-              confirm the item appears here, then open it directly in Localization Studio.
+
+            <div className="card loc-home-focus-card">
+              <div className="loc-home-eyebrow">Next</div>
+              <h3 className="loc-home-focus-title">{nextAction.title}</h3>
+              <div className="loc-home-support">{nextAction.detail}</div>
+              <div className="loc-home-focus-detail">
+                {currentHomeItem
+                  ? "Keep the next step explicit so the workflow does not feel like a dead end or a hidden background queue."
+                  : "Localization Studio starts here, but import/setup should stay secondary to the actual source-to-output workflow."}
+              </div>
+              <div className="row" style={{ marginTop: 0, flexWrap: "wrap" }}>
+                {pendingImportPath ? (
+                  <button
+                    type="button"
+                    disabled={busy || recentItemsBusy}
+                    onClick={() => {
+                      void refreshRecentItems().then((items) => {
+                        void refreshRecentItemStatuses(items);
+                      });
+                    }}
+                  >
+                    {nextAction.actionLabel}
+                  </button>
+                ) : currentHomeItem ? (
+                  <button
+                    type="button"
+                    disabled={busy}
+                    onClick={() =>
+                      nextAction.sectionId
+                        ? onOpenEditorSection(currentHomeItem.id, nextAction.sectionId)
+                        : onOpenEditor(currentHomeItem.id)
+                    }
+                  >
+                    {nextAction.actionLabel}
+                  </button>
+                ) : (
+                  <button
+                    type="button"
+                    disabled={busy}
+                    onClick={() => importLocalMedia().catch(() => undefined)}
+                  >
+                    Import local media
+                  </button>
+                )}
+                {currentHomeItem ? (
+                  <button
+                    type="button"
+                    disabled={busy}
+                    onClick={() => onOpenEditorSection(currentHomeItem.id, "loc-advanced")}
+                  >
+                    Advanced tools
+                  </button>
+                ) : (
+                  <button type="button" disabled={busy} onClick={onOpenVideoArchiver}>
+                    Video Archiver
+                  </button>
+                )}
+              </div>
             </div>
+
+            <div className="card loc-home-focus-card">
+              <div className="loc-home-eyebrow">Last Output</div>
+              <h3 className="loc-home-focus-title">
+                {latestPreviewItem?.title || "No preview deliverable yet"}
+              </h3>
+              <div className="loc-home-support">
+                {latestPreviewStatus?.preview_mp4_path
+                  ? "Latest preview MP4 is ready from the current Localization queue."
+                  : currentHomeStatus?.working_dir
+                    ? "No preview MP4 yet, but the working folder is already available."
+                    : "Preview/deliverable state will appear here as soon as the staged run produces outputs."}
+              </div>
+              <div className="loc-home-focus-detail">
+                {latestPreviewStatus?.preview_mp4_path ??
+                  latestPreviewStatus?.working_dir ??
+                  currentHomeStatus?.working_dir ??
+                  localizationRoot?.current_dir ??
+                  "-"}
+              </div>
+              <div className="row" style={{ marginTop: 0, flexWrap: "wrap" }}>
+                <button
+                  type="button"
+                  disabled={busy || !latestPreviewStatus?.preview_mp4_path}
+                  onClick={() => {
+                    openPathBestEffort(latestPreviewStatus?.preview_mp4_path ?? "").catch(
+                      () => undefined,
+                    );
+                  }}
+                >
+                  Open latest preview
+                </button>
+                <button
+                  type="button"
+                  disabled={
+                    busy || !(latestPreviewStatus?.working_dir ?? currentHomeStatus?.working_dir)
+                  }
+                  onClick={() => {
+                    revealPath(
+                      latestPreviewStatus?.working_dir ?? currentHomeStatus?.working_dir ?? "",
+                    ).catch(() => undefined);
+                  }}
+                >
+                  Open working folder
+                </button>
+              </div>
+            </div>
+          </div>
+          <div className="loc-home-layout">
+            <div className="card loc-home-card">
+              <div className="loc-home-eyebrow">Current Item</div>
+              <h2 style={{ marginTop: 0 }}>Continue localization</h2>
+              {currentHomeItem ? (
+                <div className="loc-home-item-card">
+                  <div className="loc-home-item-header">
+                    <div>
+                      <div className="loc-home-item-title">
+                        {currentHomeItem.title || "Untitled media"}
+                      </div>
+                      <div className="loc-home-item-subtle">
+                        {currentHomeItem.source_type || "local source"}
+                      </div>
+                    </div>
+                    <span
+                      className={`loc-home-pill loc-home-pill-${localizationHomeStateTone(
+                        currentHomeStatus,
+                      )}`}
+                    >
+                      {localizationHomeStateLabel(currentHomeStatus)}
+                    </span>
+                  </div>
+                  <div className="loc-home-support">
+                    {currentHomeStatus?.detail ??
+                      "Open the current item and continue the staged localization flow."}
+                  </div>
+                  <div className="loc-home-path">
+                    <code>{currentHomeItem.media_path}</code>
+                  </div>
+                  <div className="row" style={{ marginTop: 0, flexWrap: "wrap" }}>
+                    <button type="button" disabled={busy} onClick={() => onOpenEditor(currentHomeItem.id)}>
+                      Open current item
+                    </button>
+                    <button
+                      type="button"
+                      disabled={busy}
+                      onClick={() => onOpenEditorSection(currentHomeItem.id, "loc-run")}
+                    >
+                      Run controls
+                    </button>
+                    <button
+                      type="button"
+                      disabled={busy}
+                      onClick={() => onOpenEditorSection(currentHomeItem.id, "loc-library")}
+                    >
+                      Outputs
+                    </button>
+                    <button
+                      type="button"
+                      disabled={busy}
+                      onClick={() => onOpenEditorSection(currentHomeItem.id, "loc-advanced")}
+                    >
+                      Advanced tools
+                    </button>
+                    <button
+                      type="button"
+                      disabled={busy || !currentHomeItem.media_path}
+                      onClick={() => {
+                        openPathBestEffort(currentHomeItem.media_path).catch(() => undefined);
+                      }}
+                    >
+                      Open source
+                    </button>
+                    <button
+                      type="button"
+                      disabled={busy || !currentHomeStatus?.preview_mp4_path}
+                      onClick={() => {
+                        openPathBestEffort(currentHomeStatus?.preview_mp4_path ?? "").catch(
+                          () => undefined,
+                        );
+                      }}
+                    >
+                      Open preview MP4
+                    </button>
+                  </div>
+                </div>
+              ) : (
+                <div className="loc-home-empty">
+                  No current localization item yet. Import a local file or reopen one from Media
+                  Library to start the staged workflow.
+                </div>
+              )}
+            </div>
+
+            <div className="card loc-home-card">
+              <div className="loc-home-eyebrow">Start New Work</div>
+              <h2 style={{ marginTop: 0 }}>Import and setup</h2>
+              <div className="loc-home-support">
+                Keep ingest lightweight here. Archive-heavy source management remains in Video
+                Archiver and Media Library.
+              </div>
+              <div className="kv" style={{ marginTop: 10 }}>
+                <div className="k">Localization export root</div>
+                <div className="v">
+                  {localizationRoot?.current_dir ?? "Loading localization root..."}
+                  {!localizationRoot?.exists ? " (currently unavailable)" : ""}
+                </div>
+              </div>
+              <div className="row">
+                <button type="button" disabled={busy} onClick={() => importLocalMedia().catch(() => undefined)}>
+                  Import local media
+                </button>
+                <button type="button" disabled={busy} onClick={onOpenVideoArchiver}>
+                  Video Archiver
+                </button>
+                <button type="button" disabled={busy} onClick={onOpenMediaLibrary}>
+                  Media Library
+                </button>
+                <button type="button" disabled={busy} onClick={onOpenOptions}>
+                  Options
+                </button>
+              </div>
+              <label style={{ display: "flex", alignItems: "center", gap: 8 }}>
+                <span>ASR language</span>
+                <select
+                  value={asrLang}
+                  disabled={busy}
+                  onChange={(e) => setAsrLang(e.currentTarget.value as AsrLang)}
+                >
+                  <option value="auto">auto</option>
+                  <option value="ja">ja</option>
+                  <option value="ko">ko</option>
+                </select>
+              </label>
+            </div>
+
+            <div className="card loc-home-card">
+              <div className="loc-home-eyebrow">Workflow</div>
+              <h2 style={{ marginTop: 0 }}>What happens here</h2>
+              <div className="loc-home-support">
+                The shipped Localization path is staged and operator-visible rather than a black
+                box.
+              </div>
+              <div className="loc-home-stage-list">
+                {LOCALIZATION_HOME_STAGES.map((stage) => (
+                  <div key={stage.title} className="loc-home-stage">
+                    <div className="loc-home-stage-title">{stage.title}</div>
+                    <div className="loc-home-stage-detail">{stage.detail}</div>
+                  </div>
+                ))}
+              </div>
+              {currentHomeItem ? (
+                <div className="row" style={{ marginTop: 0, flexWrap: "wrap" }}>
+                  <button
+                    type="button"
+                    disabled={busy}
+                    onClick={() => onOpenEditorSection(currentHomeItem.id, "loc-run")}
+                  >
+                    Open run contract
+                  </button>
+                  <button
+                    type="button"
+                    disabled={busy}
+                    onClick={() => onOpenEditorSection(currentHomeItem.id, "loc-library")}
+                  >
+                    Open outputs library
+                  </button>
+                </div>
+              ) : null}
+            </div>
+
+            <div className="card loc-home-card">
+              <div className="loc-home-eyebrow">Outputs</div>
+              <h2 style={{ marginTop: 0 }}>Preview and deliverables</h2>
+              <div className="loc-home-support">
+                Source media, working artifacts, and deliverables should stay obvious from the
+                first Localization screen.
+              </div>
+              <div className="kv" style={{ marginTop: 10 }}>
+                <div className="k">Latest preview-ready item</div>
+                <div className="v">{latestPreviewItem?.title ?? "No preview MP4 yet"}</div>
+              </div>
+              <div className="kv">
+                <div className="k">Latest preview MP4</div>
+                <div className="v">{latestPreviewStatus?.preview_mp4_path ?? "-"}</div>
+              </div>
+              <div className="kv">
+                <div className="k">Latest working folder</div>
+                <div className="v">{latestPreviewStatus?.working_dir ?? currentHomeStatus?.working_dir ?? "-"}</div>
+              </div>
+              <div className="row">
+                <button
+                  type="button"
+                  disabled={busy || !latestPreviewStatus?.preview_mp4_path}
+                  onClick={() => {
+                    openPathBestEffort(latestPreviewStatus?.preview_mp4_path ?? "").catch(
+                      () => undefined,
+                    );
+                  }}
+                >
+                  Open latest preview
+                </button>
+                <button
+                  type="button"
+                  disabled={busy || !(latestPreviewStatus?.working_dir ?? currentHomeStatus?.working_dir)}
+                  onClick={() => {
+                    revealPath(
+                      latestPreviewStatus?.working_dir ?? currentHomeStatus?.working_dir ?? "",
+                    ).catch(() => undefined);
+                  }}
+                >
+                  Open working folder
+                </button>
+                <button type="button" disabled={busy} onClick={onOpenOptions}>
+                  Output options
+                </button>
+              </div>
+            </div>
+          </div>
+
+          <div className="card loc-home-card">
             <div
-              style={{
-                border: "1px solid #e5e7eb",
-                borderRadius: 8,
-                maxHeight: 240,
-                overflow: "auto",
-              }}
+              className="row"
+              style={{ marginTop: 0, alignItems: "center", justifyContent: "space-between" }}
             >
-              <table>
-                <thead>
-                  <tr>
-                    <th>Title</th>
-                    <th>Source</th>
-                    <th>Localization</th>
-                    <th>Path</th>
-                    <th>Actions</th>
-                  </tr>
-                </thead>
-                <tbody>
-                  {recentItems.length ? (
-                    recentItems.map((item) => {
-                      const status = recentItemStatuses[item.id];
-                      const isPending = pendingImportPath
-                        ? normalizePathForMatch(item.media_path) ===
-                            normalizePathForMatch(pendingImportPath) ||
-                          fileNameFromPath(item.media_path).toLowerCase() ===
-                            fileNameFromPath(pendingImportPath).toLowerCase()
-                        : false;
-                      return (
-                        <tr key={item.id}>
-                          <td>{item.title || "-"}</td>
-                          <td>{item.source_type || "-"}</td>
-                          <td style={{ maxWidth: 260 }}>
-                            <div>{status?.summary ?? "-"}</div>
-                            <div style={{ fontSize: 12, opacity: 0.75 }}>{status?.detail ?? "-"}</div>
-                          </td>
-                          <td style={{ maxWidth: 420 }}>{item.media_path}</td>
-                          <td>
-                            <div className="row" style={{ marginTop: 0, flexWrap: "wrap" }}>
-                              <button type="button" disabled={busy} onClick={() => onOpenEditor(item.id)}>
-                                Open in Localization Studio
-                              </button>
-                              <button
-                                type="button"
-                                disabled={busy}
-                                onClick={() => onOpenEditorSection(item.id, "loc-run")}
-                              >
-                                Open run controls
-                              </button>
-                              <button
-                                type="button"
-                                disabled={busy}
-                                onClick={() => onOpenEditorSection(item.id, "loc-library")}
-                              >
-                                Open outputs
-                              </button>
-                              <button
-                                type="button"
-                                disabled={busy}
-                                onClick={() => onOpenEditorSection(item.id, "loc-advanced")}
-                              >
-                                Open advanced tools
-                              </button>
-                              <button
-                                type="button"
-                                disabled={busy || !item.media_path}
-                                onClick={() => {
-                                  openPathBestEffort(item.media_path).catch(() => undefined);
-                                }}
-                              >
-                                Open source
-                              </button>
-                              <button
-                                type="button"
-                                disabled={busy || !status?.working_dir}
-                                onClick={() => {
-                                  revealPath(status?.working_dir ?? "").catch(() => undefined);
-                                }}
-                              >
-                                Open working folder
-                              </button>
-                              <button
-                                type="button"
-                                disabled={busy || !status?.preview_mp4_path}
-                                onClick={() => {
-                                  openPathBestEffort(status?.preview_mp4_path ?? "").catch(
-                                    () => undefined,
-                                  );
-                                }}
-                              >
-                                Open preview MP4
-                              </button>
-                              {isPending ? (
-                                <span style={{ fontSize: 12, opacity: 0.75 }}>Imported now</span>
-                              ) : null}
-                            </div>
-                          </td>
-                        </tr>
-                      );
-                    })
-                  ) : (
-                    <tr>
-                      <td colSpan={5}>
-                        {recentItemsBusy
-                          ? "Loading recent items..."
-                          : "No recent media yet. Import a local file or use Media Library."}
-                      </td>
-                    </tr>
-                  )}
-                </tbody>
-              </table>
+              <div>
+                <div className="loc-home-eyebrow">Recent Work</div>
+                <h2 style={{ marginTop: 0, marginBottom: 6 }}>Recent localization items</h2>
+                <div className="loc-home-support">
+                  Open items directly into the editor, run contract, outputs library, or advanced
+                  tools without bouncing through another window first.
+                </div>
+              </div>
+              <div className="row" style={{ marginTop: 0, flexWrap: "wrap" }}>
+                <button
+                  type="button"
+                  disabled={busy || recentItemsBusy}
+                  onClick={() => {
+                    void refreshRecentItems();
+                  }}
+                >
+                  Refresh recent items
+                </button>
+                <button type="button" disabled={busy} onClick={onOpenMediaLibrary}>
+                  Open Media Library
+                </button>
+              </div>
             </div>
+            {recentHomeItems.length ? (
+              <div className="loc-home-item-grid">
+                {recentHomeItems.map((item) => {
+                  const status = recentItemStatuses[item.id];
+                  const isPending = pendingImportPath
+                    ? normalizePathForMatch(item.media_path) ===
+                        normalizePathForMatch(pendingImportPath) ||
+                      fileNameFromPath(item.media_path).toLowerCase() ===
+                        fileNameFromPath(pendingImportPath).toLowerCase()
+                    : false;
+                  return (
+                    <div key={item.id} className="loc-home-item-card">
+                      <div className="loc-home-item-header">
+                        <div>
+                          <div className="loc-home-item-title">{item.title || "Untitled media"}</div>
+                          <div className="loc-home-item-subtle">{item.source_type || "-"}</div>
+                        </div>
+                        <span
+                          className={`loc-home-pill loc-home-pill-${localizationHomeStateTone(
+                            status,
+                          )}`}
+                        >
+                          {localizationHomeStateLabel(status)}
+                        </span>
+                      </div>
+                      <div className="loc-home-support">
+                        {status?.summary ?? "-"}
+                        {status?.detail ? ` - ${status.detail}` : ""}
+                      </div>
+                      <div className="loc-home-path">
+                        <code>{item.media_path}</code>
+                      </div>
+                      <div className="row" style={{ marginTop: 0, flexWrap: "wrap" }}>
+                        <button type="button" disabled={busy} onClick={() => onOpenEditor(item.id)}>
+                          Open item
+                        </button>
+                        <button
+                          type="button"
+                          disabled={busy}
+                          onClick={() => onOpenEditorSection(item.id, "loc-run")}
+                        >
+                          Run
+                        </button>
+                        <button
+                          type="button"
+                          disabled={busy}
+                          onClick={() => onOpenEditorSection(item.id, "loc-library")}
+                        >
+                          Outputs
+                        </button>
+                        <button
+                          type="button"
+                          disabled={busy}
+                          onClick={() => onOpenEditorSection(item.id, "loc-advanced")}
+                        >
+                          Advanced
+                        </button>
+                        <button
+                          type="button"
+                          disabled={busy || !item.media_path}
+                          onClick={() => {
+                            openPathBestEffort(item.media_path).catch(() => undefined);
+                          }}
+                        >
+                          Source
+                        </button>
+                        <button
+                          type="button"
+                          disabled={busy || !status?.preview_mp4_path}
+                          onClick={() => {
+                            openPathBestEffort(status?.preview_mp4_path ?? "").catch(
+                              () => undefined,
+                            );
+                          }}
+                        >
+                          Preview MP4
+                        </button>
+                        {isPending ? <span className="loc-home-inline-note">Imported now</span> : null}
+                      </div>
+                    </div>
+                  );
+                })}
+              </div>
+            ) : (
+              <div className="loc-home-empty">
+                {recentItemsBusy
+                  ? "Loading recent Localization items..."
+                  : "No recent localization items yet. Import a local file or open one from Media Library to start the main workflow."}
+              </div>
+            )}
           </div>
-        ) : null}
-      </div>
+        </>
+      )}
     </>
   );
 }
@@ -645,9 +1207,11 @@ function App() {
         currentWindow.isFullscreen(),
         currentWindow.isMaximized(),
       ]);
-      setShellWindowMode(isFullscreen ? "fullscreen" : isMaximized ? "maximized" : "floating");
+      setShellWindowMode(
+        isFullscreen ? "fullscreen" : isMaximized ? "maximized" : inferViewportShellMode(),
+      );
     } catch {
-      // Ignore shell window state read errors.
+      setShellWindowMode(inferViewportShellMode());
     }
   }, [currentWindow]);
 
@@ -659,18 +1223,27 @@ function App() {
 
   useEffect(() => {
     let disposed = false;
+    let animationFrameId: number | null = null;
     const unlistenFns: Array<() => void> = [];
     const scheduleRefresh = () => {
       if (disposed) return;
-      void refreshShellWindowMode();
+      if (animationFrameId !== null) {
+        window.cancelAnimationFrame(animationFrameId);
+      }
+      animationFrameId = window.requestAnimationFrame(() => {
+        animationFrameId = null;
+        void refreshShellWindowMode();
+      });
     };
 
     void refreshShellWindowMode();
+    window.addEventListener("resize", scheduleRefresh);
 
     void (async () => {
       try {
         unlistenFns.push(await currentWindow.onResized(scheduleRefresh));
         unlistenFns.push(await currentWindow.onScaleChanged(scheduleRefresh));
+        unlistenFns.push(await currentWindow.onMoved(scheduleRefresh));
       } catch {
         // Ignore window listener registration errors.
       }
@@ -678,6 +1251,10 @@ function App() {
 
     return () => {
       disposed = true;
+      if (animationFrameId !== null) {
+        window.cancelAnimationFrame(animationFrameId);
+      }
+      window.removeEventListener("resize", scheduleRefresh);
       for (const unlisten of unlistenFns) {
         unlisten();
       }
@@ -734,10 +1311,10 @@ function App() {
 
   async function startWindowDrag() {
     try {
-      await currentWindow.startDragging();
+      await invoke("window_start_drag");
     } catch {
       try {
-        await invoke("window_start_drag");
+        await currentWindow.startDragging();
       } catch {
         // Ignore window API errors.
       }
@@ -746,9 +1323,13 @@ function App() {
 
   async function startWindowResize(direction: ResizeDirection) {
     try {
-      await currentWindow.startResizeDragging(direction);
+      await invoke("window_start_resize_drag", { direction });
     } catch {
-      // Ignore window API errors.
+      try {
+        await currentWindow.startResizeDragging(direction);
+      } catch {
+        // Ignore window API errors.
+      }
     }
   }
 
@@ -930,6 +1511,32 @@ function App() {
                   Loading {startupPctLabel}
                 </button>
               ) : null}
+              {startupFailed ? (
+                <button
+                  type="button"
+                  className="startup-pill startup-pill-error"
+                  data-no-drag="true"
+                  onClick={() => setStartupDetailsOpen(true)}
+                  title="Show startup recovery details"
+                >
+                  Startup error
+                </button>
+              ) : null}
+              <button
+                type="button"
+                className={`startup-pill ${
+                  safeMode?.enabled ? "startup-pill-safe" : "startup-pill-recovery"
+                }`}
+                data-no-drag="true"
+                onClick={() => void setSafeModeEnabled(!safeMode?.enabled)}
+                title={
+                  safeMode?.enabled
+                    ? "Exit Safe Mode"
+                    : "Enable Safe Mode if startup feels unstable"
+                }
+              >
+                {safeMode?.enabled ? "Safe Mode ON" : "Recovery"}
+              </button>
               <nav className="nav" data-no-drag="true">
                 <button
                   className={page === "localization" ? "active" : ""}
@@ -996,8 +1603,9 @@ function App() {
                 aria-label="Move window"
                 role="button"
                 tabIndex={0}
-                onMouseDown={(e) => {
-                  if (e.buttons !== 1) return;
+                data-tauri-drag-region=""
+                onPointerDown={(e) => {
+                  if (e.button !== 0) return;
                   e.preventDefault();
                   e.stopPropagation();
                   void startWindowDrag();
@@ -1017,7 +1625,6 @@ function App() {
                 <span className="move-handle-glyph" aria-hidden="true">
                   ::::::
                 </span>
-                <span>Move window</span>
               </div>
               <div className="window-controls" data-no-drag="true" data-tauri-drag-region="false">
                 <button className="win-btn" type="button" onClick={minimizeWindow} title="Minimize">
@@ -1039,91 +1646,81 @@ function App() {
           </div>
         </header>
         <main className="content" data-no-drag="true">
-        {safeMode?.enabled ? (
-          <div className="card">
-            <strong>Safe Mode is ON.</strong> Startup auto-refresh is disabled and background jobs
-            are paused so you can recover/export data safely.
-            <div className="row">
-              <button type="button" onClick={() => void setSafeModeEnabled(false)}>
-                Exit Safe Mode
-              </button>
-            </div>
-          </div>
-        ) : (
-          <div className="card">
-            <strong>Recovery:</strong> If startup feels unstable, turn on Safe Mode.
-            <div className="row">
-              <button type="button" onClick={() => void setSafeModeEnabled(true)}>
-                Enable Safe Mode
-              </button>
-            </div>
-          </div>
-        )}
-        {startupBusy ? (
-          <div className="card">
-            <strong>Startup tasks in progress.</strong> The app stays usable while background
-            initialization finishes.
-            <div style={{ marginTop: 8, color: "#4b5563" }}>
-              {startupPctLabel} complete. {startupResolvedCount}/{startupPhaseCount} phases resolved.
-            </div>
-            <div style={{ marginTop: 10 }}>
-              <div
-                aria-hidden="true"
-                style={{
-                  height: 10,
-                  width: "100%",
-                  borderRadius: 999,
-                  background: "rgba(82, 94, 112, 0.18)",
-                  overflow: "hidden",
-                }}
-              >
-                <div
-                  style={{
-                    height: "100%",
-                    width: `${Math.max(8, Math.round((startup?.progress_pct ?? 0) * 100))}%`,
-                    borderRadius: 999,
-                    background:
-                      "linear-gradient(90deg, rgba(78,114,148,0.92), rgba(59,81,105,0.94))",
-                  }}
-                />
+        {safeMode?.enabled || startupBusy || startupFailed ? (
+          <div className="shell-status-strip">
+            {safeMode?.enabled ? (
+              <div className="card shell-status-card">
+                <div className="shell-status-title">Safe Mode is ON</div>
+                <div className="shell-status-support">
+                  Startup auto-refresh is disabled and background jobs are paused so recovery and
+                  data export stay safe.
+                </div>
+                <div className="row" style={{ marginTop: 0, flexWrap: "wrap" }}>
+                  <button type="button" onClick={() => void setSafeModeEnabled(false)}>
+                    Exit Safe Mode
+                  </button>
+                  <button type="button" onClick={() => switchPage("diagnostics")}>
+                    Open Diagnostics
+                  </button>
+                </div>
               </div>
-            </div>
-            <div style={{ marginTop: 8, color: "#4b5563" }}>
-              {startupActivePhase
-                ? `Current phase: ${startupActivePhase.label}`
-                : "Finalizing startup state."}
-            </div>
-            <div className="row">
-              <button type="button" onClick={() => setStartupDetailsOpen(true)}>
-                Loading details
-              </button>
-              <button type="button" onClick={() => switchPage("diagnostics")}>
-                Open Diagnostics
-              </button>
-            </div>
-            <div className="table-wrap" style={{ marginTop: 10 }}>
-              <table>
-                <thead>
-                  <tr>
-                    <th>Phase</th>
-                    <th>Status</th>
-                  </tr>
-                </thead>
-                <tbody>
-                  {(startup?.phases ?? []).map((phase) => (
-                    <tr key={phase.id}>
-                      <td>{phase.label}</td>
-                      <td>{phase.state}</td>
-                    </tr>
-                  ))}
-                </tbody>
-              </table>
-            </div>
-          </div>
-        ) : null}
-        {startupFailed ? (
-          <div className="error">
-            Startup dependency hydration failed: {startup?.offline_bundle_error ?? "unknown error"}
+            ) : null}
+            {startupBusy || startupFailed ? (
+              <div
+                className={`card shell-status-card ${
+                  startupFailed ? "shell-status-card-error" : ""
+                }`}
+              >
+                <div className="shell-status-title">
+                  {startupFailed ? "Startup recovery needed" : "Startup still hydrating"}
+                </div>
+                <div className="shell-status-support">
+                  {startupFailed
+                    ? `Startup dependency hydration failed: ${
+                        startup?.offline_bundle_error ?? "unknown error"
+                      }`
+                    : "The app stays usable while background initialization finishes."}
+                </div>
+                <div className="shell-status-meta">
+                  {startupPctLabel} complete. {startupResolvedCount}/{startupPhaseCount} phases resolved.
+                </div>
+                <div style={{ marginTop: 10 }}>
+                  <div
+                    aria-hidden="true"
+                    style={{
+                      height: 10,
+                      width: "100%",
+                      borderRadius: 999,
+                      background: "rgba(82, 94, 112, 0.18)",
+                      overflow: "hidden",
+                    }}
+                  >
+                    <div
+                      style={{
+                        height: "100%",
+                        width: `${Math.max(8, Math.round((startup?.progress_pct ?? 0) * 100))}%`,
+                        borderRadius: 999,
+                        background:
+                          "linear-gradient(90deg, rgba(78,114,148,0.92), rgba(59,81,105,0.94))",
+                      }}
+                    />
+                  </div>
+                </div>
+                <div className="shell-status-meta">
+                  {startupActivePhase
+                    ? `Current phase: ${startupActivePhase.label}`
+                    : "Finalizing startup state."}
+                </div>
+                <div className="row" style={{ marginTop: 0, flexWrap: "wrap" }}>
+                  <button type="button" onClick={() => setStartupDetailsOpen(true)}>
+                    Loading details
+                  </button>
+                  <button type="button" onClick={() => switchPage("diagnostics")}>
+                    Open Diagnostics
+                  </button>
+                </div>
+              </div>
+            ) : null}
           </div>
         ) : null}
         <Suspense fallback={<div className="card">Loading window...</div>}>
@@ -1224,20 +1821,23 @@ function App() {
             </div>
           </div>
         ) : null}
-        {shellWindowMode === "floating" ? (
-          <div
-            className="resize-handle resize-handle-se"
-            data-no-drag="true"
-            onPointerDown={(e) => {
-              if (e.button !== 0) return;
-              e.preventDefault();
-              e.stopPropagation();
-              void startWindowResize("SouthEast");
-            }}
-            title="Resize window"
-            aria-hidden="true"
-          />
-        ) : null}
+        {shellWindowMode === "floating"
+          ? FLOATING_RESIZE_HANDLES.map(({ direction, className, title }) => (
+              <div
+                key={direction}
+                className={`resize-handle ${className}`}
+                data-no-drag="true"
+                onPointerDown={(e) => {
+                  if (e.button !== 0) return;
+                  e.preventDefault();
+                  e.stopPropagation();
+                  void startWindowResize(direction);
+                }}
+                title={title}
+                aria-hidden="true"
+              />
+            ))
+          : null}
       </div>
     </div>
   );

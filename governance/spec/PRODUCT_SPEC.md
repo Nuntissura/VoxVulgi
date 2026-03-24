@@ -298,9 +298,11 @@ Current implementation status:
 - Discoverable: operator-critical controls must be visible in the workflow where they are needed rather than buried behind long scroll chains or hidden state gates.
 - Localization Studio should surface a workflow/readiness summary that makes current track readiness, runtime readiness, and the main backend/benchmark/QC/artifact sections obvious before the operator starts deeper dubbing steps.
 - Localization Studio should not require a confusing bounce through Media Library just to understand current source, active run, or output state after import; the current item handoff and its output path should remain obvious inside Localization Studio.
+- Localization Studio should use its first screen as a true operator dashboard: current item, recommended next action, and latest preview/deliverable path should be understandable at a glance before the operator scrolls or opens another window.
 - Localization Studio should make the speaker-reference checkpoint survivable for first-run operators:
   - when the run pauses for missing references, the app should surface a direct path to generate or apply reference candidates from the current media,
   - the operator should not need to leave the current item flow just to build a first voice-cloned dub preview.
+- Generic startup/recovery messaging should remain available without visually displacing Localization Studio as the main feature surface once the app is usable; compact shell-status affordances should be the default, with larger recovery/detail panels reserved for Safe Mode, active failure, or explicit operator request.
 - Ergonomic: dense archive/workflow panes should provide clear scrolling behavior and an explicit app-move affordance that does not conflict with text selection or scrollbar use.
 
 ## 8) Key UX Screens
@@ -325,6 +327,7 @@ Current implementation status:
 
 - **Localization Studio**: first/default window, focused on subtitles + dubbing workflow.
 - **Localization Studio** also keeps a lightweight ingest block in-context for local import and ASR language selection, even when the editor is already open.
+- **Localization Studio** first-screen home should prioritize current-item continuation, recent localization items, workflow/readiness, outputs handoff, and advanced-tool entrypoints before import/setup utilities.
 - **Video Archiver**: local import + URL batch ingest + presets/templates + YouTube subscriptions/groups + legacy archive reconciliation.
 - **Instagram Archiver**: dedicated Instagram batch ingest workflow plus recurring archive targets.
 - **Image Archive**: dedicated crawler-based image archive ingest workflow.
