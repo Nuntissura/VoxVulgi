@@ -45,3 +45,4 @@ Out of scope:
 - 2026-03-12: Created from `WP-0151` research findings as the next practical localization recovery step.
 - 2026-03-12: Implemented item-scoped generated speaker-reference bundles in the engine/Tauri/frontend path, plus apply-as-append/replace flows inside Localization Studio.
 - 2026-03-12: Verified with the staged `wp0150_localization_run_smoke` on the Queen sample after switching the smoke harness from manual reference injection to the new assisted-reference path.
+- 2026-03-24: Follow-on reusable-voice basics remediation is now split into `WP-0155` to `WP-0159` so first-dub recovery, reusable-voice reuse, and clone-vs-fallback truth do not drift together under one broad packet.

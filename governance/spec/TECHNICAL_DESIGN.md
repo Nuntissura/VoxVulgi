@@ -313,6 +313,11 @@ Phase 2 preview implementation notes (current):
   - keep those candidates in item-managed voice-reference storage,
   - require explicit operator apply before they become active references,
   - preserve any existing manual multi-reference state unless the operator chooses to replace it.
+- The basic reusable-voice path should be expressible as one compressed operator lane built on top of the existing reusable asset layers:
+  - capture reusable voice from the current item speaker,
+  - save it into an app-managed reusable asset,
+  - apply it to a later translated item,
+  - continue the dubbed preview from that applied state.
 - Direct speech-to-speech systems (for example SeamlessExpressive-, Translatotron-, or TransVIP-style families) are useful research references, but they should remain future R&D or benchmark lanes rather than the default shipped path until they satisfy local packaging, operator-control, and artifact-inspection requirements at the same level as the staged cascade.
 
 Voice-preserving approach (core feature):
@@ -344,6 +349,10 @@ Voice-preserving approach (core feature):
   - candidate clips are extracted from diarized source-media spans,
   - the candidate bundle is stored under the current item's managed voice-reference area,
   - the operator can apply it as append-or-replace into the current speaker settings before continuing the staged localization run.
+- Voice-preserving truthfulness requirement:
+  - report and manifest state must distinguish real conversion, partial conversion, and plain TTS fallback,
+  - operator surfaces must not present plain TTS fallback as if it were a successful cloned-voice result,
+  - if fallback remains allowed for resilience, that fallback must be visible and reviewable end to end rather than hidden behind a generic "dub succeeded" state.
 - Voice-backend modernization strategy:
   - keep the current OpenVoice V2 + Kokoro path as the managed default until benchmark evidence supports a change,
   - add a built-in backend catalog with descriptors for managed and experimental candidates,

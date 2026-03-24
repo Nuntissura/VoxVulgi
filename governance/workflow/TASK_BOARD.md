@@ -1,6 +1,6 @@
 # VoxVulgi â€” Task Board
 
-Last updated: 2026-03-22
+Last updated: 2026-03-24
 
 This is the single source of truth for work status.
 
@@ -168,3 +168,8 @@ This is the single source of truth for work status.
 | WP-0152 | Assisted speaker-reference extraction and first-dub recovery | DONE | Codex | Localization Studio now generates source-based speaker-reference bundles after diarization, lets operators apply them into the current voice plan, and is proven through the staged Queen smoke under `product/desktop/build_target/tool_artifacts/wp_runs/WP-0152/20260312_130500/`. |
 | WP-0153 | Localization home first-screen contract refresh | DONE | Codex | Spec/design/roadmap now define the home surface as a current-item + next-step + latest-output dashboard with compact shell-status chrome, which grounds the follow-on implementation tranche. |
 | WP-0154 | Localization first-screen hierarchy and shell-status demotion | IN_PROGRESS | Codex | The home surface now includes a `Now / Next / Last Output` orientation layer and generic recovery/startup cards are demoted into compact shell-status chrome; pending live operator validation in the desktop app. |
+| WP-0155 | Voice clone basics contract and governance refresh | DONE | Codex | Governance now defines the educational-core reusable-voice contract as capture -> apply later -> dub -> verify clone-vs-fallback truth, and splits the follow-on remediation into narrow packets. |
+| WP-0156 | Voice clone truthfulness and fallback disclosure | BACKLOG | Codex | Runtime and operator surfaces must stop presenting plain TTS fallback as if it were a successful cloned-voice result; truth-state needs to be explicit end to end. |
+| WP-0157 | Reusable voice capture and apply first-run flow | BACKLOG | Codex | Localization Studio needs one obvious reusable-voice lane for capture/save/apply/dub so operators do not need to understand every advanced asset layer before basic reuse works. |
+| WP-0158 | Reusable voice asset contract and drift guardrails | BACKLOG | Codex | Templates, cast packs, memory, and character profiles need tighter shared contract and regression coverage so reusable-voice behavior does not drift apart behind the scenes. |
+| WP-0159 | Voice clone basics installer-state smoke and proof | BACKLOG | Codex | The educational-core reusable-voice promise needs a real installer-state proof path across multiple items, including explicit evidence of clone success versus fallback. |

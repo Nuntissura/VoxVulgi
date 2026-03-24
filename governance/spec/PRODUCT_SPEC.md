@@ -192,6 +192,11 @@ Initial language focus: **Korean + Japanese → English**.
   - background-aware mix,
   - MP4 mux/export,
   - explicit review of outputs.
+- The educational-core reusable-voice promise should remain simple even as advanced surfaces grow:
+  - capture a reusable voice from the current speaker setup,
+  - apply that reusable voice to a later translated item,
+  - run the dubbed preview,
+  - verify whether the result was actually voice-preserved or plain TTS fallback.
 - The explicit `Start / continue localization run` action should advance automatically only until the next real operator checkpoint.
   - If speaker labels are missing, it should queue diarization rather than jumping straight into dubbing.
   - If speaker labels exist but the voice plan is incomplete, it should pause at the speaker/reference stage and tell the operator which speakers still need references or Standard TTS routing.
@@ -252,6 +257,7 @@ Current implementation status:
 - Current implementation now also includes backend-specific starter recipes so Diagnostics can prefill stronger BYO adapter drafts for known OSS stacks.
 - Current implementation now also lets operators promote benchmark winners directly into the selected reusable voice template or cast pack and optionally seed later item voice plans from those saved defaults during apply.
 - Export packs include speech stems and alternate dubbed variants when available.
+- Voice-preserving runs must not be presented as successful cloned-voice results when conversion did not actually occur; clone-vs-fallback truth is part of the product contract, not an optional detail.
 - Artifact-browser actions must remain variant-aware:
   - rerun, status, and log links for A/B/alternate artifacts must target the matching variant/track/container instead of falling back to the base artifact state,
   - unsupported artifact rows must not expose misleading rerun actions.
@@ -302,6 +308,8 @@ Current implementation status:
 - Localization Studio should make the speaker-reference checkpoint survivable for first-run operators:
   - when the run pauses for missing references, the app should surface a direct path to generate or apply reference candidates from the current media,
   - the operator should not need to leave the current item flow just to build a first voice-cloned dub preview.
+- Localization Studio should also make reusable-voice basics obvious before advanced reusable asset layers:
+  - operators should be able to save a reusable voice from one item and apply it to a later item without first reasoning about cast packs, memory profiles, character profiles, benchmark defaults, or backend research surfaces.
 - Generic startup/recovery messaging should remain available without visually displacing Localization Studio as the main feature surface once the app is usable; compact shell-status affordances should be the default, with larger recovery/detail panels reserved for Safe Mode, active failure, or explicit operator request.
 - Ergonomic: dense archive/workflow panes should provide clear scrolling behavior and an explicit app-move affordance that does not conflict with text selection or scrollbar use.
 

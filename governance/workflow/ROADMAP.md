@@ -1,6 +1,6 @@
 # VoxVulgi - Roadmap / Backlog (Draft)
 
-Date: 2026-03-22
+Date: 2026-03-24
 
 ## Immediate Track - Stabilization + IA Refresh (2026-03)
 
@@ -131,6 +131,14 @@ Date: 2026-03-22
 - WP-0151: Document the current localization runtime failure and convert it into a research-backed reference-acquisition strategy instead of another blind backend swap. DONE.
 - WP-0152: Add assisted speaker-reference extraction from the current source media so the staged localization run can bridge the voice-plan checkpoint into a first real dubbed preview. DONE.
 - WP-0095: Re-run the manual app smoke after the regression tranche lands. BLOCKED until the above packets are closed.
+
+## Educational-Core Voice Clone Basics Recovery (2026-03)
+
+- WP-0155: Refresh governance around the reusable-voice basics contract so the product explicitly promises capture -> apply later -> dub -> verify clone-vs-fallback truth, then split the follow-on remediation cleanly. DONE 2026-03-24.
+- WP-0156: Make the runtime and operator surfaces truthful about actual voice-preserving conversion versus plain TTS fallback. BACKLOG.
+- WP-0157: Compress reusable-voice UX into one first-run flow for capture, save, apply, and dub while keeping advanced surfaces secondary. BACKLOG.
+- WP-0158: Tighten the shared contract and regression guardrails across templates, cast packs, memory profiles, and character profiles so reusable-voice behavior does not drift. BACKLOG.
+- WP-0159: Add an installer-state proof path for reusable voice basics across multiple items, including explicit clone-vs-fallback evidence. BACKLOG.
 
 ## Phase 0 - Decisions (1-2 days)
 
