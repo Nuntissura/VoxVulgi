@@ -6441,6 +6441,28 @@ export function SubtitleEditorPage({
                 ? `Generated voice sample ready (${Math.round((voiceBasicsGeneratedCandidate.total_duration_ms ?? 0) / 100) / 10}s)`
                 : "No generated voice sample loaded"}
             </div>
+            {voiceBasicsGeneratedCandidate?.candidate_exists ? (
+              <div style={{ fontSize: 11, marginTop: 2 }}>
+                {(() => {
+                  const dur = (voiceBasicsGeneratedCandidate.total_duration_ms ?? 0) / 1000;
+                  const clips = voiceBasicsGeneratedCandidate.clip_count ?? 0;
+                  const warns = voiceBasicsGeneratedCandidate.warnings ?? [];
+                  const factors: string[] = [];
+                  if (dur >= 3 && dur <= 12) factors.push("\u2713 Duration OK");
+                  else if (dur < 3) factors.push("\u26A0 Too short (aim for 3-12s)");
+                  else factors.push("\u26A0 Long (12s+ may slow cloning)");
+                  if (clips >= 2) factors.push(`\u2713 ${clips} clips`);
+                  else if (clips === 1) factors.push("\u26A0 Single clip (2+ recommended)");
+                  if (warns.length === 0) factors.push("\u2713 No warnings");
+                  else factors.push(`\u26A0 ${warns.length} warning${warns.length > 1 ? "s" : ""}`);
+                  return factors.join(" \u00B7 ");
+                })()}
+              </div>
+            ) : (
+              <div style={{ fontSize: 11, opacity: 0.5, marginTop: 2 }}>
+                Tip: 3-12 seconds of clear speech, no background music, natural pace
+              </div>
+            )}
           </div>
           <div
             style={{
