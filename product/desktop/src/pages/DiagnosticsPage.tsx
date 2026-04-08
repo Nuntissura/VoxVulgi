@@ -579,7 +579,7 @@ function formatModelRole(role: ModelInventoryItem["role"]): string {
 function formatModelDelivery(delivery: ModelInventoryItem["delivery"]): string {
   switch (delivery) {
     case "offline_hydrated":
-      return "Offline bundle / first-launch hydration";
+      return "Offline bundle / first-launch setup";
     case "manual_install":
       return "Manual install";
     case "bundled_resource":
@@ -1079,14 +1079,14 @@ export function DiagnosticsPage({ visible = true }: { visible?: boolean }) {
   const toolLifecycleRows = useMemo(
     () => [
       {
-        name: "Installer hydration",
+        name: "Installer setup",
         state:
           startup?.offline_bundle_state === "ready"
-            ? "bundled resources hydrated into app data"
+            ? "bundled resources installed into app data"
             : startup?.offline_bundle_state === "skipped_safe_mode"
               ? "skipped because Safe Mode is enabled"
               : startup?.offline_bundle_state === "error"
-                ? "hydration failed"
+                ? "setup failed"
                 : startup?.offline_bundle_state ?? "not started",
       },
       {
@@ -1107,7 +1107,7 @@ export function DiagnosticsPage({ visible = true }: { visible?: boolean }) {
       },
       {
         name: "Portable Python",
-        state: portablePython?.installed ? "hydrated locally" : "not hydrated",
+        state: portablePython?.installed ? "installed locally" : "not installed",
       },
       {
         name: "Python venv",
@@ -1437,14 +1437,14 @@ export function DiagnosticsPage({ visible = true }: { visible?: boolean }) {
 
   async function enqueueInstallPhase2Packs() {
     const ok = await confirm(
-      "Install Phase 2 packs now?\n\nThis downloads large dependencies (multiple GB) and writes under app data. Installs only after this explicit click.",
-      { title: "Install Phase 2 packs", kind: "warning" },
+      "Install Voice cloning packages now?\n\nThis downloads large dependencies (multiple GB) and writes under app data. Installs only after this explicit click.",
+      { title: "Install Voice cloning packages", kind: "warning" },
     );
     if (!ok) return;
 
     setBusy(true);
     setError(null);
-    setNotice("Queued Phase 2 packs installer. See progress below (updates while running).");
+    setNotice("Queued Voice cloning packages installer. See progress below (updates while running).");
     try {
       await invoke("jobs_enqueue_install_phase2_packs_v1");
       await refresh();
@@ -1779,7 +1779,7 @@ export function DiagnosticsPage({ visible = true }: { visible?: boolean }) {
       const ok = await confirm(
         `Forget ${preview.terminal_job_count} terminal job${preview.terminal_job_count === 1 ? "" : "s"}, remove ${preview.log_file_count} log file${preview.log_file_count === 1 ? "" : "s"}, ${preview.artifact_dir_count} job artifact folder${preview.artifact_dir_count === 1 ? "" : "s"}, and ${preview.cache_entry_count} cache entr${preview.cache_entry_count === 1 ? "y" : "ies"}? Output folders are handled by separate prompts.`,
         {
-          title: "Flush job history",
+          title: "Clean up job history",
           kind: "warning",
         },
       );
@@ -1965,7 +1965,7 @@ export function DiagnosticsPage({ visible = true }: { visible?: boolean }) {
   const sectionEntries: Array<[DiagnosticsSectionKey, string]> = [
     ["build", "Build + core"],
     ["tools", "Tools"],
-    ["phase2", "Phase 2 packs"],
+    ["phase2", "Voice cloning packages"],
     ["storage", "Storage"],
     ["trace", "Diagnostics trace"],
     ["jobs", "Recent jobs"],
@@ -1977,11 +1977,43 @@ export function DiagnosticsPage({ visible = true }: { visible?: boolean }) {
 
       {error ? <div className="error">{error}</div> : null}
       {notice ? <div className="card">{notice}</div> : null}
+
+      <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(180px, 1fr))", gap: 10, marginBottom: 16 }}>
+        <div className="card" style={{ margin: 0, textAlign: "center", cursor: "pointer" }} onClick={() => document.getElementById("diag-build")?.scrollIntoView({ behavior: "smooth" })}>
+          <div style={{ fontSize: 12, textTransform: "uppercase", opacity: 0.6, marginBottom: 4 }}>App version</div>
+          <div style={{ fontWeight: 700, fontSize: 18 }}>{info?.app_version ?? "..."}</div>
+        </div>
+        <div className="card" style={{ margin: 0, textAlign: "center", cursor: "pointer" }} onClick={() => document.getElementById("diag-phase2")?.scrollIntoView({ behavior: "smooth" })}>
+          <div style={{ fontSize: 12, textTransform: "uppercase", opacity: 0.6, marginBottom: 4 }}>Voice packages</div>
+          <div style={{ fontWeight: 700, fontSize: 18, color: phase2HasActive ? "#92400e" : phase2Steps.length > 0 && phase2Steps.every((s: any) => s?.status === "succeeded") ? "#166534" : undefined }}>
+            {phase2HasActive ? "Installing..." : phase2Steps.length > 0 && phase2Steps.every((s: any) => s?.status === "succeeded") ? "Installed" : "Not installed"}
+          </div>
+        </div>
+        <div className="card" style={{ margin: 0, textAlign: "center", cursor: "pointer" }} onClick={() => document.getElementById("diag-tools")?.scrollIntoView({ behavior: "smooth" })}>
+          <div style={{ fontSize: 12, textTransform: "uppercase", opacity: 0.6, marginBottom: 4 }}>FFmpeg</div>
+          <div style={{ fontWeight: 700, fontSize: 18, color: ffmpeg?.installed ? "#166534" : "#dc2626" }}>
+            {ffmpeg?.installed ? "Ready" : "Missing"}
+          </div>
+        </div>
+        <div className="card" style={{ margin: 0, textAlign: "center", cursor: "pointer" }} onClick={() => document.getElementById("diag-storage")?.scrollIntoView({ behavior: "smooth" })}>
+          <div style={{ fontSize: 12, textTransform: "uppercase", opacity: 0.6, marginBottom: 4 }}>Storage</div>
+          <div style={{ fontWeight: 700, fontSize: 18 }}>
+            {storage ? `${Math.round((storage.total_bytes ?? 0) / 1024 / 1024)} MB` : "..."}
+          </div>
+        </div>
+        <div className="card" style={{ margin: 0, textAlign: "center", cursor: "pointer" }} onClick={() => document.getElementById("diag-failures")?.scrollIntoView({ behavior: "smooth" })}>
+          <div style={{ fontSize: 12, textTransform: "uppercase", opacity: 0.6, marginBottom: 4 }}>Recent failures</div>
+          <div style={{ fontWeight: 700, fontSize: 18, color: recentFailures.length > 0 ? "#dc2626" : "#166534" }}>
+            {recentFailures.length}
+          </div>
+        </div>
+      </div>
+
       <div className="card">
         <h2>Loading status</h2>
         <div style={{ color: "#4b5563", marginBottom: 8 }}>
           Diagnostics sections load independently so this page stays responsive. If a feature is
-          still hydrating, use the app-state snapshot below to see which dependency is blocking it.
+          still initializing, use the app-state snapshot below to see which dependency is blocking it.
         </div>
         <div style={{ marginBottom: 10 }}>
           <div
@@ -2007,7 +2039,7 @@ export function DiagnosticsPage({ visible = true }: { visible?: boolean }) {
         </div>
         <div style={{ color: "#4b5563", marginBottom: 8 }}>
           Diagnostics ready: {sectionProgress.ready}/{sectionProgress.total}. Loading:{" "}
-          {sectionProgress.loading}. Failed: {sectionProgress.failed}. Startup hydration:{" "}
+          {sectionProgress.loading}. Failed: {sectionProgress.failed}. Startup progress:{" "}
           {startup ? `${Math.round((startup.progress_pct ?? 0) * 100)}%` : "-"}.
         </div>
         <div className="table-wrap">
@@ -2032,7 +2064,7 @@ export function DiagnosticsPage({ visible = true }: { visible?: boolean }) {
         </div>
       </div>
 
-      <div className="card">
+      <div className="card" id="diag-build">
         <h2>Build</h2>
         <div className="kv">
           <div className="k">App</div>
@@ -2045,7 +2077,7 @@ export function DiagnosticsPage({ visible = true }: { visible?: boolean }) {
           <div className="v">{info?.engine_version ?? "-"}</div>
         </div>
         <div className="kv">
-          <div className="k">Startup hydration</div>
+          <div className="k">Startup initialization</div>
           <div className="v">{startup?.offline_bundle_state ?? "-"}</div>
         </div>
         <div className="kv">
@@ -2085,11 +2117,11 @@ export function DiagnosticsPage({ visible = true }: { visible?: boolean }) {
       </div>
 
       <div className="card">
-        <h2>Tool lifecycle model</h2>
+        <h2>Component status</h2>
         <div style={{ color: "#4b5563", marginBottom: 8 }}>
-          Bundled means shipped inside the installer. Hydrated means copied/extracted into app data.
-          Available means jobs can use it now. Optional means the pack is not required for the
-          base workflow.
+          Included means shipped inside the installer. Ready means installed and usable.
+          Installed means copied into app data but may not be fully configured.
+          Optional means the package is not required for the base workflow.
         </div>
         <div className="table-wrap">
           <table>
@@ -2337,7 +2369,7 @@ export function DiagnosticsPage({ visible = true }: { visible?: boolean }) {
         </div>
       </div>
 
-      <div className="card">
+      <div className="card" id="diag-tools">
         <h2>Tools</h2>
         <div className="kv">
           <div className="k">FFmpeg</div>
@@ -2419,7 +2451,7 @@ export function DiagnosticsPage({ visible = true }: { visible?: boolean }) {
         </div>
 
         <div className="kv">
-          <div className="k">Python (Phase 2)</div>
+          <div className="k">Python (voice cloning)</div>
           <div className="v">{python?.base_available ? "available" : "not available"}</div>
         </div>
         <div className="kv">
@@ -2467,9 +2499,9 @@ export function DiagnosticsPage({ visible = true }: { visible?: boolean }) {
           <div className="v">{portablePython?.install_dir ?? "-"}</div>
         </div>
         <div className="kv">
-          <div className="k">Phase 2 packs privacy/footprint</div>
+          <div className="k">Voice cloning packages privacy/footprint</div>
           <div className="v">
-            Offline-full installers bundle Phase 1 + Phase 2 dependencies. If you are using a
+            Offline-full installers bundle all core and voice cloning dependencies. If you are using a
             lightweight build, installs happen only when you click Install and may download
             packages. These can use multiple GB; check Storage below. No telemetry.
           </div>
@@ -2986,16 +3018,16 @@ export function DiagnosticsPage({ visible = true }: { visible?: boolean }) {
         </div>
       </div>
 
-      <div className="card">
-        <h2>Phase 2 packs (one-click)</h2>
+      <div className="card" id="diag-phase2">
+        <h2>Voice cloning packages (one-click)</h2>
         <div style={{ color: "#4b5563" }}>
-          Installs all Phase 2 Python packs in one flow. Offline-full installers already include
+          Installs all voice cloning Python packages in one flow. Offline-full installers already include
           these (this button is mainly for repair). No telemetry.
         </div>
 
         <div className="row" style={{ flexWrap: "wrap" }}>
           <button type="button" disabled={busy} onClick={enqueueInstallPhase2Packs}>
-            Install Phase 2 packs
+            Install Voice cloning packages
           </button>
           <button type="button" disabled={busy} onClick={() => refresh()}>
             Refresh
@@ -3440,7 +3472,7 @@ export function DiagnosticsPage({ visible = true }: { visible?: boolean }) {
         </div>
       </div>
 
-      <div className="card">
+      <div className="card" id="diag-storage">
         <h2>Storage</h2>
         <div className="kv">
           <div className="k">Library</div>
@@ -3498,7 +3530,7 @@ export function DiagnosticsPage({ visible = true }: { visible?: boolean }) {
             Clear thumbnail cache
           </button>
           <button type="button" disabled={busy} onClick={flushJobsCache}>
-            Flush job history
+            Clean up job history
           </button>
           <button type="button" disabled={busy} onClick={pruneJobLogs}>
             Prune job logs
@@ -3535,7 +3567,7 @@ export function DiagnosticsPage({ visible = true }: { visible?: boolean }) {
         ))}
       </div>
 
-      <div className="card">
+      <div className="card" id="diag-failures">
         <h2>Recent failures</h2>
         <div className="table-wrap">
           <table>
@@ -3602,7 +3634,7 @@ export function DiagnosticsPage({ visible = true }: { visible?: boolean }) {
       <div className="card">
         <h2>Models (local-first)</h2>
         <div style={{ color: "#4b5563" }}>
-          Required runtime models should already be hydrated by the installer/offline bundle.
+          Required runtime models should already be installed by the installer/offline bundle.
           Demo/test assets are optional and are not needed for real subtitle generation or
           translation.
         </div>

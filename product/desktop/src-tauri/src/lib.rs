@@ -2,12 +2,205 @@ use base64::Engine as _;
 use sha2::{Digest, Sha256};
 use std::sync::{
     atomic::{AtomicBool, Ordering},
-    Arc, Mutex,
+    Arc, Mutex, OnceLock,
 };
 use std::time::Duration;
 use sysinfo::{ProcessesToUpdate, System};
-use tauri::{Manager, State};
+use tauri::{Emitter, Manager, State};
 use tauri_runtime::ResizeDirection as TauriResizeDirection;
+
+// ---------------------------------------------------------------------------
+// Agent Bridge — localhost HTTP API for headless agent control (WP-0171)
+// ---------------------------------------------------------------------------
+
+static AGENT_APP_HANDLE: OnceLock<tauri::AppHandle> = OnceLock::new();
+static AGENT_BRIDGE_STATE: OnceLock<Arc<Mutex<AgentBridgeInner>>> = OnceLock::new();
+
+#[derive(Debug, Default)]
+struct AgentBridgeInner {
+    current_page: String,
+    editor_item_id: Option<String>,
+    safe_mode: bool,
+    snapshot_tx: Option<std::sync::mpsc::Sender<String>>,
+}
+
+fn agent_bridge_state() -> &'static Arc<Mutex<AgentBridgeInner>> {
+    AGENT_BRIDGE_STATE.get_or_init(|| Arc::new(Mutex::new(AgentBridgeInner::default())))
+}
+
+fn spawn_agent_bridge(app_data_dir: &std::path::Path) {
+    let port_file = app_data_dir.join("agent_bridge_port.txt");
+    let port_file_cleanup = port_file.clone();
+
+    std::thread::spawn(move || {
+        let listener = match std::net::TcpListener::bind("127.0.0.1:0") {
+            Ok(l) => l,
+            Err(_) => return,
+        };
+        let port = match listener.local_addr() {
+            Ok(addr) => addr.port(),
+            Err(_) => return,
+        };
+        let _ = std::fs::write(&port_file_cleanup, port.to_string());
+
+        // Non-blocking accept with 2 second timeout so we can check for shutdown
+        let _ = listener.set_nonblocking(false);
+
+        for stream in listener.incoming() {
+            match stream {
+                Ok(mut stream) => {
+                    let _ = stream.set_read_timeout(Some(Duration::from_secs(5)));
+                    let _ = stream.set_write_timeout(Some(Duration::from_secs(5)));
+                    handle_agent_request(&mut stream);
+                }
+                Err(_) => continue,
+            }
+        }
+    });
+
+    // Clean up port file on app exit (best-effort via a Drop guard isn't easy here,
+    // but the port file is harmless if stale — agent checks /health first)
+}
+
+fn handle_agent_request(stream: &mut std::net::TcpStream) {
+    use std::io::{BufRead, BufReader, Read, Write};
+
+    let mut reader = BufReader::new(stream.try_clone().unwrap_or_else(|_| return_dummy_stream()));
+    let mut request_line = String::new();
+    if reader.read_line(&mut request_line).is_err() {
+        return;
+    }
+    let parts: Vec<&str> = request_line.trim().split_whitespace().collect();
+    if parts.len() < 2 {
+        return;
+    }
+    let method = parts[0];
+    let path = parts[1];
+
+    // Read headers to find Content-Length
+    let mut content_length: usize = 0;
+    loop {
+        let mut header = String::new();
+        if reader.read_line(&mut header).is_err() || header.trim().is_empty() {
+            break;
+        }
+        let lower = header.to_ascii_lowercase();
+        if lower.starts_with("content-length:") {
+            content_length = lower
+                .trim_start_matches("content-length:")
+                .trim()
+                .parse()
+                .unwrap_or(0);
+        }
+    }
+
+    // Read body
+    let mut body = vec![0u8; content_length];
+    if content_length > 0 {
+        let _ = reader.read_exact(&mut body);
+    }
+    let body_str = String::from_utf8_lossy(&body);
+
+    let (status, response_body) = match (method, path) {
+        ("GET", "/agent/health") => ("200 OK", r#"{"status":"ok"}"#.to_string()),
+        ("GET", "/agent/state") => ("200 OK", agent_handle_state()),
+        ("POST", "/agent/navigate") => agent_handle_navigate(&body_str),
+        ("POST", "/agent/snapshot") => agent_handle_snapshot(&body_str),
+        _ => ("404 Not Found", r#"{"error":"not found"}"#.to_string()),
+    };
+
+    let response = format!(
+        "HTTP/1.1 {}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+        status,
+        response_body.len(),
+        response_body
+    );
+    let _ = stream.write_all(response.as_bytes());
+    let _ = stream.flush();
+}
+
+fn return_dummy_stream() -> std::net::TcpStream {
+    // This should never actually be called — it exists to satisfy the type system
+    std::net::TcpStream::connect("127.0.0.1:1").unwrap()
+}
+
+fn agent_handle_state() -> String {
+    let state = agent_bridge_state().lock().unwrap();
+    serde_json::json!({
+        "current_page": state.current_page,
+        "editor_item_id": state.editor_item_id,
+        "safe_mode": state.safe_mode,
+    })
+    .to_string()
+}
+
+fn agent_handle_navigate(body: &str) -> (&'static str, String) {
+    let parsed: serde_json::Value = match serde_json::from_str(body) {
+        Ok(v) => v,
+        Err(_) => return ("400 Bad Request", r#"{"error":"invalid json"}"#.to_string()),
+    };
+    let page = match parsed.get("page").and_then(|v| v.as_str()) {
+        Some(p) => p.to_string(),
+        None => return ("400 Bad Request", r#"{"error":"missing page field"}"#.to_string()),
+    };
+    let valid = [
+        "localization",
+        "video_ingest",
+        "instagram_archive",
+        "image_archive",
+        "media_library",
+        "jobs",
+        "diagnostics",
+        "options",
+    ];
+    if !valid.contains(&page.as_str()) {
+        return (
+            "400 Bad Request",
+            format!(r#"{{"error":"invalid page","valid":{}}}"#, serde_json::json!(valid)),
+        );
+    }
+    if let Some(app) = AGENT_APP_HANDLE.get() {
+        let _ = app.emit("agent-navigate", &page);
+    }
+    ("200 OK", format!(r#"{{"navigated":"{}"}}"#, page))
+}
+
+fn agent_handle_snapshot(body: &str) -> (&'static str, String) {
+    let parsed: serde_json::Value = serde_json::from_str(body).unwrap_or(serde_json::json!({}));
+    let subfolder = parsed
+        .get("subfolder")
+        .and_then(|v| v.as_str())
+        .unwrap_or("")
+        .to_string();
+    let label = parsed
+        .get("label")
+        .and_then(|v| v.as_str())
+        .unwrap_or("")
+        .to_string();
+
+    let (tx, rx) = std::sync::mpsc::channel::<String>();
+
+    {
+        let mut state = agent_bridge_state().lock().unwrap();
+        state.snapshot_tx = Some(tx);
+    }
+
+    if let Some(app) = AGENT_APP_HANDLE.get() {
+        let _ = app.emit(
+            "agent-snapshot-request",
+            serde_json::json!({"subfolder": subfolder, "label": label}),
+        );
+    }
+
+    // Wait for frontend to complete the snapshot (up to 15 seconds for heavy pages)
+    match rx.recv_timeout(Duration::from_secs(15)) {
+        Ok(path) => ("200 OK", format!(r#"{{"path":"{}"}}"#, path.replace('\\', "\\\\"))),
+        Err(_) => (
+            "504 Gateway Timeout",
+            r#"{"error":"snapshot timed out (15s)"}"#.to_string(),
+        ),
+    }
+}
 use voxvulgi_engine::models::ModelStore;
 use voxvulgi_engine::paths::AppPaths;
 use voxvulgi_engine::{
@@ -5882,35 +6075,61 @@ fn jobs_retry(
 #[tauri::command]
 fn admin_save_snapshot(
     base64_data: String,
+    subfolder: Option<String>,
+    label: Option<String>,
 ) -> Result<String, String> {
     let b64 = if let Some(stripped) = base64_data.strip_prefix("data:image/png;base64,") {
         stripped
     } else {
         &base64_data
     };
-    
+
     let decoded = base64::Engine::decode(&base64::engine::general_purpose::STANDARD, b64)
         .map_err(|e| format!("Failed to decode base64: {}", e))?;
-    
-    // In dev, the cwd is typically 'product/desktop' or 'product/desktop/src-tauri' or project root
-    // To be safe, we will just use absolute path from env::current_dir combined with a fallback, 
-    // or just write it directly to the workspace root if we can find it.
+
     let mut snapshots_dir = std::env::current_dir().unwrap_or_default();
-    // try to find governance dir moving up
     while !snapshots_dir.join("governance").exists() && snapshots_dir.parent().is_some() {
         snapshots_dir = snapshots_dir.parent().unwrap().to_path_buf();
     }
-    let target_dir = snapshots_dir.join("governance").join("snapshots");
+    let mut target_dir = snapshots_dir.join("governance").join("snapshots");
+    if let Some(ref sub) = subfolder {
+        let sanitized = sub.replace(['/', '\\', ':', '*', '?', '"', '<', '>', '|'], "_");
+        if !sanitized.is_empty() {
+            target_dir = target_dir.join(sanitized);
+        }
+    }
     if !target_dir.exists() {
         std::fs::create_dir_all(&target_dir).map_err(|e| format!("Failed to create snapshot dir: {}", e))?;
     }
-    
-    let file_name = format!("snapshot_{}.png", now_epoch_ms_i64());
+
+    let label_part = label
+        .map(|l| l.replace(['/', '\\', ':', '*', '?', '"', '<', '>', '|', ' '], "_"))
+        .filter(|l| !l.is_empty());
+    let file_name = match label_part {
+        Some(l) => format!("{}_{}.png", l, now_epoch_ms_i64()),
+        None => format!("snapshot_{}.png", now_epoch_ms_i64()),
+    };
     let path = target_dir.join(file_name);
-    
+
     std::fs::write(&path, decoded).map_err(|e| format!("Failed to write snapshot: {}", e))?;
     let abs_path = std::fs::canonicalize(&path).unwrap_or(path).to_string_lossy().to_string();
     Ok(abs_path)
+}
+
+#[tauri::command]
+fn agent_report_state(page: String, editor_item_id: Option<String>, safe_mode: bool) {
+    let mut state = agent_bridge_state().lock().unwrap();
+    state.current_page = page;
+    state.editor_item_id = editor_item_id;
+    state.safe_mode = safe_mode;
+}
+
+#[tauri::command]
+fn agent_snapshot_complete(path: String) {
+    let mut state = agent_bridge_state().lock().unwrap();
+    if let Some(tx) = state.snapshot_tx.take() {
+        let _ = tx.send(path);
+    }
 }
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
@@ -5920,6 +6139,8 @@ pub fn run() {
             let base_dir = app.path().app_data_dir()?;
             let paths = AppPaths::new(AppPaths::normalize_base_dir(&base_dir));
             let startup = Arc::new(Mutex::new(StartupTracker::new()));
+            let _ = AGENT_APP_HANDLE.set(app.handle().clone());
+            spawn_agent_bridge(&AppPaths::normalize_base_dir(&base_dir));
             set_startup_phase(&startup, &paths, "app_dirs", "running", None);
             paths.ensure_dirs()?;
             set_startup_phase(&startup, &paths, "app_dirs", "ready", None);
@@ -6211,7 +6432,9 @@ pub fn run() {
             window_start_drag,
             window_start_resize_drag,
             window_toggle_maximize,
-            admin_save_snapshot
+            admin_save_snapshot,
+            agent_report_state,
+            agent_snapshot_complete
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

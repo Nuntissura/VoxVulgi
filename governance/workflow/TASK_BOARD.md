@@ -177,3 +177,11 @@ This is the single source of truth for work status.
 | WP-0161 | Video Archiver progress UX vs 4K Downloader | REVIEW | Codex | Phase 1 done: Type/Downloaded/Status columns added. Detected count deferred. |
 | WP-0162 | Global Authentication and Sessions | DONE | Codex | Global YouTube auth config in Options; engine jobs/subscriptions fall back to global cookies when no per-job or per-subscription cookie exists; verified via `cargo check` + `npm run build`. |
 | WP-0163 | Built-in Visual Debugger for Agents | DONE | Codex | `html2canvas` frontend capture + `admin_save_snapshot` Tauri command + hotkey (Ctrl+Shift+S) + programmatic trigger (`window.__voxVulgiRequestSnapshot()`); documented in `AGENTS.md`. |
+| WP-0164 | Localization Studio Declutter | REVIEW | Codex | Workflow Map buttons grouped into 4 categories (Captions, Voice, Quality, Advanced) with grid layout. |
+| WP-0165 | Archive Pages Progressive Disclosure | REVIEW | Codex | Quick/Advanced toggle shared across Video, Instagram, Image archive pages; Quick hides subscriptions, presets, groups, legacy import, Pinterest. |
+| WP-0166 | Terminology and Help Text Cleanup | REVIEW | Codex | Renamed: ASR lang→Source language, dub truth→Clone status, Phase 2 packs→Voice cloning packages, Flush→Clean up, hydration→initialization, refs→voice samples, voice memory→saved voice, reconciliation→import, Tool lifecycle→Component status. |
+| WP-0167 | Diagnostics Dashboard Summary | REVIEW | Codex | 5 clickable status tiles at top: App version, Voice packages, FFmpeg, Storage, Recent failures. Each scrolls to detail section. |
+| WP-0168 | Jobs Page Cleanup | BACKLOG | Codex | Remove dev-only controls from default view, consolidate per-row actions into dropdown, improve labels. |
+| WP-0169 | Options Page Consolidation | BACKLOG | Codex | Replace 4 feature-root cards with single table, add radio-button auth UX, show free disk space. |
+| WP-0170 | Media Library Search and Filters | BACKLOG | Codex | Add search input, source/status/date filters, and sort selector to Media Library (spec gap). |
+| WP-0171 | Headless Agent Bridge | REVIEW | Codex | Localhost HTTP server with /agent/navigate, /agent/snapshot, /agent/state, /agent/health; port file discovery; frontend event listeners; AGENTS.md documented. |

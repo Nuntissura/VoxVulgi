@@ -553,7 +553,7 @@ export function JobsPage({ visible = true }: { visible?: boolean }) {
       const ok = await confirm(
         `Forget ${preview.terminal_job_count} terminal job${preview.terminal_job_count === 1 ? "" : "s"}, remove ${preview.log_file_count} log file${preview.log_file_count === 1 ? "" : "s"}, ${preview.artifact_dir_count} job artifact folder${preview.artifact_dir_count === 1 ? "" : "s"}, and ${preview.cache_entry_count} cache entr${preview.cache_entry_count === 1 ? "y" : "ies"}? Output folders are handled by separate prompts.`,
         {
-          title: "Flush cache",
+          title: "Clean up old jobs and logs",
           kind: "warning",
         },
       );
@@ -772,7 +772,7 @@ export function JobsPage({ visible = true }: { visible?: boolean }) {
             />
           </label>
           <button type="button" disabled={busy} onClick={enqueueDummy}>
-            Enqueue dummy job
+            Run test job
           </button>
           <button type="button" disabled={busy} onClick={() => refresh()}>
             Refresh
@@ -790,7 +790,7 @@ export function JobsPage({ visible = true }: { visible?: boolean }) {
             Cancel all active
           </button>
           <button type="button" disabled={busy} onClick={flushCache}>
-            Flush cache/history
+            Clean up old jobs and logs
           </button>
         </div>
         <div style={{ color: "#4b5563", marginTop: 8 }}>

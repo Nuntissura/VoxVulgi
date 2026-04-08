@@ -2100,7 +2100,7 @@ export function SubtitleEditorPage({
       return {
         title: "Capture a first voice reference",
         detail:
-          "Generate a source-based ref from the current item or choose a clean clip manually before saving reusable voice memory.",
+          "Generate voice samples from the current item or choose a clean clip manually before saving a reusable voice.",
       };
     }
     if (!voiceBasicsProfilePaths.length && voiceBasicsGeneratedCandidate?.candidate_exists) {
@@ -2113,7 +2113,7 @@ export function SubtitleEditorPage({
       return {
         title: "Save or apply a reusable voice",
         detail:
-          "You have usable reference audio. Save it as reusable voice memory for later items, or apply an existing memory profile now.",
+          "You have usable reference audio. Save it as a reusable voice for later items, or apply an existing saved voice now.",
       };
     }
     if (voicePlanMissingSpeakers.length) {
@@ -5822,44 +5822,62 @@ export function SubtitleEditorPage({
             </div>
           ))}
         </div>
+        <div style={{ marginTop: 12, display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(280px, 1fr))", gap: 10 }}>
+          <div>
+            <div style={{ fontWeight: 600, fontSize: 12, textTransform: "uppercase", opacity: 0.6, marginBottom: 4 }}>Captions &amp; Translation</div>
+            <div className="row" style={{ marginTop: 0, flexWrap: "wrap" }}>
+              <button type="button" disabled={busy} onClick={() => scrollToLocalizationSection("loc-track")}>
+                Tracks and core jobs
+              </button>
+              <button type="button" disabled={busy} onClick={() => scrollToLocalizationSection("loc-library")}>
+                Outputs library
+              </button>
+            </div>
+          </div>
+          <div>
+            <div style={{ fontWeight: 600, fontSize: 12, textTransform: "uppercase", opacity: 0.6, marginBottom: 4 }}>Voice &amp; Dubbing</div>
+            <div className="row" style={{ marginTop: 0, flexWrap: "wrap" }}>
+              <button type="button" disabled={busy} onClick={() => scrollToLocalizationSection("loc-voice-basics")}>
+                Reusable voice basics
+              </button>
+              <button type="button" disabled={busy} onClick={() => scrollToLocalizationSection("loc-voice-plan")}>
+                Speaker / voice plan
+              </button>
+              <button type="button" disabled={busy} onClick={() => scrollToLocalizationSection("loc-batch")}>
+                Batch dubbing
+              </button>
+            </div>
+          </div>
+          <div>
+            <div style={{ fontWeight: 600, fontSize: 12, textTransform: "uppercase", opacity: 0.6, marginBottom: 4 }}>Quality &amp; Review</div>
+            <div className="row" style={{ marginTop: 0, flexWrap: "wrap" }}>
+              <button type="button" disabled={busy} onClick={() => scrollToLocalizationSection("loc-ab")}>
+                A/B preview
+              </button>
+              <button type="button" disabled={busy} onClick={() => scrollToLocalizationSection("loc-qc")}>
+                QC report
+              </button>
+              <button type="button" disabled={busy} onClick={() => scrollToLocalizationSection("loc-artifacts")}>
+                Artifacts
+              </button>
+            </div>
+          </div>
+          <div>
+            <div style={{ fontWeight: 600, fontSize: 12, textTransform: "uppercase", opacity: 0.6, marginBottom: 4 }}>Advanced</div>
+            <div className="row" style={{ marginTop: 0, flexWrap: "wrap" }}>
+              <button type="button" disabled={busy} onClick={() => scrollToLocalizationSection("loc-backends")}>
+                Backend strategy
+              </button>
+              <button type="button" disabled={busy} onClick={() => scrollToLocalizationSection("loc-benchmark")}>
+                Benchmark lab
+              </button>
+              <button type="button" disabled={busy} onClick={() => scrollToLocalizationSection("loc-advanced")}>
+                Advanced tools
+              </button>
+            </div>
+          </div>
+        </div>
         <div className="row" style={{ marginTop: 12, flexWrap: "wrap" }}>
-          <button type="button" disabled={busy} onClick={() => scrollToLocalizationSection("loc-library")}>
-            Outputs library
-          </button>
-          <button
-            type="button"
-            disabled={busy}
-            onClick={() => scrollToLocalizationSection("loc-voice-basics")}
-          >
-            Reusable voice basics
-          </button>
-          <button type="button" disabled={busy} onClick={() => scrollToLocalizationSection("loc-track")}>
-            Tracks and core jobs
-          </button>
-          <button type="button" disabled={busy} onClick={() => scrollToLocalizationSection("loc-voice-plan")}>
-            Speaker / voice plan
-          </button>
-          <button type="button" disabled={busy} onClick={() => scrollToLocalizationSection("loc-backends")}>
-            Backend strategy
-          </button>
-          <button type="button" disabled={busy} onClick={() => scrollToLocalizationSection("loc-benchmark")}>
-            Benchmark lab
-          </button>
-          <button type="button" disabled={busy} onClick={() => scrollToLocalizationSection("loc-advanced")}>
-            Advanced tools
-          </button>
-          <button type="button" disabled={busy} onClick={() => scrollToLocalizationSection("loc-batch")}>
-            Batch dubbing
-          </button>
-          <button type="button" disabled={busy} onClick={() => scrollToLocalizationSection("loc-ab")}>
-            A/B preview
-          </button>
-          <button type="button" disabled={busy} onClick={() => scrollToLocalizationSection("loc-qc")}>
-            QC report
-          </button>
-          <button type="button" disabled={busy} onClick={() => scrollToLocalizationSection("loc-artifacts")}>
-            Artifacts
-          </button>
           <button type="button" disabled={busy} onClick={() => refreshLocalizationReadiness().catch((e) => setError(String(e)))}>
             Refresh readiness
           </button>
@@ -5947,7 +5965,7 @@ export function SubtitleEditorPage({
               fontSize: 12,
             }}
           >
-            <strong>Current dub truth:</strong> {activeVoiceCloneTruth.label}
+            <strong>Clone status:</strong> {activeVoiceCloneTruth.label}
             {activeVoiceCloneTruth.detail ? ` (${activeVoiceCloneTruth.detail})` : ""}.
           </div>
         ) : null}
@@ -5976,7 +5994,7 @@ export function SubtitleEditorPage({
       <div className="card" id="loc-voice-basics">
         <h2>Reusable Voice Basics</h2>
         <div style={{ color: "#4b5563" }}>
-          Capture one speaker, save it as reusable voice memory, apply it to later items, then
+          Capture one speaker, save it as a reusable voice, apply it to later items, then
           continue the translated dub. This is the first-run lane for the educational voice-clone
           workflow.
         </div>
@@ -6004,13 +6022,13 @@ export function SubtitleEditorPage({
             </div>
             <div style={{ fontSize: 12, opacity: 0.75 }}>
               {voiceBasicsProfilePaths.length
-                ? `${voiceBasicsProfilePaths.length} active ref${voiceBasicsProfilePaths.length === 1 ? "" : "s"}`
-                : "No active voice refs yet"}
+                ? `${voiceBasicsProfilePaths.length} voice sample${voiceBasicsProfilePaths.length === 1 ? "" : "s"}`
+                : "No voice samples yet"}
             </div>
             <div style={{ fontSize: 12, opacity: 0.75 }}>
               {voiceBasicsGeneratedCandidate?.candidate_exists
-                ? `Generated source ref ready (${Math.round((voiceBasicsGeneratedCandidate.total_duration_ms ?? 0) / 100) / 10}s)`
-                : "No generated source ref loaded"}
+                ? `Generated voice sample ready (${Math.round((voiceBasicsGeneratedCandidate.total_duration_ms ?? 0) / 100) / 10}s)`
+                : "No generated voice sample loaded"}
             </div>
           </div>
           <div
@@ -6055,12 +6073,12 @@ export function SubtitleEditorPage({
             <div style={{ fontSize: 12, opacity: 0.75 }}>{voiceBasicsNextStep.detail}</div>
             {activeVoiceCloneTruth ? (
               <div style={{ fontSize: 12, opacity: 0.75 }}>
-                Current dub truth: {activeVoiceCloneTruth.label}
+                Clone status: {activeVoiceCloneTruth.label}
                 {activeVoiceCloneTruth.detail ? ` (${activeVoiceCloneTruth.detail})` : ""}
               </div>
             ) : (
               <div style={{ fontSize: 12, opacity: 0.75 }}>
-                No dub truth yet. Generate a voice-preserving dub after setup.
+                No clone status yet. Generate a voice-preserving dub after setup.
               </div>
             )}
           </div>
@@ -6338,7 +6356,7 @@ export function SubtitleEditorPage({
           <li>Run <strong>ASR (local)</strong> to create the source subtitles.</li>
           <li>Run <strong>Translate -&gt; EN (local)</strong> to produce the English subtitle track.</li>
           <li>Run <strong>Diarize speakers (local)</strong> if you want speaker-aware dubbing.</li>
-          <li>Open <strong>Diagnostics</strong> and verify FFmpeg plus the Phase 2 dubbing packs are installed.</li>
+          <li>Open <strong>Diagnostics</strong> and verify FFmpeg plus the voice cloning packages are installed.</li>
           <li>Assign a short clean reference clip per speaker, then save it as a <strong>Reusable voice template</strong> if you want to reuse the same cast on later episodes.</li>
           <li>Run <strong>Dub voice-preserving (local)</strong> for the English voice-cloned dub, or use one of the TTS preview jobs first.</li>
           <li>
@@ -8177,7 +8195,7 @@ export function SubtitleEditorPage({
 
             <div style={{ marginTop: 16 }}>
               <div className="row" style={{ alignItems: "center", gap: 10, flexWrap: "wrap" }}>
-                <div style={{ fontSize: 12, opacity: 0.85 }}>Cross-episode voice memory</div>
+                <div style={{ fontSize: 12, opacity: 0.85 }}>Cross-episode saved voice</div>
                 <button
                   type="button"
                   disabled={voiceLibraryBusy || voiceLibraryActionBusy}
@@ -8540,7 +8558,7 @@ export function SubtitleEditorPage({
                   </div>
                 </div>
                 <div className="kv">
-                  <div className="k">Current dub truth</div>
+                  <div className="k">Clone status</div>
                   <div className="v">
                     {activeVoiceCloneTruth
                       ? `${activeVoiceCloneTruth.label}${activeVoiceCloneTruth.detail ? ` (${activeVoiceCloneTruth.detail})` : ""}`

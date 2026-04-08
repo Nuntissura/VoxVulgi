@@ -66,7 +66,52 @@
 ## Built-in Visual Debugger (Agent Usage)
 
 - Agents can capture a snapshot of the current application surface to visually debug the frontend state.
-- **Trigger via JS**: Evaluate `window.__voxVulgiRequestSnapshot()` in the active WebView. This returns the absolute file path to the saved PNG snapshot.
-- **Trigger via hotkey**: While the app window is focused, an operator or agent (via keyboard simulator) can press `Ctrl + Shift + S`.
-- The snapshots are saved to `governance/snapshots/snapshot_<timestamp>.png`.
+- **Trigger via JS**: Evaluate `window.__voxVulgiRequestSnapshot(subfolder?, label?)` in the active WebView. This returns the absolute file path to the saved PNG snapshot.
+  - `subfolder` (optional): organizes snapshots into `governance/snapshots/<subfolder>/`. Use a WP ID (e.g. `"WP-0161"`), audit name (e.g. `"audit_2026-04-08"`), or test label.
+  - `label` (optional): prefixes the filename instead of the default `snapshot` (e.g. `label: "library_page"` → `library_page_<timestamp>.png`).
+- **Trigger via hotkey**: While the app window is focused, press `Ctrl + Shift + S`. Hotkey snapshots go to `governance/snapshots/manual/`.
+- **Folder structure**:
+  ```
+  governance/snapshots/
+    manual/              ← hotkey captures
+    WP-0161/             ← per-work-packet test captures
+    audit_2026-04-08/    ← agent audit runs
+  ```
 - Agents can then use their `view_file` tool to inspect the captured PNG file to visually evaluate layout, UI state, or evaluate QA conditions.
+
+## Headless Agent Bridge (WP-0171)
+
+The app exposes a localhost-only HTTP API so agents can navigate pages, trigger snapshots, and read state **without stealing window focus or using keyboard/mouse simulation**.
+
+### Discovery
+
+On startup the app writes the bridge port to:
+```
+%APPDATA%\com.voxvulgi.voxvulgi\agent_bridge_port.txt
+```
+Read that file to get the port number, then call `http://127.0.0.1:<port>/agent/health` to verify.
+
+### Endpoints
+
+| Method | Path | Body | Description |
+|--------|------|------|-------------|
+| `GET` | `/agent/health` | — | Liveness check. Returns `{"status":"ok"}`. |
+| `GET` | `/agent/state` | — | Returns `{"current_page","editor_item_id","safe_mode"}`. |
+| `POST` | `/agent/navigate` | `{"page":"video_ingest"}` | Switches the active page. Valid pages: `localization`, `video_ingest`, `instagram_archive`, `image_archive`, `media_library`, `jobs`, `diagnostics`, `options`. |
+| `POST` | `/agent/snapshot` | `{"subfolder":"WP-0171","label":"jobs_page"}` | Captures a snapshot via html2canvas and returns `{"path":"..."}`. Blocks up to 15 seconds. |
+
+### Example (from a terminal or agent script)
+
+```bash
+PORT=$(cat "$APPDATA/com.voxvulgi.voxvulgi/agent_bridge_port.txt")
+# Navigate to Video Archiver
+curl -s -X POST http://127.0.0.1:$PORT/agent/navigate -d '{"page":"video_ingest"}'
+sleep 2
+# Capture snapshot
+curl -s -X POST http://127.0.0.1:$PORT/agent/snapshot -d '{"subfolder":"audit","label":"video_archiver"}'
+```
+
+### JS globals (in-WebView use)
+
+- `window.__voxVulgiNavigate(page)` — switch page programmatically.
+- `window.__voxVulgiRequestSnapshot(subfolder?, label?)` — capture snapshot (returns path).

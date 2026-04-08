@@ -501,6 +501,9 @@ export function LibraryPage({ onOpenEditor, mode = "all" }: LibraryPageProps) {
   const [subscriptionGroups, setSubscriptionGroups] = useState<YoutubeSubscriptionGroupRow[]>([]);
   const [archiveStats, setArchiveStats] = useState<Record<string, number>>({});
   const [activeRefreshSubIds, setActiveRefreshSubIds] = useState<Set<string>>(new Set());
+  const [advancedMode, setAdvancedMode] = useState(() => {
+    return safeLocalStorageGet("voxvulgi.v1.library.advanced_mode") === "1";
+  });
   const [downloadPresets, setDownloadPresets] = useState<DownloadPresetsConfig | null>(null);
   const [batchRules, setBatchRules] = useState<BatchOnImportRules | null>(null);
   const [error, setError] = useState<string | null>(null);
@@ -1074,6 +1077,10 @@ export function LibraryPage({ onOpenEditor, mode = "all" }: LibraryPageProps) {
   useEffect(() => {
     safeLocalStorageSet("voxvulgi.v1.settings.asr_lang", asrLang);
   }, [asrLang]);
+
+  useEffect(() => {
+    safeLocalStorageSet("voxvulgi.v1.library.advanced_mode", advancedMode ? "1" : "0");
+  }, [advancedMode]);
 
   useEffect(() => {
     safeLocalStorageSet("voxvulgi.v1.library.url_batch_output_dir", urlBatchOutputDir);
@@ -2368,7 +2375,7 @@ export function LibraryPage({ onOpenEditor, mode = "all" }: LibraryPageProps) {
             Refresh
           </button>
           <label style={{ display: "flex", alignItems: "center", gap: 8 }}>
-            <span>ASR lang</span>
+            <span>Source language</span>
             <select
               value={asrLang}
               onChange={(e) => setAsrLang(e.currentTarget.value as "auto" | "ja" | "ko")}
@@ -2395,9 +2402,34 @@ export function LibraryPage({ onOpenEditor, mode = "all" }: LibraryPageProps) {
         </div>
       ) : null}
 
-      {showVideoIngest ? (
+      {showVideoIngest || showInstagramArchive || showImageArchive ? (
+        <div className="card" style={{ display: "flex", alignItems: "center", gap: 12 }}>
+          <strong>View mode:</strong>
+          <button
+            type="button"
+            style={{ fontWeight: advancedMode ? undefined : 700 }}
+            onClick={() => setAdvancedMode(false)}
+          >
+            Quick
+          </button>
+          <button
+            type="button"
+            style={{ fontWeight: advancedMode ? 700 : undefined }}
+            onClick={() => setAdvancedMode(true)}
+          >
+            Advanced
+          </button>
+          <span style={{ color: "#4b5563", fontSize: 13 }}>
+            {advancedMode
+              ? "Showing all controls including subscriptions, presets, and advanced options."
+              : "Simple mode. Switch to Advanced for subscriptions and extra options."}
+          </span>
+        </div>
+      ) : null}
+
+      {showVideoIngest && advancedMode ? (
         <div className="card">
-        <h2>Legacy archive reconciliation (read-only)</h2>
+        <h2>Legacy archive import (read-only)</h2>
         <div style={{ color: "#4b5563", marginBottom: 8 }}>
           Use this when you already have a large downloader-managed archive on local disk or NAS.
           VoxVulgi only analyzes and indexes it here. It does not move, delete, or rewrite legacy
@@ -2603,7 +2635,7 @@ export function LibraryPage({ onOpenEditor, mode = "all" }: LibraryPageProps) {
             ) : null}
             {legacyArchiveAnalysis.recommendations.length ? (
               <div style={{ marginTop: 12 }}>
-                <div style={{ fontWeight: 600, marginBottom: 6 }}>Recommended reconciliation order</div>
+                <div style={{ fontWeight: 600, marginBottom: 6 }}>Recommended import order</div>
                 <ul style={{ margin: 0, paddingLeft: 18 }}>
                   {legacyArchiveAnalysis.recommendations.map((line) => (
                     <li key={line}>{line}</li>
@@ -2772,7 +2804,7 @@ export function LibraryPage({ onOpenEditor, mode = "all" }: LibraryPageProps) {
         </div>
       ) : null}
 
-      {showVideoIngest ? (
+      {showVideoIngest && advancedMode ? (
         <div className="card">
         <h2>Download presets + templates</h2>
         <div style={{ color: "#4b5563", marginBottom: 8 }}>
@@ -2909,7 +2941,7 @@ export function LibraryPage({ onOpenEditor, mode = "all" }: LibraryPageProps) {
         </div>
       ) : null}
 
-      {showVideoIngest ? (
+      {showVideoIngest && advancedMode ? (
         <div className="card">
         <h2>Subscription groups</h2>
         <div style={{ color: "#4b5563", marginBottom: 8 }}>
@@ -2994,7 +3026,7 @@ export function LibraryPage({ onOpenEditor, mode = "all" }: LibraryPageProps) {
         </div>
       ) : null}
 
-      {showVideoIngest ? (
+      {showVideoIngest && advancedMode ? (
         <div className="card">
         <h2>YouTube subscriptions</h2>
         <div style={{ color: "#4b5563", marginBottom: 8 }}>
@@ -3362,7 +3394,7 @@ export function LibraryPage({ onOpenEditor, mode = "all" }: LibraryPageProps) {
         </div>
       ) : null}
 
-      {showInstagramArchive ? (
+      {showInstagramArchive && advancedMode ? (
         <div className="card">
         <h2>Instagram subscriptions</h2>
         <div style={{ color: "#4b5563", marginBottom: 8 }}>
@@ -3669,7 +3701,7 @@ export function LibraryPage({ onOpenEditor, mode = "all" }: LibraryPageProps) {
         </div>
       ) : null}
 
-      {showImageArchive ? (
+      {showImageArchive && advancedMode ? (
         <div className="card">
         <h2>Pinterest archive crawler</h2>
         <div style={{ color: "#4b5563", marginBottom: 8 }}>

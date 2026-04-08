@@ -1,5 +1,6 @@
 import { Suspense, lazy, type ReactNode, useCallback, useEffect, useMemo, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
+import { listen } from "@tauri-apps/api/event";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import { open } from "@tauri-apps/plugin-dialog";
 import html2canvas from "html2canvas";
@@ -1229,7 +1230,10 @@ function App() {
         try {
           const canvas = await html2canvas(document.body);
           const base64Data = canvas.toDataURL("image/png");
-          const absPath = await invoke<string>("admin_save_snapshot", { base64Data });
+          const absPath = await invoke<string>("admin_save_snapshot", {
+            base64Data,
+            subfolder: "manual",
+          });
           // eslint-disable-next-line no-console
           console.log("[Visual Debugger] Snapshot saved to:", absPath);
         } catch (err) {
@@ -1240,26 +1244,81 @@ function App() {
     };
     window.addEventListener("keydown", handleKeyDown);
 
-    // Expose a global hook for scripts to trigger programmatically 
+    // Expose a global hook for scripts to trigger programmatically
     // @ts-ignore
-    window.__voxVulgiRequestSnapshot = async () => {
+    window.__voxVulgiRequestSnapshot = async (subfolder?: string, label?: string) => {
       try {
         const canvas = await html2canvas(document.body);
         const base64Data = canvas.toDataURL("image/png");
-        return await invoke<string>("admin_save_snapshot", { base64Data });
+        return await invoke<string>("admin_save_snapshot", {
+          base64Data,
+          subfolder: subfolder ?? null,
+          label: label ?? null,
+        });
       } catch (err) {
         // eslint-disable-next-line no-console
         console.error("[Visual Debugger] programmatic capture failed", err);
-        throw err; // allow caller to handle
+        throw err;
       }
+    };
+
+    // @ts-ignore
+    window.__voxVulgiNavigate = (targetPage: string) => {
+      switchPage(targetPage as AppPage);
     };
 
     return () => {
       window.removeEventListener("keydown", handleKeyDown);
       // @ts-ignore
       delete window.__voxVulgiRequestSnapshot;
+      // @ts-ignore
+      delete window.__voxVulgiNavigate;
     };
   }, []);
+
+  // Agent bridge: listen for headless navigation and snapshot requests (WP-0171)
+  useEffect(() => {
+    const unlisteners: Array<() => void> = [];
+    (async () => {
+      unlisteners.push(
+        await listen<string>("agent-navigate", (event) => {
+          const target = event.payload as AppPage;
+          switchPage(target);
+        }),
+      );
+      unlisteners.push(
+        await listen<{ subfolder?: string; label?: string }>("agent-snapshot-request", async (event) => {
+          try {
+            const { subfolder, label } = event.payload ?? {};
+            const canvas = await html2canvas(document.body);
+            const base64Data = canvas.toDataURL("image/png");
+            const absPath = await invoke<string>("admin_save_snapshot", {
+              base64Data,
+              subfolder: subfolder || null,
+              label: label || null,
+            });
+            await invoke("agent_snapshot_complete", { path: absPath });
+          } catch (err) {
+            // eslint-disable-next-line no-console
+            console.error("[Agent Bridge] snapshot capture failed", err);
+            await invoke("agent_snapshot_complete", { path: "" }).catch(() => {});
+          }
+        }),
+      );
+    })();
+    return () => {
+      for (const u of unlisteners) u();
+    };
+  }, []);
+
+  // Agent bridge: report page + state changes to backend
+  useEffect(() => {
+    invoke("agent_report_state", {
+      page,
+      editorItemId: editorItemId ?? null,
+      safeMode: safeMode?.enabled ?? false,
+    }).catch(() => {});
+  }, [page, editorItemId, safeMode?.enabled]);
 
   useEffect(() => {
     let disposed = false;
@@ -1712,11 +1771,11 @@ function App() {
                 }`}
               >
                 <div className="shell-status-title">
-                  {startupFailed ? "Startup recovery needed" : "Startup still hydrating"}
+                  {startupFailed ? "Startup recovery needed" : "Startup still initializing"}
                 </div>
                 <div className="shell-status-support">
                   {startupFailed
-                    ? `Startup dependency hydration failed: ${
+                    ? `Startup initialization failed: ${
                         startup?.offline_bundle_error ?? "unknown error"
                       }`
                     : "The app stays usable while background initialization finishes."}
@@ -1790,7 +1849,7 @@ function App() {
             >
             <h2>Startup loading details</h2>
             <div style={{ color: "#4b5563", marginBottom: 10 }}>
-              Use this when a feature looks blocked while local tools/models are still hydrating.
+              Use this when a feature looks blocked while local tools/models are still initializing.
             </div>
             <div className="kv">
               <div className="k">Overall progress</div>
