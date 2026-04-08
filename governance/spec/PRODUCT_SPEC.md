@@ -37,6 +37,7 @@ Initial language focus: **Korean + Japanese → English**.
 ### 4.1 Library + Ingestion (core UX)
 
 - Import local video/audio files.
+- Drag-and-drop import: operators can drag media files onto the Localization Studio home screen to import; visual drop indicator during drag-over; supports multi-file batch; accepted formats include mp4, mkv, avi, mov, webm, mp3, wav, flac, ogg.
 - Downloading: provider layer + batch URL ingest:
   - direct HTTP/HTTPS media URLs (strict schemes; best-effort),
   - YouTube (and many webpage video links) via `yt-dlp`, with a supported local JavaScript runtime available when current upstream extraction requires it,
@@ -61,7 +62,7 @@ Initial language focus: **Korean + Japanese → English**.
   - import from JSON with merge-by-URL behavior (upsert existing, add missing),
   - no subscription deletion on import unless explicitly requested by the user.
 - Video workflow split:
-  - Localization Studio should include a lightweight video-ingest block for local import/refresh and ASR language selection (`auto` plus explicit language choices),
+  - Localization Studio should include a lightweight video-ingest block for local import/refresh and source language selection (`auto` plus explicit language choices),
   - the separate archive window should focus on URL ingest, presets/templates, subscription groups, and subscriptions,
   - archive windows should not duplicate Localization Studio ingest controls or global storage-root configuration blocks.
 - Authenticated archive-session support:
@@ -97,6 +98,14 @@ Initial language focus: **Korean + Japanese → English**.
   - cards remain available as a secondary view, but list view is the default for large archives,
   - rows should surface provider, container type, container label, source reference, codecs, and file path without forcing the operator to open a detail view,
   - explicit container semantics so operators can tell whether a row/group represents a playlist, subscription, folder, or single imported file.
+- Current Media Library filter controls:
+  - search input filters by title and file path (real-time client-side),
+  - source filter (YouTube / Instagram / Local import / All),
+  - media-type filter (Video / Image / Audio / Other / All),
+  - sort selector (Date added / Title),
+  - view mode (Archive list / Cards),
+  - group mode (Container/folder / Flat list),
+  - all filter state persists in localStorage across page switches.
 - Default archive/output media policy:
   - video workflows should prefer MP4 by default wherever the local toolchain can merge or remux cleanly,
   - image workflows should prefer JPEG defaults where the provider/toolchain offers multiple encodings without destructive tradeoffs.
@@ -112,7 +121,8 @@ Initial language focus: **Korean + Japanese → English**.
   - segment list + timeline,
   - text edit,
   - split/merge,
-  - time nudge and reflow.
+  - time nudge and reflow,
+  - undo/redo (Ctrl+Z / Ctrl+Shift+Z) for text, timing, and speaker changes with a 50-operation stack that resets on track switch.
 
 ### 4.3 Translate CC (JA/KO -> EN) v1
 
@@ -131,6 +141,10 @@ Initial language focus: **Korean + Japanese → English**.
   - model inventory (what's installed, where it's stored, and how much space it uses),
   - storage usage breakdown (library, cache, logs),
   - last job errors with copy/export.
+- Diagnostics dashboard summary (top of page):
+  - clickable status tiles: App version, Voice packages (installed/missing), FFmpeg (ready/missing), Storage (total MB), Recent failures (count),
+  - each tile scrolls to the corresponding detail section below,
+  - color coding: green (ready), yellow (action needed), red (error/missing).
 - Startup and performance diagnostics:
   - show a meaningful startup progress bar or phase list while heavyweight background initialization is in flight,
   - show numeric progress or percentages where the app can derive them,
@@ -205,6 +219,15 @@ Initial language focus: **Korean + Japanese → English**.
   - If speaker labels exist but the voice plan is incomplete, it should pause at the speaker/reference stage and tell the operator which speakers still need references or Standard TTS routing.
   - Localization Studio should also provide an assisted bridge out of that checkpoint by letting operators generate candidate speaker-reference bundles from the current source media after diarization, review/apply them, and then continue the staged run without manual file hunting.
 - Direct speech-to-speech research systems may inform future R&D and benchmark lanes, but they should not replace the default shipped operator path until they meet the same packaging, inspectability, and operator-control standard as the staged cascade.
+- Keyboard shortcuts for common Localization Studio actions:
+  - Ctrl+Z / Ctrl+Shift+Z — undo/redo subtitle edits,
+  - Ctrl+Enter — start/continue localization run,
+  - Ctrl+Shift+E — export selected outputs,
+  - Ctrl+Shift+R — refresh readiness,
+  - Ctrl+1 through Ctrl+5 — jump to Track, Voice Basics, Run, Outputs, Artifacts,
+  - visible shortcut reference in the Workflow Map card; disabled when typing in form fields.
+- Sticky quick-actions bar: persistent bottom bar visible when an item is open, showing item title, run status (idle/running), and Run/Export/Open Outputs buttons at all scroll positions.
+- Batch-on-import auto-processing surface: collapsible section in Localization Studio home Import card with checkboxes for Speech recognition, Translate to English, Separate audio stems, Label speakers, Dub preview; changes save immediately.
 - Provide mix controls:
   - ducking, loudness normalization, fade, noise reduction (optional).
 - Current dubbing-quality controls:
@@ -307,6 +330,7 @@ Current implementation status:
 - Safe defaults: no voice cloning by default.
 - Voice and dubbing controls remain operator-directed; VoxVulgi should not add content-judgment or censorship workflows as part of these features.
 - Discoverable: operator-critical controls must be visible in the workflow where they are needed rather than buried behind long scroll chains or hidden state gates.
+- Plain language: all operator-facing labels use non-technical terminology; "Source language" not "ASR lang", "Voice samples" not "refs", "Saved voice" not "voice memory profile", "Clone status" not "dub truth", "Clean up" not "Flush", "Component status" not "Tool lifecycle model".
 - Localization Studio should surface a workflow/readiness summary that makes current track readiness, runtime readiness, and the main backend/benchmark/QC/artifact sections obvious before the operator starts deeper dubbing steps.
 - Localization Studio should not require a confusing bounce through Media Library just to understand current source, active run, or output state after import; the current item handoff and its output path should remain obvious inside Localization Studio.
 - Localization Studio should use its first screen as a true operator dashboard: current item, recommended next action, and latest preview/deliverable path should be understandable at a glance before the operator scrolls or opens another window.
@@ -332,21 +356,22 @@ Current implementation status:
   - dedicated `Reusable Voice Basics` lane for speaker -> reference -> save/apply reusable voice -> continue dub,
   - reusable voice-template save/apply for recurring speaker setups,
   - translation side-by-side,
-  - QC warnings (too fast, too long).
-- **Jobs/Queue**: running/failed/completed, retry, logs link.
+  - QC warnings (too fast, too long),
+  - in-context help system: (?) button on every section heading that expands a help panel showing "What this does", "When to use it", "Steps", and "Key terms"; persistent "Show all help" toggle for learning mode.
+- **Jobs/Queue**: running/failed/completed, retry, logs link; developer-only test controls behind toggle; secondary actions grouped into expandable dropdown; "Clean up old jobs and logs" replaces "Flush cache".
 - **Diagnostics**: storage usage, logs export, version info, privacy settings.
 - **Diagnostics** should also surface a voice-backend catalog, backend readiness, and recommendation reasoning instead of only package versions.
 
 ### 8.0.1 Current top-level windows (implemented 2026-03-03)
 
 - **Localization Studio**: first/default window, focused on subtitles + dubbing workflow.
-- **Localization Studio** also keeps a lightweight ingest block in-context for local import and ASR language selection, even when the editor is already open.
+- **Localization Studio** also keeps a lightweight ingest block in-context for local import and source language selection, even when the editor is already open.
 - **Localization Studio** first-screen home should prioritize current-item continuation, recent localization items, workflow/readiness, outputs handoff, and advanced-tool entrypoints before import/setup utilities.
-- **Video Archiver**: local import + URL batch ingest + presets/templates + YouTube subscriptions/groups + legacy archive reconciliation.
-- **Instagram Archiver**: dedicated Instagram batch ingest workflow plus recurring archive targets.
-- **Image Archive**: dedicated crawler-based image archive ingest workflow.
-- **Media Library**: renamed from ambiguous "Items"; browse imported media and hand off to Localization Studio.
-- **Jobs/Queue**: execution state + retry/cancel + logs and output reveal.
+- **Video Archiver**: local import + URL batch ingest + presets/templates + YouTube subscriptions/groups + legacy archive reconciliation. Quick/Advanced toggle (Quick shows batch URL input only; Advanced adds subscriptions, groups, presets, legacy import). Subscription table includes Type/Downloaded/Status progress columns.
+- **Instagram Archiver**: dedicated Instagram batch ingest workflow plus recurring archive targets. Quick/Advanced toggle (Quick shows batch + recent media; Advanced adds subscriptions).
+- **Image Archive**: dedicated crawler-based image archive ingest workflow. Quick/Advanced toggle (Quick shows URL + output; Advanced adds Pinterest crawler and crawl settings).
+- **Media Library**: renamed from ambiguous "Items"; browse imported media and hand off to Localization Studio. Includes search, source filter, type filter, sort, view mode, and group-by controls.
+- **Jobs/Queue**: execution state + retry/cancel + logs and output reveal. Developer tools behind toggle; per-job actions grouped into dropdown.
 - **Diagnostics**: non-blocking, section-by-section loading with explicit readiness states, recent local trace rows, and startup/tool-lifecycle visibility.
 - Localization Studio artifact rows must receive typed runtime metadata from the bridge for rerun/status matching, rather than reconstructing artifact identity from filenames in the UI.
 
@@ -357,7 +382,10 @@ Current implementation status:
 - **Legacy archive reconciliation** now distinguishes 4KVDP-managed subscription/playlist containers from unmatched manual folders and loose root files, using the old 4KVDP app-state SQLite when available to preserve folder mapping while keeping ongoing subscription continuity state inside VoxVulgi-managed storage rather than the legacy archive path.
 - The Library subscription surface should treat mapped output folders and continuity tracking as separate concepts: output overrides decide where media lands, while dedupe / "already downloaded" state is app-managed and may be seeded or merged from legacy archive files.
 - **Instagram Archiver** is the dedicated home for direct Instagram archive runs plus recurring archive targets.
-- **Options** is the discoverable home for shared storage-root configuration and related global path behavior.
+- **Options** is the discoverable home for shared storage-root configuration and related global path behavior. Feature roots consolidated into a single table (Feature/Path/Status/Actions) instead of 4 separate cards. YouTube auth improved with help text and clear button.
+- **Localization Studio** Workflow Map buttons grouped into 4 categories (Captions & Translation, Voice & Dubbing, Quality & Review, Advanced) instead of a flat button row.
+- **Built-in visual debugger**: deterministic snapshot tool that captures the active worksurface to `governance/snapshots/` for AI orchestrators; supports subfolder and label for organized captures; triggered by Ctrl+Shift+S hotkey or `window.__voxVulgiRequestSnapshot()`.
+- **Headless agent bridge**: localhost-only HTTP server that lets AI agents navigate pages (`POST /agent/navigate`), capture snapshots (`POST /agent/snapshot`), read state (`GET /agent/state`), and check health (`GET /agent/health`) without stealing window focus; port written to `agent_bridge_port.txt` in app data on startup.
 
 ## 8.1) Stabilization priorities for commercial readiness (2026-03-03)
 
@@ -379,7 +407,7 @@ Current implementation status:
 ### 8.1.2 Required top-level window model
 
 - Localization Studio (Dub/CC) - default first-run window and main feature surface.
-- Localization Studio ingest block - local import/refresh + ASR language selection in-context.
+- Localization Studio ingest block - local import/refresh + source language selection in-context.
 - Video Archiver - local ingest + URL ingest + presets/templates + playlist/subscription/folder-map flows.
 - Instagram Archiver - dedicated archive workflow with recurring archive targets.
 - Image Archive - dedicated archive workflow.
@@ -436,6 +464,12 @@ Current implementation status:
 ## 9) Top 20 ROI backlog (next additions)
 
 Current direction keeps baseline values intact; these are explicitly deferred/planned features.
+
+Note (2026-04-08): WP-0161 through WP-0182 move several ROI items from backlog to implementation:
+- ROI-12 (Batch processing rules): batch-on-import toggles surfaced in Localization Studio home (WP-0174).
+- ROI-16 (Derived output browser): exists; sticky quick-actions bar improves discoverability (WP-0178).
+- Undo/redo (WP-0175), drag-and-drop import (WP-0176), keyboard shortcuts (WP-0173), and in-context help system (WP-0172) now implemented.
+- Remaining ROI items below are still deferred/planned.
 
 ROI-01. One-click Phase 2 Packs installer UI (no consent gate), progress, and disk impact estimates.  
 ROI-02. Portable Python distribution option so system Python is not required.  
