@@ -2315,6 +2315,23 @@ export function SubtitleEditorPage({
     };
   }, [activeVoiceCloneArtifact]);
 
+  // WP-0185: Clone outcome notification — show notice when a new clone result appears
+  const prevCloneOutcomeRef = useRef<string | null>(null);
+  useEffect(() => {
+    if (!activeVoiceCloneTruth) return;
+    const key = `${activeVoiceCloneTruth.artifact.id}:${activeVoiceCloneTruth.label}`;
+    if (prevCloneOutcomeRef.current === key) return;
+    prevCloneOutcomeRef.current = key;
+    const outcome = activeVoiceCloneTruth.artifact.voice_clone_outcome;
+    if (outcome === "clone_preserved") {
+      setNotice(`Voice cloning complete: ${activeVoiceCloneTruth.label}. ${activeVoiceCloneTruth.detail || "All segments used cloned voice."}`);
+    } else if (outcome === "partial_fallback" || outcome === "fallback_only") {
+      setError(`Voice cloning issue: ${activeVoiceCloneTruth.label}. ${activeVoiceCloneTruth.detail || "Some segments fell back to standard TTS."} Check voice samples and reference quality.`);
+    } else if (outcome === "standard_tts_only") {
+      setNotice(`Dubbing complete (standard TTS only). ${activeVoiceCloneTruth.detail || "No voice cloning was attempted."}`);
+    }
+  }, [activeVoiceCloneTruth]);
+
   const voiceBasicsSpeakerSetting = useMemo(() => {
     if (!voiceBasicsSpeakerKey) return null;
     return speakerSettingsByKey.get(voiceBasicsSpeakerKey) ?? null;
@@ -4050,8 +4067,34 @@ export function SubtitleEditorPage({
     }
   }
 
+  function checkCloneReadiness(): { ready: boolean; warnings: string[] } {
+    const warnings: string[] = [];
+    if (!speakerSettings.length) {
+      warnings.push("No speakers configured. Run diarization first to label speakers.");
+      return { ready: false, warnings };
+    }
+    for (const setting of speakerSettings) {
+      if (setting.render_mode === "clone" || !setting.render_mode) {
+        const paths = setting.tts_voice_profile_paths ?? [];
+        if (paths.length === 0) {
+          warnings.push(`Speaker "${setting.speaker_key}": no voice samples set. Will fall back to standard TTS.`);
+        }
+      }
+    }
+    return { ready: warnings.length === 0, warnings };
+  }
+
   async function enqueueDubVoicePreservingV1() {
     if (!trackId) return;
+
+    // WP-0187: Pre-flight check
+    const preflight = checkCloneReadiness();
+    if (!preflight.ready) {
+      const msg = `Clone pre-flight check:\n${preflight.warnings.join("\n")}\n\nProceed anyway?`;
+      const proceed = await confirm(msg, { title: "Voice cloning readiness", kind: "warning" });
+      if (!proceed) return;
+    }
+
     setBusy(true);
     setError(null);
     setNotice(null);

@@ -198,7 +198,7 @@ This is the single source of truth for work status.
 | WP-0182 | Per-Segment Audio Preview | REVIEW | Codex | Play/stop button on each segment row; seeks mix dub WAV to segment start, auto-stops at end; visual indicator on playing segment. |
 | WP-0183 | CosyVoice 2 Backend Integration | BACKLOG | Codex | Single-pass zero-shot voice cloning backend (Apache 2.0). Native JA/KO/EN cross-lingual. Replaces two-stage Kokoro+OpenVoice pipeline. |
 | WP-0184 | Fish Speech 1.5 Backend Integration | BACKLOG | Codex | Highest benchmark zero-shot TTS (80+ languages). CC-BY-NC-SA weights for evaluation. 4B params. |
-| WP-0185 | Clone Outcome Notification | BACKLOG | Codex | Toast/banner after voice-preserving job showing clone vs fallback count and reasons. |
+| WP-0185 | Clone Outcome Notification | REVIEW | Codex | Auto-notification when clone outcome changes: success=notice, fallback=error with segment counts and guidance. |
 | WP-0186 | Per-Segment Clone Fallback Breakdown | BACKLOG | Codex | Clone status column in segment table with color coding; filter for fallback-only segments. |
-| WP-0187 | Clone Pre-Flight Check | BACKLOG | Codex | Validate reference profiles before queuing expensive voice-preserving jobs; flag missing/weak references. |
+| WP-0187 | Clone Pre-Flight Check | REVIEW | Codex | Validates speaker profiles before voice-preserving job; warns about missing voice samples with confirm dialog. |
 | WP-0188 | Reference Quality Score Explanation | BACKLOG | Codex | Per-factor quality breakdown (duration, level, noise, pitch) on each speaker's reference with improvement tips. |
