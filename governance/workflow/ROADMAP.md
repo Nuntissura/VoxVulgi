@@ -135,10 +135,11 @@ Date: 2026-03-24
 ## Educational-Core Voice Clone Basics Recovery (2026-03)
 
 - WP-0155: Refresh governance around the reusable-voice basics contract so the product explicitly promises capture -> apply later -> dub -> verify clone-vs-fallback truth, then split the follow-on remediation cleanly. DONE 2026-03-24.
-- WP-0156: Make the runtime and operator surfaces truthful about actual voice-preserving conversion versus plain TTS fallback. BACKLOG.
-- WP-0157: Compress reusable-voice UX into one first-run flow for capture, save, apply, and dub while keeping advanced surfaces secondary. BACKLOG.
+- WP-0156: Make the runtime and operator surfaces truthful about actual voice-preserving conversion versus plain TTS fallback. IN_PROGRESS.
+- WP-0157: Compress reusable-voice UX into one first-run flow for capture, save, apply, and dub while keeping advanced surfaces secondary. First basics-lane slice is now live in Localization Studio. IN_PROGRESS.
 - WP-0158: Tighten the shared contract and regression guardrails across templates, cast packs, memory profiles, and character profiles so reusable-voice behavior does not drift. BACKLOG.
 - WP-0159: Add an installer-state proof path for reusable voice basics across multiple items, including explicit clone-vs-fallback evidence. BACKLOG.
+- WP-0160: Decouple legacy YouTube subscription continuity state from the output folder so imported NAS-backed subscriptions keep refreshing against their mapped folders even when the global root changes. IN_PROGRESS.
 
 ## Phase 0 - Decisions (1-2 days)
 

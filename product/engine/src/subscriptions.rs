@@ -688,10 +688,7 @@ pub fn seed_archive_from_scan(
     let mut appended_ids = 0_usize;
     let mut skipped_existing_ids = 0_usize;
     for sub in target_subscriptions {
-        let archive_path = youtube_subscription_archive_path(paths, &sub)?;
-        if let Some(parent) = archive_path.parent() {
-            std::fs::create_dir_all(parent)?;
-        }
+        let archive_path = ensure_youtube_subscription_archive_state(paths, &sub)?;
         let (appended, skipped_existing) = merge_archive_file(&archive_path, &inferred_ids)?;
         if appended > 0 {
             archive_files_updated += 1;
@@ -1797,13 +1794,13 @@ fn seed_archives_from_4kvdp_entries(
             continue;
         };
 
-        let archive_path = youtube_subscription_archive_path(paths, &sub)?;
-        if let Some(parent) = archive_path.parent() {
-            if let Err(_) = std::fs::create_dir_all(parent) {
+        let archive_path = match ensure_youtube_subscription_archive_state(paths, &sub) {
+            Ok(path) => path,
+            Err(_) => {
                 failures += 1;
                 continue;
             }
-        }
+        };
 
         if merge_archive_file(&archive_path, &ids).is_err() {
             failures += 1;
@@ -1863,13 +1860,13 @@ ORDER BY downloader_subscription_info_id ASC, id ASC
             continue;
         };
 
-        let archive_path = youtube_subscription_archive_path(paths, &sub)?;
-        if let Some(parent) = archive_path.parent() {
-            if let Err(_) = std::fs::create_dir_all(parent) {
+        let archive_path = match ensure_youtube_subscription_archive_state(paths, &sub) {
+            Ok(path) => path,
+            Err(_) => {
                 failures += 1;
                 continue;
             }
-        }
+        };
 
         if merge_archive_file(&archive_path, &ids).is_err() {
             failures += 1;
@@ -2091,6 +2088,29 @@ fn merge_archive_file(path: &Path, video_ids: &HashSet<String>) -> std::io::Resu
     Ok((appended, skipped_existing))
 }
 
+fn read_archive_file_ids(path: &Path) -> std::io::Result<HashSet<String>> {
+    let mut out: HashSet<String> = HashSet::new();
+    if !path.exists() {
+        return Ok(out);
+    }
+
+    let file = std::fs::File::open(path)?;
+    let reader = BufReader::new(file);
+    for line in reader.lines().flatten() {
+        let trimmed = line.trim();
+        if trimmed.is_empty() {
+            continue;
+        }
+        let parts: Vec<&str> = trimmed.split_whitespace().collect();
+        if parts.len() == 2 {
+            out.insert(parts[1].to_string());
+        } else {
+            out.insert(trimmed.to_string());
+        }
+    }
+    Ok(out)
+}
+
 pub fn youtube_subscription_output_dir(
     paths: &AppPaths,
     sub: &YoutubeSubscriptionRow,
@@ -2110,11 +2130,61 @@ pub fn youtube_subscription_output_dir(
         .join(sanitize_folder_map(&sub.folder_map)))
 }
 
-pub fn youtube_subscription_archive_path(
+fn legacy_output_youtube_subscription_archive_path(
     paths: &AppPaths,
     sub: &YoutubeSubscriptionRow,
 ) -> Result<PathBuf> {
     Ok(youtube_subscription_output_dir(paths, sub)?.join(YT_DLP_ARCHIVE_FILENAME))
+}
+
+pub fn youtube_subscription_archive_path(
+    paths: &AppPaths,
+    sub: &YoutubeSubscriptionRow,
+) -> Result<PathBuf> {
+    Ok(paths.youtube_subscription_archive_state_path(&sub.id))
+}
+
+pub fn ensure_youtube_subscription_archive_state(
+    paths: &AppPaths,
+    sub: &YoutubeSubscriptionRow,
+) -> Result<PathBuf> {
+    let archive_path = youtube_subscription_archive_path(paths, sub)?;
+    if let Some(parent) = archive_path.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    if !archive_path.exists() {
+        let legacy_path = legacy_output_youtube_subscription_archive_path(paths, sub)?;
+        if legacy_path != archive_path && legacy_path.exists() {
+            let legacy_ids = read_archive_file_ids(&legacy_path)?;
+            if !legacy_ids.is_empty() {
+                merge_archive_file(&archive_path, &legacy_ids)?;
+            }
+        }
+    }
+    Ok(archive_path)
+}
+
+pub fn load_youtube_subscription_archive_ids(
+    paths: &AppPaths,
+    sub: &YoutubeSubscriptionRow,
+) -> Result<HashSet<String>> {
+    let archive_path = ensure_youtube_subscription_archive_state(paths, sub)?;
+    read_archive_file_ids(&archive_path).map_err(Into::into)
+}
+
+pub fn youtube_subscriptions_archive_stats(
+    paths: &AppPaths,
+) -> Result<HashMap<String, usize>> {
+    let subs = list_youtube_subscriptions(paths)?;
+    let mut stats = HashMap::with_capacity(subs.len());
+    for sub in &subs {
+        let count = match load_youtube_subscription_archive_ids(paths, sub) {
+            Ok(ids) => ids.len(),
+            Err(_) => 0,
+        };
+        stats.insert(sub.id.clone(), count);
+    }
+    Ok(stats)
 }
 
 fn fourkvd_title(raw: &FourkvdSubscription) -> String {
@@ -3366,12 +3436,61 @@ CREATE TABLE subscription_entries (
             youtube_subscription_archive_path(&paths, creator).expect("creator archive");
         let playlist_archive =
             youtube_subscription_archive_path(&paths, playlist).expect("playlist archive");
+        assert!(creator_archive.starts_with(paths.youtube_subscription_state_dir()));
+        assert!(playlist_archive.starts_with(paths.youtube_subscription_state_dir()));
         assert!(std::fs::read_to_string(creator_archive)
             .expect("read creator archive")
             .contains("youtube AAAA1111AAA"));
         assert!(std::fs::read_to_string(playlist_archive)
             .expect("read playlist archive")
             .contains("youtube BBBB2222BBB"));
+    }
+
+    #[test]
+    fn ensure_archive_state_merges_legacy_output_archive_into_app_managed_path() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let paths = AppPaths::new(dir.path().to_path_buf());
+        crate::db::ensure_schema(&paths).expect("schema");
+
+        let legacy_output_dir = dir.path().join("legacy_output");
+        std::fs::create_dir_all(&legacy_output_dir).expect("mkdir legacy output");
+        let legacy_archive_path = legacy_output_dir.join(YT_DLP_ARCHIVE_FILENAME);
+        std::fs::write(
+            &legacy_archive_path,
+            "youtube dQw4w9WgXcQ\nyoutube 5NV6Rdv1a3I\n",
+        )
+        .expect("seed legacy archive");
+
+        let sub = upsert_youtube_subscription(
+            &paths,
+            YoutubeSubscriptionUpsert {
+                id: None,
+                title: "Legacy NAS sub".to_string(),
+                source_url: "https://www.youtube.com/@legacy/videos".to_string(),
+                folder_map: Some("legacy_nas_sub".to_string()),
+                output_dir_override: Some(legacy_output_dir.to_string_lossy().to_string()),
+                use_browser_cookies: false,
+                auth_session_input: None,
+                clear_auth_session: false,
+                active: true,
+                preset_id: None,
+                group_ids: Vec::new(),
+                refresh_interval_minutes: Some(DEFAULT_REFRESH_INTERVAL_MINUTES),
+            },
+        )
+        .expect("upsert sub");
+
+        let archive_path =
+            ensure_youtube_subscription_archive_state(&paths, &sub).expect("ensure archive state");
+        let archived_ids =
+            load_youtube_subscription_archive_ids(&paths, &sub).expect("load archived ids");
+
+        assert!(archive_path.starts_with(paths.youtube_subscription_state_dir()));
+        assert_ne!(archive_path, legacy_archive_path);
+        assert!(archive_path.is_file());
+        assert!(legacy_archive_path.is_file());
+        assert!(archived_ids.contains("dQw4w9WgXcQ"));
+        assert!(archived_ids.contains("5NV6Rdv1a3I"));
     }
 
     #[test]

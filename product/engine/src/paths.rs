@@ -120,6 +120,23 @@ impl AppPaths {
         self.subscription_secrets_dir().join("youtube")
     }
 
+    pub fn subscription_state_dir(&self) -> PathBuf {
+        self.library_dir().join("subscriptions")
+    }
+
+    pub fn youtube_subscription_state_dir(&self) -> PathBuf {
+        self.subscription_state_dir().join("youtube")
+    }
+
+    pub fn youtube_subscription_state_item_dir(&self, subscription_id: &str) -> PathBuf {
+        self.youtube_subscription_state_dir().join(subscription_id)
+    }
+
+    pub fn youtube_subscription_archive_state_path(&self, subscription_id: &str) -> PathBuf {
+        self.youtube_subscription_state_item_dir(subscription_id)
+            .join("voxvulgi_youtube_archive.txt")
+    }
+
     pub fn instagram_subscription_secrets_dir(&self) -> PathBuf {
         self.subscription_secrets_dir().join("instagram")
     }
@@ -342,6 +359,10 @@ impl AppPaths {
         self.config_dir().join("feature_storage_roots.json")
     }
 
+    pub fn youtube_auth_config_path(&self) -> PathBuf {
+        self.config_dir().join("youtube_auth.json")
+    }
+
     pub fn diarization_optional_backend_config_path(&self) -> PathBuf {
         self.config_dir().join("diarization_optional_backend.json")
     }
@@ -407,6 +428,7 @@ impl AppPaths {
         std::fs::create_dir_all(self.db_dir())?;
         std::fs::create_dir_all(self.logs_dir())?;
         std::fs::create_dir_all(self.job_logs_dir())?;
+        std::fs::create_dir_all(self.youtube_subscription_state_dir())?;
         std::fs::create_dir_all(self.default_diagnostics_trace_dir())?;
         std::fs::create_dir_all(self.cache_dir())?;
         std::fs::create_dir_all(self.thumbnail_cache_dir())?;

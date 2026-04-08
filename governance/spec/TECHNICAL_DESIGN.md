@@ -318,6 +318,12 @@ Phase 2 preview implementation notes (current):
   - save it into an app-managed reusable asset,
   - apply it to a later translated item,
   - continue the dubbed preview from that applied state.
+- Localization Studio should expose that lane as a first-class surface (`Reusable Voice Basics`) rather than only as scattered advanced tools:
+  - choose current speaker,
+  - generate/apply a source-based reference or manual reference,
+  - save reusable voice memory,
+  - apply an existing reusable voice,
+  - continue the localization run from that state.
 - Direct speech-to-speech systems (for example SeamlessExpressive-, Translatotron-, or TransVIP-style families) are useful research references, but they should remain future R&D or benchmark lanes rather than the default shipped path until they satisfy local packaging, operator-control, and artifact-inspection requirements at the same level as the staged cascade.
 
 Voice-preserving approach (core feature):
@@ -353,6 +359,11 @@ Voice-preserving approach (core feature):
   - report and manifest state must distinguish real conversion, partial conversion, and plain TTS fallback,
   - operator surfaces must not present plain TTS fallback as if it were a successful cloned-voice result,
   - if fallback remains allowed for resilience, that fallback must be visible and reviewable end to end rather than hidden behind a generic "dub succeeded" state.
+- Current runtime contract for truthfulness:
+  - TTS manifests/reports should carry per-segment `voice_clone_intent` and `voice_clone_outcome` metadata,
+  - run-level artifact metadata should carry `voice_clone_outcome` plus requested/converted/fallback/standard-TTS segment counters,
+  - current run-level outcomes are `clone_preserved`, `partial_fallback`, `fallback_only`, and `standard_tts_only`,
+  - the bridge/frontend should consume that metadata directly for the item voice plan, Localization Run, Outputs, and benchmark surfaces instead of inferring clone success from file existence alone.
 - Voice-backend modernization strategy:
   - keep the current OpenVoice V2 + Kokoro path as the managed default until benchmark evidence supports a change,
   - add a built-in backend catalog with descriptors for managed and experimental candidates,
@@ -376,6 +387,10 @@ Operator-flow implementation requirements:
   - which stage is active,
   - what prerequisites are still missing,
   - where the resulting outputs will appear.
+- Current operator-surface sync requirements:
+  - the main Localization Studio flow should keep reusable-voice basics visible before advanced reusable asset abstractions,
+  - current-item/run/output surfaces should show clone-truth labels from runtime metadata rather than generic dub-success messaging,
+  - benchmark cards may add detail, but clone-vs-fallback truth must already be visible on the main item path.
 - Item handoff from import -> current localization item should be visible inside Localization Studio rather than hidden behind a separate Media Library navigation step.
 - The Localization home surface should expose a compact first-screen orientation layer that makes the current item, recommended next action, and latest preview or deliverable path obvious without a second navigation hop.
 - Non-blocking startup/recovery state should use compact shell-level status affordances when the app is otherwise usable; expanded cards or modal detail views should be reserved for Safe Mode, active startup failure, or explicit operator request for details.
@@ -520,6 +535,8 @@ Phase 1 extension status (2026-02-25):
   - default mapped path: `downloads/video/subscriptions/<folder_map>/`
   - optional absolute output override per subscription (`output_dir_override`)
 - For subscriptions that already point at an existing archive folder, refresh logic should reconcile already-downloaded items against that folder and seed/refresh dedupe state where practical before queueing new media.
+- Per-subscription dedupe / "already downloaded" continuity state must live in VoxVulgi-managed app data and must not rely on the output folder remaining writable or stable. Legacy output-folder archive files may be merged as migration input, but ongoing tracking state should be app-managed.
+- Current managed-state layout is `library/subscriptions/youtube/<subscription_id>/voxvulgi_youtube_archive.txt` under the VoxVulgi app-data root; `output_dir_override` continues to control where downloaded media lands, but not where continuity state is persisted.
 - Added JSON export/import for subscription portability:
   - export path is user selected in desktop UI,
   - import uses URL-keyed upsert (`source_url`) and keeps existing rows not present in the import file.
@@ -529,7 +546,7 @@ Phase 1 extension status (2026-02-25):
   - correlate stored `dirname` basenames against the selected legacy root,
   - classify managed subscription/channel rows vs playlist rows, then separate those from unmatched manual folders and loose root files,
   - import managed rows directly into `youtube_subscription` plus `youtube_subscription_group` memberships,
-  - seed VoxVulgi archive files from legacy `subscription_entries` so refresh jobs inherit dedupe state without touching the NAS.
+  - seed VoxVulgi-managed subscription archive state from legacy `subscription_entries`, with one-time merge from any older output-folder archive file when present, so refresh jobs inherit dedupe state without requiring ongoing NAS-side state writes.
 
 Responsiveness hardening:
 

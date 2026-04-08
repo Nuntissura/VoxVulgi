@@ -63,3 +63,10 @@
 - Treat third-party app databases/exports (e.g., 4KVDP SQLite + export dirs) as **read-only** unless the user explicitly requests modification.
 - Avoid running deletion/cleanup commands against user media/library/export folders; keep cleanup limited to generated artifacts and require explicit confirmation for destructive modes (e.g., `cleanup_artifacts.ps1 -Force`).
 
+## Built-in Visual Debugger (Agent Usage)
+
+- Agents can capture a snapshot of the current application surface to visually debug the frontend state.
+- **Trigger via JS**: Evaluate `window.__voxVulgiRequestSnapshot()` in the active WebView. This returns the absolute file path to the saved PNG snapshot.
+- **Trigger via hotkey**: While the app window is focused, an operator or agent (via keyboard simulator) can press `Ctrl + Shift + S`.
+- The snapshots are saved to `governance/snapshots/snapshot_<timestamp>.png`.
+- Agents can then use their `view_file` tool to inspect the captured PNG file to visually evaluate layout, UI state, or evaluate QA conditions.

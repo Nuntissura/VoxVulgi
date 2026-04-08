@@ -9,8 +9,8 @@ use rusqlite::params;
 use scraper::{Html, Selector};
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet, VecDeque};
-use std::fs::{File, OpenOptions};
-use std::io::{BufRead, BufReader, Read, Write};
+use std::fs::OpenOptions;
+use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
@@ -601,6 +601,158 @@ struct TtsPreviewManifest {
     segments: Vec<TtsPreviewManifestSegment>,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum VoiceCloneIntent {
+    Clone,
+    StandardTts,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum VoiceCloneSegmentOutcome {
+    Converted,
+    StandardTts,
+    FallbackTts,
+    Failed,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum VoiceCloneRunOutcome {
+    ClonePreserved,
+    PartialFallback,
+    FallbackOnly,
+    StandardTtsOnly,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub(crate) struct VoiceCloneOutcomeSummary {
+    pub(crate) clone_requested_segments: usize,
+    pub(crate) clone_converted_segments: usize,
+    pub(crate) clone_fallback_segments: usize,
+    pub(crate) standard_tts_segments: usize,
+    pub(crate) outcome: Option<VoiceCloneRunOutcome>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+struct VoiceCloneReport {
+    #[serde(default)]
+    segments_total: usize,
+    #[serde(default)]
+    segments_base_ok: usize,
+    #[serde(default)]
+    segments_converted_ok: usize,
+    #[serde(default)]
+    voice_clone_outcome: Option<VoiceCloneRunOutcome>,
+    #[serde(default)]
+    voice_clone_requested_segments: usize,
+    #[serde(default)]
+    voice_clone_converted_segments: usize,
+    #[serde(default)]
+    voice_clone_fallback_segments: usize,
+    #[serde(default)]
+    voice_clone_standard_tts_segments: usize,
+    #[serde(default)]
+    segments: Vec<VoiceCloneReportSegment>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+struct VoiceCloneReportSegment {
+    index: u32,
+    #[serde(default)]
+    voice_clone_intent: Option<VoiceCloneIntent>,
+    #[serde(default)]
+    voice_clone_outcome: Option<VoiceCloneSegmentOutcome>,
+    #[serde(default)]
+    error: Option<String>,
+}
+
+fn voice_clone_intent_for_render_mode(render_mode: Option<&str>) -> VoiceCloneIntent {
+    if render_mode.is_some_and(|value| value.trim() == "standard_tts") {
+        VoiceCloneIntent::StandardTts
+    } else {
+        VoiceCloneIntent::Clone
+    }
+}
+
+fn classify_voice_clone_run_outcome(
+    clone_requested_segments: usize,
+    clone_converted_segments: usize,
+    clone_fallback_segments: usize,
+    standard_tts_segments: usize,
+) -> Option<VoiceCloneRunOutcome> {
+    if clone_requested_segments == 0 {
+        if standard_tts_segments > 0 {
+            Some(VoiceCloneRunOutcome::StandardTtsOnly)
+        } else {
+            None
+        }
+    } else if clone_converted_segments >= clone_requested_segments && clone_fallback_segments == 0 {
+        Some(VoiceCloneRunOutcome::ClonePreserved)
+    } else if clone_converted_segments > 0 {
+        Some(VoiceCloneRunOutcome::PartialFallback)
+    } else {
+        Some(VoiceCloneRunOutcome::FallbackOnly)
+    }
+}
+
+fn summarize_voice_clone_outcome_segments(
+    segments: &[VoiceCloneReportSegment],
+) -> VoiceCloneOutcomeSummary {
+    let mut summary = VoiceCloneOutcomeSummary::default();
+    for segment in segments {
+        match segment.voice_clone_intent {
+            Some(VoiceCloneIntent::Clone) => summary.clone_requested_segments += 1,
+            Some(VoiceCloneIntent::StandardTts) => summary.standard_tts_segments += 1,
+            None => {}
+        }
+        match segment.voice_clone_outcome {
+            Some(VoiceCloneSegmentOutcome::Converted) => summary.clone_converted_segments += 1,
+            Some(VoiceCloneSegmentOutcome::FallbackTts) => summary.clone_fallback_segments += 1,
+            Some(VoiceCloneSegmentOutcome::StandardTts)
+                if segment.voice_clone_intent.is_none() =>
+            {
+                summary.standard_tts_segments += 1;
+            }
+            _ => {}
+        }
+    }
+    summary.outcome = classify_voice_clone_run_outcome(
+        summary.clone_requested_segments,
+        summary.clone_converted_segments,
+        summary.clone_fallback_segments,
+        summary.standard_tts_segments,
+    );
+    summary
+}
+
+fn summarize_voice_clone_report(report: &VoiceCloneReport) -> VoiceCloneOutcomeSummary {
+    let mut summary = VoiceCloneOutcomeSummary {
+        clone_requested_segments: report.voice_clone_requested_segments,
+        clone_converted_segments: report.voice_clone_converted_segments,
+        clone_fallback_segments: report.voice_clone_fallback_segments,
+        standard_tts_segments: report.voice_clone_standard_tts_segments,
+        outcome: report.voice_clone_outcome.clone(),
+    };
+    if summary.clone_requested_segments == 0
+        && summary.clone_converted_segments == 0
+        && summary.clone_fallback_segments == 0
+        && summary.standard_tts_segments == 0
+        && !report.segments.is_empty()
+    {
+        summary = summarize_voice_clone_outcome_segments(&report.segments);
+    } else if summary.outcome.is_none() {
+        summary.outcome = classify_voice_clone_run_outcome(
+            summary.clone_requested_segments,
+            summary.clone_converted_segments,
+            summary.clone_fallback_segments,
+            summary.standard_tts_segments,
+        );
+    }
+    summary
+}
+
 #[derive(Debug, Clone, Deserialize)]
 struct TtsManifestMeta {
     #[serde(default)]
@@ -609,6 +761,16 @@ struct TtsManifestMeta {
     item_id: Option<String>,
     #[serde(default)]
     track_id: Option<String>,
+    #[serde(default)]
+    voice_clone_outcome: Option<VoiceCloneRunOutcome>,
+    #[serde(default)]
+    voice_clone_requested_segments: usize,
+    #[serde(default)]
+    voice_clone_converted_segments: usize,
+    #[serde(default)]
+    voice_clone_fallback_segments: usize,
+    #[serde(default)]
+    voice_clone_standard_tts_segments: usize,
     #[serde(default)]
     segments: Vec<TtsPreviewManifestSegment>,
 }
@@ -624,6 +786,12 @@ pub(crate) struct TtsPreviewManifestSegment {
     pub(crate) audio_path: Option<String>,
     #[serde(default)]
     pub(crate) audio_exists: bool,
+    #[serde(default)]
+    pub(crate) voice_clone_intent: Option<VoiceCloneIntent>,
+    #[serde(default)]
+    pub(crate) voice_clone_outcome: Option<VoiceCloneSegmentOutcome>,
+    #[serde(default)]
+    pub(crate) voice_clone_error: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -2032,6 +2200,36 @@ LIMIT ?1 OFFSET ?2
     Ok(rows)
 }
 
+pub fn active_youtube_subscription_refresh_ids(paths: &AppPaths) -> Result<HashSet<String>> {
+    let conn = db::open(paths)?;
+    db::migrate(&conn)?;
+
+    let mut stmt = conn.prepare(
+        r#"
+SELECT params_json FROM job
+WHERE type = ?1 AND status IN (?2, ?3)
+"#,
+    )?;
+    let rows = stmt
+        .query_map(
+            params![
+                JobType::YoutubeSubscriptionRefreshV1.as_str(),
+                JobStatus::Queued.as_str(),
+                JobStatus::Running.as_str(),
+            ],
+            |row| row.get::<_, String>(0),
+        )?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+
+    let mut ids = HashSet::new();
+    for params_json in &rows {
+        if let Ok(p) = serde_json::from_str::<YoutubeSubscriptionRefreshV1Params>(params_json) {
+            ids.insert(p.subscription_id);
+        }
+    }
+    Ok(ids)
+}
+
 pub fn list_jobs_for_item(
     paths: &AppPaths,
     item_id: &str,
@@ -2987,8 +3185,10 @@ fn execute_job(paths: &AppPaths, job_id: &str, type_str: &str, params_json: &str
             let provider = effective_download_provider(&p.provider, &url);
             let auth_cookie = if let Some(secret) = read_job_cookie_secret(paths, job_id) {
                 Some(secret)
+            } else if let Some(inline) = normalize_auth_cookie(p.auth_cookie)? {
+                Some(inline)
             } else {
-                normalize_auth_cookie(p.auth_cookie)?
+                resolve_global_youtube_auth_cookie(paths)
             };
             remove_job_cookie_secret(paths, job_id);
             let mut output_dir = normalize_output_dir(p.output_dir);
@@ -3084,7 +3284,8 @@ fn execute_job(paths: &AppPaths, job_id: &str, type_str: &str, params_json: &str
         JobType::YoutubeSubscriptionRefreshV1 => {
             set_progress(paths, job_id, 0.05)?;
             let p: YoutubeSubscriptionRefreshV1Params = serde_json::from_str(params_json)?;
-            let auth_cookie = read_job_cookie_secret(paths, job_id);
+            let auth_cookie = read_job_cookie_secret(paths, job_id)
+                .or_else(|| resolve_global_youtube_auth_cookie(paths));
 
             if is_canceled(paths, job_id)? {
                 log_line(paths, job_id, "info", "job_canceled", serde_json::json!({}))?;
@@ -3105,8 +3306,8 @@ fn execute_job(paths: &AppPaths, job_id: &str, type_str: &str, params_json: &str
                 let output_dir = subscriptions::youtube_subscription_output_dir(paths, &sub)?;
                 std::fs::create_dir_all(&output_dir)?;
 
-                let archive_path = subscriptions::youtube_subscription_archive_path(paths, &sub)?;
-                let archived = read_ytdlp_archive_ids(&archive_path).unwrap_or_default();
+                let archive_path = subscriptions::ensure_youtube_subscription_archive_state(paths, &sub)?;
+                let archived = subscriptions::load_youtube_subscription_archive_ids(paths, &sub)?;
 
                 log_line(
                     paths,
@@ -5599,6 +5800,9 @@ def main() -> None:
     segments = []
     convert_ok = 0
     base_ok = 0
+    clone_requested = 0
+    clone_fallback = 0
+    standard_tts_segments = 0
 
     for item in items:
         idx = item.get("index")
@@ -5607,8 +5811,15 @@ def main() -> None:
         out_path = (item.get("out_path") or "").strip()
         base_out_path = (item.get("base_out_path") or "").strip()
         voice_id = (item.get("voice_id") or "").strip()
+        render_mode = (item.get("render_mode") or "").strip()
         if not text or not out_path or not base_out_path:
             continue
+
+        voice_clone_intent = "standard_tts" if render_mode == "standard_tts" else "clone"
+        if voice_clone_intent == "clone":
+            clone_requested += 1
+        else:
+            standard_tts_segments += 1
 
         seg_rec = {
             "index": idx,
@@ -5616,6 +5827,8 @@ def main() -> None:
             "text_len": len(text),
             "base_out_path": base_out_path,
             "out_path": out_path,
+            "voice_clone_intent": voice_clone_intent,
+            "voice_clone_outcome": None,
             "used_voice_preserving": False,
             "error": None,
         }
@@ -5625,7 +5838,7 @@ def main() -> None:
             base_ok += 1
 
             tgt_se = speaker_se.get(speaker)
-            if tgt_se is not None:
+            if voice_clone_intent == "clone" and tgt_se is not None:
                 try:
                     src_se = converter.extract_se([base_out_path])
                     converter.convert(
@@ -5638,6 +5851,7 @@ def main() -> None:
                     if file_exists(out_path):
                         convert_ok += 1
                         seg_rec["used_voice_preserving"] = True
+                        seg_rec["voice_clone_outcome"] = "converted"
                     else:
                         raise RuntimeError("convert produced no output")
                 except Exception as e:
@@ -5646,6 +5860,11 @@ def main() -> None:
             if not file_exists(out_path):
                 os.makedirs(os.path.dirname(out_path), exist_ok=True)
                 shutil.copyfile(base_out_path, out_path)
+                if voice_clone_intent == "clone":
+                    clone_fallback += 1
+                    seg_rec["voice_clone_outcome"] = "fallback_tts"
+                else:
+                    seg_rec["voice_clone_outcome"] = "standard_tts"
         except Exception as e:
             seg_rec["error"] = seg_rec["error"] or f"segment_failed: {e}"
             if (
@@ -5656,10 +5875,34 @@ def main() -> None:
             ):
                 os.makedirs(os.path.dirname(out_path), exist_ok=True)
                 shutil.copyfile(base_out_path, out_path)
+                if voice_clone_intent == "clone":
+                    clone_fallback += 1
+                    seg_rec["voice_clone_outcome"] = "fallback_tts"
+                else:
+                    seg_rec["voice_clone_outcome"] = "standard_tts"
+
+        if seg_rec["voice_clone_outcome"] is None:
+            if seg_rec["used_voice_preserving"]:
+                seg_rec["voice_clone_outcome"] = "converted"
+            elif seg_rec["out_exists"] if "out_exists" in seg_rec else file_exists(out_path):
+                seg_rec["voice_clone_outcome"] = (
+                    "standard_tts" if voice_clone_intent == "standard_tts" else "fallback_tts"
+                )
+            else:
+                seg_rec["voice_clone_outcome"] = "failed"
 
         seg_rec["base_exists"] = file_exists(base_out_path)
         seg_rec["out_exists"] = file_exists(out_path)
         segments.append(seg_rec)
+
+    if clone_requested == 0:
+        voice_clone_outcome = "standard_tts_only" if standard_tts_segments > 0 else None
+    elif convert_ok >= clone_requested and clone_fallback == 0:
+        voice_clone_outcome = "clone_preserved"
+    elif convert_ok > 0:
+        voice_clone_outcome = "partial_fallback"
+    else:
+        voice_clone_outcome = "fallback_only"
 
     report = {
         "schema_version": 1,
@@ -5668,6 +5911,11 @@ def main() -> None:
         "segments_total": len(segments),
         "segments_base_ok": base_ok,
         "segments_converted_ok": convert_ok,
+        "voice_clone_outcome": voice_clone_outcome,
+        "voice_clone_requested_segments": clone_requested,
+        "voice_clone_converted_segments": convert_ok,
+        "voice_clone_fallback_segments": clone_fallback,
+        "voice_clone_standard_tts_segments": standard_tts_segments,
         "speakers_with_profiles": sorted(list(speaker_profile.keys())),
         "speakers_with_embeddings": sorted(list(speaker_se.keys())),
         "segments": segments,
@@ -5746,15 +5994,8 @@ if __name__ == "__main__":
             set_progress(paths, job_id, 0.80)?;
 
             let report_json = std::fs::read_to_string(&report_path)?;
-            let report_value: serde_json::Value = serde_json::from_str(&report_json)?;
-            let segments_base_ok = report_value
-                .get("segments_base_ok")
-                .and_then(|v| v.as_u64())
-                .unwrap_or(0);
-            let segments_converted_ok = report_value
-                .get("segments_converted_ok")
-                .and_then(|v| v.as_u64())
-                .unwrap_or(0);
+            let report: VoiceCloneReport = serde_json::from_str(&report_json)?;
+            let clone_summary = summarize_voice_clone_report(&report);
             let output_segments = request
                 .iter()
                 .filter(|seg| Path::new(&seg.out_path).is_file())
@@ -5768,31 +6009,31 @@ if __name__ == "__main__":
                 serde_json::json!({
                     "report_path": &report_path,
                     "segments_requested": request.len(),
-                    "segments_base_ok": segments_base_ok,
-                    "segments_converted_ok": segments_converted_ok,
+                    "segments_base_ok": report.segments_base_ok,
+                    "segments_converted_ok": report.segments_converted_ok,
+                    "voice_clone_outcome": clone_summary.outcome,
+                    "voice_clone_requested_segments": clone_summary.clone_requested_segments,
+                    "voice_clone_converted_segments": clone_summary.clone_converted_segments,
+                    "voice_clone_fallback_segments": clone_summary.clone_fallback_segments,
+                    "voice_clone_standard_tts_segments": clone_summary.standard_tts_segments,
                     "output_segments": output_segments,
                 }),
             )?;
 
             if output_segments == 0 {
-                let sample_errors = report_value
-                    .get("segments")
-                    .and_then(|v| v.as_array())
-                    .map(|segments| {
-                        segments
-                            .iter()
-                            .filter_map(|segment| {
-                                segment
-                                    .get("error")
-                                    .and_then(|v| v.as_str())
-                                    .map(str::trim)
-                                    .filter(|msg| !msg.is_empty())
-                                    .map(|msg| msg.to_string())
-                            })
-                            .take(3)
-                            .collect::<Vec<_>>()
+                let sample_errors = report
+                    .segments
+                    .iter()
+                    .filter_map(|segment| {
+                        segment
+                            .error
+                            .as_deref()
+                            .map(str::trim)
+                            .filter(|msg| !msg.is_empty())
+                            .map(|msg| msg.to_string())
                     })
-                    .unwrap_or_default();
+                    .take(3)
+                    .collect::<Vec<_>>();
                 let detail = if sample_errors.is_empty() {
                     "no segment-level error details were captured".to_string()
                 } else {
@@ -5818,6 +6059,12 @@ if __name__ == "__main__":
                 text: String,
                 audio_path: Option<String>,
                 audio_exists: bool,
+                #[serde(default)]
+                voice_clone_intent: Option<VoiceCloneIntent>,
+                #[serde(default)]
+                voice_clone_outcome: Option<VoiceCloneSegmentOutcome>,
+                #[serde(default)]
+                voice_clone_error: Option<String>,
             }
 
             #[derive(Serialize)]
@@ -5826,9 +6073,24 @@ if __name__ == "__main__":
                 backend: String,
                 item_id: String,
                 track_id: String,
+                #[serde(skip_serializing_if = "Option::is_none")]
+                voice_clone_outcome: Option<VoiceCloneRunOutcome>,
+                #[serde(default)]
+                voice_clone_requested_segments: usize,
+                #[serde(default)]
+                voice_clone_converted_segments: usize,
+                #[serde(default)]
+                voice_clone_fallback_segments: usize,
+                #[serde(default)]
+                voice_clone_standard_tts_segments: usize,
                 segments: Vec<TtsManifestSegment>,
             }
 
+            let report_segments_by_index = report
+                .segments
+                .iter()
+                .map(|segment| (segment.index, segment))
+                .collect::<HashMap<_, _>>();
             let mut manifest_segments: Vec<TtsManifestSegment> = Vec::new();
             for seg in &doc.segments {
                 let audio_path = segments_dir.join(format!("seg_{:04}.wav", seg.index));
@@ -5855,6 +6117,7 @@ if __name__ == "__main__":
                 } else {
                     Vec::new()
                 };
+                let report_segment = report_segments_by_index.get(&seg.index);
                 manifest_segments.push(TtsManifestSegment {
                     index: seg.index,
                     start_ms: seg.start_ms,
@@ -5862,7 +6125,7 @@ if __name__ == "__main__":
                     speaker,
                     tts_voice_profile_path,
                     tts_voice_profile_paths,
-                    render_mode,
+                    render_mode: render_mode.clone(),
                     text: prepare_tts_text(&seg.text, &render_settings),
                     audio_path: if exists {
                         Some(audio_path.to_string_lossy().to_string())
@@ -5870,6 +6133,12 @@ if __name__ == "__main__":
                         None
                     },
                     audio_exists: exists,
+                    voice_clone_intent: report_segment
+                        .and_then(|value| value.voice_clone_intent.clone())
+                        .or_else(|| Some(voice_clone_intent_for_render_mode(render_mode.as_deref()))),
+                    voice_clone_outcome: report_segment
+                        .and_then(|value| value.voice_clone_outcome.clone()),
+                    voice_clone_error: report_segment.and_then(|value| value.error.clone()),
                 });
             }
 
@@ -5878,6 +6147,11 @@ if __name__ == "__main__":
                 backend: "voice_preserving_local_v1".to_string(),
                 item_id: item.id.clone(),
                 track_id: source_track.id.clone(),
+                voice_clone_outcome: clone_summary.outcome,
+                voice_clone_requested_segments: clone_summary.clone_requested_segments,
+                voice_clone_converted_segments: clone_summary.clone_converted_segments,
+                voice_clone_fallback_segments: clone_summary.clone_fallback_segments,
+                voice_clone_standard_tts_segments: clone_summary.standard_tts_segments,
                 segments: manifest_segments,
             };
 
@@ -9432,30 +9706,6 @@ fn redact_url_for_log(value: &str) -> String {
     }
 }
 
-fn read_ytdlp_archive_ids(path: &Path) -> std::io::Result<HashSet<String>> {
-    let mut out: HashSet<String> = HashSet::new();
-    if !path.exists() {
-        return Ok(out);
-    }
-
-    let file = File::open(path)?;
-    let reader = BufReader::new(file);
-    for line in reader.lines().flatten() {
-        let trimmed = line.trim();
-        if trimmed.is_empty() {
-            continue;
-        }
-        // Common format: "<extractor> <id>" (e.g., "youtube dQw4w9WgXcQ").
-        let parts: Vec<&str> = trimmed.split_whitespace().collect();
-        if parts.len() == 2 {
-            out.insert(parts[1].to_string());
-        } else {
-            out.insert(trimmed.to_string());
-        }
-    }
-    Ok(out)
-}
-
 fn append_youtube_archive_on_success(
     paths: &AppPaths,
     subscription_id: &str,
@@ -9469,10 +9719,7 @@ fn append_youtube_archive_on_success(
         return Ok(());
     };
 
-    let archive_path = subscriptions::youtube_subscription_archive_path(paths, &sub)?;
-    if let Some(parent) = archive_path.parent() {
-        std::fs::create_dir_all(parent)?;
-    }
+    let archive_path = subscriptions::ensure_youtube_subscription_archive_state(paths, &sub)?;
 
     let mut file = OpenOptions::new()
         .create(true)
@@ -11521,6 +11768,20 @@ fn read_job_cookie_secret(paths: &AppPaths, job_id: &str) -> Option<String> {
 
 fn remove_job_cookie_secret(paths: &AppPaths, job_id: &str) {
     remove_auth_cookie_secret_path(&paths.job_cookie_secret_path(job_id));
+}
+
+/// Resolve a YouTube auth cookie from the global `YoutubeAuthConfig` in Options.
+/// Returns `None` if no global config is set or the stored JSON is empty/invalid.
+fn resolve_global_youtube_auth_cookie(paths: &AppPaths) -> Option<String> {
+    let auth_config = config::load_youtube_auth_config(paths).ok()?;
+    let raw_json = auth_config.netscape_cookie_json?;
+    let trimmed = raw_json.trim();
+    if trimmed.is_empty() {
+        return None;
+    }
+    // The stored value is the raw JSON array from a browser extension.
+    // normalize_auth_cookie already handles JSON cookie arrays.
+    normalize_auth_cookie(Some(trimmed.to_string())).ok().flatten()
 }
 
 fn delete_job_by_id(paths: &AppPaths, job_id: &str) -> Result<()> {
@@ -13622,6 +13883,47 @@ mod tests {
         .expect("candidate");
         assert_eq!(selected.backend_id, "cosyvoice");
         assert_eq!(selected.variant_label, None);
+    }
+
+    #[test]
+    fn summarize_voice_clone_report_detects_partial_fallback() {
+        let report = VoiceCloneReport {
+            segments_total: 3,
+            segments_base_ok: 3,
+            segments_converted_ok: 2,
+            voice_clone_outcome: None,
+            voice_clone_requested_segments: 0,
+            voice_clone_converted_segments: 0,
+            voice_clone_fallback_segments: 0,
+            voice_clone_standard_tts_segments: 0,
+            segments: vec![
+                VoiceCloneReportSegment {
+                    index: 0,
+                    voice_clone_intent: Some(VoiceCloneIntent::Clone),
+                    voice_clone_outcome: Some(VoiceCloneSegmentOutcome::Converted),
+                    error: None,
+                },
+                VoiceCloneReportSegment {
+                    index: 1,
+                    voice_clone_intent: Some(VoiceCloneIntent::Clone),
+                    voice_clone_outcome: Some(VoiceCloneSegmentOutcome::FallbackTts),
+                    error: Some("convert_failed".to_string()),
+                },
+                VoiceCloneReportSegment {
+                    index: 2,
+                    voice_clone_intent: Some(VoiceCloneIntent::StandardTts),
+                    voice_clone_outcome: Some(VoiceCloneSegmentOutcome::StandardTts),
+                    error: None,
+                },
+            ],
+        };
+
+        let summary = summarize_voice_clone_report(&report);
+        assert_eq!(summary.clone_requested_segments, 2);
+        assert_eq!(summary.clone_converted_segments, 1);
+        assert_eq!(summary.clone_fallback_segments, 1);
+        assert_eq!(summary.standard_tts_segments, 1);
+        assert_eq!(summary.outcome, Some(VoiceCloneRunOutcome::PartialFallback));
     }
 
     #[test]

@@ -161,6 +161,14 @@ function inferProviderLabel(item: LibraryItem): string {
   return sourceType || "Local file";
 }
 
+function inferSubscriptionType(url: string): "Channel" | "Shorts" | "Playlist" | "URL" {
+  const lower = url.toLowerCase();
+  if (/\/shorts\b/.test(lower) || /\/@[^/]+\/shorts/.test(lower)) return "Shorts";
+  if (/[?&]list=/.test(lower)) return "Playlist";
+  if (/\/@/.test(lower) || /\/(?:channel|c|user)\//.test(lower)) return "Channel";
+  return "URL";
+}
+
 function relativeContainerParts(mediaPath: string, downloadRoot: string): string[] {
   const sourceParent = parentPath(mediaPath);
   if (!sourceParent) return [];
@@ -491,6 +499,8 @@ export function LibraryPage({ onOpenEditor, mode = "all" }: LibraryPageProps) {
     [],
   );
   const [subscriptionGroups, setSubscriptionGroups] = useState<YoutubeSubscriptionGroupRow[]>([]);
+  const [archiveStats, setArchiveStats] = useState<Record<string, number>>({});
+  const [activeRefreshSubIds, setActiveRefreshSubIds] = useState<Set<string>>(new Set());
   const [downloadPresets, setDownloadPresets] = useState<DownloadPresetsConfig | null>(null);
   const [batchRules, setBatchRules] = useState<BatchOnImportRules | null>(null);
   const [error, setError] = useState<string | null>(null);
@@ -860,6 +870,8 @@ export function LibraryPage({ onOpenEditor, mode = "all" }: LibraryPageProps) {
       nextGroups,
       nextPresets,
       nextInstagramSubscriptions,
+      nextArchiveStats,
+      nextActiveRefreshIds,
     ] = await Promise.all([
       wantsItems
         ? invoke<LibraryItem[]>("library_list", {
@@ -882,6 +894,12 @@ export function LibraryPage({ onOpenEditor, mode = "all" }: LibraryPageProps) {
       wantsInstagram
         ? invoke<InstagramSubscriptionRow[]>("instagram_subscriptions_list").catch(() => [])
         : Promise.resolve([] as InstagramSubscriptionRow[]),
+      wantsVideo
+        ? invoke<Record<string, number>>("youtube_subscriptions_archive_stats").catch(() => ({}))
+        : Promise.resolve({} as Record<string, number>),
+      wantsVideo
+        ? invoke<string[]>("youtube_subscriptions_active_refresh_ids").catch(() => [])
+        : Promise.resolve([] as string[]),
     ]);
     setItems(nextItems);
     setItemsOffset(nextItems.length);
@@ -891,6 +909,8 @@ export function LibraryPage({ onOpenEditor, mode = "all" }: LibraryPageProps) {
     setSubscriptions(nextSubscriptions);
     setSubscriptionGroups(nextGroups);
     setInstagramSubscriptions(nextInstagramSubscriptions);
+    setArchiveStats(nextArchiveStats);
+    setActiveRefreshSubIds(new Set(nextActiveRefreshIds));
     if (nextPresets) {
       setDownloadPresets(nextPresets);
       setUrlBatchPresetId((current) => current || nextPresets.default_preset_id || "");
@@ -2986,6 +3006,11 @@ export function LibraryPage({ onOpenEditor, mode = "all" }: LibraryPageProps) {
           Effective YouTube subscription root: <code>{defaultSubscriptionDownloadsDir || "-"}</code>.
           Change the durable root in <strong>Options</strong>; the field below is only a per-subscription override.
         </div>
+        <div style={{ color: "#4b5563", marginBottom: 8 }}>
+          Output override chooses where subscription media lands. "Already downloaded" continuity is
+          tracked in VoxVulgi-managed state, so migrated legacy/NAS folders can stay the target even
+          when the global root changes.
+        </div>
         <div className="row">
           <label style={{ display: "flex", alignItems: "center", gap: 8, flex: 1 }}>
             <span>Title</span>
@@ -3165,7 +3190,7 @@ export function LibraryPage({ onOpenEditor, mode = "all" }: LibraryPageProps) {
             Import 4KVDP exports
           </button>
           <button type="button" disabled={busy} onClick={() => scanFolderSeedArchive()}>
-            Scan folder + seed archive
+            Scan folder + seed continuity
           </button>
           <button type="button" disabled={busy} onClick={importExistingDownloadsFromLegacyRoot}>
             Import existing downloads
@@ -3187,7 +3212,10 @@ export function LibraryPage({ onOpenEditor, mode = "all" }: LibraryPageProps) {
             <thead>
               <tr>
                 <th>Title</th>
+                <th>Type</th>
                 <th>URL</th>
+                <th>Downloaded</th>
+                <th>Status</th>
                 <th>Folder map</th>
                 <th>Groups</th>
                 <th>Session</th>
@@ -3204,9 +3232,12 @@ export function LibraryPage({ onOpenEditor, mode = "all" }: LibraryPageProps) {
                 visibleSubscriptions.map((sub) => (
                   <tr key={sub.id}>
                     <td>{sub.title}</td>
+                    <td>{inferSubscriptionType(sub.source_url)}</td>
                     <td style={{ minWidth: 260, maxWidth: 360, wordBreak: "break-word" }}>
                       {sub.source_url}
                     </td>
+                    <td>{archiveStats[sub.id] ?? 0}</td>
+                    <td>{activeRefreshSubIds.has(sub.id) ? "Downloading\u2026" : "Idle"}</td>
                     <td>{sub.folder_map}</td>
                     <td>
                       {sub.group_ids.length
@@ -3257,7 +3288,7 @@ export function LibraryPage({ onOpenEditor, mode = "all" }: LibraryPageProps) {
                           disabled={busy}
                           onClick={() => scanFolderSeedArchive(sub.id)}
                         >
-                          Seed archive
+                          Seed continuity
                         </button>
                       </div>
                     </td>
@@ -3265,7 +3296,7 @@ export function LibraryPage({ onOpenEditor, mode = "all" }: LibraryPageProps) {
                 ))
               ) : (
                 <tr>
-                  <td colSpan={11}>No subscriptions yet.</td>
+                  <td colSpan={14}>No subscriptions yet.</td>
                 </tr>
               )}
             </tbody>

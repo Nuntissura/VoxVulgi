@@ -378,3 +378,38 @@ fn write_secret_token(path: &Path, token: &str) -> Result<()> {
     persistence::atomic_write_text(path, &text)?;
     Ok(())
 }
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct YoutubeAuthConfig {
+    #[serde(default)]
+    pub netscape_cookie_json: Option<String>,
+}
+
+pub fn load_youtube_auth_config(paths: &AppPaths) -> Result<YoutubeAuthConfig> {
+    let path = paths.youtube_auth_config_path();
+    if !path.exists() {
+        return Ok(YoutubeAuthConfig::default());
+    }
+    let bytes = std::fs::read(&path)?;
+    let parsed: YoutubeAuthConfig = serde_json::from_slice(&bytes).map_err(|e| {
+        EngineError::InstallFailed(format!(
+            "failed to parse youtube auth config at {}: {e}",
+            path.to_string_lossy()
+        ))
+    })?;
+    Ok(parsed)
+}
+
+pub fn save_youtube_auth_config(
+    paths: &AppPaths,
+    config: &YoutubeAuthConfig,
+) -> Result<()> {
+    let path = paths.youtube_auth_config_path();
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    let json = serde_json::to_string_pretty(config)?;
+    let text = format!("{json}\n");
+    persistence::atomic_write_text(&path, &text)?;
+    Ok(())
+}

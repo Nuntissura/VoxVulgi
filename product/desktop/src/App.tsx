@@ -2,6 +2,7 @@ import { Suspense, lazy, type ReactNode, useCallback, useEffect, useMemo, useSta
 import { invoke } from "@tauri-apps/api/core";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import { open } from "@tauri-apps/plugin-dialog";
+import html2canvas from "html2canvas";
 import "./App.css";
 import { useDesktopActivity, usePageActivity, usePollingLoop } from "./lib/activity";
 import { diagnosticsTrace } from "./lib/diagnosticsTrace";
@@ -1219,6 +1220,45 @@ function App() {
     invoke<SafeModeStatus>("safe_mode_status")
       .then((status) => setSafeMode(status))
       .catch(() => undefined);
+  }, []);
+
+  useEffect(() => {
+    const handleKeyDown = async (e: KeyboardEvent) => {
+      if (e.shiftKey && (e.ctrlKey || e.metaKey) && e.key.toLowerCase() === "s") {
+        e.preventDefault();
+        try {
+          const canvas = await html2canvas(document.body);
+          const base64Data = canvas.toDataURL("image/png");
+          const absPath = await invoke<string>("admin_save_snapshot", { base64Data });
+          // eslint-disable-next-line no-console
+          console.log("[Visual Debugger] Snapshot saved to:", absPath);
+        } catch (err) {
+          // eslint-disable-next-line no-console
+          console.error("[Visual Debugger] Failed to save snapshot", err);
+        }
+      }
+    };
+    window.addEventListener("keydown", handleKeyDown);
+
+    // Expose a global hook for scripts to trigger programmatically 
+    // @ts-ignore
+    window.__voxVulgiRequestSnapshot = async () => {
+      try {
+        const canvas = await html2canvas(document.body);
+        const base64Data = canvas.toDataURL("image/png");
+        return await invoke<string>("admin_save_snapshot", { base64Data });
+      } catch (err) {
+        // eslint-disable-next-line no-console
+        console.error("[Visual Debugger] programmatic capture failed", err);
+        throw err; // allow caller to handle
+      }
+    };
+
+    return () => {
+      window.removeEventListener("keydown", handleKeyDown);
+      // @ts-ignore
+      delete window.__voxVulgiRequestSnapshot;
+    };
   }, []);
 
   useEffect(() => {

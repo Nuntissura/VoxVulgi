@@ -46,6 +46,7 @@ Initial language focus: **Korean + Japanese → English**.
   - save persistent subscriptions (channel/playlist/video feed URLs),
   - define a folder map per subscription so each subscription writes into its own mapped folder,
   - preserve the current mapped folder for an existing subscription and reconcile already-downloaded items where practical before queueing fresh downloads,
+  - keep per-subscription "already downloaded" continuity state in VoxVulgi-managed storage rather than the physical output folder so legacy/NAS overrides remain usable when the global root changes,
   - set a per-subscription refresh interval (minutes) that can be edited in the Library UI,
   - queue refresh for one subscription or all active subscriptions,
   - keep loaded subscriptions stable across pane switches and window focus changes.
@@ -197,6 +198,8 @@ Initial language focus: **Korean + Japanese → English**.
   - apply that reusable voice to a later translated item,
   - run the dubbed preview,
   - verify whether the result was actually voice-preserved or plain TTS fallback.
+- Localization Studio should expose that basic promise as one obvious operator lane before the deeper reusable-asset surfaces:
+  - a dedicated `Reusable Voice Basics` surface should let the operator choose a speaker, capture or apply source references, save reusable voice memory, apply saved reusable voice, and continue the dubbed preview without detouring through cast packs, character profiles, benchmark-default setup, or backend research surfaces first.
 - The explicit `Start / continue localization run` action should advance automatically only until the next real operator checkpoint.
   - If speaker labels are missing, it should queue diarization rather than jumping straight into dubbing.
   - If speaker labels exist but the voice plan is incomplete, it should pause at the speaker/reference stage and tell the operator which speakers still need references or Standard TTS routing.
@@ -249,6 +252,7 @@ Initial language focus: **Korean + Japanese → English**.
 Current implementation status:
 
 - Localization Studio surfaces batch dubbing, A/B speaker previews, export stems/alternates visibility, voice memory, character libraries, and reference cleanup controls.
+- Localization Studio now also exposes a dedicated `Reusable Voice Basics` lane for choosing a speaker, capturing/applying references, saving reusable voice memory, applying saved reusable voice, and handing off directly into the localization run.
 - Localization Studio now also generates goal-aware voice benchmark reports, stores them as durable JSON/Markdown artifacts, and surfaces the top-ranked candidates with explainable metric breakdowns.
 - Localization Studio now also generates source-based speaker-reference candidate bundles after diarization and lets operators apply them directly into the current item voice plan as a bridge to a first real dubbed preview.
 - Diagnostics now exposes a local-only BYO backend registry where operators can save, probe, and remove experimental backend adapters without bundling or auto-installing those stacks.
@@ -258,6 +262,7 @@ Current implementation status:
 - Current implementation now also lets operators promote benchmark winners directly into the selected reusable voice template or cast pack and optionally seed later item voice plans from those saved defaults during apply.
 - Export packs include speech stems and alternate dubbed variants when available.
 - Voice-preserving runs must not be presented as successful cloned-voice results when conversion did not actually occur; clone-vs-fallback truth is part of the product contract, not an optional detail.
+- Current implementation now surfaces clone-truth status directly in the main Localization Studio operator flow, including the item voice plan, localization run, outputs surfaces, and benchmark candidate cards, using explicit labels such as `clone preserved`, `partial fallback`, `plain TTS fallback`, and `standard TTS only`.
 - Artifact-browser actions must remain variant-aware:
   - rerun, status, and log links for A/B/alternate artifacts must target the matching variant/track/container instead of falling back to the base artifact state,
   - unsupported artifact rows must not expose misleading rerun actions.
@@ -324,6 +329,7 @@ Current implementation status:
 - **Subtitle editor**:
   - timeline + segment table,
   - speaker labels,
+  - dedicated `Reusable Voice Basics` lane for speaker -> reference -> save/apply reusable voice -> continue dub,
   - reusable voice-template save/apply for recurring speaker setups,
   - translation side-by-side,
   - QC warnings (too fast, too long).
@@ -348,7 +354,8 @@ Current implementation status:
 
 - **Localization Studio** now includes the lightweight ingest block for local import/refresh plus ASR-language selection because this is the primary operator workflow.
 - **Video Archiver** is the dedicated home for URL ingest, presets/templates, subscription groups, YouTube subscriptions, and legacy archive reconciliation.
-- **Legacy archive reconciliation** now distinguishes 4KVDP-managed subscription/playlist containers from unmatched manual folders and loose root files, using the old 4KVDP app-state SQLite when available to preserve folder mapping and resume/dedupe state without touching the legacy archive.
+- **Legacy archive reconciliation** now distinguishes 4KVDP-managed subscription/playlist containers from unmatched manual folders and loose root files, using the old 4KVDP app-state SQLite when available to preserve folder mapping while keeping ongoing subscription continuity state inside VoxVulgi-managed storage rather than the legacy archive path.
+- The Library subscription surface should treat mapped output folders and continuity tracking as separate concepts: output overrides decide where media lands, while dedupe / "already downloaded" state is app-managed and may be seeded or merged from legacy archive files.
 - **Instagram Archiver** is the dedicated home for direct Instagram archive runs plus recurring archive targets.
 - **Options** is the discoverable home for shared storage-root configuration and related global path behavior.
 

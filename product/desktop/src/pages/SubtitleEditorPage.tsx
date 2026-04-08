@@ -537,6 +537,12 @@ type VoiceBenchmarkScoreTerm = {
   points: number;
 };
 
+type VoiceCloneOutcome =
+  | "clone_preserved"
+  | "partial_fallback"
+  | "fallback_only"
+  | "standard_tts_only";
+
 type VoiceBenchmarkCandidate = {
   candidate_id: string;
   display_name: string;
@@ -557,6 +563,11 @@ type VoiceBenchmarkCandidate = {
   output_fail_count: number;
   similarity_proxy: number | null;
   converted_ratio: number | null;
+  voice_clone_outcome: VoiceCloneOutcome | null;
+  voice_clone_requested_segments: number;
+  voice_clone_converted_segments: number;
+  voice_clone_fallback_segments: number;
+  voice_clone_standard_tts_segments: number;
   final_mix_ready: boolean;
   export_pack_ready: boolean;
   score: number;
@@ -828,6 +839,33 @@ function formatReusableVoicePlanDefault(plan: ReusableVoicePlanDefault | null | 
       : null,
   ].filter((value): value is string => !!value);
   return bits.join(" / ");
+}
+
+function formatVoiceCloneOutcomeLabel(outcome: VoiceCloneOutcome | null | undefined): string {
+  switch (outcome) {
+    case "clone_preserved":
+      return "clone preserved";
+    case "partial_fallback":
+      return "partial fallback";
+    case "fallback_only":
+      return "plain TTS fallback";
+    case "standard_tts_only":
+      return "standard TTS only";
+    default:
+      return "unknown";
+  }
+}
+
+function voiceCloneOutcomeTone(
+  outcome: VoiceCloneOutcome | null | undefined,
+): { background: string; color: string; border: string } {
+  if (outcome === "clone_preserved") {
+    return { background: "#ecfdf5", color: "#166534", border: "#bbf7d0" };
+  }
+  if (outcome === "standard_tts_only") {
+    return { background: "#eff6ff", color: "#1d4ed8", border: "#bfdbfe" };
+  }
+  return { background: "#fef2f2", color: "#991b1b", border: "#fecaca" };
 }
 
 function normalizeDoc(doc: SubtitleDocument): SubtitleDocument {
@@ -1135,6 +1173,9 @@ export function SubtitleEditorPage({
   const [characterProfiles, setCharacterProfiles] = useState<VoiceLibraryProfile[]>([]);
   const [voiceLibraryBusy, setVoiceLibraryBusy] = useState(false);
   const [voiceLibraryActionBusy, setVoiceLibraryActionBusy] = useState(false);
+  const [voiceBasicsSpeakerKey, setVoiceBasicsSpeakerKey] = useState("");
+  const [voiceBasicsMemoryProfileId, setVoiceBasicsMemoryProfileId] = useState("");
+  const [voiceBasicsProfileName, setVoiceBasicsProfileName] = useState("");
   const [selectedMemoryProfileId, setSelectedMemoryProfileId] = useState("");
   const [selectedCharacterProfileId, setSelectedCharacterProfileId] = useState("");
   const [selectedMemoryProfileDetail, setSelectedMemoryProfileDetail] =
@@ -1935,6 +1976,167 @@ export function SubtitleEditorPage({
     return map;
   }, [itemJobs]);
 
+  const activeVoiceCloneArtifact = useMemo(() => {
+    const selectedVariant = normalizeVariantLabel(itemVoicePlan?.selected_variant_label);
+    const candidates = artifacts.filter(
+      (artifact) =>
+        artifact.kind === "tts_manifest" &&
+        artifact.exists &&
+        ttsBackendIdsMatch(artifact.tts_backend_id, "openvoice_v2") &&
+        !!artifact.voice_clone_outcome,
+    );
+    if (!candidates.length) return null;
+    if (selectedVariant) {
+      const selectedMatch =
+        candidates.find(
+          (artifact) => normalizeVariantLabel(artifact.variant_label) === selectedVariant,
+        ) ?? null;
+      if (selectedMatch) return selectedMatch;
+    }
+    return (
+      candidates.find((artifact) => !normalizeVariantLabel(artifact.variant_label)) ??
+      candidates[0] ??
+      null
+    );
+  }, [artifacts, itemVoicePlan?.selected_variant_label]);
+
+  const activeVoiceCloneTruth = useMemo(() => {
+    const artifact = activeVoiceCloneArtifact;
+    const outcome = artifact?.voice_clone_outcome ?? null;
+    if (!artifact || !outcome) return null;
+    const requested = artifact.voice_clone_requested_segments ?? 0;
+    const converted = artifact.voice_clone_converted_segments ?? 0;
+    const fallback = artifact.voice_clone_fallback_segments ?? 0;
+    const standard = artifact.voice_clone_standard_tts_segments ?? 0;
+    const detailBits: string[] = [];
+    if (requested > 0) {
+      detailBits.push(`${converted}/${requested} clone-intended segment(s) converted`);
+    } else if (converted > 0) {
+      detailBits.push(`${converted} converted segment(s)`);
+    }
+    if (fallback > 0) {
+      detailBits.push(`${fallback} fallback segment(s)`);
+    }
+    if (standard > 0) {
+      detailBits.push(`${standard} standard TTS segment(s)`);
+    }
+    return {
+      artifact,
+      label: formatVoiceCloneOutcomeLabel(outcome),
+      detail: detailBits.join(" | "),
+      tone: voiceCloneOutcomeTone(outcome),
+    };
+  }, [activeVoiceCloneArtifact]);
+
+  const voiceBasicsSpeakerSetting = useMemo(() => {
+    if (!voiceBasicsSpeakerKey) return null;
+    return speakerSettingsByKey.get(voiceBasicsSpeakerKey) ?? null;
+  }, [speakerSettingsByKey, voiceBasicsSpeakerKey]);
+
+  const voiceBasicsProfilePaths = useMemo(
+    () => speakerProfilePaths(voiceBasicsSpeakerSetting),
+    [voiceBasicsSpeakerSetting],
+  );
+
+  const voiceBasicsGeneratedCandidate = useMemo(() => {
+    if (!voiceBasicsSpeakerKey) return null;
+    return voiceReferenceCandidateBundles[voiceBasicsSpeakerKey] ?? null;
+  }, [voiceBasicsSpeakerKey, voiceReferenceCandidateBundles]);
+
+  const voiceBasicsSuggestions = useMemo(
+    () =>
+      memorySuggestions.filter((suggestion) => suggestion.item_speaker_key === voiceBasicsSpeakerKey),
+    [memorySuggestions, voiceBasicsSpeakerKey],
+  );
+
+  const voiceBasicsAppliedMemoryProfile = useMemo(() => {
+    const profileId = trimOrNull(voiceBasicsSpeakerSetting?.voice_profile_id) ?? "";
+    if (!profileId) return null;
+    return memoryProfiles.find((profile) => profile.id === profileId) ?? null;
+  }, [memoryProfiles, voiceBasicsSpeakerSetting?.voice_profile_id]);
+
+  const voiceBasicsSelectedMemoryProfile = useMemo(() => {
+    const profileId = trimOrNull(voiceBasicsMemoryProfileId) ?? "";
+    if (!profileId) return null;
+    return memoryProfiles.find((profile) => profile.id === profileId) ?? null;
+  }, [memoryProfiles, voiceBasicsMemoryProfileId]);
+
+  const voiceBasicsSpeakerLabel = useMemo(() => {
+    if (!voiceBasicsSpeakerKey) return "";
+    return (speakerNameDrafts[voiceBasicsSpeakerKey] ?? voiceBasicsSpeakerSetting?.display_name ?? "").trim();
+  }, [speakerNameDrafts, voiceBasicsSpeakerKey, voiceBasicsSpeakerSetting?.display_name]);
+
+  const defaultVoiceBasicsProfileName = useMemo(() => {
+    const base = voiceBasicsSpeakerLabel || voiceBasicsSpeakerKey;
+    if (!base) return "";
+    return `${base} reusable voice`;
+  }, [voiceBasicsSpeakerKey, voiceBasicsSpeakerLabel]);
+
+  const effectiveVoiceBasicsProfileName = useMemo(
+    () => trimOrNull(voiceBasicsProfileName) ?? defaultVoiceBasicsProfileName,
+    [defaultVoiceBasicsProfileName, voiceBasicsProfileName],
+  );
+
+  const voiceBasicsNextStep = useMemo(() => {
+    if (!translatedEnglishTrack) {
+      return {
+        title: "Run Translate -> EN first",
+        detail: "The reusable-voice lane starts from the English localization track used for dubbing.",
+      };
+    }
+    if (!speakersInTrack.length) {
+      return {
+        title: "Run diarization on the English track",
+        detail: "Localization Studio needs speaker labels before you can capture or reuse a speaker voice.",
+      };
+    }
+    if (!voiceBasicsSpeakerKey) {
+      return {
+        title: "Choose a speaker",
+        detail: "Pick the current speaker you want to capture or reuse first.",
+      };
+    }
+    if (!voiceBasicsProfilePaths.length && !voiceBasicsGeneratedCandidate?.candidate_exists) {
+      return {
+        title: "Capture a first voice reference",
+        detail:
+          "Generate a source-based ref from the current item or choose a clean clip manually before saving reusable voice memory.",
+      };
+    }
+    if (!voiceBasicsProfilePaths.length && voiceBasicsGeneratedCandidate?.candidate_exists) {
+      return {
+        title: "Apply the generated source ref",
+        detail: "Review the generated candidate, then attach it to this speaker to make the voice clone-ready.",
+      };
+    }
+    if (!voiceBasicsAppliedMemoryProfile) {
+      return {
+        title: "Save or apply a reusable voice",
+        detail:
+          "You have usable reference audio. Save it as reusable voice memory for later items, or apply an existing memory profile now.",
+      };
+    }
+    if (voicePlanMissingSpeakers.length) {
+      return {
+        title: "Finish the remaining speakers",
+        detail: `${voiceBasicsSpeakerLabel || voiceBasicsSpeakerKey} is ready. Remaining: ${voicePlanMissingSpeakers.join(", ")}.`,
+      };
+    }
+    return {
+      title: "Continue the dub run",
+      detail: `Reusable voice ${voiceBasicsAppliedMemoryProfile.name} is active. Continue Localization Run to generate the translated dub.`,
+    };
+  }, [
+    speakersInTrack.length,
+    translatedEnglishTrack,
+    voiceBasicsAppliedMemoryProfile,
+    voiceBasicsGeneratedCandidate?.candidate_exists,
+    voiceBasicsProfilePaths.length,
+    voiceBasicsSpeakerKey,
+    voiceBasicsSpeakerLabel,
+    voicePlanMissingSpeakers,
+  ]);
+
   const localizationRunStages = useMemo(() => {
     const stageJob = (jobType: string) => latestItemJobByType.get(jobType) ?? null;
     return [
@@ -1998,6 +2200,8 @@ export function SubtitleEditorPage({
             ? `Running ${Math.round((stageJob("dub_voice_preserving_v1")?.progress ?? 0) * 100)}%`
             : stageJob("dub_voice_preserving_v1")
               ? `Last job: ${stageJob("dub_voice_preserving_v1")?.status ?? "unknown"}`
+              : activeVoiceCloneTruth
+                ? `Current truth: ${activeVoiceCloneTruth.label}${activeVoiceCloneTruth.detail ? ` (${activeVoiceCloneTruth.detail})` : ""}`
               : "Render the English dub segments with the managed or selected backend.",
       },
       {
@@ -2030,6 +2234,7 @@ export function SubtitleEditorPage({
     speakersInTrack.length,
     tracks,
     translatedEnglishTrack,
+    activeVoiceCloneTruth,
     voicePlanMissingSpeakers,
   ]);
 
@@ -2284,10 +2489,37 @@ export function SubtitleEditorPage({
   useEffect(() => {
     if (!speakersInTrack.length) {
       setAbSpeakerKey("");
+      setVoiceBasicsSpeakerKey("");
+      setVoiceBasicsMemoryProfileId("");
+      setVoiceBasicsProfileName("");
       return;
     }
     setAbSpeakerKey((prev) => (prev && speakersInTrack.includes(prev) ? prev : speakersInTrack[0] ?? ""));
   }, [speakersInTrack]);
+
+  useEffect(() => {
+    if (!speakersInTrack.length) return;
+    setVoiceBasicsSpeakerKey((prev) =>
+      prev && speakersInTrack.includes(prev) ? prev : (speakersInTrack[0] ?? ""),
+    );
+  }, [speakersInTrack]);
+
+  useEffect(() => {
+    if (!voiceBasicsSpeakerKey) {
+      setVoiceBasicsMemoryProfileId("");
+      return;
+    }
+    setVoiceBasicsMemoryProfileId((prev) => {
+      if (prev.trim()) return prev;
+      const appliedId =
+        trimOrNull(speakerSettingsByKey.get(voiceBasicsSpeakerKey)?.voice_profile_id) ?? "";
+      if (appliedId) return appliedId;
+      return (
+        memorySuggestions.find((suggestion) => suggestion.item_speaker_key === voiceBasicsSpeakerKey)
+          ?.profile_id ?? ""
+      );
+    });
+  }, [memorySuggestions, speakerSettingsByKey, voiceBasicsSpeakerKey]);
 
   useEffect(() => {
     const source = speakerSettingsByKey.get(abSpeakerKey) ?? null;
@@ -2795,6 +3027,7 @@ export function SubtitleEditorPage({
                 ? `Still missing speaker setup for: ${voicePlanMissingSpeakers.join(", ")}.`
                 : "Ready to assign saved templates, cast packs, and per-speaker render settings.",
         buttons: [
+          { label: "Basics lane", sectionId: "loc-voice-basics" },
           { label: "Open voice plan", sectionId: "loc-voice-plan" },
         ],
       },
@@ -4349,8 +4582,12 @@ export function SubtitleEditorPage({
     }
   }
 
-  async function createVoiceLibraryFromSpeaker(kind: "memory" | "character", speakerKey: string) {
-    const name = (kind === "memory" ? memoryProfileName : characterProfileName).trim();
+  async function createVoiceLibraryFromSpeaker(
+    kind: "memory" | "character",
+    speakerKey: string,
+    nameOverride?: string,
+  ) {
+    const name = (nameOverride ?? (kind === "memory" ? memoryProfileName : characterProfileName)).trim();
     if (!name) {
       setError(`${kind === "memory" ? "Memory" : "Character"} profile name is empty.`);
       return;
@@ -4372,6 +4609,9 @@ export function SubtitleEditorPage({
       if (kind === "memory") {
         setSelectedMemoryProfileId(detail.profile.id);
         setSelectedMemoryProfileDetail(detail);
+        if (speakerKey === voiceBasicsSpeakerKey) {
+          setVoiceBasicsMemoryProfileId(detail.profile.id);
+        }
       } else {
         setSelectedCharacterProfileId(detail.profile.id);
         setSelectedCharacterProfileDetail(detail);
@@ -4452,6 +4692,14 @@ export function SubtitleEditorPage({
         speakerKey,
         profileId,
       });
+      if (kind === "memory") {
+        setSelectedMemoryProfileId(profileId);
+        if (speakerKey === voiceBasicsSpeakerKey) {
+          setVoiceBasicsMemoryProfileId(profileId);
+        }
+      } else {
+        setSelectedCharacterProfileId(profileId);
+      }
       setSpeakerSettings((prev) => {
         const filtered = prev.filter((value) => value.speaker_key !== next.speaker_key);
         return [...filtered, next].sort((a, b) => a.speaker_key.localeCompare(b.speaker_key));
@@ -5578,6 +5826,13 @@ export function SubtitleEditorPage({
           <button type="button" disabled={busy} onClick={() => scrollToLocalizationSection("loc-library")}>
             Outputs library
           </button>
+          <button
+            type="button"
+            disabled={busy}
+            onClick={() => scrollToLocalizationSection("loc-voice-basics")}
+          >
+            Reusable voice basics
+          </button>
           <button type="button" disabled={busy} onClick={() => scrollToLocalizationSection("loc-track")}>
             Tracks and core jobs
           </button>
@@ -5680,6 +5935,22 @@ export function SubtitleEditorPage({
             which manual stage button needs to be pressed next.
           </div>
         )}
+        {activeVoiceCloneTruth ? (
+          <div
+            style={{
+              marginTop: 10,
+              padding: "10px 12px",
+              borderRadius: 10,
+              border: `1px solid ${activeVoiceCloneTruth.tone.border}`,
+              background: activeVoiceCloneTruth.tone.background,
+              color: activeVoiceCloneTruth.tone.color,
+              fontSize: 12,
+            }}
+          >
+            <strong>Current dub truth:</strong> {activeVoiceCloneTruth.label}
+            {activeVoiceCloneTruth.detail ? ` (${activeVoiceCloneTruth.detail})` : ""}.
+          </div>
+        ) : null}
         <div className="table-wrap" style={{ marginTop: 12 }}>
           <table>
             <thead>
@@ -5699,6 +5970,298 @@ export function SubtitleEditorPage({
               ))}
             </tbody>
           </table>
+        </div>
+      </div>
+
+      <div className="card" id="loc-voice-basics">
+        <h2>Reusable Voice Basics</h2>
+        <div style={{ color: "#4b5563" }}>
+          Capture one speaker, save it as reusable voice memory, apply it to later items, then
+          continue the translated dub. This is the first-run lane for the educational voice-clone
+          workflow.
+        </div>
+        <div
+          style={{
+            marginTop: 12,
+            display: "grid",
+            gridTemplateColumns: "repeat(auto-fit, minmax(220px, 1fr))",
+            gap: 10,
+          }}
+        >
+          <div
+            style={{
+              border: "1px solid #e5e7eb",
+              borderRadius: 10,
+              padding: "10px 12px",
+              display: "flex",
+              flexDirection: "column",
+              gap: 6,
+            }}
+          >
+            <div style={{ fontSize: 12, opacity: 0.75 }}>Current speaker</div>
+            <div style={{ fontWeight: 600 }}>
+              {voiceBasicsSpeakerLabel || voiceBasicsSpeakerKey || "No speaker selected"}
+            </div>
+            <div style={{ fontSize: 12, opacity: 0.75 }}>
+              {voiceBasicsProfilePaths.length
+                ? `${voiceBasicsProfilePaths.length} active ref${voiceBasicsProfilePaths.length === 1 ? "" : "s"}`
+                : "No active voice refs yet"}
+            </div>
+            <div style={{ fontSize: 12, opacity: 0.75 }}>
+              {voiceBasicsGeneratedCandidate?.candidate_exists
+                ? `Generated source ref ready (${Math.round((voiceBasicsGeneratedCandidate.total_duration_ms ?? 0) / 100) / 10}s)`
+                : "No generated source ref loaded"}
+            </div>
+          </div>
+          <div
+            style={{
+              border: "1px solid #e5e7eb",
+              borderRadius: 10,
+              padding: "10px 12px",
+              display: "flex",
+              flexDirection: "column",
+              gap: 6,
+            }}
+          >
+            <div style={{ fontSize: 12, opacity: 0.75 }}>Reusable voice</div>
+            <div style={{ fontWeight: 600 }}>
+              {voiceBasicsAppliedMemoryProfile?.name ?? "No reusable voice applied"}
+            </div>
+            <div style={{ fontSize: 12, opacity: 0.75 }}>
+              {voiceBasicsAppliedMemoryProfile
+                ? `Active profile: ${voiceBasicsAppliedMemoryProfile.reference_count} ref${voiceBasicsAppliedMemoryProfile.reference_count === 1 ? "" : "s"}`
+                : voiceBasicsSelectedMemoryProfile
+                  ? `Selected to apply: ${voiceBasicsSelectedMemoryProfile.name}`
+                  : "Choose or save a memory profile for later reuse"}
+            </div>
+            <div style={{ fontSize: 12, opacity: 0.75 }}>
+              {voiceBasicsSuggestions.length
+                ? `Suggested: ${voiceBasicsSuggestions[0]?.profile_name} (${voiceBasicsSuggestions[0]?.match_reason})`
+                : "No saved voice suggestion yet"}
+            </div>
+          </div>
+          <div
+            style={{
+              border: "1px solid #e5e7eb",
+              borderRadius: 10,
+              padding: "10px 12px",
+              display: "flex",
+              flexDirection: "column",
+              gap: 6,
+            }}
+          >
+            <div style={{ fontSize: 12, opacity: 0.75 }}>Next step</div>
+            <div style={{ fontWeight: 600 }}>{voiceBasicsNextStep.title}</div>
+            <div style={{ fontSize: 12, opacity: 0.75 }}>{voiceBasicsNextStep.detail}</div>
+            {activeVoiceCloneTruth ? (
+              <div style={{ fontSize: 12, opacity: 0.75 }}>
+                Current dub truth: {activeVoiceCloneTruth.label}
+                {activeVoiceCloneTruth.detail ? ` (${activeVoiceCloneTruth.detail})` : ""}
+              </div>
+            ) : (
+              <div style={{ fontSize: 12, opacity: 0.75 }}>
+                No dub truth yet. Generate a voice-preserving dub after setup.
+              </div>
+            )}
+          </div>
+        </div>
+        <div
+          className="row"
+          style={{ marginTop: 12, alignItems: "flex-end", flexWrap: "wrap", gap: 10 }}
+        >
+          <label style={{ display: "flex", flexDirection: "column", gap: 4 }}>
+            <span style={{ fontSize: 12, opacity: 0.75 }}>Speaker</span>
+            <select
+              value={voiceBasicsSpeakerKey}
+              disabled={busy || !speakersInTrack.length}
+              onChange={(e) => {
+                setVoiceBasicsSpeakerKey(e.currentTarget.value);
+                setVoiceBasicsMemoryProfileId("");
+                setVoiceBasicsProfileName("");
+              }}
+              style={{ minWidth: 220 }}
+            >
+              <option value="">Choose speaker...</option>
+              {speakersInTrack.map((speakerKey) => {
+                const label =
+                  (speakerNameDrafts[speakerKey] ??
+                    speakerSettingsByKey.get(speakerKey)?.display_name ??
+                    "").trim() || speakerKey;
+                return (
+                  <option key={`voice-basics-speaker-${speakerKey}`} value={speakerKey}>
+                    {label}
+                  </option>
+                );
+              })}
+            </select>
+          </label>
+          <label style={{ display: "flex", flexDirection: "column", gap: 4 }}>
+            <span style={{ fontSize: 12, opacity: 0.75 }}>Save reusable voice as</span>
+            <input
+              value={voiceBasicsProfileName}
+              disabled={voiceLibraryActionBusy || !voiceBasicsSpeakerKey}
+              onChange={(e) => setVoiceBasicsProfileName(e.currentTarget.value)}
+              placeholder={defaultVoiceBasicsProfileName || "Reusable voice name"}
+              style={{ minWidth: 260 }}
+            />
+          </label>
+          <label style={{ display: "flex", flexDirection: "column", gap: 4 }}>
+            <span style={{ fontSize: 12, opacity: 0.75 }}>Apply saved voice</span>
+            <select
+              value={voiceBasicsMemoryProfileId}
+              disabled={voiceLibraryBusy || voiceLibraryActionBusy || !memoryProfiles.length}
+              onChange={(e) => setVoiceBasicsMemoryProfileId(e.currentTarget.value)}
+              style={{ minWidth: 320 }}
+            >
+              <option value="">Choose reusable voice...</option>
+              {memoryProfiles.map((profile) => (
+                <option key={`voice-basics-memory-${profile.id}`} value={profile.id}>
+                  {profile.name} ({profile.reference_count} ref
+                  {profile.reference_count === 1 ? "" : "s"})
+                </option>
+              ))}
+            </select>
+          </label>
+        </div>
+        <div className="row" style={{ marginTop: 12, flexWrap: "wrap" }}>
+          <button
+            type="button"
+            disabled={voiceReferenceCandidateBusyKey === voiceBasicsSpeakerKey || !voiceBasicsSpeakerKey}
+            onClick={() => {
+              generateVoiceReferenceCandidates(voiceBasicsSpeakerKey).catch(() => undefined);
+            }}
+          >
+            Generate source ref
+          </button>
+          <button
+            type="button"
+            disabled={voiceReferenceCandidateBusyKey === voiceBasicsSpeakerKey || !voiceBasicsSpeakerKey}
+            onClick={() => {
+              loadVoiceReferenceCandidates(voiceBasicsSpeakerKey).catch(() => undefined);
+            }}
+          >
+            Reload generated ref
+          </button>
+          <button
+            type="button"
+            disabled={
+              voiceReferenceCandidateBusyKey === voiceBasicsSpeakerKey ||
+              !voiceBasicsSpeakerKey ||
+              !voiceBasicsGeneratedCandidate?.candidate_exists
+            }
+            onClick={() => {
+              applyVoiceReferenceCandidate(
+                voiceBasicsSpeakerKey,
+                voiceBasicsProfilePaths.length ? "replace" : "append",
+              ).catch(() => undefined);
+            }}
+          >
+            {voiceBasicsProfilePaths.length ? "Replace with generated ref" : "Use generated ref"}
+          </button>
+          <button
+            type="button"
+            disabled={speakerSettingsBusy || !voiceBasicsSpeakerKey}
+            onClick={() => {
+              pickSpeakerVoiceProfiles(voiceBasicsSpeakerKey).catch(() => undefined);
+            }}
+          >
+            Choose refs...
+          </button>
+          <button
+            type="button"
+            disabled={
+              voiceLibraryActionBusy ||
+              !voiceBasicsSpeakerKey ||
+              !voiceBasicsProfilePaths.length ||
+              !effectiveVoiceBasicsProfileName.trim()
+            }
+            onClick={() => {
+              createVoiceLibraryFromSpeaker(
+                "memory",
+                voiceBasicsSpeakerKey,
+                effectiveVoiceBasicsProfileName,
+              ).catch(() => undefined);
+            }}
+          >
+            Save reusable voice
+          </button>
+          <button
+            type="button"
+            disabled={voiceLibraryActionBusy || !voiceBasicsSpeakerKey || !voiceBasicsMemoryProfileId}
+            onClick={() => {
+              applyVoiceLibraryProfile("memory", voiceBasicsSpeakerKey, voiceBasicsMemoryProfileId).catch(
+                () => undefined,
+              );
+            }}
+          >
+            Apply selected reusable voice
+          </button>
+          {voiceBasicsSuggestions.slice(0, 2).map((suggestion) => (
+            <button
+              key={`voice-basics-suggestion-${suggestion.profile_id}`}
+              type="button"
+              disabled={voiceLibraryActionBusy || !voiceBasicsSpeakerKey}
+              onClick={() => {
+                setVoiceBasicsMemoryProfileId(suggestion.profile_id);
+                applyVoiceLibraryProfile("memory", voiceBasicsSpeakerKey, suggestion.profile_id).catch(
+                  () => undefined,
+                );
+              }}
+            >
+              Use {suggestion.profile_name}
+            </button>
+          ))}
+          <button type="button" disabled={busy || localizationRunBusy} onClick={enqueueLocalizationRun}>
+            Continue localization run
+          </button>
+          <button
+            type="button"
+            disabled={busy}
+            onClick={() => scrollToLocalizationSection("loc-voice-plan")}
+          >
+            Full voice plan
+          </button>
+          <button
+            type="button"
+            disabled={voiceLibraryBusy || voiceLibraryActionBusy}
+            onClick={() => {
+              Promise.all([refreshVoiceLibraryProfiles(), refreshMemorySuggestions()]).catch((e) =>
+                setError(String(e)),
+              );
+            }}
+          >
+            Reload reusable voices
+          </button>
+        </div>
+        <div
+          style={{
+            marginTop: 12,
+            display: "flex",
+            flexDirection: "column",
+            gap: 6,
+            fontSize: 12,
+            opacity: 0.8,
+          }}
+        >
+          <div>
+            Active refs:{" "}
+            {voiceBasicsProfilePaths.length
+              ? voiceBasicsProfilePaths.map((path) => fileNameFromPath(path)).join(" | ")
+              : "No current refs"}
+          </div>
+          {voiceBasicsGeneratedCandidate?.candidate_exists ? (
+            <div>
+              Generated candidate: {fileNameFromPath(voiceBasicsGeneratedCandidate.candidate_path) || "-"}
+              {voiceBasicsGeneratedCandidate.notes.length
+                ? ` | ${voiceBasicsGeneratedCandidate.notes.join(" ")}`
+                : ""}
+            </div>
+          ) : null}
+          {voiceBasicsSelectedMemoryProfile ? (
+            <div>
+              Selected reusable voice folder: <code>{voiceBasicsSelectedMemoryProfile.dir_path}</code>
+            </div>
+          ) : null}
         </div>
       </div>
 
@@ -5794,6 +6357,55 @@ export function SubtitleEditorPage({
           Working files stay in app-data for reproducible jobs. User-facing deliverables export to a
           predictable folder under the main download root by default.
         </div>
+        {activeVoiceCloneTruth ? (
+          <div
+            style={{
+              marginTop: 12,
+              padding: "12px 14px",
+              borderRadius: 10,
+              border: `1px solid ${activeVoiceCloneTruth.tone.border}`,
+              background: activeVoiceCloneTruth.tone.background,
+              color: activeVoiceCloneTruth.tone.color,
+              display: "flex",
+              flexDirection: "column",
+              gap: 8,
+            }}
+          >
+            <div style={{ fontWeight: 700 }}>
+              Dub truth: {activeVoiceCloneTruth.label}
+            </div>
+            <div style={{ fontSize: 12 }}>
+              {activeVoiceCloneTruth.detail || "No segment-level counts were reported."}
+            </div>
+            <div style={{ fontSize: 12, opacity: 0.85 }}>
+              Source manifest: <code>{activeVoiceCloneTruth.artifact.path}</code>
+            </div>
+            <div className="row" style={{ marginTop: 0, flexWrap: "wrap" }}>
+              <button
+                type="button"
+                disabled={busy}
+                onClick={() =>
+                  openPathBestEffort(activeVoiceCloneTruth.artifact.path).catch((e) =>
+                    setError(String(e)),
+                  )
+                }
+              >
+                Open truth manifest
+              </button>
+              <button
+                type="button"
+                disabled={busy}
+                onClick={() =>
+                  revealPath(activeVoiceCloneTruth.artifact.path).catch((e) =>
+                    setError(String(e)),
+                  )
+                }
+              >
+                Reveal truth manifest
+              </button>
+            </div>
+          </div>
+        ) : null}
         <div className="row" style={{ marginTop: 10, flexWrap: "wrap", alignItems: "center" }}>
           <label style={{ display: "flex", alignItems: "center", gap: 8 }}>
             <input
@@ -7927,6 +8539,40 @@ export function SubtitleEditorPage({
                       : ""}
                   </div>
                 </div>
+                <div className="kv">
+                  <div className="k">Current dub truth</div>
+                  <div className="v">
+                    {activeVoiceCloneTruth
+                      ? `${activeVoiceCloneTruth.label}${activeVoiceCloneTruth.detail ? ` (${activeVoiceCloneTruth.detail})` : ""}`
+                      : "No live clone-truth manifest loaded yet."}
+                  </div>
+                </div>
+                {activeVoiceCloneTruth ? (
+                  <div className="row" style={{ marginTop: 0, flexWrap: "wrap" }}>
+                    <button
+                      type="button"
+                      disabled={busy}
+                      onClick={() =>
+                        openPathBestEffort(activeVoiceCloneTruth.artifact.path).catch((e) =>
+                          setError(String(e)),
+                        )
+                      }
+                    >
+                      Open truth manifest
+                    </button>
+                    <button
+                      type="button"
+                      disabled={busy}
+                      onClick={() =>
+                        revealPath(activeVoiceCloneTruth.artifact.path).catch((e) =>
+                          setError(String(e)),
+                        )
+                      }
+                    >
+                      Reveal truth manifest
+                    </button>
+                  </div>
+                ) : null}
                 <label style={{ display: "flex", flexDirection: "column", gap: 6 }}>
                   <span style={{ fontSize: 12, opacity: 0.75 }}>Operator notes</span>
                   <textarea
@@ -8469,8 +9115,25 @@ export function SubtitleEditorPage({
                         }}
                       >
                         <div className="row" style={{ justifyContent: "space-between", gap: 10 }}>
-                          <div style={{ fontWeight: 600 }}>
-                            #{index + 1} {candidate.display_name}
+                          <div style={{ display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap" }}>
+                            <div style={{ fontWeight: 600 }}>
+                              #{index + 1} {candidate.display_name}
+                            </div>
+                            {candidate.voice_clone_outcome ? (
+                              <span
+                                style={{
+                                  fontSize: 11,
+                                  lineHeight: 1,
+                                  padding: "4px 6px",
+                                  borderRadius: 999,
+                                  border: `1px solid ${voiceCloneOutcomeTone(candidate.voice_clone_outcome).border}`,
+                                  background: voiceCloneOutcomeTone(candidate.voice_clone_outcome).background,
+                                  color: voiceCloneOutcomeTone(candidate.voice_clone_outcome).color,
+                                }}
+                              >
+                                {formatVoiceCloneOutcomeLabel(candidate.voice_clone_outcome)}
+                              </span>
+                            ) : null}
                           </div>
                           <code>{candidate.score.toFixed(1)}</code>
                         </div>
@@ -8490,7 +9153,28 @@ export function SubtitleEditorPage({
                               ? "-"
                               : `${(candidate.converted_ratio * 100).toFixed(0)}%`}
                           </span>
+                          {candidate.voice_clone_outcome ? (
+                            <span>
+                              clone {candidate.voice_clone_converted_segments}/
+                              {candidate.voice_clone_requested_segments || candidate.rendered_segments}
+                            </span>
+                          ) : null}
                         </div>
+                        {candidate.voice_clone_outcome ? (
+                          <div style={{ fontSize: 12, opacity: 0.78 }}>
+                            Clone truth: {formatVoiceCloneOutcomeLabel(candidate.voice_clone_outcome)}.
+                            {" "}Converted {candidate.voice_clone_converted_segments}
+                            {candidate.voice_clone_requested_segments
+                              ? ` of ${candidate.voice_clone_requested_segments} clone-intended segment(s)`
+                              : " segment(s)"}
+                            {candidate.voice_clone_fallback_segments
+                              ? `; fallback ${candidate.voice_clone_fallback_segments}`
+                              : ""}
+                            {candidate.voice_clone_standard_tts_segments
+                              ? `; standard TTS ${candidate.voice_clone_standard_tts_segments}`
+                              : ""}.
+                          </div>
+                        ) : null}
                         {candidate.strengths.length ? (
                           <div style={{ fontSize: 12, opacity: 0.75 }}>
                             Strengths: {candidate.strengths.join(" | ")}

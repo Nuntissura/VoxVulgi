@@ -1,4 +1,6 @@
-use crate::jobs::{self, QcIssueRecord, TtsPreviewManifestSegment, VoiceQcReportSection};
+use crate::jobs::{
+    self, QcIssueRecord, TtsPreviewManifestSegment, VoiceCloneRunOutcome, VoiceQcReportSection,
+};
 use crate::paths::AppPaths;
 use crate::subtitle_tracks;
 use crate::subtitles::SubtitleDocument;
@@ -38,6 +40,11 @@ pub struct VoiceBenchmarkCandidate {
     pub output_fail_count: usize,
     pub similarity_proxy: Option<f32>,
     pub converted_ratio: Option<f32>,
+    pub voice_clone_outcome: Option<VoiceCloneRunOutcome>,
+    pub voice_clone_requested_segments: usize,
+    pub voice_clone_converted_segments: usize,
+    pub voice_clone_fallback_segments: usize,
+    pub voice_clone_standard_tts_segments: usize,
     pub final_mix_ready: bool,
     pub export_pack_ready: bool,
     pub score: f32,
@@ -115,6 +122,16 @@ struct TtsManifestMeta {
     #[serde(default)]
     track_id: Option<String>,
     #[serde(default)]
+    voice_clone_outcome: Option<VoiceCloneRunOutcome>,
+    #[serde(default)]
+    voice_clone_requested_segments: usize,
+    #[serde(default)]
+    voice_clone_converted_segments: usize,
+    #[serde(default)]
+    voice_clone_fallback_segments: usize,
+    #[serde(default)]
+    voice_clone_standard_tts_segments: usize,
+    #[serde(default)]
     segments: Vec<TtsPreviewManifestSegment>,
 }
 
@@ -138,6 +155,11 @@ struct ManifestCandidateSpec {
     segments: Vec<TtsPreviewManifestSegment>,
     durations_by_index: HashMap<u32, i64>,
     converted_ratio: Option<f32>,
+    voice_clone_outcome: Option<VoiceCloneRunOutcome>,
+    voice_clone_requested_segments: usize,
+    voice_clone_converted_segments: usize,
+    voice_clone_fallback_segments: usize,
+    voice_clone_standard_tts_segments: usize,
     final_mix_ready: bool,
     export_pack_ready: bool,
 }
@@ -431,6 +453,11 @@ fn load_manifest_candidate(
         segments: meta.segments,
         durations_by_index,
         converted_ratio: load_voice_preserving_ratio(&variant_dir, normalized_variant.as_deref()),
+        voice_clone_outcome: meta.voice_clone_outcome,
+        voice_clone_requested_segments: meta.voice_clone_requested_segments,
+        voice_clone_converted_segments: meta.voice_clone_converted_segments,
+        voice_clone_fallback_segments: meta.voice_clone_fallback_segments,
+        voice_clone_standard_tts_segments: meta.voice_clone_standard_tts_segments,
         final_mix_ready,
         export_pack_ready,
     }))
@@ -578,6 +605,24 @@ fn summarize_candidate(
             ));
         }
     }
+    match spec.voice_clone_outcome {
+        Some(VoiceCloneRunOutcome::ClonePreserved) => {
+            strengths.push("Clone truth confirmed: all clone-intended segments were converted.".to_string());
+        }
+        Some(VoiceCloneRunOutcome::PartialFallback) => {
+            concerns.push(format!(
+                "Clone truth: {} segment(s) converted and {} fell back to plain TTS.",
+                spec.voice_clone_converted_segments, spec.voice_clone_fallback_segments
+            ));
+        }
+        Some(VoiceCloneRunOutcome::FallbackOnly) => {
+            concerns.push("Clone truth: no clone-intended segments converted; output is plain TTS fallback.".to_string());
+        }
+        Some(VoiceCloneRunOutcome::StandardTtsOnly) => {
+            strengths.push("Current run stayed on standard TTS routing only.".to_string());
+        }
+        None => {}
+    }
 
     VoiceBenchmarkCandidate {
         candidate_id: spec.candidate_id,
@@ -599,6 +644,11 @@ fn summarize_candidate(
         output_fail_count,
         similarity_proxy,
         converted_ratio: spec.converted_ratio,
+        voice_clone_outcome: spec.voice_clone_outcome,
+        voice_clone_requested_segments: spec.voice_clone_requested_segments,
+        voice_clone_converted_segments: spec.voice_clone_converted_segments,
+        voice_clone_fallback_segments: spec.voice_clone_fallback_segments,
+        voice_clone_standard_tts_segments: spec.voice_clone_standard_tts_segments,
         final_mix_ready: spec.final_mix_ready,
         export_pack_ready: spec.export_pack_ready,
         score: 0.0,
@@ -700,6 +750,20 @@ fn build_report_summary(candidates: &[VoiceBenchmarkCandidate]) -> Vec<String> {
         best.timing_fit_ratio * 100.0,
         best.output_fail_count
     ));
+    if let Some(outcome) = &best.voice_clone_outcome {
+        summary.push(format!(
+            "Clone truth state is {} (converted {}, fallback {}, standard TTS {}).",
+            match outcome {
+                VoiceCloneRunOutcome::ClonePreserved => "clone preserved",
+                VoiceCloneRunOutcome::PartialFallback => "partial fallback",
+                VoiceCloneRunOutcome::FallbackOnly => "fallback only",
+                VoiceCloneRunOutcome::StandardTtsOnly => "standard TTS only",
+            },
+            best.voice_clone_converted_segments,
+            best.voice_clone_fallback_segments,
+            best.voice_clone_standard_tts_segments
+        ));
+    }
     if candidates.len() > 1 {
         let second = &candidates[1];
         summary.push(format!(
@@ -727,7 +791,7 @@ fn render_markdown(report: &VoiceBenchmarkReport) -> String {
         out.push_str(&format!("- {line}\n"));
     }
     out.push_str(
-        "\n| Rank | Candidate | Score | Coverage | Timing | Output fails | Similarity | Conversion |\n| --- | --- | ---: | ---: | ---: | ---: | ---: | ---: |\n",
+        "\n| Rank | Candidate | Score | Coverage | Timing | Output fails | Similarity | Conversion | Clone truth |\n| --- | --- | ---: | ---: | ---: | ---: | ---: | ---: | --- |\n",
     );
     for (index, candidate) in report.candidates.iter().enumerate() {
         let similarity = candidate
@@ -738,8 +802,21 @@ fn render_markdown(report: &VoiceBenchmarkReport) -> String {
             .converted_ratio
             .map(|value| format!("{:.0}%", value * 100.0))
             .unwrap_or_else(|| "-".to_string());
+        let clone_truth = candidate
+            .voice_clone_outcome
+            .as_ref()
+            .map(|value| match value {
+                VoiceCloneRunOutcome::ClonePreserved => "clone preserved".to_string(),
+                VoiceCloneRunOutcome::PartialFallback => format!(
+                    "partial fallback ({} converted / {} fallback)",
+                    candidate.voice_clone_converted_segments, candidate.voice_clone_fallback_segments
+                ),
+                VoiceCloneRunOutcome::FallbackOnly => "fallback only".to_string(),
+                VoiceCloneRunOutcome::StandardTtsOnly => "standard TTS only".to_string(),
+            })
+            .unwrap_or_else(|| "-".to_string());
         out.push_str(&format!(
-            "| {} | {} | {:.1} | {:.0}% | {:.0}% | {} | {} | {} |\n",
+            "| {} | {} | {:.1} | {:.0}% | {:.0}% | {} | {} | {} | {} |\n",
             index + 1,
             candidate.display_name,
             candidate.score,
@@ -747,7 +824,8 @@ fn render_markdown(report: &VoiceBenchmarkReport) -> String {
             candidate.timing_fit_ratio * 100.0,
             candidate.output_fail_count,
             similarity,
-            conversion
+            conversion,
+            clone_truth
         ));
     }
     out
@@ -1563,6 +1641,11 @@ mod tests {
             output_fail_count: 0,
             similarity_proxy,
             converted_ratio,
+            voice_clone_outcome: None,
+            voice_clone_requested_segments: 0,
+            voice_clone_converted_segments: 0,
+            voice_clone_fallback_segments: 0,
+            voice_clone_standard_tts_segments: 0,
             final_mix_ready: true,
             export_pack_ready: true,
             score: 0.0,

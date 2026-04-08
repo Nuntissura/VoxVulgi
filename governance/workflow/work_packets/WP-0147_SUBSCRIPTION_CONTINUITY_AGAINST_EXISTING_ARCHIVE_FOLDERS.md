@@ -42,3 +42,4 @@ Out of scope:
 ## Status updates
 
 - 2026-03-12: Created from smoke note attached to `ST-019`.
+- 2026-03-25: Narrow implementation follow-on spun out as `WP-0160` after confirming that imported legacy subscriptions already preserve NAS folder overrides, but continuity state is still coupled to the output folder instead of VoxVulgi-managed state.

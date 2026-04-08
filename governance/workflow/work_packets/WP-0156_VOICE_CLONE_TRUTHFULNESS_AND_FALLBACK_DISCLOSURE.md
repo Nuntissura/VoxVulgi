@@ -3,7 +3,7 @@
 ## Metadata
 - ID: WP-0156
 - Owner: Codex
-- Status: BACKLOG
+- Status: IN_PROGRESS
 - Created: 2026-03-24
 - Target milestone: Educational-core voice-clone recovery
 
@@ -46,3 +46,6 @@ Out of scope:
 ## Status updates
 
 - 2026-03-24: Created from inspection findings that the current educational-core path can overstate cloned-voice success when conversion fails.
+- 2026-03-24: Implementation started. First slice is adding explicit clone outcome state to the managed voice-preserving runtime, manifest/report metadata, and current operator-facing benchmark surfaces so fallback no longer reads as generic success.
+- 2026-03-24: First implementation slice landed in code. Managed voice-preserving runs now emit explicit clone-intent and clone-outcome state per segment plus run-level clone outcome/counters in report + manifest metadata, and the benchmark cards now show clone preserved vs partial/plain-TTS fallback. Packet remains open for broader current-item/operator proof and follow-on surfaces.
+- 2026-03-24: Follow-on current-item slice landed in code. `item_artifacts_list_v1` now exposes live clone-truth metadata from TTS manifests, and Localization Studio surfaces that truth directly in the item voice plan, localization run, and outputs cards so operators no longer need Benchmark Lab just to see whether the latest dub was actually cloned.

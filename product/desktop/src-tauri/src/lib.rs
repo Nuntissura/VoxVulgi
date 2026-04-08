@@ -84,7 +84,26 @@ struct ArtifactInfo {
     track_id: Option<String>,
     mux_container: Option<String>,
     tts_backend_id: Option<String>,
+    voice_clone_outcome: Option<jobs::VoiceCloneRunOutcome>,
+    voice_clone_requested_segments: Option<usize>,
+    voice_clone_converted_segments: Option<usize>,
+    voice_clone_fallback_segments: Option<usize>,
+    voice_clone_standard_tts_segments: Option<usize>,
     rerun_kind: Option<ArtifactRerunKind>,
+}
+
+#[derive(Debug, Clone, serde::Deserialize)]
+struct ArtifactVoiceCloneMeta {
+    #[serde(default)]
+    voice_clone_outcome: Option<jobs::VoiceCloneRunOutcome>,
+    #[serde(default)]
+    voice_clone_requested_segments: Option<usize>,
+    #[serde(default)]
+    voice_clone_converted_segments: Option<usize>,
+    #[serde(default)]
+    voice_clone_fallback_segments: Option<usize>,
+    #[serde(default)]
+    voice_clone_standard_tts_segments: Option<usize>,
 }
 
 #[derive(Debug, Clone)]
@@ -1149,6 +1168,11 @@ mod tests {
             track_id: Some("track-en".to_string()),
             mux_container: Some("mp4".to_string()),
             tts_backend_id: Some("openvoice_v2".to_string()),
+            voice_clone_outcome: Some(jobs::VoiceCloneRunOutcome::ClonePreserved),
+            voice_clone_requested_segments: Some(4),
+            voice_clone_converted_segments: Some(4),
+            voice_clone_fallback_segments: Some(0),
+            voice_clone_standard_tts_segments: Some(0),
             rerun_kind: Some(ArtifactRerunKind::MuxDubPreviewV1),
         };
 
@@ -1160,6 +1184,9 @@ mod tests {
         assert_eq!(value["track_id"], "track-en");
         assert_eq!(value["mux_container"], "mp4");
         assert_eq!(value["tts_backend_id"], "openvoice_v2");
+        assert_eq!(value["voice_clone_outcome"], "clone_preserved");
+        assert_eq!(value["voice_clone_requested_segments"], 4);
+        assert_eq!(value["voice_clone_converted_segments"], 4);
     }
 
     #[test]
@@ -2311,6 +2338,17 @@ fn normalize_variant_label(raw: Option<&str>) -> Option<String> {
     }
 }
 
+fn load_artifact_voice_clone_meta(
+    kind: &ArtifactKind,
+    path: &std::path::Path,
+) -> Option<ArtifactVoiceCloneMeta> {
+    if !matches!(kind, ArtifactKind::TtsManifest) || !path.exists() {
+        return None;
+    }
+    let bytes = std::fs::read(path).ok()?;
+    serde_json::from_slice::<ArtifactVoiceCloneMeta>(&bytes).ok()
+}
+
 fn qc_report_identity(file_name: &str) -> (Option<String>, Option<String>) {
     let Some(stem) = file_name.strip_suffix(".json") else {
         return (None, None);
@@ -2351,6 +2389,7 @@ fn item_artifacts_list_v1(
                     tts_backend_id: Option<&str>,
                     rerun_kind: Option<ArtifactRerunKind>,
                     path: std::path::PathBuf| {
+        let voice_clone_meta = load_artifact_voice_clone_meta(&kind, &path);
         out.push(ArtifactInfo {
             id: id.to_string(),
             title: title.to_string(),
@@ -2363,6 +2402,21 @@ fn item_artifacts_list_v1(
             track_id,
             mux_container: mux_container.map(|value| value.to_string()),
             tts_backend_id: tts_backend_id.map(|value| value.to_string()),
+            voice_clone_outcome: voice_clone_meta
+                .as_ref()
+                .and_then(|value| value.voice_clone_outcome.clone()),
+            voice_clone_requested_segments: voice_clone_meta
+                .as_ref()
+                .and_then(|value| value.voice_clone_requested_segments),
+            voice_clone_converted_segments: voice_clone_meta
+                .as_ref()
+                .and_then(|value| value.voice_clone_converted_segments),
+            voice_clone_fallback_segments: voice_clone_meta
+                .as_ref()
+                .and_then(|value| value.voice_clone_fallback_segments),
+            voice_clone_standard_tts_segments: voice_clone_meta
+                .as_ref()
+                .and_then(|value| value.voice_clone_standard_tts_segments),
             rerun_kind,
         });
     };
@@ -3568,6 +3622,23 @@ fn config_batch_on_import_set(
     config::save_batch_on_import_rules(&state.paths, &rules).map_err(|e| e.to_string())?;
     Ok(rules)
 }
+
+#[tauri::command]
+fn config_youtube_auth_get(
+    state: State<'_, AppState>,
+) -> Result<config::YoutubeAuthConfig, String> {
+    config::load_youtube_auth_config(&state.paths).map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+fn config_youtube_auth_set(
+    state: State<'_, AppState>,
+    config_value: config::YoutubeAuthConfig,
+) -> Result<config::YoutubeAuthConfig, String> {
+    config::save_youtube_auth_config(&state.paths, &config_value).map_err(|e| e.to_string())?;
+    Ok(config_value)
+}
+
 
 #[tauri::command]
 fn config_diarization_optional_status(
@@ -5122,6 +5193,22 @@ fn youtube_subscriptions_seed_archive_scan(
 }
 
 #[tauri::command]
+fn youtube_subscriptions_archive_stats(
+    state: State<'_, AppState>,
+) -> Result<std::collections::HashMap<String, usize>, String> {
+    subscriptions::youtube_subscriptions_archive_stats(&state.paths).map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+fn youtube_subscriptions_active_refresh_ids(
+    state: State<'_, AppState>,
+) -> Result<Vec<String>, String> {
+    jobs::active_youtube_subscription_refresh_ids(&state.paths)
+        .map(|s| s.into_iter().collect())
+        .map_err(|e| e.to_string())
+}
+
+#[tauri::command]
 async fn youtube_subscriptions_import_existing_downloads(
     state: State<'_, AppState>,
     scan_dir: String,
@@ -5792,6 +5879,40 @@ fn jobs_retry(
     jobs::retry_job(&state.paths, &job_id).map_err(|e| e.to_string())
 }
 
+#[tauri::command]
+fn admin_save_snapshot(
+    base64_data: String,
+) -> Result<String, String> {
+    let b64 = if let Some(stripped) = base64_data.strip_prefix("data:image/png;base64,") {
+        stripped
+    } else {
+        &base64_data
+    };
+    
+    let decoded = base64::Engine::decode(&base64::engine::general_purpose::STANDARD, b64)
+        .map_err(|e| format!("Failed to decode base64: {}", e))?;
+    
+    // In dev, the cwd is typically 'product/desktop' or 'product/desktop/src-tauri' or project root
+    // To be safe, we will just use absolute path from env::current_dir combined with a fallback, 
+    // or just write it directly to the workspace root if we can find it.
+    let mut snapshots_dir = std::env::current_dir().unwrap_or_default();
+    // try to find governance dir moving up
+    while !snapshots_dir.join("governance").exists() && snapshots_dir.parent().is_some() {
+        snapshots_dir = snapshots_dir.parent().unwrap().to_path_buf();
+    }
+    let target_dir = snapshots_dir.join("governance").join("snapshots");
+    if !target_dir.exists() {
+        std::fs::create_dir_all(&target_dir).map_err(|e| format!("Failed to create snapshot dir: {}", e))?;
+    }
+    
+    let file_name = format!("snapshot_{}.png", now_epoch_ms_i64());
+    let path = target_dir.join(file_name);
+    
+    std::fs::write(&path, decoded).map_err(|e| format!("Failed to write snapshot: {}", e))?;
+    let abs_path = std::fs::canonicalize(&path).unwrap_or(path).to_string_lossy().to_string();
+    Ok(abs_path)
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
@@ -5915,6 +6036,8 @@ pub fn run() {
             downloads_feature_root_use_default,
             config_batch_on_import_get,
             config_batch_on_import_set,
+            config_youtube_auth_get,
+            config_youtube_auth_set,
             config_diarization_optional_clear_token,
             config_diarization_optional_set,
             config_diarization_optional_status,
@@ -5942,6 +6065,8 @@ pub fn run() {
             youtube_subscriptions_import_4kvdp_dir,
             youtube_subscriptions_import_4kvdp_state,
             youtube_subscriptions_seed_archive_scan,
+            youtube_subscriptions_archive_stats,
+            youtube_subscriptions_active_refresh_ids,
             instagram_subscriptions_list,
             instagram_subscriptions_upsert,
             instagram_subscriptions_delete,
@@ -6085,7 +6210,8 @@ pub fn run() {
             window_minimize,
             window_start_drag,
             window_start_resize_drag,
-            window_toggle_maximize
+            window_toggle_maximize,
+            admin_save_snapshot
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

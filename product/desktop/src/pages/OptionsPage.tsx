@@ -1,3 +1,5 @@
+import { useEffect, useState } from "react";
+import { invoke } from "@tauri-apps/api/core";
 import { open } from "@tauri-apps/plugin-dialog";
 import { openPathBestEffort } from "../lib/pathOpener";
 import {
@@ -35,9 +37,39 @@ const FEATURE_ROOTS: Array<{ key: FeatureRootKey; title: string; description: st
 ];
 
 export function OptionsPage() {
-  const { status: downloadDir, loading, error } = useSharedDownloadDirStatus();
+  const { status: downloadDir, loading: dirLoading, error: dirError } = useSharedDownloadDirStatus();
   const effectiveRoot = (downloadDir?.current_dir ?? "").trim();
   const defaultRoot = (downloadDir?.default_dir ?? "").trim();
+
+  const [authJson, setAuthJson] = useState("");
+  const [authBusy, setAuthBusy] = useState(false);
+  const [authMessage, setAuthMessage] = useState("");
+
+  useEffect(() => {
+    invoke<any>("config_youtube_auth_get")
+      .then((cfg) => {
+        setAuthJson(cfg.netscape_cookie_json || "");
+      })
+      .catch((err) => console.error("Failed to load auth config", err));
+  }, []);
+
+  async function saveYoutubeAuth() {
+    setAuthBusy(true);
+    setAuthMessage("");
+    try {
+      if (authJson.trim()) {
+        JSON.parse(authJson); // simple loose validation
+      }
+      await invoke("config_youtube_auth_set", {
+        configValue: { netscape_cookie_json: authJson },
+      });
+      setAuthMessage("Saved global YouTube cookies successfully.");
+    } catch (e) {
+      setAuthMessage(`Error saving cookies: ${String(e)}`);
+    } finally {
+      setAuthBusy(false);
+    }
+  }
 
   async function chooseFolder(title: string) {
     const selected = await open({
@@ -72,6 +104,27 @@ export function OptionsPage() {
       </div>
 
       <div className="card">
+        <h2>Global Authentication & Sessions</h2>
+        <div style={{ color: "#4b5563", marginTop: 6, marginBottom: 12 }}>
+          Store global browser session cookies used by YouTube archiver jobs and subscriptions.
+          Paste a JSON array of cookies exported from your browser (e.g. EditThisCookie or similar).
+        </div>
+        <textarea
+          style={{ width: "100%", height: 160, fontFamily: "monospace", fontSize: 13, marginBottom: 8 }}
+          placeholder='[{"domain": ".youtube.com", "name": "__Secure-YEC", ...}]'
+          value={authJson}
+          onChange={(e) => setAuthJson(e.target.value)}
+          disabled={authBusy}
+        />
+        {authMessage && <div style={{ marginBottom: 8, color: authMessage.includes("Error") ? "red" : "green" }}>{authMessage}</div>}
+        <div className="row">
+          <button type="button" disabled={authBusy} onClick={saveYoutubeAuth}>
+            Save global YouTube cookies
+          </button>
+        </div>
+      </div>
+
+      <div className="card">
         <h2>Base storage root</h2>
         <div className="kv">
           <div className="k">Current root</div>
@@ -84,38 +137,38 @@ export function OptionsPage() {
         <div className="kv">
           <div className="k">Status</div>
           <div className="v">
-            {loading && !downloadDir ? "checking..." : downloadDir?.exists ? "ready" : "missing"}
+            {dirLoading && !downloadDir ? "checking..." : downloadDir?.exists ? "ready" : "missing"}
             {downloadDir ? (downloadDir.using_default ? " (default)" : " (custom)") : ""}
           </div>
         </div>
-        {error ? <div className="error">{error}</div> : null}
-        {!loading && downloadDir && !downloadDir.exists ? (
+        {dirError ? <div className="error">{dirError}</div> : null}
+        {!dirLoading && downloadDir && !downloadDir.exists ? (
           <div className="error">
             The configured base root is unavailable. Choose an existing folder or switch back to
             the default root.
           </div>
         ) : null}
         <div className="row">
-          <button type="button" disabled={loading} onClick={() => chooseBaseRoot().catch(() => undefined)}>
+          <button type="button" disabled={dirLoading} onClick={() => chooseBaseRoot().catch(() => undefined)}>
             Choose folder
           </button>
           <button
             type="button"
-            disabled={loading}
+            disabled={dirLoading}
             onClick={() => useDefaultSharedDownloadDir().catch(() => undefined)}
           >
             Use default folder
           </button>
           <button
             type="button"
-            disabled={loading || !effectiveRoot}
+            disabled={dirLoading || !effectiveRoot}
             onClick={() => openPathBestEffort(effectiveRoot).catch(() => undefined)}
           >
             Open root
           </button>
           <button
             type="button"
-            disabled={loading}
+            disabled={dirLoading}
             onClick={() => refreshSharedDownloadDirStatus().catch(() => undefined)}
           >
             Refresh status
@@ -144,11 +197,11 @@ export function OptionsPage() {
             <div className="kv">
               <div className="k">Status</div>
               <div className="v">
-                {loading && !downloadDir ? "checking..." : status?.exists ? "ready" : "missing"}
+                {dirLoading && !downloadDir ? "checking..." : status?.exists ? "ready" : "missing"}
                 {status?.override_dir ? " (override)" : " (default)"}
               </div>
             </div>
-            {!loading && status && !status.exists ? (
+            {!dirLoading && status && !status.exists ? (
               <div className="error">
                 This feature root is unavailable. Choose an override here or fall back to the base
                 root default.
@@ -157,21 +210,21 @@ export function OptionsPage() {
             <div className="row">
               <button
                 type="button"
-                disabled={loading}
+                disabled={dirLoading}
                 onClick={() => chooseFeatureRoot(feature.key, feature.title).catch(() => undefined)}
               >
                 Choose folder
               </button>
               <button
                 type="button"
-                disabled={loading}
+                disabled={dirLoading}
                 onClick={() => useDefaultFeatureDownloadDir(feature.key).catch(() => undefined)}
               >
                 Use default path
               </button>
               <button
                 type="button"
-                disabled={loading || !status?.current_dir}
+                disabled={dirLoading || !status?.current_dir}
                 onClick={() => {
                   if (!status?.current_dir) return;
                   void openPathBestEffort(status.current_dir).catch(() => undefined);

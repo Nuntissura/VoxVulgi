@@ -37,6 +37,16 @@ export type ArtifactInfo = {
   track_id: string | null;
   mux_container: "mp4" | "mkv" | null;
   tts_backend_id: string | null;
+  voice_clone_outcome:
+    | "clone_preserved"
+    | "partial_fallback"
+    | "fallback_only"
+    | "standard_tts_only"
+    | null;
+  voice_clone_requested_segments: number | null;
+  voice_clone_converted_segments: number | null;
+  voice_clone_fallback_segments: number | null;
+  voice_clone_standard_tts_segments: number | null;
   rerun_kind: ArtifactRerunKind | null;
 };
 

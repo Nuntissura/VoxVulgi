@@ -3,7 +3,7 @@
 ## Metadata
 - ID: WP-0157
 - Owner: Codex
-- Status: BACKLOG
+- Status: IN_PROGRESS
 - Created: 2026-03-24
 - Target milestone: Educational-core voice-clone recovery
 
@@ -49,3 +49,5 @@ Out of scope:
 ## Status updates
 
 - 2026-03-24: Created from the finding that reusable-voice power features now outnumber the basic educational-core path they are supposed to support.
+- 2026-03-24: Implementation started. First slice is a top-level Localization Studio basics lane built on current speaker refs plus voice memory so operators can capture, save, apply, and continue the dub without detouring through templates, cast packs, characters, or benchmark promotion first.
+- 2026-03-24: First basics-lane slice landed in the Localization window. Operators now get a dedicated `Reusable Voice Basics` card with current speaker status, next-step guidance, save/apply memory actions, a direct handoff to continue the localization run, and a visible link back to the full voice-plan power surfaces.
