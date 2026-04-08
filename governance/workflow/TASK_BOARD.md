@@ -181,7 +181,7 @@ This is the single source of truth for work status.
 | WP-0165 | Archive Pages Progressive Disclosure | REVIEW | Codex | Quick/Advanced toggle shared across Video, Instagram, Image archive pages; Quick hides subscriptions, presets, groups, legacy import, Pinterest. |
 | WP-0166 | Terminology and Help Text Cleanup | REVIEW | Codex | Renamed: ASR lang→Source language, dub truth→Clone status, Phase 2 packs→Voice cloning packages, Flush→Clean up, hydration→initialization, refs→voice samples, voice memory→saved voice, reconciliation→import, Tool lifecycle→Component status. |
 | WP-0167 | Diagnostics Dashboard Summary | REVIEW | Codex | 5 clickable status tiles at top: App version, Voice packages, FFmpeg, Storage, Recent failures. Each scrolls to detail section. |
-| WP-0168 | Jobs Page Cleanup | BACKLOG | Codex | Remove dev-only controls from default view, consolidate per-row actions into dropdown, improve labels. |
-| WP-0169 | Options Page Consolidation | BACKLOG | Codex | Replace 4 feature-root cards with single table, add radio-button auth UX, show free disk space. |
-| WP-0170 | Media Library Search and Filters | BACKLOG | Codex | Add search input, source/status/date filters, and sort selector to Media Library (spec gap). |
+| WP-0168 | Jobs Page Cleanup | REVIEW | Codex | Test job behind Developer tools toggle, secondary actions in More… dropdown, tree indentation, paused state explanation. |
+| WP-0169 | Options Page Consolidation | REVIEW | Codex | 4 feature-root cards replaced with single table (Feature/Path/Status/Actions), auth UX improved with help text and clear button. |
+| WP-0170 | Media Library Search and Filters | REVIEW | Codex | Added Source filter (YouTube/Instagram/Local) and Sort by (Date/Title) to existing search+type+view+group controls. |
 | WP-0171 | Headless Agent Bridge | REVIEW | Codex | Localhost HTTP server with /agent/navigate, /agent/snapshot, /agent/state, /agent/health; port file discovery; frontend event listeners; AGENTS.md documented. |

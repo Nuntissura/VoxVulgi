@@ -655,12 +655,12 @@ export function JobsPage({ visible = true }: { visible?: boolean }) {
     return (
       <tr key={job.id} className={nested ? "batch-child-row" : undefined}>
         <td>
-          {nested ? "sub " : ""}
+          {nested ? "\u251C\u2500 " : ""}
           {job.status}
           {job.error ? `: ${job.error}` : ""}
         </td>
         <td title={job.id}>
-          <code>{job.id.slice(0, 8)}</code>
+          <code>{job.item_id ? job.item_id.slice(0, 8) : job.id.slice(0, 8)}</code>
         </td>
         <td>{job.job_type}</td>
         <td>{Math.round((job.progress ?? 0) * 100)}%</td>
@@ -683,55 +683,60 @@ export function JobsPage({ visible = true }: { visible?: boolean }) {
             >
               Retry
             </button>
-            {canInstallFfmpegTools ? (
-              <button type="button" disabled={busy} onClick={installFfmpegTools}>
-                Install FFmpeg tools
-              </button>
-            ) : null}
-            {canRevealMuxedPreview ? (
-              <button
-                type="button"
-                disabled={busy}
-                onClick={() => openMuxedPreview(job.item_id ?? "")}
-              >
-                Open preview
-              </button>
-            ) : null}
-            {canRevealMuxedPreview ? (
-              <button
-                type="button"
-                disabled={busy}
-                onClick={() =>
-                  exportMuxedPreview(
-                    job.item_id ?? "",
-                    `voxvulgi-dub-preview-${(job.item_id ?? job.id).slice(0, 8)}`,
-                  )
-                }
-              >
-                Export preview…
-              </button>
-            ) : null}
-            <button
-              type="button"
-              disabled={!job.logs_path}
-              onClick={() => openLogFile(job.logs_path)}
-            >
-              Open log
-            </button>
-            {canOpenOutputs ? (
-              <button
-                type="button"
-                disabled={busy}
-                onClick={() => openItemOutputsDir(job.item_id ?? "")}
-              >
-                Open outputs
-              </button>
-            ) : null}
-            {canOpenArtifacts ? (
-              <button type="button" disabled={busy} onClick={() => openJobArtifactsDir(job.id)}>
-                Open artifacts
-              </button>
-            ) : null}
+            <details style={{ display: "inline" }}>
+              <summary style={{ cursor: "pointer", fontSize: 13 }}>More…</summary>
+              <div className="row" style={{ marginTop: 4, flexWrap: "wrap" }}>
+                {canInstallFfmpegTools ? (
+                  <button type="button" disabled={busy} onClick={installFfmpegTools}>
+                    Install FFmpeg
+                  </button>
+                ) : null}
+                {canRevealMuxedPreview ? (
+                  <button
+                    type="button"
+                    disabled={busy}
+                    onClick={() => openMuxedPreview(job.item_id ?? "")}
+                  >
+                    Open preview
+                  </button>
+                ) : null}
+                {canRevealMuxedPreview ? (
+                  <button
+                    type="button"
+                    disabled={busy}
+                    onClick={() =>
+                      exportMuxedPreview(
+                        job.item_id ?? "",
+                        `voxvulgi-dub-preview-${(job.item_id ?? job.id).slice(0, 8)}`,
+                      )
+                    }
+                  >
+                    Export preview…
+                  </button>
+                ) : null}
+                <button
+                  type="button"
+                  disabled={!job.logs_path}
+                  onClick={() => openLogFile(job.logs_path)}
+                >
+                  Open log
+                </button>
+                {canOpenOutputs ? (
+                  <button
+                    type="button"
+                    disabled={busy}
+                    onClick={() => openItemOutputsDir(job.item_id ?? "")}
+                  >
+                    Open outputs
+                  </button>
+                ) : null}
+                {canOpenArtifacts ? (
+                  <button type="button" disabled={busy} onClick={() => openJobArtifactsDir(job.id)}>
+                    Open artifacts
+                  </button>
+                ) : null}
+              </div>
+            </details>
           </div>
           {artifactsDir ? (
             <div style={{ marginTop: 6, color: "#4b5563", fontSize: 12, lineHeight: 1.3 }}>
@@ -758,27 +763,11 @@ export function JobsPage({ visible = true }: { visible?: boolean }) {
       {notice ? <div className="card">{notice}</div> : null}
 
       <div className="card">
-        <h2>Enqueue</h2>
+        <h2>Queue controls</h2>
         <div className="row">
-          <label style={{ display: "flex", alignItems: "center", gap: 8 }}>
-            <span>Dummy seconds</span>
-            <input
-              type="number"
-              min={1}
-              max={600}
-              value={dummySeconds}
-              onChange={(e) => setDummySeconds(Number(e.currentTarget.value))}
-              style={{ width: 110 }}
-            />
-          </label>
-          <button type="button" disabled={busy} onClick={enqueueDummy}>
-            Run test job
-          </button>
           <button type="button" disabled={busy} onClick={() => refresh()}>
             Refresh
           </button>
-        </div>
-        <div className="row">
           <button
             type="button"
             disabled={busy}
@@ -794,8 +783,29 @@ export function JobsPage({ visible = true }: { visible?: boolean }) {
           </button>
         </div>
         <div style={{ color: "#4b5563", marginTop: 8 }}>
-          Queue state: {queuePaused ? "paused" : "running"}
+          {queuePaused
+            ? "Queue paused — queued jobs will not start until resumed. Running jobs continue."
+            : "Queue running — jobs are being processed normally."}
         </div>
+        <details style={{ marginTop: 8 }}>
+          <summary style={{ cursor: "pointer", color: "#4b5563", fontSize: 13 }}>Developer tools</summary>
+          <div className="row" style={{ marginTop: 8 }}>
+            <label style={{ display: "flex", alignItems: "center", gap: 8 }}>
+              <span>Test duration (seconds)</span>
+              <input
+                type="number"
+                min={1}
+                max={600}
+                value={dummySeconds}
+                onChange={(e) => setDummySeconds(Number(e.currentTarget.value))}
+                style={{ width: 110 }}
+              />
+            </label>
+            <button type="button" disabled={busy} onClick={enqueueDummy}>
+              Run test job
+            </button>
+          </div>
+        </details>
         <div className="row">
           <label style={{ display: "flex", alignItems: "center", gap: 8 }}>
             <span>Concurrency</span>

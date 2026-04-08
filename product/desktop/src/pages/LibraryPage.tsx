@@ -703,6 +703,17 @@ export function LibraryPage({ onOpenEditor, mode = "all" }: LibraryPageProps) {
     const raw = safeLocalStorageGet("voxvulgi.v1.library.media_view_mode");
     return raw === "cards" ? raw : "list";
   });
+  const [mediaLibrarySourceFilter, setMediaLibrarySourceFilter] = useState<
+    "all" | "youtube" | "instagram" | "local"
+  >(() => {
+    const raw = safeLocalStorageGet("voxvulgi.v1.library.media_source_filter");
+    if (raw === "youtube" || raw === "instagram" || raw === "local") return raw;
+    return "all";
+  });
+  const [mediaLibrarySortBy, setMediaLibrarySortBy] = useState<"date" | "title">(() => {
+    const raw = safeLocalStorageGet("voxvulgi.v1.library.media_sort_by");
+    return raw === "title" ? raw : "date";
+  });
   const { status: downloadDir } = useSharedDownloadDirStatus();
   const parsedUrlCount = useMemo(
     () =>
@@ -791,10 +802,16 @@ export function LibraryPage({ onOpenEditor, mode = "all" }: LibraryPageProps) {
   );
   const filteredMediaItems = useMemo(() => {
     const needle = mediaLibrarySearch.trim().toLowerCase();
-    return items.filter((item) => {
+    const filtered = items.filter((item) => {
       const mediaKind = inferMediaKind(item);
       if (mediaLibraryTypeFilter !== "all" && mediaKind !== mediaLibraryTypeFilter) {
         return false;
+      }
+      if (mediaLibrarySourceFilter !== "all") {
+        const provider = inferProviderLabel(item).toLowerCase();
+        if (mediaLibrarySourceFilter === "youtube" && !provider.includes("youtube")) return false;
+        if (mediaLibrarySourceFilter === "instagram" && !provider.includes("instagram")) return false;
+        if (mediaLibrarySourceFilter === "local" && !provider.includes("local")) return false;
       }
       if (!needle) return true;
       const haystack = [
@@ -809,7 +826,11 @@ export function LibraryPage({ onOpenEditor, mode = "all" }: LibraryPageProps) {
         .toLowerCase();
       return haystack.includes(needle);
     });
-  }, [items, mediaLibrarySearch, mediaLibraryTypeFilter]);
+    if (mediaLibrarySortBy === "title") {
+      filtered.sort((a, b) => (a.title ?? "").localeCompare(b.title ?? ""));
+    }
+    return filtered;
+  }, [items, mediaLibrarySearch, mediaLibraryTypeFilter, mediaLibrarySourceFilter, mediaLibrarySortBy]);
   const mediaLibraryRows = useMemo(
     () =>
       filteredMediaItems.map((item) => ({
@@ -1254,6 +1275,14 @@ export function LibraryPage({ onOpenEditor, mode = "all" }: LibraryPageProps) {
   useEffect(() => {
     safeLocalStorageSet("voxvulgi.v1.library.media_type_filter", mediaLibraryTypeFilter);
   }, [mediaLibraryTypeFilter]);
+
+  useEffect(() => {
+    safeLocalStorageSet("voxvulgi.v1.library.media_source_filter", mediaLibrarySourceFilter);
+  }, [mediaLibrarySourceFilter]);
+
+  useEffect(() => {
+    safeLocalStorageSet("voxvulgi.v1.library.media_sort_by", mediaLibrarySortBy);
+  }, [mediaLibrarySortBy]);
 
   useEffect(() => {
     safeLocalStorageSet("voxvulgi.v1.library.media_group_mode", mediaLibraryGroupMode);
@@ -3907,6 +3936,36 @@ export function LibraryPage({ onOpenEditor, mode = "all" }: LibraryPageProps) {
                 <option value="image">Image</option>
                 <option value="audio">Audio</option>
                 <option value="other">Other</option>
+              </select>
+            </label>
+            <label style={{ display: "flex", alignItems: "center", gap: 8 }}>
+              <span>Source</span>
+              <select
+                value={mediaLibrarySourceFilter}
+                disabled={busy}
+                onChange={(e) =>
+                  setMediaLibrarySourceFilter(
+                    e.currentTarget.value as typeof mediaLibrarySourceFilter,
+                  )
+                }
+              >
+                <option value="all">All</option>
+                <option value="youtube">YouTube</option>
+                <option value="instagram">Instagram</option>
+                <option value="local">Local import</option>
+              </select>
+            </label>
+            <label style={{ display: "flex", alignItems: "center", gap: 8 }}>
+              <span>Sort</span>
+              <select
+                value={mediaLibrarySortBy}
+                disabled={busy}
+                onChange={(e) =>
+                  setMediaLibrarySortBy(e.currentTarget.value as typeof mediaLibrarySortBy)
+                }
+              >
+                <option value="date">Date added</option>
+                <option value="title">Title</option>
               </select>
             </label>
             <label style={{ display: "flex", alignItems: "center", gap: 8 }}>

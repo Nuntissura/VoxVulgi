@@ -106,12 +106,17 @@ export function OptionsPage() {
       <div className="card">
         <h2>Global Authentication & Sessions</h2>
         <div style={{ color: "#4b5563", marginTop: 6, marginBottom: 12 }}>
-          Store global browser session cookies used by YouTube archiver jobs and subscriptions.
-          Paste a JSON array of cookies exported from your browser (e.g. EditThisCookie or similar).
+          Store browser session cookies used by YouTube archiver jobs and subscriptions.
+          When no per-job or per-subscription cookie is set, the global cookies are used as fallback.
+        </div>
+        <div style={{ marginBottom: 8 }}>
+          <strong>How to export cookies:</strong> Install a browser extension like
+          "EditThisCookie" or "Get cookies.txt", visit youtube.com while logged in,
+          export cookies as JSON, then paste below.
         </div>
         <textarea
-          style={{ width: "100%", height: 160, fontFamily: "monospace", fontSize: 13, marginBottom: 8 }}
-          placeholder='[{"domain": ".youtube.com", "name": "__Secure-YEC", ...}]'
+          style={{ width: "100%", height: 120, fontFamily: "monospace", fontSize: 13, marginBottom: 8 }}
+          placeholder='Paste exported cookie JSON here, e.g.:&#10;[{"domain": ".youtube.com", "name": "__Secure-YEC", "value": "...", ...}]'
           value={authJson}
           onChange={(e) => setAuthJson(e.target.value)}
           disabled={authBusy}
@@ -120,6 +125,9 @@ export function OptionsPage() {
         <div className="row">
           <button type="button" disabled={authBusy} onClick={saveYoutubeAuth}>
             Save global YouTube cookies
+          </button>
+          <button type="button" disabled={authBusy} onClick={() => { setAuthJson(""); }}>
+            Clear
           </button>
         </div>
       </div>
@@ -176,66 +184,76 @@ export function OptionsPage() {
         </div>
       </div>
 
-      {FEATURE_ROOTS.map((feature) => {
-        const status = featureRootStatus(downloadDir, feature.key);
-        return (
-          <div className="card" key={feature.key}>
-            <h2>{feature.title}</h2>
-            <div style={{ color: "#4b5563", marginTop: 6 }}>{feature.description}</div>
-            <div className="kv">
-              <div className="k">Effective path</div>
-              <div className="v">{status?.current_dir || "-"}</div>
-            </div>
-            <div className="kv">
-              <div className="k">Default path</div>
-              <div className="v">{status?.default_dir || "-"}</div>
-            </div>
-            <div className="kv">
-              <div className="k">Override</div>
-              <div className="v">{status?.override_dir || "(using base root default)"}</div>
-            </div>
-            <div className="kv">
-              <div className="k">Status</div>
-              <div className="v">
-                {dirLoading && !downloadDir ? "checking..." : status?.exists ? "ready" : "missing"}
-                {status?.override_dir ? " (override)" : " (default)"}
-              </div>
-            </div>
-            {!dirLoading && status && !status.exists ? (
-              <div className="error">
-                This feature root is unavailable. Choose an override here or fall back to the base
-                root default.
-              </div>
-            ) : null}
-            <div className="row">
-              <button
-                type="button"
-                disabled={dirLoading}
-                onClick={() => chooseFeatureRoot(feature.key, feature.title).catch(() => undefined)}
-              >
-                Choose folder
-              </button>
-              <button
-                type="button"
-                disabled={dirLoading}
-                onClick={() => useDefaultFeatureDownloadDir(feature.key).catch(() => undefined)}
-              >
-                Use default path
-              </button>
-              <button
-                type="button"
-                disabled={dirLoading || !status?.current_dir}
-                onClick={() => {
-                  if (!status?.current_dir) return;
-                  void openPathBestEffort(status.current_dir).catch(() => undefined);
-                }}
-              >
-                Open folder
-              </button>
-            </div>
-          </div>
-        );
-      })}
+      <div className="card">
+        <h2>Feature storage roots</h2>
+        <div style={{ color: "#4b5563", marginBottom: 8 }}>
+          Each feature can use the base root or its own custom folder. Custom paths override the base root.
+        </div>
+        <div className="table-wrap">
+          <table>
+            <thead>
+              <tr>
+                <th>Feature</th>
+                <th>Effective path</th>
+                <th>Status</th>
+                <th>Actions</th>
+              </tr>
+            </thead>
+            <tbody>
+              {FEATURE_ROOTS.map((feature) => {
+                const status = featureRootStatus(downloadDir, feature.key);
+                return (
+                  <tr key={feature.key}>
+                    <td>
+                      <div style={{ fontWeight: 600 }}>{feature.title}</div>
+                      <div style={{ fontSize: 12, color: "#4b5563" }}>{feature.description}</div>
+                      {status?.override_dir ? (
+                        <div style={{ fontSize: 11, color: "#92400e" }}>Custom override active</div>
+                      ) : null}
+                    </td>
+                    <td style={{ maxWidth: 360, wordBreak: "break-word", fontSize: 13 }}>
+                      {status?.current_dir || "-"}
+                    </td>
+                    <td>
+                      <span style={{ color: status?.exists ? "#166534" : "#dc2626", fontWeight: 600 }}>
+                        {dirLoading && !downloadDir ? "..." : status?.exists ? "Ready" : "Missing"}
+                      </span>
+                    </td>
+                    <td>
+                      <div className="row" style={{ marginTop: 0, flexWrap: "nowrap" }}>
+                        <button
+                          type="button"
+                          disabled={dirLoading}
+                          onClick={() => chooseFeatureRoot(feature.key, feature.title).catch(() => undefined)}
+                        >
+                          Change
+                        </button>
+                        <button
+                          type="button"
+                          disabled={dirLoading}
+                          onClick={() => useDefaultFeatureDownloadDir(feature.key).catch(() => undefined)}
+                        >
+                          Reset
+                        </button>
+                        <button
+                          type="button"
+                          disabled={dirLoading || !status?.current_dir}
+                          onClick={() => {
+                            if (!status?.current_dir) return;
+                            void openPathBestEffort(status.current_dir).catch(() => undefined);
+                          }}
+                        >
+                          Open
+                        </button>
+                      </div>
+                    </td>
+                  </tr>
+                );
+              })}
+            </tbody>
+          </table>
+        </div>
+      </div>
     </section>
   );
 }
