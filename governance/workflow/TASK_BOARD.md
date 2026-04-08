@@ -196,8 +196,8 @@ This is the single source of truth for work status.
 | WP-0180 | Bilingual Subtitle View | DONE | Codex | Already implemented: bilingual checkbox + auto-pair/manual track selection + paired text column in segment table. |
 | WP-0181 | Pipeline Presets | REVIEW | Codex | 4 built-in presets (Japanese Anime, Korean Variety, Quick Subtitles, Full Dub); one-click configures ASR lang + batch-on-import rules. |
 | WP-0182 | Per-Segment Audio Preview | REVIEW | Codex | Play/stop button on each segment row; seeks mix dub WAV to segment start, auto-stops at end; visual indicator on playing segment. |
-| WP-0183 | CosyVoice 2 Backend Integration | BACKLOG | Codex | Single-pass zero-shot voice cloning backend (Apache 2.0). Native JA/KO/EN cross-lingual. Replaces two-stage Kokoro+OpenVoice pipeline. |
-| WP-0184 | Fish Speech 1.5 Backend Integration | BACKLOG | Codex | Highest benchmark zero-shot TTS (80+ languages). CC-BY-NC-SA weights for evaluation. 4B params. |
+| WP-0183 | CosyVoice 2 Backend Integration | REVIEW | Codex | Repo cloned, render wrapper written (cross_lingual inference), adapter template registered. Needs model weights download + PyTorch deps. |
+| WP-0184 | Fish Speech 1.5 Backend Integration | REVIEW | Codex | Repo cloned, render wrapper written (API server client), adapter template registered. Needs model weights + API server running. |
 | WP-0185 | Clone Outcome Notification | REVIEW | Codex | Auto-notification when clone outcome changes: success=notice, fallback=error with segment counts and guidance. |
 | WP-0186 | Per-Segment Clone Fallback Breakdown | REVIEW | Codex | Tauri command loads manifest per-segment data; colored dot per segment (green=cloned, red=fallback, grey=standard); tooltip with error detail. |
 | WP-0187 | Clone Pre-Flight Check | REVIEW | Codex | Validates speaker profiles before voice-preserving job; warns about missing voice samples with confirm dialog. |
