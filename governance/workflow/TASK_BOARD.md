@@ -185,3 +185,4 @@ This is the single source of truth for work status.
 | WP-0169 | Options Page Consolidation | REVIEW | Codex | 4 feature-root cards replaced with single table (Feature/Path/Status/Actions), auth UX improved with help text and clear button. |
 | WP-0170 | Media Library Search and Filters | REVIEW | Codex | Added Source filter (YouTube/Instagram/Local) and Sort by (Date/Title) to existing search+type+view+group controls. |
 | WP-0171 | Headless Agent Bridge | REVIEW | Codex | Localhost HTTP server with /agent/navigate, /agent/snapshot, /agent/state, /agent/health; port file discovery; frontend event listeners; AGENTS.md documented. |
+| WP-0172 | Localization Studio Built-in Manual | REVIEW | Codex | In-context (?) help on 18 section headers with What/When/Steps/Concepts; "Show all help" toggle for learning mode. |

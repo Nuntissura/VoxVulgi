@@ -982,6 +982,189 @@ function isEnglishLocalizationTrack(track: SubtitleTrackRow | null): boolean {
   return Boolean(track && track.kind === "translated" && track.lang === "en");
 }
 
+// ---------------------------------------------------------------------------
+// Built-in Manual — in-context help for each Localization Studio section (WP-0172)
+// ---------------------------------------------------------------------------
+
+const SECTION_HELP: Record<string, { what: string; when: string; steps: string[]; concepts?: Record<string, string> }> = {
+  "loc-library": {
+    what: "Browse all outputs for the current item — source media, working files, and exported deliverables in one place.",
+    when: "After any job completes to find your results, or to open/reveal exported files.",
+    steps: ["Select an item in Localization Studio", "Check the output table rows for each stage", "Click Open/Reveal to access files on disk"],
+  },
+  "loc-workflow": {
+    what: "Shows which workflow stages are ready and which need attention. Jump to any section from here.",
+    when: "Before starting a localization run to confirm all prerequisites are met.",
+    steps: ["Review each stage for Ready or Needs attention", "Click a section button to jump directly to it", "Click Refresh readiness to update the status"],
+    concepts: { "Ready": "This stage has everything it needs to run.", "Needs attention": "Missing input — click through to fix it." },
+  },
+  "loc-run": {
+    what: "Start or continue the localization pipeline. It advances through stages automatically and pauses at checkpoints that need your input.",
+    when: "When the Workflow Map shows enough stages are ready. The run will queue ASR, translation, diarization, dubbing, mixing, and export as needed.",
+    steps: ["Review readiness in the Workflow Map above", "Click Start / continue localization run", "Watch the stage table update as jobs complete", "When it pauses for missing voice samples, go to Reusable Voice Basics or the Voice Plan section"],
+    concepts: { "Clone status": "Whether the dub used actual voice cloning or fell back to standard text-to-speech.", "Export pack": "A zip containing all outputs (subtitles, audio stems, dubbed video)." },
+  },
+  "loc-voice-basics": {
+    what: "The simple path to voice cloning: choose a speaker, capture voice samples, save them for reuse, and apply them to other items.",
+    when: "When you want to clone a speaker's voice for dubbing. Start here before exploring advanced voice tools.",
+    steps: ["Select a speaker from the dropdown", "Generate or choose voice samples (short audio clips of the speaker)", "Save as a reusable voice for later items", "Apply a saved voice when working on a different item"],
+    concepts: { "Voice samples": "Short audio clips of a speaker used as reference for voice cloning.", "Saved voice": "A reusable voice profile stored for future items.", "Speaker": "A labeled voice in the media (Speaker 1, Speaker 2, etc. from diarization)." },
+  },
+  "loc-advanced": {
+    what: "Index of all advanced localization tools. Most operators only need the sections above — these are for power users.",
+    when: "When you need fine-grained control over backends, benchmarks, cast packs, or A/B comparisons.",
+    steps: ["Scan the list to find the tool you need", "Click the button to jump to that section"],
+  },
+  "loc-first-dub": {
+    what: "Step-by-step guide for your first dubbed video from Japanese or Korean source material.",
+    when: "If this is your first time using Localization Studio and you want a quick walkthrough.",
+    steps: ["Follow the numbered steps from top to bottom", "Each step links to the relevant section"],
+  },
+  "loc-outputs": {
+    what: "Export your finished work — subtitles, dubbed audio, and muxed video.",
+    when: "After a successful localization run when you want to save deliverables to a specific folder.",
+    steps: ["Choose export folder (app default or custom)", "Check the boxes for what to export (SRT, VTT, video)", "Choose video container (MP4 recommended)", "Click Export selected"],
+    concepts: { "Mux": "Combining the dubbed audio track with the original video into a single file.", "Stems": "Separated audio layers — speech only, background only, or final mix." },
+  },
+  "loc-track": {
+    what: "Core job controls for every stage: ASR (speech recognition), translation, speaker labeling, dubbing, audio separation, mixing, and video muxing.",
+    when: "When you need to run individual stages manually instead of using the automatic localization run.",
+    steps: ["Select the track to work with from the dropdown", "Run jobs in order: ASR first, then Translate, then Diarize", "After dubbing: Separate stems, Mix dub, Mux preview", "Adjust mix settings (ducking, loudness) before mixing"],
+    concepts: { "ASR": "Automatic Speech Recognition — converts audio to text subtitles.", "Diarization": "Identifying which speaker is talking in each segment.", "Ducking": "Lowering the background volume when dubbed speech plays.", "Source language": "The language spoken in the original media (Japanese or Korean)." },
+  },
+  "loc-voice-plan": {
+    what: "Map each speaker to voice samples and choose whether they use voice cloning or standard text-to-speech.",
+    when: "After diarization labels speakers. The localization run pauses here if voice samples are missing.",
+    steps: ["Review each speaker box — green means samples are ready", "Generate voice samples from the source media, or choose your own audio clips", "Optionally apply cleanup (denoise, de-reverb) to samples", "Continue the localization run once all speakers have samples or are set to standard TTS"],
+    concepts: { "Voice samples": "Audio clips of the speaker used as reference for cloning.", "Standard TTS": "Computer-generated voice without cloning — used when no samples are available.", "Cleanup": "Removing noise, echo, or music from voice sample clips." },
+  },
+  "loc-templates": {
+    what: "Save and reuse speaker voice setups across multiple items. Useful for recurring shows with the same hosts.",
+    when: "After setting up voice samples for a speaker you'll encounter in future episodes.",
+    steps: ["Set up a speaker's voice samples in the current item", "Enter a template name and click Save", "On a future item, select the template and apply it"],
+  },
+  "loc-cast-packs": {
+    what: "Group multiple speaker roles into a cast pack for recurring shows (host, narrator, guest, etc.).",
+    when: "When a show has the same cast across many episodes and you want one-click setup.",
+    steps: ["Create a cast pack with a name", "Add roles (host, narrator, contestant, etc.)", "Apply the cast pack to new items to set up all speakers at once"],
+  },
+  "loc-backends": {
+    what: "Choose which voice synthesis engine to use for dubbing. The default (OpenVoice V2 + Kokoro) works well — change this only if benchmarks suggest a better option.",
+    when: "Only when benchmark results show a different backend performs better for your content.",
+    steps: ["Select a goal (balanced, identity, expressive, timing, speed)", "Review the recommended backend", "Click Promote to plan to apply the recommendation"],
+  },
+  "loc-characters": {
+    what: "Save named character voices (narrator, teacher, etc.) that can be reused across any item — separate from show-specific templates.",
+    when: "For generic recurring voices that aren't tied to a specific show or cast.",
+    steps: ["Create a character profile with a name", "Add voice samples from any item", "Apply the character voice to future items"],
+  },
+  "loc-benchmark": {
+    what: "Compare voice cloning quality across different settings. Generates a ranked report with scores.",
+    when: "When deciding which backend or voice samples produce the best results for your content.",
+    steps: ["Click Generate report to analyze current outputs", "Review the ranked candidates — higher score is better", "Promote the winner to your voice plan or template"],
+    concepts: { "Coverage": "How many segments were successfully dubbed.", "Timing fit": "How well the dubbed speech fits within the original timing.", "Clone status": "Whether actual voice cloning was used vs. standard TTS fallback." },
+  },
+  "loc-batch": {
+    what: "Run the dubbing pipeline across multiple items at once instead of one at a time.",
+    when: "When you have a series or playlist of videos that all need the same dubbing treatment.",
+    steps: ["Select items from the list (or click Select all)", "Optionally enable QC reports and export packs", "Click Queue batch dubbing"],
+  },
+  "loc-ab": {
+    what: "Compare two different voice settings side-by-side (Variant A vs B) to pick the best one.",
+    when: "When you want to hear how different voice samples or settings sound before committing.",
+    steps: ["Select a speaker", "Configure Variant A and Variant B with different settings", "Click Queue A/B preview", "Listen to both and click Promote on the winner"],
+  },
+  "loc-qc": {
+    what: "Quality check report that flags potential issues: timing problems, audio anomalies, missing segments.",
+    when: "After dubbing to verify the output quality before exporting.",
+    steps: ["Click Generate QC report", "Review the issues table", "Fix flagged problems in the relevant sections"],
+    concepts: { "CPS": "Characters per second — too high means text is too fast to read.", "Silence": "Unexpectedly silent segments that might indicate a rendering failure." },
+  },
+  "loc-artifacts": {
+    what: "All derived files (audio stems, manifests, reports, exports) in one table. Play, open, or rerun any artifact.",
+    when: "To find specific working files, replay audio, or re-run a failed stage.",
+    steps: ["Browse the artifacts table", "Click Play to preview audio", "Click Open or Reveal to find files on disk", "Click Rerun to re-execute a specific job"],
+  },
+};
+
+function SectionHelp({ sectionId }: { sectionId: string }) {
+  const help = SECTION_HELP[sectionId];
+  const [open, setOpen] = useState(() => {
+    return safeLocalStorageGet("voxvulgi.v1.loc.help_all") === "1";
+  });
+  if (!help) return null;
+  return (
+    <>
+      <button
+        type="button"
+        onClick={() => setOpen(!open)}
+        title={open ? "Hide help" : "Show help"}
+        style={{
+          display: "inline-flex",
+          alignItems: "center",
+          justifyContent: "center",
+          width: 22,
+          height: 22,
+          borderRadius: "50%",
+          border: "1px solid rgba(100,120,140,0.4)",
+          background: open ? "rgba(59,81,105,0.15)" : "transparent",
+          color: "#4b5563",
+          fontSize: 13,
+          fontWeight: 700,
+          cursor: "pointer",
+          marginLeft: 8,
+          verticalAlign: "middle",
+          flexShrink: 0,
+        }}
+      >
+        ?
+      </button>
+      {open ? (
+        <div
+          style={{
+            marginTop: 8,
+            padding: "10px 14px",
+            borderRadius: 8,
+            background: "rgba(59,81,105,0.08)",
+            border: "1px solid rgba(100,120,140,0.2)",
+            fontSize: 13,
+            lineHeight: 1.5,
+          }}
+        >
+          <div style={{ marginBottom: 6 }}>
+            <strong>What this does:</strong> {help.what}
+          </div>
+          <div style={{ marginBottom: 6 }}>
+            <strong>When to use it:</strong> {help.when}
+          </div>
+          {help.steps.length > 0 ? (
+            <div style={{ marginBottom: help.concepts ? 6 : 0 }}>
+              <strong>Steps:</strong>
+              <ol style={{ margin: "4px 0 0 0", paddingLeft: 20 }}>
+                {help.steps.map((step, i) => (
+                  <li key={i}>{step}</li>
+                ))}
+              </ol>
+            </div>
+          ) : null}
+          {help.concepts ? (
+            <div>
+              <strong>Key terms:</strong>
+              <ul style={{ margin: "4px 0 0 0", paddingLeft: 20 }}>
+                {Object.entries(help.concepts).map(([term, def]) => (
+                  <li key={term}>
+                    <strong>{term}</strong> — {def}
+                  </li>
+                ))}
+              </ul>
+            </div>
+          ) : null}
+        </div>
+      ) : null}
+    </>
+  );
+}
+
 export function SubtitleEditorPage({
   itemId,
   visible = true,
@@ -5693,7 +5876,7 @@ export function SubtitleEditorPage({
       </div>
 
       <div className="card">
-        <h2>Localization Library</h2>
+        <h2>Localization Library <SectionHelp sectionId="loc-library" /></h2>
         <div style={{ color: "#4b5563" }}>
           One place for the source video, current working artifacts, and predictable deliverable
           paths. Working files stay in app-data; deliverables export to the resolved localization
@@ -5790,7 +5973,20 @@ export function SubtitleEditorPage({
       </div>
 
       <div className="card">
-        <h2>Workflow Map</h2>
+        <h2 style={{ display: "flex", alignItems: "center", gap: 8 }}>
+          Workflow Map <SectionHelp sectionId="loc-workflow" />
+          <label style={{ fontSize: 12, fontWeight: 400, display: "flex", alignItems: "center", gap: 4, marginLeft: "auto" }}>
+            <input
+              type="checkbox"
+              checked={safeLocalStorageGet("voxvulgi.v1.loc.help_all") === "1"}
+              onChange={(e) => {
+                safeLocalStorageSet("voxvulgi.v1.loc.help_all", e.target.checked ? "1" : "0");
+                window.location.reload();
+              }}
+            />
+            Show all help
+          </label>
+        </h2>
         <div style={{ color: "#4b5563" }}>
           Localization Studio expects an English translated track for dubbing, benchmarking, and
           backend comparison. The shipped run contract is staged: ASR, Translate -&gt; EN, speaker
@@ -5895,7 +6091,7 @@ export function SubtitleEditorPage({
       </div>
 
       <div className="card" id="loc-run">
-        <h2>Localization Run</h2>
+        <h2>Localization Run <SectionHelp sectionId="loc-run" /></h2>
         <div style={{ color: "#4b5563" }}>
           Configure the current item first, then start or continue the full localization run from
           this card. VoxVulgi decides the next missing stage automatically: ASR, Translate -&gt; EN,
@@ -5992,7 +6188,7 @@ export function SubtitleEditorPage({
       </div>
 
       <div className="card" id="loc-voice-basics">
-        <h2>Reusable Voice Basics</h2>
+        <h2>Reusable Voice Basics <SectionHelp sectionId="loc-voice-basics" /></h2>
         <div style={{ color: "#4b5563" }}>
           Capture one speaker, save it as a reusable voice, apply it to later items, then
           continue the translated dub. This is the first-run lane for the educational voice-clone
@@ -6284,7 +6480,7 @@ export function SubtitleEditorPage({
       </div>
 
       <div className="card" id="loc-advanced">
-        <h2>Advanced Tools</h2>
+        <h2>Advanced Tools <SectionHelp sectionId="loc-advanced" /></h2>
         <div style={{ color: "#4b5563" }}>
           These are the advanced localization surfaces that were easy to miss in the long page
           flow. Use this index to jump directly to backend strategy, benchmarking, batch dubbing,
@@ -6348,7 +6544,7 @@ export function SubtitleEditorPage({
       </div>
 
       <div className="card">
-        <h2>First Dub Guide</h2>
+        <h2>First Dub Guide <SectionHelp sectionId="loc-first-dub" /></h2>
         <div style={{ color: "#4b5563" }}>
           Recommended order for a first Japanese/Korean to English dubbed preview:
         </div>
@@ -6370,7 +6566,7 @@ export function SubtitleEditorPage({
       </div>
 
       <div className="card">
-        <h2>Outputs</h2>
+        <h2>Outputs <SectionHelp sectionId="loc-outputs" /></h2>
         <div style={{ color: "#4b5563" }}>
           Working files stay in app-data for reproducible jobs. User-facing deliverables export to a
           predictable folder under the main download root by default.
@@ -6640,7 +6836,7 @@ export function SubtitleEditorPage({
       </div>
 
       <div className="card" id="loc-track">
-        <h2>Track</h2>
+        <h2>Track <SectionHelp sectionId="loc-track" /></h2>
         <div className="row">
           <select
             value={trackId ?? ""}
@@ -7033,7 +7229,7 @@ export function SubtitleEditorPage({
 
             <div id="loc-voice-plan" style={{ marginTop: 16 }}>
               <div className="row" style={{ alignItems: "center", gap: 10, flexWrap: "wrap" }}>
-                <div style={{ fontSize: 12, opacity: 0.85 }}>Voice profiles (voice-preserving)</div>
+                <div style={{ fontSize: 12, opacity: 0.85 }}>Voice profiles (voice-preserving) <SectionHelp sectionId="loc-voice-plan" /></div>
                 <div style={{ fontSize: 12, opacity: 0.6 }}>
                   Pick a short reference clip per speaker, or generate a first-pass candidate from
                   the current source media after diarization.
@@ -7545,7 +7741,7 @@ export function SubtitleEditorPage({
 
             <div style={{ marginTop: 16 }}>
               <div className="row" style={{ alignItems: "center", gap: 10, flexWrap: "wrap" }}>
-                <div style={{ fontSize: 12, opacity: 0.85 }}>Reusable voice templates</div>
+                <div style={{ fontSize: 12, opacity: 0.85 }}>Reusable voice templates <SectionHelp sectionId="loc-templates" /></div>
                 <button
                   type="button"
                   disabled={voiceTemplateActionBusy || speakerSettingsBusy || !speakersInTrack.length}
@@ -8340,7 +8536,7 @@ export function SubtitleEditorPage({
 
             <div style={{ marginTop: 16 }}>
               <div className="row" style={{ alignItems: "center", gap: 10, flexWrap: "wrap" }}>
-                <div style={{ fontSize: 12, opacity: 0.85 }}>Character voice library</div>
+                <div style={{ fontSize: 12, opacity: 0.85 }}>Character voice library <SectionHelp sectionId="loc-characters" /></div>
                 <button
                   type="button"
                   disabled={voiceLibraryBusy || voiceLibraryActionBusy}
@@ -9008,7 +9204,7 @@ export function SubtitleEditorPage({
 
             <div id="loc-benchmark" style={{ marginTop: 16 }}>
               <div className="row" style={{ alignItems: "center", gap: 10, flexWrap: "wrap" }}>
-                <div style={{ fontSize: 12, opacity: 0.85 }}>Voice benchmark lab</div>
+                <div style={{ fontSize: 12, opacity: 0.85 }}>Voice benchmark lab <SectionHelp sectionId="loc-benchmark" /></div>
                 <button
                   type="button"
                   disabled={busy || voiceBenchmarkBusy || !trackId}
@@ -9379,7 +9575,7 @@ export function SubtitleEditorPage({
 
             <div id="loc-batch" style={{ marginTop: 16 }}>
               <div className="row" style={{ alignItems: "center", gap: 10, flexWrap: "wrap" }}>
-                <div style={{ fontSize: 12, opacity: 0.85 }}>Batch dubbing</div>
+                <div style={{ fontSize: 12, opacity: 0.85 }}>Batch dubbing <SectionHelp sectionId="loc-batch" /></div>
                 <button
                   type="button"
                   disabled={libraryItemsBusy || batchQueueBusy}
@@ -9475,7 +9671,7 @@ export function SubtitleEditorPage({
 
             <div id="loc-ab" style={{ marginTop: 16 }}>
               <div className="row" style={{ alignItems: "center", gap: 10, flexWrap: "wrap" }}>
-                <div style={{ fontSize: 12, opacity: 0.85 }}>A/B voice preview</div>
+                <div style={{ fontSize: 12, opacity: 0.85 }}>A/B voice preview <SectionHelp sectionId="loc-ab" /></div>
                 <div style={{ fontSize: 12, opacity: 0.6 }}>
                   Queue two alternate clone variants for one speaker, then compare them in Artifacts.
                 </div>
@@ -9628,7 +9824,7 @@ export function SubtitleEditorPage({
       </div>
 
       <div className="card" id="loc-qc">
-        <h2>QC report</h2>
+        <h2>QC report <SectionHelp sectionId="loc-qc" /></h2>
         <div style={{ color: "#4b5563" }}>
           Flags subtitle and voice issues: CPS, long lines, overlaps, timing mismatches, silent clips,
           noisy references, clipping, and weak clone similarity.
@@ -9813,7 +10009,7 @@ export function SubtitleEditorPage({
       </div>
 
       <div className="card" id="loc-artifacts">
-        <h2>Artifacts</h2>
+        <h2>Artifacts <SectionHelp sectionId="loc-artifacts" /></h2>
         <div style={{ color: "#4b5563" }}>
           Derived outputs for this item (stems, manifests, previews, QC, exports).
         </div>
