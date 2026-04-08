@@ -1186,7 +1186,42 @@ export function SubtitleEditorPage({
   const [item, setItem] = useState<LibraryItem | null>(null);
   const [tracks, setTracks] = useState<SubtitleTrackRow[]>([]);
   const [trackId, setTrackId] = useState<string | null>(null);
-  const [doc, setDoc] = useState<SubtitleDocument | null>(null);
+  const [doc, setDocRaw] = useState<SubtitleDocument | null>(null);
+  const undoStack = useRef<SubtitleDocument[]>([]);
+  const redoStack = useRef<SubtitleDocument[]>([]);
+  const skipUndoCapture = useRef(false);
+  const setDoc: typeof setDocRaw = useCallback((updater) => {
+    setDocRaw((prev) => {
+      const next = typeof updater === "function" ? updater(prev) : updater;
+      if (prev && next && prev !== next && !skipUndoCapture.current) {
+        undoStack.current = undoStack.current.slice(-49).concat(prev);
+        redoStack.current = [];
+      }
+      return next;
+    });
+  }, []);
+  function undoDoc() {
+    const prev = undoStack.current.pop();
+    if (!prev) return;
+    setDocRaw((current) => {
+      if (current) redoStack.current.push(current);
+      return prev;
+    });
+    setDirty(true);
+  }
+  function redoDoc() {
+    const next = redoStack.current.pop();
+    if (!next) return;
+    setDocRaw((current) => {
+      if (current) undoStack.current.push(current);
+      return next;
+    });
+    setDirty(true);
+  }
+  function resetUndoStacks() {
+    undoStack.current = [];
+    redoStack.current = [];
+  }
   const [dirty, setDirty] = useState(false);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -1803,7 +1838,10 @@ export function SubtitleEditorPage({
       const nextDoc = await invoke<SubtitleDocument>("subtitles_load_track", {
         trackId: nextTrackId,
       });
+      skipUndoCapture.current = true;
       setDoc(normalizeDoc(nextDoc));
+      skipUndoCapture.current = false;
+      resetUndoStacks();
       setDirty(false);
       setTrackId(nextTrackId);
     },
@@ -3304,15 +3342,27 @@ export function SubtitleEditorPage({
     target?.scrollIntoView({ behavior: "smooth", block: "start" });
   }
 
-  // Keyboard shortcuts for Localization Studio (WP-0173)
+  // Keyboard shortcuts for Localization Studio (WP-0173 + WP-0175)
   useEffect(() => {
     if (!visible) return;
     function handleKeyDown(e: KeyboardEvent) {
-      // Skip if user is typing in an input/textarea/select
-      const tag = (e.target as HTMLElement)?.tagName;
-      if (tag === "INPUT" || tag === "TEXTAREA" || tag === "SELECT") return;
-
       const ctrl = e.ctrlKey || e.metaKey;
+      const tag = (e.target as HTMLElement)?.tagName;
+
+      // Undo/redo work everywhere including text fields (WP-0175)
+      if (ctrl && !e.shiftKey && e.key.toLowerCase() === "z") {
+        e.preventDefault();
+        undoDoc();
+        return;
+      }
+      if (ctrl && (e.shiftKey && e.key.toLowerCase() === "z" || e.key.toLowerCase() === "y")) {
+        e.preventDefault();
+        redoDoc();
+        return;
+      }
+
+      // Other shortcuts skip when focused on input/textarea/select
+      if (tag === "INPUT" || tag === "TEXTAREA" || tag === "SELECT") return;
 
       // Ctrl+Enter — Start / continue localization run
       if (ctrl && e.key === "Enter") {
@@ -6132,6 +6182,8 @@ export function SubtitleEditorPage({
         <details style={{ marginTop: 8 }}>
           <summary style={{ cursor: "pointer", color: "#4b5563", fontSize: 12 }}>Keyboard shortcuts</summary>
           <div style={{ marginTop: 6, fontSize: 12, color: "#4b5563", display: "grid", gridTemplateColumns: "auto 1fr", gap: "4px 12px" }}>
+            <kbd style={{ fontFamily: "monospace", background: "rgba(0,0,0,0.06)", padding: "1px 5px", borderRadius: 3 }}>Ctrl+Z</kbd><span>Undo subtitle edit</span>
+            <kbd style={{ fontFamily: "monospace", background: "rgba(0,0,0,0.06)", padding: "1px 5px", borderRadius: 3 }}>Ctrl+Shift+Z</kbd><span>Redo subtitle edit</span>
             <kbd style={{ fontFamily: "monospace", background: "rgba(0,0,0,0.06)", padding: "1px 5px", borderRadius: 3 }}>Ctrl+Enter</kbd><span>Start / continue localization run</span>
             <kbd style={{ fontFamily: "monospace", background: "rgba(0,0,0,0.06)", padding: "1px 5px", borderRadius: 3 }}>Ctrl+Shift+E</kbd><span>Export selected outputs</span>
             <kbd style={{ fontFamily: "monospace", background: "rgba(0,0,0,0.06)", padding: "1px 5px", borderRadius: 3 }}>Ctrl+Shift+R</kbd><span>Refresh readiness</span>
@@ -10575,6 +10627,47 @@ export function SubtitleEditorPage({
             {busy ? "Loading…" : "No subtitle document loaded."}
           </div>
         )}
+      </div>
+      {/* Sticky quick-actions bar (WP-0178) */}
+      <div
+        style={{
+          position: "sticky",
+          bottom: 0,
+          zIndex: 100,
+          background: "linear-gradient(180deg, rgba(220,227,235,0.95) 0%, rgba(201,210,220,0.98) 100%)",
+          borderTop: "1px solid rgba(100,120,140,0.3)",
+          padding: "8px 16px",
+          display: "flex",
+          alignItems: "center",
+          gap: 12,
+          flexWrap: "wrap",
+          backdropFilter: "blur(8px)",
+        }}
+      >
+        <div style={{ fontSize: 13, fontWeight: 600, flex: 1, minWidth: 120, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+          {item?.title ?? "No item"}
+        </div>
+        <div style={{ fontSize: 12, color: "#4b5563" }}>
+          {localizationRunBusy ? "Running..." : dirty ? "Unsaved changes" : "Ready"}
+        </div>
+        <button type="button" disabled={busy || localizationRunBusy} onClick={enqueueLocalizationRun} style={{ fontSize: 13 }}>
+          Run
+        </button>
+        <button type="button" disabled={busy} onClick={exportSelectedOutputs} style={{ fontSize: 13 }}>
+          Export
+        </button>
+        <button
+          type="button"
+          disabled={busy || !localizationRootStatus?.current_dir}
+          onClick={() => {
+            if (localizationRootStatus?.current_dir) {
+              void openPathBestEffort(localizationRootStatus.current_dir).catch(() => undefined);
+            }
+          }}
+          style={{ fontSize: 13 }}
+        >
+          Open outputs
+        </button>
       </div>
     </section>
   );

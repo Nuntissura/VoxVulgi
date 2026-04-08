@@ -498,6 +498,8 @@ function LocalizationStudioHome({
     },
   );
 
+  const [dragOver, setDragOver] = useState(false);
+
   async function importLocalMedia() {
     setBusy(true);
     setError(null);
@@ -509,20 +511,50 @@ function LocalizationStudioHome({
         title: "Select local media for Localization Studio",
       });
       if (!selected || typeof selected !== "string") return;
-      await invoke("jobs_enqueue_import_local", { path: selected });
-      setPendingImportPath(selected);
-      setNotice(
-        "Queued local import. VoxVulgi will refresh recent items here; once the import finishes you can open the item directly in Localization Studio.",
-      );
-      void diagnosticsTrace("localization_home_import_queued", {
-        path: selected,
-        asr_lang: asrLang,
-      });
+      await importMediaByPath(selected);
     } catch (e) {
       setError(String(e));
     } finally {
       setBusy(false);
     }
+  }
+
+  async function importMediaByPath(path: string) {
+    await invoke("jobs_enqueue_import_local", { path });
+    setPendingImportPath(path);
+    setNotice(
+      "Queued local import. VoxVulgi will refresh recent items here; once the import finishes you can open the item directly in Localization Studio.",
+    );
+    void diagnosticsTrace("localization_home_import_queued", {
+      path,
+      asr_lang: asrLang,
+    });
+  }
+
+  function handleDrop(e: React.DragEvent) {
+    e.preventDefault();
+    setDragOver(false);
+    const files = e.dataTransfer?.files;
+    if (!files || files.length === 0) return;
+    const validExtensions = /\.(mp4|mkv|avi|mov|webm|mp3|wav|flac|ogg|m4a|aac|wma)$/i;
+    const paths: string[] = [];
+    for (let i = 0; i < files.length; i++) {
+      const f = files[i] as File & { path?: string };
+      if (f.path && validExtensions.test(f.name)) {
+        paths.push(f.path);
+      }
+    }
+    if (paths.length === 0) {
+      setError("No supported media files found. Supported formats: MP4, MKV, AVI, MOV, WebM, MP3, WAV, FLAC, OGG.");
+      return;
+    }
+    setBusy(true);
+    setError(null);
+    setNotice(null);
+    Promise.all(paths.map((p) => importMediaByPath(p)))
+      .then(() => setNotice(`Queued ${paths.length} file${paths.length === 1 ? "" : "s"} for import.`))
+      .catch((err) => setError(String(err)))
+      .finally(() => setBusy(false));
   }
 
   const currentEditorStatus = currentEditorItemId ? recentItemStatuses[currentEditorItemId] ?? null : null;
@@ -560,7 +592,26 @@ function LocalizationStudioHome({
     : localizationHomeNextAction(currentHomeStatus);
 
   return (
-    <>
+    <div
+      onDragOver={(e) => { e.preventDefault(); setDragOver(true); }}
+      onDragLeave={() => setDragOver(false)}
+      onDrop={handleDrop}
+      style={{ position: "relative" }}
+    >
+      {dragOver ? (
+        <div style={{
+          position: "fixed", inset: 0, zIndex: 9999,
+          background: "rgba(59,81,105,0.15)",
+          border: "3px dashed rgba(59,81,105,0.5)",
+          borderRadius: 12,
+          display: "flex", alignItems: "center", justifyContent: "center",
+          pointerEvents: "none",
+        }}>
+          <div style={{ fontSize: 20, fontWeight: 700, color: "#374151", background: "rgba(255,255,255,0.9)", padding: "16px 32px", borderRadius: 10 }}>
+            Drop media files to import
+          </div>
+        </div>
+      ) : null}
       {error ? <div className="error">{error}</div> : null}
       {notice ? <div className="card">{notice}</div> : null}
       {compact ? (
@@ -1240,7 +1291,7 @@ function LocalizationStudioHome({
           </div>
         </>
       )}
-    </>
+    </div>
   );
 }
 
