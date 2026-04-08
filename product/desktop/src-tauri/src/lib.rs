@@ -6130,6 +6130,51 @@ fn agent_report_state(page: String, editor_item_id: Option<String>, safe_mode: b
 }
 
 // ---------------------------------------------------------------------------
+// Per-segment clone breakdown (WP-0186)
+// ---------------------------------------------------------------------------
+
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+struct TtsManifestSegmentCloneInfo {
+    index: u32,
+    speaker: Option<String>,
+    voice_clone_intent: Option<String>,
+    voice_clone_outcome: Option<String>,
+    voice_clone_error: Option<String>,
+}
+
+#[tauri::command]
+fn tts_manifest_clone_segments(path: String) -> Result<Vec<TtsManifestSegmentCloneInfo>, String> {
+    let data = std::fs::read(&path).map_err(|e| format!("Failed to read manifest: {e}"))?;
+    let parsed: serde_json::Value =
+        serde_json::from_slice(&data).map_err(|e| format!("Failed to parse manifest: {e}"))?;
+    let segments = parsed
+        .get("segments")
+        .and_then(|v| v.as_array())
+        .cloned()
+        .unwrap_or_default();
+    let result: Vec<TtsManifestSegmentCloneInfo> = segments
+        .iter()
+        .map(|seg| TtsManifestSegmentCloneInfo {
+            index: seg.get("index").and_then(|v| v.as_u64()).unwrap_or(0) as u32,
+            speaker: seg.get("speaker").and_then(|v| v.as_str()).map(String::from),
+            voice_clone_intent: seg
+                .get("voice_clone_intent")
+                .and_then(|v| v.as_str())
+                .map(String::from),
+            voice_clone_outcome: seg
+                .get("voice_clone_outcome")
+                .and_then(|v| v.as_str())
+                .map(String::from),
+            voice_clone_error: seg
+                .get("voice_clone_error")
+                .and_then(|v| v.as_str())
+                .map(String::from),
+        })
+        .collect();
+    Ok(result)
+}
+
+// ---------------------------------------------------------------------------
 // Glossary commands (WP-0177)
 // ---------------------------------------------------------------------------
 
@@ -6469,6 +6514,7 @@ pub fn run() {
             window_start_resize_drag,
             window_toggle_maximize,
             admin_save_snapshot,
+            tts_manifest_clone_segments,
             glossary_get,
             glossary_set,
             glossary_export_csv,

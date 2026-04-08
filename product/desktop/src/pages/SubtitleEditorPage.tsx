@@ -1249,6 +1249,7 @@ export function SubtitleEditorPage({
     if (raw === "ja" || raw === "ko") return raw;
     return "auto";
   });
+  const [segmentCloneMap, setSegmentCloneMap] = useState<Record<number, { outcome: string | null; error: string | null }>>({});
   const segmentAudioRef = useRef<HTMLAudioElement | null>(null);
   const segmentAudioTimer = useRef<number | null>(null);
   const [playingSegmentIndex, setPlayingSegmentIndex] = useState<number | null>(null);
@@ -2314,6 +2315,28 @@ export function SubtitleEditorPage({
       tone: voiceCloneOutcomeTone(outcome),
     };
   }, [activeVoiceCloneArtifact]);
+
+  // WP-0186: Load per-segment clone breakdown when manifest artifact is available
+  useEffect(() => {
+    if (!activeVoiceCloneArtifact?.path) {
+      setSegmentCloneMap({});
+      return;
+    }
+    // The artifact path is the manifest JSON — but we need the actual manifest file path
+    // The artifact.path points to the manifest. Load its per-segment data.
+    invoke<Array<{ index: number; voice_clone_outcome: string | null; voice_clone_error: string | null }>>(
+      "tts_manifest_clone_segments",
+      { path: activeVoiceCloneArtifact.path },
+    )
+      .then((segments) => {
+        const map: Record<number, { outcome: string | null; error: string | null }> = {};
+        for (const seg of segments) {
+          map[seg.index] = { outcome: seg.voice_clone_outcome, error: seg.voice_clone_error };
+        }
+        setSegmentCloneMap(map);
+      })
+      .catch(() => setSegmentCloneMap({}));
+  }, [activeVoiceCloneArtifact?.path]);
 
   // WP-0185: Clone outcome notification — show notice when a new clone result appears
   const prevCloneOutcomeRef = useRef<string | null>(null);
@@ -10680,6 +10703,34 @@ export function SubtitleEditorPage({
                     <tr key={`${seg.index}-${i}`}>
                       <td>
                         <code>{i + 1}</code>
+                        {segmentCloneMap[i] ? (
+                          <span
+                            title={
+                              segmentCloneMap[i].outcome === "converted"
+                                ? "Cloned"
+                                : segmentCloneMap[i].outcome === "fallback_tts"
+                                  ? `Fallback TTS${segmentCloneMap[i].error ? `: ${segmentCloneMap[i].error}` : ""}`
+                                  : segmentCloneMap[i].outcome === "standard_tts"
+                                    ? "Standard TTS"
+                                    : segmentCloneMap[i].outcome ?? "Unknown"
+                            }
+                            style={{
+                              display: "inline-block",
+                              width: 8,
+                              height: 8,
+                              borderRadius: "50%",
+                              marginLeft: 4,
+                              background:
+                                segmentCloneMap[i].outcome === "converted"
+                                  ? "#22c55e"
+                                  : segmentCloneMap[i].outcome === "fallback_tts"
+                                    ? "#ef4444"
+                                    : segmentCloneMap[i].outcome === "standard_tts"
+                                      ? "#6b7280"
+                                      : "#eab308",
+                            }}
+                          />
+                        ) : null}
                       </td>
                       <td>
                         <input
