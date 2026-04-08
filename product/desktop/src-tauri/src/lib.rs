@@ -192,13 +192,18 @@ fn agent_handle_snapshot(body: &str) -> (&'static str, String) {
         );
     }
 
-    // Wait for frontend to complete the snapshot (up to 15 seconds for heavy pages)
-    match rx.recv_timeout(Duration::from_secs(15)) {
+    // Wait for frontend to complete the snapshot (up to 30 seconds for heavy pages under load)
+    match rx.recv_timeout(Duration::from_secs(30)) {
         Ok(path) => ("200 OK", format!(r#"{{"path":"{}"}}"#, path.replace('\\', "\\\\"))),
-        Err(_) => (
-            "504 Gateway Timeout",
-            r#"{"error":"snapshot timed out (15s)"}"#.to_string(),
-        ),
+        Err(_) => {
+            // Clear stale sender so late-arriving captures don't contaminate the next request
+            let mut state = agent_bridge_state().lock().unwrap();
+            state.snapshot_tx = None;
+            (
+                "504 Gateway Timeout",
+                r#"{"error":"snapshot timed out (30s)"}"#.to_string(),
+            )
+        }
     }
 }
 use voxvulgi_engine::models::ModelStore;
