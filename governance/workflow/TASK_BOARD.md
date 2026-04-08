@@ -186,3 +186,5 @@ This is the single source of truth for work status.
 | WP-0170 | Media Library Search and Filters | REVIEW | Codex | Added Source filter (YouTube/Instagram/Local) and Sort by (Date/Title) to existing search+type+view+group controls. |
 | WP-0171 | Headless Agent Bridge | REVIEW | Codex | Localhost HTTP server with /agent/navigate, /agent/snapshot, /agent/state, /agent/health; port file discovery; frontend event listeners; AGENTS.md documented. |
 | WP-0172 | Localization Studio Built-in Manual | REVIEW | Codex | In-context (?) help on 18 section headers with What/When/Steps/Concepts; "Show all help" toggle for learning mode. |
+| WP-0173 | Localization Studio Keyboard Shortcuts | REVIEW | Codex | Ctrl+Enter run, Ctrl+Shift+E export, Ctrl+Shift+R refresh, Ctrl+1..5 section jumps; visible reference in Workflow Map. |
+| WP-0174 | Batch-on-Import Discoverability | REVIEW | Codex | Auto-processing toggles surfaced in Localization Studio Import card with immediate save; Source language label improved. |

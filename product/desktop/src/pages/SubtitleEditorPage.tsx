@@ -3304,6 +3304,47 @@ export function SubtitleEditorPage({
     target?.scrollIntoView({ behavior: "smooth", block: "start" });
   }
 
+  // Keyboard shortcuts for Localization Studio (WP-0173)
+  useEffect(() => {
+    if (!visible) return;
+    function handleKeyDown(e: KeyboardEvent) {
+      // Skip if user is typing in an input/textarea/select
+      const tag = (e.target as HTMLElement)?.tagName;
+      if (tag === "INPUT" || tag === "TEXTAREA" || tag === "SELECT") return;
+
+      const ctrl = e.ctrlKey || e.metaKey;
+
+      // Ctrl+Enter — Start / continue localization run
+      if (ctrl && e.key === "Enter") {
+        e.preventDefault();
+        enqueueLocalizationRun();
+        return;
+      }
+      // Ctrl+Shift+E — Export selected outputs
+      if (ctrl && e.shiftKey && e.key.toLowerCase() === "e") {
+        e.preventDefault();
+        exportSelectedOutputs();
+        return;
+      }
+      // Ctrl+Shift+R — Refresh readiness
+      if (ctrl && e.shiftKey && e.key.toLowerCase() === "r") {
+        e.preventDefault();
+        refreshLocalizationReadiness().catch(() => {});
+        return;
+      }
+      // Ctrl+1..5 — Jump to workflow sections
+      if (ctrl && !e.shiftKey && e.key >= "1" && e.key <= "5") {
+        e.preventDefault();
+        const sections = ["loc-track", "loc-voice-basics", "loc-run", "loc-outputs", "loc-artifacts"];
+        const idx = parseInt(e.key) - 1;
+        if (sections[idx]) scrollToLocalizationSection(sections[idx]);
+        return;
+      }
+    }
+    window.addEventListener("keydown", handleKeyDown);
+    return () => window.removeEventListener("keydown", handleKeyDown);
+  }, [visible]);
+
   useEffect(() => {
     if (!visible || !itemId) return;
     const request = navigationRequest;
@@ -6088,6 +6129,19 @@ export function SubtitleEditorPage({
             Use translated EN track
           </button>
         </div>
+        <details style={{ marginTop: 8 }}>
+          <summary style={{ cursor: "pointer", color: "#4b5563", fontSize: 12 }}>Keyboard shortcuts</summary>
+          <div style={{ marginTop: 6, fontSize: 12, color: "#4b5563", display: "grid", gridTemplateColumns: "auto 1fr", gap: "4px 12px" }}>
+            <kbd style={{ fontFamily: "monospace", background: "rgba(0,0,0,0.06)", padding: "1px 5px", borderRadius: 3 }}>Ctrl+Enter</kbd><span>Start / continue localization run</span>
+            <kbd style={{ fontFamily: "monospace", background: "rgba(0,0,0,0.06)", padding: "1px 5px", borderRadius: 3 }}>Ctrl+Shift+E</kbd><span>Export selected outputs</span>
+            <kbd style={{ fontFamily: "monospace", background: "rgba(0,0,0,0.06)", padding: "1px 5px", borderRadius: 3 }}>Ctrl+Shift+R</kbd><span>Refresh readiness</span>
+            <kbd style={{ fontFamily: "monospace", background: "rgba(0,0,0,0.06)", padding: "1px 5px", borderRadius: 3 }}>Ctrl+1</kbd><span>Jump to Track</span>
+            <kbd style={{ fontFamily: "monospace", background: "rgba(0,0,0,0.06)", padding: "1px 5px", borderRadius: 3 }}>Ctrl+2</kbd><span>Jump to Reusable Voice Basics</span>
+            <kbd style={{ fontFamily: "monospace", background: "rgba(0,0,0,0.06)", padding: "1px 5px", borderRadius: 3 }}>Ctrl+3</kbd><span>Jump to Localization Run</span>
+            <kbd style={{ fontFamily: "monospace", background: "rgba(0,0,0,0.06)", padding: "1px 5px", borderRadius: 3 }}>Ctrl+4</kbd><span>Jump to Outputs</span>
+            <kbd style={{ fontFamily: "monospace", background: "rgba(0,0,0,0.06)", padding: "1px 5px", borderRadius: 3 }}>Ctrl+5</kbd><span>Jump to Artifacts</span>
+          </div>
+        </details>
       </div>
 
       <div className="card" id="loc-run">

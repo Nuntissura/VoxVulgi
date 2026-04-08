@@ -381,10 +381,23 @@ function LocalizationStudioHome({
   });
   const { status: downloadDir } = useSharedDownloadDirStatus();
   const localizationRoot = featureRootStatus(downloadDir, "localization");
+  const [batchRules, setBatchRules] = useState<{
+    auto_asr: boolean;
+    auto_translate: boolean;
+    auto_separate: boolean;
+    auto_diarize: boolean;
+    auto_dub_preview: boolean;
+  } | null>(null);
 
   useEffect(() => {
     safeLocalStorageSet("voxvulgi.v1.settings.asr_lang", asrLang);
   }, [asrLang]);
+
+  useEffect(() => {
+    invoke<any>("config_batch_on_import_get")
+      .then((rules) => setBatchRules(rules))
+      .catch(() => {});
+  }, []);
 
   const refreshRecentItems = useCallback(async () => {
     setRecentItemsBusy(true);
@@ -966,17 +979,60 @@ function LocalizationStudioHome({
                 </button>
               </div>
               <label style={{ display: "flex", alignItems: "center", gap: 8 }}>
-                <span>ASR language</span>
+                <span>Source language</span>
                 <select
                   value={asrLang}
                   disabled={busy}
                   onChange={(e) => setAsrLang(e.currentTarget.value as AsrLang)}
                 >
                   <option value="auto">auto</option>
-                  <option value="ja">ja</option>
-                  <option value="ko">ko</option>
+                  <option value="ja">ja (Japanese)</option>
+                  <option value="ko">ko (Korean)</option>
                 </select>
               </label>
+              <details style={{ marginTop: 8 }}>
+                <summary style={{ cursor: "pointer", fontSize: 13, color: "#4b5563" }}>
+                  Auto-processing on import{" "}
+                  {batchRules && (batchRules.auto_asr || batchRules.auto_translate || batchRules.auto_dub_preview)
+                    ? "(active)"
+                    : "(off)"}
+                </summary>
+                <div style={{ marginTop: 6, fontSize: 13, color: "#4b5563" }}>
+                  When enabled, importing media will automatically queue these jobs:
+                </div>
+                <div className="row" style={{ marginTop: 6, flexWrap: "wrap" }}>
+                  {(
+                    [
+                      ["auto_asr", "Speech recognition"],
+                      ["auto_translate", "Translate to English"],
+                      ["auto_separate", "Separate audio stems"],
+                      ["auto_diarize", "Label speakers"],
+                      ["auto_dub_preview", "Dub preview (TTS + Mix + Mux)"],
+                    ] as const
+                  ).map(([key, label]) => (
+                    <label key={key} style={{ display: "flex", alignItems: "center", gap: 6 }}>
+                      <input
+                        type="checkbox"
+                        checked={(batchRules as any)?.[key] ?? false}
+                        disabled={busy}
+                        onChange={(e) => {
+                          const next = {
+                            auto_asr: batchRules?.auto_asr ?? false,
+                            auto_translate: batchRules?.auto_translate ?? false,
+                            auto_separate: batchRules?.auto_separate ?? false,
+                            auto_diarize: batchRules?.auto_diarize ?? false,
+                            auto_dub_preview: batchRules?.auto_dub_preview ?? false,
+                            [key]: e.target.checked,
+                          };
+                          setBatchRules(next);
+                          invoke("config_batch_on_import_set", { rules: next }).catch(() => {});
+                        }}
+                      />
+                      <span>{label}</span>
+                    </label>
+                  ))}
+                </div>
+              </details>
             </div>
 
             <div className="card loc-home-card">
