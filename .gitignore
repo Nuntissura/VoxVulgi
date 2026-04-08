@@ -5,6 +5,9 @@
 Thumbs.db
 .idea/
 
+# Visual debugger snapshots (local only)
+governance/snapshots/
+
 # Environment/secrets (local only)
 .env
 .env.*
