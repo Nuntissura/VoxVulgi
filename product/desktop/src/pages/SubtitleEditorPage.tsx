@@ -1080,6 +1080,12 @@ const SECTION_HELP: Record<string, { what: string; when: string; steps: string[]
     steps: ["Click Generate QC report", "Review the issues table", "Fix flagged problems in the relevant sections"],
     concepts: { "CPS": "Characters per second — too high means text is too fast to read.", "Silence": "Unexpectedly silent segments that might indicate a rendering failure." },
   },
+  "loc-glossary": {
+    what: "Define custom term mappings so names, places, and domain terms translate consistently.",
+    when: "Before running Translate to English. Terms added here apply to all future translations.",
+    steps: ["Add source terms (Japanese/Korean) with their English translations", "Run Translate — glossary terms are automatically applied to the output", "Export/import as CSV to share glossaries across items or machines"],
+    concepts: { "Term mapping": "A pair: source text and its desired English translation.", "Longest match first": "If you have both '東京都' and '東京', the longer match is applied first to avoid partial replacements." },
+  },
   "loc-artifacts": {
     what: "All derived files (audio stems, manifests, reports, exports) in one table. Play, open, or rerun any artifact.",
     when: "To find specific working files, replay audio, or re-run a failed stage.",
@@ -1243,6 +1249,52 @@ export function SubtitleEditorPage({
     if (raw === "ja" || raw === "ko") return raw;
     return "auto";
   });
+  const segmentAudioRef = useRef<HTMLAudioElement | null>(null);
+  const segmentAudioTimer = useRef<number | null>(null);
+  const [playingSegmentIndex, setPlayingSegmentIndex] = useState<number | null>(null);
+
+  function playSegmentAudio(segIndex: number, startMs: number, endMs: number) {
+    const mixPath = outputs?.mix_dub_preview_v1_wav_path;
+    if (!mixPath || !outputs?.mix_dub_preview_v1_wav_exists) return;
+    // Stop any currently playing segment
+    stopSegmentAudio();
+    const audio = new Audio(convertFileSrc(mixPath));
+    segmentAudioRef.current = audio;
+    setPlayingSegmentIndex(segIndex);
+    audio.currentTime = startMs / 1000;
+    audio.play().catch(() => {});
+    // Stop at segment end
+    const durationMs = endMs - startMs;
+    segmentAudioTimer.current = window.setTimeout(() => {
+      stopSegmentAudio();
+    }, durationMs + 100);
+  }
+
+  function stopSegmentAudio() {
+    if (segmentAudioRef.current) {
+      segmentAudioRef.current.pause();
+      segmentAudioRef.current = null;
+    }
+    if (segmentAudioTimer.current != null) {
+      window.clearTimeout(segmentAudioTimer.current);
+      segmentAudioTimer.current = null;
+    }
+    setPlayingSegmentIndex(null);
+  }
+
+  const [translationStyle, setTranslationStyle] = useState<"neutral" | "formal" | "informal">(() => {
+    const raw = safeLocalStorageGet("voxvulgi.v1.editor.translation_style");
+    if (raw === "formal" || raw === "informal") return raw;
+    return "neutral";
+  });
+  const [honorificMode, setHonorificMode] = useState<"preserve" | "translate" | "drop">(() => {
+    const raw = safeLocalStorageGet("voxvulgi.v1.editor.honorific_mode");
+    if (raw === "translate" || raw === "drop") return raw;
+    return "preserve";
+  });
+  const [glossaryEntries, setGlossaryEntries] = useState<Record<string, string>>({});
+  const [glossaryNewSource, setGlossaryNewSource] = useState("");
+  const [glossaryNewTarget, setGlossaryNewTarget] = useState("");
   const [bilingualEnabled, setBilingualEnabled] = useState(() => {
     const raw = safeLocalStorageGet("voxvulgi.v1.editor.bilingual_enabled");
     return raw === null ? true : raw === "1";
@@ -1520,6 +1572,20 @@ export function SubtitleEditorPage({
   useEffect(() => {
     safeLocalStorageSet("voxvulgi.v1.settings.asr_lang", asrLang);
   }, [asrLang]);
+
+  useEffect(() => {
+    safeLocalStorageSet("voxvulgi.v1.editor.translation_style", translationStyle);
+  }, [translationStyle]);
+
+  useEffect(() => {
+    safeLocalStorageSet("voxvulgi.v1.editor.honorific_mode", honorificMode);
+  }, [honorificMode]);
+
+  useEffect(() => {
+    invoke<Record<string, string>>("glossary_get")
+      .then((entries) => setGlossaryEntries(entries ?? {}))
+      .catch(() => {});
+  }, []);
 
   useEffect(() => {
     safeLocalStorageSet("voxvulgi.v1.editor.bilingual_enabled", bilingualEnabled ? "1" : "0");
@@ -6941,6 +7007,108 @@ export function SubtitleEditorPage({
         </div>
       </div>
 
+      <div className="card" id="loc-glossary">
+        <h2>Glossary <SectionHelp sectionId="loc-glossary" /></h2>
+        <div style={{ color: "#4b5563", marginBottom: 8 }}>
+          Define term mappings applied during translation. Add source terms (Japanese/Korean) and
+          their English translations. Longer terms are matched first to avoid partial replacements.
+        </div>
+        <div className="row" style={{ flexWrap: "wrap", gap: 8 }}>
+          <input
+            placeholder="Source term (e.g. 東京)"
+            value={glossaryNewSource}
+            onChange={(e) => setGlossaryNewSource(e.target.value)}
+            style={{ width: 200 }}
+          />
+          <input
+            placeholder="English translation (e.g. Tokyo)"
+            value={glossaryNewTarget}
+            onChange={(e) => setGlossaryNewTarget(e.target.value)}
+            style={{ width: 200 }}
+          />
+          <button
+            type="button"
+            disabled={busy || !glossaryNewSource.trim()}
+            onClick={async () => {
+              const next = { ...glossaryEntries, [glossaryNewSource.trim()]: glossaryNewTarget.trim() };
+              await invoke("glossary_set", { entries: next }).catch((e) => setError(String(e)));
+              setGlossaryEntries(next);
+              setGlossaryNewSource("");
+              setGlossaryNewTarget("");
+            }}
+          >
+            Add term
+          </button>
+          <button
+            type="button"
+            disabled={busy}
+            onClick={async () => {
+              const path = await save({ title: "Export glossary as CSV", filters: [{ name: "CSV", extensions: ["csv"] }] });
+              if (!path) return;
+              await invoke("glossary_export_csv", { path }).catch((e) => setError(String(e)));
+              setNotice("Glossary exported.");
+            }}
+          >
+            Export CSV
+          </button>
+          <button
+            type="button"
+            disabled={busy}
+            onClick={async () => {
+              const selected = await open({ title: "Import glossary CSV", filters: [{ name: "CSV", extensions: ["csv"] }] });
+              if (!selected || typeof selected !== "string") return;
+              const count = await invoke<number>("glossary_import_csv", { path: selected });
+              const refreshed = await invoke<Record<string, string>>("glossary_get");
+              setGlossaryEntries(refreshed ?? {});
+              setNotice(`Imported ${count} glossary term${count === 1 ? "" : "s"}.`);
+            }}
+          >
+            Import CSV
+          </button>
+        </div>
+        {Object.keys(glossaryEntries).length > 0 ? (
+          <div className="table-wrap" style={{ marginTop: 10, maxHeight: 240, overflowY: "auto" }}>
+            <table>
+              <thead>
+                <tr>
+                  <th>Source</th>
+                  <th>English</th>
+                  <th>Actions</th>
+                </tr>
+              </thead>
+              <tbody>
+                {Object.entries(glossaryEntries)
+                  .sort(([a], [b]) => a.localeCompare(b))
+                  .map(([source, target]) => (
+                    <tr key={source}>
+                      <td>{source}</td>
+                      <td>{target}</td>
+                      <td>
+                        <button
+                          type="button"
+                          disabled={busy}
+                          onClick={async () => {
+                            const next = { ...glossaryEntries };
+                            delete next[source];
+                            await invoke("glossary_set", { entries: next }).catch((e) => setError(String(e)));
+                            setGlossaryEntries(next);
+                          }}
+                        >
+                          Remove
+                        </button>
+                      </td>
+                    </tr>
+                  ))}
+              </tbody>
+            </table>
+          </div>
+        ) : (
+          <div style={{ color: "#4b5563", marginTop: 8, fontSize: 13 }}>
+            No glossary terms yet. Add terms above — they will be applied to future translations.
+          </div>
+        )}
+      </div>
+
       <div className="card" id="loc-track">
         <h2>Track <SectionHelp sectionId="loc-track" /></h2>
         <div className="row">
@@ -7009,6 +7177,26 @@ export function SubtitleEditorPage({
           <button type="button" disabled={busy} onClick={enqueueAsrLocal}>
             ASR (local)
           </button>
+          <select
+            value={translationStyle}
+            disabled={busy}
+            onChange={(e) => setTranslationStyle(e.currentTarget.value as typeof translationStyle)}
+            title="Translation style"
+          >
+            <option value="neutral">Neutral</option>
+            <option value="formal">Formal</option>
+            <option value="informal">Informal</option>
+          </select>
+          <select
+            value={honorificMode}
+            disabled={busy}
+            onChange={(e) => setHonorificMode(e.currentTarget.value as typeof honorificMode)}
+            title="Honorific handling"
+          >
+            <option value="preserve">Honorifics: keep (-san, -sensei)</option>
+            <option value="translate">Honorifics: translate to English</option>
+            <option value="drop">Honorifics: remove</option>
+          </select>
           <button type="button" disabled={busy || !trackId} onClick={enqueueTranslateEn}>
             Translate -&gt; EN (local)
           </button>
@@ -10558,6 +10746,21 @@ export function SubtitleEditorPage({
                     ) : null}
                     <td>
                       <div className="row" style={{ marginTop: 0, flexWrap: "wrap" }}>
+                        <button
+                          type="button"
+                          disabled={!outputs?.mix_dub_preview_v1_wav_exists}
+                          onClick={() => {
+                            if (playingSegmentIndex === i) {
+                              stopSegmentAudio();
+                            } else {
+                              playSegmentAudio(i, seg.start_ms, seg.end_ms);
+                            }
+                          }}
+                          title={playingSegmentIndex === i ? "Stop" : "Play dubbed audio for this segment"}
+                          style={{ minWidth: 28, padding: "6px 8px" }}
+                        >
+                          {playingSegmentIndex === i ? "\u25A0" : "\u25B6"}
+                        </button>
                         <button
                           type="button"
                           disabled={busy}

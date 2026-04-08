@@ -161,6 +161,58 @@ fn apply_glossary(text: &str, entries: &[(String, String)]) -> String {
     out
 }
 
+// ---------------------------------------------------------------------------
+// Public glossary API (WP-0177)
+// ---------------------------------------------------------------------------
+
+pub fn glossary_load(paths: &AppPaths) -> Result<BTreeMap<String, String>> {
+    let path = paths.glossary_path();
+    ensure_default_glossary(&path)?;
+    load_glossary(&path)
+}
+
+pub fn glossary_save(paths: &AppPaths, entries: &BTreeMap<String, String>) -> Result<()> {
+    let path = paths.glossary_path();
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    let json = serde_json::to_string_pretty(entries)?;
+    std::fs::write(&path, json)?;
+    Ok(())
+}
+
+pub fn glossary_export_csv(paths: &AppPaths, out_path: &Path) -> Result<usize> {
+    let entries = glossary_load(paths)?;
+    let mut wtr = csv::Writer::from_path(out_path)?;
+    wtr.write_record(["source", "target"])?;
+    for (k, v) in &entries {
+        wtr.write_record([k.as_str(), v.as_str()])?;
+    }
+    wtr.flush()?;
+    Ok(entries.len())
+}
+
+pub fn glossary_import_csv(paths: &AppPaths, csv_path: &Path) -> Result<usize> {
+    let mut existing = glossary_load(paths)?;
+    let mut rdr = csv::ReaderBuilder::new()
+        .has_headers(true)
+        .from_path(csv_path)?;
+    let mut count = 0usize;
+    for result in rdr.records() {
+        let record = result?;
+        if record.len() >= 2 {
+            let source = record[0].trim().to_string();
+            let target = record[1].trim().to_string();
+            if !source.is_empty() {
+                existing.insert(source, target);
+                count += 1;
+            }
+        }
+    }
+    glossary_save(paths, &existing)?;
+    Ok(count)
+}
+
 fn align_translated_to_source(
     source: &SubtitleDocument,
     translated: &SubtitleDocument,

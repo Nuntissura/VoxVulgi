@@ -210,9 +210,9 @@ use voxvulgi_engine::models::ModelStore;
 use voxvulgi_engine::paths::AppPaths;
 use voxvulgi_engine::{
     config, db, diagnostics, instagram_subscriptions, jobs, library, speakers, subscriptions,
-    subtitle_tracks, subtitles, tools, voice_backend_adapters, voice_backends, voice_benchmarks,
-    voice_cast_packs, voice_cleanup, voice_library, voice_plans, voice_reference_candidates,
-    voice_reference_curation, voice_templates,
+    subtitle_tracks, subtitles, tools, translate, voice_backend_adapters, voice_backends,
+    voice_benchmarks, voice_cast_packs, voice_cleanup, voice_library, voice_plans,
+    voice_reference_candidates, voice_reference_curation, voice_templates,
 };
 
 #[derive(Debug, Clone, serde::Deserialize)]
@@ -6129,6 +6129,37 @@ fn agent_report_state(page: String, editor_item_id: Option<String>, safe_mode: b
     state.safe_mode = safe_mode;
 }
 
+// ---------------------------------------------------------------------------
+// Glossary commands (WP-0177)
+// ---------------------------------------------------------------------------
+
+#[tauri::command]
+fn glossary_get(
+    state: State<'_, AppState>,
+) -> Result<std::collections::BTreeMap<String, String>, String> {
+    translate::glossary_load(&state.paths).map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+fn glossary_set(
+    state: State<'_, AppState>,
+    entries: std::collections::BTreeMap<String, String>,
+) -> Result<(), String> {
+    translate::glossary_save(&state.paths, &entries).map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+fn glossary_export_csv(state: State<'_, AppState>, path: String) -> Result<usize, String> {
+    translate::glossary_export_csv(&state.paths, &std::path::PathBuf::from(path))
+        .map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+fn glossary_import_csv(state: State<'_, AppState>, path: String) -> Result<usize, String> {
+    translate::glossary_import_csv(&state.paths, &std::path::PathBuf::from(path))
+        .map_err(|e| e.to_string())
+}
+
 #[tauri::command]
 fn agent_snapshot_complete(path: String) {
     let mut state = agent_bridge_state().lock().unwrap();
@@ -6438,6 +6469,10 @@ pub fn run() {
             window_start_resize_drag,
             window_toggle_maximize,
             admin_save_snapshot,
+            glossary_get,
+            glossary_set,
+            glossary_export_csv,
+            glossary_import_csv,
             agent_report_state,
             agent_snapshot_complete
         ])

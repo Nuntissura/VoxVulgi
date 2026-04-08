@@ -3,7 +3,7 @@
 ## Metadata
 - ID: WP-0182
 - Owner: Codex
-- Status: BACKLOG
+- Status: REVIEW
 - Created: 2026-04-08
 - Target milestone: UX Polish
 

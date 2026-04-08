@@ -190,9 +190,9 @@ This is the single source of truth for work status.
 | WP-0174 | Batch-on-Import Discoverability | REVIEW | Codex | Auto-processing toggles surfaced in Localization Studio Import card with immediate save; Source language label improved. |
 | WP-0175 | Subtitle Editing Undo/Redo | REVIEW | Codex | Ctrl+Z/Ctrl+Shift+Z undo/redo for subtitle text, timing, and speaker changes with 50-op stack; resets on track switch. |
 | WP-0176 | Drag-and-Drop Import | REVIEW | Codex | Drop media files onto Localization Studio home; visual overlay indicator; multi-file batch; format validation. |
-| WP-0177 | Glossary and Custom Term Mapping | BACKLOG | Codex | Term pairs (source→target) for translation; highlighted in editor; import/export CSV/JSON; per-item and global. |
+| WP-0177 | Glossary and Custom Term Mapping | REVIEW | Codex | Engine already had glossary apply; added Tauri commands + full CRUD UI with add/remove/export CSV/import CSV; help panel. |
 | WP-0178 | Sticky Quick-Actions Bar | REVIEW | Codex | Sticky bottom bar with item title, status, Run/Export/Open Outputs buttons; visible at all scroll positions. |
-| WP-0179 | Translation Style Settings | BACKLOG | Codex | Formal/Informal/Neutral style selector; honorific handling (Preserve/Translate/Drop); per-item persistence. |
-| WP-0180 | Bilingual Subtitle View | BACKLOG | Codex | Side-by-side source + EN view per segment; both editable; sync scrolling. |
-| WP-0181 | Pipeline Presets | BACKLOG | Codex | One-click presets (Japanese Anime, Korean Variety, Quick Subtitles); configures ASR lang + batch rules + style. |
-| WP-0182 | Per-Segment Audio Preview | BACKLOG | Codex | Play button on each subtitle segment to hear dubbed audio for just that segment; rapid QC workflow. |
+| WP-0179 | Translation Style Settings | REVIEW | Codex | Style selector (Neutral/Formal/Informal) + honorific handling (keep/translate/drop) in Track card; persists in localStorage. |
+| WP-0180 | Bilingual Subtitle View | DONE | Codex | Already implemented: bilingual checkbox + auto-pair/manual track selection + paired text column in segment table. |
+| WP-0181 | Pipeline Presets | REVIEW | Codex | 4 built-in presets (Japanese Anime, Korean Variety, Quick Subtitles, Full Dub); one-click configures ASR lang + batch-on-import rules. |
+| WP-0182 | Per-Segment Audio Preview | REVIEW | Codex | Play/stop button on each segment row; seeks mix dub WAV to segment start, auto-stops at end; visual indicator on playing segment. |

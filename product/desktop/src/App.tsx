@@ -1030,6 +1030,43 @@ function LocalizationStudioHome({
                 </button>
               </div>
               <label style={{ display: "flex", alignItems: "center", gap: 8 }}>
+                <span>Pipeline preset</span>
+                <select
+                  disabled={busy}
+                  value=""
+                  onChange={(e) => {
+                    const v = e.currentTarget.value;
+                    if (v === "ja_anime") {
+                      setAsrLang("ja");
+                      const rules = { auto_asr: true, auto_translate: true, auto_separate: false, auto_diarize: true, auto_dub_preview: false };
+                      setBatchRules(rules);
+                      invoke("config_batch_on_import_set", { rules }).catch(() => {});
+                    } else if (v === "ko_variety") {
+                      setAsrLang("ko");
+                      const rules = { auto_asr: true, auto_translate: true, auto_separate: false, auto_diarize: true, auto_dub_preview: false };
+                      setBatchRules(rules);
+                      invoke("config_batch_on_import_set", { rules }).catch(() => {});
+                    } else if (v === "subtitles_only") {
+                      setAsrLang("auto");
+                      const rules = { auto_asr: true, auto_translate: false, auto_separate: false, auto_diarize: false, auto_dub_preview: false };
+                      setBatchRules(rules);
+                      invoke("config_batch_on_import_set", { rules }).catch(() => {});
+                    } else if (v === "full_dub") {
+                      const rules = { auto_asr: true, auto_translate: true, auto_separate: true, auto_diarize: true, auto_dub_preview: true };
+                      setBatchRules(rules);
+                      invoke("config_batch_on_import_set", { rules }).catch(() => {});
+                    }
+                    e.currentTarget.value = "";
+                  }}
+                >
+                  <option value="">Apply a preset...</option>
+                  <option value="ja_anime">Japanese Anime (ASR+Translate+Diarize)</option>
+                  <option value="ko_variety">Korean Variety (ASR+Translate+Diarize)</option>
+                  <option value="subtitles_only">Quick Subtitles Only (ASR)</option>
+                  <option value="full_dub">Full Dub Pipeline (all stages)</option>
+                </select>
+              </label>
+              <label style={{ display: "flex", alignItems: "center", gap: 8 }}>
                 <span>Source language</span>
                 <select
                   value={asrLang}

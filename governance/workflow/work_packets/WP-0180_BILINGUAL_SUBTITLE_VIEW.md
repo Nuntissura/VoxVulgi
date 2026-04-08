@@ -3,7 +3,7 @@
 ## Metadata
 - ID: WP-0180
 - Owner: Codex
-- Status: BACKLOG
+- Status: DONE
 - Created: 2026-04-08
 - Target milestone: Translation Quality
 
