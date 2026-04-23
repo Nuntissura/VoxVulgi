@@ -3,7 +3,7 @@
 ## Metadata
 - ID: WP-0195
 - Owner: Codex
-- Status: BACKLOG
+- Status: IN_PROGRESS
 - Created: 2026-04-23
 - Target milestone: Desktop archive/operator usability
 
@@ -39,3 +39,4 @@ Out of scope:
 ## Status updates
 
 - 2026-04-23: Created from smoke feedback that imported 4KVDP NAS targets and newer VoxVulgi outputs still feel like separate systems and that archive outputs are difficult to identify by name alone.
+- 2026-04-23: Implemented a first clarity pass in `LibraryPage`: recurring YouTube and Instagram subscriptions now show target mode plus effective target path, the editor copy explicitly distinguishes managed-root behavior from pinned legacy/NAS overrides, Instagram one-shot vs saved-subscription behavior is called out, and the Media Library viewport now scales more with window height. `npm run build` passed.

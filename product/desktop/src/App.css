@@ -28,8 +28,8 @@
     "Baumans", "Eurostile", "Microgramma D Extended", "Bank Gothic", "Square 721",
     "Aldrich", "Rajdhani", sans-serif;
   font-family: var(--font-ui);
-  font-size: 17px;
-  line-height: 1.45;
+  font-size: calc(19px * var(--font-scale, 1));
+  line-height: 1.5;
   font-weight: 400;
   color: var(--ink);
   font-synthesis: none;
@@ -251,13 +251,36 @@ code {
 }
 
 .brand {
-  font-size: clamp(0.94rem, 0.9rem + 0.33vw, 1.12rem);
+  display: inline-flex;
+  align-items: baseline;
+  gap: 8px;
+  min-width: 0;
+  font-size: clamp(0.98rem, 0.92rem + 0.33vw, 1.18rem);
   font-family: var(--font-panel);
   font-weight: 400;
   text-transform: uppercase;
   letter-spacing: 0.07em;
   line-height: 1.05;
   color: #1a2028;
+}
+
+.brand-name,
+.brand-version {
+  min-width: 0;
+}
+
+.brand-version {
+  padding: 2px 7px;
+  border: 1px solid rgba(72, 78, 88, 0.38);
+  border-radius: 999px;
+  background: rgba(255, 255, 255, 0.32);
+  color: #3d4957;
+  font-family: var(--font-ui);
+  font-size: 0.72rem;
+  font-weight: 700;
+  letter-spacing: 0.05em;
+  text-transform: none;
+  white-space: nowrap;
 }
 
 .move-handle {
@@ -733,6 +756,20 @@ select:active:not(:disabled) {
 button:disabled {
   opacity: 0.58;
   cursor: not-allowed;
+}
+
+/* Legacy pages still contain many fixed inline 11-14px labels. Keep them readable
+   while the remaining UI scales from the root rem size. */
+:where([style*="font-size: 11px"], [style*="font-size: 12px"]) {
+  font-size: 0.78rem !important;
+}
+
+:where([style*="font-size: 13px"]) {
+  font-size: 0.84rem !important;
+}
+
+:where([style*="font-size: 14px"]) {
+  font-size: 0.9rem !important;
 }
 
 input:not([type="checkbox"]),

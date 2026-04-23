@@ -45,3 +45,4 @@ Out of scope:
 ## Status updates
 
 - 2026-04-23: Created after operator smoke showed Localization Studio freezing and flickering on first open against a `122k+` item library.
+- 2026-04-23: Implemented the first containment pass in `SubtitleEditorPage`: the page no longer hydrates the full library on first open, advanced voice data shifts into a deferred background load, and batch-library selection becomes explicit via a manual `Load items` action. `npm run build` and `cargo check` passed.

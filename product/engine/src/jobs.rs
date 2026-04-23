@@ -710,9 +710,7 @@ fn summarize_voice_clone_outcome_segments(
         match segment.voice_clone_outcome {
             Some(VoiceCloneSegmentOutcome::Converted) => summary.clone_converted_segments += 1,
             Some(VoiceCloneSegmentOutcome::FallbackTts) => summary.clone_fallback_segments += 1,
-            Some(VoiceCloneSegmentOutcome::StandardTts)
-                if segment.voice_clone_intent.is_none() =>
-            {
+            Some(VoiceCloneSegmentOutcome::StandardTts) if segment.voice_clone_intent.is_none() => {
                 summary.standard_tts_segments += 1;
             }
             _ => {}
@@ -3306,7 +3304,8 @@ fn execute_job(paths: &AppPaths, job_id: &str, type_str: &str, params_json: &str
                 let output_dir = subscriptions::youtube_subscription_output_dir(paths, &sub)?;
                 std::fs::create_dir_all(&output_dir)?;
 
-                let archive_path = subscriptions::ensure_youtube_subscription_archive_state(paths, &sub)?;
+                let archive_path =
+                    subscriptions::ensure_youtube_subscription_archive_state(paths, &sub)?;
                 let archived = subscriptions::load_youtube_subscription_archive_ids(paths, &sub)?;
 
                 log_line(
@@ -6135,7 +6134,9 @@ if __name__ == "__main__":
                     audio_exists: exists,
                     voice_clone_intent: report_segment
                         .and_then(|value| value.voice_clone_intent.clone())
-                        .or_else(|| Some(voice_clone_intent_for_render_mode(render_mode.as_deref()))),
+                        .or_else(|| {
+                            Some(voice_clone_intent_for_render_mode(render_mode.as_deref()))
+                        }),
                     voice_clone_outcome: report_segment
                         .and_then(|value| value.voice_clone_outcome.clone()),
                     voice_clone_error: report_segment.and_then(|value| value.error.clone()),
@@ -9331,11 +9332,15 @@ pub(crate) fn normalize_auth_cookie(value: Option<String>) -> Result<Option<Stri
         return Ok(None);
     }
 
+    if let Some(from_json) = cookie_json_to_netscape(trimmed) {
+        return Ok(Some(from_json));
+    }
+
     if let Some(from_json) = cookie_json_to_header(trimmed) {
         return Ok(Some(from_json));
     }
 
-    if let Some(from_netscape) = netscape_cookie_text_to_header(trimmed) {
+    if let Some(from_netscape) = normalize_netscape_cookie_text(trimmed) {
         return Ok(Some(from_netscape));
     }
 
@@ -9363,6 +9368,206 @@ pub(crate) fn normalize_auth_cookie(value: Option<String>) -> Result<Option<Stri
     }
 
     Ok(Some(trimmed.to_string()))
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct NetscapeCookieRecord {
+    domain: String,
+    include_subdomains: bool,
+    path: String,
+    secure: bool,
+    expires: i64,
+    name: String,
+    value: String,
+    http_only: bool,
+}
+
+fn normalize_cookie_name(value: &str) -> Option<String> {
+    let trimmed = value.trim();
+    if trimmed.is_empty()
+        || trimmed.contains(' ')
+        || trimmed.contains('\t')
+        || trimmed.contains('\r')
+        || trimmed.contains('\n')
+        || trimmed.contains(';')
+        || trimmed.contains('=')
+    {
+        return None;
+    }
+    Some(trimmed.to_string())
+}
+
+fn normalize_cookie_value(value: &str) -> Option<String> {
+    if value.contains('\t') || value.contains('\r') || value.contains('\n') {
+        return None;
+    }
+    Some(value.trim().to_string())
+}
+
+fn normalize_cookie_domain(value: &str) -> Option<String> {
+    let trimmed = value.trim();
+    if trimmed.is_empty()
+        || trimmed.contains('\t')
+        || trimmed.contains('\r')
+        || trimmed.contains('\n')
+        || trimmed.contains(' ')
+    {
+        return None;
+    }
+    Some(trimmed.to_ascii_lowercase())
+}
+
+fn normalize_cookie_path_value(value: Option<&str>) -> String {
+    let trimmed = value.unwrap_or("/").trim();
+    if trimmed.is_empty() {
+        "/".to_string()
+    } else {
+        trimmed.to_string()
+    }
+}
+
+fn cookie_json_expiration(value: Option<&serde_json::Value>, session: bool) -> i64 {
+    if session {
+        return 0;
+    }
+    value
+        .and_then(|raw| {
+            raw.as_i64()
+                .or_else(|| raw.as_u64().and_then(|v| i64::try_from(v).ok()))
+                .or_else(|| raw.as_f64().map(|v| v.floor() as i64))
+        })
+        .unwrap_or(2_147_483_647)
+        .max(0)
+}
+
+fn cookie_json_record_from_object(
+    map: &serde_json::Map<String, serde_json::Value>,
+) -> Option<NetscapeCookieRecord> {
+    let name = normalize_cookie_name(map.get("name")?.as_str()?)?;
+    let value = normalize_cookie_value(map.get("value")?.as_str()?)?;
+    let mut domain = normalize_cookie_domain(map.get("domain")?.as_str()?)?;
+    let host_only = map
+        .get("hostOnly")
+        .and_then(serde_json::Value::as_bool)
+        .unwrap_or(false);
+    if host_only {
+        domain = domain.trim_start_matches('.').to_string();
+    } else if !domain.starts_with('.') {
+        domain = format!(".{domain}");
+    }
+    let path = normalize_cookie_path_value(map.get("path").and_then(serde_json::Value::as_str));
+    let secure = map
+        .get("secure")
+        .and_then(serde_json::Value::as_bool)
+        .unwrap_or(false);
+    let session = map
+        .get("session")
+        .and_then(serde_json::Value::as_bool)
+        .unwrap_or(false);
+    let http_only = map
+        .get("httpOnly")
+        .and_then(serde_json::Value::as_bool)
+        .unwrap_or(false);
+    let expires = cookie_json_expiration(map.get("expirationDate"), session);
+    Some(NetscapeCookieRecord {
+        domain,
+        include_subdomains: !host_only,
+        path,
+        secure,
+        expires,
+        name,
+        value,
+        http_only,
+    })
+}
+
+fn format_netscape_cookie_records(records: &[NetscapeCookieRecord]) -> Option<String> {
+    if records.is_empty() {
+        return None;
+    }
+
+    let mut dedup_seen: HashSet<String> = HashSet::new();
+    let mut dedup_records: Vec<NetscapeCookieRecord> = Vec::new();
+    for record in records.iter().rev() {
+        let key = format!("{}\t{}\t{}", record.domain, record.path, record.name);
+        if dedup_seen.insert(key) {
+            dedup_records.push(record.clone());
+        }
+    }
+    dedup_records.reverse();
+
+    let mut contents = String::from("# Netscape HTTP Cookie File\n");
+    for record in dedup_records {
+        let line_domain = if record.http_only {
+            format!("#HttpOnly_{}", record.domain)
+        } else {
+            record.domain.clone()
+        };
+        contents.push_str(&format!(
+            "{line_domain}\t{}\t{}\t{}\t{}\t{}\t{}\n",
+            if record.include_subdomains {
+                "TRUE"
+            } else {
+                "FALSE"
+            },
+            record.path,
+            if record.secure { "TRUE" } else { "FALSE" },
+            record.expires.max(0),
+            record.name,
+            record.value
+        ));
+    }
+    Some(contents)
+}
+
+fn netscape_cookie_text_to_records(raw_text: &str) -> Vec<NetscapeCookieRecord> {
+    let mut records: Vec<NetscapeCookieRecord> = Vec::new();
+    for line in raw_text.lines() {
+        let trimmed = line.trim();
+        if trimmed.is_empty() {
+            continue;
+        }
+        let (http_only, payload) = if let Some(rest) = trimmed.strip_prefix("#HttpOnly_") {
+            (true, rest)
+        } else if trimmed.starts_with('#') {
+            continue;
+        } else {
+            (false, trimmed)
+        };
+        let parts: Vec<&str> = payload.split('\t').collect();
+        if parts.len() < 7 {
+            continue;
+        }
+        let Some(domain) = normalize_cookie_domain(parts[0]) else {
+            continue;
+        };
+        let Some(name) = normalize_cookie_name(parts[5]) else {
+            continue;
+        };
+        let Some(value) = normalize_cookie_value(parts[6]) else {
+            continue;
+        };
+        let include_subdomains = parts[1].trim().eq_ignore_ascii_case("true");
+        let path = normalize_cookie_path_value(Some(parts[2]));
+        let secure = parts[3].trim().eq_ignore_ascii_case("true");
+        let expires = parts[4].trim().parse::<i64>().unwrap_or(0).max(0);
+        records.push(NetscapeCookieRecord {
+            domain,
+            include_subdomains,
+            path,
+            secure,
+            expires,
+            name,
+            value,
+            http_only,
+        });
+    }
+    records
+}
+
+fn normalize_netscape_cookie_text(raw_text: &str) -> Option<String> {
+    let records = netscape_cookie_text_to_records(raw_text);
+    format_netscape_cookie_records(&records)
 }
 
 fn looks_like_cookie_file_path(value: &str) -> bool {
@@ -9402,24 +9607,10 @@ fn cookie_pairs_to_header(pairs: &[(String, String)]) -> Option<String> {
 }
 
 fn netscape_cookie_text_to_header(raw_text: &str) -> Option<String> {
-    let mut pairs: Vec<(String, String)> = Vec::new();
-    for line in raw_text.lines() {
-        let trimmed = line.trim();
-        if trimmed.is_empty() || trimmed.starts_with('#') {
-            continue;
-        }
-        let parts: Vec<&str> = trimmed.split('\t').collect();
-        if parts.len() < 7 {
-            continue;
-        }
-        let name = parts[5].trim();
-        let value = parts[6].trim();
-        if name.is_empty() || name.contains(' ') || name.contains('\t') {
-            continue;
-        }
-        pairs.push((name.to_string(), value.to_string()));
-    }
-
+    let pairs: Vec<(String, String)> = netscape_cookie_text_to_records(raw_text)
+        .into_iter()
+        .map(|record| (record.name, record.value))
+        .collect();
     cookie_pairs_to_header(&pairs)
 }
 
@@ -9477,78 +9668,75 @@ fn cookie_file_domain_for_url(url: &str) -> Result<String> {
         .host_str()
         .ok_or_else(|| EngineError::InstallFailed("cookie URL missing host".to_string()))?
         .to_ascii_lowercase();
-    if host.ends_with("instagram.com") {
+    if host == "youtube.com" || host.ends_with(".youtube.com") || host == "youtu.be" {
+        Ok(".youtube.com".to_string())
+    } else if host.ends_with("instagram.com") {
         Ok(".instagram.com".to_string())
     } else {
         Ok(host)
     }
 }
 
-fn write_cookie_header_as_netscape_file(
+fn cookie_pairs_to_netscape_text_for_url(url: &str, pairs: &[(String, String)]) -> Result<String> {
+    let domain = cookie_file_domain_for_url(url)?;
+    let include_subdomains = domain.starts_with('.');
+    let secure = url.to_ascii_lowercase().starts_with("https://");
+    let records = pairs
+        .iter()
+        .map(|(name, value)| NetscapeCookieRecord {
+            domain: domain.clone(),
+            include_subdomains,
+            path: "/".to_string(),
+            secure,
+            expires: 2_147_483_647,
+            name: name.clone(),
+            value: value.clone(),
+            http_only: false,
+        })
+        .collect::<Vec<_>>();
+    format_netscape_cookie_records(&records).ok_or_else(|| {
+        EngineError::InstallFailed("cookie value did not contain valid key=value pairs".to_string())
+    })
+}
+
+fn auth_cookie_to_netscape_text(url: &str, auth_cookie: &str) -> Result<String> {
+    if let Some(netscape) = normalize_netscape_cookie_text(auth_cookie) {
+        return Ok(netscape);
+    }
+    let pairs = parse_cookie_header_pairs(auth_cookie);
+    if pairs.is_empty() {
+        return Err(EngineError::InstallFailed(
+            "cookie value did not contain valid key=value pairs".to_string(),
+        ));
+    }
+    cookie_pairs_to_netscape_text_for_url(url, &pairs)
+}
+
+fn write_auth_cookie_as_netscape_file(
     paths: &AppPaths,
     job_id: &str,
     url: &str,
-    cookie_header: &str,
+    auth_cookie: &str,
 ) -> Result<PathBuf> {
-    let pairs = parse_cookie_header_pairs(cookie_header);
-    if pairs.is_empty() {
-        return Err(EngineError::InstallFailed(
-            "cookie value did not contain valid key=value pairs".to_string(),
-        ));
-    }
-
     let artifacts_dir = paths.job_artifacts_dir(job_id);
     std::fs::create_dir_all(&artifacts_dir)?;
     let cookie_path = artifacts_dir.join("yt_dlp_cookies.txt");
-
-    write_cookie_header_as_netscape_path(&cookie_path, url, &pairs)?;
+    let contents = auth_cookie_to_netscape_text(url, auth_cookie)?;
+    persistence::atomic_write_text(&cookie_path, &contents)?;
     Ok(cookie_path)
 }
 
-fn write_cookie_header_as_netscape_temp_file(
+fn write_auth_cookie_as_netscape_temp_file(
     paths: &AppPaths,
     url: &str,
-    cookie_header: &str,
+    auth_cookie: &str,
 ) -> Result<PathBuf> {
-    let pairs = parse_cookie_header_pairs(cookie_header);
-    if pairs.is_empty() {
-        return Err(EngineError::InstallFailed(
-            "cookie value did not contain valid key=value pairs".to_string(),
-        ));
-    }
-
     let dir = paths.cache_dir().join("yt_dlp_cookie_files");
     std::fs::create_dir_all(&dir)?;
     let cookie_path = dir.join(format!("cookie_{}.txt", Uuid::new_v4()));
-    write_cookie_header_as_netscape_path(&cookie_path, url, &pairs)?;
+    let contents = auth_cookie_to_netscape_text(url, auth_cookie)?;
+    persistence::atomic_write_text(&cookie_path, &contents)?;
     Ok(cookie_path)
-}
-
-fn write_cookie_header_as_netscape_path(
-    cookie_path: &Path,
-    url: &str,
-    pairs: &[(String, String)],
-) -> Result<()> {
-    let domain = cookie_file_domain_for_url(url)?;
-    let include_subdomains = if domain.starts_with('.') {
-        "TRUE"
-    } else {
-        "FALSE"
-    };
-    let secure = if url.to_ascii_lowercase().starts_with("https://") {
-        "TRUE"
-    } else {
-        "FALSE"
-    };
-
-    let mut contents = String::from("# Netscape HTTP Cookie File\n");
-    for (name, value) in pairs {
-        contents.push_str(&format!(
-            "{domain}\t{include_subdomains}\t/\t{secure}\t2147483647\t{name}\t{value}\n"
-        ));
-    }
-    persistence::atomic_write_text(cookie_path, &contents)?;
-    Ok(())
 }
 
 fn strip_browser_cookie_args(args: &mut Vec<String>) -> bool {
@@ -9564,6 +9752,95 @@ fn strip_browser_cookie_args(args: &mut Vec<String>) -> bool {
         i += 1;
     }
     false
+}
+
+fn strip_yt_dlp_option_with_value(args: &mut Vec<String>, option: &str) -> bool {
+    let mut i = 0_usize;
+    while i < args.len() {
+        if args[i] == option {
+            args.remove(i);
+            if i < args.len() {
+                args.remove(i);
+            }
+            return true;
+        }
+        i += 1;
+    }
+    false
+}
+
+fn yt_dlp_should_retry_without_format(url: &str, err: &EngineError) -> bool {
+    let lower = err.to_string().to_ascii_lowercase();
+    lower.contains("requested format is not available")
+        || lower.contains("yt-dlp downloaded an empty file")
+        || (is_youtube_url(url)
+            && (lower.contains("http error 403") || lower.contains("fragment 1 not found")))
+}
+
+fn run_yt_dlp_with_browser_cookie_retry(
+    paths: &AppPaths,
+    args: &[String],
+    job_id: Option<&str>,
+    timeout_secs: u64,
+    using_browser_cookies: bool,
+) -> Result<std::process::Output> {
+    match run_yt_dlp(paths, args, job_id, timeout_secs) {
+        Ok(output) => Ok(output),
+        Err(first_err) => {
+            if !using_browser_cookies {
+                return Err(first_err);
+            }
+
+            let mut retry_args = args.to_vec();
+            if !strip_browser_cookie_args(&mut retry_args) {
+                return Err(first_err);
+            }
+
+            match run_yt_dlp(paths, &retry_args, job_id, timeout_secs) {
+                Ok(output) => Ok(output),
+                Err(second_err) => Err(EngineError::InstallFailed(format!(
+                    "{first_err}; retry without browser cookies failed: {second_err}"
+                ))),
+            }
+        }
+    }
+}
+
+fn cookie_json_to_netscape(raw_json: &str) -> Option<String> {
+    let value: serde_json::Value = serde_json::from_str(raw_json).ok()?;
+    let mut records: Vec<NetscapeCookieRecord> = Vec::new();
+
+    fn collect(value: &serde_json::Value, records: &mut Vec<NetscapeCookieRecord>) {
+        match value {
+            serde_json::Value::Array(values) => {
+                for item in values {
+                    collect(item, records);
+                }
+            }
+            serde_json::Value::Object(map) => {
+                if let Some(record) = cookie_json_record_from_object(map) {
+                    records.push(record);
+                    return;
+                }
+                if let Some(cookies) = map.get("cookies") {
+                    collect(cookies, records);
+                    return;
+                }
+                for nested in map.values() {
+                    if matches!(
+                        nested,
+                        serde_json::Value::Array(_) | serde_json::Value::Object(_)
+                    ) {
+                        collect(nested, records);
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+
+    collect(&value, &mut records);
+    format_netscape_cookie_records(&records)
 }
 
 fn cookie_json_to_header(raw_json: &str) -> Option<String> {
@@ -10264,7 +10541,7 @@ fn run_yt_dlp(
                 }
 
                 let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
-                failures.push(format!(
+                let failure = format!(
                     "{program} failed (code={:?}): {}",
                     output.status.code(),
                     if stderr.is_empty() {
@@ -10272,7 +10549,11 @@ fn run_yt_dlp(
                     } else {
                         stderr
                     }
-                ));
+                );
+                if yt_dlp_failure_should_stop(&failure) {
+                    return Err(EngineError::InstallFailed(failure));
+                }
+                failures.push(failure);
                 continue;
             }
             Err(CommandRunError::Spawn(e)) if e.kind() == std::io::ErrorKind::NotFound => {
@@ -10310,6 +10591,17 @@ fn run_yt_dlp(
     ))
 }
 
+fn yt_dlp_failure_should_stop(message: &str) -> bool {
+    let lower = message.to_ascii_lowercase();
+    lower.contains(" error:")
+        || lower.contains("unable to extract")
+        || lower.contains("requested format is not available")
+        || lower.contains("sign in to confirm")
+        || lower.contains("unsupported url")
+        || lower.contains("private video")
+        || lower.contains("this video is unavailable")
+}
+
 fn expand_yt_dlp_urls(
     paths: &AppPaths,
     url: &str,
@@ -10337,7 +10629,7 @@ fn expand_yt_dlp_urls(
     if let Some(cookie) = auth_cookie {
         let trimmed = cookie.trim();
         if !trimmed.is_empty() {
-            let cookie_file = write_cookie_header_as_netscape_temp_file(paths, url, trimmed)?;
+            let cookie_file = write_auth_cookie_as_netscape_temp_file(paths, url, trimmed)?;
             args.push("--cookies".to_string());
             args.push(cookie_file.to_string_lossy().to_string());
             cookie_file_path = Some(cookie_file);
@@ -10355,26 +10647,13 @@ fn expand_yt_dlp_urls(
     let js_runtime_available =
         append_yt_dlp_runtime_args(paths, &mut args, url, auth_cookie_present);
 
-    let output_res = match run_yt_dlp(paths, &args, None, YT_DLP_EXPAND_TIMEOUT_SECS) {
-        Ok(output) => Ok(output),
-        Err(first_err) => {
-            if !using_browser_cookies {
-                Err(first_err)
-            } else {
-                let mut retry_args = args.clone();
-                if !strip_browser_cookie_args(&mut retry_args) {
-                    Err(first_err)
-                } else {
-                    match run_yt_dlp(paths, &retry_args, None, YT_DLP_EXPAND_TIMEOUT_SECS) {
-                        Ok(output) => Ok(output),
-                        Err(second_err) => Err(EngineError::InstallFailed(format!(
-                            "{first_err}; retry without browser cookies failed: {second_err}"
-                        ))),
-                    }
-                }
-            }
-        }
-    };
+    let output_res = run_yt_dlp_with_browser_cookie_retry(
+        paths,
+        &args,
+        None,
+        YT_DLP_EXPAND_TIMEOUT_SECS,
+        using_browser_cookies,
+    );
     if let Some(path) = cookie_file_path {
         let _ = std::fs::remove_file(path);
     }
@@ -11639,7 +11918,7 @@ fn download_yt_dlp_url_to_library(
     if let Some(cookie) = auth_cookie {
         let trimmed = cookie.trim();
         if !trimmed.is_empty() {
-            let cookie_file = write_cookie_header_as_netscape_file(paths, job_id, url, trimmed)?;
+            let cookie_file = write_auth_cookie_as_netscape_file(paths, job_id, url, trimmed)?;
             args.push("--cookies".to_string());
             args.push(cookie_file.to_string_lossy().to_string());
             cookie_file_path = Some(cookie_file);
@@ -11657,30 +11936,37 @@ fn download_yt_dlp_url_to_library(
     let js_runtime_available =
         append_yt_dlp_runtime_args(paths, &mut args, url, auth_cookie_present);
 
-    let output_res = match run_yt_dlp(paths, &args, Some(job_id), YT_DLP_DOWNLOAD_TIMEOUT_SECS) {
-        Ok(output) => Ok(output),
-        Err(first_err) => {
-            if !using_browser_cookies {
+    let output_res = run_yt_dlp_with_browser_cookie_retry(
+        paths,
+        &args,
+        Some(job_id),
+        YT_DLP_DOWNLOAD_TIMEOUT_SECS,
+        using_browser_cookies,
+    );
+    let output_res = match output_res {
+        Err(first_err)
+            if normalize_non_empty(format_preference).is_some()
+                && yt_dlp_should_retry_without_format(url, &first_err) =>
+        {
+            let mut retry_args = args.clone();
+            if !strip_yt_dlp_option_with_value(&mut retry_args, "-f") {
                 Err(first_err)
             } else {
-                let mut retry_args = args.clone();
-                if !strip_browser_cookie_args(&mut retry_args) {
-                    Err(first_err)
-                } else {
-                    match run_yt_dlp(
-                        paths,
-                        &retry_args,
-                        Some(job_id),
-                        YT_DLP_DOWNLOAD_TIMEOUT_SECS,
-                    ) {
-                        Ok(output) => Ok(output),
-                        Err(second_err) => Err(EngineError::InstallFailed(format!(
-                            "{first_err}; retry without browser cookies failed: {second_err}"
-                        ))),
-                    }
+                match run_yt_dlp_with_browser_cookie_retry(
+                    paths,
+                    &retry_args,
+                    Some(job_id),
+                    YT_DLP_DOWNLOAD_TIMEOUT_SECS,
+                    using_browser_cookies,
+                ) {
+                    Ok(output) => Ok(output),
+                    Err(second_err) => Err(EngineError::InstallFailed(format!(
+                        "{first_err}; retry without explicit format failed: {second_err}"
+                    ))),
                 }
             }
         }
+        other => other,
     };
     if let Some(path) = cookie_file_path {
         let _ = std::fs::remove_file(path);
@@ -11781,7 +12067,9 @@ fn resolve_global_youtube_auth_cookie(paths: &AppPaths) -> Option<String> {
     }
     // The stored value is the raw JSON array from a browser extension.
     // normalize_auth_cookie already handles JSON cookie arrays.
-    normalize_auth_cookie(Some(trimmed.to_string())).ok().flatten()
+    normalize_auth_cookie(Some(trimmed.to_string()))
+        .ok()
+        .flatten()
 }
 
 fn delete_job_by_id(paths: &AppPaths, job_id: &str) -> Result<()> {
@@ -14399,6 +14687,20 @@ EOF
     }
 
     #[test]
+    fn normalize_auth_cookie_preserves_browser_export_cookie_metadata() {
+        let cookie = normalize_auth_cookie(Some(
+            r#"[{"domain":".youtube.com","expirationDate":1810220022.284679,"hostOnly":false,"httpOnly":true,"name":"__Secure-3PSID","path":"/","secure":true,"session":false,"value":"abc123"}]"#
+                .to_string(),
+        ))
+        .expect("cookie")
+        .expect("normalized cookie");
+        assert_eq!(
+            cookie,
+            "# Netscape HTTP Cookie File\n#HttpOnly_.youtube.com\tTRUE\t/\tTRUE\t1810220022\t__Secure-3PSID\tabc123\n"
+        );
+    }
+
+    #[test]
     fn normalize_auth_cookie_accepts_netscape_cookie_text() {
         let cookie = normalize_auth_cookie(Some(
             "# Netscape HTTP Cookie File\n.instagram.com\tTRUE\t/\tTRUE\t2147483647\tsessionid\tabc123\n"
@@ -14406,7 +14708,19 @@ EOF
         ))
         .expect("cookie")
         .expect("normalized cookie");
-        assert_eq!(cookie, "sessionid=abc123");
+        assert_eq!(
+            cookie,
+            "# Netscape HTTP Cookie File\n.instagram.com\tTRUE\t/\tTRUE\t2147483647\tsessionid\tabc123\n"
+        );
+    }
+
+    #[test]
+    fn netscape_cookie_text_to_header_keeps_http_only_entries() {
+        let header = netscape_cookie_text_to_header(
+            "# Netscape HTTP Cookie File\n#HttpOnly_.youtube.com\tTRUE\t/\tTRUE\t1810220022\tSID\tabc123\n",
+        )
+        .expect("cookie header");
+        assert_eq!(header, "SID=abc123");
     }
 
     #[test]
@@ -14417,6 +14731,43 @@ EOF
             err.to_string().contains("cookie file path does not exist"),
             "unexpected error: {err}"
         );
+    }
+
+    #[test]
+    fn cookie_file_domain_for_url_uses_youtube_parent_domain() {
+        let domain = cookie_file_domain_for_url("https://www.youtube.com/watch?v=abc123")
+            .expect("cookie domain");
+        assert_eq!(domain, ".youtube.com");
+    }
+
+    #[test]
+    fn strip_yt_dlp_option_with_value_removes_flag_and_value() {
+        let mut args = vec![
+            "--no-warnings".to_string(),
+            "-f".to_string(),
+            "bv*+ba/b".to_string(),
+            "https://www.youtube.com/watch?v=abc123".to_string(),
+        ];
+        assert!(strip_yt_dlp_option_with_value(&mut args, "-f"));
+        assert!(!args.iter().any(|value| value == "-f"));
+        assert!(!args.iter().any(|value| value == "bv*+ba/b"));
+    }
+
+    #[test]
+    fn yt_dlp_retry_without_format_triggers_for_format_and_youtube_403_failures() {
+        let format_err =
+            EngineError::InstallFailed("ERROR: Requested format is not available".to_string());
+        assert!(yt_dlp_should_retry_without_format(
+            "https://www.youtube.com/watch?v=abc123",
+            &format_err
+        ));
+
+        let youtube_err =
+            EngineError::InstallFailed("ERROR: HTTP Error 403: Forbidden".to_string());
+        assert!(yt_dlp_should_retry_without_format(
+            "https://www.youtube.com/watch?v=abc123",
+            &youtube_err
+        ));
     }
 
     #[test]

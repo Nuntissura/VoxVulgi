@@ -3,7 +3,7 @@
 ## Metadata
 - ID: WP-0194
 - Owner: Codex
-- Status: BACKLOG
+- Status: IN_PROGRESS
 - Created: 2026-04-23
 - Target milestone: Desktop diagnostics reliability
 
@@ -39,3 +39,4 @@ Out of scope:
 ## Status updates
 
 - 2026-04-23: Created after smoke reported Tools/Storage still loading long after startup, while trace evidence showed offline bundle hydration already completed successfully.
+- 2026-04-23: Implemented a first truthfulness pass: Diagnostics now loads core tool readiness before optional pack details, summary cards no longer default to misleading `Missing`/`Not installed` states while still checking, and engine storage scans are explicitly bounded so the storage section can settle. `cargo check` passed.

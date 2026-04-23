@@ -1518,7 +1518,9 @@ export function SubtitleEditorPage({
     return "balanced";
   });
   const [libraryItems, setLibraryItems] = useState<LibraryItem[]>([]);
+  const [libraryItemsLoaded, setLibraryItemsLoaded] = useState(false);
   const [libraryItemsBusy, setLibraryItemsBusy] = useState(false);
+  const [deferredContextBusy, setDeferredContextBusy] = useState(false);
   const [batchSelectedItemIds, setBatchSelectedItemIds] = useState<string[]>([itemId]);
   const [batchQueueBusy, setBatchQueueBusy] = useState(false);
   const [batchQueueQc, setBatchQueueQc] = useState(true);
@@ -1801,6 +1803,7 @@ export function SubtitleEditorPage({
         if (page.length < pageSize) break;
       }
       setLibraryItems(next);
+      setLibraryItemsLoaded(true);
       return next;
     } finally {
       setLibraryItemsBusy(false);
@@ -1899,6 +1902,33 @@ export function SubtitleEditorPage({
     }
   }, [itemId]);
 
+  const loadDeferredContext = useCallback(async () => {
+    setDeferredContextBusy(true);
+    try {
+      await Promise.all([
+        refreshVoiceTemplates(),
+        refreshVoiceCastPacks(),
+        refreshVoiceLibraryProfiles(),
+        refreshMemorySuggestions(),
+        refreshCharacterSuggestions(),
+        refreshVoiceBackendStrategy(),
+        refreshItemVoicePlan(),
+        loadVoiceReferenceCandidates(),
+      ]);
+    } finally {
+      setDeferredContextBusy(false);
+    }
+  }, [
+    refreshVoiceTemplates,
+    refreshVoiceCastPacks,
+    refreshVoiceLibraryProfiles,
+    refreshMemorySuggestions,
+    refreshCharacterSuggestions,
+    refreshVoiceBackendStrategy,
+    refreshItemVoicePlan,
+    loadVoiceReferenceCandidates,
+  ]);
+
   const loadTrack = useCallback(
     async (nextTrackId: string) => {
       setError(null);
@@ -1916,6 +1946,8 @@ export function SubtitleEditorPage({
   );
 
   useEffect(() => {
+    let cancelled = false;
+    let deferredTimer: number | null = null;
     setError(null);
     setNotice(null);
     setBusy(true);
@@ -1924,45 +1956,57 @@ export function SubtitleEditorPage({
       refreshTracks(),
       refreshLocalizationReadiness(),
       refreshSpeakerSettings(),
-      refreshVoiceTemplates(),
-      refreshVoiceCastPacks(),
-      refreshVoiceLibraryProfiles(),
-      refreshMemorySuggestions(),
-      refreshCharacterSuggestions(),
-      refreshVoiceBackendStrategy(),
-      refreshItemVoicePlan(),
-      refreshLibraryItems(),
-      loadVoiceReferenceCandidates(),
       refreshOutputs(),
       refreshArtifacts(),
       refreshItemJobs(),
     ])
-      .then(([nextItem, nextTracks]) => {
+      .then(async ([nextItem, nextTracks]) => {
+        if (cancelled) return;
         setItem(nextItem);
         const preferred = preferredLocalizationTrack(nextTracks);
         if (preferred) {
-          loadTrack(preferred.id).catch((e) => setError(String(e)));
+          try {
+            await loadTrack(preferred.id);
+          } catch (e) {
+            if (!cancelled) {
+              setError(String(e));
+            }
+          }
+        }
+        if (cancelled) return;
+        deferredTimer = window.setTimeout(() => {
+          void loadDeferredContext().catch((e) => {
+            if (!cancelled) {
+              setError((prev) => prev ?? String(e));
+            }
+          });
+        }, 80);
+      })
+      .catch((e) => {
+        if (!cancelled) {
+          setError(String(e));
         }
       })
-      .catch((e) => setError(String(e)))
-      .finally(() => setBusy(false));
+      .finally(() => {
+        if (!cancelled) {
+          setBusy(false);
+        }
+      });
+    return () => {
+      cancelled = true;
+      if (deferredTimer !== null) {
+        window.clearTimeout(deferredTimer);
+      }
+    };
   }, [
     itemId,
     refreshTracks,
     refreshLocalizationReadiness,
     refreshSpeakerSettings,
-    refreshVoiceTemplates,
-    refreshVoiceCastPacks,
-    refreshVoiceLibraryProfiles,
-    refreshMemorySuggestions,
-    refreshCharacterSuggestions,
-    refreshVoiceBackendStrategy,
-    refreshItemVoicePlan,
-    refreshLibraryItems,
-    loadVoiceReferenceCandidates,
     refreshOutputs,
     refreshArtifacts,
     refreshItemJobs,
+    loadDeferredContext,
     loadTrack,
   ]);
 
@@ -9965,7 +10009,7 @@ export function SubtitleEditorPage({
                     refreshLibraryItems().catch((e) => setError(String(e)));
                   }}
                 >
-                  Reload items
+                  {libraryItemsLoaded ? "Reload items" : "Load items"}
                 </button>
                 <button
                   type="button"
@@ -10002,6 +10046,16 @@ export function SubtitleEditorPage({
                 <div style={{ fontSize: 12, opacity: 0.6 }}>
                   Uses the currently selected template and cast pack if you set them above.
                 </div>
+                {!libraryItemsLoaded ? (
+                  <div style={{ fontSize: 12, opacity: 0.7 }}>
+                    Large libraries stay lazy on first open. Load the full item list only when you need multi-item batch work.
+                  </div>
+                ) : null}
+                {deferredContextBusy ? (
+                  <div style={{ fontSize: 12, opacity: 0.7 }}>
+                    Advanced voice tools are still loading in the background.
+                  </div>
+                ) : null}
                 <button type="button" disabled={batchQueueBusy} onClick={queueLocalizationBatch}>
                   Queue batch dubbing
                 </button>
@@ -10017,20 +10071,26 @@ export function SubtitleEditorPage({
                 }}
               >
                 <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
-                  {batchLibraryItems.map((entry) => (
-                    <label
-                      key={`batch-${entry.id}`}
-                      style={{ display: "flex", alignItems: "center", gap: 8 }}
-                    >
-                      <input
-                        type="checkbox"
-                        checked={batchSelectedItemIds.includes(entry.id)}
-                        onChange={(e) => toggleBatchItem(entry.id, e.currentTarget.checked)}
-                      />
-                      <span>{entry.title || fileNameFromPath(entry.media_path) || entry.id}</span>
-                      {entry.id === itemId ? <code>current</code> : null}
-                    </label>
-                  ))}
+                  {libraryItemsLoaded ? (
+                    batchLibraryItems.map((entry) => (
+                      <label
+                        key={`batch-${entry.id}`}
+                        style={{ display: "flex", alignItems: "center", gap: 8 }}
+                      >
+                        <input
+                          type="checkbox"
+                          checked={batchSelectedItemIds.includes(entry.id)}
+                          onChange={(e) => toggleBatchItem(entry.id, e.currentTarget.checked)}
+                        />
+                        <span>{entry.title || fileNameFromPath(entry.media_path) || entry.id}</span>
+                        {entry.id === itemId ? <code>current</code> : null}
+                      </label>
+                    ))
+                  ) : (
+                    <div style={{ fontSize: 12, opacity: 0.72 }}>
+                      Current item batch actions are ready. Load items above if you want to select from the wider library.
+                    </div>
+                  )}
                 </div>
               </div>
               {batchQueueSummary ? (
@@ -10991,5 +11051,3 @@ export function SubtitleEditorPage({
     </section>
   );
 }
-
-

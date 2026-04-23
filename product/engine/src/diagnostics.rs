@@ -7,6 +7,10 @@ use std::collections::BTreeMap;
 use std::io::{BufRead, BufReader, Write};
 use std::path::{Path, PathBuf};
 use std::sync::OnceLock;
+use std::time::{Duration, Instant};
+
+const STORAGE_SCAN_MAX_ENTRIES_PER_ROOT: usize = 25_000;
+const STORAGE_SCAN_MAX_MILLIS_PER_ROOT: u64 = 1_500;
 
 #[derive(Debug, Clone, Serialize)]
 pub struct StorageBreakdown {
@@ -758,13 +762,22 @@ pub(crate) fn directory_size_bytes_best_effort(path: &Path) -> u64 {
         return 0;
     }
 
+    let deadline = Instant::now() + Duration::from_millis(STORAGE_SCAN_MAX_MILLIS_PER_ROOT);
+    let mut remaining_entries = STORAGE_SCAN_MAX_ENTRIES_PER_ROOT;
     let mut stack = vec![path.to_path_buf()];
     while let Some(dir) = stack.pop() {
+        if remaining_entries == 0 || Instant::now() >= deadline {
+            break;
+        }
         let entries = match std::fs::read_dir(&dir) {
             Ok(v) => v,
             Err(_) => continue,
         };
         for entry in entries.flatten() {
+            if remaining_entries == 0 || Instant::now() >= deadline {
+                break;
+            }
+            remaining_entries = remaining_entries.saturating_sub(1);
             let file_type = match entry.file_type() {
                 Ok(v) => v,
                 Err(_) => continue,

@@ -1,6 +1,13 @@
 import { useEffect, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { open } from "@tauri-apps/plugin-dialog";
+import {
+  MAX_FONT_SCALE_PCT,
+  MIN_FONT_SCALE_PCT,
+  resetStoredDesktopFontScalePct,
+  setStoredDesktopFontScalePct,
+  getStoredDesktopFontScalePct,
+} from "../lib/fontScale";
 import { openPathBestEffort } from "../lib/pathOpener";
 import {
   featureRootStatus,
@@ -40,6 +47,7 @@ export function OptionsPage() {
   const { status: downloadDir, loading: dirLoading, error: dirError } = useSharedDownloadDirStatus();
   const effectiveRoot = (downloadDir?.current_dir ?? "").trim();
   const defaultRoot = (downloadDir?.default_dir ?? "").trim();
+  const [fontScalePct, setFontScalePct] = useState(() => getStoredDesktopFontScalePct());
 
   const [authJson, setAuthJson] = useState("");
   const [authBusy, setAuthBusy] = useState(false);
@@ -93,6 +101,11 @@ export function OptionsPage() {
     await setFeatureDownloadDir(feature, selected);
   }
 
+  function updateFontScale(nextValue: number) {
+    const normalized = setStoredDesktopFontScalePct(nextValue);
+    setFontScalePct(normalized);
+  }
+
   return (
     <section>
       <div className="card">
@@ -100,6 +113,49 @@ export function OptionsPage() {
         <div style={{ color: "#4b5563", marginTop: 6 }}>
           Durable storage roots live here. Feature panes should only show their effective paths,
           not own their root configuration.
+        </div>
+      </div>
+
+      <div className="card">
+        <h2>Readability</h2>
+        <div style={{ color: "#4b5563", marginTop: 6, marginBottom: 12 }}>
+          Scale the full desktop UI without changing window zoom. This applies immediately and is saved on this machine.
+        </div>
+        <div className="kv">
+          <div className="k">Current font scale</div>
+          <div className="v">{fontScalePct}%</div>
+        </div>
+        <div className="row">
+          <input
+            type="range"
+            min={MIN_FONT_SCALE_PCT}
+            max={MAX_FONT_SCALE_PCT}
+            step={5}
+            value={fontScalePct}
+            onChange={(e) => updateFontScale(Number(e.currentTarget.value))}
+            style={{ flex: 1, minWidth: 240 }}
+          />
+          <button type="button" onClick={() => updateFontScale(100)}>
+            100%
+          </button>
+          <button type="button" onClick={() => updateFontScale(110)}>
+            110%
+          </button>
+          <button type="button" onClick={() => updateFontScale(120)}>
+            120%
+          </button>
+          <button
+            type="button"
+            onClick={() => {
+              const normalized = resetStoredDesktopFontScalePct();
+              setFontScalePct(normalized);
+            }}
+          >
+            Reset
+          </button>
+        </div>
+        <div style={{ color: "#4b5563", marginTop: 8 }}>
+          Range: {MIN_FONT_SCALE_PCT}% to {MAX_FONT_SCALE_PCT}%. Use this when the default UI still feels too small.
         </div>
       </div>
 

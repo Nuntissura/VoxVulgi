@@ -169,6 +169,27 @@ function inferSubscriptionType(url: string): "Channel" | "Shorts" | "Playlist" |
   return "URL";
 }
 
+function describeRecurringTarget(
+  outputDirOverride: string | null,
+  defaultRoot: string,
+  folderMap: string,
+) {
+  const pinned = (outputDirOverride ?? "").trim();
+  if (pinned) {
+    const normalizedDefault = (defaultRoot ?? "").trim().toLowerCase();
+    const looksLegacyPinned =
+      !normalizedDefault || !pinned.toLowerCase().startsWith(normalizedDefault);
+    return {
+      mode: looksLegacyPinned ? "Pinned legacy/NAS target" : "Pinned custom target",
+      path: pinned,
+    };
+  }
+  return {
+    mode: "Managed under current root",
+    path: joinPath(defaultRoot, folderMap || ""),
+  };
+}
+
 function relativeContainerParts(mediaPath: string, downloadRoot: string): string[] {
   const sourceParent = parentPath(mediaPath);
   if (!sourceParent) return [];
@@ -471,7 +492,7 @@ export function LibraryPage({ onOpenEditor, mode = "all" }: LibraryPageProps) {
   const maxInstagramBatchUrls = 1500;
   const maxImageBatchUrls = 1500;
   const libraryPageSize = 200;
-  const libraryViewportHeight = 560;
+  const libraryViewportHeight = "min(72vh, 960px)";
   const libraryLoadMoreThresholdPx = 240;
   const minSubscriptionRefreshIntervalMinutes = 5;
   const maxSubscriptionRefreshIntervalMinutes = 10080;
@@ -3072,6 +3093,10 @@ export function LibraryPage({ onOpenEditor, mode = "all" }: LibraryPageProps) {
           tracked in VoxVulgi-managed state, so migrated legacy/NAS folders can stay the target even
           when the global root changes.
         </div>
+        <div style={{ color: "#4b5563", marginBottom: 8 }}>
+          Leave the override blank for a new managed folder under <code>{defaultSubscriptionDownloadsDir || "-"}</code>.
+          Set an override when this subscription must keep writing into an existing legacy/NAS archive.
+        </div>
         <div className="row">
           <label style={{ display: "flex", alignItems: "center", gap: 8, flex: 1 }}>
             <span>Title</span>
@@ -3277,6 +3302,8 @@ export function LibraryPage({ onOpenEditor, mode = "all" }: LibraryPageProps) {
                 <th>URL</th>
                 <th>Downloaded</th>
                 <th>Status</th>
+                <th>Target mode</th>
+                <th>Target path</th>
                 <th>Folder map</th>
                 <th>Groups</th>
                 <th>Session</th>
@@ -3290,74 +3317,85 @@ export function LibraryPage({ onOpenEditor, mode = "all" }: LibraryPageProps) {
             </thead>
             <tbody>
               {visibleSubscriptions.length ? (
-                visibleSubscriptions.map((sub) => (
-                  <tr key={sub.id}>
-                    <td>{sub.title}</td>
-                    <td>{inferSubscriptionType(sub.source_url)}</td>
-                    <td style={{ minWidth: 260, maxWidth: 360, wordBreak: "break-word" }}>
-                      {sub.source_url}
-                    </td>
-                    <td>{archiveStats[sub.id] ?? 0}</td>
-                    <td>{activeRefreshSubIds.has(sub.id) ? "Downloading\u2026" : "Idle"}</td>
-                    <td>{sub.folder_map}</td>
-                    <td>
-                      {sub.group_ids.length
-                        ? sub.group_ids.map((id) => groupNameById.get(id) ?? id).join(", ")
-                        : "-"}
-                    </td>
-                    <td>{sub.auth_session_configured ? "saved" : "-"}</td>
-                    <td>{sub.active ? "yes" : "no"}</td>
-                    <td>
-                      {sub.preset_id
-                        ? downloadPresets?.presets.find((preset) => preset.id === sub.preset_id)?.title ??
-                          sub.preset_id
-                        : "(default)"}
-                    </td>
-                    <td>{sub.refresh_interval_minutes}</td>
-                    <td>
-                      {sub.last_queued_at_ms
-                        ? new Date(sub.last_queued_at_ms).toLocaleString()
-                        : "-"}
-                    </td>
-                    <td>
-                      {sub.next_allowed_refresh_at_ms &&
-                      sub.next_allowed_refresh_at_ms > Date.now()
-                        ? `retry after ${new Date(sub.next_allowed_refresh_at_ms).toLocaleString()}`
-                        : "ready"}
-                      {sub.consecutive_failures > 0 ? ` (${sub.consecutive_failures} fail)` : ""}
-                    </td>
-                    <td>
-                      <div className="row" style={{ marginTop: 0, flexWrap: "nowrap" }}>
-                        <button type="button" disabled={busy} onClick={() => editSubscription(sub)}>
-                          Edit
-                        </button>
-                        <button type="button" disabled={busy} onClick={() => queueSubscription(sub.id)}>
-                          Queue
-                        </button>
-                        <button
-                          type="button"
-                          disabled={busy}
-                          onClick={() => openYoutubeSubscriptionFolder(sub.id)}
-                        >
-                          Open folder
-                        </button>
-                        <button type="button" disabled={busy} onClick={() => deleteSubscription(sub.id)}>
-                          Delete
-                        </button>
-                        <button
-                          type="button"
-                          disabled={busy}
-                          onClick={() => scanFolderSeedArchive(sub.id)}
-                        >
-                          Seed continuity
-                        </button>
-                      </div>
-                    </td>
-                  </tr>
-                ))
+                visibleSubscriptions.map((sub) => {
+                  const target = describeRecurringTarget(
+                    sub.output_dir_override,
+                    defaultSubscriptionDownloadsDir,
+                    sub.folder_map,
+                  );
+                  return (
+                    <tr key={sub.id}>
+                      <td>{sub.title}</td>
+                      <td>{inferSubscriptionType(sub.source_url)}</td>
+                      <td style={{ minWidth: 260, maxWidth: 360, wordBreak: "break-word" }}>
+                        {sub.source_url}
+                      </td>
+                      <td>{archiveStats[sub.id] ?? 0}</td>
+                      <td>{activeRefreshSubIds.has(sub.id) ? "Downloading..." : "Idle"}</td>
+                      <td>{target.mode}</td>
+                      <td style={{ minWidth: 260, maxWidth: 380, wordBreak: "break-word" }}>
+                        {target.path || "-"}
+                      </td>
+                      <td>{sub.folder_map}</td>
+                      <td>
+                        {sub.group_ids.length
+                          ? sub.group_ids.map((id) => groupNameById.get(id) ?? id).join(", ")
+                          : "-"}
+                      </td>
+                      <td>{sub.auth_session_configured ? "saved" : "-"}</td>
+                      <td>{sub.active ? "yes" : "no"}</td>
+                      <td>
+                        {sub.preset_id
+                          ? downloadPresets?.presets.find((preset) => preset.id === sub.preset_id)?.title ??
+                            sub.preset_id
+                          : "(default)"}
+                      </td>
+                      <td>{sub.refresh_interval_minutes}</td>
+                      <td>
+                        {sub.last_queued_at_ms
+                          ? new Date(sub.last_queued_at_ms).toLocaleString()
+                          : "-"}
+                      </td>
+                      <td>
+                        {sub.next_allowed_refresh_at_ms &&
+                        sub.next_allowed_refresh_at_ms > Date.now()
+                          ? `retry after ${new Date(sub.next_allowed_refresh_at_ms).toLocaleString()}`
+                          : "ready"}
+                        {sub.consecutive_failures > 0 ? ` (${sub.consecutive_failures} fail)` : ""}
+                      </td>
+                      <td>
+                        <div className="row" style={{ marginTop: 0, flexWrap: "nowrap" }}>
+                          <button type="button" disabled={busy} onClick={() => editSubscription(sub)}>
+                            Edit
+                          </button>
+                          <button type="button" disabled={busy} onClick={() => queueSubscription(sub.id)}>
+                            Queue
+                          </button>
+                          <button
+                            type="button"
+                            disabled={busy}
+                            onClick={() => openYoutubeSubscriptionFolder(sub.id)}
+                          >
+                            Open folder
+                          </button>
+                          <button type="button" disabled={busy} onClick={() => deleteSubscription(sub.id)}>
+                            Delete
+                          </button>
+                          <button
+                            type="button"
+                            disabled={busy}
+                            onClick={() => scanFolderSeedArchive(sub.id)}
+                          >
+                            Seed continuity
+                          </button>
+                        </div>
+                      </td>
+                    </tr>
+                  );
+                })
               ) : (
                 <tr>
-                  <td colSpan={14}>No subscriptions yet.</td>
+                  <td colSpan={16}>No subscriptions yet.</td>
                 </tr>
               )}
             </tbody>
@@ -3430,6 +3468,9 @@ export function LibraryPage({ onOpenEditor, mode = "all" }: LibraryPageProps) {
           Save recurring Instagram archive targets with their own folder map and refresh interval.
           Queue due active runs uses the saved interval against the last queued time. Explicit
           session input takes precedence over browser-cookie fallback.
+        </div>
+        <div style={{ color: "#4b5563", marginBottom: 8 }}>
+          This section is for recurring saved targets. The Instagram Archiver batch below is a one-time paste-and-queue flow.
         </div>
         <div className="row">
           <label style={{ display: "flex", alignItems: "center", gap: 8, flex: 1 }}>
@@ -3586,6 +3627,8 @@ export function LibraryPage({ onOpenEditor, mode = "all" }: LibraryPageProps) {
               <tr>
                 <th>Title</th>
                 <th>URL</th>
+                <th>Target mode</th>
+                <th>Target path</th>
                 <th>Folder map</th>
                 <th>Session</th>
                 <th>Active</th>
@@ -3596,54 +3639,65 @@ export function LibraryPage({ onOpenEditor, mode = "all" }: LibraryPageProps) {
             </thead>
             <tbody>
               {instagramSubscriptions.length ? (
-                instagramSubscriptions.map((sub) => (
-                  <tr key={sub.id}>
-                    <td>{sub.title}</td>
-                    <td style={{ minWidth: 260, maxWidth: 360, wordBreak: "break-word" }}>
-                      {sub.source_url}
-                    </td>
-                    <td>{sub.folder_map}</td>
-                    <td>{sub.auth_session_configured ? "saved" : "-"}</td>
-                    <td>{sub.active ? "yes" : "no"}</td>
-                    <td>{sub.refresh_interval_minutes}</td>
-                    <td>{sub.last_queued_at_ms ? new Date(sub.last_queued_at_ms).toLocaleString() : "-"}</td>
-                    <td>
-                      <div className="row" style={{ marginTop: 0, flexWrap: "nowrap" }}>
-                        <button
-                          type="button"
-                          disabled={busy}
-                          onClick={() => editInstagramSubscription(sub)}
-                        >
-                          Edit
-                        </button>
-                        <button
-                          type="button"
-                          disabled={busy}
-                          onClick={() => queueInstagramSubscription(sub.id)}
-                        >
-                          Queue
-                        </button>
-                        <button
-                          type="button"
-                          disabled={busy}
-                          onClick={() => openInstagramSubscriptionFolder(sub.id)}
-                        >
-                          Open folder
-                        </button>
-                        <button
-                          type="button"
-                          disabled={busy}
-                          onClick={() => deleteInstagramSubscription(sub.id)}
-                        >
-                          Delete
-                        </button>
-                      </div>
-                    </td>
-                  </tr>
-                ))
+                instagramSubscriptions.map((sub) => {
+                  const target = describeRecurringTarget(
+                    sub.output_dir_override,
+                    defaultInstagramSubscriptionDownloadsDir,
+                    sub.folder_map,
+                  );
+                  return (
+                    <tr key={sub.id}>
+                      <td>{sub.title}</td>
+                      <td style={{ minWidth: 260, maxWidth: 360, wordBreak: "break-word" }}>
+                        {sub.source_url}
+                      </td>
+                      <td>{target.mode}</td>
+                      <td style={{ minWidth: 240, maxWidth: 360, wordBreak: "break-word" }}>
+                        {target.path || "-"}
+                      </td>
+                      <td>{sub.folder_map}</td>
+                      <td>{sub.auth_session_configured ? "saved" : "-"}</td>
+                      <td>{sub.active ? "yes" : "no"}</td>
+                      <td>{sub.refresh_interval_minutes}</td>
+                      <td>{sub.last_queued_at_ms ? new Date(sub.last_queued_at_ms).toLocaleString() : "-"}</td>
+                      <td>
+                        <div className="row" style={{ marginTop: 0, flexWrap: "nowrap" }}>
+                          <button
+                            type="button"
+                            disabled={busy}
+                            onClick={() => editInstagramSubscription(sub)}
+                          >
+                            Edit
+                          </button>
+                          <button
+                            type="button"
+                            disabled={busy}
+                            onClick={() => queueInstagramSubscription(sub.id)}
+                          >
+                            Queue
+                          </button>
+                          <button
+                            type="button"
+                            disabled={busy}
+                            onClick={() => openInstagramSubscriptionFolder(sub.id)}
+                          >
+                            Open folder
+                          </button>
+                          <button
+                            type="button"
+                            disabled={busy}
+                            onClick={() => deleteInstagramSubscription(sub.id)}
+                          >
+                            Delete
+                          </button>
+                        </div>
+                      </td>
+                    </tr>
+                  );
+                })
               ) : (
                 <tr>
-                  <td colSpan={8}>No Instagram subscriptions yet.</td>
+                  <td colSpan={10}>No Instagram subscriptions yet.</td>
                 </tr>
               )}
             </tbody>
@@ -3660,6 +3714,9 @@ export function LibraryPage({ onOpenEditor, mode = "all" }: LibraryPageProps) {
           Output folder is optional; if left empty, each job is saved to a new folder under
           `instagram` in the main download folder. Explicit session input accepts a cookie
           header, browser-export JSON, Netscape cookie text, or a cookie-file path.
+        </div>
+        <div style={{ color: "#4b5563", marginBottom: 8 }}>
+          This batch section runs once for the pasted URLs. Use the saved Instagram subscriptions above when the same profile should refresh again later.
         </div>
         <textarea
           value={instagramBatchText}
@@ -4256,4 +4313,3 @@ export function LibraryPage({ onOpenEditor, mode = "all" }: LibraryPageProps) {
     </section>
   );
 }
-

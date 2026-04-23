@@ -3,7 +3,7 @@
 ## Metadata
 - ID: WP-0193
 - Owner: Codex
-- Status: BACKLOG
+- Status: IN_PROGRESS
 - Created: 2026-04-23
 - Target milestone: Desktop archive/operator usability
 
@@ -39,3 +39,4 @@ Out of scope:
 ## Status updates
 
 - 2026-04-23: Created after smoke feedback that Jobs is useful in principle but still does not tell the operator what failed rows correspond to or where completed outputs live.
+- 2026-04-23: Implemented a first operator-context pass in `JobsPage`: rows now resolve item titles/source URLs where possible, direct URL/import/subscription jobs show human-readable targets, batches summarize those targets, and non-item jobs expose direct target-root/source actions. `npm run build` passed.

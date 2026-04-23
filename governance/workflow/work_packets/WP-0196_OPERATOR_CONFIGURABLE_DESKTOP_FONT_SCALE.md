@@ -3,7 +3,7 @@
 ## Metadata
 - ID: WP-0196
 - Owner: Codex
-- Status: BACKLOG
+- Status: IN_PROGRESS
 - Created: 2026-04-23
 - Target milestone: Desktop accessibility and operator comfort
 
@@ -39,3 +39,4 @@ Out of scope:
 ## Status updates
 
 - 2026-04-23: Created after post-`WP-0190` operator feedback asked for a real adjustable font size instead of only the new default scale.
+- 2026-04-23: Implemented a first desktop font-scale preference in `OptionsPage` plus app bootstrap wiring. The chosen percentage now persists locally and applies app-wide through the root CSS scale variable. `npm run build` passed.

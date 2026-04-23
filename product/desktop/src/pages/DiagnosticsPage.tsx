@@ -875,7 +875,7 @@ export function DiagnosticsPage({ visible = true }: { visible?: boolean }) {
     }
   }, [updateSectionStatus]);
 
-  const loadToolsSection = useCallback(async () => {
+  const loadToolsCoreSection = useCallback(async () => {
     updateSectionStatus("tools", "loading");
     try {
       const [
@@ -884,15 +884,6 @@ export function DiagnosticsPage({ visible = true }: { visible?: boolean }) {
         nextJsRuntime,
         nextPython,
         nextPortablePython,
-        nextSpleeter,
-        nextDemucs,
-        nextDiarization,
-        nextTtsPreview,
-        nextTtsNeuralLocalV1,
-        nextTtsVoicePreservingLocalV1,
-        nextVoiceBackendCatalog,
-        nextVoiceBackendAdapters,
-        nextVoiceBackendRecommendation,
         nextIntegrity,
         nextPerfTier,
       ] = await Promise.all([
@@ -901,15 +892,6 @@ export function DiagnosticsPage({ visible = true }: { visible?: boolean }) {
         invoke<JsRuntimeToolsStatus>("tools_js_runtime_status"),
         invoke<PythonToolchainStatus>("tools_python_status"),
         invoke<PortablePythonStatus>("tools_python_portable_status"),
-        invoke<SpleeterPackStatus>("tools_spleeter_status"),
-        invoke<DemucsPackStatus>("tools_demucs_status"),
-        invoke<DiarizationPackStatus>("tools_diarization_status"),
-        invoke<TtsPreviewPackStatus>("tools_tts_preview_status"),
-        invoke<TtsNeuralLocalV1PackStatus>("tools_tts_neural_local_v1_status"),
-        invoke<TtsVoicePreservingLocalV1PackStatus>("tools_tts_voice_preserving_local_v1_status"),
-        invoke<VoiceBackendCatalog>("voice_backends_catalog"),
-        invoke<VoiceBackendAdapterDetail[]>("voice_backend_adapters_list"),
-        invoke<VoiceBackendRecommendation>("voice_backends_recommend"),
         invoke<PackIntegrityManifestStatus>("tools_pack_integrity_manifest_status"),
         invoke<PerformanceTierStatus>("tools_performance_tier_status"),
       ]);
@@ -919,6 +901,40 @@ export function DiagnosticsPage({ visible = true }: { visible?: boolean }) {
         setJsRuntime(nextJsRuntime);
         setPython(nextPython);
         setPortablePython(nextPortablePython);
+        setIntegrity(nextIntegrity);
+        setPerfTier(nextPerfTier);
+        updateSectionStatus("tools", "ready");
+      });
+    } catch (e) {
+      updateSectionStatus("tools", "failed", String(e));
+      setError((prev) => prev ?? String(e));
+    }
+  }, [updateSectionStatus]);
+
+  const loadToolsSupplementalData = useCallback(async () => {
+    try {
+      const [
+        nextSpleeter,
+        nextDemucs,
+        nextDiarization,
+        nextTtsPreview,
+        nextTtsNeuralLocalV1,
+        nextTtsVoicePreservingLocalV1,
+        nextVoiceBackendCatalog,
+        nextVoiceBackendAdapters,
+        nextVoiceBackendRecommendation,
+      ] = await Promise.all([
+        invoke<SpleeterPackStatus>("tools_spleeter_status"),
+        invoke<DemucsPackStatus>("tools_demucs_status"),
+        invoke<DiarizationPackStatus>("tools_diarization_status"),
+        invoke<TtsPreviewPackStatus>("tools_tts_preview_status"),
+        invoke<TtsNeuralLocalV1PackStatus>("tools_tts_neural_local_v1_status"),
+        invoke<TtsVoicePreservingLocalV1PackStatus>("tools_tts_voice_preserving_local_v1_status"),
+        invoke<VoiceBackendCatalog>("voice_backends_catalog"),
+        invoke<VoiceBackendAdapterDetail[]>("voice_backend_adapters_list"),
+        invoke<VoiceBackendRecommendation>("voice_backends_recommend"),
+      ]);
+      startTransition(() => {
         setSpleeter(nextSpleeter);
         setDemucs(nextDemucs);
         setDiarization(nextDiarization);
@@ -948,15 +964,16 @@ export function DiagnosticsPage({ visible = true }: { visible?: boolean }) {
           return next;
         });
         setVoiceBackendRecommendation(nextVoiceBackendRecommendation);
-        setIntegrity(nextIntegrity);
-        setPerfTier(nextPerfTier);
-        updateSectionStatus("tools", "ready");
       });
-    } catch (e) {
-      updateSectionStatus("tools", "failed", String(e));
-      setError((prev) => prev ?? String(e));
+    } catch {
+      // Keep the core tool section usable even if optional pack/adapter probes fail.
     }
-  }, [updateSectionStatus]);
+  }, []);
+
+  const loadToolsSection = useCallback(async () => {
+    await loadToolsCoreSection();
+    await loadToolsSupplementalData();
+  }, [loadToolsCoreSection, loadToolsSupplementalData]);
 
   const loadPhase2Section = useCallback(async () => {
     updateSectionStatus("phase2", "loading");
@@ -1034,7 +1051,8 @@ export function DiagnosticsPage({ visible = true }: { visible?: boolean }) {
     setError(null);
     const timers: number[] = [];
     const buildRaf = window.requestAnimationFrame(() => void loadBuildSection());
-    timers.push(window.setTimeout(() => void loadToolsSection(), 0));
+    timers.push(window.setTimeout(() => void loadToolsCoreSection(), 0));
+    timers.push(window.setTimeout(() => void loadToolsSupplementalData(), 220));
     timers.push(window.setTimeout(() => void loadPhase2Section(), 40));
     timers.push(window.setTimeout(() => void loadStorageSection(), 80));
     timers.push(window.setTimeout(() => void loadTraceSection(), 120));
@@ -1043,7 +1061,15 @@ export function DiagnosticsPage({ visible = true }: { visible?: boolean }) {
       window.cancelAnimationFrame(buildRaf);
       timers.forEach((id) => window.clearTimeout(id));
     };
-  }, [loadBuildSection, loadJobsSection, loadPhase2Section, loadStorageSection, loadToolsSection, loadTraceSection]);
+  }, [
+    loadBuildSection,
+    loadJobsSection,
+    loadPhase2Section,
+    loadStorageSection,
+    loadToolsCoreSection,
+    loadToolsSupplementalData,
+    loadTraceSection,
+  ]);
 
   const modelGroups = useMemo(() => {
     const models = inventory?.models ?? [];
@@ -1135,6 +1161,29 @@ export function DiagnosticsPage({ visible = true }: { visible?: boolean }) {
   const phase2HasActive = useMemo(() => {
     return phase2Steps.some((s) => s?.status === "queued" || s?.status === "running");
   }, [phase2Steps]);
+
+  const phase2SummaryLabel =
+    sectionStatus.phase2.state === "loading" && !phase2Latest
+      ? "Checking..."
+      : phase2HasActive
+        ? "Installing..."
+        : phase2Steps.length > 0 && phase2Steps.every((s: any) => s?.status === "succeeded")
+          ? "Installed"
+          : "Not installed";
+
+  const ffmpegSummaryLabel =
+    sectionStatus.tools.state === "loading" && !ffmpeg
+      ? "Checking..."
+      : ffmpeg?.installed
+        ? "Ready"
+        : "Missing";
+
+  const storageSummaryLabel =
+    sectionStatus.storage.state === "loading" && !storage
+      ? "Calculating..."
+      : storage
+        ? `${Math.round((storage.total_bytes ?? 0) / 1024 / 1024)} MB`
+        : "...";
 
   usePollingLoop(
     async () => {
@@ -1986,20 +2035,18 @@ export function DiagnosticsPage({ visible = true }: { visible?: boolean }) {
         <div className="card" style={{ margin: 0, textAlign: "center", cursor: "pointer" }} onClick={() => document.getElementById("diag-phase2")?.scrollIntoView({ behavior: "smooth" })}>
           <div style={{ fontSize: 12, textTransform: "uppercase", opacity: 0.6, marginBottom: 4 }}>Voice packages</div>
           <div style={{ fontWeight: 700, fontSize: 18, color: phase2HasActive ? "#92400e" : phase2Steps.length > 0 && phase2Steps.every((s: any) => s?.status === "succeeded") ? "#166534" : undefined }}>
-            {phase2HasActive ? "Installing..." : phase2Steps.length > 0 && phase2Steps.every((s: any) => s?.status === "succeeded") ? "Installed" : "Not installed"}
+            {phase2SummaryLabel}
           </div>
         </div>
         <div className="card" style={{ margin: 0, textAlign: "center", cursor: "pointer" }} onClick={() => document.getElementById("diag-tools")?.scrollIntoView({ behavior: "smooth" })}>
           <div style={{ fontSize: 12, textTransform: "uppercase", opacity: 0.6, marginBottom: 4 }}>FFmpeg</div>
-          <div style={{ fontWeight: 700, fontSize: 18, color: ffmpeg?.installed ? "#166534" : "#dc2626" }}>
-            {ffmpeg?.installed ? "Ready" : "Missing"}
+          <div style={{ fontWeight: 700, fontSize: 18, color: ffmpegSummaryLabel === "Ready" ? "#166534" : ffmpegSummaryLabel === "Missing" ? "#dc2626" : undefined }}>
+            {ffmpegSummaryLabel}
           </div>
         </div>
         <div className="card" style={{ margin: 0, textAlign: "center", cursor: "pointer" }} onClick={() => document.getElementById("diag-storage")?.scrollIntoView({ behavior: "smooth" })}>
           <div style={{ fontSize: 12, textTransform: "uppercase", opacity: 0.6, marginBottom: 4 }}>Storage</div>
-          <div style={{ fontWeight: 700, fontSize: 18 }}>
-            {storage ? `${Math.round((storage.total_bytes ?? 0) / 1024 / 1024)} MB` : "..."}
-          </div>
+          <div style={{ fontWeight: 700, fontSize: 18 }}>{storageSummaryLabel}</div>
         </div>
         <div className="card" style={{ margin: 0, textAlign: "center", cursor: "pointer" }} onClick={() => document.getElementById("diag-failures")?.scrollIntoView({ behavior: "smooth" })}>
           <div style={{ fontSize: 12, textTransform: "uppercase", opacity: 0.6, marginBottom: 4 }}>Recent failures</div>
@@ -2371,6 +2418,9 @@ export function DiagnosticsPage({ visible = true }: { visible?: boolean }) {
 
       <div className="card" id="diag-tools">
         <h2>Tools</h2>
+        <div style={{ color: "#4b5563", marginBottom: 8 }}>
+          Core tool state loads first so this page stays truthful. Optional pack versions and adapter details continue filling in below without blocking FFmpeg or yt-dlp readiness.
+        </div>
         <div className="kv">
           <div className="k">FFmpeg</div>
           <div className="v">{ffmpeg?.installed ? "installed" : "not installed"}</div>
@@ -3474,6 +3524,9 @@ export function DiagnosticsPage({ visible = true }: { visible?: boolean }) {
 
       <div className="card" id="diag-storage">
         <h2>Storage</h2>
+        <div style={{ color: "#4b5563", marginBottom: 8 }}>
+          Storage totals are best-effort and bounded so Diagnostics does not stall on very large artifact trees.
+        </div>
         <div className="kv">
           <div className="k">Library</div>
           <div className="v">{storage ? formatBytes(storage.library_bytes) : "-"}</div>
@@ -3833,5 +3886,3 @@ export function DiagnosticsPage({ visible = true }: { visible?: boolean }) {
     </section>
   );
 }
-
-

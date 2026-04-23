@@ -18,6 +18,37 @@ type JobRow = {
   started_at_ms: number | null;
   finished_at_ms: number | null;
   logs_path: string;
+  params_json?: string;
+};
+
+type LibraryItem = {
+  id: string;
+  title: string;
+  source_uri: string;
+  media_path: string;
+};
+
+type YoutubeSubscriptionRow = {
+  id: string;
+  title: string;
+  source_url: string;
+  folder_map: string;
+  output_dir_override: string | null;
+};
+
+type InstagramSubscriptionRow = {
+  id: string;
+  title: string;
+  source_url: string;
+  folder_map: string;
+  output_dir_override: string | null;
+};
+
+type JobContextSummary = {
+  label: string;
+  detail: string | null;
+  target_path: string | null;
+  target_action_label: string | null;
 };
 
 type JobGroup = {
@@ -172,9 +203,63 @@ function parseExternalToolMissing(error: string | null): string | null {
   return tool ? tool.split(/\s+/)[0] : null;
 }
 
+function stringOrNull(value: unknown): string | null {
+  return typeof value === "string" && value.trim() ? value.trim() : null;
+}
+
+function stringArray(value: unknown): string[] {
+  return Array.isArray(value)
+    ? value.map((entry) => stringOrNull(entry)).filter((entry): entry is string => Boolean(entry))
+    : [];
+}
+
+function safeParseJobParams(job: JobRow): Record<string, unknown> | null {
+  if (!job.params_json?.trim()) return null;
+  try {
+    const parsed = JSON.parse(job.params_json) as Record<string, unknown>;
+    return parsed && typeof parsed === "object" ? parsed : null;
+  } catch {
+    return null;
+  }
+}
+
+function fileNameFromPath(path: string | null): string | null {
+  const normalized = (path ?? "").trim();
+  if (!normalized) return null;
+  const idx = Math.max(normalized.lastIndexOf("\\"), normalized.lastIndexOf("/"));
+  return idx >= 0 ? normalized.slice(idx + 1) : normalized;
+}
+
+function summarizeUrls(urls: string[]): string {
+  if (!urls.length) return "Direct download";
+  if (urls.length === 1) return urls[0];
+  return `${urls[0]} (+${urls.length - 1} more)`;
+}
+
+function summarizeGroupTargets(jobs: JobRow[], contexts: Record<string, JobContextSummary>): string {
+  const labels = Array.from(
+    new Set(
+      jobs
+        .map((job) => contexts[job.id]?.label?.trim())
+        .filter((value): value is string => Boolean(value)),
+    ),
+  );
+  if (!labels.length) return "-";
+  if (labels.length === 1) return labels[0];
+  if (labels.length === 2) return `${labels[0]} + ${labels[1]}`;
+  return `${labels[0]} + ${labels.length - 1} more`;
+}
+
 export function JobsPage({ visible = true }: { visible?: boolean }) {
   const pageActive = usePageActivity(visible);
   const [jobs, setJobs] = useState<JobRow[]>([]);
+  const [jobItemsById, setJobItemsById] = useState<Record<string, LibraryItem>>({});
+  const [youtubeSubscriptionsById, setYoutubeSubscriptionsById] = useState<
+    Record<string, YoutubeSubscriptionRow>
+  >({});
+  const [instagramSubscriptionsById, setInstagramSubscriptionsById] = useState<
+    Record<string, InstagramSubscriptionRow>
+  >({});
   const [expandedGroups, setExpandedGroups] = useState<Record<string, boolean>>({});
   const [appDataDir, setAppDataDir] = useState<string>("");
   const [error, setError] = useState<string | null>(null);
@@ -191,14 +276,22 @@ export function JobsPage({ visible = true }: { visible?: boolean }) {
   }
 
   const refresh = useCallback(async () => {
-    const [next, control, runtime] = await Promise.all([
+    const [next, control, runtime, youtubeSubscriptions, instagramSubscriptions] = await Promise.all([
       invoke<JobRow[]>("jobs_list", { limit: 200, offset: 0 }),
       invoke<JobQueueControlState>("jobs_queue_control_get"),
       invoke<JobRuntimeSettings>("jobs_runtime_settings_get"),
+      invoke<YoutubeSubscriptionRow[]>("youtube_subscriptions_list").catch(() => []),
+      invoke<InstagramSubscriptionRow[]>("instagram_subscriptions_list").catch(() => []),
     ]);
     setJobs(next);
     setQueuePaused(control.paused);
     setMaxConcurrency(runtime.max_concurrency);
+    setYoutubeSubscriptionsById(
+      Object.fromEntries(youtubeSubscriptions.map((subscription) => [subscription.id, subscription])),
+    );
+    setInstagramSubscriptionsById(
+      Object.fromEntries(instagramSubscriptions.map((subscription) => [subscription.id, subscription])),
+    );
   }, []);
 
   useEffect(() => {
@@ -211,6 +304,46 @@ export function JobsPage({ visible = true }: { visible?: boolean }) {
       .then((info) => setAppDataDir(info.app_data_dir ?? ""))
       .catch(() => undefined);
   }, []);
+
+  useEffect(() => {
+    let cancelled = false;
+    const itemIds = Array.from(
+      new Set(
+        jobs
+          .map((job) => job.item_id?.trim())
+          .filter((value): value is string => Boolean(value)),
+      ),
+    );
+    if (!itemIds.length) {
+      setJobItemsById({});
+      return () => {
+        cancelled = true;
+      };
+    }
+
+    Promise.all(
+      itemIds.map(async (itemId) => {
+        try {
+          return await invoke<LibraryItem>("library_get", { itemId });
+        } catch {
+          return null;
+        }
+      }),
+    ).then((items) => {
+      if (cancelled) return;
+      const next: Record<string, LibraryItem> = {};
+      for (const item of items) {
+        if (item) {
+          next[item.id] = item;
+        }
+      }
+      setJobItemsById(next);
+    });
+
+    return () => {
+      cancelled = true;
+    };
+  }, [jobs]);
 
   const hasActive = useMemo(
     () => jobs.some((job) => isActive(job.status)),
@@ -234,6 +367,82 @@ export function JobsPage({ visible = true }: { visible?: boolean }) {
 
     return groups;
   }, [jobs]);
+
+  const jobContexts = useMemo(() => {
+    const next: Record<string, JobContextSummary> = {};
+    for (const job of jobs) {
+      const item = job.item_id ? jobItemsById[job.item_id] : undefined;
+      if (item) {
+        next[job.id] = {
+          label: item.title || fileNameFromPath(item.media_path) || item.id,
+          detail: item.source_uri || item.media_path || null,
+          target_path: item.media_path || null,
+          target_action_label: "Open media folder",
+        };
+        continue;
+      }
+
+      const params = safeParseJobParams(job);
+      if (job.job_type === "download_direct_url") {
+        const urls = stringArray(params?.urls);
+        const outputDir = stringOrNull(params?.output_dir);
+        next[job.id] = {
+          label: summarizeUrls(urls),
+          detail: outputDir ? `Target root: ${outputDir}` : null,
+          target_path: outputDir,
+          target_action_label: outputDir ? "Open target root" : null,
+        };
+        continue;
+      }
+
+      if (job.job_type === "youtube_subscription_refresh_v1") {
+        const subscriptionId = stringOrNull(params?.subscription_id);
+        const subscription = subscriptionId ? youtubeSubscriptionsById[subscriptionId] : undefined;
+        next[job.id] = {
+          label: subscription?.title || "YouTube subscription refresh",
+          detail: subscription?.source_url ?? null,
+          target_path: subscriptionId ?? null,
+          target_action_label: subscriptionId ? "Open subscription target" : null,
+        };
+        continue;
+      }
+
+      if (job.job_type === "download_image_batch") {
+        const urls = stringArray(params?.start_urls);
+        const outputDir = stringOrNull(params?.output_dir);
+        next[job.id] = {
+          label: summarizeUrls(urls),
+          detail: outputDir ? `Target root: ${outputDir}` : null,
+          target_path: outputDir,
+          target_action_label: outputDir ? "Open target root" : null,
+        };
+        continue;
+      }
+
+      if (job.job_type === "import_local") {
+        const path = stringOrNull(params?.path);
+        next[job.id] = {
+          label: fileNameFromPath(path) || "Import local file",
+          detail: path,
+          target_path: path,
+          target_action_label: path ? "Open source" : null,
+        };
+        continue;
+      }
+
+      const instagramSubscriptionId = stringOrNull(params?.instagram_subscription_id);
+      const instagramSubscription = instagramSubscriptionId
+        ? instagramSubscriptionsById[instagramSubscriptionId]
+        : undefined;
+      next[job.id] = {
+        label: instagramSubscription?.title || job.job_type,
+        detail: instagramSubscription?.source_url ?? null,
+        target_path: null,
+        target_action_label: null,
+      };
+    }
+    return next;
+  }, [instagramSubscriptionsById, jobItemsById, jobs, youtubeSubscriptionsById]);
 
   useEffect(() => {
     setExpandedGroups((prev) => {
@@ -411,6 +620,58 @@ export function JobsPage({ visible = true }: { visible?: boolean }) {
       );
     } catch (e) {
       await handlePathOpenFailure(outputsDir, e, "Open outputs");
+    }
+  }
+
+  async function openJobContextTarget(job: JobRow) {
+    const params = safeParseJobParams(job);
+    try {
+      if (job.job_type === "download_direct_url" || job.job_type === "download_image_batch") {
+        const outputDir = stringOrNull(params?.output_dir);
+        if (!outputDir) {
+          throw new Error("No explicit target root was recorded for this job.");
+        }
+        const opened = await openPathBestEffort(outputDir);
+        setNotice(
+          opened.method === "shell_open_path"
+            ? `Opened target root: ${opened.path}`
+            : `Opened target root in file explorer: ${opened.path}`,
+        );
+        return;
+      }
+
+      if (job.job_type === "youtube_subscription_refresh_v1") {
+        const subscriptionId = stringOrNull(params?.subscription_id);
+        if (!subscriptionId) {
+          throw new Error("No subscription id was recorded for this job.");
+        }
+        const path = await invoke<string>("youtube_subscriptions_output_dir", { id: subscriptionId });
+        const opened = await openPathBestEffort(path);
+        setNotice(
+          opened.method === "shell_open_path"
+            ? `Opened subscription target: ${opened.path}`
+            : `Opened subscription target in file explorer: ${opened.path}`,
+        );
+        return;
+      }
+
+      if (job.job_type === "import_local") {
+        const path = stringOrNull(params?.path);
+        if (!path) {
+          throw new Error("No source path was recorded for this job.");
+        }
+        const opened = await openPathBestEffort(path);
+        setNotice(
+          opened.method === "shell_open_path"
+            ? `Opened source path: ${opened.path}`
+            : `Opened source path in file explorer: ${opened.path}`,
+        );
+        return;
+      }
+
+      throw new Error("This job does not expose a direct target folder.");
+    } catch (e) {
+      setError(String(e));
     }
   }
 
@@ -651,6 +912,8 @@ export function JobsPage({ visible = true }: { visible?: boolean }) {
         : "";
     const canOpenArtifacts = Boolean(artifactsDir) && job.status !== "queued";
     const canOpenOutputs = Boolean(outputsDir);
+    const jobContext = jobContexts[job.id];
+    const canOpenContextTarget = !job.item_id && Boolean(jobContext?.target_action_label);
 
     return (
       <tr key={job.id} className={nested ? "batch-child-row" : undefined}>
@@ -661,6 +924,14 @@ export function JobsPage({ visible = true }: { visible?: boolean }) {
         </td>
         <td title={job.id}>
           <code>{job.item_id ? job.item_id.slice(0, 8) : job.id.slice(0, 8)}</code>
+        </td>
+        <td style={{ minWidth: 260, maxWidth: 420 }}>
+          <div style={{ fontWeight: 600 }}>{jobContext?.label ?? "-"}</div>
+          {jobContext?.detail ? (
+            <div style={{ color: "#4b5563", fontSize: 12, lineHeight: 1.3, wordBreak: "break-word" }}>
+              {jobContext.detail}
+            </div>
+          ) : null}
         </td>
         <td>{job.job_type}</td>
         <td>{Math.round((job.progress ?? 0) * 100)}%</td>
@@ -721,6 +992,11 @@ export function JobsPage({ visible = true }: { visible?: boolean }) {
                 >
                   Open log
                 </button>
+                {canOpenContextTarget ? (
+                  <button type="button" disabled={busy} onClick={() => openJobContextTarget(job)}>
+                    {jobContext?.target_action_label}
+                  </button>
+                ) : null}
                 {canOpenOutputs ? (
                   <button
                     type="button"
@@ -806,6 +1082,9 @@ export function JobsPage({ visible = true }: { visible?: boolean }) {
             </button>
           </div>
         </details>
+        <div style={{ color: "#4b5563", marginTop: 8, fontSize: 12 }}>
+          Developer tools only contains the synthetic test job. The main queue below is where real archive and localization work appears.
+        </div>
         <div className="row">
           <label style={{ display: "flex", alignItems: "center", gap: 8 }}>
             <span>Concurrency</span>
@@ -833,6 +1112,7 @@ export function JobsPage({ visible = true }: { visible?: boolean }) {
               <tr>
                 <th>Status</th>
                 <th>ID</th>
+                <th>Target</th>
                 <th>Type</th>
                 <th>Progress</th>
                 <th>Created</th>
@@ -871,6 +1151,12 @@ export function JobsPage({ visible = true }: { visible?: boolean }) {
                         </td>
                         <td title={group.batchId ?? group.key}>
                           <code>{(group.batchId ?? group.key).slice(0, 8)}</code>
+                        </td>
+                        <td style={{ minWidth: 260, maxWidth: 420 }}>
+                          <div style={{ fontWeight: 600 }}>{summarizeGroupTargets(group.jobs, jobContexts)}</div>
+                          <div style={{ color: "#4b5563", fontSize: 12 }}>
+                            {group.jobs.length} job{group.jobs.length === 1 ? "" : "s"} in this batch
+                          </div>
                         </td>
                         <td>{summarizeGroupType(group.jobs)}</td>
                         <td>{Math.round(progress * 100)}%</td>
@@ -921,7 +1207,7 @@ export function JobsPage({ visible = true }: { visible?: boolean }) {
                 })
               ) : (
                 <tr>
-                  <td colSpan={8}>No jobs yet.</td>
+                  <td colSpan={9}>No jobs yet.</td>
                 </tr>
               )}
             </tbody>
