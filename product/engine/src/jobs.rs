@@ -270,6 +270,8 @@ pub struct ItemArtifactRetentionPolicy {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct ImportLocalParams {
     path: String,
+    #[serde(default)]
+    add_to_localization_workspace: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
@@ -945,8 +947,15 @@ pub struct JobRuntimeSettings {
     pub max_concurrency: usize,
 }
 
-pub fn enqueue_import_local(paths: &AppPaths, path: String) -> Result<JobRow> {
-    let params_json = serde_json::to_string(&ImportLocalParams { path })?;
+pub fn enqueue_import_local(
+    paths: &AppPaths,
+    path: String,
+    add_to_localization_workspace: bool,
+) -> Result<JobRow> {
+    let params_json = serde_json::to_string(&ImportLocalParams {
+        path,
+        add_to_localization_workspace,
+    })?;
     enqueue(paths, JobType::ImportLocal, params_json)
 }
 
@@ -3103,12 +3112,24 @@ fn execute_job(paths: &AppPaths, job_id: &str, type_str: &str, params_json: &str
                 params![item.id, job_id],
             )?;
 
+            if p.add_to_localization_workspace {
+                library::add_item_to_localization_workspace(
+                    paths,
+                    &item.id,
+                    "localization_import",
+                    Some(&item.media_path),
+                )?;
+            }
+
             log_line(
                 paths,
                 job_id,
                 "info",
                 "import_local_done",
-                serde_json::json!({ "item_id": item.id }),
+                serde_json::json!({
+                    "item_id": item.id,
+                    "added_to_localization_workspace": p.add_to_localization_workspace,
+                }),
             )?;
 
             // Optional: batch-on-import automation (local-only; off by default).

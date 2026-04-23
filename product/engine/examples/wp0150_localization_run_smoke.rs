@@ -238,7 +238,11 @@ fn main() -> Result<()> {
 
     let runner = jobs::start_runner(paths.clone())?;
 
-    let import_job = jobs::enqueue_import_local(&paths, media_path.to_string_lossy().to_string())?;
+    let import_job = jobs::enqueue_import_local(
+        &paths,
+        media_path.to_string_lossy().to_string(),
+        true,
+    )?;
     wait_for_job(&paths, &import_job.id, Duration::from_secs(20 * 60))?;
 
     let canonical_media = std::fs::canonicalize(&media_path)?;
@@ -289,8 +293,12 @@ fn main() -> Result<()> {
         )));
     }
     for speaker_key in &speaker_keys {
-        let _ =
-            voice_reference_candidates::apply_reference_candidate(&paths, &item.id, speaker_key, "replace")?;
+        let _ = voice_reference_candidates::apply_reference_candidate(
+            &paths,
+            &item.id,
+            speaker_key,
+            "replace",
+        )?;
     }
 
     let second_run = jobs::enqueue_localization_run_v1(

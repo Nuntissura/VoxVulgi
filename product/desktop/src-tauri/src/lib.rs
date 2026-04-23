@@ -5215,6 +5215,16 @@ fn library_list(
 }
 
 #[tauri::command]
+fn localization_workspace_list(
+    state: State<'_, AppState>,
+    limit: usize,
+    offset: usize,
+) -> Result<Vec<library::LibraryItem>, String> {
+    library::list_localization_workspace_items(&state.paths, limit, offset)
+        .map_err(|e| e.to_string())
+}
+
+#[tauri::command]
 fn library_get(
     state: State<'_, AppState>,
     item_id: String,
@@ -5637,8 +5647,14 @@ async fn jobs_list_for_item(
 fn jobs_enqueue_import_local(
     state: State<'_, AppState>,
     path: String,
+    add_to_localization_workspace: Option<bool>,
 ) -> Result<jobs::JobRow, String> {
-    jobs::enqueue_import_local(&state.paths, path).map_err(|e| e.to_string())
+    jobs::enqueue_import_local(
+        &state.paths,
+        path,
+        add_to_localization_workspace.unwrap_or(false),
+    )
+    .map_err(|e| e.to_string())
 }
 
 #[tauri::command]
@@ -6349,6 +6365,7 @@ pub fn run() {
             download_presets_set,
             library_get,
             library_list,
+            localization_workspace_list,
             youtube_subscription_groups_delete,
             youtube_subscription_groups_list,
             youtube_subscription_groups_set_for_subscription,

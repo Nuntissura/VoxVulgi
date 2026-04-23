@@ -3,7 +3,7 @@
 ## Metadata
 - ID: WP-0197
 - Owner: Codex
-- Status: IN_PROGRESS
+- Status: REVIEW
 - Created: 2026-04-23
 - Target milestone: Localization operator usability
 
@@ -46,3 +46,4 @@ Out of scope:
 ## Status updates
 
 - 2026-04-23: Created after operator direction clarified that Localization Studio must only work on files explicitly selected for localization and must not remain coupled to YouTube/archive or legacy 4KVDP inventory.
+- 2026-04-23: Landed the first implementation slice: added an explicit `localization_workspace_item` store, routed Localization home/editor recent-item flows through that workspace, required Localization imports to opt into workspace intake, and removed archive/media-library item actions that opened shared items straight into Localization. Verification: `cargo check`, `npm run build`.

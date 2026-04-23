@@ -3,7 +3,7 @@ use crate::Result;
 use rusqlite::{Connection, OpenFlags};
 use std::time::Duration;
 
-const CURRENT_SCHEMA_VERSION: u32 = 10;
+const CURRENT_SCHEMA_VERSION: u32 = 11;
 
 struct MigrationStep {
     version: u32,
@@ -16,8 +16,12 @@ const MIGRATION_STEPS: &[MigrationStep] = &[
         apply: apply_base_schema_v1,
     },
     MigrationStep {
-        version: CURRENT_SCHEMA_VERSION,
+        version: 10,
         apply: apply_schema_v10,
+    },
+    MigrationStep {
+        version: CURRENT_SCHEMA_VERSION,
+        apply: apply_schema_v11,
     },
 ];
 
@@ -623,6 +627,24 @@ CREATE INDEX IF NOT EXISTS idx_ingest_provenance_created ON ingest_provenance(cr
     Ok(())
 }
 
+fn apply_schema_v11(conn: &Connection) -> Result<()> {
+    conn.execute_batch(
+        r#"
+CREATE TABLE IF NOT EXISTS localization_workspace_item (
+  item_id TEXT PRIMARY KEY,
+  selected_at_ms INTEGER NOT NULL,
+  selection_source TEXT NOT NULL,
+  selection_path TEXT,
+  FOREIGN KEY (item_id) REFERENCES library_item(id) ON DELETE CASCADE
+);
+
+CREATE INDEX IF NOT EXISTS idx_localization_workspace_selected
+  ON localization_workspace_item(selected_at_ms DESC, item_id);
+"#,
+    )?;
+    Ok(())
+}
+
 fn ensure_column(conn: &Connection, table: &str, column: &str, column_def: &str) -> Result<()> {
     let mut stmt = conn.prepare(&format!("PRAGMA table_info({table})"))?;
     let mut rows = stmt.query([])?;
@@ -797,6 +819,26 @@ CREATE TABLE IF NOT EXISTS job (
     }
 
     #[test]
+    fn migrate_creates_localization_workspace_table() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let paths = AppPaths::new(dir.path().to_path_buf());
+        let conn = open(&paths).expect("open");
+        migrate(&conn).expect("migrate");
+
+        let names: Vec<String> = conn
+            .prepare(
+                "SELECT name FROM sqlite_master WHERE type='table' AND name='localization_workspace_item'",
+            )
+            .expect("prepare")
+            .query_map([], |row| row.get::<_, String>(0))
+            .expect("query")
+            .collect::<rusqlite::Result<Vec<_>>>()
+            .expect("collect rows");
+
+        assert_eq!(names, vec!["localization_workspace_item".to_string()]);
+    }
+
+    #[test]
     fn migrate_sets_user_version_and_meta_schema_version() {
         let dir = tempfile::tempdir().expect("tempdir");
         let paths = AppPaths::new(dir.path().to_path_buf());
@@ -808,7 +850,11 @@ CREATE TABLE IF NOT EXISTS job (
             CURRENT_SCHEMA_VERSION as u32
         );
         let meta: String = conn
-            .query_row("SELECT value FROM meta WHERE key='schema_version'", [], |row| row.get(0))
+            .query_row(
+                "SELECT value FROM meta WHERE key='schema_version'",
+                [],
+                |row| row.get(0),
+            )
             .expect("meta schema version");
         assert_eq!(meta, CURRENT_SCHEMA_VERSION.to_string());
     }

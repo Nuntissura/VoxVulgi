@@ -27,6 +27,24 @@ pub struct LibraryItem {
     pub thumbnail_path: Option<String>,
 }
 
+fn library_item_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<LibraryItem> {
+    Ok(LibraryItem {
+        id: row.get(0)?,
+        created_at_ms: row.get(1)?,
+        source_type: row.get(2)?,
+        source_uri: row.get(3)?,
+        title: row.get(4)?,
+        media_path: row.get(5)?,
+        duration_ms: row.get(6)?,
+        width: row.get(7)?,
+        height: row.get(8)?,
+        container: row.get(9)?,
+        video_codec: row.get(10)?,
+        audio_codec: row.get(11)?,
+        thumbnail_path: row.get(12)?,
+    })
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ThumbnailCacheStatus {
     pub cache_dir: String,
@@ -160,23 +178,45 @@ LIMIT ?1 OFFSET ?2
     )?;
 
     let items = stmt
-        .query_map(params![limit as i64, offset as i64], |row| {
-            Ok(LibraryItem {
-                id: row.get(0)?,
-                created_at_ms: row.get(1)?,
-                source_type: row.get(2)?,
-                source_uri: row.get(3)?,
-                title: row.get(4)?,
-                media_path: row.get(5)?,
-                duration_ms: row.get(6)?,
-                width: row.get(7)?,
-                height: row.get(8)?,
-                container: row.get(9)?,
-                video_codec: row.get(10)?,
-                audio_codec: row.get(11)?,
-                thumbnail_path: row.get(12)?,
-            })
-        })?
+        .query_map(params![limit as i64, offset as i64], library_item_from_row)?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+
+    Ok(items)
+}
+
+pub fn list_localization_workspace_items(
+    paths: &AppPaths,
+    limit: usize,
+    offset: usize,
+) -> Result<Vec<LibraryItem>> {
+    let conn = db::open(paths)?;
+    db::migrate(&conn)?;
+
+    let mut stmt = conn.prepare(
+        r#"
+SELECT
+  library_item.id,
+  library_item.created_at_ms,
+  library_item.source_type,
+  library_item.source_uri,
+  library_item.title,
+  library_item.media_path,
+  library_item.duration_ms,
+  library_item.width,
+  library_item.height,
+  library_item.container,
+  library_item.video_codec,
+  library_item.audio_codec,
+  library_item.thumbnail_path
+FROM localization_workspace_item
+JOIN library_item ON library_item.id = localization_workspace_item.item_id
+ORDER BY localization_workspace_item.selected_at_ms DESC, library_item.created_at_ms DESC
+LIMIT ?1 OFFSET ?2
+"#,
+    )?;
+
+    let items = stmt
+        .query_map(params![limit as i64, offset as i64], library_item_from_row)?
         .collect::<rusqlite::Result<Vec<_>>>()?;
 
     Ok(items)
@@ -206,23 +246,7 @@ FROM library_item
 WHERE id=?1
 "#,
         params![item_id],
-        |row| {
-            Ok(LibraryItem {
-                id: row.get(0)?,
-                created_at_ms: row.get(1)?,
-                source_type: row.get(2)?,
-                source_uri: row.get(3)?,
-                title: row.get(4)?,
-                media_path: row.get(5)?,
-                duration_ms: row.get(6)?,
-                width: row.get(7)?,
-                height: row.get(8)?,
-                container: row.get(9)?,
-                video_codec: row.get(10)?,
-                audio_codec: row.get(11)?,
-                thumbnail_path: row.get(12)?,
-            })
-        },
+        library_item_from_row,
     )
     .map_err(|e| match e {
         rusqlite::Error::QueryReturnedNoRows => {
@@ -230,6 +254,52 @@ WHERE id=?1
         }
         other => crate::EngineError::Database(other),
     })
+}
+
+pub fn add_item_to_localization_workspace(
+    paths: &AppPaths,
+    item_id: &str,
+    selection_source: &str,
+    selection_path: Option<&str>,
+) -> Result<()> {
+    let item_id = item_id.trim();
+    let selection_source = selection_source.trim();
+    if item_id.is_empty() {
+        return Err(crate::EngineError::InstallFailed(
+            "item_id is required for localization workspace".to_string(),
+        ));
+    }
+    if selection_source.is_empty() {
+        return Err(crate::EngineError::InstallFailed(
+            "selection_source is required for localization workspace".to_string(),
+        ));
+    }
+
+    let conn = db::open(paths)?;
+    db::migrate(&conn)?;
+    conn.execute(
+        r#"
+INSERT INTO localization_workspace_item (
+  item_id,
+  selected_at_ms,
+  selection_source,
+  selection_path
+) VALUES (?1, ?2, ?3, ?4)
+ON CONFLICT(item_id) DO UPDATE SET
+  selected_at_ms=excluded.selected_at_ms,
+  selection_source=excluded.selection_source,
+  selection_path=excluded.selection_path
+"#,
+        params![
+            item_id,
+            now_ms(),
+            selection_source,
+            selection_path
+                .map(|value| value.trim())
+                .filter(|value| !value.is_empty()),
+        ],
+    )?;
+    Ok(())
 }
 
 pub fn import_local_file(paths: &AppPaths, input_path: &Path) -> Result<LibraryItem> {

@@ -1798,7 +1798,10 @@ export function SubtitleEditorPage({
       const pageSize = 500;
       const next: LibraryItem[] = [];
       for (let offset = 0; ; offset += pageSize) {
-        const page = await invoke<LibraryItem[]>("library_list", { limit: pageSize, offset });
+        const page = await invoke<LibraryItem[]>("localization_workspace_list", {
+          limit: pageSize,
+          offset,
+        });
         next.push(...page);
         if (page.length < pageSize) break;
       }
@@ -10048,7 +10051,8 @@ export function SubtitleEditorPage({
                 </div>
                 {!libraryItemsLoaded ? (
                   <div style={{ fontSize: 12, opacity: 0.7 }}>
-                    Large libraries stay lazy on first open. Load the full item list only when you need multi-item batch work.
+                    Large workspaces stay lazy on first open. Load the full Localization workspace
+                    list only when you need multi-item batch work.
                   </div>
                 ) : null}
                 {deferredContextBusy ? (
@@ -10088,7 +10092,8 @@ export function SubtitleEditorPage({
                     ))
                   ) : (
                     <div style={{ fontSize: 12, opacity: 0.72 }}>
-                      Current item batch actions are ready. Load items above if you want to select from the wider library.
+                      Current item batch actions are ready. Load items above if you want to select
+                      from the wider Localization workspace.
                     </div>
                   )}
                 </div>

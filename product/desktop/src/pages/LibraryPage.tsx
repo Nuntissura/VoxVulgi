@@ -261,7 +261,6 @@ function deriveLibraryContainerMeta(item: LibraryItem, downloadRoot: string): Li
 }
 
 type LibraryPageProps = {
-  onOpenEditor?: (itemId: string) => void;
   mode?: LibraryPageMode;
   visible?: boolean;
   onOpenOptions?: () => void;
@@ -273,11 +272,6 @@ export type LibraryPageMode =
   | "instagram_archive"
   | "image_archive"
   | "media_library";
-
-type ItemOutputs = {
-  item_id: string;
-  derived_item_dir: string;
-};
 
 type FfmpegToolsStatus = {
   installed: boolean;
@@ -487,7 +481,7 @@ type YoutubeSubscriptionsImport4kvdpStateSummary = {
   group_names: string[];
 };
 
-export function LibraryPage({ onOpenEditor, mode = "all" }: LibraryPageProps) {
+export function LibraryPage({ mode = "all" }: LibraryPageProps) {
   const maxBatchUrls = 1500;
   const maxInstagramBatchUrls = 1500;
   const maxImageBatchUrls = 1500;
@@ -1354,64 +1348,6 @@ export function LibraryPage({ onOpenEditor, mode = "all" }: LibraryPageProps) {
     }
   }
 
-  async function runAsr(itemId: string) {
-    setBusy(true);
-    setError(null);
-    setNotice(null);
-    try {
-      await invoke("jobs_enqueue_asr_local", {
-        itemId,
-        lang: asrLang === "auto" ? null : asrLang,
-      });
-    } catch (e) {
-      setError(String(e));
-    } finally {
-      setBusy(false);
-    }
-  }
-
-  async function runSeparation(itemId: string) {
-    setBusy(true);
-    setError(null);
-    setNotice(null);
-    try {
-      await invoke("jobs_enqueue_separate_audio_spleeter", { itemId });
-      setNotice("Queued separation job.");
-    } catch (e) {
-      setError(String(e));
-    } finally {
-      setBusy(false);
-    }
-  }
-
-  async function runMixDubPreview(itemId: string) {
-    setBusy(true);
-    setError(null);
-    setNotice(null);
-    try {
-      await invoke("jobs_enqueue_mix_dub_preview_v1", { itemId });
-      setNotice("Queued dub preview mix job.");
-    } catch (e) {
-      setError(String(e));
-    } finally {
-      setBusy(false);
-    }
-  }
-
-  async function runMuxDubPreview(itemId: string) {
-    setBusy(true);
-    setError(null);
-    setNotice(null);
-    try {
-      await invoke("jobs_enqueue_mux_dub_preview_v1", { itemId, outputContainer: "mp4" });
-      setNotice("Queued dub preview mux job (MP4).");
-    } catch (e) {
-      setError(String(e));
-    } finally {
-      setBusy(false);
-    }
-  }
-
   async function openMediaFile(item: LibraryItem) {
     setBusy(true);
     setError(null);
@@ -1448,28 +1384,6 @@ export function LibraryPage({ onOpenEditor, mode = "all" }: LibraryPageProps) {
     }
   }
 
-  async function openItemOutputs(itemId: string) {
-    setBusy(true);
-    setError(null);
-    setNotice(null);
-    let targetPath = "";
-    try {
-      const outputs = await invoke<ItemOutputs>("item_outputs", { itemId });
-      targetPath = outputs.derived_item_dir ?? "";
-      const opened = await openPathBestEffort(targetPath);
-      setNotice(
-        opened.method === "shell_open_path"
-          ? `Working files folder: ${opened.path}`
-          : `Working files folder revealed in file explorer: ${opened.path}`,
-      );
-    } catch (e) {
-      const copied = await copyPathToClipboard(targetPath);
-      const suffix = copied ? " Output path copied to clipboard." : "";
-      setError(`Open working files failed: ${String(e)}.${suffix}`);
-    } finally {
-      setBusy(false);
-    }
-  }
 
   async function enqueueUrlBatch() {
     setBusy(true);
@@ -4169,33 +4083,11 @@ export function LibraryPage({ onOpenEditor, mode = "all" }: LibraryPageProps) {
                                 {item.media_path}
                               </div>
                               <div className="row" style={{ marginTop: 0 }}>
-                                <button type="button" disabled={busy} onClick={() => runAsr(item.id)}>
-                                  ASR
-                                </button>
-                                <button type="button" disabled={busy} onClick={() => runSeparation(item.id)}>
-                                  Separate
-                                </button>
-                                <button type="button" disabled={busy} onClick={() => runMixDubPreview(item.id)}>
-                                  Mix dub
-                                </button>
-                                <button type="button" disabled={busy} onClick={() => runMuxDubPreview(item.id)}>
-                                  Mux MP4
-                                </button>
-                                <button
-                                  type="button"
-                                  disabled={busy || !onOpenEditor}
-                                  onClick={() => onOpenEditor?.(item.id)}
-                                >
-                                  Edit subs
-                                </button>
                                 <button type="button" disabled={busy} onClick={() => openMediaFile(item)}>
                                   Open file
                                 </button>
                                 <button type="button" disabled={busy} onClick={() => revealMediaFile(item)}>
                                   Open folder
-                                </button>
-                                <button type="button" disabled={busy} onClick={() => openItemOutputs(item.id)}>
-                                  Working files
                                 </button>
                               </div>
                             </article>
@@ -4253,33 +4145,11 @@ export function LibraryPage({ onOpenEditor, mode = "all" }: LibraryPageProps) {
                                 {item.media_path}
                               </div>
                               <div className="row" style={{ marginTop: 0 }}>
-                                <button type="button" disabled={busy} onClick={() => runAsr(item.id)}>
-                                  ASR
-                                </button>
-                                <button type="button" disabled={busy} onClick={() => runSeparation(item.id)}>
-                                  Separate
-                                </button>
-                                <button type="button" disabled={busy} onClick={() => runMixDubPreview(item.id)}>
-                                  Mix dub
-                                </button>
-                                <button type="button" disabled={busy} onClick={() => runMuxDubPreview(item.id)}>
-                                  Mux MP4
-                                </button>
-                                <button
-                                  type="button"
-                                  disabled={busy || !onOpenEditor}
-                                  onClick={() => onOpenEditor?.(item.id)}
-                                >
-                                  Edit subs
-                                </button>
                                 <button type="button" disabled={busy} onClick={() => openMediaFile(item)}>
                                   Open file
                                 </button>
                                 <button type="button" disabled={busy} onClick={() => revealMediaFile(item)}>
                                   Open folder
-                                </button>
-                                <button type="button" disabled={busy} onClick={() => openItemOutputs(item.id)}>
-                                  Working files
                                 </button>
                               </div>
                             </article>

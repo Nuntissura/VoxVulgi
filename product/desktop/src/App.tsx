@@ -49,6 +49,11 @@ type SafeModeStatus = {
   queue_paused: boolean;
 };
 
+type ShellAppInfo = {
+  app_name: string;
+  app_version: string;
+};
+
 type AsrLang = "auto" | "ja" | "ko";
 
 type StartupPhase = {
@@ -143,7 +148,7 @@ const SHELL_MODE_TOLERANCE_PX = 20;
 const LOCALIZATION_HOME_STAGES = [
   {
     title: "Import or pick media",
-    detail: "Bring a local source file in, or reopen a recent item from the Localization queue.",
+    detail: "Bring a local source file in, or reopen a recent item from the Localization workspace.",
   },
   {
     title: "Captions and translation",
@@ -347,7 +352,6 @@ function summarizeRecentLocalizationItem(
 
 function LocalizationStudioHome({
   onOpenVideoArchiver,
-  onOpenMediaLibrary,
   onOpenEditor,
   onOpenEditorSection,
   onOpenOptions,
@@ -356,7 +360,6 @@ function LocalizationStudioHome({
   visible = true,
 }: {
   onOpenVideoArchiver: () => void;
-  onOpenMediaLibrary: () => void;
   onOpenEditor: (itemId: string) => void;
   onOpenEditorSection: (itemId: string, sectionId: LocalizationSectionId | null) => void;
   onOpenOptions: () => void;
@@ -402,7 +405,10 @@ function LocalizationStudioHome({
   const refreshRecentItems = useCallback(async () => {
     setRecentItemsBusy(true);
     try {
-      const items = await invoke<HomeLibraryItem[]>("library_list", { limit: 12, offset: 0 });
+      const items = await invoke<HomeLibraryItem[]>("localization_workspace_list", {
+        limit: 12,
+        offset: 0,
+      });
       setRecentItems(items ?? []);
       return items ?? [];
     } catch (e) {
@@ -520,10 +526,13 @@ function LocalizationStudioHome({
   }
 
   async function importMediaByPath(path: string) {
-    await invoke("jobs_enqueue_import_local", { path });
+    await invoke("jobs_enqueue_import_local", {
+      path,
+      add_to_localization_workspace: true,
+    });
     setPendingImportPath(path);
     setNotice(
-      "Queued local import. VoxVulgi will refresh recent items here; once the import finishes you can open the item directly in Localization Studio.",
+      "Queued local import for the Localization workspace. VoxVulgi will refresh recent items here; once the import finishes you can open the item directly in Localization Studio.",
     );
     void diagnosticsTrace("localization_home_import_queued", {
       path,
@@ -636,9 +645,6 @@ function LocalizationStudioHome({
             <button type="button" disabled={busy} onClick={onOpenVideoArchiver}>
               Open Video Archiver
             </button>
-            <button type="button" disabled={busy} onClick={onOpenMediaLibrary}>
-              Open Media Library
-            </button>
             <button type="button" disabled={busy} onClick={onOpenOptions}>
               Open Options
             </button>
@@ -719,7 +725,7 @@ function LocalizationStudioHome({
               </div>
               <div className="loc-home-summary-grid">
                 <div className="loc-home-summary-card">
-                  <div className="loc-home-summary-label">Recent items</div>
+                  <div className="loc-home-summary-label">Workspace items</div>
                   <div className="loc-home-summary-value">{prioritizedRecentItems.length}</div>
                 </div>
                 <div className="loc-home-summary-card">
@@ -747,9 +753,6 @@ function LocalizationStudioHome({
               <button type="button" disabled={busy} onClick={() => importLocalMedia().catch(() => undefined)}>
                 Import local media
               </button>
-              <button type="button" disabled={busy} onClick={onOpenMediaLibrary}>
-                Open Media Library
-              </button>
               <button type="button" disabled={busy} onClick={onOpenVideoArchiver}>
                 Open Video Archiver
               </button>
@@ -764,7 +767,7 @@ function LocalizationStudioHome({
               <div className="loc-home-support">
                 {currentHomeItem
                   ? currentHomeStatus?.summary ?? "Loading current item status..."
-                  : "Import local media or reopen an item from Media Library to establish the current working item."}
+                  : "Import local media to create the current Localization workspace item."}
               </div>
               <div className="loc-home-focus-detail">
                 {currentHomeItem
@@ -802,9 +805,6 @@ function LocalizationStudioHome({
                     onClick={() => importLocalMedia().catch(() => undefined)}
                   >
                     Import local media
-                  </button>
-                  <button type="button" disabled={busy} onClick={onOpenMediaLibrary}>
-                    Open Media Library
                   </button>
                 </div>
               )}
@@ -876,7 +876,7 @@ function LocalizationStudioHome({
               </h3>
               <div className="loc-home-support">
                 {latestPreviewStatus?.preview_mp4_path
-                  ? "Latest preview MP4 is ready from the current Localization queue."
+                  ? "Latest preview MP4 is ready from the current Localization workspace."
                   : currentHomeStatus?.working_dir
                     ? "No preview MP4 yet, but the working folder is already available."
                     : "Preview/deliverable state will appear here as soon as the staged run produces outputs."}
@@ -1005,8 +1005,8 @@ function LocalizationStudioHome({
               <div className="loc-home-eyebrow">Start New Work</div>
               <h2 style={{ marginTop: 0 }}>Import and setup</h2>
               <div className="loc-home-support">
-                Keep ingest lightweight here. Archive-heavy source management remains in Video
-                Archiver and Media Library.
+                Keep intake lightweight here. Archive-heavy source management stays outside the
+                Localization workspace.
               </div>
               <div className="kv" style={{ marginTop: 10 }}>
                 <div className="k">Localization export root</div>
@@ -1021,9 +1021,6 @@ function LocalizationStudioHome({
                 </button>
                 <button type="button" disabled={busy} onClick={onOpenVideoArchiver}>
                   Video Archiver
-                </button>
-                <button type="button" disabled={busy} onClick={onOpenMediaLibrary}>
-                  Media Library
                 </button>
                 <button type="button" disabled={busy} onClick={onOpenOptions}>
                   Options
@@ -1230,9 +1227,6 @@ function LocalizationStudioHome({
                 >
                   Refresh recent items
                 </button>
-                <button type="button" disabled={busy} onClick={onOpenMediaLibrary}>
-                  Open Media Library
-                </button>
               </div>
             </div>
             {recentHomeItems.length ? (
@@ -1322,7 +1316,7 @@ function LocalizationStudioHome({
               <div className="loc-home-empty">
                 {recentItemsBusy
                   ? "Loading recent Localization items..."
-                  : "No recent localization items yet. Import a local file or open one from Media Library to start the main workflow."}
+                  : "No recent localization items yet. Import a local file to start the main workflow."}
               </div>
             )}
           </div>
@@ -1345,6 +1339,7 @@ function App() {
   const [startup, setStartup] = useState<StartupStatus | null>(null);
   const [startupDetailsOpen, setStartupDetailsOpen] = useState(false);
   const [shellWindowMode, setShellWindowMode] = useState<ShellWindowMode>("floating");
+  const [appInfo, setAppInfo] = useState<ShellAppInfo | null>(null);
   const desktopActivity = useDesktopActivity();
 
   const refreshShellWindowMode = useCallback(async () => {
@@ -1366,6 +1361,25 @@ function App() {
       .then((status) => setSafeMode(status))
       .catch(() => undefined);
   }, []);
+
+  useEffect(() => {
+    let disposed = false;
+    invoke<ShellAppInfo>("diagnostics_info")
+      .then((info) => {
+        if (!disposed) {
+          setAppInfo(info);
+        }
+      })
+      .catch(() => undefined);
+    return () => {
+      disposed = true;
+    };
+  }, []);
+
+  useEffect(() => {
+    const version = appInfo?.app_version?.trim();
+    document.title = version ? `VoxVulgi v${version}` : "VoxVulgi";
+  }, [appInfo?.app_version]);
 
   useEffect(() => {
     const handleKeyDown = async (e: KeyboardEvent) => {
@@ -1640,7 +1654,6 @@ function App() {
             compact
             visible={page === "localization"}
             onOpenVideoArchiver={() => switchPage("video_ingest")}
-            onOpenMediaLibrary={() => switchPage("media_library")}
             onOpenEditor={(nextItemId) => openLocalizationItem(nextItemId)}
             onOpenEditorSection={(nextItemId, sectionId) =>
               openLocalizationItem(nextItemId, sectionId)
@@ -1669,7 +1682,6 @@ function App() {
         <LocalizationStudioHome
           visible={page === "localization"}
           onOpenVideoArchiver={() => switchPage("video_ingest")}
-          onOpenMediaLibrary={() => switchPage("media_library")}
           onOpenEditor={(nextItemId) => openLocalizationItem(nextItemId)}
           onOpenEditorSection={(nextItemId, sectionId) =>
             openLocalizationItem(nextItemId, sectionId)
@@ -1681,7 +1693,6 @@ function App() {
         <LibraryPage
           mode="video_ingest"
           visible={page === "video_ingest"}
-          onOpenEditor={(itemId) => openLocalizationItem(itemId)}
           onOpenOptions={() => switchPage("options")}
         />
       ),
@@ -1703,7 +1714,6 @@ function App() {
         <LibraryPage
           mode="media_library"
           visible={page === "media_library"}
-          onOpenEditor={(itemId) => openLocalizationItem(itemId)}
           onOpenOptions={() => switchPage("options")}
         />
       ),
@@ -1740,7 +1750,19 @@ function App() {
         <header className="topbar">
           <div className="topbar-main">
             <div className="topbar-leading">
-              <div className="brand">VoxVulgi</div>
+              <div
+                className="brand"
+                aria-label={
+                  appInfo?.app_version
+                    ? `VoxVulgi version ${appInfo.app_version}`
+                    : "VoxVulgi"
+                }
+              >
+                <span className="brand-name">VoxVulgi</span>
+                {appInfo?.app_version ? (
+                  <span className="brand-version">v{appInfo.app_version}</span>
+                ) : null}
+              </div>
             </div>
             <div className="topbar-center">
               {startupBusy ? (
