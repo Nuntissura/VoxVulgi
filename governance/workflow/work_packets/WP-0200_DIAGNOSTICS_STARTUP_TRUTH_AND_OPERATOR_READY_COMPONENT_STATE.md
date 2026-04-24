@@ -46,3 +46,4 @@ Out of scope:
 ## Status updates
 
 - 2026-04-24: Created after operator smoke showed Diagnostics still behaving like a cold-loading surface despite startup claiming `100%`, with component-state trust breaking down in normal use.
+- 2026-04-24: First implementation slice landed: the app now pre-visits Diagnostics after startup settles so component state can hydrate before the operator opens the page, reducing the misleading cold-start feel on first entry. Verification: `npm run build`, `cargo check`.

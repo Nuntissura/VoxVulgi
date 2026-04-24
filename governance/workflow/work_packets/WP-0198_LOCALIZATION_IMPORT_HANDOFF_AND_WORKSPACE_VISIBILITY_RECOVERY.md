@@ -46,3 +46,4 @@ Out of scope:
 ## Status updates
 
 - 2026-04-24: Created after operator smoke showed a completed Localization import that remained absent from `Continue current item` and `Localization Library`, while the job log recorded `added_to_localization_workspace=false`.
+- 2026-04-24: First implementation slice landed: Localization home now uses the Tauri command's camelCase invoke args, imports explicitly request workspace intake, and Localization-owned imports suppress automatic batch-on-import follow-on jobs so the workspace handoff can complete visibly before processing starts. Verification: `npm run build`, `cargo check`.

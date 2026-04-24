@@ -267,11 +267,17 @@ pub struct ItemArtifactRetentionPolicy {
     pub classes: Vec<ItemArtifactRetentionClass>,
 }
 
+fn default_true() -> bool {
+    true
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct ImportLocalParams {
     path: String,
     #[serde(default)]
     add_to_localization_workspace: bool,
+    #[serde(default = "default_true")]
+    apply_batch_on_import: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
@@ -951,10 +957,12 @@ pub fn enqueue_import_local(
     paths: &AppPaths,
     path: String,
     add_to_localization_workspace: bool,
+    apply_batch_on_import: bool,
 ) -> Result<JobRow> {
     let params_json = serde_json::to_string(&ImportLocalParams {
         path,
         add_to_localization_workspace,
+        apply_batch_on_import,
     })?;
     enqueue(paths, JobType::ImportLocal, params_json)
 }
@@ -3139,7 +3147,7 @@ fn execute_job(paths: &AppPaths, job_id: &str, type_str: &str, params_json: &str
                 || rules.auto_separate
                 || rules.auto_diarize
                 || rules.auto_dub_preview;
-            if any_enabled {
+            if any_enabled && p.apply_batch_on_import {
                 let batch_id = Some(Uuid::new_v4().to_string());
                 log_line(
                     paths,
@@ -3194,6 +3202,23 @@ fn execute_job(paths: &AppPaths, job_id: &str, type_str: &str, params_json: &str
                         batch_id.clone(),
                     )?;
                 }
+            } else if any_enabled {
+                log_line(
+                    paths,
+                    job_id,
+                    "info",
+                    "batch_on_import_suppressed",
+                    serde_json::json!({
+                        "reason": "disabled_for_this_import",
+                        "rules": {
+                            "auto_asr": rules.auto_asr,
+                            "auto_translate": rules.auto_translate,
+                            "auto_separate": rules.auto_separate,
+                            "auto_diarize": rules.auto_diarize,
+                            "auto_dub_preview": rules.auto_dub_preview,
+                        }
+                    }),
+                )?;
             }
         }
         JobType::DownloadDirectUrl => {

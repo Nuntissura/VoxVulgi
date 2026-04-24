@@ -5648,11 +5648,13 @@ fn jobs_enqueue_import_local(
     state: State<'_, AppState>,
     path: String,
     add_to_localization_workspace: Option<bool>,
+    apply_batch_on_import: Option<bool>,
 ) -> Result<jobs::JobRow, String> {
     jobs::enqueue_import_local(
         &state.paths,
         path,
         add_to_localization_workspace.unwrap_or(false),
+        apply_batch_on_import.unwrap_or(true),
     )
     .map_err(|e| e.to_string())
 }

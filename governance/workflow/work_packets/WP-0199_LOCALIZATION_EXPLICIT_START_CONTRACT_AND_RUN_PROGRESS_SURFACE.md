@@ -46,3 +46,4 @@ Out of scope:
 ## Status updates
 
 - 2026-04-24: Created after operator smoke and live inspection showed Localization starts are hard to reason about, with implicit follow-on jobs and no trustworthy run-progress story on the main surface.
+- 2026-04-24: First implementation slice landed: Localization home now exposes an explicit `Start localization run` action, import completion no longer auto-opens the editor as hidden work proceeds, and current/recent items now show stage labels, progress bars, and failure excerpts directly on the Localization surface. Verification: `npm run build`, `cargo check`.
