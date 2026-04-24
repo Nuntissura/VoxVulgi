@@ -22,6 +22,13 @@ pub struct SubtitleSegment {
     pub speaker: Option<String>,
 }
 
+pub fn usable_segment_count(doc: &SubtitleDocument) -> usize {
+    doc.segments
+        .iter()
+        .filter(|segment| !segment.text.trim().is_empty())
+        .count()
+}
+
 pub fn write_artifacts(
     doc: &SubtitleDocument,
     json_path: &Path,

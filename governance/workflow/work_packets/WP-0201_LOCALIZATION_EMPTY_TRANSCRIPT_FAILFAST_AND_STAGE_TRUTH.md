@@ -3,7 +3,7 @@
 ## Metadata
 - ID: WP-0201
 - Owner: Codex
-- Status: BACKLOG
+- Status: REVIEW
 - Created: 2026-04-24
 - Target milestone: Localization runtime reliability
 
@@ -49,3 +49,5 @@ Out of scope:
 ## Status updates
 
 - 2026-04-24: Created after installer-state smoke reproduced a path where `asr_local` and `translate_local` both succeeded, but `source.json` and `en.json` contained zero subtitle segments and no usable localization run could continue.
+- 2026-04-25: Activated for implementation after reviewing the failed Localization smoke tranche and confirming the root runtime-truth issue is empty ASR/translation tracks being persisted as successful stage outputs.
+- 2026-04-25: Implementation slice landed: ASR/translation now fail before persisting empty tracks, stale empty source/translated tracks block continuation without queueing downstream work, and proof was captured under `product/desktop/build_target/tool_artifacts/wp_runs/WP-0201/20260425_004344/`. Status remains REVIEW pending live Queen-sample/operator smoke.

@@ -39,6 +39,10 @@ pub struct TranslateReport {
     pub source_lang: Option<String>,
     pub glossary_path: String,
     pub glossary_entries: usize,
+    pub source_segment_count: usize,
+    pub translated_raw_segment_count: usize,
+    pub translated_usable_segment_count: usize,
+    pub aligned_usable_segment_count: usize,
     pub warnings: Vec<TranslateQcWarning>,
 }
 
@@ -73,7 +77,7 @@ pub fn translate_doc_whisper_to_en(
     };
 
     // Run Whisper.cpp in translate mode (speech -> English).
-    let translated_raw = asr::translate_whisper_wav_16k_mono_to_en(
+    let translated_raw = asr::translate_whisper_wav_16k_mono_to_en_with_stats(
         paths,
         model_id,
         wav_path,
@@ -81,7 +85,7 @@ pub fn translate_doc_whisper_to_en(
     )?;
 
     // Align Whisper segments onto the source segment windows to keep timing stable.
-    let aligned_texts = align_translated_to_source(source_doc, &translated_raw);
+    let aligned_texts = align_translated_to_source(source_doc, &translated_raw.doc);
 
     let mut out_segments: Vec<SubtitleSegment> = Vec::with_capacity(source_doc.segments.len());
     let mut warnings: Vec<TranslateQcWarning> = Vec::new();
@@ -108,6 +112,7 @@ pub fn translate_doc_whisper_to_en(
         lang: "en".to_string(),
         segments: out_segments,
     };
+    let aligned_usable_segment_count = crate::subtitles::usable_segment_count(&doc);
 
     let report = TranslateReport {
         engine: "whispercpp_translate".to_string(),
@@ -115,6 +120,10 @@ pub fn translate_doc_whisper_to_en(
         source_lang,
         glossary_path: glossary_path.to_string_lossy().to_string(),
         glossary_entries: glossary_map.len(),
+        source_segment_count: source_doc.segments.len(),
+        translated_raw_segment_count: translated_raw.stats.raw_segment_count,
+        translated_usable_segment_count: translated_raw.stats.usable_segment_count,
+        aligned_usable_segment_count,
         warnings,
     };
 

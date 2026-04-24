@@ -3,9 +3,22 @@ use crate::paths::AppPaths;
 use crate::subtitles::{SubtitleDocument, SubtitleSegment, SUBTITLE_JSON_SCHEMA_VERSION};
 use crate::{EngineError, Result};
 use hound::SampleFormat;
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use std::path::Path;
 use std::{ffi::CStr, ffi::CString, os::raw::c_char};
+
+#[derive(Debug, Clone, Serialize)]
+pub struct WhisperTranscriptStats {
+    pub detected_lang: Option<String>,
+    pub raw_segment_count: usize,
+    pub usable_segment_count: usize,
+}
+
+#[derive(Debug, Clone)]
+pub struct WhisperTranscriptResult {
+    pub doc: SubtitleDocument,
+    pub stats: WhisperTranscriptStats,
+}
 
 pub fn transcribe_whisper_wav_16k_mono(
     paths: &AppPaths,
@@ -13,6 +26,15 @@ pub fn transcribe_whisper_wav_16k_mono(
     wav_path: &Path,
     lang: Option<&str>,
 ) -> Result<SubtitleDocument> {
+    Ok(transcribe_whisper_wav_16k_mono_with_stats(paths, model_id, wav_path, lang)?.doc)
+}
+
+pub fn transcribe_whisper_wav_16k_mono_with_stats(
+    paths: &AppPaths,
+    model_id: &str,
+    wav_path: &Path,
+    lang: Option<&str>,
+) -> Result<WhisperTranscriptResult> {
     let model_path = resolve_whisper_model_path(paths, model_id)?;
     let audio = load_wav_16k_mono_f32(wav_path)?;
 
@@ -60,49 +82,7 @@ pub fn transcribe_whisper_wav_16k_mono(
     unsafe { ytf_whisper_free_string(out_ptr) };
 
     let parsed: WhisperJson = serde_json::from_str(&json)?;
-
-    let mut segments = Vec::new();
-    for seg in parsed.segments {
-        let text = seg.text.trim().to_string();
-        if text.is_empty() {
-            continue;
-        }
-        let mut start_ms = seg.start_ms;
-        let mut end_ms = seg.end_ms;
-        if start_ms < 0 {
-            start_ms = 0;
-        }
-        if end_ms < start_ms {
-            end_ms = start_ms;
-        }
-        segments.push(SubtitleSegment {
-            index: segments.len() as u32,
-            start_ms,
-            end_ms,
-            text,
-            speaker: None,
-        });
-    }
-
-    let lang_out = if let Some(v) = parsed.lang {
-        let v = v.trim().to_string();
-        if v.is_empty() {
-            None
-        } else {
-            Some(v)
-        }
-    } else {
-        None
-    };
-
-    Ok(SubtitleDocument {
-        schema_version: SUBTITLE_JSON_SCHEMA_VERSION,
-        kind: "source".to_string(),
-        lang: lang_out
-            .or_else(|| lang.map(|s| s.to_string()))
-            .unwrap_or_else(|| "und".to_string()),
-        segments,
-    })
+    Ok(whisper_json_to_document(parsed, "source", lang))
 }
 
 pub fn translate_whisper_wav_16k_mono_to_en(
@@ -111,6 +91,15 @@ pub fn translate_whisper_wav_16k_mono_to_en(
     wav_path: &Path,
     lang: Option<&str>,
 ) -> Result<SubtitleDocument> {
+    Ok(translate_whisper_wav_16k_mono_to_en_with_stats(paths, model_id, wav_path, lang)?.doc)
+}
+
+pub fn translate_whisper_wav_16k_mono_to_en_with_stats(
+    paths: &AppPaths,
+    model_id: &str,
+    wav_path: &Path,
+    lang: Option<&str>,
+) -> Result<WhisperTranscriptResult> {
     let model_path = resolve_whisper_model_path(paths, model_id)?;
     let audio = load_wav_16k_mono_f32(wav_path)?;
 
@@ -158,7 +147,36 @@ pub fn translate_whisper_wav_16k_mono_to_en(
     unsafe { ytf_whisper_free_string(out_ptr) };
 
     let parsed: WhisperJson = serde_json::from_str(&json)?;
+    Ok(whisper_json_to_document(parsed, "translated", Some("en")))
+}
 
+#[derive(Debug, Deserialize)]
+struct WhisperJson {
+    lang: Option<String>,
+    segments: Vec<WhisperJsonSegment>,
+}
+
+#[derive(Debug, Deserialize)]
+struct WhisperJsonSegment {
+    start_ms: i64,
+    end_ms: i64,
+    text: String,
+}
+
+fn normalize_lang(value: Option<&str>) -> Option<String> {
+    value
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(str::to_string)
+}
+
+fn whisper_json_to_document(
+    parsed: WhisperJson,
+    kind: &str,
+    lang_override: Option<&str>,
+) -> WhisperTranscriptResult {
+    let detected_lang = normalize_lang(parsed.lang.as_deref());
+    let raw_segment_count = parsed.segments.len();
     let mut segments = Vec::new();
     for seg in parsed.segments {
         let text = seg.text.trim().to_string();
@@ -182,25 +200,29 @@ pub fn translate_whisper_wav_16k_mono_to_en(
         });
     }
 
-    Ok(SubtitleDocument {
-        schema_version: SUBTITLE_JSON_SCHEMA_VERSION,
-        kind: "translated".to_string(),
-        lang: "en".to_string(),
-        segments,
-    })
-}
+    let lang = if kind == "translated" {
+        "en".to_string()
+    } else {
+        detected_lang
+            .clone()
+            .or_else(|| normalize_lang(lang_override))
+            .unwrap_or_else(|| "und".to_string())
+    };
+    let usable_segment_count = segments.len();
 
-#[derive(Debug, Deserialize)]
-struct WhisperJson {
-    lang: Option<String>,
-    segments: Vec<WhisperJsonSegment>,
-}
-
-#[derive(Debug, Deserialize)]
-struct WhisperJsonSegment {
-    start_ms: i64,
-    end_ms: i64,
-    text: String,
+    WhisperTranscriptResult {
+        doc: SubtitleDocument {
+            schema_version: SUBTITLE_JSON_SCHEMA_VERSION,
+            kind: kind.to_string(),
+            lang,
+            segments,
+        },
+        stats: WhisperTranscriptStats {
+            detected_lang,
+            raw_segment_count,
+            usable_segment_count,
+        },
+    }
 }
 
 fn resolve_whisper_model_path(paths: &AppPaths, model_id: &str) -> Result<std::path::PathBuf> {
@@ -256,6 +278,60 @@ fn load_wav_16k_mono_f32(path: &Path) -> Result<Vec<f32>> {
     }
 
     Ok(samples)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn whisper_json_to_document_reports_raw_and_usable_segments() {
+        let result = whisper_json_to_document(
+            WhisperJson {
+                lang: Some("ja".to_string()),
+                segments: vec![
+                    WhisperJsonSegment {
+                        start_ms: -25,
+                        end_ms: 250,
+                        text: "   ".to_string(),
+                    },
+                    WhisperJsonSegment {
+                        start_ms: 500,
+                        end_ms: 400,
+                        text: " hello ".to_string(),
+                    },
+                ],
+            },
+            "source",
+            None,
+        );
+
+        assert_eq!(result.stats.detected_lang.as_deref(), Some("ja"));
+        assert_eq!(result.stats.raw_segment_count, 2);
+        assert_eq!(result.stats.usable_segment_count, 1);
+        assert_eq!(result.doc.lang, "ja");
+        assert_eq!(result.doc.segments.len(), 1);
+        assert_eq!(result.doc.segments[0].start_ms, 500);
+        assert_eq!(result.doc.segments[0].end_ms, 500);
+        assert_eq!(result.doc.segments[0].text, "hello");
+    }
+
+    #[test]
+    fn whisper_json_to_translated_document_keeps_detected_language_as_diagnostic() {
+        let result = whisper_json_to_document(
+            WhisperJson {
+                lang: Some("ko".to_string()),
+                segments: Vec::new(),
+            },
+            "translated",
+            Some("en"),
+        );
+
+        assert_eq!(result.doc.lang, "en");
+        assert_eq!(result.stats.detected_lang.as_deref(), Some("ko"));
+        assert_eq!(result.stats.raw_segment_count, 0);
+        assert_eq!(result.stats.usable_segment_count, 0);
+    }
 }
 
 extern "C" {

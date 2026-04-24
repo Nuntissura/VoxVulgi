@@ -3,7 +3,7 @@
 ## Metadata
 - ID: WP-0200
 - Owner: Codex
-- Status: IN_PROGRESS
+- Status: REVIEW
 - Created: 2026-04-24
 - Target milestone: Diagnostics operator trust
 

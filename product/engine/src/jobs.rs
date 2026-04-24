@@ -1443,6 +1443,79 @@ fn track_speaker_keys(paths: &AppPaths, track_id: &str) -> Result<Vec<String>> {
     Ok(speakers)
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct SubtitleDocumentSegmentStats {
+    raw_segment_count: usize,
+    usable_segment_count: usize,
+}
+
+fn subtitle_document_segment_stats(
+    doc: &subtitles::SubtitleDocument,
+) -> SubtitleDocumentSegmentStats {
+    SubtitleDocumentSegmentStats {
+        raw_segment_count: doc.segments.len(),
+        usable_segment_count: subtitles::usable_segment_count(doc),
+    }
+}
+
+fn empty_transcript_reason(raw_segment_count: usize, usable_segment_count: usize) -> &'static str {
+    if raw_segment_count == 0 {
+        "no_speech_detected"
+    } else if usable_segment_count == 0 {
+        "all_segments_empty_after_filtering"
+    } else {
+        "usable_segments_present"
+    }
+}
+
+fn empty_transcript_error_message(
+    stage_label: &str,
+    raw_segment_count: usize,
+    usable_segment_count: usize,
+    media_path: &str,
+) -> String {
+    let reason = empty_transcript_reason(raw_segment_count, usable_segment_count);
+    format!(
+        "{stage_label} produced no usable subtitle segments ({reason}; raw segments: {raw_segment_count}; usable segments: {usable_segment_count}; media: {media_path}). No downstream localization stages were queued."
+    )
+}
+
+fn empty_track_stage(track: &subtitle_tracks::SubtitleTrackRow) -> String {
+    match track.kind.as_str() {
+        "source" => "empty_source_track".to_string(),
+        "translated" => "empty_translation_track".to_string(),
+        other => format!("empty_{other}_track"),
+    }
+}
+
+fn empty_track_continuation_outcome(
+    track: &subtitle_tracks::SubtitleTrackRow,
+    stats: SubtitleDocumentSegmentStats,
+) -> LocalizationContinuationOutcome {
+    let stage = empty_track_stage(track);
+    LocalizationContinuationOutcome {
+        stage,
+        source_track_id: if track.kind == "source" {
+            Some(track.id.clone())
+        } else {
+            None
+        },
+        translated_track_id: if track.kind == "translated" {
+            Some(track.id.clone())
+        } else {
+            None
+        },
+        queued_jobs: Vec::new(),
+        notes: vec![format!(
+            "The {} track contains no usable subtitle segments ({}; raw segments: {}; usable segments: {}). Re-run the failed prerequisite stage before continuing localization.",
+            track.kind,
+            empty_transcript_reason(stats.raw_segment_count, stats.usable_segment_count),
+            stats.raw_segment_count,
+            stats.usable_segment_count
+        )],
+    }
+}
+
 fn missing_voice_plan_speakers(
     paths: &AppPaths,
     item_id: &str,
@@ -1517,6 +1590,11 @@ fn queue_localization_continuation_from_track(
         } else {
             latest_translated_english_track(paths, &item.id)?.map(|value| value.id)
         };
+    let track_doc = subtitle_tracks::load_document(paths, &track.id)?;
+    let track_stats = subtitle_document_segment_stats(&track_doc);
+    if track_stats.usable_segment_count == 0 {
+        return Ok(empty_track_continuation_outcome(track, track_stats));
+    }
 
     match decide_localization_next_stage(paths, &item.id, track)? {
         LocalizationNextStageDecision::Translate => {
@@ -3619,17 +3697,47 @@ fn execute_job(paths: &AppPaths, job_id: &str, type_str: &str, params_json: &str
                 "asr_transcribe_begin",
                 serde_json::json!({ "model_id": &p.model_id, "lang": &p.lang, "audio_path": &audio_path }),
             )?;
-            let doc = asr::transcribe_whisper_wav_16k_mono(
+            let result = asr::transcribe_whisper_wav_16k_mono_with_stats(
                 paths,
                 &p.model_id,
                 &audio_path,
                 p.lang.as_deref(),
             )?;
+            let doc = result.doc;
             set_progress(paths, job_id, 0.85)?;
 
             if is_canceled(paths, job_id)? {
                 log_line(paths, job_id, "info", "job_canceled", serde_json::json!({}))?;
                 return Ok(());
+            }
+
+            if result.stats.usable_segment_count == 0 {
+                let message = empty_transcript_error_message(
+                    "ASR",
+                    result.stats.raw_segment_count,
+                    result.stats.usable_segment_count,
+                    &item.media_path,
+                );
+                log_line(
+                    paths,
+                    job_id,
+                    "error",
+                    "asr_empty_transcript",
+                    serde_json::json!({
+                        "item_id": &item.id,
+                        "media_path": &item.media_path,
+                        "audio_path": &audio_path,
+                        "requested_lang": &p.lang,
+                        "detected_lang": result.stats.detected_lang.as_deref(),
+                        "raw_segment_count": result.stats.raw_segment_count,
+                        "usable_segment_count": result.stats.usable_segment_count,
+                        "reason": empty_transcript_reason(
+                            result.stats.raw_segment_count,
+                            result.stats.usable_segment_count,
+                        ),
+                    }),
+                )?;
+                return Err(EngineError::InstallFailed(message));
             }
 
             let json_path = asr_dir.join("source.json");
@@ -3781,6 +3889,34 @@ INSERT INTO subtitle_track (
 
             let item = library::get_item_by_id(paths, &p.item_id)?;
             let media_path = Path::new(&item.media_path);
+            let source_stats = subtitle_document_segment_stats(&source_doc);
+            if source_stats.usable_segment_count == 0 {
+                let message = empty_transcript_error_message(
+                    "Translation source track",
+                    source_stats.raw_segment_count,
+                    source_stats.usable_segment_count,
+                    &item.media_path,
+                );
+                log_line(
+                    paths,
+                    job_id,
+                    "error",
+                    "translate_empty_source_track",
+                    serde_json::json!({
+                        "item_id": &item.id,
+                        "media_path": &item.media_path,
+                        "source_track_id": &p.source_track_id,
+                        "source_track_lang": &source_doc.lang,
+                        "raw_segment_count": source_stats.raw_segment_count,
+                        "usable_segment_count": source_stats.usable_segment_count,
+                        "reason": empty_transcript_reason(
+                            source_stats.raw_segment_count,
+                            source_stats.usable_segment_count,
+                        ),
+                    }),
+                )?;
+                return Err(EngineError::InstallFailed(message));
+            }
 
             let translate_dir = paths.derived_item_dir(&item.id).join("translate");
             std::fs::create_dir_all(&translate_dir)?;
@@ -3832,6 +3968,45 @@ INSERT INTO subtitle_track (
             if is_canceled(paths, job_id)? {
                 log_line(paths, job_id, "info", "job_canceled", serde_json::json!({}))?;
                 return Ok(());
+            }
+
+            let translated_stats = subtitle_document_segment_stats(&result.doc);
+            if translated_stats.usable_segment_count == 0 {
+                let reason = if result.report.translated_raw_segment_count == 0 {
+                    "no_translation_segments_returned"
+                } else if result.report.translated_usable_segment_count == 0 {
+                    "all_translation_segments_empty_after_filtering"
+                } else {
+                    "translated_segments_did_not_align_to_source_windows"
+                };
+                let message = format!(
+                    "Translation produced no usable English subtitle segments ({reason}; whisper raw segments: {}; whisper usable segments: {}; aligned usable segments: {}; media: {}). No downstream localization stages were queued.",
+                    result.report.translated_raw_segment_count,
+                    result.report.translated_usable_segment_count,
+                    translated_stats.usable_segment_count,
+                    item.media_path
+                );
+                log_line(
+                    paths,
+                    job_id,
+                    "error",
+                    "translate_empty_transcript",
+                    serde_json::json!({
+                        "item_id": &item.id,
+                        "media_path": &item.media_path,
+                        "audio_path": &audio_path,
+                        "source_track_id": &p.source_track_id,
+                        "source_track_lang": &source_doc.lang,
+                        "source_raw_segment_count": source_stats.raw_segment_count,
+                        "source_usable_segment_count": source_stats.usable_segment_count,
+                        "whisper_raw_segment_count": result.report.translated_raw_segment_count,
+                        "whisper_usable_segment_count": result.report.translated_usable_segment_count,
+                        "aligned_raw_segment_count": translated_stats.raw_segment_count,
+                        "aligned_usable_segment_count": translated_stats.usable_segment_count,
+                        "reason": reason,
+                    }),
+                )?;
+                return Err(EngineError::InstallFailed(message));
             }
 
             let conn = db::open(paths)?;
@@ -13981,6 +14156,54 @@ mod tests {
         .expect("insert track");
     }
 
+    fn seed_empty_subtitle_track_named(
+        paths: &AppPaths,
+        item_id: &str,
+        track_id: &str,
+        kind: &str,
+        lang: &str,
+        version: i64,
+    ) {
+        let doc = SubtitleDocument {
+            schema_version: SUBTITLE_JSON_SCHEMA_VERSION,
+            kind: kind.to_string(),
+            lang: lang.to_string(),
+            segments: Vec::new(),
+        };
+        let track_path = paths
+            .derived_item_dir(item_id)
+            .join(kind)
+            .join(format!("{track_id}.json"));
+        if let Some(parent) = track_path.parent() {
+            std::fs::create_dir_all(parent).expect("track dir");
+        }
+        std::fs::write(
+            &track_path,
+            format!(
+                "{}\n",
+                serde_json::to_string_pretty(&doc).expect("doc json")
+            ),
+        )
+        .expect("write track");
+
+        let conn = db::open(paths).expect("open db");
+        db::migrate(&conn).expect("migrate");
+        conn.execute(
+            "INSERT INTO subtitle_track (id, item_id, kind, lang, format, path, created_by, version) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+            params![
+                track_id,
+                item_id,
+                kind,
+                lang,
+                "ytfetch_subtitle_json_v1",
+                track_path.to_string_lossy().to_string(),
+                "test",
+                version
+            ],
+        )
+        .expect("insert track");
+    }
+
     fn seed_item_and_track_named(paths: &AppPaths, item_id: &str, track_id: &str, title: &str) {
         seed_item_only(paths, item_id, title);
         seed_subtitle_track_named(paths, item_id, track_id, "translated", "eng", 1, &["S1"]);
@@ -14005,6 +14228,40 @@ mod tests {
             writer.write_sample(sample).expect("sample");
         }
         writer.finalize().expect("finalize");
+    }
+
+    #[test]
+    fn subtitle_document_segment_stats_counts_usable_text_only() {
+        let doc = SubtitleDocument {
+            schema_version: SUBTITLE_JSON_SCHEMA_VERSION,
+            kind: "source".to_string(),
+            lang: "ja".to_string(),
+            segments: vec![
+                SubtitleSegment {
+                    index: 0,
+                    start_ms: 0,
+                    end_ms: 500,
+                    text: "   ".to_string(),
+                    speaker: None,
+                },
+                SubtitleSegment {
+                    index: 1,
+                    start_ms: 500,
+                    end_ms: 1000,
+                    text: "hello".to_string(),
+                    speaker: None,
+                },
+            ],
+        };
+
+        let stats = subtitle_document_segment_stats(&doc);
+        assert_eq!(
+            stats,
+            SubtitleDocumentSegmentStats {
+                raw_segment_count: 2,
+                usable_segment_count: 1,
+            }
+        );
     }
 
     #[test]
@@ -14036,6 +14293,68 @@ mod tests {
         assert_eq!(pipeline.separation_backend.as_deref(), Some("demucs"));
         assert!(pipeline.queue_qc);
         assert!(pipeline.queue_export_pack);
+    }
+
+    #[test]
+    fn enqueue_localization_run_v1_blocks_empty_source_track() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let paths = AppPaths::new(dir.path().to_path_buf());
+        seed_item_only(&paths, "item-1", "Item 1");
+        seed_empty_subtitle_track_named(&paths, "item-1", "track-source", "source", "ja", 1);
+
+        let summary = enqueue_localization_run_v1(
+            &paths,
+            LocalizationRunRequest {
+                item_id: "item-1".to_string(),
+                asr_lang: Some("ja".to_string()),
+                separation_backend: None,
+                queue_export_pack: false,
+                queue_qc: false,
+            },
+        )
+        .expect("queue summary");
+
+        assert_eq!(summary.stage, "empty_source_track");
+        assert!(summary.queued_jobs.is_empty());
+        assert!(
+            summary
+                .notes
+                .iter()
+                .any(|note| note.contains("no usable subtitle segments")),
+            "expected empty-track note, got {:?}",
+            summary.notes
+        );
+    }
+
+    #[test]
+    fn enqueue_localization_run_v1_blocks_empty_translated_track() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let paths = AppPaths::new(dir.path().to_path_buf());
+        seed_item_only(&paths, "item-1", "Item 1");
+        seed_empty_subtitle_track_named(&paths, "item-1", "track-en", "translated", "en", 1);
+
+        let summary = enqueue_localization_run_v1(
+            &paths,
+            LocalizationRunRequest {
+                item_id: "item-1".to_string(),
+                asr_lang: Some("ko".to_string()),
+                separation_backend: None,
+                queue_export_pack: false,
+                queue_qc: false,
+            },
+        )
+        .expect("queue summary");
+
+        assert_eq!(summary.stage, "empty_translation_track");
+        assert!(summary.queued_jobs.is_empty());
+        assert!(
+            summary
+                .notes
+                .iter()
+                .any(|note| note.contains("no usable subtitle segments")),
+            "expected empty-track note, got {:?}",
+            summary.notes
+        );
     }
 
     #[test]

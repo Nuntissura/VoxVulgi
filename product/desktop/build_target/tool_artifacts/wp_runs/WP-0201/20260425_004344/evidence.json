@@ -1,0 +1,60 @@
+{
+  "wp_id": "WP-0201",
+  "status": "REVIEW",
+  "date": "2026-04-25",
+  "commands": [
+    {
+      "command": "cargo test whisper_json_to --lib",
+      "workdir": "product/engine",
+      "result": "passed",
+      "notes": "2 ASR Whisper diagnostic parser tests passed."
+    },
+    {
+      "command": "cargo test empty --lib",
+      "workdir": "product/engine",
+      "result": "passed",
+      "notes": "2 localization-run empty-track blocking tests passed."
+    },
+    {
+      "command": "cargo test subtitle_document_segment_stats_counts_usable_text_only --lib",
+      "workdir": "product/engine",
+      "result": "passed",
+      "notes": "1 usable-text counting guard test passed."
+    },
+    {
+      "command": "cargo check",
+      "workdir": "product/engine",
+      "result": "passed",
+      "notes": "Completed with existing dead-code warnings."
+    },
+    {
+      "command": "npm run build",
+      "workdir": "product/desktop",
+      "result": "blocked",
+      "notes": "PowerShell blocked npm.ps1 under local execution policy."
+    },
+    {
+      "command": "& 'C:\\Program Files\\nodejs\\npm.cmd' run build",
+      "workdir": "product/desktop",
+      "result": "passed",
+      "notes": "TypeScript and Vite production build passed."
+    },
+    {
+      "command": "cargo check",
+      "workdir": "product/desktop/src-tauri",
+      "result": "passed",
+      "notes": "Completed with existing warnings."
+    }
+  ],
+  "coverage": [
+    "ASR raw and usable segment diagnostics",
+    "empty source-track continuation blocking",
+    "empty translated-track continuation blocking",
+    "frontend TypeScript build boundary",
+    "Tauri Rust build boundary"
+  ],
+  "remaining_verification": [
+    "Rerun the failed Queen-sample installer-state smoke and confirm ASR/translation fail truthfully instead of persisting empty source/en tracks.",
+    "Confirm Jobs and Localization surfaces show the failed stage reason clearly in the live app."
+  ]
+}
