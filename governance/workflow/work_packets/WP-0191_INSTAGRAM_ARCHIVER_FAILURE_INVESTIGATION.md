@@ -41,3 +41,4 @@ Out of scope:
 
 - 2026-04-23: Created from recent Instagram Archiver failures and diagnostic-trace review.
 - 2026-04-23: Operator smoke reproduced the one-shot profile failure path with `ERROR: [instagram:user] ... Unable to extract data`, while older failures in the same app data also show repeated `got more than 100 headers` extraction failures. The current failed one-shot jobs never create a `library_item`, which leaves Jobs without item/output context and makes root-path verification harder for operators.
+- 2026-04-24: Additional operator notes confirmed the remaining UX gap around this failure path: one-shot Instagram Archiver and recurring Instagram subscriptions are still easy to confuse, and when extractor failure happens before item creation the operator cannot verify the expected output root or whether anything should have landed on disk at all.

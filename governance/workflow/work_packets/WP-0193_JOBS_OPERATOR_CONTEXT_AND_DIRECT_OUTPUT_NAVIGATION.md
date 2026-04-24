@@ -40,3 +40,4 @@ Out of scope:
 
 - 2026-04-23: Created after smoke feedback that Jobs is useful in principle but still does not tell the operator what failed rows correspond to or where completed outputs live.
 - 2026-04-23: Implemented a first operator-context pass in `JobsPage`: rows now resolve item titles/source URLs where possible, direct URL/import/subscription jobs show human-readable targets, batches summarize those targets, and non-item jobs expose direct target-root/source actions. `npm run build` passed.
+- 2026-04-24: Follow-on operator smoke says the page is still not sufficient for real troubleshooting when a queue is busy: rows still need clearer playlist/video/profile naming, more obvious current-stage meaning, and direct file/folder navigation for completed outputs so Jobs can serve as the operational command surface instead of only a raw trace list.
