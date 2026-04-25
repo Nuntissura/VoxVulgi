@@ -98,7 +98,8 @@ Read that file to get the port number, then call `http://127.0.0.1:<port>/agent/
 | `GET` | `/agent/health` | — | Liveness check. Returns `{"status":"ok"}`. |
 | `GET` | `/agent/state` | — | Returns `{"current_page","editor_item_id","safe_mode"}`. |
 | `POST` | `/agent/navigate` | `{"page":"video_ingest"}` | Switches the active page. Valid pages: `localization`, `video_ingest`, `instagram_archive`, `image_archive`, `media_library`, `jobs`, `diagnostics`, `options`. |
-| `POST` | `/agent/snapshot` | `{"subfolder":"WP-0171","label":"jobs_page"}` | Captures a snapshot via html2canvas and returns `{"path":"..."}`. Blocks up to 15 seconds. |
+| `POST` | `/agent/snapshot` | `{"subfolder":"WP-0171","label":"jobs_page"}` | Captures a snapshot via html2canvas and returns `{"path":"..."}`. Blocks up to 30 seconds. |
+| `POST` | `/agent/dump` | `{"subfolder":"WP-0209","label":"after_run"}` | Writes a JSON state dump (URL, viewport, `.content` scroll, filtered `voxvulgi.*` localStorage, mounted `loc-*` element ids, last 200 console entries) and returns `{"path":"..."}`. Blocks up to 10 seconds. (WP-0209) |
 
 ### Example (from a terminal or agent script)
 
@@ -107,11 +108,13 @@ PORT=$(cat "$APPDATA/com.voxvulgi.voxvulgi/agent_bridge_port.txt")
 # Navigate to Video Archiver
 curl -s -X POST http://127.0.0.1:$PORT/agent/navigate -d '{"page":"video_ingest"}'
 sleep 2
-# Capture snapshot
+# Capture snapshot + paired state dump
 curl -s -X POST http://127.0.0.1:$PORT/agent/snapshot -d '{"subfolder":"audit","label":"video_archiver"}'
+curl -s -X POST http://127.0.0.1:$PORT/agent/dump     -d '{"subfolder":"audit","label":"video_archiver"}'
 ```
 
 ### JS globals (in-WebView use)
 
 - `window.__voxVulgiNavigate(page)` — switch page programmatically.
 - `window.__voxVulgiRequestSnapshot(subfolder?, label?)` — capture snapshot (returns path).
+- `window.__voxVulgiRequestDump(subfolder?, label?)` — write paired JSON state dump (returns path). The dump file is `<label>_<ts>.dump.json` next to the snapshot under the same subfolder.

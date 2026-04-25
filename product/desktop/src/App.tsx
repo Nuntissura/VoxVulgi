@@ -11,6 +11,76 @@ import { openPathBestEffort, revealPath } from "./lib/pathOpener";
 import { featureRootStatus, useSharedDownloadDirStatus } from "./lib/sharedDownloadDir";
 import { safeLocalStorageGet, safeLocalStorageSet } from "./lib/persist";
 
+// ---------------------------------------------------------------------------
+// Visual debugger console buffer (WP-0209)
+// ---------------------------------------------------------------------------
+type ConsoleBufferEntry = { ts_ms: number; level: "log" | "warn" | "error"; args: string };
+const CONSOLE_BUFFER_MAX = 200;
+const consoleBuffer: ConsoleBufferEntry[] = [];
+let consolePatched = false;
+
+function installConsoleBuffer() {
+  if (consolePatched) return;
+  consolePatched = true;
+  const levels: Array<"log" | "warn" | "error"> = ["log", "warn", "error"];
+  for (const level of levels) {
+    const original = (console as Record<string, unknown>)[level] as (...a: unknown[]) => void;
+    (console as Record<string, unknown>)[level] = (...args: unknown[]) => {
+      try {
+        const serialized = args
+          .map((a) => {
+            if (typeof a === "string") return a;
+            try {
+              return JSON.stringify(a);
+            } catch {
+              return String(a);
+            }
+          })
+          .join(" ");
+        consoleBuffer.push({ ts_ms: Date.now(), level, args: serialized });
+        if (consoleBuffer.length > CONSOLE_BUFFER_MAX) {
+          consoleBuffer.splice(0, consoleBuffer.length - CONSOLE_BUFFER_MAX);
+        }
+      } catch {
+        // never let buffer side-effects break the original call
+      }
+      original.apply(console, args);
+    };
+  }
+}
+
+function buildVisualDebuggerDump(): Record<string, unknown> {
+  const ls: Record<string, string> = {};
+  try {
+    for (let i = 0; i < window.localStorage.length; i++) {
+      const key = window.localStorage.key(i);
+      if (!key || !key.startsWith("voxvulgi.")) continue;
+      const raw = window.localStorage.getItem(key) ?? "";
+      ls[key] = raw.length > 4096 ? raw.slice(0, 4096) + "...[truncated]" : raw;
+    }
+  } catch {
+    // ignore
+  }
+  const mountedSectionIds: string[] = [];
+  try {
+    document.querySelectorAll<HTMLElement>("[id]").forEach((el) => {
+      if (el.id && el.id.startsWith("loc-")) mountedSectionIds.push(el.id);
+    });
+  } catch {
+    // ignore
+  }
+  const contentEl = document.querySelector<HTMLElement>(".content");
+  return {
+    timestamp_ms: Date.now(),
+    url: window.location.href,
+    viewport: { width: window.innerWidth, height: window.innerHeight },
+    content_scroll_top: contentEl ? contentEl.scrollTop : null,
+    localstorage_voxvulgi: ls,
+    mounted_section_ids: mountedSectionIds,
+    console_buffer: consoleBuffer.slice(),
+  };
+}
+
 const DiagnosticsPage = lazy(async () => {
   const mod = await import("./pages/DiagnosticsPage");
   return { default: mod.DiagnosticsPage };
@@ -1571,6 +1641,7 @@ function App() {
   }, [appInfo?.app_version]);
 
   useEffect(() => {
+    installConsoleBuffer();
     const handleKeyDown = async (e: KeyboardEvent) => {
       if (e.shiftKey && (e.ctrlKey || e.metaKey) && e.key.toLowerCase() === "s") {
         e.preventDefault();
@@ -1614,12 +1685,30 @@ function App() {
       switchPage(targetPage as AppPage);
     };
 
+    // @ts-ignore
+    window.__voxVulgiRequestDump = async (subfolder?: string, label?: string) => {
+      try {
+        const dump = buildVisualDebuggerDump();
+        return await invoke<string>("admin_save_dump", {
+          jsonData: JSON.stringify(dump, null, 2),
+          subfolder: subfolder ?? null,
+          label: label ?? null,
+        });
+      } catch (err) {
+        // eslint-disable-next-line no-console
+        console.error("[Visual Debugger] dump capture failed", err);
+        throw err;
+      }
+    };
+
     return () => {
       window.removeEventListener("keydown", handleKeyDown);
       // @ts-ignore
       delete window.__voxVulgiRequestSnapshot;
       // @ts-ignore
       delete window.__voxVulgiNavigate;
+      // @ts-ignore
+      delete window.__voxVulgiRequestDump;
     };
   }, []);
 
@@ -1684,6 +1773,24 @@ function App() {
             // eslint-disable-next-line no-console
             console.error("[Agent Bridge] snapshot capture failed", err);
             await invoke("agent_snapshot_complete", { path: "" }).catch(() => {});
+          }
+        }),
+      );
+      unlisteners.push(
+        await listen<{ subfolder?: string; label?: string }>("agent-dump-request", async (event) => {
+          try {
+            const { subfolder, label } = event.payload ?? {};
+            const dump = buildVisualDebuggerDump();
+            const absPath = await invoke<string>("admin_save_dump", {
+              jsonData: JSON.stringify(dump, null, 2),
+              subfolder: subfolder || null,
+              label: label || null,
+            });
+            await invoke("agent_dump_complete", { path: absPath });
+          } catch (err) {
+            // eslint-disable-next-line no-console
+            console.error("[Agent Bridge] dump capture failed", err);
+            await invoke("agent_dump_complete", { path: "" }).catch(() => {});
           }
         }),
       );

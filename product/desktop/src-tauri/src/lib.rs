@@ -22,6 +22,7 @@ struct AgentBridgeInner {
     editor_item_id: Option<String>,
     safe_mode: bool,
     snapshot_tx: Option<std::sync::mpsc::Sender<String>>,
+    dump_tx: Option<std::sync::mpsc::Sender<String>>,
 }
 
 fn agent_bridge_state() -> &'static Arc<Mutex<AgentBridgeInner>> {
@@ -106,6 +107,7 @@ fn handle_agent_request(stream: &mut std::net::TcpStream) {
         ("GET", "/agent/state") => ("200 OK", agent_handle_state()),
         ("POST", "/agent/navigate") => agent_handle_navigate(&body_str),
         ("POST", "/agent/snapshot") => agent_handle_snapshot(&body_str),
+        ("POST", "/agent/dump") => agent_handle_dump(&body_str),
         _ => ("404 Not Found", r#"{"error":"not found"}"#.to_string()),
     };
 
@@ -254,6 +256,51 @@ fn agent_handle_snapshot(body: &str) -> (&'static str, String) {
             (
                 "504 Gateway Timeout",
                 r#"{"error":"snapshot timed out (30s)"}"#.to_string(),
+            )
+        }
+    }
+}
+
+fn agent_handle_dump(body: &str) -> (&'static str, String) {
+    let parsed: serde_json::Value = serde_json::from_str(body).unwrap_or(serde_json::json!({}));
+    let subfolder = parsed
+        .get("subfolder")
+        .and_then(|v| v.as_str())
+        .unwrap_or("")
+        .to_string();
+    let label = parsed
+        .get("label")
+        .and_then(|v| v.as_str())
+        .unwrap_or("")
+        .to_string();
+
+    let (tx, rx) = std::sync::mpsc::channel::<String>();
+    {
+        let mut state = agent_bridge_state().lock().unwrap();
+        state.dump_tx = Some(tx);
+    }
+
+    if let Some(app) = AGENT_APP_HANDLE.get() {
+        let _ = app.emit(
+            "agent-dump-request",
+            serde_json::json!({
+                "subfolder": subfolder,
+                "label": label,
+            }),
+        );
+    }
+
+    match rx.recv_timeout(Duration::from_secs(10)) {
+        Ok(path) => (
+            "200 OK",
+            format!(r#"{{"path":"{}"}}"#, path.replace('\\', "\\\\")),
+        ),
+        Err(_) => {
+            let mut state = agent_bridge_state().lock().unwrap();
+            state.dump_tx = None;
+            (
+                "504 Gateway Timeout",
+                r#"{"error":"dump timed out (10s)"}"#.to_string(),
             )
         }
     }
@@ -6533,6 +6580,46 @@ fn agent_report_state(page: String, editor_item_id: Option<String>, safe_mode: b
     state.safe_mode = safe_mode;
 }
 
+#[tauri::command]
+fn admin_save_dump(
+    json_data: String,
+    subfolder: Option<String>,
+    label: Option<String>,
+) -> Result<String, String> {
+    let mut snapshots_dir = std::env::current_dir().unwrap_or_default();
+    while !snapshots_dir.join("governance").exists() && snapshots_dir.parent().is_some() {
+        snapshots_dir = snapshots_dir.parent().unwrap().to_path_buf();
+    }
+    let mut target_dir = snapshots_dir.join("governance").join("snapshots");
+    if let Some(ref sub) = subfolder {
+        let sanitized = sub.replace(['/', '\\', ':', '*', '?', '"', '<', '>', '|'], "_");
+        if !sanitized.is_empty() {
+            target_dir = target_dir.join(sanitized);
+        }
+    }
+    if !target_dir.exists() {
+        std::fs::create_dir_all(&target_dir)
+            .map_err(|e| format!("Failed to create dump dir: {}", e))?;
+    }
+
+    let label_part = label
+        .map(|l| l.replace(['/', '\\', ':', '*', '?', '"', '<', '>', '|', ' '], "_"))
+        .filter(|l| !l.is_empty());
+    let file_name = match label_part {
+        Some(l) => format!("{}_{}.dump.json", l, now_epoch_ms_i64()),
+        None => format!("dump_{}.dump.json", now_epoch_ms_i64()),
+    };
+    let path = target_dir.join(file_name);
+
+    std::fs::write(&path, json_data.as_bytes())
+        .map_err(|e| format!("Failed to write dump: {}", e))?;
+    let abs_path = std::fs::canonicalize(&path)
+        .unwrap_or(path)
+        .to_string_lossy()
+        .to_string();
+    Ok(abs_path)
+}
+
 // ---------------------------------------------------------------------------
 // Per-segment clone breakdown (WP-0186)
 // ---------------------------------------------------------------------------
@@ -6616,6 +6703,14 @@ fn glossary_import_csv(state: State<'_, AppState>, path: String) -> Result<usize
 fn agent_snapshot_complete(path: String) {
     let mut state = agent_bridge_state().lock().unwrap();
     if let Some(tx) = state.snapshot_tx.take() {
+        let _ = tx.send(path);
+    }
+}
+
+#[tauri::command]
+fn agent_dump_complete(path: String) {
+    let mut state = agent_bridge_state().lock().unwrap();
+    if let Some(tx) = state.dump_tx.take() {
         let _ = tx.send(path);
     }
 }
@@ -6923,13 +7018,15 @@ pub fn run() {
             window_start_resize_drag,
             window_toggle_maximize,
             admin_save_snapshot,
+            admin_save_dump,
             tts_manifest_clone_segments,
             glossary_get,
             glossary_set,
             glossary_export_csv,
             glossary_import_csv,
             agent_report_state,
-            agent_snapshot_complete
+            agent_snapshot_complete,
+            agent_dump_complete
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
