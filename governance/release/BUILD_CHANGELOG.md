@@ -111,3 +111,12 @@ This changelog tracks desktop installer builds produced by `governance/scripts/b
   - `product/desktop/build_target/Current/release/bundle/nsis/VoxVulgi_0.1.10_x64-setup.exe`
   - `product/desktop/build_target/Current/release/bundle/msi/VoxVulgi_0.1.10_x64_en-US.msi`
 - Notes: Desktop test build for Localization workspace decoupling.
+
+## 0.1.11 - 2026-04-25T03:38:34Z
+- Work Packets: `WP-0200`, `WP-0201`, `WP-0202`, `WP-0203`, `WP-0204`
+- Commit: `40566e1`
+- Offline Bundle ID: `offline_full_win64_20260425_030631`
+- Artifacts:
+  - `product/desktop/build_target/Current/release/bundle/nsis/VoxVulgi_0.1.11_x64-setup.exe`
+  - `product/desktop/build_target/Current/release/bundle/msi/VoxVulgi_0.1.11_x64_en-US.msi`
+- Notes: Post-localization-smoke desktop target build with localization reliability and voice/backend updates.
