@@ -2172,9 +2172,7 @@ pub fn load_youtube_subscription_archive_ids(
     read_archive_file_ids(&archive_path).map_err(Into::into)
 }
 
-pub fn youtube_subscriptions_archive_stats(
-    paths: &AppPaths,
-) -> Result<HashMap<String, usize>> {
+pub fn youtube_subscriptions_archive_stats(paths: &AppPaths) -> Result<HashMap<String, usize>> {
     let subs = list_youtube_subscriptions(paths)?;
     let mut stats = HashMap::with_capacity(subs.len());
     for sub in &subs {
@@ -2334,7 +2332,10 @@ fn sync_auth_session_secret(
     clear_auth_session: bool,
 ) -> Result<()> {
     let secret_path = paths.youtube_subscription_cookie_secret_path(subscription_id);
-    if let Some(value) = auth_session_input.map(str::trim).filter(|value| !value.is_empty()) {
+    if let Some(value) = auth_session_input
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+    {
         jobs::write_auth_cookie_secret_path(&secret_path, value)?;
     } else if clear_auth_session {
         jobs::remove_auth_cookie_secret_path(&secret_path);
@@ -3004,9 +3005,7 @@ mod tests {
                 folder_map: None,
                 output_dir_override: None,
                 use_browser_cookies: false,
-                auth_session_input: Some(
-                    r#"[{"name":"SAPISID","value":"cookie123"}]"#.to_string(),
-                ),
+                auth_session_input: Some(r#"[{"name":"SAPISID","value":"cookie123"}]"#.to_string()),
                 clear_auth_session: false,
                 active: true,
                 preset_id: None,
@@ -3016,7 +3015,10 @@ mod tests {
         )
         .expect("upsert");
 
-        assert!(sub.auth_session_configured, "saved auth session should be surfaced");
+        assert!(
+            sub.auth_session_configured,
+            "saved auth session should be surfaced"
+        );
         let stored = jobs::read_auth_cookie_secret_path(
             &paths.youtube_subscription_cookie_secret_path(&sub.id),
         )
@@ -3024,8 +3026,9 @@ mod tests {
         assert_eq!(stored, "SAPISID=cookie123");
 
         let queued = queue_youtube_subscription(&paths, &sub.id).expect("queue");
-        let job_secret = jobs::read_auth_cookie_secret_path(&paths.job_cookie_secret_path(&queued[0].id))
-            .expect("job auth secret");
+        let job_secret =
+            jobs::read_auth_cookie_secret_path(&paths.job_cookie_secret_path(&queued[0].id))
+                .expect("job auth secret");
         assert_eq!(job_secret, "SAPISID=cookie123");
     }
 

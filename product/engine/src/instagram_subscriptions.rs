@@ -153,9 +153,10 @@ ON CONFLICT(source_url) DO UPDATE SET
         )?;
     }
 
-    let mut row = subscription_by_source_url_conn(&conn, &normalized.source_url)?.ok_or_else(|| {
-        EngineError::InstallFailed("failed to load saved Instagram subscription".to_string())
-    })?;
+    let mut row =
+        subscription_by_source_url_conn(&conn, &normalized.source_url)?.ok_or_else(|| {
+            EngineError::InstallFailed("failed to load saved Instagram subscription".to_string())
+        })?;
     sync_auth_session_secret(
         paths,
         row.id.as_str(),
@@ -280,7 +281,10 @@ fn sync_auth_session_secret(
     clear_auth_session: bool,
 ) -> Result<()> {
     let secret_path = paths.instagram_subscription_cookie_secret_path(subscription_id);
-    if let Some(value) = auth_session_input.map(str::trim).filter(|value| !value.is_empty()) {
+    if let Some(value) = auth_session_input
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+    {
         jobs::write_auth_cookie_secret_path(&secret_path, value)?;
     } else if clear_auth_session {
         jobs::remove_auth_cookie_secret_path(&secret_path);
@@ -590,7 +594,10 @@ mod tests {
         )
         .expect("upsert");
 
-        assert!(sub.auth_session_configured, "saved auth session should be surfaced");
+        assert!(
+            sub.auth_session_configured,
+            "saved auth session should be surfaced"
+        );
         let stored = jobs::read_auth_cookie_secret_path(
             &paths.instagram_subscription_cookie_secret_path(&sub.id),
         )
@@ -598,8 +605,9 @@ mod tests {
         assert_eq!(stored, "sessionid=abc123");
 
         let queued = queue_instagram_subscription(&paths, &sub.id).expect("queue");
-        let job_secret = jobs::read_auth_cookie_secret_path(&paths.job_cookie_secret_path(&queued[0].id))
-            .expect("job auth secret");
+        let job_secret =
+            jobs::read_auth_cookie_secret_path(&paths.job_cookie_secret_path(&queued[0].id))
+                .expect("job auth secret");
         assert_eq!(job_secret, "sessionid=abc123");
     }
 }

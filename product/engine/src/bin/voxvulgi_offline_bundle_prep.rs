@@ -2,6 +2,7 @@ use std::path::{Path, PathBuf};
 
 use voxvulgi_engine::models::ModelStore;
 use voxvulgi_engine::paths::AppPaths;
+use voxvulgi_engine::pinned_dependency_manifest;
 use voxvulgi_engine::{cmd, db, tools, EngineError, Result};
 use zip::write::FileOptions;
 
@@ -87,7 +88,10 @@ fn run() -> Result<()> {
     #[cfg(windows)]
     {
         let ytdlp = tools::ytdlp_tools_status(&paths);
-        if !ytdlp.bundled_installed {
+        let yt_dlp_pin = &pinned_dependency_manifest::manifest().yt_dlp_windows;
+        if !ytdlp.bundled_installed
+            || ytdlp.ytdlp_version.as_deref() != Some(yt_dlp_pin.version.as_str())
+        {
             println!("installing yt-dlp tools...");
             let _ = tools::install_ytdlp_tools(&paths)?;
         } else {

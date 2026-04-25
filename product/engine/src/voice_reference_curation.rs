@@ -86,7 +86,10 @@ pub fn generate_reference_curation_report(
                 path: raw_path.clone(),
                 label: file_label(&path),
                 stats: VoiceAudioStats::default(),
-                warnings: vec![format!("Reference clip is missing: {}", path.to_string_lossy())],
+                warnings: vec![format!(
+                    "Reference clip is missing: {}",
+                    path.to_string_lossy()
+                )],
                 warn_count: 0,
                 fail_count: 1,
             });
@@ -94,13 +97,22 @@ pub fn generate_reference_curation_report(
         }
         let stats = analyze_reference_audio(paths, &path, &temp_dir, &format!("ref_{index:02}"))?;
         let warnings = jobs::voice_qc_messages(&stats, true, None, Some(speaker_key));
-        let warn_count = warnings.iter().filter(|(_, severity, _, _)| severity == "warn").count();
-        let fail_count = warnings.iter().filter(|(_, severity, _, _)| severity == "fail").count();
+        let warn_count = warnings
+            .iter()
+            .filter(|(_, severity, _, _)| severity == "warn")
+            .count();
+        let fail_count = warnings
+            .iter()
+            .filter(|(_, severity, _, _)| severity == "fail")
+            .count();
         analyzed.push(AnalyzedReference {
             path: path.to_string_lossy().to_string(),
             label: file_label(&path),
             stats,
-            warnings: warnings.into_iter().map(|(_, _, message, _)| message).collect(),
+            warnings: warnings
+                .into_iter()
+                .map(|(_, _, message, _)| message)
+                .collect(),
             warn_count,
             fail_count,
         });
@@ -124,13 +136,18 @@ pub fn generate_reference_curation_report(
             .then_with(|| a.label.cmp(&b.label))
     });
 
-    let recommended_ranked_paths = ranked.iter().map(|entry| entry.path.clone()).collect::<Vec<_>>();
+    let recommended_ranked_paths = ranked
+        .iter()
+        .map(|entry| entry.path.clone())
+        .collect::<Vec<_>>();
     let recommended_compact_paths = recommended_compact_paths(&ranked);
     let recommended_primary_path = ranked.first().map(|entry| entry.path.clone());
     for (index, entry) in ranked.iter_mut().enumerate() {
         entry.rank = index + 1;
         entry.recommended_primary = index == 0;
-        entry.recommended_compact = recommended_compact_paths.iter().any(|path| path == &entry.path);
+        entry.recommended_compact = recommended_compact_paths
+            .iter()
+            .any(|path| path == &entry.path);
     }
 
     let (json_path, markdown_path) = report_paths(paths, item_id, speaker_key);
@@ -148,7 +165,10 @@ pub fn generate_reference_curation_report(
         markdown_path: markdown_path.to_string_lossy().to_string(),
         references: ranked,
     };
-    std::fs::write(&json_path, format!("{}\n", serde_json::to_string_pretty(&report)?))?;
+    std::fs::write(
+        &json_path,
+        format!("{}\n", serde_json::to_string_pretty(&report)?),
+    )?;
     std::fs::write(&markdown_path, render_markdown(&report))?;
     let _ = std::fs::remove_dir_all(&temp_dir);
     Ok(report)
@@ -163,9 +183,9 @@ pub fn load_reference_curation_report(
     if !json_path.exists() {
         return Ok(None);
     }
-    Ok(Some(serde_json::from_slice::<VoiceReferenceCurationReport>(
-        &std::fs::read(json_path)?,
-    )?))
+    Ok(Some(
+        serde_json::from_slice::<VoiceReferenceCurationReport>(&std::fs::read(json_path)?)?,
+    ))
 }
 
 pub fn apply_reference_curation(
@@ -223,20 +243,29 @@ fn get_item_speaker_setting(
 }
 
 fn report_dir(paths: &AppPaths, item_id: &str) -> PathBuf {
-    paths.derived_item_dir(item_id).join("voice_reference_curation")
+    paths
+        .derived_item_dir(item_id)
+        .join("voice_reference_curation")
 }
 
 fn report_paths(paths: &AppPaths, item_id: &str, speaker_key: &str) -> (PathBuf, PathBuf) {
     let stem = format!("voice_reference_curation_v1_{}", sanitize_key(speaker_key));
     let dir = report_dir(paths, item_id);
-    (dir.join(format!("{stem}.json")), dir.join(format!("{stem}.md")))
+    (
+        dir.join(format!("{stem}.json")),
+        dir.join(format!("{stem}.md")),
+    )
 }
 
 fn sanitize_key(raw: &str) -> String {
     let mut out = String::new();
     let mut prev_underscore = false;
     for ch in raw.trim().chars() {
-        let mapped = if ch.is_ascii_alphanumeric() { ch.to_ascii_lowercase() } else { '_' };
+        let mapped = if ch.is_ascii_alphanumeric() {
+            ch.to_ascii_lowercase()
+        } else {
+            '_'
+        };
         if mapped == '_' {
             if prev_underscore {
                 continue;
@@ -366,9 +395,18 @@ fn recommended_compact_paths(entries: &[VoiceReferenceCurationEntry]) -> Vec<Str
         }
     }
     if selected.is_empty() {
-        selected.extend(entries.iter().take(entries.len().min(3)).map(|entry| entry.path.clone()));
+        selected.extend(
+            entries
+                .iter()
+                .take(entries.len().min(3))
+                .map(|entry| entry.path.clone()),
+        );
     } else if selected.len() == 1 && entries.len() > 1 {
-        if let Some(next) = entries.iter().skip(1).find(|entry| entry.path != selected[0]) {
+        if let Some(next) = entries
+            .iter()
+            .skip(1)
+            .find(|entry| entry.path != selected[0])
+        {
             selected.push(next.path.clone());
         }
     }
@@ -655,19 +693,19 @@ mod tests {
         )
         .expect("upsert");
 
-        let report =
-            generate_reference_curation_report(&paths, "item-1", "spk-1").expect("report");
+        let report = generate_reference_curation_report(&paths, "item-1", "spk-1").expect("report");
         assert_eq!(report.references.len(), 2);
-        assert_eq!(report.references[0].path, good.to_string_lossy().to_string());
+        assert_eq!(
+            report.references[0].path,
+            good.to_string_lossy().to_string()
+        );
         assert_eq!(
             report.recommended_primary_path.as_deref(),
             Some(good.to_string_lossy().as_ref())
         );
-        assert!(
-            report
-                .recommended_compact_paths
-                .contains(&good.to_string_lossy().to_string())
-        );
+        assert!(report
+            .recommended_compact_paths
+            .contains(&good.to_string_lossy().to_string()));
     }
 
     #[test]
@@ -700,9 +738,12 @@ mod tests {
         )
         .expect("upsert");
 
-        let updated = apply_reference_curation(&paths, "item-1", "spk-1", "ranked")
-            .expect("apply ranked");
-        assert_eq!(updated.tts_voice_profile_paths[0], second.to_string_lossy().to_string());
+        let updated =
+            apply_reference_curation(&paths, "item-1", "spk-1", "ranked").expect("apply ranked");
+        assert_eq!(
+            updated.tts_voice_profile_paths[0],
+            second.to_string_lossy().to_string()
+        );
         assert_eq!(updated.voice_profile_id.as_deref(), Some("profile-1"));
         assert_eq!(updated.style_preset.as_deref(), Some("neutral"));
     }
@@ -732,7 +773,12 @@ mod tests {
             "INSERT INTO library_item (
                 id, created_at_ms, source_type, source_uri, title, media_path
             ) VALUES (?1, 0, 'local', ?2, ?3, ?4)",
-            params![item_id, format!("file:///{item_id}"), item_id, format!("{item_id}.mp4")],
+            params![
+                item_id,
+                format!("file:///{item_id}"),
+                item_id,
+                format!("{item_id}.mp4")
+            ],
         )
         .expect("seed item");
     }

@@ -400,10 +400,7 @@ pub fn load_youtube_auth_config(paths: &AppPaths) -> Result<YoutubeAuthConfig> {
     Ok(parsed)
 }
 
-pub fn save_youtube_auth_config(
-    paths: &AppPaths,
-    config: &YoutubeAuthConfig,
-) -> Result<()> {
+pub fn save_youtube_auth_config(paths: &AppPaths, config: &YoutubeAuthConfig) -> Result<()> {
     let path = paths.youtube_auth_config_path();
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent)?;

@@ -364,7 +364,10 @@ pub fn upsert_voice_backend_adapter(
     config.backend_id = template.backend_id.clone();
     config.updated_at_ms = now_ms();
     let mut configs = load_configs(paths)?;
-    if let Some(existing) = configs.iter_mut().find(|value| value.backend_id == config.backend_id) {
+    if let Some(existing) = configs
+        .iter_mut()
+        .find(|value| value.backend_id == config.backend_id)
+    {
         *existing = config.clone();
     } else {
         configs.push(config.clone());
@@ -408,10 +411,22 @@ pub fn apply_voice_backend_starter_recipe(
     config.entry_command = recipe.default_entry_command.clone();
     config.probe_command = recipe.default_probe_command.clone();
     config.render_command = recipe.default_render_command.clone();
-    if config.model_dir.as_deref().map(str::trim).unwrap_or("").is_empty() {
+    if config
+        .model_dir
+        .as_deref()
+        .map(str::trim)
+        .unwrap_or("")
+        .is_empty()
+    {
         config.model_dir = recipe.suggested_model_dir.clone();
     }
-    if config.notes.as_deref().map(str::trim).unwrap_or("").is_empty() {
+    if config
+        .notes
+        .as_deref()
+        .map(str::trim)
+        .unwrap_or("")
+        .is_empty()
+    {
         config.notes = Some(format!(
             "Starter recipe: {}. {}",
             recipe.display_name, recipe.description
@@ -429,12 +444,17 @@ pub fn probe_voice_backend_adapter(
     let config = load_configs(paths)?
         .into_iter()
         .find(|value| value.backend_id == backend_id)
-        .ok_or_else(|| EngineError::InstallFailed(format!("adapter config not found: {backend_id}")))?;
+        .ok_or_else(|| {
+            EngineError::InstallFailed(format!("adapter config not found: {backend_id}"))
+        })?;
     let template = template_by_backend_id(&backend_id)?;
     let probe = run_probe(&template, &config)?;
 
     let mut probes = load_probes(paths)?;
-    if let Some(existing) = probes.iter_mut().find(|value| value.backend_id == backend_id) {
+    if let Some(existing) = probes
+        .iter_mut()
+        .find(|value| value.backend_id == backend_id)
+    {
         *existing = probe.clone();
     } else {
         probes.push(probe);
@@ -462,7 +482,10 @@ pub fn resolve_voice_backend_adapter_render_command(
 ) -> Result<VoiceBackendAdapterResolvedCommand> {
     let detail = get_voice_backend_adapter_detail(paths, backend_id)?;
     let config = detail.config.ok_or_else(|| {
-        EngineError::InstallFailed(format!("adapter config not found: {}", detail.template.backend_id))
+        EngineError::InstallFailed(format!(
+            "adapter config not found: {}",
+            detail.template.backend_id
+        ))
     })?;
     if !config.enabled {
         return Err(EngineError::InstallFailed(format!(
@@ -580,7 +603,10 @@ pub fn catalog_status_overrides(paths: &AppPaths) -> Result<HashMap<String, (Str
             ),
             (Some(config), Some(probe)) if config.enabled => (
                 "byo_probe_failed".to_string(),
-                format!("BYO adapter is configured but last probe failed: {}", probe.summary),
+                format!(
+                    "BYO adapter is configured but last probe failed: {}",
+                    probe.summary
+                ),
             ),
             (Some(config), None) if config.enabled => (
                 "byo_configured_unprobed".to_string(),
@@ -624,7 +650,10 @@ fn run_probe(
     config: &VoiceBackendAdapterConfig,
 ) -> Result<VoiceBackendAdapterProbe> {
     let root_dir = config.root_dir.as_deref().map(PathBuf::from);
-    let root_exists = root_dir.as_ref().map(|value| value.is_dir()).unwrap_or(false);
+    let root_exists = root_dir
+        .as_ref()
+        .map(|value| value.is_dir())
+        .unwrap_or(false);
     let python_exists = config
         .python_exe
         .as_deref()
@@ -643,7 +672,11 @@ fn run_probe(
     } else {
         config.entry_command.clone()
     };
-    let entry_exists = command_target_exists(root_dir.as_deref(), &entry_tokens, config.python_exe.as_deref());
+    let entry_exists = command_target_exists(
+        root_dir.as_deref(),
+        &entry_tokens,
+        config.python_exe.as_deref(),
+    );
 
     let mut markers_found = Vec::new();
     let mut missing_markers = Vec::new();
@@ -671,14 +704,20 @@ fn run_probe(
         messages.push("Configured model_dir is missing.".to_string());
     }
     if !entry_exists {
-        messages.push("Entry command target could not be resolved from the current config.".to_string());
+        messages.push(
+            "Entry command target could not be resolved from the current config.".to_string(),
+        );
     }
 
     let mut command_exit_code = None;
     let mut stdout_preview = None;
     let mut stderr_preview = None;
     if !config.probe_command.is_empty() {
-        match run_probe_command(root_dir.as_deref(), &config.probe_command, config.python_exe.as_deref()) {
+        match run_probe_command(
+            root_dir.as_deref(),
+            &config.probe_command,
+            config.python_exe.as_deref(),
+        ) {
             Ok((code, stdout, stderr)) => {
                 command_exit_code = code;
                 stdout_preview = stdout;
@@ -730,7 +769,11 @@ fn run_probe(
     })
 }
 
-fn command_target_exists(root_dir: Option<&Path>, tokens: &[String], python_exe: Option<&str>) -> bool {
+fn command_target_exists(
+    root_dir: Option<&Path>,
+    tokens: &[String],
+    python_exe: Option<&str>,
+) -> bool {
     let Some(first) = tokens.first() else {
         return false;
     };
@@ -742,7 +785,10 @@ fn command_target_exists(root_dir: Option<&Path>, tokens: &[String], python_exe:
         return true;
     }
     let path = PathBuf::from(&first);
-    path.exists() || root_dir.map(|root| root.join(&first).exists()).unwrap_or(false)
+    path.exists()
+        || root_dir
+            .map(|root| root.join(&first).exists())
+            .unwrap_or(false)
 }
 
 fn run_probe_command(
@@ -754,7 +800,10 @@ fn run_probe_command(
         return Err("Probe command is empty.".to_string());
     };
     let model_dir = None;
-    let program = resolve_program_token(&expand_token(first, root_dir, python_exe, model_dir), root_dir);
+    let program = resolve_program_token(
+        &expand_token(first, root_dir, python_exe, model_dir),
+        root_dir,
+    );
     let mut command = Command::new(&program);
     if let Some(root) = root_dir {
         command.current_dir(root);
@@ -762,11 +811,17 @@ fn run_probe_command(
     for token in tokens.iter().skip(1) {
         command.arg(expand_token(token, root_dir, python_exe, model_dir));
     }
-    let output = command.output().map_err(|e| format!("Probe command failed to start: {e}"))?;
+    let output = command
+        .output()
+        .map_err(|e| format!("Probe command failed to start: {e}"))?;
     Ok((
         output.status.code(),
-        Some(truncate_output(String::from_utf8_lossy(&output.stdout).trim())),
-        Some(truncate_output(String::from_utf8_lossy(&output.stderr).trim())),
+        Some(truncate_output(
+            String::from_utf8_lossy(&output.stdout).trim(),
+        )),
+        Some(truncate_output(
+            String::from_utf8_lossy(&output.stderr).trim(),
+        )),
     ))
 }
 
@@ -816,22 +871,13 @@ fn expand_render_token(
                     .unwrap_or_default(),
             ),
             ("{model_dir}", model_dir.unwrap_or_default().to_string()),
-            (
-                "{request_json}",
-                request_json.to_string_lossy().to_string(),
-            ),
+            ("{request_json}", request_json.to_string_lossy().to_string()),
             (
                 "{manifest_json}",
                 manifest_json.to_string_lossy().to_string(),
             ),
-            (
-                "{report_json}",
-                report_json.to_string_lossy().to_string(),
-            ),
-            (
-                "{output_dir}",
-                output_dir.to_string_lossy().to_string(),
-            ),
+            ("{report_json}", report_json.to_string_lossy().to_string()),
+            ("{output_dir}", output_dir.to_string_lossy().to_string()),
             ("{backend_id}", backend_id.to_string()),
             ("{item_id}", item_id.to_string()),
             ("{track_id}", track_id.to_string()),
@@ -879,7 +925,9 @@ fn template_by_backend_id(backend_id: &str) -> Result<VoiceBackendAdapterTemplat
     adapter_templates()
         .into_iter()
         .find(|template| template.backend_id == backend_id)
-        .ok_or_else(|| EngineError::InstallFailed(format!("unsupported BYO backend id: {backend_id}")))
+        .ok_or_else(|| {
+            EngineError::InstallFailed(format!("unsupported BYO backend id: {backend_id}"))
+        })
 }
 
 fn normalize_backend_id(value: &str) -> String {
@@ -975,7 +1023,11 @@ mod tests {
         let probe_command = if cfg!(windows) {
             vec!["cmd".to_string(), "/C".to_string(), "echo ok".to_string()]
         } else {
-            vec!["/bin/sh".to_string(), "-c".to_string(), "echo ok".to_string()]
+            vec![
+                "/bin/sh".to_string(),
+                "-c".to_string(),
+                "echo ok".to_string(),
+            ]
         };
         upsert_voice_backend_adapter(
             &paths,
@@ -994,7 +1046,10 @@ mod tests {
         )
         .expect("upsert");
         let detail = probe_voice_backend_adapter(&paths, "cosyvoice").expect("probe");
-        assert_eq!(detail.last_probe.as_ref().map(|value| value.ready), Some(true));
+        assert_eq!(
+            detail.last_probe.as_ref().map(|value| value.ready),
+            Some(true)
+        );
     }
 
     #[test]
@@ -1050,10 +1105,22 @@ mod tests {
         )
         .expect("resolve");
         assert_eq!(resolved.program, "python3");
-        assert!(resolved.args.iter().any(|value| value.ends_with("request.json")));
-        assert!(resolved.args.iter().any(|value| value.ends_with("manifest.json")));
-        assert!(resolved.args.iter().any(|value| value.ends_with("report.json")));
-        assert!(resolved.args.iter().any(|value| value.ends_with("render_out")));
+        assert!(resolved
+            .args
+            .iter()
+            .any(|value| value.ends_with("request.json")));
+        assert!(resolved
+            .args
+            .iter()
+            .any(|value| value.ends_with("manifest.json")));
+        assert!(resolved
+            .args
+            .iter()
+            .any(|value| value.ends_with("report.json")));
+        assert!(resolved
+            .args
+            .iter()
+            .any(|value| value.ends_with("render_out")));
         assert!(resolved.args.iter().any(|value| value == "cosyvoice"));
         assert!(resolved.args.iter().any(|value| value == "item-1"));
         assert!(resolved.args.iter().any(|value| value == "track-1"));
@@ -1101,15 +1168,22 @@ mod tests {
         assert_eq!(updated.root_dir.as_deref(), Some("D:/voice/cosyvoice"));
         assert_eq!(updated.python_exe.as_deref(), Some("D:/Python/python.exe"));
         assert_eq!(updated.model_dir.as_deref(), Some("pretrained_models"));
-        assert_eq!(updated.entry_command.first().map(String::as_str), Some("{python_exe}"));
-        assert_eq!(updated.probe_command.first().map(String::as_str), Some("{python_exe}"));
-        assert_eq!(updated.render_command.first().map(String::as_str), Some("{python_exe}"));
-        assert!(
-            updated
-                .notes
-                .as_deref()
-                .unwrap_or("")
-                .contains("Starter recipe")
+        assert_eq!(
+            updated.entry_command.first().map(String::as_str),
+            Some("{python_exe}")
         );
+        assert_eq!(
+            updated.probe_command.first().map(String::as_str),
+            Some("{python_exe}")
+        );
+        assert_eq!(
+            updated.render_command.first().map(String::as_str),
+            Some("{python_exe}")
+        );
+        assert!(updated
+            .notes
+            .as_deref()
+            .unwrap_or("")
+            .contains("Starter recipe"));
     }
 }

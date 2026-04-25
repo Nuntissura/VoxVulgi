@@ -1,3 +1,5 @@
+#[cfg(test)]
+use crate::db;
 use crate::ffmpeg;
 use crate::library;
 use crate::paths::AppPaths;
@@ -5,13 +7,11 @@ use crate::speakers;
 use crate::subtitle_tracks;
 use crate::subtitles::SubtitleSegment;
 use crate::{jobs, EngineError, Result};
+#[cfg(test)]
+use rusqlite::params;
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
-#[cfg(test)]
-use crate::db;
-#[cfg(test)]
-use rusqlite::params;
 
 const CANDIDATE_SCHEMA_VERSION: u32 = 1;
 const TARGET_DURATION_MS: i64 = 8_000;
@@ -213,7 +213,12 @@ pub fn apply_reference_candidate(
     }
     let mode = normalize_apply_mode(mode)?;
     let report = load_reference_candidates(paths, item_id, Some(speaker_key))?
-        .and_then(|value| value.bundles.into_iter().find(|bundle| bundle.speaker_key == speaker_key))
+        .and_then(|value| {
+            value
+                .bundles
+                .into_iter()
+                .find(|bundle| bundle.speaker_key == speaker_key)
+        })
         .ok_or_else(|| {
             EngineError::InstallFailed(format!(
                 "no generated reference candidate found for speaker {speaker_key}"
@@ -230,21 +235,32 @@ pub fn apply_reference_candidate(
     let next_paths = match mode {
         "replace" => vec![report.candidate_path.clone()],
         _ => unique_paths(
-            std::iter::once(report.candidate_path.clone())
-                .chain(current.iter().flat_map(|setting| setting.tts_voice_profile_paths.clone())),
+            std::iter::once(report.candidate_path.clone()).chain(
+                current
+                    .iter()
+                    .flat_map(|setting| setting.tts_voice_profile_paths.clone()),
+            ),
         ),
     };
     speakers::upsert_item_speaker_setting(
         paths,
         item_id,
         speaker_key,
-        current.as_ref().and_then(|setting| setting.display_name.clone()),
+        current
+            .as_ref()
+            .and_then(|setting| setting.display_name.clone()),
         None,
-        current.as_ref().and_then(|setting| setting.tts_voice_id.clone()),
+        current
+            .as_ref()
+            .and_then(|setting| setting.tts_voice_id.clone()),
         next_paths.first().cloned(),
         Some(next_paths),
-        current.as_ref().and_then(|setting| setting.style_preset.clone()),
-        current.as_ref().and_then(|setting| setting.prosody_preset.clone()),
+        current
+            .as_ref()
+            .and_then(|setting| setting.style_preset.clone()),
+        current
+            .as_ref()
+            .and_then(|setting| setting.prosody_preset.clone()),
         current
             .as_ref()
             .and_then(|setting| setting.pronunciation_overrides.clone()),
@@ -319,7 +335,8 @@ fn generate_bundle_for_speaker(
 
     let candidate_path = speaker_root.join("candidate_bundle_v1.wav");
     ffmpeg::concat_wav_files_16k_mono(paths, &clip_paths, &candidate_path)?;
-    let candidate_stats = jobs::analyze_audio_for_qc(paths, &candidate_path, &temp_dir, "candidate")?;
+    let candidate_stats =
+        jobs::analyze_audio_for_qc(paths, &candidate_path, &temp_dir, "candidate")?;
     let warnings = jobs::voice_qc_messages(&candidate_stats, true, None, Some(speaker_key))
         .into_iter()
         .map(|(_, _, message, _)| message)
@@ -380,11 +397,13 @@ fn select_track_with_speakers(
     {
         if let Some(track) = tracks.iter().find(|track| track.id == track_id) {
             let doc = subtitle_tracks::load_document(paths, &track.id)?;
-            if doc
-                .segments
-                .iter()
-                .any(|segment| segment.speaker.as_deref().map(|value| !value.trim().is_empty()).unwrap_or(false))
-            {
+            if doc.segments.iter().any(|segment| {
+                segment
+                    .speaker
+                    .as_deref()
+                    .map(|value| !value.trim().is_empty())
+                    .unwrap_or(false)
+            }) {
                 return Ok(track.clone());
             }
         }
@@ -426,7 +445,9 @@ fn choose_segments_for_speaker<'a>(
     candidates.sort_by(|a, b| {
         let a_duration = a.end_ms - a.start_ms;
         let b_duration = b.end_ms - b.start_ms;
-        b_duration.cmp(&a_duration).then_with(|| a.index.cmp(&b.index))
+        b_duration
+            .cmp(&a_duration)
+            .then_with(|| a.index.cmp(&b.index))
     });
 
     let mut selected: Vec<SubtitleSegment> = Vec::new();
@@ -471,7 +492,9 @@ fn prepare_candidate_segment(segment: &SubtitleSegment) -> Option<SubtitleSegmen
 }
 
 fn candidates_root(paths: &AppPaths, item_id: &str) -> PathBuf {
-    paths.derived_item_voice_dir(item_id).join("reference_candidates")
+    paths
+        .derived_item_voice_dir(item_id)
+        .join("reference_candidates")
 }
 
 fn candidate_speaker_root(paths: &AppPaths, item_id: &str, speaker_key: &str) -> PathBuf {
@@ -619,7 +642,10 @@ mod tests {
         std::fs::create_dir_all(track_path.parent().expect("track dir")).expect("track dir");
         std::fs::write(
             &track_path,
-            format!("{}\n", serde_json::to_string_pretty(&doc).expect("doc json")),
+            format!(
+                "{}\n",
+                serde_json::to_string_pretty(&doc).expect("doc json")
+            ),
         )
         .expect("write track");
         let conn = db::open(paths).expect("open db");

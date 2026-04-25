@@ -14,7 +14,10 @@ pub fn atomic_write_bytes(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
     let parent = path.parent().ok_or_else(|| {
         std::io::Error::new(
             std::io::ErrorKind::InvalidInput,
-            format!("cannot atomically write path without parent: {}", path.display()),
+            format!(
+                "cannot atomically write path without parent: {}",
+                path.display()
+            ),
         )
     })?;
     std::fs::create_dir_all(parent)?;

@@ -131,7 +131,10 @@ pub fn delete_item_voice_plan(paths: &AppPaths, item_id: &str) -> Result<()> {
     }
     let conn = db::open(paths)?;
     db::migrate(&conn)?;
-    conn.execute("DELETE FROM item_voice_plan WHERE item_id=?1", params![item_id])?;
+    conn.execute(
+        "DELETE FROM item_voice_plan WHERE item_id=?1",
+        params![item_id],
+    )?;
     Ok(())
 }
 
@@ -360,7 +363,9 @@ fn now_ms() -> i64 {
 mod tests {
     use super::*;
     use crate::db;
-    use crate::voice_benchmarks::{VoiceBenchmarkCandidate, VoiceBenchmarkReport, VoiceBenchmarkScoreTerm};
+    use crate::voice_benchmarks::{
+        VoiceBenchmarkCandidate, VoiceBenchmarkReport, VoiceBenchmarkScoreTerm,
+    };
     use rusqlite::params;
     use tempfile::tempdir;
 
@@ -392,7 +397,9 @@ mod tests {
         assert_eq!(loaded.preferred_backend_id.as_deref(), Some("seed_vc"));
 
         delete_item_voice_plan(&paths, "item-1").expect("delete");
-        assert!(get_item_voice_plan(&paths, "item-1").expect("load after delete").is_none());
+        assert!(get_item_voice_plan(&paths, "item-1")
+            .expect("load after delete")
+            .is_none());
     }
 
     #[test]
@@ -484,7 +491,12 @@ mod tests {
             "INSERT INTO library_item (
                 id, created_at_ms, source_type, source_uri, title, media_path
             ) VALUES (?1, 0, 'local', ?2, ?3, ?4)",
-            params![item_id, format!("file:///{item_id}"), item_id, format!("{item_id}.mp4")],
+            params![
+                item_id,
+                format!("file:///{item_id}"),
+                item_id,
+                format!("{item_id}.mp4")
+            ],
         )
         .expect("seed item");
     }

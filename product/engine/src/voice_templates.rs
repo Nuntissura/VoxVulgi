@@ -651,10 +651,7 @@ pub fn apply_voice_template_to_item(
 
     if seed_voice_plan {
         if let Some(default) = detail.template.voice_plan_default.as_ref() {
-            let source_note = format!(
-                "Seeded from voice template \"{}\".",
-                detail.template.name
-            );
+            let source_note = format!("Seeded from voice template \"{}\".", detail.template.name);
             let _ = voice_plans::upsert_item_voice_plan_from_reusable_default(
                 paths,
                 item_id,

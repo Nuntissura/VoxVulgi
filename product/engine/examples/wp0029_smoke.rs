@@ -187,11 +187,8 @@ fn main() -> Result<()> {
     let runner = jobs::start_runner(paths.clone())?;
 
     // 1) Import.
-    let import_job = jobs::enqueue_import_local(
-        &paths,
-        media_path.to_string_lossy().to_string(),
-        true,
-    )?;
+    let import_job =
+        jobs::enqueue_import_local(&paths, media_path.to_string_lossy().to_string(), true)?;
     wait_for_job(&paths, &import_job.id, Duration::from_secs(20 * 60))?;
 
     let canonical_media = std::fs::canonicalize(&media_path)?;

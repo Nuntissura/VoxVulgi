@@ -91,7 +91,8 @@ pub fn backend_catalog(paths: &AppPaths) -> VoiceBackendCatalog {
             status_detail: openvoice_status.1,
             managed_default: true,
             language_scope: "multilingual dubbing with explicit EN text control".to_string(),
-            reference_expectation: "1+ short clean references; multi-reference supported".to_string(),
+            reference_expectation: "1+ short clean references; multi-reference supported"
+                .to_string(),
             gpu_recommended: false,
             code_license: "MIT / Apache-2.0 components".to_string(),
             weights_license: "MIT / Apache-2.0 components".to_string(),
@@ -116,8 +117,8 @@ pub fn backend_catalog(paths: &AppPaths) -> VoiceBackendCatalog {
             status_detail: cosy_status.1,
             managed_default: false,
             language_scope: "multilingual zero-shot TTS".to_string(),
-            reference_expectation: "short clean references; stronger results with higher-quality inputs"
-                .to_string(),
+            reference_expectation:
+                "short clean references; stronger results with higher-quality inputs".to_string(),
             gpu_recommended: true,
             code_license: "Apache-2.0".to_string(),
             weights_license: "Apache-2.0 (check chosen release)".to_string(),
@@ -151,8 +152,8 @@ pub fn backend_catalog(paths: &AppPaths) -> VoiceBackendCatalog {
                 }),
             managed_default: false,
             language_scope: "speech-to-speech timbre transfer".to_string(),
-            reference_expectation: "multiple clean references recommended for strong identity transfer"
-                .to_string(),
+            reference_expectation:
+                "multiple clean references recommended for strong identity transfer".to_string(),
             gpu_recommended: true,
             code_license: "Apache-2.0".to_string(),
             weights_license: "Check chosen release".to_string(),
@@ -180,13 +181,12 @@ pub fn backend_catalog(paths: &AppPaths) -> VoiceBackendCatalog {
                 .get("indextts2")
                 .map(|value| value.1.clone())
                 .unwrap_or_else(|| {
-                    "Research-backed direct TTS candidate; not managed by VoxVulgi yet."
-                        .to_string()
+                    "Research-backed direct TTS candidate; not managed by VoxVulgi yet.".to_string()
                 }),
             managed_default: false,
             language_scope: "zero-shot TTS with duration and emotion control".to_string(),
-            reference_expectation: "short clean references; quality scales with better voice samples"
-                .to_string(),
+            reference_expectation:
+                "short clean references; quality scales with better voice samples".to_string(),
             gpu_recommended: true,
             code_license: "MIT".to_string(),
             weights_license: "Check chosen release".to_string(),
@@ -285,8 +285,10 @@ fn recommend_backend_for_catalog(
     request: VoiceBackendRecommendationRequest,
 ) -> VoiceBackendRecommendation {
     let goal = normalize_goal(request.goal.as_deref());
-    let source_lang = normalize_lang(request.source_lang.as_deref()).unwrap_or_else(|| "auto".to_string());
-    let target_lang = normalize_lang(request.target_lang.as_deref()).unwrap_or_else(|| "en".to_string());
+    let source_lang =
+        normalize_lang(request.source_lang.as_deref()).unwrap_or_else(|| "auto".to_string());
+    let target_lang =
+        normalize_lang(request.target_lang.as_deref()).unwrap_or_else(|| "en".to_string());
     let reference_count = request.reference_count.unwrap_or(0);
     let tier = catalog.performance_tier.clone();
 

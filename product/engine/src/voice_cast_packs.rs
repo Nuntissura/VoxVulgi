@@ -898,15 +898,16 @@ INSERT INTO library_item (
             88.0,
         );
 
-        let template = voice_templates::promote_benchmark_candidate_to_voice_template_voice_plan_default(
-            &paths,
-            &template.template.id,
-            "template-item",
-            "track-1",
-            Some("timing"),
-            "xtts_a",
-        )
-        .expect("promote template default");
+        let template =
+            voice_templates::promote_benchmark_candidate_to_voice_template_voice_plan_default(
+                &paths,
+                &template.template.id,
+                "template-item",
+                "track-1",
+                Some("timing"),
+                "xtts_a",
+            )
+            .expect("promote template default");
         let pack =
             create_voice_cast_pack_from_template(&paths, &template.template.id, "Panel pack")
                 .expect("cast pack");

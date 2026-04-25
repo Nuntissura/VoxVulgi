@@ -146,7 +146,11 @@ impl ModelStore {
                 delivery: meta.delivery,
                 expected_installed: meta.expected_installed,
                 operator_summary: meta.operator_summary.to_string(),
-                features: meta.features.iter().map(|value| value.to_string()).collect(),
+                features: meta
+                    .features
+                    .iter()
+                    .map(|value| value.to_string())
+                    .collect(),
             });
         }
 
@@ -433,9 +437,7 @@ mod tests {
         assert_eq!(whisper.delivery, ModelInventoryDelivery::OfflineHydrated);
         assert!(whisper.expected_installed);
         assert!(
-            whisper
-                .operator_summary
-                .contains("Core local ASR runtime"),
+            whisper.operator_summary.contains("Core local ASR runtime"),
             "required model summary should explain the runtime role"
         );
 
@@ -448,8 +450,7 @@ mod tests {
         assert_eq!(demo.delivery, ModelInventoryDelivery::BundledResource);
         assert!(!demo.expected_installed);
         assert!(
-            demo.operator_summary
-                .contains("Placeholder/demo asset"),
+            demo.operator_summary.contains("Placeholder/demo asset"),
             "demo model summary should explain that it is non-required"
         );
     }

@@ -84,3 +84,30 @@ This changelog tracks desktop installer builds produced by `governance/scripts/b
   - `product/desktop/build_target/Current/release/bundle/nsis/VoxVulgi_0.1.7_x64-setup.exe`
   - `product/desktop/build_target/Current/release/bundle/msi/VoxVulgi_0.1.7_x64_en-US.msi`
 - Notes: Installer build for Localization first-screen recovery, shell drag/resize repair, and compact startup/recovery chrome.
+
+## 0.1.8 - 2026-04-19T17:35:10Z
+- Work Packets: `WP-0161`, `WP-0162`, `WP-0163`, `WP-0164`, `WP-0165`, `WP-0166`, `WP-0167`, `WP-0168`, `WP-0169`, `WP-0170`, `WP-0171`, `WP-0172`, `WP-0173`, `WP-0174`, `WP-0175`, `WP-0176`, `WP-0177`, `WP-0178`, `WP-0179`, `WP-0180`, `WP-0181`, `WP-0182`, `WP-0183`, `WP-0184`, `WP-0185`, `WP-0186`, `WP-0187`, `WP-0188`, `WP-0189`
+- Commit: `14ee0ce`
+- Offline Bundle ID: `offline_full_win64_20260419_171202`
+- Artifacts:
+  - `product/desktop/build_target/Current/release/bundle/nsis/VoxVulgi_0.1.8_x64-setup.exe`
+  - `product/desktop/build_target/Current/release/bundle/msi/VoxVulgi_0.1.8_x64_en-US.msi`
+- Notes: Desktop target build from current main after post-0.1.7 UX and voice-cloning tranche, plus WP-0189 offline-bundle compatibility repair.
+
+## 0.1.9 - 2026-04-23T12:45:37Z
+- Work Packets: `WP-0142`, `WP-0190`
+- Commit: `14ee0ce`
+- Offline Bundle ID: `offline_full_win64_20260423_122359`
+- Artifacts:
+  - `product/desktop/build_target/Current/release/bundle/nsis/VoxVulgi_0.1.9_x64-setup.exe`
+  - `product/desktop/build_target/Current/release/bundle/msi/VoxVulgi_0.1.9_x64_en-US.msi`
+- Notes: Desktop test build for YouTube downloader yt-dlp refresh and app readability/version badge.
+
+## 0.1.10 - 2026-04-24T00:55:28Z
+- Work Packets: `WP-0197`
+- Commit: `7b8d2bc`
+- Offline Bundle ID: `offline_full_win64_20260424_003520`
+- Artifacts:
+  - `product/desktop/build_target/Current/release/bundle/nsis/VoxVulgi_0.1.10_x64-setup.exe`
+  - `product/desktop/build_target/Current/release/bundle/msi/VoxVulgi_0.1.10_x64_en-US.msi`
+- Notes: Desktop test build for Localization workspace decoupling.

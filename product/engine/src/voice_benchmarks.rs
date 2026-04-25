@@ -179,8 +179,13 @@ pub fn generate_voice_benchmark_report(
     }
     let doc = subtitle_tracks::load_document(paths, track_id)?;
     let goal = normalize_goal(goal);
-    let mut candidates =
-        build_candidate_reports(paths, item_id, &paths.derived_item_dir(item_id), &doc, track_id)?;
+    let mut candidates = build_candidate_reports(
+        paths,
+        item_id,
+        &paths.derived_item_dir(item_id),
+        &doc,
+        track_id,
+    )?;
     rank_candidates(&mut candidates, &goal);
 
     let (json_path, markdown_path) = benchmark_report_paths(paths, item_id, track_id, &goal);
@@ -220,7 +225,9 @@ pub fn load_voice_benchmark_report(
         return Ok(None);
     }
     let bytes = std::fs::read(json_path)?;
-    Ok(Some(serde_json::from_slice::<VoiceBenchmarkReport>(&bytes)?))
+    Ok(Some(serde_json::from_slice::<VoiceBenchmarkReport>(
+        &bytes,
+    )?))
 }
 
 pub fn list_voice_benchmark_history(
@@ -337,7 +344,8 @@ fn discover_manifest_candidates(
         let Some(backend_name) = backend_dir.file_name().and_then(|value| value.to_str()) else {
             continue;
         };
-        if let Some(spec) = load_manifest_candidate(paths, item_dir, track_id, backend_name, None)? {
+        if let Some(spec) = load_manifest_candidate(paths, item_dir, track_id, backend_name, None)?
+        {
             out.push(spec);
         }
         let variants_dir = backend_dir.join("variants");
@@ -386,7 +394,12 @@ fn load_manifest_candidate(
         Ok(value) => value,
         Err(_) => return Ok(None),
     };
-    let Some(meta_track_id) = meta.track_id.as_deref().map(str::trim).filter(|value| !value.is_empty()) else {
+    let Some(meta_track_id) = meta
+        .track_id
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+    else {
         return Ok(None);
     };
     if meta_track_id != track_id {
@@ -556,7 +569,8 @@ fn summarize_candidate(
     if coverage_ratio >= 0.98 {
         strengths.push("Nearly full segment coverage.".to_string());
     } else if coverage_ratio < 0.85 {
-        concerns.push("Coverage is incomplete; some subtitle windows do not have audio.".to_string());
+        concerns
+            .push("Coverage is incomplete; some subtitle windows do not have audio.".to_string());
     }
     if timing_fit_ratio >= 0.9 {
         strengths.push("Timing fit stays inside most subtitle windows.".to_string());
@@ -593,11 +607,15 @@ fn summarize_candidate(
             concerns.push("Similarity proxy is weak versus the current references.".to_string());
         }
     } else {
-        concerns.push("Similarity proxy is unavailable; not enough voiced material was detected.".to_string());
+        concerns.push(
+            "Similarity proxy is unavailable; not enough voiced material was detected.".to_string(),
+        );
     }
     if let Some(converted_ratio) = spec.converted_ratio {
         if converted_ratio >= 0.95 {
-            strengths.push("Voice-preserving conversion covered nearly all rendered segments.".to_string());
+            strengths.push(
+                "Voice-preserving conversion covered nearly all rendered segments.".to_string(),
+            );
         } else {
             concerns.push(format!(
                 "Voice-preserving conversion only covered {:.0}% of rendered segments.",
@@ -607,7 +625,9 @@ fn summarize_candidate(
     }
     match spec.voice_clone_outcome {
         Some(VoiceCloneRunOutcome::ClonePreserved) => {
-            strengths.push("Clone truth confirmed: all clone-intended segments were converted.".to_string());
+            strengths.push(
+                "Clone truth confirmed: all clone-intended segments were converted.".to_string(),
+            );
         }
         Some(VoiceCloneRunOutcome::PartialFallback) => {
             concerns.push(format!(
@@ -616,7 +636,10 @@ fn summarize_candidate(
             ));
         }
         Some(VoiceCloneRunOutcome::FallbackOnly) => {
-            concerns.push("Clone truth: no clone-intended segments converted; output is plain TTS fallback.".to_string());
+            concerns.push(
+                "Clone truth: no clone-intended segments converted; output is plain TTS fallback."
+                    .to_string(),
+            );
         }
         Some(VoiceCloneRunOutcome::StandardTtsOnly) => {
             strengths.push("Current run stayed on standard TTS routing only.".to_string());
@@ -660,10 +683,16 @@ fn summarize_candidate(
 
 fn rank_candidates(candidates: &mut [VoiceBenchmarkCandidate], goal: &str) {
     for candidate in candidates.iter_mut() {
-        let output_health =
-            issue_health(candidate.output_warn_count, candidate.output_fail_count, candidate.rendered_segments.max(1));
-        let reference_health =
-            issue_health(candidate.reference_warn_count, candidate.reference_fail_count, candidate.rendered_segments.max(1));
+        let output_health = issue_health(
+            candidate.output_warn_count,
+            candidate.output_fail_count,
+            candidate.rendered_segments.max(1),
+        );
+        let reference_health = issue_health(
+            candidate.reference_warn_count,
+            candidate.reference_fail_count,
+            candidate.rendered_segments.max(1),
+        );
         let similarity = candidate.similarity_proxy.unwrap_or(0.35).clamp(0.0, 1.0);
         let availability = if candidate.final_mix_ready {
             1.0
@@ -672,7 +701,11 @@ fn rank_candidates(candidates: &mut [VoiceBenchmarkCandidate], goal: &str) {
         } else {
             0.0
         };
-        let export_readiness = if candidate.export_pack_ready { 1.0 } else { 0.75 };
+        let export_readiness = if candidate.export_pack_ready {
+            1.0
+        } else {
+            0.75
+        };
         let conversion = if candidate.backend_id == "dub_voice_preserving_v1" {
             Some(candidate.converted_ratio.unwrap_or(0.35).clamp(0.0, 1.0))
         } else {
@@ -680,14 +713,54 @@ fn rank_candidates(candidates: &mut [VoiceBenchmarkCandidate], goal: &str) {
         };
 
         let terms = vec![
-            ScoreTermInput::new("coverage", "Coverage", weight_for_goal(goal, "coverage"), Some(candidate.coverage_ratio)),
-            ScoreTermInput::new("timing_fit", "Timing fit", weight_for_goal(goal, "timing_fit"), Some(candidate.timing_fit_ratio)),
-            ScoreTermInput::new("output_health", "Output health", weight_for_goal(goal, "output_health"), Some(output_health)),
-            ScoreTermInput::new("reference_health", "Reference health", weight_for_goal(goal, "reference_health"), Some(reference_health)),
-            ScoreTermInput::new("similarity", "Similarity proxy", weight_for_goal(goal, "similarity"), Some(similarity)),
-            ScoreTermInput::new("conversion", "Voice-preserving coverage", weight_for_goal(goal, "conversion"), conversion),
-            ScoreTermInput::new("availability", "Ready preview", weight_for_goal(goal, "availability"), Some(availability)),
-            ScoreTermInput::new("export_readiness", "Export readiness", weight_for_goal(goal, "export_readiness"), Some(export_readiness)),
+            ScoreTermInput::new(
+                "coverage",
+                "Coverage",
+                weight_for_goal(goal, "coverage"),
+                Some(candidate.coverage_ratio),
+            ),
+            ScoreTermInput::new(
+                "timing_fit",
+                "Timing fit",
+                weight_for_goal(goal, "timing_fit"),
+                Some(candidate.timing_fit_ratio),
+            ),
+            ScoreTermInput::new(
+                "output_health",
+                "Output health",
+                weight_for_goal(goal, "output_health"),
+                Some(output_health),
+            ),
+            ScoreTermInput::new(
+                "reference_health",
+                "Reference health",
+                weight_for_goal(goal, "reference_health"),
+                Some(reference_health),
+            ),
+            ScoreTermInput::new(
+                "similarity",
+                "Similarity proxy",
+                weight_for_goal(goal, "similarity"),
+                Some(similarity),
+            ),
+            ScoreTermInput::new(
+                "conversion",
+                "Voice-preserving coverage",
+                weight_for_goal(goal, "conversion"),
+                conversion,
+            ),
+            ScoreTermInput::new(
+                "availability",
+                "Ready preview",
+                weight_for_goal(goal, "availability"),
+                Some(availability),
+            ),
+            ScoreTermInput::new(
+                "export_readiness",
+                "Export readiness",
+                weight_for_goal(goal, "export_readiness"),
+                Some(export_readiness),
+            ),
         ];
         let total_weight = terms
             .iter()
@@ -809,7 +882,8 @@ fn render_markdown(report: &VoiceBenchmarkReport) -> String {
                 VoiceCloneRunOutcome::ClonePreserved => "clone preserved".to_string(),
                 VoiceCloneRunOutcome::PartialFallback => format!(
                     "partial fallback ({} converted / {} fallback)",
-                    candidate.voice_clone_converted_segments, candidate.voice_clone_fallback_segments
+                    candidate.voice_clone_converted_segments,
+                    candidate.voice_clone_fallback_segments
                 ),
                 VoiceCloneRunOutcome::FallbackOnly => "fallback only".to_string(),
                 VoiceCloneRunOutcome::StandardTtsOnly => "standard TTS only".to_string(),
@@ -839,7 +913,10 @@ fn benchmark_report_paths(
 ) -> (PathBuf, PathBuf) {
     let dir = paths.derived_item_dir(item_id).join("voice_benchmark");
     let stem = format!("voice_benchmark_v1_{track_id}_{goal}");
-    (dir.join(format!("{stem}.json")), dir.join(format!("{stem}.md")))
+    (
+        dir.join(format!("{stem}.json")),
+        dir.join(format!("{stem}.md")),
+    )
 }
 
 fn benchmark_history_dir(paths: &AppPaths, item_id: &str, track_id: &str, goal: &str) -> PathBuf {
@@ -859,7 +936,10 @@ fn benchmark_snapshot_paths(
 ) -> (PathBuf, PathBuf) {
     let dir = benchmark_history_dir(paths, item_id, track_id, goal);
     let stem = format!("voice_benchmark_snapshot_v1_{track_id}_{goal}_{generated_at_ms}");
-    (dir.join(format!("{stem}.json")), dir.join(format!("{stem}.md")))
+    (
+        dir.join(format!("{stem}.json")),
+        dir.join(format!("{stem}.md")),
+    )
 }
 
 fn leaderboard_export_paths(
@@ -909,7 +989,8 @@ fn load_benchmark_history_reports(
     if history_dir.exists() {
         for entry in std::fs::read_dir(&history_dir)?.flatten() {
             let path = entry.path();
-            if !path.is_file() || path.extension().and_then(|value| value.to_str()) != Some("json") {
+            if !path.is_file() || path.extension().and_then(|value| value.to_str()) != Some("json")
+            {
                 continue;
             }
             let bytes = match std::fs::read(&path) {
@@ -970,26 +1051,28 @@ struct LeaderboardAccumulator {
 fn build_leaderboard_rows(reports: &[VoiceBenchmarkReport]) -> Vec<VoiceBenchmarkLeaderboardRow> {
     let mut by_candidate: HashMap<String, LeaderboardAccumulator> = HashMap::new();
     for report in reports {
-        let winner_key = report
-            .candidates
-            .first()
-            .map(|candidate| aggregate_candidate_key(&candidate.backend_id, candidate.variant_label.as_deref()));
+        let winner_key = report.candidates.first().map(|candidate| {
+            aggregate_candidate_key(&candidate.backend_id, candidate.variant_label.as_deref())
+        });
         for candidate in &report.candidates {
-            let key = aggregate_candidate_key(&candidate.backend_id, candidate.variant_label.as_deref());
-            let entry = by_candidate.entry(key.clone()).or_insert_with(|| LeaderboardAccumulator {
-                aggregate_id: key.clone(),
-                display_name: candidate.display_name.clone(),
-                backend_id: candidate.backend_id.clone(),
-                variant_label: candidate.variant_label.clone(),
-                appearance_count: 0,
-                win_count: 0,
-                latest_generated_at_ms: report.generated_at_ms,
-                latest_score: candidate.score,
-                best_score: candidate.score,
-                total_score: 0.0,
-                total_coverage_ratio: 0.0,
-                total_timing_fit_ratio: 0.0,
-            });
+            let key =
+                aggregate_candidate_key(&candidate.backend_id, candidate.variant_label.as_deref());
+            let entry = by_candidate
+                .entry(key.clone())
+                .or_insert_with(|| LeaderboardAccumulator {
+                    aggregate_id: key.clone(),
+                    display_name: candidate.display_name.clone(),
+                    backend_id: candidate.backend_id.clone(),
+                    variant_label: candidate.variant_label.clone(),
+                    appearance_count: 0,
+                    win_count: 0,
+                    latest_generated_at_ms: report.generated_at_ms,
+                    latest_score: candidate.score,
+                    best_score: candidate.score,
+                    total_score: 0.0,
+                    total_coverage_ratio: 0.0,
+                    total_timing_fit_ratio: 0.0,
+                });
             entry.appearance_count += 1;
             if winner_key.as_deref() == Some(key.as_str()) {
                 entry.win_count += 1;
@@ -1021,8 +1104,10 @@ fn build_leaderboard_rows(reports: &[VoiceBenchmarkReport]) -> Vec<VoiceBenchmar
             latest_score: value.latest_score,
             best_score: value.best_score,
             average_score: value.total_score / value.appearance_count.max(1) as f32,
-            average_coverage_ratio: value.total_coverage_ratio / value.appearance_count.max(1) as f32,
-            average_timing_fit_ratio: value.total_timing_fit_ratio / value.appearance_count.max(1) as f32,
+            average_coverage_ratio: value.total_coverage_ratio
+                / value.appearance_count.max(1) as f32,
+            average_timing_fit_ratio: value.total_timing_fit_ratio
+                / value.appearance_count.max(1) as f32,
         })
         .collect::<Vec<_>>();
     rows.sort_by(|a, b| {
@@ -1052,7 +1137,11 @@ fn render_leaderboard_markdown(export: &VoiceBenchmarkLeaderboardExport) -> Stri
     out.push_str("# Voice Benchmark Leaderboard\n\n");
     out.push_str(&format!(
         "- Item: `{}`\n- Track: `{}`\n- Goal: `{}`\n- Source reports: `{}`\n- Generated: `{}`\n\n",
-        export.item_id, export.track_id, export.goal, export.source_report_count, export.generated_at_ms
+        export.item_id,
+        export.track_id,
+        export.goal,
+        export.source_report_count,
+        export.generated_at_ms
     ));
     out.push_str(
         "| Rank | Candidate | Wins | Appearances | Latest | Best | Avg | Coverage | Timing |\n| --- | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: |\n",
@@ -1391,12 +1480,18 @@ mod tests {
         });
         std::fs::write(
             base_dir.join("manifest.json"),
-            format!("{}\n", serde_json::to_string_pretty(&manifest).expect("manifest")),
+            format!(
+                "{}\n",
+                serde_json::to_string_pretty(&manifest).expect("manifest")
+            ),
         )
         .expect("write manifest");
         std::fs::write(
             variant_dir.join("manifest.json"),
-            format!("{}\n", serde_json::to_string_pretty(&manifest).expect("variant")),
+            format!(
+                "{}\n",
+                serde_json::to_string_pretty(&manifest).expect("variant")
+            ),
         )
         .expect("write variant manifest");
 
@@ -1410,7 +1505,13 @@ mod tests {
     #[test]
     fn rank_candidates_prefers_identity_similarity() {
         let mut candidates = vec![
-            sample_candidate("seed", "dub_voice_preserving_v1", Some(0.92), Some(0.95), 0.80),
+            sample_candidate(
+                "seed",
+                "dub_voice_preserving_v1",
+                Some(0.92),
+                Some(0.95),
+                0.80,
+            ),
             sample_candidate("timing", "tts_neural_local_v1", Some(0.55), None, 0.96),
         ];
         rank_candidates(&mut candidates, "identity");
@@ -1451,7 +1552,10 @@ mod tests {
         });
         std::fs::write(
             base_dir.join("manifest.json"),
-            format!("{}\n", serde_json::to_string_pretty(&manifest).expect("manifest")),
+            format!(
+                "{}\n",
+                serde_json::to_string_pretty(&manifest).expect("manifest")
+            ),
         )
         .expect("write manifest");
         std::fs::write(
@@ -1482,15 +1586,13 @@ mod tests {
         )
         .expect("speaker");
 
-        let report =
-            generate_voice_benchmark_report(&paths, "item-1", "track-1", Some("balanced"))
-                .expect("report");
+        let report = generate_voice_benchmark_report(&paths, "item-1", "track-1", Some("balanced"))
+            .expect("report");
         assert_eq!(report.candidate_count, 1);
         assert!(Path::new(&report.json_path).exists());
         assert!(Path::new(&report.markdown_path).exists());
-        let history =
-            list_voice_benchmark_history(&paths, "item-1", "track-1", Some("balanced"))
-                .expect("history");
+        let history = list_voice_benchmark_history(&paths, "item-1", "track-1", Some("balanced"))
+            .expect("history");
         assert_eq!(history.len(), 1);
         assert!(Path::new(&history[0].json_path).exists());
         assert!(Path::new(&history[0].markdown_path).exists());
@@ -1544,7 +1646,10 @@ mod tests {
         });
         std::fs::write(
             base_dir.join("manifest.json"),
-            format!("{}\n", serde_json::to_string_pretty(&base_manifest).expect("base manifest")),
+            format!(
+                "{}\n",
+                serde_json::to_string_pretty(&base_manifest).expect("base manifest")
+            ),
         )
         .expect("write base manifest");
         std::fs::write(
@@ -1588,13 +1693,11 @@ mod tests {
         )
         .expect("speaker");
 
-        let first =
-            generate_voice_benchmark_report(&paths, "item-1", "track-1", Some("balanced"))
-                .expect("first report");
+        let first = generate_voice_benchmark_report(&paths, "item-1", "track-1", Some("balanced"))
+            .expect("first report");
         std::thread::sleep(Duration::from_millis(2));
-        let second =
-            generate_voice_benchmark_report(&paths, "item-1", "track-1", Some("balanced"))
-                .expect("second report");
+        let second = generate_voice_benchmark_report(&paths, "item-1", "track-1", Some("balanced"))
+            .expect("second report");
 
         let export =
             export_voice_benchmark_leaderboard(&paths, "item-1", "track-1", Some("balanced"))
@@ -1685,7 +1788,10 @@ mod tests {
         }
         std::fs::write(
             &track_path,
-            format!("{}\n", serde_json::to_string_pretty(&doc).expect("doc json")),
+            format!(
+                "{}\n",
+                serde_json::to_string_pretty(&doc).expect("doc json")
+            ),
         )
         .expect("write track");
         conn.execute(
@@ -1718,8 +1824,8 @@ mod tests {
         let total_samples = ((sample_rate as u64) * (duration_ms as u64) / 1000) as usize;
         for index in 0..total_samples {
             let t = index as f32 / sample_rate as f32;
-            let sample = (0.25 * (2.0 * std::f32::consts::PI * 220.0 * t).sin()
-                * i16::MAX as f32) as i16;
+            let sample =
+                (0.25 * (2.0 * std::f32::consts::PI * 220.0 * t).sin() * i16::MAX as f32) as i16;
             writer.write_sample(sample).expect("sample");
         }
         writer.finalize().expect("finalize");

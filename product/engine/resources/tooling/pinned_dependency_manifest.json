@@ -2,10 +2,10 @@
   "schema_version": 1,
   "allow_unpinned_fallback_env": "VOXVULGI_ALLOW_UNPINNED_FALLBACK",
   "yt_dlp_windows": {
-    "version": "2026.03.03",
-    "url": "https://github.com/yt-dlp/yt-dlp/releases/download/2026.03.03/yt-dlp.exe",
-    "sha256_hex": "554E868CA1DF425D4FE90C224980F0862FE20E28DCED6256461F16752D7A1218",
-    "file_bytes": 18408128,
+    "version": "2026.03.17",
+    "url": "https://github.com/yt-dlp/yt-dlp/releases/download/2026.03.17/yt-dlp.exe",
+    "sha256_hex": "3DB811B366B2DA47337D2FCFDFE5BBD9A258DAD3F350C54974F005DF115A1545",
+    "file_bytes": 18448981,
     "source_label": "github:yt-dlp/yt-dlp"
   },
   "portable_python_windows": {
@@ -93,7 +93,7 @@
   "tts_voice_preserving_local_v1": {
     "openvoice_git_spec": "git+https://github.com/myshell-ai/OpenVoice.git@74a1d147b17a8c3092dd5430504bd83ef6c7eb23",
     "pinned_dependencies": [
-      "huggingface_hub==1.4.1",
+      "huggingface_hub==1.5.0",
       "librosa==0.11.0",
       "soundfile==0.13.1",
       "inflect==7.5.0",

@@ -147,7 +147,7 @@ mod tests {
             manifest.allow_unpinned_fallback_env,
             "VOXVULGI_ALLOW_UNPINNED_FALLBACK"
         );
-        assert_eq!(manifest.yt_dlp_windows.version, "2026.03.03");
+        assert_eq!(manifest.yt_dlp_windows.version, "2026.03.17");
         assert_eq!(manifest.portable_python_windows.version, "3.11.9");
         assert_eq!(manifest.deno_windows.version, "2.7.5");
         assert!(manifest
