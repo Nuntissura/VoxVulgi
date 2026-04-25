@@ -1,7 +1,7 @@
 use crate::ffmpeg;
 use crate::paths::AppPaths;
 use crate::{db, Result};
-use rusqlite::params;
+use rusqlite::{params, OptionalExtension};
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -254,6 +254,46 @@ WHERE id=?1
         }
         other => crate::EngineError::Database(other),
     })
+}
+
+pub fn get_item_by_canonical_media_path(
+    paths: &AppPaths,
+    media_path: &Path,
+) -> Result<Option<LibraryItem>> {
+    let canonical = media_path.canonicalize()?;
+    let media_path_str = canonical.to_string_lossy().to_string();
+
+    let conn = db::open(paths)?;
+    db::migrate(&conn)?;
+
+    let item = conn
+        .query_row(
+            r#"
+SELECT
+  id,
+  created_at_ms,
+  source_type,
+  source_uri,
+  title,
+  media_path,
+  duration_ms,
+  width,
+  height,
+  container,
+  video_codec,
+  audio_codec,
+  thumbnail_path
+FROM library_item
+WHERE media_path=?1
+ORDER BY created_at_ms DESC
+LIMIT 1
+"#,
+            params![media_path_str],
+            library_item_from_row,
+        )
+        .optional()?;
+
+    Ok(item)
 }
 
 pub fn add_item_to_localization_workspace(

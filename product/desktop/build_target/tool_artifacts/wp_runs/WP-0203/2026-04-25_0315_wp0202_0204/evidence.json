@@ -1,0 +1,27 @@
+{
+  "wp_id": "WP-0203",
+  "status": "REVIEW",
+  "verified_at": "2026-04-25",
+  "queen_sample": {
+    "path": "D:\\Projects\\LLM projects\\VoxVulgi\\Test material\\[4K] Queen is here 😍 Miyeon so cute 💕 (ENG SUB).mp4",
+    "reused_item_id": "ab16785e-0fc4-4eba-9363-db81727a31db",
+    "reuse_job_ids": [
+      "9aab4db0-34db-4d67-8af0-8456abeb01b9",
+      "c79ed2d5-4087-43f9-ba9c-9f312de59217"
+    ],
+    "workspace_rows_for_reused_item": 1,
+    "active_queen_import_jobs": 0
+  },
+  "snapshots": [
+    "governance/snapshots/WP-0203_0204/localization_queen_absolute_0_1777080238731.png",
+    "governance/snapshots/WP-0203_0204/jobs_queue_absolute_0_1777080578744.png",
+    "governance/snapshots/WP-0203_0204/jobs_queue_absolute_900_1777080602293.png"
+  ],
+  "commands": [
+    "cargo test enqueue_localization_import --lib",
+    "cargo test cancel_import_local_propagates --lib",
+    "cargo check (product/engine)",
+    "cargo check (product/desktop/src-tauri)",
+    "npm.cmd run build (product/desktop)"
+  ]
+}

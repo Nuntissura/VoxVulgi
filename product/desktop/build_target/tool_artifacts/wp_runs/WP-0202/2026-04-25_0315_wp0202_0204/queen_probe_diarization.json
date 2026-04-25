@@ -1,0 +1,7 @@
+{
+  "schema_version": 1,
+  "algorithm": "resemblyzer_partials_cluster_v1_probe",
+  "partial_count": 9,
+  "slice_count": 9,
+  "speaker_label_count": 2
+}

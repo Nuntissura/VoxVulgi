@@ -3,7 +3,7 @@
 ## Metadata
 - ID: WP-0203
 - Owner: Codex
-- Status: BACKLOG
+- Status: REVIEW
 - Created: 2026-04-24
 - Target milestone: Localization operator reliability
 
@@ -47,3 +47,5 @@ Out of scope:
 ## Status updates
 
 - 2026-04-24: Created after operator smoke showed duplicate local imports of the same file surviving cancellation and fanning out into parallel ASR/translate/diarize work, with the kept import taking roughly thirty minutes to exit the import stage.
+- 2026-04-25: Implementation pass started. Scope is duplicate same-path Localization intake reuse, import batch/cancel containment, and clearer import stage progress.
+- 2026-04-25: Moved to REVIEW. Same-path active Localization imports now reuse the existing active job; existing library media reselects the workspace item with completed reuse rows; import cancellation propagates to same-batch children. Queen sample smoke reused item `ab16785e-0fc4-4eba-9363-db81727a31db` with 0 active duplicate imports. Proof: `product/desktop/build_target/tool_artifacts/wp_runs/WP-0203/2026-04-25_0315_wp0202_0204/summary.md`.

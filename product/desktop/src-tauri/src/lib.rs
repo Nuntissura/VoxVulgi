@@ -141,7 +141,12 @@ fn agent_handle_navigate(body: &str) -> (&'static str, String) {
     };
     let page = match parsed.get("page").and_then(|v| v.as_str()) {
         Some(p) => p.to_string(),
-        None => return ("400 Bad Request", r#"{"error":"missing page field"}"#.to_string()),
+        None => {
+            return (
+                "400 Bad Request",
+                r#"{"error":"missing page field"}"#.to_string(),
+            )
+        }
     };
     let valid = [
         "localization",
@@ -156,13 +161,49 @@ fn agent_handle_navigate(body: &str) -> (&'static str, String) {
     if !valid.contains(&page.as_str()) {
         return (
             "400 Bad Request",
-            format!(r#"{{"error":"invalid page","valid":{}}}"#, serde_json::json!(valid)),
+            format!(
+                r#"{{"error":"invalid page","valid":{}}}"#,
+                serde_json::json!(valid)
+            ),
         );
     }
+    let item_id = parsed
+        .get("item_id")
+        .or_else(|| parsed.get("itemId"))
+        .and_then(|v| v.as_str())
+        .map(str::trim)
+        .filter(|v| !v.is_empty())
+        .map(str::to_string);
+    let section_id = parsed
+        .get("section_id")
+        .or_else(|| parsed.get("sectionId"))
+        .and_then(|v| v.as_str())
+        .map(str::trim)
+        .filter(|v| !v.is_empty())
+        .map(str::to_string);
     if let Some(app) = AGENT_APP_HANDLE.get() {
-        let _ = app.emit("agent-navigate", &page);
+        if item_id.is_some() || section_id.is_some() {
+            let _ = app.emit(
+                "agent-navigate",
+                serde_json::json!({
+                    "page": page,
+                    "item_id": item_id,
+                    "section_id": section_id,
+                }),
+            );
+        } else {
+            let _ = app.emit("agent-navigate", &page);
+        }
     }
-    ("200 OK", format!(r#"{{"navigated":"{}"}}"#, page))
+    (
+        "200 OK",
+        serde_json::json!({
+            "navigated": page,
+            "item_id": item_id,
+            "section_id": section_id,
+        })
+        .to_string(),
+    )
 }
 
 fn agent_handle_snapshot(body: &str) -> (&'static str, String) {
@@ -177,6 +218,10 @@ fn agent_handle_snapshot(body: &str) -> (&'static str, String) {
         .and_then(|v| v.as_str())
         .unwrap_or("")
         .to_string();
+    let scroll_top = parsed
+        .get("scroll_top")
+        .or_else(|| parsed.get("scrollTop"))
+        .and_then(|v| v.as_f64());
 
     let (tx, rx) = std::sync::mpsc::channel::<String>();
 
@@ -188,13 +233,20 @@ fn agent_handle_snapshot(body: &str) -> (&'static str, String) {
     if let Some(app) = AGENT_APP_HANDLE.get() {
         let _ = app.emit(
             "agent-snapshot-request",
-            serde_json::json!({"subfolder": subfolder, "label": label}),
+            serde_json::json!({
+                "subfolder": subfolder,
+                "label": label,
+                "scroll_top": scroll_top,
+            }),
         );
     }
 
     // Wait for frontend to complete the snapshot (up to 30 seconds for heavy pages under load)
     match rx.recv_timeout(Duration::from_secs(30)) {
-        Ok(path) => ("200 OK", format!(r#"{{"path":"{}"}}"#, path.replace('\\', "\\\\"))),
+        Ok(path) => (
+            "200 OK",
+            format!(r#"{{"path":"{}"}}"#, path.replace('\\', "\\\\")),
+        ),
         Err(_) => {
             // Clear stale sender so late-arriving captures don't contaminate the next request
             let mut state = agent_bridge_state().lock().unwrap();
@@ -618,8 +670,17 @@ struct DiagnosticsTraceEntry {
 #[derive(Debug, Clone, serde::Serialize)]
 struct ItemOutputs {
     item_id: String,
+    source_media_path: String,
+    source_media_exists: bool,
     derived_item_dir: String,
     dub_preview_dir: String,
+    source_track_count: usize,
+    source_usable_segment_count: usize,
+    latest_source_track_path: Option<String>,
+    translated_en_track_count: usize,
+    translated_en_usable_segment_count: usize,
+    translated_en_speaker_count: usize,
+    latest_translated_en_track_path: Option<String>,
     mix_dub_preview_v1_wav_path: String,
     mix_dub_preview_v1_wav_exists: bool,
     mux_dub_preview_v1_mp4_path: String,
@@ -628,6 +689,14 @@ struct ItemOutputs {
     mux_dub_preview_v1_mkv_exists: bool,
     export_pack_v1_zip_path: String,
     export_pack_v1_zip_exists: bool,
+    terminal_state: String,
+    terminal_summary: String,
+    terminal_detail: String,
+    terminal_stage_label: Option<String>,
+    terminal_progress: Option<f32>,
+    terminal_error: Option<String>,
+    deliverable_path: Option<String>,
+    deliverable_exists: bool,
 }
 
 #[derive(Debug, Clone, serde::Serialize)]
@@ -2399,6 +2468,253 @@ fn diagnostics_info(app: tauri::AppHandle, state: State<'_, AppState>) -> Diagno
     }
 }
 
+fn localization_job_type_label(job_type: &str) -> &'static str {
+    match job_type {
+        "import_local" => "Import local media",
+        "asr_local" => "Speech recognition",
+        "translate_local" => "Translate to English",
+        "diarize_local_v1" => "Label speakers",
+        "dub_voice_preserving_v1" => "Dub speech generation",
+        "tts_preview_pyttsx3_v1" | "tts_neural_local_v1" => "TTS preview",
+        "mix_dub_preview_v1" => "Mix dub",
+        "mux_dub_preview_v1" => "Mux preview",
+        "export_pack_v1" => "Export pack",
+        "qc_report_v1" => "QC report",
+        _ => "Localization job",
+    }
+}
+
+fn job_status_label(status: &jobs::JobStatus) -> &'static str {
+    match status {
+        jobs::JobStatus::Queued => "queued",
+        jobs::JobStatus::Running => "running",
+        jobs::JobStatus::Succeeded => "succeeded",
+        jobs::JobStatus::Failed => "failed",
+        jobs::JobStatus::Canceled => "canceled",
+    }
+}
+
+fn is_english_lang_tag(value: &str) -> bool {
+    matches!(
+        value.trim().to_ascii_lowercase().as_str(),
+        "en" | "eng" | "en-us" | "en-gb"
+    )
+}
+
+#[derive(Debug, Default)]
+struct TrackAvailabilitySummary {
+    track_count: usize,
+    usable_segment_count: usize,
+    speaker_count: usize,
+    latest_track_path: Option<String>,
+}
+
+fn summarize_tracks_for_outputs(
+    paths: &AppPaths,
+    tracks: &[subtitle_tracks::SubtitleTrackRow],
+    include: impl Fn(&subtitle_tracks::SubtitleTrackRow) -> bool,
+) -> TrackAvailabilitySummary {
+    let mut summary = TrackAvailabilitySummary::default();
+    let mut latest_version = i64::MIN;
+    let mut speakers = std::collections::BTreeSet::<String>::new();
+
+    for track in tracks.iter().filter(|track| include(track)) {
+        summary.track_count += 1;
+        if track.version >= latest_version {
+            latest_version = track.version;
+            summary.latest_track_path = Some(track.path.clone());
+        }
+        if let Ok(doc) = subtitle_tracks::load_document(paths, &track.id) {
+            summary.usable_segment_count += subtitles::usable_segment_count(&doc);
+            for speaker in doc
+                .segments
+                .iter()
+                .filter_map(|segment| segment.speaker.as_deref())
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
+            {
+                speakers.insert(speaker.to_string());
+            }
+        }
+    }
+
+    summary.speaker_count = speakers.len();
+    summary
+}
+
+#[allow(clippy::too_many_arguments)]
+fn localization_terminal_outcome(
+    jobs: &[jobs::JobRow],
+    source: &TrackAvailabilitySummary,
+    translated_en: &TrackAvailabilitySummary,
+    mix_exists: bool,
+    mux_mp4_path: &std::path::Path,
+    mux_mp4_exists: bool,
+    mux_mkv_path: &std::path::Path,
+    mux_mkv_exists: bool,
+    export_pack_path: &std::path::Path,
+    export_pack_exists: bool,
+    derived_item_dir: &std::path::Path,
+) -> (
+    String,
+    String,
+    String,
+    Option<String>,
+    Option<f32>,
+    Option<String>,
+    Option<String>,
+    bool,
+) {
+    let active = jobs.iter().find(|job| {
+        matches!(
+            job.status,
+            jobs::JobStatus::Running | jobs::JobStatus::Queued
+        )
+    });
+    if let Some(job) = active {
+        let label = localization_job_type_label(&job.job_type).to_string();
+        let status = job_status_label(&job.status);
+        return (
+            "running".to_string(),
+            format!(
+                "{} {}%",
+                label,
+                ((job.progress).clamp(0.0, 1.0) * 100.0).round() as i64
+            ),
+            format!(
+                "{label} is {status}. Working folder: {}",
+                derived_item_dir.to_string_lossy()
+            ),
+            Some(label),
+            Some(job.progress.clamp(0.0, 1.0)),
+            None,
+            None,
+            false,
+        );
+    }
+
+    let deliverable = if export_pack_exists {
+        Some(("Export pack ready", export_pack_path))
+    } else if mux_mp4_exists {
+        Some(("Preview MP4 ready", mux_mp4_path))
+    } else if mux_mkv_exists {
+        Some(("Preview MKV ready", mux_mkv_path))
+    } else {
+        None
+    };
+    if let Some((summary, path)) = deliverable {
+        return (
+            if export_pack_exists {
+                "export_ready"
+            } else {
+                "preview_ready"
+            }
+            .to_string(),
+            summary.to_string(),
+            path.to_string_lossy().to_string(),
+            Some(summary.to_string()),
+            Some(1.0),
+            None,
+            Some(path.to_string_lossy().to_string()),
+            true,
+        );
+    }
+
+    let failed = jobs
+        .iter()
+        .find(|job| matches!(job.status, jobs::JobStatus::Failed));
+    if let Some(job) = failed {
+        let label = localization_job_type_label(&job.job_type).to_string();
+        let detail = job
+            .error
+            .clone()
+            .filter(|value| !value.trim().is_empty())
+            .unwrap_or_else(|| "No error detail recorded.".to_string());
+        return (
+            "failed".to_string(),
+            format!("Failed before deliverable: {label}"),
+            detail.clone(),
+            Some(label),
+            Some(job.progress.clamp(0.0, 1.0)),
+            Some(detail),
+            None,
+            false,
+        );
+    }
+
+    if mix_exists {
+        return (
+            "dub_audio_ready".to_string(),
+            "Dub audio ready".to_string(),
+            "Dub mix exists, but no muxed preview video or export pack exists yet.".to_string(),
+            Some("Mix dub".to_string()),
+            Some(1.0),
+            None,
+            None,
+            false,
+        );
+    }
+    if translated_en.usable_segment_count > 0 && translated_en.speaker_count > 0 {
+        return (
+            "speaker_labels_ready".to_string(),
+            "Translation and speaker labels ready".to_string(),
+            format!(
+                "{} usable English segment(s), {} speaker label(s). No dub preview deliverable exists yet.",
+                translated_en.usable_segment_count, translated_en.speaker_count
+            ),
+            Some("Label speakers".to_string()),
+            Some(1.0),
+            None,
+            None,
+            false,
+        );
+    }
+    if translated_en.usable_segment_count > 0 {
+        return (
+            "translation_ready".to_string(),
+            "Translation ready".to_string(),
+            format!(
+                "{} usable English segment(s). Speaker labeling and dub stages have not produced a preview yet.",
+                translated_en.usable_segment_count
+            ),
+            Some("Translate to English".to_string()),
+            Some(1.0),
+            None,
+            None,
+            false,
+        );
+    }
+    if source.usable_segment_count > 0 {
+        return (
+            "captions_ready".to_string(),
+            "Captions ready".to_string(),
+            format!(
+                "{} usable source caption segment(s). Translation has not produced English deliverables yet.",
+                source.usable_segment_count
+            ),
+            Some("Speech recognition".to_string()),
+            Some(1.0),
+            None,
+            None,
+            false,
+        );
+    }
+
+    (
+        "imported_only".to_string(),
+        "Imported only".to_string(),
+        format!(
+            "The source is in the Localization workspace. No caption, translation, preview, or export artifact exists yet. Working folder: {}",
+            derived_item_dir.to_string_lossy()
+        ),
+        Some("Ready to start".to_string()),
+        None,
+        None,
+        None,
+        false,
+    )
+}
+
 #[tauri::command]
 fn item_outputs(
     state: State<'_, AppState>,
@@ -2411,25 +2727,76 @@ fn item_outputs(
         .filter(|v| !v.is_empty())
         .ok_or_else(|| "missing required key itemId".to_string())?;
 
+    let item = library::get_item_by_id(&state.paths, &item_id).map_err(|e| e.to_string())?;
     let item_dir = state.paths.derived_item_dir(&item_id);
     let dub_preview_dir = item_dir.join("dub_preview");
     let mix_path = dub_preview_dir.join("mix_dub_preview_v1.wav");
     let mux_mp4_path = dub_preview_dir.join("mux_dub_preview_v1.mp4");
     let mux_mkv_path = dub_preview_dir.join("mux_dub_preview_v1.mkv");
     let export_pack_path = item_dir.join("exports").join("export_pack_v1.zip");
+    let tracks = subtitle_tracks::list_tracks(&state.paths, &item_id).unwrap_or_default();
+    let source_summary =
+        summarize_tracks_for_outputs(&state.paths, &tracks, |track| track.kind == "source");
+    let translated_en_summary = summarize_tracks_for_outputs(&state.paths, &tracks, |track| {
+        track.kind == "translated" && is_english_lang_tag(&track.lang)
+    });
+    let item_jobs = jobs::list_jobs_for_item(&state.paths, &item_id, 80, 0).unwrap_or_default();
+    let mix_exists = mix_path.exists();
+    let mux_mp4_exists = mux_mp4_path.exists();
+    let mux_mkv_exists = mux_mkv_path.exists();
+    let export_pack_exists = export_pack_path.exists();
+    let (
+        terminal_state,
+        terminal_summary,
+        terminal_detail,
+        terminal_stage_label,
+        terminal_progress,
+        terminal_error,
+        deliverable_path,
+        deliverable_exists,
+    ) = localization_terminal_outcome(
+        &item_jobs,
+        &source_summary,
+        &translated_en_summary,
+        mix_exists,
+        &mux_mp4_path,
+        mux_mp4_exists,
+        &mux_mkv_path,
+        mux_mkv_exists,
+        &export_pack_path,
+        export_pack_exists,
+        &item_dir,
+    );
 
     Ok(ItemOutputs {
         item_id,
+        source_media_path: item.media_path.clone(),
+        source_media_exists: std::path::Path::new(&item.media_path).exists(),
         derived_item_dir: item_dir.to_string_lossy().to_string(),
         dub_preview_dir: dub_preview_dir.to_string_lossy().to_string(),
+        source_track_count: source_summary.track_count,
+        source_usable_segment_count: source_summary.usable_segment_count,
+        latest_source_track_path: source_summary.latest_track_path,
+        translated_en_track_count: translated_en_summary.track_count,
+        translated_en_usable_segment_count: translated_en_summary.usable_segment_count,
+        translated_en_speaker_count: translated_en_summary.speaker_count,
+        latest_translated_en_track_path: translated_en_summary.latest_track_path,
         mix_dub_preview_v1_wav_path: mix_path.to_string_lossy().to_string(),
-        mix_dub_preview_v1_wav_exists: mix_path.exists(),
+        mix_dub_preview_v1_wav_exists: mix_exists,
         mux_dub_preview_v1_mp4_path: mux_mp4_path.to_string_lossy().to_string(),
-        mux_dub_preview_v1_mp4_exists: mux_mp4_path.exists(),
+        mux_dub_preview_v1_mp4_exists: mux_mp4_exists,
         mux_dub_preview_v1_mkv_path: mux_mkv_path.to_string_lossy().to_string(),
-        mux_dub_preview_v1_mkv_exists: mux_mkv_path.exists(),
+        mux_dub_preview_v1_mkv_exists: mux_mkv_exists,
         export_pack_v1_zip_path: export_pack_path.to_string_lossy().to_string(),
-        export_pack_v1_zip_exists: export_pack_path.exists(),
+        export_pack_v1_zip_exists: export_pack_exists,
+        terminal_state,
+        terminal_summary,
+        terminal_detail,
+        terminal_stage_label,
+        terminal_progress,
+        terminal_error,
+        deliverable_path,
+        deliverable_exists,
     })
 }
 
@@ -3836,7 +4203,6 @@ fn config_youtube_auth_set(
     config::save_youtube_auth_config(&state.paths, &config_value).map_err(|e| e.to_string())?;
     Ok(config_value)
 }
-
 
 #[tauri::command]
 fn config_diarization_optional_status(
@@ -6122,7 +6488,8 @@ fn admin_save_snapshot(
         }
     }
     if !target_dir.exists() {
-        std::fs::create_dir_all(&target_dir).map_err(|e| format!("Failed to create snapshot dir: {}", e))?;
+        std::fs::create_dir_all(&target_dir)
+            .map_err(|e| format!("Failed to create snapshot dir: {}", e))?;
     }
 
     let label_part = label
@@ -6135,7 +6502,10 @@ fn admin_save_snapshot(
     let path = target_dir.join(file_name);
 
     std::fs::write(&path, decoded).map_err(|e| format!("Failed to write snapshot: {}", e))?;
-    let abs_path = std::fs::canonicalize(&path).unwrap_or(path).to_string_lossy().to_string();
+    let abs_path = std::fs::canonicalize(&path)
+        .unwrap_or(path)
+        .to_string_lossy()
+        .to_string();
     Ok(abs_path)
 }
 
@@ -6174,7 +6544,10 @@ fn tts_manifest_clone_segments(path: String) -> Result<Vec<TtsManifestSegmentClo
         .iter()
         .map(|seg| TtsManifestSegmentCloneInfo {
             index: seg.get("index").and_then(|v| v.as_u64()).unwrap_or(0) as u32,
-            speaker: seg.get("speaker").and_then(|v| v.as_str()).map(String::from),
+            speaker: seg
+                .get("speaker")
+                .and_then(|v| v.as_str())
+                .map(String::from),
             voice_clone_intent: seg
                 .get("voice_clone_intent")
                 .and_then(|v| v.as_str())

@@ -3,7 +3,7 @@
 ## Metadata
 - ID: WP-0202
 - Owner: Codex
-- Status: BACKLOG
+- Status: REVIEW
 - Created: 2026-04-24
 - Target milestone: Localization runtime reliability
 
@@ -48,3 +48,5 @@ Out of scope:
 ## Status updates
 
 - 2026-04-24: Created after operator smoke and live environment inspection showed a broken managed diarization venv (`numba 0.64.0`, `llvmlite 0.46.0`) while current pack validation still lacked full runtime-integrity checks.
+- 2026-04-25: Implementation pass started. Live managed venv reproduced the broken state: `numba` import fails because installed `llvmlite` is below its runtime requirement, while existing Diagnostics validation still only checked a subset of packages.
+- 2026-04-25: Moved to REVIEW. Added validated diarization pins, runtime warmup validation, Diagnostics broken/repair detail, and repair install flow. Live venv repaired to `numba 0.65.0`/`llvmlite 0.47.0`; VoiceEncoder validation and a Queen-media resemblyzer probe passed. Proof: `product/desktop/build_target/tool_artifacts/wp_runs/WP-0202/2026-04-25_0315_wp0202_0204/summary.md`.

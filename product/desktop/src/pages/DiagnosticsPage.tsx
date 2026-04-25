@@ -88,9 +88,18 @@ type DemucsPackStatus = {
 
 type DiarizationPackStatus = {
   installed: boolean;
+  state: "not_installed" | "installed" | "broken" | string;
+  repair_required: boolean;
+  status_detail: string;
   resemblyzer_version: string | null;
   numpy_version: string | null;
   sklearn_version: string | null;
+  librosa_version: string | null;
+  numba_version: string | null;
+  llvmlite_version: string | null;
+  webrtcvad_version: string | null;
+  soundfile_version: string | null;
+  runtime_validation_error: string | null;
 };
 
 type TtsPreviewPackStatus = {
@@ -1323,7 +1332,11 @@ export function DiagnosticsPage({ visible = true }: { visible?: boolean }) {
   async function installDiarizationPack() {
     setBusy(true);
     setError(null);
-    setNotice("Installing diarization pack (Python deps download; may take a few minutes).");
+    setNotice(
+      diarization?.repair_required
+        ? "Repairing diarization pack (forced reinstall of validated Python deps; may take a few minutes)."
+        : "Installing diarization pack (Python deps download; may take a few minutes).",
+    );
     try {
       await invoke<DiarizationPackStatus>("tools_diarization_install");
       await refresh();
@@ -2577,11 +2590,30 @@ export function DiagnosticsPage({ visible = true }: { visible?: boolean }) {
 
         <div className="kv">
           <div className="k">Diarization (baseline)</div>
-          <div className="v">{diarization?.installed ? "installed" : "not installed"}</div>
+          <div className="v">
+            {diarization?.state ??
+              (diarization?.installed ? "installed" : "not installed")}
+          </div>
+        </div>
+        <div className="kv">
+          <div className="k">Diarization detail</div>
+          <div className="v">{diarization?.status_detail ?? "-"}</div>
         </div>
         <div className="kv">
           <div className="k">resemblyzer</div>
           <div className="v">{diarization?.resemblyzer_version ?? "-"}</div>
+        </div>
+        <div className="kv">
+          <div className="k">librosa</div>
+          <div className="v">{diarization?.librosa_version ?? "-"}</div>
+        </div>
+        <div className="kv">
+          <div className="k">numba</div>
+          <div className="v">{diarization?.numba_version ?? "-"}</div>
+        </div>
+        <div className="kv">
+          <div className="k">llvmlite</div>
+          <div className="v">{diarization?.llvmlite_version ?? "-"}</div>
         </div>
         <div className="kv">
           <div className="k">numpy</div>
@@ -2591,6 +2623,20 @@ export function DiagnosticsPage({ visible = true }: { visible?: boolean }) {
           <div className="k">sklearn</div>
           <div className="v">{diarization?.sklearn_version ?? "-"}</div>
         </div>
+        <div className="kv">
+          <div className="k">webrtcvad</div>
+          <div className="v">{diarization?.webrtcvad_version ?? "-"}</div>
+        </div>
+        <div className="kv">
+          <div className="k">soundfile</div>
+          <div className="v">{diarization?.soundfile_version ?? "-"}</div>
+        </div>
+        {diarization?.runtime_validation_error ? (
+          <div className="kv">
+            <div className="k">Diarization validation error</div>
+            <div className="v">{diarization.runtime_validation_error}</div>
+          </div>
+        ) : null}
 
         <div className="kv">
           <div className="k">TTS preview (pyttsx3)</div>
@@ -3036,10 +3082,10 @@ export function DiagnosticsPage({ visible = true }: { visible?: boolean }) {
           </button>
           <button
             type="button"
-            disabled={busy || !!diarization?.installed}
+            disabled={busy || (!!diarization?.installed && !diarization?.repair_required)}
             onClick={installDiarizationPack}
           >
-            Install diarization pack
+            {diarization?.repair_required ? "Repair diarization pack" : "Install diarization pack"}
           </button>
           <button
             type="button"

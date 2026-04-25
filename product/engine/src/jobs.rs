@@ -73,7 +73,7 @@ pub fn prune_job_logs_now(paths: &AppPaths) -> Result<()> {
     prune_job_logs(paths)
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum JobStatus {
     Queued,
@@ -278,6 +278,10 @@ struct ImportLocalParams {
     add_to_localization_workspace: bool,
     #[serde(default = "default_true")]
     apply_batch_on_import: bool,
+    #[serde(default)]
+    reuse_existing_item: bool,
+    #[serde(default)]
+    duplicate_of_item_id: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
@@ -953,9 +957,104 @@ pub struct JobRuntimeSettings {
     pub max_concurrency: usize,
 }
 
-pub fn enqueue_import_local(
+fn canonical_import_path(path: &str) -> Result<String> {
+    let trimmed = path.trim();
+    if trimmed.is_empty() {
+        return Err(EngineError::InstallFailed(
+            "import path is required".to_string(),
+        ));
+    }
+    Ok(Path::new(trimmed)
+        .canonicalize()?
+        .to_string_lossy()
+        .to_string())
+}
+
+fn import_path_match_key(path: &str) -> String {
+    path.trim()
+        .replace('/', "\\")
+        .trim_end_matches('\\')
+        .to_ascii_lowercase()
+}
+
+fn job_row_from_query_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<JobRow> {
+    let status_str: String = row.get(4)?;
+    let status = JobStatus::from_str(&status_str).unwrap_or(JobStatus::Failed);
+    Ok(JobRow {
+        id: row.get(0)?,
+        item_id: row.get(1)?,
+        batch_id: row.get(2)?,
+        job_type: row.get(3)?,
+        status,
+        progress: row.get(5)?,
+        error: row.get(6)?,
+        created_at_ms: row.get(7)?,
+        started_at_ms: row.get(8)?,
+        finished_at_ms: row.get(9)?,
+        logs_path: row.get(10)?,
+        params_json: row.get(11)?,
+    })
+}
+
+fn active_localization_import_for_path(
+    paths: &AppPaths,
+    canonical_path: &str,
+) -> Result<Option<JobRow>> {
+    let conn = db::open(paths)?;
+    db::migrate(&conn)?;
+
+    let mut stmt = conn.prepare(
+        r#"
+SELECT
+  id,
+  item_id,
+  batch_id,
+  type,
+  status,
+  progress,
+  error,
+  created_at_ms,
+  started_at_ms,
+  finished_at_ms,
+  logs_path,
+  params_json
+FROM job
+WHERE type=?1 AND status IN (?2, ?3)
+ORDER BY created_at_ms ASC
+"#,
+    )?;
+    let rows = stmt
+        .query_map(
+            params![
+                JobType::ImportLocal.as_str(),
+                JobStatus::Queued.as_str(),
+                JobStatus::Running.as_str()
+            ],
+            job_row_from_query_row,
+        )?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+
+    let wanted = import_path_match_key(canonical_path);
+    for row in rows {
+        let Ok(params) = serde_json::from_str::<ImportLocalParams>(&row.params_json) else {
+            continue;
+        };
+        if !params.add_to_localization_workspace {
+            continue;
+        }
+        let existing_path = canonical_import_path(&params.path).unwrap_or(params.path);
+        if import_path_match_key(&existing_path) == wanted {
+            return Ok(Some(row));
+        }
+    }
+
+    Ok(None)
+}
+
+fn enqueue_completed_import_reuse_job(
     paths: &AppPaths,
     path: String,
+    item: library::LibraryItem,
     add_to_localization_workspace: bool,
     apply_batch_on_import: bool,
 ) -> Result<JobRow> {
@@ -963,8 +1062,95 @@ pub fn enqueue_import_local(
         path,
         add_to_localization_workspace,
         apply_batch_on_import,
+        reuse_existing_item: true,
+        duplicate_of_item_id: Some(item.id.clone()),
     })?;
-    enqueue(paths, JobType::ImportLocal, params_json)
+    let mut job = enqueue_with_type_item_and_batch_id(
+        paths,
+        JobType::ImportLocal,
+        params_json,
+        Some(item.id.clone()),
+        None,
+    )?;
+    let now = now_ms();
+    let conn = db::open(paths)?;
+    db::migrate(&conn)?;
+    conn.execute(
+        "UPDATE job SET status=?1, progress=1.0, started_at_ms=?2, finished_at_ms=?3, item_id=?4 WHERE id=?5",
+        params![
+            JobStatus::Succeeded.as_str(),
+            now,
+            now,
+            &item.id,
+            &job.id
+        ],
+    )?;
+    let item_id = item.id.clone();
+    let media_path = item.media_path.clone();
+    log_line(
+        paths,
+        &job.id,
+        "info",
+        "import_local_reused_existing_item",
+        serde_json::json!({
+            "item_id": item_id,
+            "media_path": media_path,
+            "added_to_localization_workspace": add_to_localization_workspace,
+        }),
+    )?;
+    job.item_id = Some(item.id);
+    job.status = JobStatus::Succeeded;
+    job.progress = 1.0;
+    job.started_at_ms = Some(now);
+    job.finished_at_ms = Some(now);
+    Ok(job)
+}
+
+pub fn enqueue_import_local(
+    paths: &AppPaths,
+    path: String,
+    add_to_localization_workspace: bool,
+    apply_batch_on_import: bool,
+) -> Result<JobRow> {
+    let canonical_path = canonical_import_path(&path)?;
+
+    if add_to_localization_workspace {
+        if let Some(existing_job) = active_localization_import_for_path(paths, &canonical_path)? {
+            return Ok(existing_job);
+        }
+
+        if let Some(item) =
+            library::get_item_by_canonical_media_path(paths, Path::new(&canonical_path))?
+        {
+            library::add_item_to_localization_workspace(
+                paths,
+                &item.id,
+                "localization_import_reuse",
+                Some(&item.media_path),
+            )?;
+            return enqueue_completed_import_reuse_job(
+                paths,
+                canonical_path,
+                item,
+                add_to_localization_workspace,
+                apply_batch_on_import,
+            );
+        }
+    }
+
+    let params_json = serde_json::to_string(&ImportLocalParams {
+        path: canonical_path,
+        add_to_localization_workspace,
+        apply_batch_on_import,
+        reuse_existing_item: false,
+        duplicate_of_item_id: None,
+    })?;
+    let batch_id = if apply_batch_on_import {
+        Some(Uuid::new_v4().to_string())
+    } else {
+        None
+    };
+    enqueue_with_type_item_and_batch_id(paths, JobType::ImportLocal, params_json, None, batch_id)
 }
 
 pub fn enqueue_install_phase2_packs_v1(paths: &AppPaths) -> Result<JobRow> {
@@ -2429,6 +2615,14 @@ pub fn cancel_job(paths: &AppPaths, job_id: &str) -> Result<()> {
     let conn = db::open(paths)?;
     db::migrate(&conn)?;
 
+    let job_context: Option<(String, Option<String>)> = conn
+        .query_row(
+            "SELECT type, batch_id FROM job WHERE id=?1",
+            params![job_id],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .ok();
+
     let updated = conn.execute(
         "UPDATE job SET status=?1, finished_at_ms=?2 WHERE id=?3 AND status IN (?4, ?5)",
         params![
@@ -2442,6 +2636,26 @@ pub fn cancel_job(paths: &AppPaths, job_id: &str) -> Result<()> {
 
     if updated == 0 {
         return Ok(());
+    }
+
+    if let Some((job_type, Some(batch_id))) = job_context {
+        if job_type == JobType::ImportLocal.as_str() && !batch_id.trim().is_empty() {
+            conn.execute(
+                r#"
+UPDATE job
+SET status=?1, finished_at_ms=?2
+WHERE batch_id=?3 AND id<>?4 AND status IN (?5, ?6)
+"#,
+                params![
+                    JobStatus::Canceled.as_str(),
+                    now_ms(),
+                    batch_id,
+                    job_id,
+                    JobStatus::Queued.as_str(),
+                    JobStatus::Running.as_str()
+                ],
+            )?;
+        }
     }
 
     remove_job_cookie_secret(paths, job_id);
@@ -3186,9 +3400,20 @@ fn execute_job(paths: &AppPaths, job_id: &str, type_str: &str, params_json: &str
                 "import_local_begin",
                 serde_json::json!({ "path": p.path }),
             )?;
+            set_progress(paths, job_id, 0.15)?;
+            log_line(
+                paths,
+                job_id,
+                "info",
+                "import_local_metadata_begin",
+                serde_json::json!({
+                    "path": p.path,
+                    "stage": "metadata_probe_and_thumbnail",
+                }),
+            )?;
 
             let item = library::import_local_file(paths, Path::new(&p.path))?;
-            set_progress(paths, job_id, 1.0)?;
+            set_progress(paths, job_id, 0.75)?;
 
             // Associate created item id.
             let conn = db::open(paths)?;
@@ -3198,7 +3423,23 @@ fn execute_job(paths: &AppPaths, job_id: &str, type_str: &str, params_json: &str
                 params![item.id, job_id],
             )?;
 
+            if is_canceled(paths, job_id)? {
+                log_line(
+                    paths,
+                    job_id,
+                    "info",
+                    "import_local_canceled_after_item_handoff",
+                    serde_json::json!({
+                        "item_id": item.id,
+                        "media_path": item.media_path,
+                        "downstream_jobs_queued": false,
+                    }),
+                )?;
+                return Ok(());
+            }
+
             if p.add_to_localization_workspace {
+                set_progress(paths, job_id, 0.85)?;
                 library::add_item_to_localization_workspace(
                     paths,
                     &item.id,
@@ -3206,6 +3447,7 @@ fn execute_job(paths: &AppPaths, job_id: &str, type_str: &str, params_json: &str
                     Some(&item.media_path),
                 )?;
             }
+            set_progress(paths, job_id, 0.95)?;
 
             log_line(
                 paths,
@@ -3218,6 +3460,21 @@ fn execute_job(paths: &AppPaths, job_id: &str, type_str: &str, params_json: &str
                 }),
             )?;
 
+            if is_canceled(paths, job_id)? {
+                log_line(
+                    paths,
+                    job_id,
+                    "info",
+                    "import_local_canceled_before_downstream",
+                    serde_json::json!({
+                        "item_id": item.id,
+                        "media_path": item.media_path,
+                        "downstream_jobs_queued": false,
+                    }),
+                )?;
+                return Ok(());
+            }
+
             // Optional: batch-on-import automation (local-only; off by default).
             let rules = config::load_batch_on_import_rules(paths).unwrap_or_default();
             let any_enabled = rules.auto_asr
@@ -3226,7 +3483,10 @@ fn execute_job(paths: &AppPaths, job_id: &str, type_str: &str, params_json: &str
                 || rules.auto_diarize
                 || rules.auto_dub_preview;
             if any_enabled && p.apply_batch_on_import {
-                let batch_id = Some(Uuid::new_v4().to_string());
+                let batch_id = job_batch_id(paths, job_id)
+                    .ok()
+                    .flatten()
+                    .or_else(|| Some(Uuid::new_v4().to_string()));
                 log_line(
                     paths,
                     job_id,
@@ -14859,6 +15119,117 @@ EOF
         };
         let text = prepare_tts_text("Final round starts now", &settings);
         assert_eq!(text, "Final round starts now!");
+    }
+
+    #[test]
+    fn enqueue_localization_import_reuses_active_same_path_job() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let paths = AppPaths::new(dir.path().to_path_buf());
+        db::ensure_schema(&paths).expect("schema");
+        let media_path = dir.path().join("queen.mp4");
+        std::fs::write(&media_path, b"media").expect("media");
+
+        let first = enqueue_import_local(
+            &paths,
+            media_path.to_string_lossy().to_string(),
+            true,
+            false,
+        )
+        .expect("first import");
+        let second = enqueue_import_local(
+            &paths,
+            media_path.to_string_lossy().to_string(),
+            true,
+            false,
+        )
+        .expect("second import");
+
+        assert_eq!(first.id, second.id);
+        let jobs = list_jobs(&paths, 20, 0).expect("jobs");
+        assert_eq!(jobs.len(), 1);
+    }
+
+    #[test]
+    fn enqueue_localization_import_reuses_existing_workspace_item() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let paths = AppPaths::new(dir.path().to_path_buf());
+        db::ensure_schema(&paths).expect("schema");
+        let media_path = dir.path().join("queen.mp4");
+        std::fs::write(&media_path, b"media").expect("media");
+        let canonical = media_path.canonicalize().expect("canonical");
+
+        let conn = db::open(&paths).expect("open");
+        db::migrate(&conn).expect("migrate");
+        conn.execute(
+            "INSERT INTO library_item (id, created_at_ms, source_type, source_uri, title, media_path) VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+            params![
+                "item-1",
+                now_ms(),
+                "local_file",
+                canonical.to_string_lossy().to_string(),
+                "Queen",
+                canonical.to_string_lossy().to_string()
+            ],
+        )
+        .expect("insert item");
+
+        let job = enqueue_import_local(
+            &paths,
+            media_path.to_string_lossy().to_string(),
+            true,
+            false,
+        )
+        .expect("reuse import");
+
+        assert_eq!(job.status, JobStatus::Succeeded);
+        assert_eq!(job.item_id.as_deref(), Some("item-1"));
+        let params: ImportLocalParams = serde_json::from_str(&job.params_json).expect("params");
+        assert!(params.reuse_existing_item);
+        assert_eq!(params.duplicate_of_item_id.as_deref(), Some("item-1"));
+
+        let workspace_items =
+            library::list_localization_workspace_items(&paths, 10, 0).expect("workspace");
+        assert_eq!(workspace_items.len(), 1);
+        assert_eq!(workspace_items[0].id, "item-1");
+    }
+
+    #[test]
+    fn cancel_import_local_propagates_to_same_batch_children() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let paths = AppPaths::new(dir.path().to_path_buf());
+        db::ensure_schema(&paths).expect("schema");
+        let media_path = dir.path().join("queen.mp4");
+        std::fs::write(&media_path, b"media").expect("media");
+
+        let import =
+            enqueue_import_local(&paths, media_path.to_string_lossy().to_string(), true, true)
+                .expect("import");
+        let batch_id = import.batch_id.clone().expect("batch id");
+        seed_item_only(&paths, "item-1", "Item 1");
+        let child = enqueue_with_type_item_and_batch_id(
+            &paths,
+            JobType::AsrLocal,
+            serde_json::to_string(&AsrLocalParams {
+                item_id: "item-1".to_string(),
+                lang: None,
+                model_id: "whispercpp-tiny".to_string(),
+                batch_on_import: true,
+                pipeline: None,
+            })
+            .expect("params"),
+            Some("item-1".to_string()),
+            Some(batch_id),
+        )
+        .expect("child");
+
+        cancel_job(&paths, &import.id).expect("cancel");
+        let jobs = list_jobs(&paths, 20, 0).expect("jobs");
+        let child_status = jobs
+            .iter()
+            .find(|job| job.id == child.id)
+            .map(|job| job.status.clone())
+            .expect("child row");
+        assert_eq!(child_status, JobStatus::Canceled);
     }
 
     #[test]

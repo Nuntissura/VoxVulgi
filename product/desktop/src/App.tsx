@@ -107,15 +107,35 @@ type PendingImportJobRow = {
 };
 
 type HomeItemOutputs = {
+  source_media_path?: string;
+  source_media_exists?: boolean;
   derived_item_dir: string;
+  source_track_count?: number;
+  source_usable_segment_count?: number;
+  latest_source_track_path?: string | null;
+  translated_en_track_count?: number;
+  translated_en_usable_segment_count?: number;
+  translated_en_speaker_count?: number;
+  latest_translated_en_track_path?: string | null;
   mix_dub_preview_v1_wav_path: string;
   mix_dub_preview_v1_wav_exists: boolean;
   mux_dub_preview_v1_mp4_path: string;
   mux_dub_preview_v1_mp4_exists: boolean;
+  export_pack_v1_zip_path?: string;
+  export_pack_v1_zip_exists?: boolean;
+  terminal_state?: string;
+  terminal_summary?: string;
+  terminal_detail?: string;
+  terminal_stage_label?: string | null;
+  terminal_progress?: number | null;
+  terminal_error?: string | null;
+  deliverable_path?: string | null;
+  deliverable_exists?: boolean;
 };
 
 type RecentLocalizationItemStatus = {
   item_id: string;
+  state: string | null;
   summary: string;
   detail: string;
   running: boolean;
@@ -159,6 +179,16 @@ type LocalizationNavRequest = {
   sectionId: LocalizationSectionId | null;
   nonce: number;
 };
+
+type AgentNavigatePayload =
+  | AppPage
+  | {
+      page?: AppPage;
+      item_id?: string | null;
+      itemId?: string | null;
+      section_id?: LocalizationSectionId | null;
+      sectionId?: LocalizationSectionId | null;
+    };
 
 type ResizeDirection = "East" | "North" | "NorthEast" | "NorthWest" | "South" | "SouthEast" | "SouthWest" | "West";
 type ShellWindowMode = "floating" | "maximized" | "fullscreen";
@@ -308,9 +338,14 @@ function inferViewportShellMode(): ShellWindowMode {
 function localizationHomeStateLabel(status: RecentLocalizationItemStatus | null | undefined): string {
   if (!status) return "Loading";
   if (status.running) return "Running";
-  if (status.preview_mp4_path) return "Preview ready";
+  if (status.state === "export_ready") return "Export ready";
+  if (status.state === "preview_ready" || status.preview_mp4_path) return "Preview ready";
+  if (status.state === "dub_audio_ready") return "Dub audio ready";
+  if (status.state === "speaker_labels_ready") return "Speakers ready";
+  if (status.state === "translation_ready") return "Translation ready";
+  if (status.state === "captions_ready") return "Captions ready";
   if (status.last_error) return "Needs repair";
-  if (status.summary === "Imported / not started") return "Ready to start";
+  if (status.summary === "Imported / not started" || status.state === "imported_only") return "Ready to start";
   return "Needs next step";
 }
 
@@ -318,17 +353,17 @@ function localizationHomeStateTone(
   status: RecentLocalizationItemStatus | null | undefined,
 ): "running" | "ready" | "pending" {
   if (status?.running) return "running";
-  if (status?.preview_mp4_path) return "ready";
+  if (status?.preview_mp4_path || status?.state === "export_ready") return "ready";
   return "pending";
 }
 
 function localizationHomeNextAction(
   status: RecentLocalizationItemStatus | null | undefined,
 ): LocalizationHomeNextAction {
-  if (status?.preview_mp4_path) {
+  if (status?.state === "export_ready" || status?.preview_mp4_path) {
     return {
       title: "Review the latest deliverable",
-      detail: "A preview MP4 is ready. Open outputs, review the result, and continue into QC or export if needed.",
+      detail: status.detail || "A deliverable is ready. Open outputs, review the result, and continue into QC or export if needed.",
       actionLabel: "Open outputs",
       sectionId: "loc-library",
       actionKind: "open_section",
@@ -354,7 +389,7 @@ function localizationHomeNextAction(
       actionKind: "open_section",
     };
   }
-  if (status?.summary === "Imported / not started") {
+  if (status?.summary === "Imported / not started" || status?.state === "imported_only") {
     return {
       title: "Start the staged localization run",
       detail: "Review the language and start contract, then press Start localization run. Import alone does not begin ASR, translation, or speaker labeling.",
@@ -403,6 +438,23 @@ function summarizeRecentLocalizationItem(
   outputs: HomeItemOutputs | null,
   jobs: HomeJobRow[],
 ): RecentLocalizationItemStatus {
+  if (outputs?.terminal_state && outputs.terminal_summary) {
+    const previewPath = outputs.mux_dub_preview_v1_mp4_exists
+      ? outputs.mux_dub_preview_v1_mp4_path
+      : null;
+    return {
+      item_id: "",
+      state: outputs.terminal_state,
+      summary: outputs.terminal_summary,
+      detail: outputs.terminal_detail ?? outputs.derived_item_dir,
+      running: outputs.terminal_state === "running",
+      working_dir: outputs.derived_item_dir,
+      preview_mp4_path: previewPath,
+      stage_label: outputs.terminal_stage_label ?? null,
+      progress_pct: outputs.terminal_progress ?? null,
+      last_error: outputs.terminal_error ?? null,
+    };
+  }
   const runningJob =
     jobs.find((job) => job.status === "running") ??
     jobs.find((job) => job.status === "queued") ??
@@ -417,6 +469,7 @@ function summarizeRecentLocalizationItem(
   if (outputs?.mux_dub_preview_v1_mp4_exists) {
     return {
       item_id: "",
+      state: "preview_ready",
       summary: "Preview MP4 ready",
       detail: outputs.mux_dub_preview_v1_mp4_path,
       running: false,
@@ -432,6 +485,7 @@ function summarizeRecentLocalizationItem(
     const running = runningJob.status !== "queued";
     return {
       item_id: "",
+      state: "running",
       summary: `${label} ${Math.round((runningJob.progress ?? 0) * 100)}%`,
       detail: running ? "Running" : "Queued",
       running: true,
@@ -446,6 +500,7 @@ function summarizeRecentLocalizationItem(
     const label = localizationJobTypeLabel(failedJob.job_type);
     return {
       item_id: "",
+      state: "failed",
       summary: `Last failed: ${label}`,
       detail: summarizeErrorMessage(failedJob.error),
       running: false,
@@ -461,6 +516,7 @@ function summarizeRecentLocalizationItem(
     const verb = latestJob.status === "canceled" ? "Last canceled" : "Last finished";
     return {
       item_id: "",
+      state: latestJob.status === "canceled" ? "canceled" : "last_finished",
       summary: `${verb}: ${label}`,
       detail: latestJob.status,
       running: false,
@@ -473,6 +529,7 @@ function summarizeRecentLocalizationItem(
   }
   return {
     item_id: "",
+    state: "imported_only",
     summary: "Imported / not started",
     detail: "Open the item to start the staged localization run.",
     running: false,
@@ -583,6 +640,7 @@ function LocalizationStudioHome({
             item.id,
             {
               item_id: item.id,
+              state: null,
               summary: "Status unavailable",
               detail: "Refresh the item inside Localization Studio for current stage/output state.",
               running: false,
@@ -1740,15 +1798,50 @@ function App() {
     const unlisteners: Array<() => void> = [];
     (async () => {
       unlisteners.push(
-        await listen<string>("agent-navigate", (event) => {
-          const target = event.payload as AppPage;
+        await listen<AgentNavigatePayload>("agent-navigate", (event) => {
+          const payload = event.payload;
+          const target = typeof payload === "string" ? payload : payload?.page;
+          if (!target) return;
+          if (target === "localization" && typeof payload !== "string") {
+            const itemId = (payload.item_id ?? payload.itemId ?? "").trim();
+            const sectionId = payload.section_id ?? payload.sectionId ?? null;
+            if (itemId) {
+              openLocalizationItem(itemId, sectionId);
+              return;
+            }
+          }
           switchPage(target);
+          if (typeof payload !== "string") {
+            const sectionId = payload.section_id ?? payload.sectionId ?? null;
+            if (sectionId) {
+              window.setTimeout(() => {
+                document.getElementById(sectionId)?.scrollIntoView({ behavior: "auto", block: "start" });
+              }, 250);
+            }
+          }
         }),
       );
       unlisteners.push(
-        await listen<{ subfolder?: string; label?: string }>("agent-snapshot-request", async (event) => {
+        await listen<{ subfolder?: string; label?: string; scroll_top?: number | null; scrollTop?: number | null }>("agent-snapshot-request", async (event) => {
           try {
             const { subfolder, label } = event.payload ?? {};
+            const scrollTop =
+              typeof event.payload?.scroll_top === "number"
+                ? event.payload.scroll_top
+                : typeof event.payload?.scrollTop === "number"
+                  ? event.payload.scrollTop
+                  : null;
+            if (scrollTop !== null) {
+              const content = document.querySelector<HTMLElement>(".content");
+              if (content) {
+                content.scrollTop = Math.max(0, scrollTop);
+                await new Promise<void>((resolve) => {
+                  window.requestAnimationFrame(() => {
+                    window.requestAnimationFrame(() => resolve());
+                  });
+                });
+              }
+            }
             const canvas = await html2canvas(document.body);
             const base64Data = canvas.toDataURL("image/png");
             const absPath = await invoke<string>("admin_save_snapshot", {

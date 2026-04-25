@@ -117,8 +117,17 @@ type DiagnosticsInfo = {
 
 type ItemOutputs = {
   item_id: string;
+  source_media_path: string;
+  source_media_exists: boolean;
   derived_item_dir: string;
   dub_preview_dir: string;
+  source_track_count: number;
+  source_usable_segment_count: number;
+  latest_source_track_path: string | null;
+  translated_en_track_count: number;
+  translated_en_usable_segment_count: number;
+  translated_en_speaker_count: number;
+  latest_translated_en_track_path: string | null;
   mix_dub_preview_v1_wav_path: string;
   mix_dub_preview_v1_wav_exists: boolean;
   mux_dub_preview_v1_mp4_path: string;
@@ -127,6 +136,14 @@ type ItemOutputs = {
   mux_dub_preview_v1_mkv_exists: boolean;
   export_pack_v1_zip_path: string;
   export_pack_v1_zip_exists: boolean;
+  terminal_state: string;
+  terminal_summary: string;
+  terminal_detail: string;
+  terminal_stage_label: string | null;
+  terminal_progress: number | null;
+  terminal_error: string | null;
+  deliverable_path: string | null;
+  deliverable_exists: boolean;
 };
 
 type ExportedFile = {
@@ -254,6 +271,7 @@ export function JobsPage({ visible = true }: { visible?: boolean }) {
   const pageActive = usePageActivity(visible);
   const [jobs, setJobs] = useState<JobRow[]>([]);
   const [jobItemsById, setJobItemsById] = useState<Record<string, LibraryItem>>({});
+  const [itemOutputsById, setItemOutputsById] = useState<Record<string, ItemOutputs>>({});
   const [youtubeSubscriptionsById, setYoutubeSubscriptionsById] = useState<
     Record<string, YoutubeSubscriptionRow>
   >({});
@@ -345,6 +363,46 @@ export function JobsPage({ visible = true }: { visible?: boolean }) {
     };
   }, [jobs]);
 
+  useEffect(() => {
+    let cancelled = false;
+    const itemIds = Array.from(
+      new Set(
+        jobs
+          .map((job) => job.item_id?.trim())
+          .filter((value): value is string => Boolean(value)),
+      ),
+    );
+    if (!itemIds.length) {
+      setItemOutputsById({});
+      return () => {
+        cancelled = true;
+      };
+    }
+
+    Promise.all(
+      itemIds.map(async (itemId) => {
+        try {
+          return await invoke<ItemOutputs>("item_outputs", { itemId });
+        } catch {
+          return null;
+        }
+      }),
+    ).then((outputs) => {
+      if (cancelled) return;
+      const next: Record<string, ItemOutputs> = {};
+      for (const output of outputs) {
+        if (output) {
+          next[output.item_id] = output;
+        }
+      }
+      setItemOutputsById(next);
+    });
+
+    return () => {
+      cancelled = true;
+    };
+  }, [jobs]);
+
   const hasActive = useMemo(
     () => jobs.some((job) => isActive(job.status)),
     [jobs],
@@ -373,9 +431,15 @@ export function JobsPage({ visible = true }: { visible?: boolean }) {
     for (const job of jobs) {
       const item = job.item_id ? jobItemsById[job.item_id] : undefined;
       if (item) {
+        const outputs = itemOutputsById[item.id];
+        const outcome = outputs?.terminal_summary?.trim();
+        const detail = [
+          outcome ? `Outcome: ${outcome}` : null,
+          item.source_uri || item.media_path || null,
+        ].filter(Boolean).join(" | ");
         next[job.id] = {
           label: item.title || fileNameFromPath(item.media_path) || item.id,
-          detail: item.source_uri || item.media_path || null,
+          detail: detail || null,
           target_path: item.media_path || null,
           target_action_label: "Open media folder",
         };
@@ -421,9 +485,10 @@ export function JobsPage({ visible = true }: { visible?: boolean }) {
 
       if (job.job_type === "import_local") {
         const path = stringOrNull(params?.path);
+        const reusedItemId = stringOrNull(params?.duplicate_of_item_id);
         next[job.id] = {
           label: fileNameFromPath(path) || "Import local file",
-          detail: path,
+          detail: reusedItemId ? `Reused existing Localization item ${reusedItemId}: ${path}` : path,
           target_path: path,
           target_action_label: path ? "Open source" : null,
         };
@@ -442,7 +507,7 @@ export function JobsPage({ visible = true }: { visible?: boolean }) {
       };
     }
     return next;
-  }, [instagramSubscriptionsById, jobItemsById, jobs, youtubeSubscriptionsById]);
+  }, [instagramSubscriptionsById, itemOutputsById, jobItemsById, jobs, youtubeSubscriptionsById]);
 
   useEffect(() => {
     setExpandedGroups((prev) => {
@@ -913,6 +978,7 @@ export function JobsPage({ visible = true }: { visible?: boolean }) {
     const canOpenArtifacts = Boolean(artifactsDir) && job.status !== "queued";
     const canOpenOutputs = Boolean(outputsDir);
     const jobContext = jobContexts[job.id];
+    const itemOutputs = job.item_id ? itemOutputsById[job.item_id] : null;
     const canOpenContextTarget = !job.item_id && Boolean(jobContext?.target_action_label);
 
     return (
@@ -1016,6 +1082,17 @@ export function JobsPage({ visible = true }: { visible?: boolean }) {
           </div>
           {artifactsDir ? (
             <div style={{ marginTop: 6, color: "#4b5563", fontSize: 12, lineHeight: 1.3 }}>
+              {itemOutputs?.terminal_summary ? (
+                <div>
+                  Outcome: {itemOutputs.terminal_summary}
+                  {itemOutputs.deliverable_path ? (
+                    <>
+                      {" "}
+                      Deliverable: <code>{itemOutputs.deliverable_path}</code>
+                    </>
+                  ) : null}
+                </div>
+              ) : null}
               <div>
                 Artifacts: <code>{artifactsDir}</code>
               </div>

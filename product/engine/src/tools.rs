@@ -1789,9 +1789,42 @@ pub fn install_demucs_pack(paths: &AppPaths) -> Result<DemucsPackStatus> {
 #[derive(Debug, Clone, Serialize)]
 pub struct DiarizationPackStatus {
     pub installed: bool,
+    pub state: String,
+    pub repair_required: bool,
+    pub status_detail: String,
     pub resemblyzer_version: Option<String>,
     pub numpy_version: Option<String>,
     pub sklearn_version: Option<String>,
+    pub librosa_version: Option<String>,
+    pub numba_version: Option<String>,
+    pub llvmlite_version: Option<String>,
+    pub webrtcvad_version: Option<String>,
+    pub soundfile_version: Option<String>,
+    pub runtime_validation_error: Option<String>,
+}
+
+fn diarization_runtime_validation_code() -> &'static str {
+    r#"
+import numpy
+import soundfile as sf
+import sklearn.cluster
+import librosa
+import numba
+import llvmlite
+import webrtcvad
+from resemblyzer import VoiceEncoder, preprocess_wav
+VoiceEncoder()
+print("ok")
+"#
+}
+
+fn validate_diarization_runtime(paths: &AppPaths, venv_python: &std::path::Path) -> Result<()> {
+    run_python_checked(
+        paths,
+        venv_python,
+        &["-c", diarization_runtime_validation_code()],
+        "diarization runtime validation failed",
+    )
 }
 
 pub fn diarization_pack_status(paths: &AppPaths) -> DiarizationPackStatus {
@@ -1800,23 +1833,92 @@ pub fn diarization_pack_status(paths: &AppPaths) -> DiarizationPackStatus {
     if !venv_python.exists() {
         return DiarizationPackStatus {
             installed: false,
+            state: "not_installed".to_string(),
+            repair_required: false,
+            status_detail: "Python venv is not prepared.".to_string(),
             resemblyzer_version: None,
             numpy_version: None,
             sklearn_version: None,
+            librosa_version: None,
+            numba_version: None,
+            llvmlite_version: None,
+            webrtcvad_version: None,
+            soundfile_version: None,
+            runtime_validation_error: None,
         };
     }
 
-    let resemblyzer_version = python_module_version(&venv_python, "resemblyzer");
-    let numpy_version = python_module_version(&venv_python, "numpy");
-    let sklearn_version = python_module_version(&venv_python, "sklearn");
+    let resemblyzer_version = python_distribution_version(&venv_python, "Resemblyzer")
+        .or_else(|| python_module_version(&venv_python, "resemblyzer"));
+    let numpy_version = python_distribution_version(&venv_python, "numpy")
+        .or_else(|| python_module_version(&venv_python, "numpy"));
+    let sklearn_version = python_distribution_version(&venv_python, "scikit-learn")
+        .or_else(|| python_module_version(&venv_python, "sklearn"));
+    let librosa_version = python_distribution_version(&venv_python, "librosa")
+        .or_else(|| python_module_version(&venv_python, "librosa"));
+    let numba_version = python_distribution_version(&venv_python, "numba")
+        .or_else(|| python_module_version(&venv_python, "numba"));
+    let llvmlite_version = python_distribution_version(&venv_python, "llvmlite")
+        .or_else(|| python_module_version(&venv_python, "llvmlite"));
+    let webrtcvad_version = python_distribution_version(&venv_python, "webrtcvad")
+        .or_else(|| python_module_version(&venv_python, "webrtcvad"));
+    let soundfile_version = python_distribution_version(&venv_python, "soundfile")
+        .or_else(|| python_module_version(&venv_python, "soundfile"));
 
-    let installed = resemblyzer_version.is_some() && numpy_version.is_some();
+    let package_presence = [
+        resemblyzer_version.as_ref(),
+        numpy_version.as_ref(),
+        sklearn_version.as_ref(),
+        librosa_version.as_ref(),
+        numba_version.as_ref(),
+        llvmlite_version.as_ref(),
+        webrtcvad_version.as_ref(),
+        soundfile_version.as_ref(),
+    ];
+    let any_present = package_presence.iter().any(|value| value.is_some());
+    let all_required_present = package_presence.iter().all(|value| value.is_some());
+    let runtime_validation_error = match validate_diarization_runtime(paths, &venv_python) {
+        Ok(()) => None,
+        Err(err) => Some(err.to_string()),
+    };
+
+    let installed = all_required_present && runtime_validation_error.is_none();
+    let (state, repair_required, status_detail) = if installed {
+        (
+            "installed".to_string(),
+            false,
+            "Diarization runtime imports and VoiceEncoder warmup passed.".to_string(),
+        )
+    } else if any_present {
+        (
+            "broken".to_string(),
+            true,
+            runtime_validation_error.clone().unwrap_or_else(|| {
+                "One or more required diarization packages are missing.".to_string()
+            }),
+        )
+    } else {
+        (
+            "not_installed".to_string(),
+            false,
+            "Diarization packages are not installed in the managed venv.".to_string(),
+        )
+    };
 
     DiarizationPackStatus {
         installed,
+        state,
+        repair_required,
+        status_detail,
         resemblyzer_version,
         numpy_version,
         sklearn_version,
+        librosa_version,
+        numba_version,
+        llvmlite_version,
+        webrtcvad_version,
+        soundfile_version,
+        runtime_validation_error,
     }
 }
 
@@ -1826,7 +1928,26 @@ pub fn install_diarization_pack(paths: &AppPaths) -> Result<DiarizationPackStatu
     let venv_python = python_venv_python_path(paths)?;
     let pin = &pinned_dependency_manifest::manifest().diarization;
 
-    let pinned_args = pip_install_args(&["-m", "pip", "install"], &pin.pinned);
+    let binary_repair_pins = pin
+        .pinned
+        .iter()
+        .filter(|spec| spec.starts_with("numba==") || spec.starts_with("llvmlite=="))
+        .cloned()
+        .collect::<Vec<_>>();
+    if !binary_repair_pins.is_empty() {
+        let binary_repair_args = pip_install_args(
+            &["-m", "pip", "install", "--upgrade", "--only-binary=:all:"],
+            &binary_repair_pins,
+        );
+        let _ = run_python_checked(
+            paths,
+            &venv_python,
+            &binary_repair_args,
+            "pip repair diarization numba/llvmlite pair failed",
+        );
+    }
+
+    let pinned_args = pip_install_args(&["-m", "pip", "install", "--upgrade"], &pin.pinned);
     let install_err = run_python_checked(
         paths,
         &venv_python,
@@ -1840,7 +1961,10 @@ pub fn install_diarization_pack(paths: &AppPaths) -> Result<DiarizationPackStatu
                 &err,
             ));
         }
-        let fallback_args = pip_install_args(&["-m", "pip", "install"], &pin.unpinned_fallback);
+        let fallback_args = pip_install_args(
+            &["-m", "pip", "install", "--upgrade"],
+            &pin.unpinned_fallback,
+        );
         // Best-effort fallback when pinned wheels are unavailable.
         let _ = run_python_checked(
             paths,
@@ -1852,16 +1976,7 @@ pub fn install_diarization_pack(paths: &AppPaths) -> Result<DiarizationPackStatu
 
     vendor_patches::patch_webrtcvad_pkg_resources_import(&venv_python)?;
 
-    // Best-effort warmup to ensure the embedding model weights shipped with the package are usable.
-    let _ = run_python_checked(
-        paths,
-        &venv_python,
-        &[
-            "-c",
-            "from resemblyzer import VoiceEncoder; VoiceEncoder(); print('ok')",
-        ],
-        "diarization warmup failed",
-    );
+    validate_diarization_runtime(paths, &venv_python)?;
 
     let status = diarization_pack_status(paths);
     let _ = generate_pack_integrity_manifest(paths);
@@ -2390,6 +2505,26 @@ fn python_module_version(python: &std::path::Path, module: &str) -> Option<Strin
     })
 }
 
+fn python_distribution_version(python: &std::path::Path, distribution: &str) -> Option<String> {
+    let code = format!("import importlib.metadata as m\nprint(m.version({distribution:?}))\n");
+    let output = crate::cmd::command(python)
+        .args(["-c", &code])
+        .output()
+        .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    let text = String::from_utf8_lossy(&output.stdout);
+    text.lines().find_map(|line| {
+        let trimmed = line.trim();
+        if trimmed.is_empty() {
+            None
+        } else {
+            Some(trimmed.to_string())
+        }
+    })
+}
+
 fn run_python_checked(
     paths: &AppPaths,
     python: &std::path::Path,
@@ -2445,4 +2580,29 @@ fn run_python_checked(
         )));
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn diarization_runtime_validation_exercises_runtime_dependency_chain() {
+        let code = diarization_runtime_validation_code();
+        for required in [
+            "resemblyzer",
+            "VoiceEncoder",
+            "librosa",
+            "numba",
+            "llvmlite",
+            "webrtcvad",
+            "soundfile",
+            "sklearn.cluster",
+        ] {
+            assert!(
+                code.contains(required),
+                "validation script should exercise {required}"
+            );
+        }
+    }
 }

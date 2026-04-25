@@ -150,6 +150,16 @@ mod tests {
         assert_eq!(manifest.yt_dlp_windows.version, "2026.03.03");
         assert_eq!(manifest.portable_python_windows.version, "3.11.9");
         assert_eq!(manifest.deno_windows.version, "2.7.5");
+        assert!(manifest
+            .diarization
+            .pinned
+            .iter()
+            .any(|pin| pin == "numba==0.65.0"));
+        assert!(manifest
+            .diarization
+            .pinned
+            .iter()
+            .any(|pin| pin == "llvmlite==0.47.0"));
         assert_eq!(
             manifest
                 .tts_voice_preserving_local_v1

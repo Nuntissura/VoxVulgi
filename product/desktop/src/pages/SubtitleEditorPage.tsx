@@ -76,8 +76,17 @@ type JobRow = {
 
 type ItemOutputs = {
   item_id: string;
+  source_media_path: string;
+  source_media_exists: boolean;
   derived_item_dir: string;
   dub_preview_dir: string;
+  source_track_count: number;
+  source_usable_segment_count: number;
+  latest_source_track_path: string | null;
+  translated_en_track_count: number;
+  translated_en_usable_segment_count: number;
+  translated_en_speaker_count: number;
+  latest_translated_en_track_path: string | null;
   mix_dub_preview_v1_wav_path: string;
   mix_dub_preview_v1_wav_exists: boolean;
   mux_dub_preview_v1_mp4_path: string;
@@ -86,6 +95,14 @@ type ItemOutputs = {
   mux_dub_preview_v1_mkv_exists: boolean;
   export_pack_v1_zip_path: string;
   export_pack_v1_zip_exists: boolean;
+  terminal_state: string;
+  terminal_summary: string;
+  terminal_detail: string;
+  terminal_stage_label: string | null;
+  terminal_progress: number | null;
+  terminal_error: string | null;
+  deliverable_path: string | null;
+  deliverable_exists: boolean;
 };
 
 type ExportedFile = {
@@ -3146,6 +3163,30 @@ export function SubtitleEditorPage({
         : null,
     );
     push(
+      outputs?.latest_source_track_path
+        ? {
+            id: "latest-source-track",
+            group: "Working",
+            title: "Latest source captions",
+            path: outputs.latest_source_track_path,
+            kind: "file",
+            status_hint: `${outputs.source_usable_segment_count ?? 0} usable source caption segment(s).`,
+          }
+        : null,
+    );
+    push(
+      outputs?.latest_translated_en_track_path
+        ? {
+            id: "latest-translated-en-track",
+            group: "Working",
+            title: "Latest English translation",
+            path: outputs.latest_translated_en_track_path,
+            kind: "file",
+            status_hint: `${outputs.translated_en_usable_segment_count ?? 0} usable English segment(s); ${outputs.translated_en_speaker_count ?? 0} speaker label(s).`,
+          }
+        : null,
+    );
+    push(
       outputs?.derived_item_dir
         ? {
             id: "working-root",
@@ -3279,9 +3320,14 @@ export function SubtitleEditorPage({
     outputs?.derived_item_dir,
     outputs?.dub_preview_dir,
     outputs?.export_pack_v1_zip_path,
+    outputs?.latest_source_track_path,
+    outputs?.latest_translated_en_track_path,
     outputs?.mix_dub_preview_v1_wav_path,
     outputs?.mux_dub_preview_v1_mkv_path,
     outputs?.mux_dub_preview_v1_mp4_path,
+    outputs?.source_usable_segment_count,
+    outputs?.translated_en_speaker_count,
+    outputs?.translated_en_usable_segment_count,
   ]);
 
   const refreshLocalizationOutputStatuses = useCallback(async () => {
@@ -6155,6 +6201,25 @@ export function SubtitleEditorPage({
         <div className="kv" style={{ marginTop: 10 }}>
           <div className="k">Localization root</div>
           <div className="v">{localizationRootStatus?.current_dir ?? "-"}</div>
+        </div>
+        <div className="kv">
+          <div className="k">Run outcome</div>
+          <div className="v">
+            {outputs?.terminal_summary ?? "-"}
+            {outputs?.terminal_stage_label ? ` (${outputs.terminal_stage_label})` : ""}
+          </div>
+        </div>
+        <div className="kv">
+          <div className="k">Outcome detail</div>
+          <div className="v">{outputs?.terminal_detail ?? "-"}</div>
+        </div>
+        <div className="kv">
+          <div className="k">Caption / translation state</div>
+          <div className="v">
+            {outputs
+              ? `${outputs.source_usable_segment_count} source segment(s), ${outputs.translated_en_usable_segment_count} English segment(s), ${outputs.translated_en_speaker_count} speaker label(s)`
+              : "-"}
+          </div>
         </div>
         <div className="kv">
           <div className="k">Resolved deliverables folder</div>
