@@ -1713,35 +1713,48 @@ function App() {
   }, []);
 
   // Agent bridge: listen for headless navigation and snapshot requests (WP-0171)
+  // The disposed-flag pattern is intentional: under React.StrictMode the effect
+  // mounts twice in dev, and `await listen(...)` resolves *after* the first
+  // cleanup runs. Without this guard the second mount races and both effect
+  // instances end up with live listeners — every emit fires twice and every
+  // snapshot/dump is saved twice (WP-0210).
   useEffect(() => {
     const unlisteners: Array<() => void> = [];
+    let disposed = false;
+    const register = async <T,>(event: string, handler: (e: { payload: T }) => void) => {
+      const u = await listen<T>(event, handler);
+      if (disposed) {
+        u();
+        return;
+      }
+      unlisteners.push(u);
+    };
     (async () => {
-      unlisteners.push(
-        await listen<AgentNavigatePayload>("agent-navigate", (event) => {
-          const payload = event.payload;
-          const target = typeof payload === "string" ? payload : payload?.page;
-          if (!target) return;
-          if (target === "localization" && typeof payload !== "string") {
-            const itemId = (payload.item_id ?? payload.itemId ?? "").trim();
-            const sectionId = payload.section_id ?? payload.sectionId ?? null;
-            if (itemId) {
-              openLocalizationItem(itemId, sectionId);
-              return;
-            }
+      await register<AgentNavigatePayload>("agent-navigate", (event) => {
+        const payload = event.payload;
+        const target = typeof payload === "string" ? payload : payload?.page;
+        if (!target) return;
+        if (target === "localization" && typeof payload !== "string") {
+          const itemId = (payload.item_id ?? payload.itemId ?? "").trim();
+          const sectionId = payload.section_id ?? payload.sectionId ?? null;
+          if (itemId) {
+            openLocalizationItem(itemId, sectionId);
+            return;
           }
-          switchPage(target);
-          if (typeof payload !== "string") {
-            const sectionId = payload.section_id ?? payload.sectionId ?? null;
-            if (sectionId) {
-              window.setTimeout(() => {
-                document.getElementById(sectionId)?.scrollIntoView({ behavior: "auto", block: "start" });
-              }, 250);
-            }
+        }
+        switchPage(target);
+        if (typeof payload !== "string") {
+          const sectionId = payload.section_id ?? payload.sectionId ?? null;
+          if (sectionId) {
+            window.setTimeout(() => {
+              document.getElementById(sectionId)?.scrollIntoView({ behavior: "auto", block: "start" });
+            }, 250);
           }
-        }),
-      );
-      unlisteners.push(
-        await listen<{ subfolder?: string; label?: string; scroll_top?: number | null; scrollTop?: number | null }>("agent-snapshot-request", async (event) => {
+        }
+      });
+      await register<{ subfolder?: string; label?: string; scroll_top?: number | null; scrollTop?: number | null }>(
+        "agent-snapshot-request",
+        async (event) => {
           try {
             const { subfolder, label } = event.payload ?? {};
             const scrollTop =
@@ -1774,28 +1787,27 @@ function App() {
             console.error("[Agent Bridge] snapshot capture failed", err);
             await invoke("agent_snapshot_complete", { path: "" }).catch(() => {});
           }
-        }),
+        },
       );
-      unlisteners.push(
-        await listen<{ subfolder?: string; label?: string }>("agent-dump-request", async (event) => {
-          try {
-            const { subfolder, label } = event.payload ?? {};
-            const dump = buildVisualDebuggerDump();
-            const absPath = await invoke<string>("admin_save_dump", {
-              jsonData: JSON.stringify(dump, null, 2),
-              subfolder: subfolder || null,
-              label: label || null,
-            });
-            await invoke("agent_dump_complete", { path: absPath });
-          } catch (err) {
-            // eslint-disable-next-line no-console
-            console.error("[Agent Bridge] dump capture failed", err);
-            await invoke("agent_dump_complete", { path: "" }).catch(() => {});
-          }
-        }),
-      );
+      await register<{ subfolder?: string; label?: string }>("agent-dump-request", async (event) => {
+        try {
+          const { subfolder, label } = event.payload ?? {};
+          const dump = buildVisualDebuggerDump();
+          const absPath = await invoke<string>("admin_save_dump", {
+            jsonData: JSON.stringify(dump, null, 2),
+            subfolder: subfolder || null,
+            label: label || null,
+          });
+          await invoke("agent_dump_complete", { path: absPath });
+        } catch (err) {
+          // eslint-disable-next-line no-console
+          console.error("[Agent Bridge] dump capture failed", err);
+          await invoke("agent_dump_complete", { path: "" }).catch(() => {});
+        }
+      });
     })();
     return () => {
+      disposed = true;
       for (const u of unlisteners) u();
     };
   }, []);

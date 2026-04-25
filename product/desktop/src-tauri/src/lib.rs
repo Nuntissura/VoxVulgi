@@ -15,6 +15,7 @@ use tauri_runtime::ResizeDirection as TauriResizeDirection;
 
 static AGENT_APP_HANDLE: OnceLock<tauri::AppHandle> = OnceLock::new();
 static AGENT_BRIDGE_STATE: OnceLock<Arc<Mutex<AgentBridgeInner>>> = OnceLock::new();
+static AGENT_BRIDGE_FILES_DIR: OnceLock<std::path::PathBuf> = OnceLock::new();
 
 #[derive(Debug, Default)]
 struct AgentBridgeInner {
@@ -30,8 +31,9 @@ fn agent_bridge_state() -> &'static Arc<Mutex<AgentBridgeInner>> {
 }
 
 fn spawn_agent_bridge(app_data_dir: &std::path::Path) {
+    let _ = AGENT_BRIDGE_FILES_DIR.set(app_data_dir.to_path_buf());
     let port_file = app_data_dir.join("agent_bridge_port.txt");
-    let port_file_cleanup = port_file.clone();
+    let json_file = app_data_dir.join("agent_bridge.json");
 
     std::thread::spawn(move || {
         let listener = match std::net::TcpListener::bind("127.0.0.1:0") {
@@ -42,9 +44,19 @@ fn spawn_agent_bridge(app_data_dir: &std::path::Path) {
             Ok(addr) => addr.port(),
             Err(_) => return,
         };
-        let _ = std::fs::write(&port_file_cleanup, port.to_string());
+        let _ = std::fs::write(&port_file, port.to_string());
+        // Sidecar with PID + start time so agents can detect a stale port file
+        // (e.g., after a crash) without hitting the network and timing out.
+        let _ = std::fs::write(
+            &json_file,
+            serde_json::json!({
+                "port": port,
+                "pid": std::process::id(),
+                "started_at_ms": now_epoch_ms_i64(),
+            })
+            .to_string(),
+        );
 
-        // Non-blocking accept with 2 second timeout so we can check for shutdown
         let _ = listener.set_nonblocking(false);
 
         for stream in listener.incoming() {
@@ -58,9 +70,13 @@ fn spawn_agent_bridge(app_data_dir: &std::path::Path) {
             }
         }
     });
+}
 
-    // Clean up port file on app exit (best-effort via a Drop guard isn't easy here,
-    // but the port file is harmless if stale — agent checks /health first)
+fn cleanup_agent_bridge_files() {
+    if let Some(dir) = AGENT_BRIDGE_FILES_DIR.get() {
+        let _ = std::fs::remove_file(dir.join("agent_bridge_port.txt"));
+        let _ = std::fs::remove_file(dir.join("agent_bridge.json"));
+    }
 }
 
 fn handle_agent_request(stream: &mut std::net::TcpStream) {
@@ -7028,6 +7044,11 @@ pub fn run() {
             agent_snapshot_complete,
             agent_dump_complete
         ])
-        .run(tauri::generate_context!())
-        .expect("error while running tauri application");
+        .build(tauri::generate_context!())
+        .expect("error while building tauri application")
+        .run(|_app_handle, event| {
+            if let tauri::RunEvent::Exit = event {
+                cleanup_agent_bridge_files();
+            }
+        });
 }

@@ -85,11 +85,19 @@ The app exposes a localhost-only HTTP API so agents can navigate pages, trigger 
 
 ### Discovery
 
-On startup the app writes the bridge port to:
+On startup the app writes two files:
 ```
-%APPDATA%\com.voxvulgi.voxvulgi\agent_bridge_port.txt
+%APPDATA%\com.voxvulgi.voxvulgi\agent_bridge_port.txt   (port number, plain text)
+%APPDATA%\com.voxvulgi.voxvulgi\agent_bridge.json       ({"port", "pid", "started_at_ms"})
 ```
-Read that file to get the port number, then call `http://127.0.0.1:<port>/agent/health` to verify.
+Both are removed on graceful shutdown. After a hard kill the JSON file is **stale** — verify the `pid` is still alive before trusting the port (avoids hanging on a network probe to a dead listener).
+
+Recommended discovery flow for an agent:
+1. Read `agent_bridge.json`. If missing, fall back to `agent_bridge_port.txt`.
+2. If JSON present: confirm the PID is alive (`Get-Process -Id $pid` on Windows). If the PID is dead, treat as stale and stop here.
+3. Probe `http://127.0.0.1:<port>/agent/health` with a **short timeout (≤ 3 seconds)** to distinguish stale-port (timeout) from busy-app (slow but eventually responding).
+
+A timed-out health check on a stale port file is the most common false-negative — always pair the file read with a PID check or a short timeout. (WP-0210)
 
 ### Endpoints
 
