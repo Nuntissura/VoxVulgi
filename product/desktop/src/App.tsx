@@ -2,7 +2,7 @@ import { Suspense, lazy, type ReactNode, useCallback, useEffect, useMemo, useSta
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { getCurrentWindow } from "@tauri-apps/api/window";
-import { open } from "@tauri-apps/plugin-dialog";
+import { confirm, open } from "@tauri-apps/plugin-dialog";
 import html2canvas from "html2canvas";
 import "./App.css";
 import { useDesktopActivity, usePageActivity, usePollingLoop } from "./lib/activity";
@@ -144,14 +144,7 @@ type RecentLocalizationItemStatus = {
   stage_label: string | null;
   progress_pct: number | null;
   last_error: string | null;
-};
-
-type LocalizationHomeNextAction = {
-  title: string;
-  detail: string;
-  actionLabel: string;
-  sectionId: LocalizationSectionId | null;
-  actionKind: "open_editor" | "open_section" | "start_run" | "refresh_recent";
+  failed_jobs_count: number;
 };
 
 type LocalizationRunQueueSummary = {
@@ -357,56 +350,6 @@ function localizationHomeStateTone(
   return "pending";
 }
 
-function localizationHomeNextAction(
-  status: RecentLocalizationItemStatus | null | undefined,
-): LocalizationHomeNextAction {
-  if (status?.state === "export_ready" || status?.preview_mp4_path) {
-    return {
-      title: "Review the latest deliverable",
-      detail: status.detail || "A deliverable is ready. Open outputs, review the result, and continue into QC or export if needed.",
-      actionLabel: "Open outputs",
-      sectionId: "loc-library",
-      actionKind: "open_section",
-    };
-  }
-  if (status?.running) {
-    return {
-      title: "Track the active run",
-      detail: `${status.summary}. Use the run surface to watch the current stage and respond to checkpoints.`,
-      actionLabel: "Open run controls",
-      sectionId: "loc-run",
-      actionKind: "open_section",
-    };
-  }
-  if (status?.last_error || (status?.summary ?? "").startsWith("Last failed")) {
-    return {
-      title: "Repair the current run",
-      detail:
-        status?.detail ||
-        "Open the run surface to inspect the failed stage and continue from the current checkpoint.",
-      actionLabel: "Open run controls",
-      sectionId: "loc-run",
-      actionKind: "open_section",
-    };
-  }
-  if (status?.summary === "Imported / not started" || status?.state === "imported_only") {
-    return {
-      title: "Start the staged localization run",
-      detail: "Review the language and start contract, then press Start localization run. Import alone does not begin ASR, translation, or speaker labeling.",
-      actionLabel: "Start localization run",
-      sectionId: null,
-      actionKind: "start_run",
-    };
-  }
-  return {
-    title: "Continue the current item",
-    detail: "Use the current item to continue the staged path through outputs, QC, and advanced tools.",
-    actionLabel: "Open current item",
-    sectionId: null,
-    actionKind: "open_editor",
-  };
-}
-
 function parseStoredPage(raw: string | null): AppPage {
   switch (raw) {
     case "localization":
@@ -438,6 +381,7 @@ function summarizeRecentLocalizationItem(
   outputs: HomeItemOutputs | null,
   jobs: HomeJobRow[],
 ): RecentLocalizationItemStatus {
+  const failedJobsCount = jobs.filter((job) => job.status === "failed").length;
   if (outputs?.terminal_state && outputs.terminal_summary) {
     const previewPath = outputs.mux_dub_preview_v1_mp4_exists
       ? outputs.mux_dub_preview_v1_mp4_path
@@ -453,6 +397,7 @@ function summarizeRecentLocalizationItem(
       stage_label: outputs.terminal_stage_label ?? null,
       progress_pct: outputs.terminal_progress ?? null,
       last_error: outputs.terminal_error ?? null,
+      failed_jobs_count: failedJobsCount,
     };
   }
   const runningJob =
@@ -478,6 +423,7 @@ function summarizeRecentLocalizationItem(
       stage_label: "Mux preview MP4",
       progress_pct: 1,
       last_error: null,
+      failed_jobs_count: failedJobsCount,
     };
   }
   if (runningJob) {
@@ -494,6 +440,7 @@ function summarizeRecentLocalizationItem(
       stage_label: label,
       progress_pct: runningJob.progress ?? 0,
       last_error: null,
+      failed_jobs_count: failedJobsCount,
     };
   }
   if (failedJob) {
@@ -509,6 +456,7 @@ function summarizeRecentLocalizationItem(
       stage_label: label,
       progress_pct: typeof failedJob.progress === "number" ? failedJob.progress : null,
       last_error: failedJob.error ?? "No error detail recorded.",
+      failed_jobs_count: failedJobsCount,
     };
   }
   if (latestJob) {
@@ -525,6 +473,7 @@ function summarizeRecentLocalizationItem(
       stage_label: label,
       progress_pct: latestJob.status === "succeeded" ? 1 : null,
       last_error: null,
+      failed_jobs_count: failedJobsCount,
     };
   }
   return {
@@ -538,6 +487,7 @@ function summarizeRecentLocalizationItem(
     stage_label: "Ready to start",
     progress_pct: null,
     last_error: null,
+    failed_jobs_count: failedJobsCount,
   };
 }
 
@@ -649,12 +599,14 @@ function LocalizationStudioHome({
               stage_label: null,
               progress_pct: null,
               last_error: null,
+              failed_jobs_count: 0,
             } satisfies RecentLocalizationItemStatus,
           ] as const;
         }
       }),
     );
-    setRecentItemStatuses(Object.fromEntries(pairs));
+    if (pairs.length === 0) return;
+    setRecentItemStatuses((prev) => ({ ...prev, ...Object.fromEntries(pairs) }));
   }, []);
 
   useEffect(() => {
@@ -666,7 +618,15 @@ function LocalizationStudioHome({
   usePollingLoop(
     async () => {
       const items = await refreshRecentItems();
-      await refreshRecentItemStatuses(items);
+      const pendingImport = Boolean(pendingImportPath) || Boolean(pendingImportJob);
+      // While an import is in flight, refresh the full set so the new item's status appears
+      // as soon as it shows up. Otherwise only re-fetch items whose status can plausibly
+      // have changed (currently running) — keeps per-tick IPC bounded under heavy host load.
+      const targets = pendingImport
+        ? items
+        : items.filter((item) => recentItemStatuses[item.id]?.running);
+      if (targets.length === 0) return;
+      await refreshRecentItemStatuses(targets);
     },
     {
       enabled:
@@ -797,6 +757,48 @@ function LocalizationStudioHome({
     }
   }
 
+  async function clearFailedRunsForItem(itemId: string, itemTitle: string) {
+    const purgeArtifacts = await confirm(
+      `Also remove orphan working artifacts for "${itemTitle || "this item"}"? Successful runs and deliverables are never touched.`,
+      { title: "Clear failed runs", okLabel: "Yes, also clean artifacts", cancelLabel: "No, keep artifacts" },
+    );
+    setBusy(true);
+    setError(null);
+    setNotice(null);
+    try {
+      const summary = await invoke<{
+        item_id: string;
+        removed_jobs: number;
+        removed_log_files: number;
+        removed_artifact_dirs: number;
+      }>("jobs_clear_failed_for_item", {
+        itemId,
+        options: {
+          remove_log_files: true,
+          purge_orphan_artifacts: purgeArtifacts,
+        },
+      });
+      setNotice(
+        summary.removed_jobs > 0
+          ? `Cleared ${summary.removed_jobs} failed run(s)${summary.removed_artifact_dirs > 0 ? ` and ${summary.removed_artifact_dirs} orphan artifact folder(s)` : ""}.`
+          : "No failed runs to clear.",
+      );
+      void diagnosticsTrace("localization_home_clear_failed", {
+        item_id: itemId,
+        removed_jobs: summary.removed_jobs,
+        removed_log_files: summary.removed_log_files,
+        removed_artifact_dirs: summary.removed_artifact_dirs,
+        purge_orphan_artifacts: purgeArtifacts,
+      });
+      const items = await refreshRecentItems();
+      await refreshRecentItemStatuses(items);
+    } catch (e) {
+      setError(String(e));
+    } finally {
+      setBusy(false);
+    }
+  }
+
   function handleDrop(e: React.DragEvent) {
     e.preventDefault();
     setDragOver(false);
@@ -849,18 +851,6 @@ function LocalizationStudioHome({
     return Boolean(status) && !status.running && !status.preview_mp4_path;
   }).length;
   const uiBusy = busy || localizationRunBusy;
-  const pendingImportProgressLabel = pendingImportJob
-    ? `${Math.round((pendingImportJob.progress ?? 0) * 100)}%`
-    : null;
-  const nextAction = pendingImportPath
-    ? {
-        title: "Wait for import handoff",
-        detail: `Queued import for ${fileNameFromPath(pendingImportPath)}.${pendingImportProgressLabel ? ` Current import progress: ${pendingImportProgressLabel}.` : ""} Localization will stay idle until you press Start localization run.`,
-        actionLabel: "Refresh recent items",
-        sectionId: null,
-        actionKind: "refresh_recent",
-      }
-    : localizationHomeNextAction(currentHomeStatus);
 
   return (
     <div
@@ -1035,181 +1025,6 @@ function LocalizationStudioHome({
                   </button>
                 </>
               )}
-            </div>
-          </div>
-          <div className="loc-home-orientation-grid">
-            <div className="card loc-home-focus-card">
-              <div className="loc-home-eyebrow">Now</div>
-              <h3 className="loc-home-focus-title">
-                {currentHomeItem?.title || "No current localization item"}
-              </h3>
-              <div className="loc-home-support">
-                {currentHomeItem
-                  ? currentHomeStatus?.summary ?? "Loading current item status..."
-                  : "Import local media to create the current Localization workspace item."}
-              </div>
-              <div className="loc-home-focus-detail">
-                {currentHomeItem
-                  ? currentHomeStatus?.detail ??
-                    "Open the current item to continue the staged localization workflow."
-                  : "Localization Studio should keep the current working item obvious from the first screen."}
-              </div>
-              {currentHomeItem ? (
-                <>
-                  <LocalizationStatusMeter status={currentHomeStatus} />
-                  <div className="loc-home-path">
-                    <code>{currentHomeItem.media_path}</code>
-                  </div>
-                  <div className="row" style={{ marginTop: 0, flexWrap: "wrap" }}>
-                    <button
-                      type="button"
-                      disabled={uiBusy || currentHomeStatus?.running || !!pendingImportPath}
-                      onClick={() => void startLocalizationRun(currentHomeItem.id)}
-                    >
-                      Start localization run
-                    </button>
-                    <button
-                      type="button"
-                      disabled={uiBusy}
-                      onClick={() => onOpenEditor(currentHomeItem.id)}
-                    >
-                      Open current item
-                    </button>
-                    <button
-                      type="button"
-                      disabled={uiBusy}
-                      onClick={() => onOpenEditorSection(currentHomeItem.id, "loc-run")}
-                    >
-                      Run controls
-                    </button>
-                    <button type="button" disabled={uiBusy} onClick={onOpenJobs}>
-                      Jobs/Queue
-                    </button>
-                  </div>
-                </>
-              ) : (
-                <div className="row" style={{ marginTop: 0, flexWrap: "wrap" }}>
-                  <button
-                    type="button"
-                    disabled={uiBusy}
-                    onClick={() => importLocalMedia().catch(() => undefined)}
-                  >
-                    Import local media
-                  </button>
-                </div>
-              )}
-            </div>
-
-            <div className="card loc-home-focus-card">
-              <div className="loc-home-eyebrow">Next</div>
-              <h3 className="loc-home-focus-title">{nextAction.title}</h3>
-              <div className="loc-home-support">{nextAction.detail}</div>
-              <div className="loc-home-focus-detail">
-                {currentHomeItem
-                  ? "Keep the next step explicit so the workflow does not feel like a dead end or a hidden background queue."
-                  : "Localization Studio starts here, but import/setup should stay secondary to the actual source-to-output workflow."}
-              </div>
-              <div className="row" style={{ marginTop: 0, flexWrap: "wrap" }}>
-                {pendingImportPath ? (
-                  <button
-                    type="button"
-                    disabled={uiBusy || recentItemsBusy}
-                    onClick={() => {
-                      void refreshRecentItems().then((items) => {
-                        void refreshRecentItemStatuses(items);
-                      });
-                    }}
-                  >
-                    {nextAction.actionLabel}
-                  </button>
-                ) : currentHomeItem ? (
-                  <button
-                    type="button"
-                    disabled={uiBusy || (nextAction.actionKind === "start_run" && currentHomeStatus?.running)}
-                    onClick={() => {
-                      if (nextAction.actionKind === "start_run") {
-                        void startLocalizationRun(currentHomeItem.id);
-                        return;
-                      }
-                      if (nextAction.actionKind === "open_section" && nextAction.sectionId) {
-                        onOpenEditorSection(currentHomeItem.id, nextAction.sectionId);
-                        return;
-                      }
-                      onOpenEditor(currentHomeItem.id);
-                    }}
-                  >
-                    {nextAction.actionLabel}
-                  </button>
-                ) : (
-                  <button
-                    type="button"
-                    disabled={uiBusy}
-                    onClick={() => importLocalMedia().catch(() => undefined)}
-                  >
-                    Import local media
-                  </button>
-                )}
-                {currentHomeItem ? (
-                  <button
-                    type="button"
-                    disabled={uiBusy}
-                    onClick={onOpenJobs}
-                  >
-                    Jobs/Queue
-                  </button>
-                ) : (
-                  <button type="button" disabled={uiBusy} onClick={onOpenVideoArchiver}>
-                    Video Archiver
-                  </button>
-                )}
-              </div>
-            </div>
-
-            <div className="card loc-home-focus-card">
-              <div className="loc-home-eyebrow">Last Output</div>
-              <h3 className="loc-home-focus-title">
-                {latestPreviewItem?.title || "No preview deliverable yet"}
-              </h3>
-              <div className="loc-home-support">
-                {latestPreviewStatus?.preview_mp4_path
-                  ? "Latest preview MP4 is ready from the current Localization workspace."
-                  : currentHomeStatus?.working_dir
-                    ? "No preview MP4 yet, but the working folder is already available."
-                    : "Preview/deliverable state will appear here as soon as the staged run produces outputs."}
-              </div>
-              <div className="loc-home-focus-detail">
-                {latestPreviewStatus?.preview_mp4_path ??
-                  latestPreviewStatus?.working_dir ??
-                  currentHomeStatus?.working_dir ??
-                  localizationRoot?.current_dir ??
-                  "-"}
-              </div>
-              <div className="row" style={{ marginTop: 0, flexWrap: "wrap" }}>
-                <button
-                  type="button"
-                  disabled={busy || !latestPreviewStatus?.preview_mp4_path}
-                  onClick={() => {
-                    openPathBestEffort(latestPreviewStatus?.preview_mp4_path ?? "").catch(
-                      () => undefined,
-                    );
-                  }}
-                >
-                  Open latest preview
-                </button>
-                <button
-                  type="button"
-                  disabled={
-                    busy || !(latestPreviewStatus?.working_dir ?? currentHomeStatus?.working_dir)
-                  }
-                  onClick={() => {
-                    revealPath(
-                      latestPreviewStatus?.working_dir ?? currentHomeStatus?.working_dir ?? "",
-                    ).catch(() => undefined);
-                  }}
-                >
-                  Open working folder
-                </button>
-              </div>
             </div>
           </div>
           <div className="loc-home-layout">
@@ -1664,6 +1479,21 @@ function LocalizationStudioHome({
                           }}
                         >
                           Preview MP4
+                        </button>
+                        <button
+                          type="button"
+                          disabled={uiBusy || !status || status.failed_jobs_count <= 0}
+                          title={
+                            status && status.failed_jobs_count > 0
+                              ? `Clear ${status.failed_jobs_count} failed run(s) for this item`
+                              : "No failed runs to clear"
+                          }
+                          onClick={() => {
+                            void clearFailedRunsForItem(item.id, item.title || "Untitled media");
+                          }}
+                        >
+                          Clear failed runs
+                          {status && status.failed_jobs_count > 0 ? ` (${status.failed_jobs_count})` : ""}
                         </button>
                         {isPending ? <span className="loc-home-inline-note">Imported now</span> : null}
                       </div>

@@ -1,6 +1,6 @@
 # VoxVulgi â€” Task Board
 
-Last updated: 2026-04-23
+Last updated: 2026-04-25
 
 This is the single source of truth for work status.
 
@@ -10,6 +10,7 @@ This is the single source of truth for work status.
 - `IN_PROGRESS` â€” actively being worked on
 - `BLOCKED` â€” waiting on external input
 - `DONE` â€” completed + verified per WP acceptance and `governance/workflow/PROOF_STANDARD.md`
+- `SUPERSEDED` â€” direction retired by a later WP; row kept for traceability and points to the replacement
 
 ## Work packets
 
@@ -167,7 +168,7 @@ This is the single source of truth for work status.
 | WP-0151 | Localization runtime failure analysis and reference strategy | DONE | Codex | Added a research-backed runtime diagnosis and reference-acquisition strategy under `governance/research/localization_pipeline_20260312/`, updated spec/design, and queued assisted speaker-reference recovery as the next practical localization step. |
 | WP-0152 | Assisted speaker-reference extraction and first-dub recovery | DONE | Codex | Localization Studio now generates source-based speaker-reference bundles after diarization, lets operators apply them into the current voice plan, and is proven through the staged Queen smoke under `product/desktop/build_target/tool_artifacts/wp_runs/WP-0152/20260312_130500/`. |
 | WP-0153 | Localization home first-screen contract refresh | DONE | Codex | Spec/design/roadmap now define the home surface as a current-item + next-step + latest-output dashboard with compact shell-status chrome, which grounds the follow-on implementation tranche. |
-| WP-0154 | Localization first-screen hierarchy and shell-status demotion | IN_PROGRESS | Codex | The home surface now includes a `Now / Next / Last Output` orientation layer and generic recovery/startup cards are demoted into compact shell-status chrome; pending live operator validation in the desktop app. |
+| WP-0154 | Localization first-screen hierarchy and shell-status demotion | SUPERSEDED | Codex | The `Now / Next / Last Output` orientation layer was retired by operator feedback; remediation continues under WP-0205. |
 | WP-0155 | Voice clone basics contract and governance refresh | DONE | Codex | Governance now defines the educational-core reusable-voice contract as capture -> apply later -> dub -> verify clone-vs-fallback truth, and splits the follow-on remediation into narrow packets. |
 | WP-0156 | Voice clone truthfulness and fallback disclosure | IN_PROGRESS | Codex | Runtime and operator surfaces are being updated so plain TTS fallback no longer looks like cloned-voice success; explicit clone outcome state is being wired through manifests, reports, and operator-facing benchmark/current-item surfaces. |
 | WP-0157 | Reusable voice capture and apply first-run flow | IN_PROGRESS | Codex | First slice landed: Localization Studio now exposes a top-level reusable-voice basics lane for choosing a speaker, capturing refs, saving reusable voice memory, applying saved voice, and continuing the dub without detouring through the advanced asset surfaces. |
@@ -218,3 +219,7 @@ This is the single source of truth for work status.
 | WP-0202 | Diarization pack dependency integrity and self-repair | REVIEW | Codex | Pins, runtime validation, Diagnostics repair state, live venv repair, and Queen-media diarization probe completed; proof under `product/desktop/build_target/tool_artifacts/wp_runs/WP-0202/2026-04-25_0315_wp0202_0204/`. |
 | WP-0203 | Localization import cancellation and duplicate queue containment | REVIEW | Codex | Same-path active import reuse, existing-item reuse, batch cancel propagation, and Queen-sample duplicate containment smoke completed; proof under `product/desktop/build_target/tool_artifacts/wp_runs/WP-0203/2026-04-25_0315_wp0202_0204/`. |
 | WP-0204 | Localization terminal truth and deliverable visibility | REVIEW | Codex | Shared terminal outcome contract now feeds Localization home/library and Jobs; Queen item shows failed-before-deliverable truth; proof under `product/desktop/build_target/tool_artifacts/wp_runs/WP-0204/2026-04-25_0315_wp0202_0204/`. |
+| WP-0205 | Localization home dashboard simplification | IN_PROGRESS | Codex | Retire the `Now / Next / Last Output` orientation grid (supersedes WP-0154), trim home polling cost. |
+| WP-0206 | Clear failed localization runs per item | IN_PROGRESS | Codex | Per-item engine + UI action to clear failed run history, default-non-destructive with optional orphan-artifact purge. |
+| WP-0207 | Localization workflow panel as the primary surface | IN_PROGRESS | Codex | Merge `loc-workflow` jump grid + `loc-run` card into one stepper-style Workflow Panel with run controls + per-stage rows + advanced expander; inline stage controls deferred to WP-0208+. |
+| WP-0208 | Localization workflow inline stage controls | IN_PROGRESS | Codex | Pull primary Run button + minimal option pickers into each Workflow Panel stage row so the operator can drive the full pipeline without scrolling to `loc-track`. |

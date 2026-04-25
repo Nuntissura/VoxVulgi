@@ -384,29 +384,6 @@ code {
   flex-wrap: wrap;
 }
 
-.loc-home-orientation-grid {
-  display: grid;
-  grid-template-columns: repeat(3, minmax(0, 1fr));
-  gap: 12px;
-}
-
-.loc-home-focus-card {
-  display: flex;
-  flex-direction: column;
-  gap: 12px;
-}
-
-.loc-home-focus-title {
-  margin: 0;
-  color: #1f2731;
-}
-
-.loc-home-focus-detail {
-  font-size: 0.82rem;
-  color: #42505f;
-  min-height: 2.8em;
-}
-
 .loc-home-support {
   color: #4b5563;
   font-size: 0.9rem;
@@ -1156,10 +1133,6 @@ img {
   }
 
   .loc-home-layout {
-    grid-template-columns: 1fr;
-  }
-
-  .loc-home-orientation-grid {
     grid-template-columns: 1fr;
   }
 

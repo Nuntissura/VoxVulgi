@@ -252,6 +252,27 @@ pub struct JobCleanupSummary {
     pub failed_paths: Vec<JobCleanupFailure>,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct ClearFailedJobsForItemOptions {
+    /// Remove the job log files (`<job_id>.jsonl`) for the cleared rows.
+    /// Default true; set false to keep post-mortem logs around.
+    #[serde(default = "default_true")]
+    pub remove_log_files: bool,
+    /// Remove per-job artifact directories under the app's job-artifacts root for the cleared rows.
+    /// Default false to honor the user-data-preservation rule (non-destructive by default).
+    #[serde(default)]
+    pub purge_orphan_artifacts: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ClearFailedJobsForItemSummary {
+    pub item_id: String,
+    pub removed_jobs: usize,
+    pub removed_log_files: usize,
+    pub removed_artifact_dirs: usize,
+    pub failed_paths: Vec<JobCleanupFailure>,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ItemArtifactRetentionClass {
     pub id: String,
@@ -2859,6 +2880,82 @@ pub fn flush_jobs_cache(
             plan.external_output_dirs.len()
         },
         removed_cache_entries,
+        failed_paths,
+    })
+}
+
+pub fn clear_failed_jobs_for_item(
+    paths: &AppPaths,
+    item_id: &str,
+    options: Option<ClearFailedJobsForItemOptions>,
+) -> Result<ClearFailedJobsForItemSummary> {
+    let item_id = item_id.trim();
+    if item_id.is_empty() {
+        return Err(EngineError::InstallFailed("item_id is empty".to_string()));
+    }
+    let options = options.unwrap_or(ClearFailedJobsForItemOptions {
+        remove_log_files: true,
+        purge_orphan_artifacts: false,
+    });
+
+    let conn = db::open(paths)?;
+    db::migrate(&conn)?;
+
+    let mut stmt = conn.prepare(
+        "SELECT id, logs_path FROM job WHERE item_id=?1 AND status=?2",
+    )?;
+    let failed: Vec<(String, String)> = stmt
+        .query_map(
+            params![item_id, JobStatus::Failed.as_str()],
+            |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)),
+        )?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+    drop(stmt);
+    drop(conn);
+
+    let mut failed_paths: Vec<JobCleanupFailure> = Vec::new();
+    let mut failed_job_ids: HashSet<String> = HashSet::new();
+
+    let mut removed_log_files = 0_usize;
+    if options.remove_log_files {
+        for (job_id, logs_path) in &failed {
+            let log_path = PathBuf::from(logs_path);
+            removed_log_files += remove_job_log_files_detailed(
+                &log_path,
+                &mut failed_paths,
+                &mut failed_job_ids,
+                Some(job_id),
+            );
+        }
+    }
+
+    let mut removed_artifact_dirs = 0_usize;
+    if options.purge_orphan_artifacts {
+        for (job_id, _) in &failed {
+            let artifacts_dir = paths.job_artifacts_dir(job_id);
+            if !artifacts_dir.exists() {
+                continue;
+            }
+            if remove_path_recursively(&artifacts_dir, "job_artifacts", &mut failed_paths).is_ok() {
+                removed_artifact_dirs += 1;
+            } else {
+                failed_job_ids.insert(job_id.clone());
+            }
+        }
+    }
+
+    let removable: Vec<String> = failed
+        .iter()
+        .filter(|(id, _)| !failed_job_ids.contains(id))
+        .map(|(id, _)| id.clone())
+        .collect();
+    let removed_jobs = delete_terminal_jobs_by_ids(paths, &removable)?;
+
+    Ok(ClearFailedJobsForItemSummary {
+        item_id: item_id.to_string(),
+        removed_jobs,
+        removed_log_files,
+        removed_artifact_dirs,
         failed_paths,
     })
 }
@@ -16172,5 +16269,106 @@ EOF
         )
         .expect("code");
         assert_eq!(code, "Cx4Qd9vIBTh");
+    }
+
+    fn seed_job_row(
+        paths: &AppPaths,
+        id: &str,
+        item_id: &str,
+        status: JobStatus,
+    ) {
+        let logs_path = paths
+            .job_logs_dir()
+            .join(format!("{id}.jsonl"))
+            .to_string_lossy()
+            .to_string();
+        let conn = db::open(paths).expect("open db");
+        db::migrate(&conn).expect("migrate");
+        conn.execute(
+            "INSERT INTO job (id, item_id, batch_id, type, status, progress, error, params_json, created_at_ms, started_at_ms, finished_at_ms, logs_path) \
+             VALUES (?1, ?2, NULL, ?3, ?4, 0.0, NULL, '{}', ?5, NULL, ?6, ?7)",
+            params![
+                id,
+                item_id,
+                JobType::AsrLocal.as_str(),
+                status.as_str(),
+                1_i64,
+                if status == JobStatus::Failed { Some(1_i64) } else { None },
+                logs_path,
+            ],
+        )
+        .expect("insert job");
+    }
+
+    #[test]
+    fn clear_failed_jobs_for_item_only_removes_failed_for_that_item() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let paths = AppPaths::new(dir.path().to_path_buf());
+        db::ensure_schema(&paths).expect("schema");
+
+        seed_item_only(&paths, "item-A", "Item A");
+        seed_item_only(&paths, "item-B", "Item B");
+
+        // item-A: 2 failed, 1 succeeded
+        seed_job_row(&paths, "a-fail-1", "item-A", JobStatus::Failed);
+        seed_job_row(&paths, "a-fail-2", "item-A", JobStatus::Failed);
+        seed_job_row(&paths, "a-ok-1", "item-A", JobStatus::Succeeded);
+        // item-B: 1 failed (must be untouched)
+        seed_job_row(&paths, "b-fail-1", "item-B", JobStatus::Failed);
+
+        let summary = clear_failed_jobs_for_item(
+            &paths,
+            "item-A",
+            Some(ClearFailedJobsForItemOptions {
+                remove_log_files: false,
+                purge_orphan_artifacts: false,
+            }),
+        )
+        .expect("clear");
+        assert_eq!(summary.removed_jobs, 2);
+        assert_eq!(summary.removed_artifact_dirs, 0);
+        assert!(summary.failed_paths.is_empty());
+
+        let a_jobs = list_jobs_for_item(&paths, "item-A", 100, 0).expect("list a");
+        assert_eq!(a_jobs.len(), 1);
+        assert_eq!(a_jobs[0].id, "a-ok-1");
+        assert_eq!(a_jobs[0].status.as_str(), JobStatus::Succeeded.as_str());
+
+        let b_jobs = list_jobs_for_item(&paths, "item-B", 100, 0).expect("list b");
+        assert_eq!(b_jobs.len(), 1);
+        assert_eq!(b_jobs[0].id, "b-fail-1");
+        assert_eq!(b_jobs[0].status.as_str(), JobStatus::Failed.as_str());
+    }
+
+    #[test]
+    fn clear_failed_jobs_for_item_purges_orphan_artifacts_when_opted_in() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let paths = AppPaths::new(dir.path().to_path_buf());
+        db::ensure_schema(&paths).expect("schema");
+
+        seed_item_only(&paths, "item-A", "Item A");
+        seed_job_row(&paths, "a-fail-1", "item-A", JobStatus::Failed);
+        seed_job_row(&paths, "a-ok-1", "item-A", JobStatus::Succeeded);
+
+        let failed_artifacts = paths.job_artifacts_dir("a-fail-1");
+        let ok_artifacts = paths.job_artifacts_dir("a-ok-1");
+        std::fs::create_dir_all(&failed_artifacts).expect("failed artifacts dir");
+        std::fs::create_dir_all(&ok_artifacts).expect("ok artifacts dir");
+        std::fs::write(failed_artifacts.join("trace.txt"), "x").expect("write fail artifact");
+        std::fs::write(ok_artifacts.join("output.txt"), "y").expect("write ok artifact");
+
+        let summary = clear_failed_jobs_for_item(
+            &paths,
+            "item-A",
+            Some(ClearFailedJobsForItemOptions {
+                remove_log_files: false,
+                purge_orphan_artifacts: true,
+            }),
+        )
+        .expect("clear");
+        assert_eq!(summary.removed_jobs, 1);
+        assert_eq!(summary.removed_artifact_dirs, 1);
+        assert!(!failed_artifacts.exists());
+        assert!(ok_artifacts.exists());
     }
 }

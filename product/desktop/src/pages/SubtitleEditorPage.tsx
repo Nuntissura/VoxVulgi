@@ -1010,15 +1010,15 @@ const SECTION_HELP: Record<string, { what: string; when: string; steps: string[]
     steps: ["Select an item in Localization Studio", "Check the output table rows for each stage", "Click Open/Reveal to access files on disk"],
   },
   "loc-workflow": {
-    what: "Shows which workflow stages are ready and which need attention. Jump to any section from here.",
-    when: "Before starting a localization run to confirm all prerequisites are met.",
-    steps: ["Review each stage for Ready or Needs attention", "Click a section button to jump directly to it", "Click Refresh readiness to update the status"],
-    concepts: { "Ready": "This stage has everything it needs to run.", "Needs attention": "Missing input — click through to fix it." },
+    what: "The central work surface for Localization Studio. Owns the explicit run controls plus a per-stage stepper showing each pipeline stage with an explainer, status, and direct link to the underlying controls.",
+    when: "Anytime you start, continue, or inspect a localization run. This is the panel to keep open while a run is in flight.",
+    steps: ["Press Start / continue localization run", "Watch each stage row update from Needs attention to Running to Done", "Click Open controls on a stage when you need to adjust something specific", "Open the Advanced expander for benchmark, backend, batch, A/B, QC, and artifact surfaces"],
+    concepts: { "Done": "This stage already has its expected output for the current item.", "Needs attention": "The stage is missing input or hasn't been run yet.", "Running": "A job for this stage is currently active.", "Failed": "The most recent attempt at this stage failed; open the controls to inspect or rerun." },
   },
   "loc-run": {
-    what: "Start or continue the localization pipeline. It advances through stages automatically and pauses at checkpoints that need your input.",
-    when: "When the Workflow Map shows enough stages are ready. The run will queue ASR, translation, diarization, dubbing, mixing, and export as needed.",
-    steps: ["Review readiness in the Workflow Map above", "Click Start / continue localization run", "Watch the stage table update as jobs complete", "When it pauses for missing voice samples, go to Reusable Voice Basics or the Voice Plan section"],
+    what: "The Workflow panel: explicit run controls plus a per-stage stepper with inline pickers and Run buttons for ASR, Translate, Diarize, Voice plan, Dub, Mix, and Mux.",
+    when: "Anytime you start, continue, or inspect a localization run. This is the panel to keep open while a run is in flight.",
+    steps: ["Press Start / continue localization run for an automatic staged run, or use a row's inline Run button to drive a single stage", "Watch each stage row transition Needs attention -> Running -> Done", "Open Reusable Voice Basics for speaker setup when the Voice plan row needs attention", "Open the Advanced expander for benchmark, backend, batch, A/B, QC, and artifact surfaces"],
     concepts: { "Clone status": "Whether the dub used actual voice cloning or fell back to standard text-to-speech.", "Export pack": "A zip containing all outputs (subtitles, audio stems, dubbed video)." },
   },
   "loc-voice-basics": {
@@ -1044,9 +1044,9 @@ const SECTION_HELP: Record<string, { what: string; when: string; steps: string[]
     concepts: { "Mux": "Combining the dubbed audio track with the original video into a single file.", "Stems": "Separated audio layers — speech only, background only, or final mix." },
   },
   "loc-track": {
-    what: "Core job controls for every stage: ASR (speech recognition), translation, speaker labeling, dubbing, audio separation, mixing, and video muxing.",
-    when: "When you need to run individual stages manually instead of using the automatic localization run.",
-    steps: ["Select the track to work with from the dropdown", "Run jobs in order: ASR first, then Translate, then Diarize", "After dubbing: Separate stems, Mix dub, Mux preview", "Adjust mix settings (ducking, loudness) before mixing"],
+    what: "Track switching, segment editing, and the manual/advanced extras (TTS preview variants, stem separation, vocals cleanup, mix-detail tweaks, QC).",
+    when: "When you need to switch tracks, edit subtitle segments, or run the manual extras that aren't part of the staged workflow run.",
+    steps: ["Select the track to work with from the dropdown", "Edit segments below, then Save new version", "Use the Workflow panel above to run the staged pipeline (ASR / Translate / Diarize / Dub / Mix / Mux)", "Use the buttons here only for TTS preview, stem separation, vocals cleanup, or QC variants"],
     concepts: { "ASR": "Automatic Speech Recognition — converts audio to text subtitles.", "Diarization": "Identifying which speaker is talking in each segment.", "Ducking": "Lowering the background volume when dubbed speech plays.", "Source language": "The language spoken in the original media (Japanese or Korean)." },
   },
   "loc-voice-plan": {
@@ -1109,6 +1109,68 @@ const SECTION_HELP: Record<string, { what: string; when: string; steps: string[]
     steps: ["Browse the artifacts table", "Click Play to preview audio", "Click Open or Reveal to find files on disk", "Click Rerun to re-execute a specific job"],
   },
 };
+
+type WorkflowPanelStage = {
+  id: string;
+  title: string;
+  sectionId: string;
+  explainer: string;
+  fallbackDetail: string;
+};
+
+const WORKFLOW_PANEL_STAGES: WorkflowPanelStage[] = [
+  {
+    id: "asr",
+    title: "Captions (ASR)",
+    sectionId: "loc-track",
+    explainer: "Extract source-language captions from the media audio.",
+    fallbackDetail: "Run ASR on the loaded media to create the source subtitle track.",
+  },
+  {
+    id: "translate",
+    title: "Translate to English",
+    sectionId: "loc-track",
+    explainer: "Produce the English subtitle track used for dubbing and benchmarking.",
+    fallbackDetail: "Run Translate -> EN once the source track exists.",
+  },
+  {
+    id: "diarize",
+    title: "Speaker labels (diarization)",
+    sectionId: "loc-track",
+    explainer: "Label which speaker is talking in each segment of the English track.",
+    fallbackDetail: "Run diarization on the English track to enable per-speaker voice planning.",
+  },
+  {
+    id: "voice_plan",
+    title: "Speaker / voice plan",
+    sectionId: "loc-voice-basics",
+    explainer:
+      "For each speaker, capture voice samples or set Standard TTS so the dub knows which voice to use.",
+    fallbackDetail: "Open Reusable Voice Basics or the Voice Plan section to set up speakers.",
+  },
+  {
+    id: "dub",
+    title: "Dub speech generation",
+    sectionId: "loc-track",
+    explainer:
+      "Render the English dub segments with the managed or selected voice-cloning backend.",
+    fallbackDetail: "Run the voice-preserving dub once speakers are planned.",
+  },
+  {
+    id: "mix",
+    title: "Mix dub",
+    sectionId: "loc-track",
+    explainer: "Mix the dubbed speech against the best available background track.",
+    fallbackDetail: "Run Mix dub after the dub artifact is produced.",
+  },
+  {
+    id: "mux",
+    title: "Mux preview MP4",
+    sectionId: "loc-track",
+    explainer: "Produce the preview MP4 deliverable for review and export.",
+    fallbackDetail: "Run Mux preview MP4 once the mixed dub WAV exists.",
+  },
+];
 
 function SectionHelp({ sectionId }: { sectionId: string }) {
   const help = SECTION_HELP[sectionId];
@@ -3369,68 +3431,6 @@ export function SubtitleEditorPage({
   useEffect(() => {
     refreshLocalizationOutputStatuses().catch(() => undefined);
   }, [refreshLocalizationOutputStatuses]);
-
-  const localizationReadinessRows = useMemo(() => {
-    const whisperInstalled = Boolean(
-      modelInventory?.models.some((model) => model.id === "whispercpp-tiny" && model.installed),
-    );
-    const ffmpegReady = Boolean(ffmpegStatus?.ffmpeg_version && ffmpegStatus?.ffprobe_version);
-    return [
-      {
-        title: "Source item",
-        ready: Boolean(item?.media_path),
-        detail: item?.media_path ? "Loaded" : "No media loaded",
-      },
-      {
-        title: "ASR runtime",
-        ready: ffmpegReady && whisperInstalled,
-        detail: ffmpegReady && whisperInstalled
-          ? "FFmpeg + Whisper.cpp ready"
-          : "Need FFmpeg and bundled Whisper.cpp runtime",
-      },
-      {
-        title: "Dub target track",
-        ready: isEnglishLocalizationTrack(currentTrack),
-        detail: isEnglishLocalizationTrack(currentTrack)
-          ? `${currentTrack?.kind}/${currentTrack?.lang} v${currentTrack?.version}`
-          : translatedEnglishTrack
-            ? `Current track is ${currentTrack?.kind ?? "none"}/${currentTrack?.lang ?? "-"}; English track available`
-            : "Run Translate -> EN first",
-      },
-      {
-        title: "Voice dubbing runtime",
-        ready: ffmpegReady && Boolean(neuralPackStatus?.installed) && Boolean(voicePreservingPackStatus?.installed),
-        detail:
-          ffmpegReady && neuralPackStatus?.installed && voicePreservingPackStatus?.installed
-            ? "FFmpeg + Kokoro + OpenVoice ready"
-            : "Need FFmpeg, Neural TTS pack, and Voice-preserving pack",
-      },
-      {
-        title: "Speaker / voice plan",
-        ready: speakersInTrack.length > 0 && voicePlanMissingSpeakers.length === 0,
-        detail:
-          !translatedEnglishTrack
-            ? "Create the English translated track first"
-            : !speakersInTrack.length
-              ? "Run diarization on the English track, then review speaker routing"
-              : voicePlanMissingSpeakers.length
-                ? `Configure references or Standard TTS for: ${voicePlanMissingSpeakers.join(", ")}`
-                : `${speakerReferenceCount} reference clip(s) configured and speaker routing is ready`,
-      },
-    ];
-  }, [
-    currentTrack,
-    ffmpegStatus?.ffmpeg_version,
-    ffmpegStatus?.ffprobe_version,
-    item?.media_path,
-    modelInventory?.models,
-    neuralPackStatus?.installed,
-    speakerReferenceCount,
-    speakersInTrack.length,
-    translatedEnglishTrack,
-    voicePlanMissingSpeakers,
-    voicePreservingPackStatus?.installed,
-  ]);
 
   const advancedLocalizationRows = useMemo(
     () => [
@@ -6307,9 +6307,10 @@ export function SubtitleEditorPage({
         ))}
       </div>
 
-      <div className="card">
+      <div className="card" id="loc-run">
+        <span id="loc-workflow" style={{ position: "absolute" }} />
         <h2 style={{ display: "flex", alignItems: "center", gap: 8 }}>
-          Workflow Map <SectionHelp sectionId="loc-workflow" />
+          Workflow <SectionHelp sectionId="loc-workflow" />
           <label style={{ fontSize: 12, fontWeight: 400, display: "flex", alignItems: "center", gap: 4, marginLeft: "auto" }}>
             <input
               type="checkbox"
@@ -6323,129 +6324,9 @@ export function SubtitleEditorPage({
           </label>
         </h2>
         <div style={{ color: "#4b5563" }}>
-          Localization Studio expects an English translated track for dubbing, benchmarking, and
-          backend comparison. The shipped run contract is staged: ASR, Translate -&gt; EN, speaker
-          labels, speaker/reference planning, dub, mix, and mux. Use this card to confirm readiness
-          and jump to the main working sections quickly.
-        </div>
-        <div style={{ marginTop: 12, display: "flex", flexDirection: "column", gap: 8 }}>
-          {localizationReadinessRows.map((row) => (
-            <div
-              key={row.title}
-              style={{
-                border: "1px solid rgba(255,255,255,0.12)",
-                borderRadius: 10,
-                padding: "10px 12px",
-                display: "flex",
-                justifyContent: "space-between",
-                gap: 12,
-                alignItems: "center",
-                flexWrap: "wrap",
-              }}
-            >
-              <div>
-                <div style={{ fontWeight: 600 }}>{row.title}</div>
-                <div style={{ fontSize: 12, opacity: 0.75 }}>{row.detail}</div>
-              </div>
-              <div style={{ fontSize: 12, fontWeight: 600, color: row.ready ? "#166534" : "#92400e" }}>
-                {row.ready ? "Ready" : "Needs attention"}
-              </div>
-            </div>
-          ))}
-        </div>
-        <div style={{ marginTop: 12, display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(280px, 1fr))", gap: 10 }}>
-          <div>
-            <div style={{ fontWeight: 600, fontSize: 12, textTransform: "uppercase", opacity: 0.6, marginBottom: 4 }}>Captions &amp; Translation</div>
-            <div className="row" style={{ marginTop: 0, flexWrap: "wrap" }}>
-              <button type="button" disabled={busy} onClick={() => scrollToLocalizationSection("loc-track")}>
-                Tracks and core jobs
-              </button>
-              <button type="button" disabled={busy} onClick={() => scrollToLocalizationSection("loc-library")}>
-                Outputs library
-              </button>
-            </div>
-          </div>
-          <div>
-            <div style={{ fontWeight: 600, fontSize: 12, textTransform: "uppercase", opacity: 0.6, marginBottom: 4 }}>Voice &amp; Dubbing</div>
-            <div className="row" style={{ marginTop: 0, flexWrap: "wrap" }}>
-              <button type="button" disabled={busy} onClick={() => scrollToLocalizationSection("loc-voice-basics")}>
-                Reusable voice basics
-              </button>
-              <button type="button" disabled={busy} onClick={() => scrollToLocalizationSection("loc-voice-plan")}>
-                Speaker / voice plan
-              </button>
-              <button type="button" disabled={busy} onClick={() => scrollToLocalizationSection("loc-batch")}>
-                Batch dubbing
-              </button>
-            </div>
-          </div>
-          <div>
-            <div style={{ fontWeight: 600, fontSize: 12, textTransform: "uppercase", opacity: 0.6, marginBottom: 4 }}>Quality &amp; Review</div>
-            <div className="row" style={{ marginTop: 0, flexWrap: "wrap" }}>
-              <button type="button" disabled={busy} onClick={() => scrollToLocalizationSection("loc-ab")}>
-                A/B preview
-              </button>
-              <button type="button" disabled={busy} onClick={() => scrollToLocalizationSection("loc-qc")}>
-                QC report
-              </button>
-              <button type="button" disabled={busy} onClick={() => scrollToLocalizationSection("loc-artifacts")}>
-                Artifacts
-              </button>
-            </div>
-          </div>
-          <div>
-            <div style={{ fontWeight: 600, fontSize: 12, textTransform: "uppercase", opacity: 0.6, marginBottom: 4 }}>Advanced</div>
-            <div className="row" style={{ marginTop: 0, flexWrap: "wrap" }}>
-              <button type="button" disabled={busy} onClick={() => scrollToLocalizationSection("loc-backends")}>
-                Backend strategy
-              </button>
-              <button type="button" disabled={busy} onClick={() => scrollToLocalizationSection("loc-benchmark")}>
-                Benchmark lab
-              </button>
-              <button type="button" disabled={busy} onClick={() => scrollToLocalizationSection("loc-advanced")}>
-                Advanced tools
-              </button>
-            </div>
-          </div>
-        </div>
-        <div className="row" style={{ marginTop: 12, flexWrap: "wrap" }}>
-          <button type="button" disabled={busy} onClick={() => refreshLocalizationReadiness().catch((e) => setError(String(e)))}>
-            Refresh readiness
-          </button>
-          <button
-            type="button"
-            disabled={busy || !translatedEnglishTrack || isEnglishLocalizationTrack(currentTrack)}
-            onClick={() => {
-              if (!translatedEnglishTrack) return;
-              loadTrack(translatedEnglishTrack.id).catch((e) => setError(String(e)));
-            }}
-          >
-            Use translated EN track
-          </button>
-        </div>
-        <details style={{ marginTop: 8 }}>
-          <summary style={{ cursor: "pointer", color: "#4b5563", fontSize: 12 }}>Keyboard shortcuts</summary>
-          <div style={{ marginTop: 6, fontSize: 12, color: "#4b5563", display: "grid", gridTemplateColumns: "auto 1fr", gap: "4px 12px" }}>
-            <kbd style={{ fontFamily: "monospace", background: "rgba(0,0,0,0.06)", padding: "1px 5px", borderRadius: 3 }}>Ctrl+Z</kbd><span>Undo subtitle edit</span>
-            <kbd style={{ fontFamily: "monospace", background: "rgba(0,0,0,0.06)", padding: "1px 5px", borderRadius: 3 }}>Ctrl+Shift+Z</kbd><span>Redo subtitle edit</span>
-            <kbd style={{ fontFamily: "monospace", background: "rgba(0,0,0,0.06)", padding: "1px 5px", borderRadius: 3 }}>Ctrl+Enter</kbd><span>Start / continue localization run</span>
-            <kbd style={{ fontFamily: "monospace", background: "rgba(0,0,0,0.06)", padding: "1px 5px", borderRadius: 3 }}>Ctrl+Shift+E</kbd><span>Export selected outputs</span>
-            <kbd style={{ fontFamily: "monospace", background: "rgba(0,0,0,0.06)", padding: "1px 5px", borderRadius: 3 }}>Ctrl+Shift+R</kbd><span>Refresh readiness</span>
-            <kbd style={{ fontFamily: "monospace", background: "rgba(0,0,0,0.06)", padding: "1px 5px", borderRadius: 3 }}>Ctrl+1</kbd><span>Jump to Track</span>
-            <kbd style={{ fontFamily: "monospace", background: "rgba(0,0,0,0.06)", padding: "1px 5px", borderRadius: 3 }}>Ctrl+2</kbd><span>Jump to Reusable Voice Basics</span>
-            <kbd style={{ fontFamily: "monospace", background: "rgba(0,0,0,0.06)", padding: "1px 5px", borderRadius: 3 }}>Ctrl+3</kbd><span>Jump to Localization Run</span>
-            <kbd style={{ fontFamily: "monospace", background: "rgba(0,0,0,0.06)", padding: "1px 5px", borderRadius: 3 }}>Ctrl+4</kbd><span>Jump to Outputs</span>
-            <kbd style={{ fontFamily: "monospace", background: "rgba(0,0,0,0.06)", padding: "1px 5px", borderRadius: 3 }}>Ctrl+5</kbd><span>Jump to Artifacts</span>
-          </div>
-        </details>
-      </div>
-
-      <div className="card" id="loc-run">
-        <h2>Localization Run <SectionHelp sectionId="loc-run" /></h2>
-        <div style={{ color: "#4b5563" }}>
-          Configure the current item first, then start or continue the full localization run from
-          this card. VoxVulgi decides the next missing stage automatically: ASR, Translate -&gt; EN,
-          speaker labels, speaker/reference planning, or the dubbing pipeline.
+          The shipped localization run is staged: ASR, Translate -&gt; EN, speaker labels,
+          speaker/reference planning, dub, mix, and mux. Start or continue the full run from this
+          panel; jump into a stage's controls only when you need to adjust something specific.
         </div>
         <div className="row" style={{ marginTop: 10, flexWrap: "wrap", alignItems: "center" }}>
           <button type="button" disabled={busy || localizationRunBusy} onClick={enqueueLocalizationRun}>
@@ -6515,26 +6396,271 @@ export function SubtitleEditorPage({
             {activeVoiceCloneTruth.detail ? ` (${activeVoiceCloneTruth.detail})` : ""}.
           </div>
         ) : null}
-        <div className="table-wrap" style={{ marginTop: 12 }}>
-          <table>
-            <thead>
-              <tr>
-                <th>Stage</th>
-                <th>State</th>
-                <th>Detail</th>
-              </tr>
-            </thead>
-            <tbody>
-              {localizationRunStages.map((stage) => (
-                <tr key={stage.id}>
-                  <td>{stage.title}</td>
-                  <td>{stage.ready ? "Ready" : "Pending"}</td>
-                  <td>{stage.detail}</td>
-                </tr>
-              ))}
-            </tbody>
-          </table>
+
+        <div style={{ marginTop: 14, display: "flex", flexDirection: "column", gap: 8 }}>
+          {WORKFLOW_PANEL_STAGES.map((stage, idx) => {
+            const data = localizationRunStages.find((s) => s.id === stage.id);
+            const detail = data?.detail ?? stage.fallbackDetail;
+            const running = (detail ?? "").startsWith("Running ");
+            const lastFailed = (detail ?? "").includes("failed");
+            const chip = data?.ready
+              ? { label: "Done", color: "#166534", bg: "rgba(22,101,52,0.10)" }
+              : running
+                ? { label: "Running", color: "#1d4ed8", bg: "rgba(29,78,216,0.10)" }
+                : lastFailed
+                  ? { label: "Failed", color: "#b91c1c", bg: "rgba(185,28,28,0.10)" }
+                  : { label: "Needs attention", color: "#92400e", bg: "rgba(146,64,14,0.10)" };
+            return (
+              <div
+                key={stage.id}
+                style={{
+                  border: "1px solid rgba(255,255,255,0.12)",
+                  borderRadius: 10,
+                  padding: "10px 12px",
+                  display: "flex",
+                  flexDirection: "column",
+                  gap: 6,
+                }}
+              >
+                <div style={{ display: "flex", alignItems: "center", gap: 10, flexWrap: "wrap" }}>
+                  <div
+                    style={{
+                      fontWeight: 700,
+                      fontSize: 11,
+                      width: 22,
+                      height: 22,
+                      borderRadius: 11,
+                      display: "inline-flex",
+                      alignItems: "center",
+                      justifyContent: "center",
+                      background: "rgba(0,0,0,0.08)",
+                      color: "#374151",
+                    }}
+                  >
+                    {idx + 1}
+                  </div>
+                  <div style={{ fontWeight: 600 }}>{stage.title}</div>
+                  <span
+                    style={{
+                      fontSize: 11,
+                      fontWeight: 600,
+                      padding: "2px 8px",
+                      borderRadius: 999,
+                      color: chip.color,
+                      background: chip.bg,
+                    }}
+                  >
+                    {chip.label}
+                  </span>
+                  <button
+                    type="button"
+                    disabled={busy}
+                    style={{ marginLeft: "auto" }}
+                    onClick={() => scrollToLocalizationSection(stage.sectionId)}
+                  >
+                    Open controls
+                  </button>
+                </div>
+                <div style={{ fontSize: 12, color: "#4b5563" }}>{stage.explainer}</div>
+                <div style={{ fontSize: 12, opacity: 0.75 }}>{detail}</div>
+                <div className="row" style={{ marginTop: 4, flexWrap: "wrap", alignItems: "center", gap: 8 }}>
+                  {stage.id === "asr" ? (
+                    <>
+                      <select
+                        value={asrLang}
+                        disabled={busy}
+                        onChange={(e) => setAsrLang(e.currentTarget.value as typeof asrLang)}
+                        title="Source language"
+                      >
+                        <option value="auto">Source: auto-detect</option>
+                        <option value="ja">Source: Japanese</option>
+                        <option value="ko">Source: Korean</option>
+                      </select>
+                      <button type="button" disabled={busy} onClick={enqueueAsrLocal}>
+                        Run ASR
+                      </button>
+                    </>
+                  ) : null}
+                  {stage.id === "translate" ? (
+                    <>
+                      <select
+                        value={translationStyle}
+                        disabled={busy}
+                        onChange={(e) =>
+                          setTranslationStyle(e.currentTarget.value as typeof translationStyle)
+                        }
+                        title="Translation style"
+                      >
+                        <option value="neutral">Style: neutral</option>
+                        <option value="formal">Style: formal</option>
+                        <option value="informal">Style: informal</option>
+                      </select>
+                      <select
+                        value={honorificMode}
+                        disabled={busy}
+                        onChange={(e) =>
+                          setHonorificMode(e.currentTarget.value as typeof honorificMode)
+                        }
+                        title="Honorific handling"
+                      >
+                        <option value="preserve">Honorifics: keep</option>
+                        <option value="translate">Honorifics: translate</option>
+                        <option value="drop">Honorifics: drop</option>
+                      </select>
+                      <button
+                        type="button"
+                        disabled={busy || !trackId}
+                        onClick={enqueueTranslateEn}
+                        title={!trackId ? "Run ASR first to create a source track" : undefined}
+                      >
+                        Run Translate -&gt; EN
+                      </button>
+                    </>
+                  ) : null}
+                  {stage.id === "diarize" ? (
+                    <>
+                      <select
+                        value={diarizationBackend}
+                        disabled={busy}
+                        onChange={(e) =>
+                          setDiarizationBackend(
+                            e.currentTarget.value as typeof diarizationBackend,
+                          )
+                        }
+                        title="Diarization backend"
+                      >
+                        <option value="baseline">Backend: baseline</option>
+                        <option value="pyannote_byo_v1">Backend: pyannote (BYO)</option>
+                      </select>
+                      <button
+                        type="button"
+                        disabled={busy || !trackId}
+                        onClick={enqueueDiarize}
+                        title={!trackId ? "Run Translate -> EN first" : undefined}
+                      >
+                        Run diarization
+                      </button>
+                    </>
+                  ) : null}
+                  {stage.id === "voice_plan" ? (
+                    <span style={{ fontSize: 12, opacity: 0.75 }}>
+                      Open the voice basics section to capture references or set Standard TTS per
+                      speaker. Run the dub stage once each speaker is covered.
+                    </span>
+                  ) : null}
+                  {stage.id === "dub" ? (
+                    <button
+                      type="button"
+                      disabled={busy || !trackId}
+                      onClick={enqueueDubVoicePreservingV1}
+                      title={!trackId ? "Load the English translated track first" : undefined}
+                    >
+                      Run voice-preserving dub
+                    </button>
+                  ) : null}
+                  {stage.id === "mix" ? (
+                    <button type="button" disabled={busy} onClick={enqueueMixDubPreview}>
+                      Run mix dub
+                    </button>
+                  ) : null}
+                  {stage.id === "mux" ? (
+                    <button type="button" disabled={busy} onClick={enqueueMuxDubPreview}>
+                      Run mux preview MP4
+                    </button>
+                  ) : null}
+                </div>
+              </div>
+            );
+          })}
         </div>
+
+        <details style={{ marginTop: 12 }}>
+          <summary style={{ cursor: "pointer", color: "#4b5563", fontSize: 13, fontWeight: 600 }}>
+            Advanced
+          </summary>
+          <div style={{ marginTop: 8, display: "flex", flexDirection: "column", gap: 8 }}>
+            {advancedLocalizationRows.map((row) => (
+              <div
+                key={row.id}
+                style={{
+                  border: "1px solid rgba(255,255,255,0.12)",
+                  borderRadius: 10,
+                  padding: "10px 12px",
+                  display: "flex",
+                  flexDirection: "column",
+                  gap: 6,
+                }}
+              >
+                <div style={{ display: "flex", alignItems: "center", gap: 10, flexWrap: "wrap" }}>
+                  <div style={{ fontWeight: 600 }}>{row.title}</div>
+                  <span
+                    style={{
+                      fontSize: 11,
+                      fontWeight: 600,
+                      padding: "2px 8px",
+                      borderRadius: 999,
+                      color: row.ready ? "#166534" : "#92400e",
+                      background: row.ready ? "rgba(22,101,52,0.10)" : "rgba(146,64,14,0.10)",
+                    }}
+                  >
+                    {row.ready ? "Ready" : "Needs attention"}
+                  </span>
+                </div>
+                <div style={{ fontSize: 12, color: "#4b5563" }}>{row.detail}</div>
+                <div className="row" style={{ marginTop: 0, flexWrap: "wrap" }}>
+                  {row.buttons.map((button) => (
+                    <button
+                      key={`workflow-${row.id}-${button.label}`}
+                      type="button"
+                      disabled={busy || (!button.sectionId && !button.action)}
+                      onClick={() => {
+                        if (button.sectionId) {
+                          scrollToLocalizationSection(button.sectionId);
+                          return;
+                        }
+                        button.action?.();
+                      }}
+                    >
+                      {button.label}
+                    </button>
+                  ))}
+                </div>
+              </div>
+            ))}
+          </div>
+        </details>
+
+        <div className="row" style={{ marginTop: 12, flexWrap: "wrap" }}>
+          <button type="button" disabled={busy} onClick={() => refreshLocalizationReadiness().catch((e) => setError(String(e)))}>
+            Refresh readiness
+          </button>
+          <button
+            type="button"
+            disabled={busy || !translatedEnglishTrack || isEnglishLocalizationTrack(currentTrack)}
+            onClick={() => {
+              if (!translatedEnglishTrack) return;
+              loadTrack(translatedEnglishTrack.id).catch((e) => setError(String(e)));
+            }}
+          >
+            Use translated EN track
+          </button>
+        </div>
+
+        <details style={{ marginTop: 8 }}>
+          <summary style={{ cursor: "pointer", color: "#4b5563", fontSize: 12 }}>Keyboard shortcuts</summary>
+          <div style={{ marginTop: 6, fontSize: 12, color: "#4b5563", display: "grid", gridTemplateColumns: "auto 1fr", gap: "4px 12px" }}>
+            <kbd style={{ fontFamily: "monospace", background: "rgba(0,0,0,0.06)", padding: "1px 5px", borderRadius: 3 }}>Ctrl+Z</kbd><span>Undo subtitle edit</span>
+            <kbd style={{ fontFamily: "monospace", background: "rgba(0,0,0,0.06)", padding: "1px 5px", borderRadius: 3 }}>Ctrl+Shift+Z</kbd><span>Redo subtitle edit</span>
+            <kbd style={{ fontFamily: "monospace", background: "rgba(0,0,0,0.06)", padding: "1px 5px", borderRadius: 3 }}>Ctrl+Enter</kbd><span>Start / continue localization run</span>
+            <kbd style={{ fontFamily: "monospace", background: "rgba(0,0,0,0.06)", padding: "1px 5px", borderRadius: 3 }}>Ctrl+Shift+E</kbd><span>Export selected outputs</span>
+            <kbd style={{ fontFamily: "monospace", background: "rgba(0,0,0,0.06)", padding: "1px 5px", borderRadius: 3 }}>Ctrl+Shift+R</kbd><span>Refresh readiness</span>
+            <kbd style={{ fontFamily: "monospace", background: "rgba(0,0,0,0.06)", padding: "1px 5px", borderRadius: 3 }}>Ctrl+1</kbd><span>Jump to Track</span>
+            <kbd style={{ fontFamily: "monospace", background: "rgba(0,0,0,0.06)", padding: "1px 5px", borderRadius: 3 }}>Ctrl+2</kbd><span>Jump to Reusable Voice Basics</span>
+            <kbd style={{ fontFamily: "monospace", background: "rgba(0,0,0,0.06)", padding: "1px 5px", borderRadius: 3 }}>Ctrl+3</kbd><span>Jump to Workflow</span>
+            <kbd style={{ fontFamily: "monospace", background: "rgba(0,0,0,0.06)", padding: "1px 5px", borderRadius: 3 }}>Ctrl+4</kbd><span>Jump to Outputs</span>
+            <kbd style={{ fontFamily: "monospace", background: "rgba(0,0,0,0.06)", padding: "1px 5px", borderRadius: 3 }}>Ctrl+5</kbd><span>Jump to Artifacts</span>
+          </div>
+        </details>
       </div>
 
       <div className="card" id="loc-voice-basics">
@@ -6918,21 +7044,18 @@ export function SubtitleEditorPage({
       <div className="card">
         <h2>First Dub Guide <SectionHelp sectionId="loc-first-dub" /></h2>
         <div style={{ color: "#4b5563" }}>
-          Recommended order for a first Japanese/Korean to English dubbed preview:
+          Recommended order for a first Japanese/Korean to English dubbed preview. Each step maps
+          directly to a row in the Workflow panel above &mdash; configure pickers there and press
+          the row's Run button.
         </div>
         <ol style={{ marginTop: 10, paddingLeft: 18, lineHeight: 1.5 }}>
-          <li>Run <strong>ASR (local)</strong> to create the source subtitles.</li>
-          <li>Run <strong>Translate -&gt; EN (local)</strong> to produce the English subtitle track.</li>
-          <li>Run <strong>Diarize speakers (local)</strong> if you want speaker-aware dubbing.</li>
-          <li>Open <strong>Diagnostics</strong> and verify FFmpeg plus the voice cloning packages are installed.</li>
-          <li>Assign a short clean reference clip per speaker, then save it as a <strong>Reusable voice template</strong> if you want to reuse the same cast on later episodes.</li>
-          <li>Run <strong>Dub voice-preserving (local)</strong> for the English voice-cloned dub, or use one of the TTS preview jobs first.</li>
-          <li>
-            Run <strong>Separate</strong> for the cleanest background preservation, then{" "}
-            <strong>Mix dub</strong>, then <strong>Mux preview</strong>. If separation fails or is
-            unavailable, <strong>Mix dub</strong> now falls back to the source media audio so you
-            can still produce a preview MP4.
-          </li>
+          <li>Workflow row 1 &mdash; <strong>Captions (ASR)</strong>. Pick the source language (auto / ja / ko) and Run ASR.</li>
+          <li>Workflow row 2 &mdash; <strong>Translate to English</strong>. Pick translation style and honorific handling, then Run.</li>
+          <li>Workflow row 3 &mdash; <strong>Speaker labels</strong>. Pick the diarization backend if needed, then Run.</li>
+          <li>Open <strong>Diagnostics</strong> once and verify FFmpeg plus the voice cloning packages are installed.</li>
+          <li>Workflow row 4 &mdash; <strong>Voice plan</strong>. Open Reusable Voice Basics to capture or apply a saved voice per speaker (saved voices reuse on later episodes).</li>
+          <li>Workflow row 5 &mdash; <strong>Dub speech generation</strong>. Run the voice-preserving dub once each speaker is covered.</li>
+          <li>Workflow rows 6 and 7 &mdash; <strong>Mix dub</strong> then <strong>Mux preview MP4</strong>. If stem separation is unavailable, Mix falls back to source media audio so a preview MP4 is still produced.</li>
           <li>Use the Outputs card below to export the final SRT/VTT and MP4 into the app export folder.</li>
         </ol>
       </div>
@@ -7365,63 +7488,15 @@ export function SubtitleEditorPage({
           <button type="button" disabled={busy || !doc} onClick={exportVtt}>
             Export VTT
           </button>
-          <select
-            value={asrLang}
-            disabled={busy}
-            onChange={(e) => setAsrLang(e.currentTarget.value as typeof asrLang)}
-          >
-            <option value="auto">ASR: auto</option>
-            <option value="ja">ASR: Japanese</option>
-            <option value="ko">ASR: Korean</option>
-          </select>
-          <button type="button" disabled={busy} onClick={enqueueAsrLocal}>
-            ASR (local)
-          </button>
-          <select
-            value={translationStyle}
-            disabled={busy}
-            onChange={(e) => setTranslationStyle(e.currentTarget.value as typeof translationStyle)}
-            title="Translation style"
-          >
-            <option value="neutral">Neutral</option>
-            <option value="formal">Formal</option>
-            <option value="informal">Informal</option>
-          </select>
-          <select
-            value={honorificMode}
-            disabled={busy}
-            onChange={(e) => setHonorificMode(e.currentTarget.value as typeof honorificMode)}
-            title="Honorific handling"
-          >
-            <option value="preserve">Honorifics: keep (-san, -sensei)</option>
-            <option value="translate">Honorifics: translate to English</option>
-            <option value="drop">Honorifics: remove</option>
-          </select>
-          <button type="button" disabled={busy || !trackId} onClick={enqueueTranslateEn}>
-            Translate -&gt; EN (local)
-          </button>
-          <select
-            value={diarizationBackend}
-            disabled={busy}
-            onChange={(e) =>
-              setDiarizationBackend(e.currentTarget.value as typeof diarizationBackend)
-            }
-            title="Diarization backend"
-          >
-            <option value="baseline">Diarize: baseline</option>
-            <option value="pyannote_byo_v1">Diarize: pyannote (BYO)</option>
-          </select>
-          <button type="button" disabled={busy || !trackId} onClick={enqueueDiarize}>
-            Diarize speakers (local)
-          </button>
+          <span style={{ fontSize: 11, opacity: 0.7, alignSelf: "center" }}>
+            ASR / Translate / Diarize / Dub now live inline in the Workflow panel above. Use the
+            buttons below for manual stems / TTS preview / QC variants.
+          </span>
           <button type="button" disabled={busy || !trackId} onClick={enqueueTtsPreview}>
             TTS preview (local)
           </button>
           <button type="button" disabled={busy || !trackId} onClick={enqueueTtsNeuralLocalV1Preview}>
             TTS preview (neural local)
-          </button>
-          <button type="button" disabled={busy || !trackId} onClick={enqueueDubVoicePreservingV1}>
-            Dub voice-preserving (local)
           </button>
           <select
             value={separationBackend}

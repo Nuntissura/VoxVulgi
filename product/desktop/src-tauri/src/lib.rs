@@ -6448,6 +6448,22 @@ fn jobs_flush_cache(
 
 #[tauri::command]
 #[allow(non_snake_case)]
+fn jobs_clear_failed_for_item(
+    state: State<'_, AppState>,
+    item_id: Option<String>,
+    itemId: Option<String>,
+    options: Option<jobs::ClearFailedJobsForItemOptions>,
+) -> Result<jobs::ClearFailedJobsForItemSummary, String> {
+    let item_id = item_id
+        .or(itemId)
+        .map(|v| v.trim().to_string())
+        .filter(|v| !v.is_empty())
+        .ok_or_else(|| "missing required key itemId".to_string())?;
+    jobs::clear_failed_jobs_for_item(&state.paths, &item_id, options).map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+#[allow(non_snake_case)]
 fn jobs_retry(
     state: State<'_, AppState>,
     job_id: Option<String>,
@@ -6795,6 +6811,7 @@ pub fn run() {
             jobs_enqueue_translate_local,
             jobs_cleanup_preview,
             jobs_flush_cache,
+            jobs_clear_failed_for_item,
             jobs_list,
             jobs_list_for_item,
             jobs_queue_control_get,
