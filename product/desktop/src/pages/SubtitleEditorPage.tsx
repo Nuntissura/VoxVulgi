@@ -977,12 +977,12 @@ function isEnglishLocalizationTrack(track: SubtitleTrackRow | null): boolean {
 }
 
 // ---------------------------------------------------------------------------
-// Built-in Manual — in-context help for each Localization Studio section (WP-0172)
+// Built-in Manual Ã¢â‚¬â€ in-context help for each Localization Studio section (WP-0172)
 // ---------------------------------------------------------------------------
 
 const SECTION_HELP: Record<string, { what: string; when: string; steps: string[]; concepts?: Record<string, string> }> = {
   "loc-library": {
-    what: "Browse all outputs for the current item — source media, working files, and exported deliverables in one place.",
+    what: "Browse all outputs for the current item Ã¢â‚¬â€ source media, working files, and exported deliverables in one place.",
     when: "After any job completes to find your results, or to open/reveal exported files.",
     steps: ["Select an item in Localization Studio", "Check the output table rows for each stage", "Click Open/Reveal to access files on disk"],
   },
@@ -1005,7 +1005,7 @@ const SECTION_HELP: Record<string, { what: string; when: string; steps: string[]
     concepts: { "Voice samples": "Short audio clips of a speaker used as reference for voice cloning.", "Saved voice": "A reusable voice profile stored for future items.", "Speaker": "A labeled voice in the media (Speaker 1, Speaker 2, etc. from diarization)." },
   },
   "loc-advanced": {
-    what: "Index of all advanced localization tools. Most operators only need the sections above — these are for power users.",
+    what: "Index of all advanced localization tools. Most operators only need the sections above Ã¢â‚¬â€ these are for power users.",
     when: "When you need fine-grained control over backends, benchmarks, cast packs, or A/B comparisons.",
     steps: ["Scan the list to find the tool you need", "Click the button to jump to that section"],
   },
@@ -1015,22 +1015,22 @@ const SECTION_HELP: Record<string, { what: string; when: string; steps: string[]
     steps: ["Follow the numbered steps from top to bottom", "Each step links to the relevant section"],
   },
   "loc-outputs": {
-    what: "Export your finished work — subtitles, dubbed audio, and muxed video.",
+    what: "Export your finished work Ã¢â‚¬â€ subtitles, dubbed audio, and muxed video.",
     when: "After a successful localization run when you want to save deliverables to a specific folder.",
     steps: ["Choose export folder (app default or custom)", "Check the boxes for what to export (SRT, VTT, video)", "Choose video container (MP4 recommended)", "Click Export selected"],
-    concepts: { "Mux": "Combining the dubbed audio track with the original video into a single file.", "Stems": "Separated audio layers — speech only, background only, or final mix." },
+    concepts: { "Mux": "Combining the dubbed audio track with the original video into a single file.", "Stems": "Separated audio layers Ã¢â‚¬â€ speech only, background only, or final mix." },
   },
   "loc-track": {
     what: "Track switching, segment editing, and the manual/advanced extras (TTS preview variants, stem separation, vocals cleanup, mix-detail tweaks, QC).",
     when: "When you need to switch tracks, edit subtitle segments, or run the manual extras that aren't part of the staged workflow run.",
     steps: ["Select the track to work with from the dropdown", "Edit segments below, then Save new version", "Use the Workflow panel above to run the staged pipeline (ASR / Translate / Diarize / Dub / Mix / Mux)", "Use the buttons here only for TTS preview, stem separation, vocals cleanup, or QC variants"],
-    concepts: { "ASR": "Automatic Speech Recognition — converts audio to text subtitles.", "Diarization": "Identifying which speaker is talking in each segment.", "Ducking": "Lowering the background volume when dubbed speech plays.", "Source language": "The language spoken in the original media (Japanese or Korean)." },
+    concepts: { "ASR": "Automatic Speech Recognition Ã¢â‚¬â€ converts audio to text subtitles.", "Diarization": "Identifying which speaker is talking in each segment.", "Ducking": "Lowering the background volume when dubbed speech plays.", "Source language": "The language spoken in the original media (Japanese or Korean)." },
   },
   "loc-voice-plan": {
     what: "Map each speaker to voice samples and choose whether they use voice cloning or standard text-to-speech.",
     when: "After diarization labels speakers. The localization run pauses here if voice samples are missing.",
-    steps: ["Review each speaker box — green means samples are ready", "Generate voice samples from the source media, or choose your own audio clips", "Optionally apply cleanup (denoise, de-reverb) to samples", "Continue the localization run once all speakers have samples or are set to standard TTS"],
-    concepts: { "Voice samples": "Audio clips of the speaker used as reference for cloning.", "Standard TTS": "Computer-generated voice without cloning — used when no samples are available.", "Cleanup": "Removing noise, echo, or music from voice sample clips." },
+    steps: ["Review each speaker box Ã¢â‚¬â€ green means samples are ready", "Generate voice samples from the source media, or choose your own audio clips", "Optionally apply cleanup (denoise, de-reverb) to samples", "Continue the localization run once all speakers have samples or are set to standard TTS"],
+    concepts: { "Voice samples": "Audio clips of the speaker used as reference for cloning.", "Standard TTS": "Computer-generated voice without cloning Ã¢â‚¬â€ used when no samples are available.", "Cleanup": "Removing noise, echo, or music from voice sample clips." },
   },
   "loc-templates": {
     what: "Save and reuse speaker voice setups across multiple items. Useful for recurring shows with the same hosts.",
@@ -1043,19 +1043,19 @@ const SECTION_HELP: Record<string, { what: string; when: string; steps: string[]
     steps: ["Create a cast pack with a name", "Add roles (host, narrator, contestant, etc.)", "Apply the cast pack to new items to set up all speakers at once"],
   },
   "loc-backends": {
-    what: "Choose which voice synthesis engine to use for dubbing. The default (OpenVoice V2 + Kokoro) works well — change this only if benchmarks suggest a better option.",
+    what: "Choose which voice synthesis engine to use for dubbing. The default (OpenVoice V2 + Kokoro) works well Ã¢â‚¬â€ change this only if benchmarks suggest a better option.",
     when: "Only when benchmark results show a different backend performs better for your content.",
     steps: ["Select a goal (balanced, identity, expressive, timing, speed)", "Review the recommended backend", "Click Promote to plan to apply the recommendation"],
   },
   "loc-characters": {
-    what: "Save named character voices (narrator, teacher, etc.) that can be reused across any item — separate from show-specific templates.",
+    what: "Save named character voices (narrator, teacher, etc.) that can be reused across any item Ã¢â‚¬â€ separate from show-specific templates.",
     when: "For generic recurring voices that aren't tied to a specific show or cast.",
     steps: ["Create a character profile with a name", "Add voice samples from any item", "Apply the character voice to future items"],
   },
   "loc-benchmark": {
     what: "Compare voice cloning quality across different settings. Generates a ranked report with scores.",
     when: "When deciding which backend or voice samples produce the best results for your content.",
-    steps: ["Click Generate report to analyze current outputs", "Review the ranked candidates — higher score is better", "Promote the winner to your voice plan or template"],
+    steps: ["Click Generate report to analyze current outputs", "Review the ranked candidates Ã¢â‚¬â€ higher score is better", "Promote the winner to your voice plan or template"],
     concepts: { "Coverage": "How many segments were successfully dubbed.", "Timing fit": "How well the dubbed speech fits within the original timing.", "Clone status": "Whether actual voice cloning was used vs. standard TTS fallback." },
   },
   "loc-batch": {
@@ -1072,13 +1072,13 @@ const SECTION_HELP: Record<string, { what: string; when: string; steps: string[]
     what: "Quality check report that flags potential issues: timing problems, audio anomalies, missing segments.",
     when: "After dubbing to verify the output quality before exporting.",
     steps: ["Click Generate QC report", "Review the issues table", "Fix flagged problems in the relevant sections"],
-    concepts: { "CPS": "Characters per second — too high means text is too fast to read.", "Silence": "Unexpectedly silent segments that might indicate a rendering failure." },
+    concepts: { "CPS": "Characters per second Ã¢â‚¬â€ too high means text is too fast to read.", "Silence": "Unexpectedly silent segments that might indicate a rendering failure." },
   },
   "loc-glossary": {
     what: "Define custom term mappings so names, places, and domain terms translate consistently.",
     when: "Before running Translate to English. Terms added here apply to all future translations.",
-    steps: ["Add source terms (Japanese/Korean) with their English translations", "Run Translate — glossary terms are automatically applied to the output", "Export/import as CSV to share glossaries across items or machines"],
-    concepts: { "Term mapping": "A pair: source text and its desired English translation.", "Longest match first": "If you have both '東京都' and '東京', the longer match is applied first to avoid partial replacements." },
+    steps: ["Add source terms (Japanese/Korean) with their English translations", "Run Translate Ã¢â‚¬â€ glossary terms are automatically applied to the output", "Export/import as CSV to share glossaries across items or machines"],
+    concepts: { "Term mapping": "A pair: source text and its desired English translation.", "Longest match first": "If you have both 'Ã¦ÂÂ±Ã¤ÂºÂ¬Ã©Æ’Â½' and 'Ã¦ÂÂ±Ã¤ÂºÂ¬', the longer match is applied first to avoid partial replacements." },
   },
   "loc-artifacts": {
     what: "All derived files (audio stems, manifests, reports, exports) in one table. Play, open, or rerun any artifact.",
@@ -1087,67 +1087,64 @@ const SECTION_HELP: Record<string, { what: string; when: string; steps: string[]
   },
 };
 
-type WorkflowPanelStage = {
-  id: string;
+// WP-0211: master-detail editor layout. The editor renders as one panel
+// with a left rail (the stage list) and a right pane (only the selected
+// stage's content). Each top-level card gets a data-stage attribute and
+// CSS hides non-matching cards via .loc-workspace-content[data-selected].
+type WorkspaceStageId =
+  | "captions"
+  | "translate"
+  | "speakers"
+  | "voice_plan"
+  | "dub"
+  | "mix"
+  | "mux"
+  | "files";
+
+type WorkspaceStageDef = {
+  id: WorkspaceStageId;
   title: string;
-  sectionId: string;
-  explainer: string;
-  fallbackDetail: string;
+  // Maps to the stage id used by `localizationRunStages` so we can derive a
+  // status chip from the existing run-stage truth without duplicating logic.
+  // null = stage has no underlying run (e.g. files).
+  runStageId: string | null;
 };
 
-const WORKFLOW_PANEL_STAGES: WorkflowPanelStage[] = [
-  {
-    id: "asr",
-    title: "Captions (ASR)",
-    sectionId: "loc-track",
-    explainer: "Extract source-language captions from the media audio.",
-    fallbackDetail: "Run ASR on the loaded media to create the source subtitle track.",
-  },
-  {
-    id: "translate",
-    title: "Translate to English",
-    sectionId: "loc-track",
-    explainer: "Produce the English subtitle track used for dubbing and benchmarking.",
-    fallbackDetail: "Run Translate -> EN once the source track exists.",
-  },
-  {
-    id: "diarize",
-    title: "Speaker labels (diarization)",
-    sectionId: "loc-track",
-    explainer: "Label which speaker is talking in each segment of the English track.",
-    fallbackDetail: "Run diarization on the English track to enable per-speaker voice planning.",
-  },
-  {
-    id: "voice_plan",
-    title: "Speaker / voice plan",
-    sectionId: "loc-voice-basics",
-    explainer:
-      "For each speaker, capture voice samples or set Standard TTS so the dub knows which voice to use.",
-    fallbackDetail: "Open Reusable Voice Basics or the Voice Plan section to set up speakers.",
-  },
-  {
-    id: "dub",
-    title: "Dub speech generation",
-    sectionId: "loc-track",
-    explainer:
-      "Render the English dub segments with the managed or selected voice-cloning backend.",
-    fallbackDetail: "Run the voice-preserving dub once speakers are planned.",
-  },
-  {
-    id: "mix",
-    title: "Mix dub",
-    sectionId: "loc-track",
-    explainer: "Mix the dubbed speech against the best available background track.",
-    fallbackDetail: "Run Mix dub after the dub artifact is produced.",
-  },
-  {
-    id: "mux",
-    title: "Mux preview MP4",
-    sectionId: "loc-track",
-    explainer: "Produce the preview MP4 deliverable for review and export.",
-    fallbackDetail: "Run Mux preview MP4 once the mixed dub WAV exists.",
-  },
+const WORKSPACE_STAGES: WorkspaceStageDef[] = [
+  { id: "captions",   title: "Captions",     runStageId: "asr" },
+  { id: "translate",  title: "Translate",    runStageId: "translate" },
+  { id: "speakers",   title: "Speakers",     runStageId: "diarize" },
+  { id: "voice_plan", title: "Voice plan",   runStageId: "voice_plan" },
+  { id: "dub",        title: "Dub",          runStageId: "dub" },
+  { id: "mix",        title: "Mix",          runStageId: "mix" },
+  { id: "mux",        title: "Mux",          runStageId: "mux" },
+  { id: "files",      title: "Files",        runStageId: null },
 ];
+
+// Maps legacy section anchors (loc-track, loc-voice-basics, ...) to their
+// new owning stage so existing programmatic jumps from App.tsx and the
+// agent bridge resolve into the right pane instead of breaking.
+const LEGACY_ANCHOR_TO_STAGE: Record<string, WorkspaceStageId> = {
+  "loc-track": "captions",
+  "loc-translate": "translate",
+  "loc-glossary": "translate",
+  "loc-voice-basics": "voice_plan",
+  "loc-voice-plan": "voice_plan",
+  "loc-templates": "voice_plan",
+  "loc-cast-packs": "voice_plan",
+  "loc-characters": "voice_plan",
+  "loc-backends": "dub",
+  "loc-benchmark": "dub",
+  "loc-batch": "dub",
+  "loc-ab": "dub",
+  "loc-qc": "mux",
+  "loc-outputs": "mux",
+  "loc-library": "files",
+  "loc-artifacts": "files",
+  "loc-run": "captions",
+  "loc-workflow": "captions",
+  "loc-advanced": "files",
+};
 
 function SectionHelp({ sectionId }: { sectionId: string }) {
   const help = SECTION_HELP[sectionId];
@@ -1215,7 +1212,7 @@ function SectionHelp({ sectionId }: { sectionId: string }) {
               <ul style={{ margin: "4px 0 0 0", paddingLeft: 20 }}>
                 {Object.entries(help.concepts).map(([term, def]) => (
                   <li key={term}>
-                    <strong>{term}</strong> — {def}
+                    <strong>{term}</strong> Ã¢â‚¬â€ {def}
                   </li>
                 ))}
               </ul>
@@ -1366,6 +1363,8 @@ export function SubtitleEditorPage({
     useState<LocalizationRunQueueSummary | null>(null);
   const [localizationRunQueueQc, setLocalizationRunQueueQc] = useState(true);
   const [localizationRunQueueExportPack, setLocalizationRunQueueExportPack] = useState(false);
+  // WP-0211: which stage's content is visible in the right pane.
+  const [selectedStage, setSelectedStage] = useState<WorkspaceStageId>("captions");
   const [diarizeJobId, setDiarizeJobId] = useState<string | null>(null);
   const [diarizeJobStatus, setDiarizeJobStatus] = useState<JobStatus | null>(null);
   const [diarizeJobError, setDiarizeJobError] = useState<string | null>(null);
@@ -2395,7 +2394,7 @@ export function SubtitleEditorPage({
       setSegmentCloneMap({});
       return;
     }
-    // The artifact path is the manifest JSON — but we need the actual manifest file path
+    // The artifact path is the manifest JSON Ã¢â‚¬â€ but we need the actual manifest file path
     // The artifact.path points to the manifest. Load its per-segment data.
     invoke<Array<{ index: number; voice_clone_outcome: string | null; voice_clone_error: string | null }>>(
       "tts_manifest_clone_segments",
@@ -2411,7 +2410,7 @@ export function SubtitleEditorPage({
       .catch(() => setSegmentCloneMap({}));
   }, [activeVoiceCloneArtifact?.path]);
 
-  // WP-0185: Clone outcome notification — show notice when a new clone result appears
+  // WP-0185: Clone outcome notification Ã¢â‚¬â€ show notice when a new clone result appears
   const prevCloneOutcomeRef = useRef<string | null>(null);
   useEffect(() => {
     if (!activeVoiceCloneTruth) return;
@@ -3379,93 +3378,6 @@ export function SubtitleEditorPage({
     refreshLocalizationOutputStatuses().catch(() => undefined);
   }, [refreshLocalizationOutputStatuses]);
 
-  const advancedLocalizationRows = useMemo(
-    () => [
-      {
-        id: "voice-plan",
-        title: "Voice plan and reusable voices",
-        ready: speakersInTrack.length > 0 && voicePlanMissingSpeakers.length === 0,
-        detail:
-          !translatedEnglishTrack
-            ? "Translate into English first, then label speakers."
-            : !speakersInTrack.length
-              ? "Run diarization so the reusable voice/template tools know which speakers to map."
-              : voicePlanMissingSpeakers.length
-                ? `Still missing speaker setup for: ${voicePlanMissingSpeakers.join(", ")}.`
-                : "Ready to assign saved templates, cast packs, and per-speaker render settings.",
-        buttons: [
-          { label: "Basics lane", sectionId: "loc-voice-basics" },
-          { label: "Open voice plan", sectionId: "loc-voice-plan" },
-        ],
-      },
-      {
-        id: "backends",
-        title: "Backend strategy and experimental runs",
-        ready: Boolean(trackId),
-        detail: trackId
-          ? `${experimentalReadyAdapters.length} experimental backend adapter(s) are render-ready. Diagnostics is where adapter config, probe results, and render commands live.`
-          : "Load a subtitle track first to compare managed and experimental backends.",
-        buttons: [
-          { label: "Backend strategy", sectionId: "loc-backends" },
-          { label: "Open Diagnostics", action: onOpenDiagnostics },
-        ],
-      },
-      {
-        id: "benchmark",
-        title: "Benchmark lab and winner promotion",
-        ready: Boolean(trackId),
-        detail:
-          !trackId
-            ? "Load a subtitle track first."
-            : voiceBenchmarkReport
-              ? `Latest report compares ${voiceBenchmarkReport.candidate_count} candidate(s). Promotion buttons live in each candidate row for item plans, templates, and cast packs.`
-              : "Generate a benchmark report to unlock visible winner-promotion actions for plans, templates, and cast packs.",
-        buttons: [
-          { label: "Benchmark lab", sectionId: "loc-benchmark" },
-        ],
-      },
-      {
-        id: "batch",
-        title: "Batch dubbing and A/B preview",
-        ready: Boolean(trackId) && batchLibraryItems.length > 0,
-        detail:
-          !trackId
-            ? "Load a subtitle track first."
-            : `${batchSelectedItemIds.length} item(s) are currently selected for batch work. A/B preview is per-speaker; batch dubbing reuses the voice plan, template, and cast-pack choices above.`,
-        buttons: [
-          { label: "Batch dubbing", sectionId: "loc-batch" },
-          { label: "A/B preview", sectionId: "loc-ab" },
-        ],
-      },
-      {
-        id: "qc-artifacts",
-        title: "QC, reruns, and artifacts",
-        ready: Boolean(trackId),
-        detail:
-          !trackId
-            ? "Load a subtitle track first."
-            : qcReport
-              ? `QC report loaded with ${qcReport.summary?.issues_total ?? (Array.isArray(qcReport.issues) ? qcReport.issues.length : 0)} issue(s). Artifact reruns and logs stay in the Artifacts section.`
-              : "Generate QC to inspect timing, silence, and reference warnings. Artifact reruns, variants, manifests, and deliverables live in Artifacts.",
-        buttons: [
-          { label: "QC report", sectionId: "loc-qc" },
-          { label: "Artifacts", sectionId: "loc-artifacts" },
-        ],
-      },
-    ],
-    [
-      batchLibraryItems.length,
-      batchSelectedItemIds.length,
-      experimentalReadyAdapters.length,
-      onOpenDiagnostics,
-      qcReport,
-      speakersInTrack.length,
-      trackId,
-      translatedEnglishTrack,
-      voiceBenchmarkReport,
-      voicePlanMissingSpeakers,
-    ],
-  );
 
   function logDiagnosticsEvent(
     event: string,
@@ -3484,6 +3396,17 @@ export function SubtitleEditorPage({
   }
 
   function scrollToLocalizationSection(sectionId: string) {
+    // WP-0211: select the owning stage first so the anchor is mounted in the
+    // right pane, then scroll once a frame has passed for layout to settle.
+    const stage = LEGACY_ANCHOR_TO_STAGE[sectionId];
+    if (stage && stage !== selectedStage) {
+      setSelectedStage(stage);
+      window.setTimeout(() => {
+        const target = document.getElementById(sectionId);
+        target?.scrollIntoView({ behavior: "smooth", block: "start" });
+      }, 50);
+      return;
+    }
     const target = document.getElementById(sectionId);
     target?.scrollIntoView({ behavior: "smooth", block: "start" });
   }
@@ -3510,27 +3433,27 @@ export function SubtitleEditorPage({
       // Other shortcuts skip when focused on input/textarea/select
       if (tag === "INPUT" || tag === "TEXTAREA" || tag === "SELECT") return;
 
-      // Ctrl+Enter — Start / continue localization run
+      // Ctrl+Enter Ã¢â‚¬â€ Start / continue localization run
       if (ctrl && e.key === "Enter") {
         e.preventDefault();
         enqueueLocalizationRun();
         return;
       }
-      // Ctrl+Shift+E — Export selected outputs
+      // Ctrl+Shift+E Ã¢â‚¬â€ Export selected outputs
       if (ctrl && e.shiftKey && e.key.toLowerCase() === "e") {
         e.preventDefault();
         exportSelectedOutputs();
         return;
       }
-      // Ctrl+Shift+R — Refresh readiness
+      // Ctrl+Shift+R Ã¢â‚¬â€ Refresh readiness
       // Ctrl+Shift+R was previously bound to "Refresh readiness" against the now-retired
       // FFmpeg/Whisper/pack readiness rows. Browser refresh fallback is intentional here.
-      // Ctrl+1..5 — Jump to workflow sections
-      if (ctrl && !e.shiftKey && e.key >= "1" && e.key <= "5") {
+      // Ctrl+1..8 Ã¢â‚¬â€ Select workspace stage in the new master-detail layout (WP-0211)
+      if (ctrl && !e.shiftKey && e.key >= "1" && e.key <= "8") {
         e.preventDefault();
-        const sections = ["loc-track", "loc-voice-basics", "loc-run", "loc-outputs", "loc-artifacts"];
         const idx = parseInt(e.key) - 1;
-        if (sections[idx]) scrollToLocalizationSection(sections[idx]);
+        const stage = WORKSPACE_STAGES[idx]?.id;
+        if (stage) setSelectedStage(stage);
         return;
       }
     }
@@ -6107,35 +6030,228 @@ export function SubtitleEditorPage({
   }
 
   return (
-    <section ref={rootSectionRef}>
-      <h1>Localization Studio</h1>
-
-      {error ? <div className="error">{error}</div> : null}
-      {notice ? <div className="card">{notice}</div> : null}
-
-      <div className="card" id="loc-library">
-        <h2>Item</h2>
-        <div className="kv">
-          <div className="k">Title</div>
-          <div className="v" style={{ fontFamily: "inherit" }}>
-            {item?.title ?? "-"}
-          </div>
+    <section ref={rootSectionRef} className="loc-workspace">
+      {/* WP-0211: editor renders as one panel Ã¢â‚¬â€ header strip + left rail + right pane.
+          Each top-level "card" carries data-stage; CSS hides those whose stage is not selected. */}
+      <header className="loc-workspace-header">
+        <div className="loc-workspace-header-title">
+          <h1 style={{ margin: 0, fontSize: 18 }}>Localization Studio</h1>
+          <div className="loc-workspace-header-item-title">{item?.title ?? "-"}</div>
         </div>
-        <div className="kv">
-          <div className="k">Path</div>
-          <div className="v">{item?.media_path ?? "-"}</div>
-        </div>
-        <div className="row" style={{ marginTop: 10, flexWrap: "wrap" }}>
+        <div className="loc-workspace-header-actions">
           <button type="button" disabled={busy || !item?.media_path} onClick={openSourceFile}>
             Open source file
           </button>
           <button type="button" disabled={busy || !item?.media_path} onClick={revealSourceFile}>
             Reveal source file
           </button>
+          <button type="button" disabled={busy || localizationRunBusy} onClick={enqueueLocalizationRun}>
+            Start / continue run
+          </button>
         </div>
-      </div>
+      </header>
 
-      <div className="card">
+      {error ? <div className="error">{error}</div> : null}
+      {notice ? <div className="loc-workspace-notice">{notice}</div> : null}
+
+      <div className="loc-workspace-body">
+        <aside className="loc-workspace-rail">
+          <div className="loc-workspace-rail-eyebrow">Workflow</div>
+          <ul className="loc-workspace-rail-stages">
+            {WORKSPACE_STAGES.map((stage, idx) => {
+              const data = stage.runStageId
+                ? localizationRunStages.find((s) => s.id === stage.runStageId)
+                : null;
+              const detail = data?.detail ?? "";
+              const running = detail.startsWith("Running ");
+              const lastFailed = detail.includes("failed");
+              const chipLabel = data?.ready
+                ? "Done"
+                : running
+                  ? "Running"
+                  : lastFailed
+                    ? "Failed"
+                    : stage.runStageId == null
+                      ? ""
+                      : "Needs attention";
+              const chipClass = data?.ready
+                ? "ready"
+                : running
+                  ? "running"
+                  : lastFailed
+                    ? "failed"
+                    : "pending";
+              const isSelected = selectedStage === stage.id;
+              return (
+                <li key={stage.id}>
+                  <button
+                    type="button"
+                    className={`loc-workspace-rail-stage${isSelected ? " is-selected" : ""}`}
+                    onClick={() => setSelectedStage(stage.id)}
+                  >
+                    <span className="loc-workspace-rail-stage-index">{idx + 1}</span>
+                    <span className="loc-workspace-rail-stage-title">{stage.title}</span>
+                    {chipLabel ? (
+                      <span className={`loc-workspace-rail-stage-chip loc-workspace-rail-chip-${chipClass}`}>
+                        {chipLabel}
+                      </span>
+                    ) : null}
+                  </button>
+                </li>
+              );
+            })}
+          </ul>
+          {localizationRunSummary ? (
+            <div className="loc-workspace-rail-runsummary">
+              Batch <code>{localizationRunSummary.batch_id}</code> at <strong>{localizationRunSummary.stage}</strong>.
+              {localizationRunSummary.notes.length ? ` ${localizationRunSummary.notes[0]}` : ""}
+            </div>
+          ) : null}
+          {activeVoiceCloneTruth ? (
+            <div className={`loc-workspace-rail-clone loc-workspace-rail-clone-${
+              activeVoiceCloneTruth.tone.color === "#9a3412" ? "warn" : "ok"
+            }`}>
+              Clone status: {activeVoiceCloneTruth.label}
+            </div>
+          ) : null}
+        </aside>
+
+        <main className="loc-workspace-content" data-selected-stage={selectedStage}>
+          {/* Stage actions strip — primary Run + minimal options for the selected stage. */}
+          <div className="loc-workspace-stage-actions">
+            {selectedStage === "captions" ? (
+              <>
+                <select
+                  value={asrLang}
+                  disabled={busy}
+                  onChange={(e) => setAsrLang(e.currentTarget.value as typeof asrLang)}
+                  title="Source language"
+                >
+                  <option value="auto">Source: auto-detect</option>
+                  <option value="ja">Source: Japanese</option>
+                  <option value="ko">Source: Korean</option>
+                </select>
+                <button type="button" disabled={busy} onClick={enqueueAsrLocal}>
+                  Run ASR
+                </button>
+              </>
+            ) : null}
+            {selectedStage === "translate" ? (
+              <>
+                <select
+                  value={translationStyle}
+                  disabled={busy}
+                  onChange={(e) => setTranslationStyle(e.currentTarget.value as typeof translationStyle)}
+                  title="Translation style"
+                >
+                  <option value="neutral">Style: neutral</option>
+                  <option value="formal">Style: formal</option>
+                  <option value="informal">Style: informal</option>
+                </select>
+                <select
+                  value={honorificMode}
+                  disabled={busy}
+                  onChange={(e) => setHonorificMode(e.currentTarget.value as typeof honorificMode)}
+                  title="Honorific handling"
+                >
+                  <option value="preserve">Honorifics: keep</option>
+                  <option value="translate">Honorifics: translate</option>
+                  <option value="drop">Honorifics: drop</option>
+                </select>
+                <button
+                  type="button"
+                  disabled={busy || !trackId}
+                  onClick={enqueueTranslateEn}
+                  title={!trackId ? "Run ASR first" : undefined}
+                >
+                  Run Translate &rarr; EN
+                </button>
+              </>
+            ) : null}
+            {selectedStage === "speakers" ? (
+              <>
+                <select
+                  value={diarizationBackend}
+                  disabled={busy}
+                  onChange={(e) =>
+                    setDiarizationBackend(e.currentTarget.value as typeof diarizationBackend)
+                  }
+                  title="Diarization backend"
+                >
+                  <option value="baseline">Backend: baseline</option>
+                  <option value="pyannote_byo_v1">Backend: pyannote (BYO)</option>
+                </select>
+                <button
+                  type="button"
+                  disabled={busy || !trackId}
+                  onClick={enqueueDiarize}
+                  title={!trackId ? "Run Translate -> EN first" : undefined}
+                >
+                  Run diarization
+                </button>
+              </>
+            ) : null}
+            {selectedStage === "dub" ? (
+              <button
+                type="button"
+                disabled={busy || !trackId}
+                onClick={enqueueDubVoicePreservingV1}
+                title={!trackId ? "Load the English translated track first" : undefined}
+              >
+                Run voice-preserving dub
+              </button>
+            ) : null}
+            {selectedStage === "mix" ? (
+              <button type="button" disabled={busy} onClick={enqueueMixDubPreview}>
+                Run mix dub
+              </button>
+            ) : null}
+            {selectedStage === "mux" ? (
+              <>
+                <label style={{ display: "flex", alignItems: "center", gap: 6 }}>
+                  <input
+                    type="checkbox"
+                    checked={localizationRunQueueQc}
+                    disabled={busy || localizationRunBusy}
+                    onChange={(e) => setLocalizationRunQueueQc(e.currentTarget.checked)}
+                  />
+                  <span style={{ fontSize: 12 }}>Queue QC</span>
+                </label>
+                <label style={{ display: "flex", alignItems: "center", gap: 6 }}>
+                  <input
+                    type="checkbox"
+                    checked={localizationRunQueueExportPack}
+                    disabled={busy || localizationRunBusy}
+                    onChange={(e) => setLocalizationRunQueueExportPack(e.currentTarget.checked)}
+                  />
+                  <span style={{ fontSize: 12 }}>Queue export pack</span>
+                </label>
+                <button type="button" disabled={busy} onClick={enqueueMuxDubPreview}>
+                  Run mux preview MP4
+                </button>
+              </>
+            ) : null}
+          </div>
+          {selectedStage === "speakers" ? (
+            <div className="loc-workspace-stage-hint">
+              <strong>Speakers</strong> &mdash; diarization runs from the strip above. Per-speaker
+              setup (references, Standard TTS) lives in the
+              {" "}<button type="button" onClick={() => setSelectedStage("voice_plan")}>Voice plan</button>{" "}
+              stage. A dedicated Speakers surface (chips per speaker, diarization preview) is
+              planned for a follow-up WP.
+            </div>
+          ) : null}
+          {selectedStage === "dub" ? (
+            <div className="loc-workspace-stage-hint">
+              <strong>Dub</strong> &mdash; the run button above renders the voice-preserving dub.
+              Backend strategy, benchmark lab, A/B preview, and per-speaker render mode currently
+              live inside the
+              {" "}<button type="button" onClick={() => setSelectedStage("voice_plan")}>Voice plan</button>{" "}
+              stage. A dedicated Dub surface is planned for a follow-up WP.
+            </div>
+          ) : null}
+
+      <div className="card loc-stage-card" data-stage="files" id="loc-library">
         <h2>Localization Library <SectionHelp sectionId="loc-library" /></h2>
         <div style={{ color: "#4b5563" }}>
           One place for the source video, current working artifacts, and predictable deliverable
@@ -6251,359 +6367,7 @@ export function SubtitleEditorPage({
         ))}
       </div>
 
-      <div className="card" id="loc-run">
-        <span id="loc-workflow" style={{ position: "absolute" }} />
-        <h2 style={{ display: "flex", alignItems: "center", gap: 8 }}>
-          Workflow <SectionHelp sectionId="loc-workflow" />
-          <label style={{ fontSize: 12, fontWeight: 400, display: "flex", alignItems: "center", gap: 4, marginLeft: "auto" }}>
-            <input
-              type="checkbox"
-              checked={safeLocalStorageGet("voxvulgi.v1.loc.help_all") === "1"}
-              onChange={(e) => {
-                safeLocalStorageSet("voxvulgi.v1.loc.help_all", e.target.checked ? "1" : "0");
-                window.location.reload();
-              }}
-            />
-            Show all help
-          </label>
-        </h2>
-        <div style={{ color: "#4b5563" }}>
-          The shipped localization run is staged: ASR, Translate -&gt; EN, speaker labels,
-          speaker/reference planning, dub, mix, and mux. Start or continue the full run from this
-          panel; jump into a stage's controls only when you need to adjust something specific.
-        </div>
-        <div className="row" style={{ marginTop: 10, flexWrap: "wrap", alignItems: "center" }}>
-          <button type="button" disabled={busy || localizationRunBusy} onClick={enqueueLocalizationRun}>
-            Start / continue localization run
-          </button>
-          <button
-            type="button"
-            disabled={
-              busy ||
-              localizationRunBusy ||
-              voiceReferenceCandidateBusyKey === "__all__" ||
-              !translatedEnglishTrack
-            }
-            onClick={() => {
-              generateVoiceReferenceCandidates(undefined, true).catch(() => undefined);
-            }}
-          >
-            Generate missing speaker refs
-          </button>
-          <label style={{ display: "flex", alignItems: "center", gap: 8 }}>
-            <input
-              type="checkbox"
-              checked={localizationRunQueueQc}
-              disabled={busy || localizationRunBusy}
-              onChange={(e) => setLocalizationRunQueueQc(e.currentTarget.checked)}
-            />
-            <span>Queue QC</span>
-          </label>
-          <label style={{ display: "flex", alignItems: "center", gap: 8 }}>
-            <input
-              type="checkbox"
-              checked={localizationRunQueueExportPack}
-              disabled={busy || localizationRunBusy}
-              onChange={(e) => setLocalizationRunQueueExportPack(e.currentTarget.checked)}
-            />
-            <span>Queue export pack</span>
-          </label>
-          <span style={{ fontSize: 12, opacity: 0.75 }}>
-            Current export root: <code>{localizationRootStatus?.current_dir ?? "-"}</code>
-          </span>
-        </div>
-        {localizationRunSummary ? (
-          <div style={{ marginTop: 10, fontSize: 12, opacity: 0.85 }}>
-            Batch <code>{localizationRunSummary.batch_id}</code> queued from stage{" "}
-            <strong>{localizationRunSummary.stage}</strong>.
-            {localizationRunSummary.notes.length ? ` ${localizationRunSummary.notes[0]}` : ""}
-          </div>
-        ) : (
-          <div style={{ marginTop: 10, fontSize: 12, opacity: 0.75 }}>
-            This is the explicit run contract for Localization Studio. Use it instead of guessing
-            which manual stage button needs to be pressed next.
-          </div>
-        )}
-        {activeVoiceCloneTruth ? (
-          <div
-            style={{
-              marginTop: 10,
-              padding: "10px 12px",
-              borderRadius: 10,
-              border: `1px solid ${activeVoiceCloneTruth.tone.border}`,
-              background: activeVoiceCloneTruth.tone.background,
-              color: activeVoiceCloneTruth.tone.color,
-              fontSize: 12,
-            }}
-          >
-            <strong>Clone status:</strong> {activeVoiceCloneTruth.label}
-            {activeVoiceCloneTruth.detail ? ` (${activeVoiceCloneTruth.detail})` : ""}.
-          </div>
-        ) : null}
-
-        <div style={{ marginTop: 14, display: "flex", flexDirection: "column", gap: 8 }}>
-          {WORKFLOW_PANEL_STAGES.map((stage, idx) => {
-            const data = localizationRunStages.find((s) => s.id === stage.id);
-            const detail = data?.detail ?? stage.fallbackDetail;
-            const running = (detail ?? "").startsWith("Running ");
-            const lastFailed = (detail ?? "").includes("failed");
-            const chip = data?.ready
-              ? { label: "Done", color: "#166534", bg: "rgba(22,101,52,0.10)" }
-              : running
-                ? { label: "Running", color: "#1d4ed8", bg: "rgba(29,78,216,0.10)" }
-                : lastFailed
-                  ? { label: "Failed", color: "#b91c1c", bg: "rgba(185,28,28,0.10)" }
-                  : { label: "Needs attention", color: "#92400e", bg: "rgba(146,64,14,0.10)" };
-            return (
-              <div
-                key={stage.id}
-                style={{
-                  border: "1px solid rgba(255,255,255,0.12)",
-                  borderRadius: 10,
-                  padding: "10px 12px",
-                  display: "flex",
-                  flexDirection: "column",
-                  gap: 6,
-                }}
-              >
-                <div style={{ display: "flex", alignItems: "center", gap: 10, flexWrap: "wrap" }}>
-                  <div
-                    style={{
-                      fontWeight: 700,
-                      fontSize: 11,
-                      width: 22,
-                      height: 22,
-                      borderRadius: 11,
-                      display: "inline-flex",
-                      alignItems: "center",
-                      justifyContent: "center",
-                      background: "rgba(0,0,0,0.08)",
-                      color: "#374151",
-                    }}
-                  >
-                    {idx + 1}
-                  </div>
-                  <div style={{ fontWeight: 600 }}>{stage.title}</div>
-                  <span
-                    style={{
-                      fontSize: 11,
-                      fontWeight: 600,
-                      padding: "2px 8px",
-                      borderRadius: 999,
-                      color: chip.color,
-                      background: chip.bg,
-                    }}
-                  >
-                    {chip.label}
-                  </span>
-                  <button
-                    type="button"
-                    disabled={busy}
-                    style={{ marginLeft: "auto" }}
-                    onClick={() => scrollToLocalizationSection(stage.sectionId)}
-                  >
-                    Open controls
-                  </button>
-                </div>
-                <div style={{ fontSize: 12, color: "#4b5563" }}>{stage.explainer}</div>
-                <div style={{ fontSize: 12, opacity: 0.75 }}>{detail}</div>
-                <div className="row" style={{ marginTop: 4, flexWrap: "wrap", alignItems: "center", gap: 8 }}>
-                  {stage.id === "asr" ? (
-                    <>
-                      <select
-                        value={asrLang}
-                        disabled={busy}
-                        onChange={(e) => setAsrLang(e.currentTarget.value as typeof asrLang)}
-                        title="Source language"
-                      >
-                        <option value="auto">Source: auto-detect</option>
-                        <option value="ja">Source: Japanese</option>
-                        <option value="ko">Source: Korean</option>
-                      </select>
-                      <button type="button" disabled={busy} onClick={enqueueAsrLocal}>
-                        Run ASR
-                      </button>
-                    </>
-                  ) : null}
-                  {stage.id === "translate" ? (
-                    <>
-                      <select
-                        value={translationStyle}
-                        disabled={busy}
-                        onChange={(e) =>
-                          setTranslationStyle(e.currentTarget.value as typeof translationStyle)
-                        }
-                        title="Translation style"
-                      >
-                        <option value="neutral">Style: neutral</option>
-                        <option value="formal">Style: formal</option>
-                        <option value="informal">Style: informal</option>
-                      </select>
-                      <select
-                        value={honorificMode}
-                        disabled={busy}
-                        onChange={(e) =>
-                          setHonorificMode(e.currentTarget.value as typeof honorificMode)
-                        }
-                        title="Honorific handling"
-                      >
-                        <option value="preserve">Honorifics: keep</option>
-                        <option value="translate">Honorifics: translate</option>
-                        <option value="drop">Honorifics: drop</option>
-                      </select>
-                      <button
-                        type="button"
-                        disabled={busy || !trackId}
-                        onClick={enqueueTranslateEn}
-                        title={!trackId ? "Run ASR first to create a source track" : undefined}
-                      >
-                        Run Translate -&gt; EN
-                      </button>
-                    </>
-                  ) : null}
-                  {stage.id === "diarize" ? (
-                    <>
-                      <select
-                        value={diarizationBackend}
-                        disabled={busy}
-                        onChange={(e) =>
-                          setDiarizationBackend(
-                            e.currentTarget.value as typeof diarizationBackend,
-                          )
-                        }
-                        title="Diarization backend"
-                      >
-                        <option value="baseline">Backend: baseline</option>
-                        <option value="pyannote_byo_v1">Backend: pyannote (BYO)</option>
-                      </select>
-                      <button
-                        type="button"
-                        disabled={busy || !trackId}
-                        onClick={enqueueDiarize}
-                        title={!trackId ? "Run Translate -> EN first" : undefined}
-                      >
-                        Run diarization
-                      </button>
-                    </>
-                  ) : null}
-                  {stage.id === "voice_plan" ? (
-                    <span style={{ fontSize: 12, opacity: 0.75 }}>
-                      Open the voice basics section to capture references or set Standard TTS per
-                      speaker. Run the dub stage once each speaker is covered.
-                    </span>
-                  ) : null}
-                  {stage.id === "dub" ? (
-                    <button
-                      type="button"
-                      disabled={busy || !trackId}
-                      onClick={enqueueDubVoicePreservingV1}
-                      title={!trackId ? "Load the English translated track first" : undefined}
-                    >
-                      Run voice-preserving dub
-                    </button>
-                  ) : null}
-                  {stage.id === "mix" ? (
-                    <button type="button" disabled={busy} onClick={enqueueMixDubPreview}>
-                      Run mix dub
-                    </button>
-                  ) : null}
-                  {stage.id === "mux" ? (
-                    <button type="button" disabled={busy} onClick={enqueueMuxDubPreview}>
-                      Run mux preview MP4
-                    </button>
-                  ) : null}
-                </div>
-              </div>
-            );
-          })}
-        </div>
-
-        <details style={{ marginTop: 12 }}>
-          <summary style={{ cursor: "pointer", color: "#4b5563", fontSize: 13, fontWeight: 600 }}>
-            Advanced
-          </summary>
-          <div style={{ marginTop: 8, display: "flex", flexDirection: "column", gap: 8 }}>
-            {advancedLocalizationRows.map((row) => (
-              <div
-                key={row.id}
-                style={{
-                  border: "1px solid rgba(255,255,255,0.12)",
-                  borderRadius: 10,
-                  padding: "10px 12px",
-                  display: "flex",
-                  flexDirection: "column",
-                  gap: 6,
-                }}
-              >
-                <div style={{ display: "flex", alignItems: "center", gap: 10, flexWrap: "wrap" }}>
-                  <div style={{ fontWeight: 600 }}>{row.title}</div>
-                  <span
-                    style={{
-                      fontSize: 11,
-                      fontWeight: 600,
-                      padding: "2px 8px",
-                      borderRadius: 999,
-                      color: row.ready ? "#166534" : "#92400e",
-                      background: row.ready ? "rgba(22,101,52,0.10)" : "rgba(146,64,14,0.10)",
-                    }}
-                  >
-                    {row.ready ? "Ready" : "Needs attention"}
-                  </span>
-                </div>
-                <div style={{ fontSize: 12, color: "#4b5563" }}>{row.detail}</div>
-                <div className="row" style={{ marginTop: 0, flexWrap: "wrap" }}>
-                  {row.buttons.map((button) => (
-                    <button
-                      key={`workflow-${row.id}-${button.label}`}
-                      type="button"
-                      disabled={busy || (!button.sectionId && !button.action)}
-                      onClick={() => {
-                        if (button.sectionId) {
-                          scrollToLocalizationSection(button.sectionId);
-                          return;
-                        }
-                        button.action?.();
-                      }}
-                    >
-                      {button.label}
-                    </button>
-                  ))}
-                </div>
-              </div>
-            ))}
-          </div>
-        </details>
-
-        <div className="row" style={{ marginTop: 12, flexWrap: "wrap" }}>
-          <button
-            type="button"
-            disabled={busy || !translatedEnglishTrack || isEnglishLocalizationTrack(currentTrack)}
-            onClick={() => {
-              if (!translatedEnglishTrack) return;
-              loadTrack(translatedEnglishTrack.id).catch((e) => setError(String(e)));
-            }}
-          >
-            Use translated EN track
-          </button>
-        </div>
-
-        <details style={{ marginTop: 8 }}>
-          <summary style={{ cursor: "pointer", color: "#4b5563", fontSize: 12 }}>Keyboard shortcuts</summary>
-          <div style={{ marginTop: 6, fontSize: 12, color: "#4b5563", display: "grid", gridTemplateColumns: "auto 1fr", gap: "4px 12px" }}>
-            <kbd style={{ fontFamily: "monospace", background: "rgba(0,0,0,0.06)", padding: "1px 5px", borderRadius: 3 }}>Ctrl+Z</kbd><span>Undo subtitle edit</span>
-            <kbd style={{ fontFamily: "monospace", background: "rgba(0,0,0,0.06)", padding: "1px 5px", borderRadius: 3 }}>Ctrl+Shift+Z</kbd><span>Redo subtitle edit</span>
-            <kbd style={{ fontFamily: "monospace", background: "rgba(0,0,0,0.06)", padding: "1px 5px", borderRadius: 3 }}>Ctrl+Enter</kbd><span>Start / continue localization run</span>
-            <kbd style={{ fontFamily: "monospace", background: "rgba(0,0,0,0.06)", padding: "1px 5px", borderRadius: 3 }}>Ctrl+Shift+E</kbd><span>Export selected outputs</span>
-            <kbd style={{ fontFamily: "monospace", background: "rgba(0,0,0,0.06)", padding: "1px 5px", borderRadius: 3 }}>Ctrl+1</kbd><span>Jump to Track</span>
-            <kbd style={{ fontFamily: "monospace", background: "rgba(0,0,0,0.06)", padding: "1px 5px", borderRadius: 3 }}>Ctrl+2</kbd><span>Jump to Reusable Voice Basics</span>
-            <kbd style={{ fontFamily: "monospace", background: "rgba(0,0,0,0.06)", padding: "1px 5px", borderRadius: 3 }}>Ctrl+3</kbd><span>Jump to Workflow</span>
-            <kbd style={{ fontFamily: "monospace", background: "rgba(0,0,0,0.06)", padding: "1px 5px", borderRadius: 3 }}>Ctrl+4</kbd><span>Jump to Outputs</span>
-            <kbd style={{ fontFamily: "monospace", background: "rgba(0,0,0,0.06)", padding: "1px 5px", borderRadius: 3 }}>Ctrl+5</kbd><span>Jump to Artifacts</span>
-          </div>
-        </details>
-      </div>
-
-      <div className="card" id="loc-voice-basics">
+      <div className="card loc-stage-card" data-stage="voice_plan" id="loc-voice-basics">
         <h2>Reusable Voice Basics <SectionHelp sectionId="loc-voice-basics" /></h2>
         <div style={{ color: "#4b5563" }}>
           Capture one speaker, save it as a reusable voice, apply it to later items, then
@@ -6917,90 +6681,7 @@ export function SubtitleEditorPage({
         </div>
       </div>
 
-      <div className="card" id="loc-advanced">
-        <h2>Advanced Tools <SectionHelp sectionId="loc-advanced" /></h2>
-        <div style={{ color: "#4b5563" }}>
-          These are the advanced localization surfaces that were easy to miss in the long page
-          flow. Use this index to jump directly to backend strategy, benchmarking, batch dubbing,
-          A/B preview, QC, and artifacts once the current item is open.
-        </div>
-        <div style={{ marginTop: 12, display: "flex", flexDirection: "column", gap: 10 }}>
-          {advancedLocalizationRows.map((row) => (
-            <div
-              key={row.id}
-              style={{
-                border: "1px solid #e5e7eb",
-                borderRadius: 10,
-                padding: "10px 12px",
-                display: "flex",
-                flexDirection: "column",
-                gap: 8,
-              }}
-            >
-              <div
-                style={{
-                  display: "flex",
-                  justifyContent: "space-between",
-                  gap: 12,
-                  alignItems: "center",
-                  flexWrap: "wrap",
-                }}
-              >
-                <div style={{ fontWeight: 600 }}>{row.title}</div>
-                <div
-                  style={{
-                    fontSize: 12,
-                    fontWeight: 600,
-                    color: row.ready ? "#166534" : "#92400e",
-                  }}
-                >
-                  {row.ready ? "Ready" : "Needs setup"}
-                </div>
-              </div>
-              <div style={{ fontSize: 12, opacity: 0.75 }}>{row.detail}</div>
-              <div className="row" style={{ marginTop: 0, flexWrap: "wrap" }}>
-                {row.buttons.map((button) => (
-                  <button
-                    key={`${row.id}-${button.label}`}
-                    type="button"
-                    disabled={busy || (!button.sectionId && !button.action)}
-                    onClick={() => {
-                      if (button.sectionId) {
-                        scrollToLocalizationSection(button.sectionId);
-                        return;
-                      }
-                      button.action?.();
-                    }}
-                  >
-                    {button.label}
-                  </button>
-                ))}
-              </div>
-            </div>
-          ))}
-        </div>
-      </div>
-
-      <div className="card">
-        <h2>First Dub Guide <SectionHelp sectionId="loc-first-dub" /></h2>
-        <div style={{ color: "#4b5563" }}>
-          Recommended order for a first Japanese/Korean to English dubbed preview. Each step maps
-          directly to a row in the Workflow panel above &mdash; configure pickers there and press
-          the row's Run button.
-        </div>
-        <ol style={{ marginTop: 10, paddingLeft: 18, lineHeight: 1.5 }}>
-          <li>Workflow row 1 &mdash; <strong>Captions (ASR)</strong>. Pick the source language (auto / ja / ko) and Run ASR.</li>
-          <li>Workflow row 2 &mdash; <strong>Translate to English</strong>. Pick translation style and honorific handling, then Run.</li>
-          <li>Workflow row 3 &mdash; <strong>Speaker labels</strong>. Pick the diarization backend if needed, then Run.</li>
-          <li>Open <strong>Diagnostics</strong> once and verify FFmpeg plus the voice cloning packages are installed.</li>
-          <li>Workflow row 4 &mdash; <strong>Voice plan</strong>. Open Reusable Voice Basics to capture or apply a saved voice per speaker (saved voices reuse on later episodes).</li>
-          <li>Workflow row 5 &mdash; <strong>Dub speech generation</strong>. Run the voice-preserving dub once each speaker is covered.</li>
-          <li>Workflow rows 6 and 7 &mdash; <strong>Mix dub</strong> then <strong>Mux preview MP4</strong>. If stem separation is unavailable, Mix falls back to source media audio so a preview MP4 is still produced.</li>
-          <li>Use the Outputs card below to export the final SRT/VTT and MP4 into the app export folder.</li>
-        </ol>
-      </div>
-
-      <div className="card">
+      <div className="card loc-stage-card" data-stage="mux" id="loc-outputs">
         <h2>Outputs <SectionHelp sectionId="loc-outputs" /></h2>
         <div style={{ color: "#4b5563" }}>
           Working files stay in app-data for reproducible jobs. User-facing deliverables export to a
@@ -7242,7 +6923,7 @@ export function SubtitleEditorPage({
             }
             onClick={exportMuxPreview}
           >
-            Export preview…
+            Export previewÃ¢â‚¬Â¦
           </button>
           <button type="button" disabled={busy} onClick={enqueueExportPack}>
             Export pack (zip)
@@ -7270,7 +6951,7 @@ export function SubtitleEditorPage({
         </div>
       </div>
 
-      <div className="card" id="loc-glossary">
+      <div className="card loc-stage-card" data-stage="translate" id="loc-glossary">
         <h2>Glossary <SectionHelp sectionId="loc-glossary" /></h2>
         <div style={{ color: "#4b5563", marginBottom: 8 }}>
           Define term mappings applied during translation. Add source terms (Japanese/Korean) and
@@ -7278,7 +6959,7 @@ export function SubtitleEditorPage({
         </div>
         <div className="row" style={{ flexWrap: "wrap", gap: 8 }}>
           <input
-            placeholder="Source term (e.g. 東京)"
+            placeholder="Source term (e.g. Ã¦ÂÂ±Ã¤ÂºÂ¬)"
             value={glossaryNewSource}
             onChange={(e) => setGlossaryNewSource(e.target.value)}
             style={{ width: 200 }}
@@ -7367,12 +7048,12 @@ export function SubtitleEditorPage({
           </div>
         ) : (
           <div style={{ color: "#4b5563", marginTop: 8, fontSize: 13 }}>
-            No glossary terms yet. Add terms above — they will be applied to future translations.
+            No glossary terms yet. Add terms above Ã¢â‚¬â€ they will be applied to future translations.
           </div>
         )}
       </div>
 
-      <div className="card" id="loc-track">
+      <div className="card loc-stage-card" data-stage="captions" id="loc-track">
         <h2>Track <SectionHelp sectionId="loc-track" /></h2>
         <div className="row">
           <select
@@ -7969,7 +7650,7 @@ export function SubtitleEditorPage({
                             pickSpeakerVoiceProfiles(speakerKey).catch(() => undefined);
                           }}
                         >
-                          Choose…
+                          ChooseÃ¢â‚¬Â¦
                         </button>
                         <button
                           type="button"
@@ -10350,7 +10031,7 @@ export function SubtitleEditorPage({
         ) : null}
       </div>
 
-      <div className="card" id="loc-qc">
+      <div className="card loc-stage-card" data-stage="mux" id="loc-qc">
         <h2>QC report <SectionHelp sectionId="loc-qc" /></h2>
         <div style={{ color: "#4b5563" }}>
           Flags subtitle and voice issues: CPS, long lines, overlaps, timing mismatches, silent clips,
@@ -10535,7 +10216,7 @@ export function SubtitleEditorPage({
         )}
       </div>
 
-      <div className="card" id="loc-artifacts">
+      <div className="card loc-stage-card" data-stage="files" id="loc-artifacts">
         <h2>Artifacts <SectionHelp sectionId="loc-artifacts" /></h2>
         <div style={{ color: "#4b5563" }}>
           Derived outputs for this item (stems, manifests, previews, QC, exports).
@@ -10679,7 +10360,7 @@ export function SubtitleEditorPage({
         </div>
       </div>
 
-      <div className="card">
+      <div className="card loc-stage-card" data-stage="mix" id="loc-preview">
         <h2>Preview</h2>
         <div className="row" style={{ marginTop: 0, flexWrap: "wrap", alignItems: "center" }}>
           <label style={{ display: "flex", alignItems: "center", gap: 8 }}>
@@ -10721,7 +10402,7 @@ export function SubtitleEditorPage({
         )}
       </div>
 
-      <div className="card">
+      <div className="card loc-stage-card" data-stage="captions" id="loc-segments">
         <h2>Segments</h2>
 
         {doc ? (
@@ -10753,7 +10434,7 @@ export function SubtitleEditorPage({
                   onChange={(e) => setBulkSpeakerKey(e.currentTarget.value)}
                 >
                   <option value="">(none)</option>
-                  <option value="__new__">New speaker…</option>
+                  <option value="__new__">New speakerÃ¢â‚¬Â¦</option>
                   {speakersInTrack.map((k) => (
                     <option key={k} value={k}>
                       {k}
@@ -10795,20 +10476,20 @@ export function SubtitleEditorPage({
                 disabled={busy}
                 onChange={(e) => setMergeFromSpeakerKey(e.currentTarget.value)}
               >
-                <option value="">From…</option>
+                <option value="">FromÃ¢â‚¬Â¦</option>
                 {speakersInTrack.map((k) => (
                   <option key={`from-${k}`} value={k}>
                     {k}
                   </option>
                 ))}
               </select>
-              <div style={{ opacity: 0.7 }}>→</div>
+              <div style={{ opacity: 0.7 }}>Ã¢â€ â€™</div>
               <select
                 value={mergeToSpeakerKey}
                 disabled={busy}
                 onChange={(e) => setMergeToSpeakerKey(e.currentTarget.value)}
               >
-                <option value="">To…</option>
+                <option value="">ToÃ¢â‚¬Â¦</option>
                 {speakersInTrack.map((k) => (
                   <option key={`to-${k}`} value={k}>
                     {k}
@@ -11062,7 +10743,7 @@ export function SubtitleEditorPage({
                           }}
                           title="-250ms"
                         >
-                          ◀
+                          Ã¢â€”â‚¬
                         </button>
                         <button
                           type="button"
@@ -11076,7 +10757,7 @@ export function SubtitleEditorPage({
                           }}
                           title="+250ms"
                         >
-                          ▶
+                          Ã¢â€“Â¶
                         </button>
                       </div>
                     </td>
@@ -11088,9 +10769,12 @@ export function SubtitleEditorPage({
           </>
         ) : (
           <div style={{ opacity: busy ? 0.7 : 1 }}>
-            {busy ? "Loading…" : "No subtitle document loaded."}
+            {busy ? "LoadingÃ¢â‚¬Â¦" : "No subtitle document loaded."}
           </div>
         )}
+      </div>
+
+        </main>
       </div>
       {/* Sticky quick-actions bar (WP-0178) */}
       <div

@@ -1159,3 +1159,258 @@ img {
     gap: 4px;
   }
 }
+
+/* WP-0211: Localization editor master-detail layout.
+   The editor renders as one panel: header strip + left rail (stages)
+   + right pane (selected-stage content). Card chrome is flattened so
+   inner sections look like one cohesive document, not a deck of cards. */
+.loc-workspace {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  height: 100%;
+}
+
+.loc-workspace-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 14px;
+  padding: 10px 14px;
+  background: var(--panel-1);
+  border: 1px solid var(--panel-border);
+  border-radius: var(--panel-radius);
+  flex-wrap: wrap;
+}
+
+.loc-workspace-header-title {
+  display: flex;
+  align-items: baseline;
+  gap: 12px;
+  flex-wrap: wrap;
+  min-width: 0;
+}
+
+.loc-workspace-header-item-title {
+  font-size: 13px;
+  color: var(--ink-soft);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  max-width: 60vw;
+}
+
+.loc-workspace-header-actions {
+  display: flex;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+.loc-workspace-notice {
+  padding: 8px 12px;
+  background: var(--panel-0);
+  border: 1px solid var(--panel-border);
+  border-radius: var(--panel-radius);
+  font-size: 13px;
+}
+
+.loc-workspace-body {
+  display: grid;
+  grid-template-columns: 320px 1fr;
+  gap: 12px;
+  flex: 1;
+  min-height: 0;
+}
+
+.loc-workspace-rail {
+  background: var(--panel-1);
+  border: 1px solid var(--panel-border);
+  border-radius: var(--panel-radius);
+  padding: 12px;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  min-height: 0;
+  overflow-y: auto;
+  position: sticky;
+  top: 0;
+  align-self: start;
+}
+
+.loc-workspace-rail-eyebrow {
+  font-size: 11px;
+  font-weight: 700;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: var(--ink-soft);
+  margin-bottom: 4px;
+}
+
+.loc-workspace-rail-stages {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.loc-workspace-rail-stage {
+  width: 100%;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 8px 10px;
+  background: transparent;
+  border: 1px solid transparent;
+  border-radius: 6px;
+  text-align: left;
+  font: inherit;
+  color: var(--ink);
+  cursor: pointer;
+}
+
+.loc-workspace-rail-stage:hover {
+  background: rgba(0, 0, 0, 0.04);
+}
+
+.loc-workspace-rail-stage.is-selected {
+  background: var(--panel-0);
+  border-color: var(--panel-border);
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.7);
+}
+
+.loc-workspace-rail-stage-index {
+  font-size: 11px;
+  font-weight: 700;
+  width: 22px;
+  height: 22px;
+  border-radius: 11px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  background: rgba(0, 0, 0, 0.08);
+  color: #374151;
+  flex-shrink: 0;
+}
+
+.loc-workspace-rail-stage-title {
+  flex: 1;
+  font-size: 13px;
+}
+
+.loc-workspace-rail-stage-chip {
+  font-size: 10px;
+  font-weight: 600;
+  padding: 2px 6px;
+  border-radius: 999px;
+  flex-shrink: 0;
+}
+
+.loc-workspace-rail-chip-ready { color: #166534; background: rgba(22, 101, 52, 0.12); }
+.loc-workspace-rail-chip-running { color: #1d4ed8; background: rgba(29, 78, 216, 0.12); }
+.loc-workspace-rail-chip-failed { color: #b91c1c; background: rgba(185, 28, 28, 0.12); }
+.loc-workspace-rail-chip-pending { color: #92400e; background: rgba(146, 64, 14, 0.12); }
+
+.loc-workspace-rail-runsummary,
+.loc-workspace-rail-clone {
+  font-size: 11px;
+  padding: 6px 8px;
+  border-radius: 6px;
+  background: var(--panel-0);
+  border: 1px solid var(--panel-border);
+  color: var(--ink-soft);
+}
+
+.loc-workspace-rail-clone-warn {
+  color: #9a3412;
+  background: rgba(154, 52, 18, 0.08);
+  border-color: rgba(154, 52, 18, 0.3);
+}
+
+.loc-workspace-content {
+  background: var(--panel-0);
+  border: 1px solid var(--panel-border);
+  border-radius: var(--panel-radius);
+  padding: 16px;
+  min-width: 0;
+  overflow-y: auto;
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+}
+
+/* Hide stage-cards whose data-stage doesn't include the selected stage. */
+.loc-workspace-content[data-selected-stage="captions"] .loc-stage-card:not([data-stage~="captions"]),
+.loc-workspace-content[data-selected-stage="translate"] .loc-stage-card:not([data-stage~="translate"]),
+.loc-workspace-content[data-selected-stage="speakers"] .loc-stage-card:not([data-stage~="speakers"]),
+.loc-workspace-content[data-selected-stage="voice_plan"] .loc-stage-card:not([data-stage~="voice_plan"]),
+.loc-workspace-content[data-selected-stage="dub"] .loc-stage-card:not([data-stage~="dub"]),
+.loc-workspace-content[data-selected-stage="mix"] .loc-stage-card:not([data-stage~="mix"]),
+.loc-workspace-content[data-selected-stage="mux"] .loc-stage-card:not([data-stage~="mux"]),
+.loc-workspace-content[data-selected-stage="files"] .loc-stage-card:not([data-stage~="files"]) {
+  display: none;
+}
+
+/* Strip card chrome inside the workspace content — sections are differentiated
+   by typography, not by border + shadow. Keep margin so multiple sections in
+   the same stage still read as separate. */
+.loc-workspace-content .loc-stage-card {
+  background: transparent;
+  border: 0;
+  box-shadow: none;
+  border-radius: 0;
+  padding: 0;
+}
+
+.loc-workspace-content .loc-stage-card + .loc-stage-card {
+  margin-top: 8px;
+  padding-top: 14px;
+  border-top: 1px solid var(--panel-border);
+}
+
+@media (max-width: 1100px) {
+  .loc-workspace-body {
+    grid-template-columns: 1fr;
+  }
+  .loc-workspace-rail {
+    position: static;
+  }
+}
+
+/* Empty-stage hint when the selected stage has no mounted card */
+.loc-workspace-content:not(:has(.loc-stage-card:not([style*="display: none"]))) {
+  /* fallback handled in JSX */
+}
+.loc-workspace-stage-hint {
+  padding: 12px 14px;
+  background: rgba(214, 226, 240, 0.5);
+  border: 1px dashed rgba(72, 102, 132, 0.5);
+  border-radius: 6px;
+  font-size: 13px;
+  line-height: 1.5;
+  color: var(--ink-soft);
+}
+.loc-workspace-stage-hint strong { color: var(--ink); }
+.loc-workspace-stage-hint button {
+  font: inherit;
+  font-weight: 600;
+  color: var(--accent);
+  background: none;
+  border: none;
+  padding: 0 2px;
+  cursor: pointer;
+  text-decoration: underline;
+}
+.loc-workspace-stage-actions {
+  display: flex;
+  gap: 8px;
+  flex-wrap: wrap;
+  align-items: center;
+  padding: 10px 12px;
+  background: rgba(255, 255, 255, 0.5);
+  border: 1px solid var(--panel-border);
+  border-radius: 6px;
+}
+
+.loc-workspace-stage-actions:empty { display: none; }

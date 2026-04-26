@@ -129,3 +129,12 @@ This changelog tracks desktop installer builds produced by `governance/scripts/b
   - `product/desktop/build_target/Current/release/bundle/nsis/VoxVulgi_0.1.12_x64-setup.exe`
   - `product/desktop/build_target/Current/release/bundle/msi/VoxVulgi_0.1.12_x64_en-US.msi`
 - Notes: Localization Studio consolidation: home dashboard simplification (WP-0205), per-item clear failed runs engine+UI (WP-0206), unified Workflow Panel merging loc-workflow + loc-run (WP-0207), inline stage controls per row (WP-0208), agent /agent/dump endpoint + console buffer (WP-0209), bridge port-file PID sidecar + exit cleanup + StrictMode listener race fix (WP-0210).
+
+## 0.1.13 - 2026-04-26T08:01:47Z
+- Work Packets: `WP-0211`
+- Commit: `359ce67`
+- Offline Bundle ID: `offline_full_win64_20260426_003826`
+- Artifacts:
+  - `product/desktop/build_target/Current/release/bundle/nsis/VoxVulgi_0.1.13_x64-setup.exe`
+  - `product/desktop/build_target/Current/release/bundle/msi/VoxVulgi_0.1.13_x64_en-US.msi`
+- Notes: Localization editor master-detail layout: one panel with item-header strip + 8-stage left rail + right pane that renders only the selected stage. Per-stage actions strip at top of right pane. Card chrome stripped inside content. Deleted Workflow / First Dub Guide / Advanced Tools cards (redundant). Per operator: 'single panel, not a fan of the card system.'
