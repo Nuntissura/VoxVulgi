@@ -120,3 +120,12 @@ This changelog tracks desktop installer builds produced by `governance/scripts/b
   - `product/desktop/build_target/Current/release/bundle/nsis/VoxVulgi_0.1.11_x64-setup.exe`
   - `product/desktop/build_target/Current/release/bundle/msi/VoxVulgi_0.1.11_x64_en-US.msi`
 - Notes: Post-localization-smoke desktop target build with localization reliability and voice/backend updates.
+
+## 0.1.12 - 2026-04-26T01:14:35Z
+- Work Packets: `WP-0205`, `WP-0206`, `WP-0207`, `WP-0208`, `WP-0209`, `WP-0210`
+- Commit: `f77dcd0`
+- Offline Bundle ID: `offline_full_win64_20260426_003826`
+- Artifacts:
+  - `product/desktop/build_target/Current/release/bundle/nsis/VoxVulgi_0.1.12_x64-setup.exe`
+  - `product/desktop/build_target/Current/release/bundle/msi/VoxVulgi_0.1.12_x64_en-US.msi`
+- Notes: Localization Studio consolidation: home dashboard simplification (WP-0205), per-item clear failed runs engine+UI (WP-0206), unified Workflow Panel merging loc-workflow + loc-run (WP-0207), inline stage controls per row (WP-0208), agent /agent/dump endpoint + console buffer (WP-0209), bridge port-file PID sidecar + exit cleanup + StrictMode listener race fix (WP-0210).
