@@ -1,6 +1,6 @@
 # VoxVulgi â€” Task Board
 
-Last updated: 2026-04-25
+Last updated: 2026-04-27
 
 This is the single source of truth for work status.
 
@@ -226,3 +226,4 @@ This is the single source of truth for work status.
 | WP-0209 | Visual debugger state dump and console buffer | IN_PROGRESS | Codex | Pair the existing PNG snapshot with a JSON state-dump (page, editor item, viewport, scroll, filtered localStorage, mounted loc-* ids, last 200 console entries); add `/agent/dump` bridge endpoint and `window.__voxVulgiRequestDump`. |
 | WP-0210 | Bridge and visual debugger reliability | IN_PROGRESS | Codex | Stop the StrictMode async-listener race that doubled every snapshot/dump capture; add an `agent_bridge.json` PID/start-time sidecar and clean both files up on Tauri exit so a stale port file no longer silently misleads agents. |
 | WP-0211 | Localization editor master-detail layout | IN_PROGRESS | Codex | Replace the 13-card editor stack with one panel: item header strip + left rail of 8 stages + right pane that renders only the selected stage. Strip card chrome, delete First Dub Guide / Reusable Tools / Advanced Tools redundancy. Per operator: "single panel, not a fan of the card system." |
+| WP-0212 | Safe Mode pill placement and exit-rehydrate notice | IN_PROGRESS | Codex | Replace the always-visible top-bar "Recovery" pill with a smaller end-of-topbar Safe Mode toggle ("Safe Mode ON" / "Safe Mode OFF") and surface an in-app dismissable notice on exit warning that a restart is required to rehydrate bundled assets skipped during Safe Mode startup. |
