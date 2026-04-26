@@ -592,18 +592,56 @@ code {
   white-space: nowrap;
 }
 
-.startup-pill-recovery {
-  min-width: 92px;
-}
-
-.startup-pill-safe {
-  border-color: rgba(44, 112, 79, 0.48);
-  background: linear-gradient(154deg, #e4f2e8 0%, #cfe4d6 100%);
-}
-
 .startup-pill-error {
   border-color: rgba(145, 74, 86, 0.58);
   background: linear-gradient(154deg, #f5e2e6 0%, #e7ccd3 100%);
+}
+
+.safe-mode-pill {
+  margin-left: 8px;
+  padding: 4px 10px;
+  font-size: 0.78rem;
+  line-height: 1.1;
+  white-space: nowrap;
+  border-radius: 999px;
+  border: 1px solid rgba(75, 94, 116, 0.35);
+  background: linear-gradient(154deg, #f1f4f8 0%, #e3e8ef 100%);
+  color: #3a4654;
+}
+
+.safe-mode-pill-on {
+  border-color: rgba(44, 112, 79, 0.55);
+  background: linear-gradient(154deg, #e4f2e8 0%, #cfe4d6 100%);
+  color: #1f3d2c;
+}
+
+.safe-mode-pill-off {
+  opacity: 0.78;
+}
+
+.safe-mode-pill-off:hover {
+  opacity: 1;
+}
+
+.shell-status-card-notice {
+  position: relative;
+  padding-right: 32px;
+}
+
+.shell-status-card-close {
+  position: absolute;
+  top: 6px;
+  right: 6px;
+  width: 22px;
+  min-width: 22px;
+  height: 22px;
+  padding: 0;
+  line-height: 1;
+  font-size: 0.75rem;
+  border-radius: 999px;
+  border: 1px solid rgba(75, 94, 116, 0.35);
+  background: rgba(255, 255, 255, 0.6);
+  color: #3a4654;
 }
 
 .win-btn {

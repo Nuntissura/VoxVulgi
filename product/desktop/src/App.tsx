@@ -1596,6 +1596,7 @@ function App() {
   const [editorItemId, setEditorItemId] = useState<string | null>(null);
   const [localizationNavRequest, setLocalizationNavRequest] = useState<LocalizationNavRequest | null>(null);
   const [safeMode, setSafeMode] = useState<SafeModeStatus | null>(null);
+  const [safeModeExitNoticeVisible, setSafeModeExitNoticeVisible] = useState(false);
   const [startup, setStartup] = useState<StartupStatus | null>(null);
   const [startupDetailsOpen, setStartupDetailsOpen] = useState(false);
   const [shellWindowMode, setShellWindowMode] = useState<ShellWindowMode>("floating");
@@ -1970,9 +1971,15 @@ function App() {
   }
 
   async function setSafeModeEnabled(enabled: boolean) {
+    const wasEnabled = safeMode?.enabled === true;
     try {
       const status = await invoke<SafeModeStatus>("safe_mode_set", { enabled });
       setSafeMode(status);
+      if (wasEnabled && !status.enabled) {
+        setSafeModeExitNoticeVisible(true);
+      } else if (status.enabled) {
+        setSafeModeExitNoticeVisible(false);
+      }
       void diagnosticsTrace(enabled ? "safe_mode_enabled" : "safe_mode_disabled", {
         queue_paused: status.queue_paused,
       });
@@ -2143,21 +2150,6 @@ function App() {
                   Startup error
                 </button>
               ) : null}
-              <button
-                type="button"
-                className={`startup-pill ${
-                  safeMode?.enabled ? "startup-pill-safe" : "startup-pill-recovery"
-                }`}
-                data-no-drag="true"
-                onClick={() => void setSafeModeEnabled(!safeMode?.enabled)}
-                title={
-                  safeMode?.enabled
-                    ? "Exit Safe Mode"
-                    : "Enable Safe Mode if startup feels unstable"
-                }
-              >
-                {safeMode?.enabled ? "Safe Mode ON" : "Recovery"}
-              </button>
               <nav className="nav" data-no-drag="true">
                 <button
                   className={page === "localization" ? "active" : ""}
@@ -2216,6 +2208,18 @@ function App() {
                   Options
                 </button>
               </nav>
+              <button
+                type="button"
+                className={`safe-mode-pill ${
+                  safeMode?.enabled ? "safe-mode-pill-on" : "safe-mode-pill-off"
+                }`}
+                data-no-drag="true"
+                onClick={() => void setSafeModeEnabled(!safeMode?.enabled)}
+                title={safeMode?.enabled ? "Exit Safe Mode" : "Enter Safe Mode"}
+                aria-pressed={safeMode?.enabled ?? false}
+              >
+                {safeMode?.enabled ? "Safe Mode ON" : "Safe Mode OFF"}
+              </button>
             </div>
             <div className="topbar-chrome">
               <div
@@ -2267,14 +2271,15 @@ function App() {
           </div>
         </header>
         <main className="content" data-no-drag="true">
-        {safeMode?.enabled || startupBusy || startupFailed ? (
+        {safeMode?.enabled || safeModeExitNoticeVisible || startupBusy || startupFailed ? (
           <div className="shell-status-strip">
             {safeMode?.enabled ? (
               <div className="card shell-status-card">
                 <div className="shell-status-title">Safe Mode is ON</div>
                 <div className="shell-status-support">
                   Startup auto-refresh is disabled and background jobs are paused so recovery and
-                  data export stay safe.
+                  data export stay safe. Exiting Safe Mode requires a restart to rehydrate bundled
+                  assets that were skipped at startup.
                 </div>
                 <div className="row" style={{ marginTop: 0, flexWrap: "wrap" }}>
                   <button type="button" onClick={() => void setSafeModeEnabled(false)}>
@@ -2283,6 +2288,24 @@ function App() {
                   <button type="button" onClick={() => switchPage("diagnostics")}>
                     Open Diagnostics
                   </button>
+                </div>
+              </div>
+            ) : null}
+            {!safeMode?.enabled && safeModeExitNoticeVisible ? (
+              <div className="card shell-status-card shell-status-card-notice">
+                <button
+                  type="button"
+                  className="shell-status-card-close"
+                  aria-label="Dismiss Safe Mode exit notice"
+                  title="Dismiss"
+                  onClick={() => setSafeModeExitNoticeVisible(false)}
+                >
+                  &#x2715;
+                </button>
+                <div className="shell-status-title">Safe Mode disabled</div>
+                <div className="shell-status-support">
+                  Restart the app to rehydrate bundled assets that were skipped during Safe Mode
+                  startup. Background jobs have resumed.
                 </div>
               </div>
             ) : null}
