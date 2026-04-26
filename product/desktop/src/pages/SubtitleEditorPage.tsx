@@ -110,29 +110,6 @@ type ExportedFile = {
   file_bytes: number;
 };
 
-type FfmpegToolsStatus = {
-  ffmpeg_version: string | null;
-  ffprobe_version: string | null;
-};
-
-type TtsNeuralLocalV1PackStatus = {
-  installed: boolean;
-  package_version: string | null;
-};
-
-type TtsVoicePreservingLocalV1PackStatus = {
-  installed: boolean;
-  openvoice_version: string | null;
-  cosyvoice_version: string | null;
-};
-
-type DiagnosticsModelInventory = {
-  models: Array<{
-    id: string;
-    installed: boolean;
-  }>;
-};
-
 type LocalizationOutputEntry = {
   id: string;
   group: "Source" | "Working" | "Deliverables";
