@@ -23,9 +23,10 @@ function installConsoleBuffer() {
   if (consolePatched) return;
   consolePatched = true;
   const levels: Array<"log" | "warn" | "error"> = ["log", "warn", "error"];
+  const consoleAny = console as unknown as Record<string, (...a: unknown[]) => void>;
   for (const level of levels) {
-    const original = (console as Record<string, unknown>)[level] as (...a: unknown[]) => void;
-    (console as Record<string, unknown>)[level] = (...args: unknown[]) => {
+    const original = consoleAny[level];
+    consoleAny[level] = (...args: unknown[]) => {
       try {
         const serialized = args
           .map((a) => {

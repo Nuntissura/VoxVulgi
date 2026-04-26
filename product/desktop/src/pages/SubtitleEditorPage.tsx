@@ -1313,11 +1313,6 @@ export function SubtitleEditorPage({
   const [notice, setNotice] = useState<string | null>(null);
   const [outputs, setOutputs] = useState<ItemOutputs | null>(null);
   const [outputPathStatuses, setOutputPathStatuses] = useState<Record<string, ShellPathStatus>>({});
-  const [ffmpegStatus, setFfmpegStatus] = useState<FfmpegToolsStatus | null>(null);
-  const [neuralPackStatus, setNeuralPackStatus] = useState<TtsNeuralLocalV1PackStatus | null>(null);
-  const [voicePreservingPackStatus, setVoicePreservingPackStatus] =
-    useState<TtsVoicePreservingLocalV1PackStatus | null>(null);
-  const [modelInventory, setModelInventory] = useState<DiagnosticsModelInventory | null>(null);
   const [artifacts, setArtifacts] = useState<ArtifactInfo[]>([]);
   const [artifactsBusy, setArtifactsBusy] = useState(false);
   const [itemJobs, setItemJobs] = useState<JobRow[]>([]);
@@ -1898,25 +1893,6 @@ export function SubtitleEditorPage({
     return next;
   }, [itemId]);
 
-  const refreshLocalizationReadiness = useCallback(async () => {
-    const [nextFfmpeg, nextNeuralPack, nextVoicePreservingPack, nextModels] = await Promise.all([
-      invoke<FfmpegToolsStatus>("tools_ffmpeg_status"),
-      invoke<TtsNeuralLocalV1PackStatus>("tools_tts_neural_local_v1_status"),
-      invoke<TtsVoicePreservingLocalV1PackStatus>("tools_tts_voice_preserving_local_v1_status"),
-      invoke<DiagnosticsModelInventory>("models_inventory"),
-    ]);
-    setFfmpegStatus(nextFfmpeg);
-    setNeuralPackStatus(nextNeuralPack);
-    setVoicePreservingPackStatus(nextVoicePreservingPack);
-    setModelInventory(nextModels);
-    return {
-      ffmpeg: nextFfmpeg,
-      neural: nextNeuralPack,
-      voicePreserving: nextVoicePreservingPack,
-      models: nextModels,
-    };
-  }, []);
-
   const refreshArtifacts = useCallback(async () => {
     setError(null);
     setArtifactsBusy(true);
@@ -2036,7 +2012,6 @@ export function SubtitleEditorPage({
     Promise.all([
       invoke<LibraryItem>("library_get", { itemId }),
       refreshTracks(),
-      refreshLocalizationReadiness(),
       refreshSpeakerSettings(),
       refreshOutputs(),
       refreshArtifacts(),
@@ -2083,7 +2058,6 @@ export function SubtitleEditorPage({
   }, [
     itemId,
     refreshTracks,
-    refreshLocalizationReadiness,
     refreshSpeakerSettings,
     refreshOutputs,
     refreshArtifacts,
@@ -2130,10 +2104,6 @@ export function SubtitleEditorPage({
     const m = new Map<string, ItemSpeakerSetting>();
     for (const s of speakerSettings) m.set(s.speaker_key, s);
     return m;
-  }, [speakerSettings]);
-
-  const speakerReferenceCount = useMemo(() => {
-    return speakerSettings.reduce((sum, setting) => sum + speakerProfilePaths(setting).length, 0);
   }, [speakerSettings]);
 
   const selectedTemplateReferencesBySpeaker = useMemo(() => {
@@ -3576,11 +3546,8 @@ export function SubtitleEditorPage({
         return;
       }
       // Ctrl+Shift+R — Refresh readiness
-      if (ctrl && e.shiftKey && e.key.toLowerCase() === "r") {
-        e.preventDefault();
-        refreshLocalizationReadiness().catch(() => {});
-        return;
-      }
+      // Ctrl+Shift+R was previously bound to "Refresh readiness" against the now-retired
+      // FFmpeg/Whisper/pack readiness rows. Browser refresh fallback is intentional here.
       // Ctrl+1..5 — Jump to workflow sections
       if (ctrl && !e.shiftKey && e.key >= "1" && e.key <= "5") {
         e.preventDefault();
@@ -6631,9 +6598,6 @@ export function SubtitleEditorPage({
         </details>
 
         <div className="row" style={{ marginTop: 12, flexWrap: "wrap" }}>
-          <button type="button" disabled={busy} onClick={() => refreshLocalizationReadiness().catch((e) => setError(String(e)))}>
-            Refresh readiness
-          </button>
           <button
             type="button"
             disabled={busy || !translatedEnglishTrack || isEnglishLocalizationTrack(currentTrack)}
@@ -6653,7 +6617,6 @@ export function SubtitleEditorPage({
             <kbd style={{ fontFamily: "monospace", background: "rgba(0,0,0,0.06)", padding: "1px 5px", borderRadius: 3 }}>Ctrl+Shift+Z</kbd><span>Redo subtitle edit</span>
             <kbd style={{ fontFamily: "monospace", background: "rgba(0,0,0,0.06)", padding: "1px 5px", borderRadius: 3 }}>Ctrl+Enter</kbd><span>Start / continue localization run</span>
             <kbd style={{ fontFamily: "monospace", background: "rgba(0,0,0,0.06)", padding: "1px 5px", borderRadius: 3 }}>Ctrl+Shift+E</kbd><span>Export selected outputs</span>
-            <kbd style={{ fontFamily: "monospace", background: "rgba(0,0,0,0.06)", padding: "1px 5px", borderRadius: 3 }}>Ctrl+Shift+R</kbd><span>Refresh readiness</span>
             <kbd style={{ fontFamily: "monospace", background: "rgba(0,0,0,0.06)", padding: "1px 5px", borderRadius: 3 }}>Ctrl+1</kbd><span>Jump to Track</span>
             <kbd style={{ fontFamily: "monospace", background: "rgba(0,0,0,0.06)", padding: "1px 5px", borderRadius: 3 }}>Ctrl+2</kbd><span>Jump to Reusable Voice Basics</span>
             <kbd style={{ fontFamily: "monospace", background: "rgba(0,0,0,0.06)", padding: "1px 5px", borderRadius: 3 }}>Ctrl+3</kbd><span>Jump to Workflow</span>
