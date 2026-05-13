@@ -1365,15 +1365,29 @@ tmp = tempfile.NamedTemporaryFile(delete=False, suffix=".tar.gz")
 tmp_path = tmp.name
 tmp.close()
 try:
-    download_url_to_file(archive_url, tmp_path, "model archive")
-
-    h = hashlib.sha256()
-    with open(tmp_path, "rb") as f:
-        for chunk in iter(lambda: f.read(1024 * 1024), b""):
-            h.update(chunk)
-    got = h.hexdigest()
+    got = None
+    last_exc = None
+    for attempt in range(1, 6):
+        try:
+            download_url_to_file(archive_url, tmp_path, "model archive")
+            h = hashlib.sha256()
+            with open(tmp_path, "rb") as f:
+                for chunk in iter(lambda: f.read(1024 * 1024), b""):
+                    h.update(chunk)
+            got = h.hexdigest()
+            if got == expected:
+                break
+            last_exc = RuntimeError("model archive checksum mismatch: expected=%s got=%s" % (expected, got))
+        except Exception as exc:
+            last_exc = exc
+        try:
+            os.unlink(tmp_path)
+        except Exception:
+            pass
+        if attempt < 5:
+            sleep_before_retry(attempt)
     if got != expected:
-        raise RuntimeError(f"model archive checksum mismatch: expected={{expected}} got={{got}}")
+        raise last_exc
 
     target_dir = os.path.join(MODEL_PATH, model_name)
     os.makedirs(target_dir, exist_ok=True)
@@ -1587,15 +1601,29 @@ tmp = tempfile.NamedTemporaryFile(delete=False, suffix=".tar.gz")
 tmp_path = tmp.name
 tmp.close()
 try:
-    download_url_to_file(archive_url, tmp_path, "model archive")
-
-    h = hashlib.sha256()
-    with open(tmp_path, "rb") as f:
-        for chunk in iter(lambda: f.read(1024 * 1024), b""):
-            h.update(chunk)
-    got = h.hexdigest()
+    got = None
+    last_exc = None
+    for attempt in range(1, 6):
+        try:
+            download_url_to_file(archive_url, tmp_path, "model archive")
+            h = hashlib.sha256()
+            with open(tmp_path, "rb") as f:
+                for chunk in iter(lambda: f.read(1024 * 1024), b""):
+                    h.update(chunk)
+            got = h.hexdigest()
+            if got == expected:
+                break
+            last_exc = RuntimeError("model archive checksum mismatch: expected=%s got=%s" % (expected, got))
+        except Exception as exc:
+            last_exc = exc
+        try:
+            os.unlink(tmp_path)
+        except Exception:
+            pass
+        if attempt < 5:
+            sleep_before_retry(attempt)
     if got != expected:
-        raise RuntimeError(f"model archive checksum mismatch: expected={{expected}} got={{got}}")
+        raise last_exc
 
     target_dir = os.path.join(MODEL_PATH, model_name)
     os.makedirs(target_dir, exist_ok=True)
