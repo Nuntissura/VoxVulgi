@@ -77,7 +77,7 @@ Implementation notes (desktop):
   - `offline/manifest.json`
   - `offline/payload.zip` (contains `tools/`, `models/`, and `cache/huggingface/`)
 - On first run, the app extracts the payload into the user app-data dir and writes a marker (`config/offline_bundle_applied_v1.json`) so it only applies once per bundle id.
-- Build policy: desktop installer packaging must refresh `src-tauri/offline/payload.zip` before each release build so bundled dependencies match the current engine/toolchain state.
+- Build policy: routine app builds and UI/backend verification should reuse an existing verified `src-tauri/offline/payload.zip` when bundled dependency inputs did not change. Payload refresh is required for explicit release/full-refresh builds, changed dependency inputs, missing/stale payloads, or operator-requested full dependency refreshes.
 - `offline/manifest.json` should carry payload byte size and SHA-256 when available, and startup hydration must verify those before extraction.
 - Bundled toolchain inputs should be tracked in a single pinned dependency manifest (`product/engine/resources/tooling/pinned_dependency_manifest.json`) so release provenance is reproducible and inspectable.
 - Mutable unpinned recovery installs remain available only behind an explicit local opt-in environment variable; release preparation must succeed without depending on them.

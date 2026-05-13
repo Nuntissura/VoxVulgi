@@ -4,7 +4,7 @@
 
 - Follow `build_rules.md` for build verification and UI construction rules: built surfaces must be inspected visually and through backend or frontend navigation/interaction without popping up the app window or hijacking the operator keyboard/mouse, and new UI must not introduce more cards.
 - For desktop release builds, use `governance/scripts/build_desktop_target.ps1` (or `npm run build:desktop:target` from `product/desktop`).
-- Desktop installer builds must refresh the bundled offline payload so Phase 1 + Phase 2 dependencies are included in the installer resources.
+- Follow the offline payload policy in `build_rules.md`: routine builds must reuse a verified payload when inputs did not change, while explicit release/full-refresh builds must state that payload refresh can be slow and show useful progress.
 - Every desktop target build must increment the desktop semantic version.
 - Every desktop target build must append an entry to `governance/release/BUILD_CHANGELOG.md` with included Work Packet IDs.
 - Managed desktop build-output folders and filenames we control must not use spaces; prefer `snake_case`.

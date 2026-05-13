@@ -60,6 +60,7 @@ Pick the first real implementation WP from `governance/workflow/ROADMAP.md` and 
 ## 7) Desktop build traceability
 
 - Follow `build_rules.md` for headless visual/app-boundary verification and the no-new-cards UI rule.
+- Follow `build_rules.md` for offline payload handling: reuse a verified payload for routine builds when dependency inputs did not change, and reserve slow payload refreshes for explicit release/full-refresh cases or changed/missing/stale payload inputs.
 - Every desktop target build must:
   - increment the desktop semantic version,
   - append an entry in `governance/release/BUILD_CHANGELOG.md`,
