@@ -2714,6 +2714,9 @@ fn run_python_checked(
             .to_string_lossy()
             .to_string(),
     );
+    cmd.env("HF_HUB_DISABLE_XET", "1");
+    cmd.env("HF_HUB_DOWNLOAD_TIMEOUT", "300");
+    cmd.env("HF_HUB_ETAG_TIMEOUT", "30");
 
     let output = cmd
         .output()
