@@ -38,19 +38,16 @@ pub fn install_ffmpeg_tools(paths: &AppPaths) -> Result<FfmpegToolsStatus> {
 
     let download_url = ffmpeg_sidecar::download::ffmpeg_download_url()
         .map_err(|e| EngineError::InstallFailed(e.to_string()))?;
-    let archive_path = match ffmpeg_sidecar::download::download_ffmpeg_package(
-        download_url,
-        &destination,
-    ) {
-        Ok(path) => path,
-        Err(primary_err) => download_ffmpeg_package_with_curl(download_url, &destination).map_err(
-            |fallback_err| {
-                EngineError::InstallFailed(format!(
+    let archive_path =
+        match ffmpeg_sidecar::download::download_ffmpeg_package(download_url, &destination) {
+            Ok(path) => path,
+            Err(primary_err) => download_ffmpeg_package_with_curl(download_url, &destination)
+                .map_err(|fallback_err| {
+                    EngineError::InstallFailed(format!(
                     "ffmpeg download failed: {primary_err}; curl fallback failed: {fallback_err}"
                 ))
-            },
-        )?,
-    };
+                })?,
+        };
     ffmpeg_sidecar::download::unpack_ffmpeg(&archive_path, &destination)
         .map_err(|e| EngineError::InstallFailed(e.to_string()))?;
 
@@ -63,7 +60,13 @@ fn download_ffmpeg_package_with_curl(url: &str, download_dir: &Path) -> Result<P
     })?;
     let archive_path = download_dir.join(filename);
 
-    let _ = std::fs::remove_file(&archive_path);
+    download_url_to_file_with_curl(url, &archive_path, "ffmpeg archive")?;
+
+    Ok(archive_path)
+}
+
+fn download_url_to_file_with_curl(url: &str, output_path: &Path, label: &str) -> Result<()> {
+    let _ = std::fs::remove_file(output_path);
 
     let curl_program = if cfg!(windows) { "curl.exe" } else { "curl" };
     let output = crate::cmd::command(curl_program)
@@ -74,7 +77,7 @@ fn download_ffmpeg_package_with_curl(url: &str, download_dir: &Path) -> Result<P
         .arg("--retry-delay")
         .arg("2")
         .arg("--output")
-        .arg(&archive_path)
+        .arg(output_path)
         .arg(url)
         .output()
         .map_err(|e| EngineError::InstallFailed(format!("could not launch curl: {e}")))?;
@@ -92,14 +95,23 @@ fn download_ffmpeg_package_with_curl(url: &str, download_dir: &Path) -> Result<P
         )));
     }
 
-    if !archive_path.exists() {
+    if !output_path.exists() {
         return Err(EngineError::InstallFailed(format!(
-            "curl did not create ffmpeg archive: {}",
-            archive_path.to_string_lossy()
+            "curl did not create {label}: {}",
+            output_path.to_string_lossy()
         )));
     }
 
-    Ok(archive_path)
+    let downloaded_size = std::fs::metadata(output_path).map(|m| m.len()).unwrap_or(0);
+    if downloaded_size == 0 {
+        let _ = std::fs::remove_file(output_path);
+        return Err(EngineError::InstallFailed(format!(
+            "curl created empty {label}: {}",
+            output_path.to_string_lossy()
+        )));
+    }
+
+    Ok(())
 }
 
 fn tool_version_first_line(program: impl AsRef<std::ffi::OsStr>) -> Option<String> {
@@ -204,21 +216,31 @@ pub fn install_ytdlp_tools(paths: &AppPaths) -> Result<YtDlpToolsStatus> {
 
         let tmp_path = destination.with_extension("download");
 
-        let resp = ureq::get(&pin.url)
-            .call()
-            .map_err(|e| EngineError::InstallFailed(format!("yt-dlp download failed: {e}")))?;
-        let status = resp.status();
-        if status.as_u16() >= 400 {
-            return Err(EngineError::InstallFailed(format!(
-                "yt-dlp download failed (status={status})"
-            )));
-        }
+        let primary_download = (|| -> Result<()> {
+            let resp = ureq::get(&pin.url)
+                .call()
+                .map_err(|e| EngineError::InstallFailed(format!("yt-dlp download failed: {e}")))?;
+            let status = resp.status();
+            if status.as_u16() >= 400 {
+                return Err(EngineError::InstallFailed(format!(
+                    "yt-dlp download failed (status={status})"
+                )));
+            }
 
-        {
             let mut reader = resp.into_body().into_reader();
             let mut file = std::fs::File::create(&tmp_path)?;
             std::io::copy(&mut reader, &mut file)?;
             file.flush()?;
+            Ok(())
+        })();
+        if let Err(primary_err) = primary_download {
+            download_url_to_file_with_curl(&pin.url, &tmp_path, "yt-dlp executable").map_err(
+                |fallback_err| {
+                    EngineError::InstallFailed(format!(
+                        "yt-dlp download failed: {primary_err}; curl fallback failed: {fallback_err}"
+                    ))
+                },
+            )?;
         }
 
         let downloaded_size = std::fs::metadata(&tmp_path).map(|m| m.len()).unwrap_or(0);
