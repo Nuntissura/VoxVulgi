@@ -2292,7 +2292,7 @@ pub fn install_tts_neural_local_v1_pack(paths: &AppPaths) -> Result<TtsNeuralLoc
         )?;
     }
 
-    run_python_checked(
+    run_python_checked_with_retries(
         paths,
         &venv_python,
         &[
@@ -2309,6 +2309,7 @@ pub fn install_tts_neural_local_v1_pack(paths: &AppPaths) -> Result<TtsNeuralLoc
             ),
         ],
         "neural TTS warmup failed",
+        5,
     )?;
 
     let warmup_probe = kokoro_warmup_probe_path(paths);
@@ -2758,6 +2759,32 @@ fn run_python_checked(
         )));
     }
     Ok(())
+}
+
+fn run_python_checked_with_retries(
+    paths: &AppPaths,
+    python: &std::path::Path,
+    args: &[&str],
+    error_prefix: &str,
+    attempts: usize,
+) -> Result<()> {
+    let attempts = attempts.max(1);
+    let mut last_error: Option<String> = None;
+    for attempt in 1..=attempts {
+        match run_python_checked(paths, python, args, error_prefix) {
+            Ok(()) => return Ok(()),
+            Err(err) => {
+                last_error = Some(err.to_string());
+                if attempt < attempts {
+                    std::thread::sleep(std::time::Duration::from_secs((1_u64 << attempt).min(20)));
+                }
+            }
+        }
+    }
+    Err(EngineError::InstallFailed(format!(
+        "{error_prefix} after {attempts} attempts: {}",
+        last_error.unwrap_or_else(|| "unknown error".to_string())
+    )))
 }
 
 #[cfg(test)]
