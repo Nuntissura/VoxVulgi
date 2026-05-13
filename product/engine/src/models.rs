@@ -326,6 +326,40 @@ fn copy_atomic(src: &Path, dst: &Path) -> Result<()> {
 fn download_atomic(url: &str, dst: &Path, expected_size: u64, expected_sha256: &str) -> Result<()> {
     let tmp_path = dst.with_extension("download");
 
+    let mut last_error: Option<String> = None;
+    for attempt in 1..=5 {
+        let _ = std::fs::remove_file(&tmp_path);
+
+        let download_result = download_atomic_ureq(url, &tmp_path).or_else(|primary_err| {
+            download_atomic_curl(url, &tmp_path).map_err(|fallback_err| {
+                EngineError::InstallFailed(format!(
+                    "model download failed: {url} ({primary_err}); curl fallback failed ({fallback_err})"
+                ))
+            })
+        });
+
+        let result = download_result.and_then(|_| {
+            verify_download_and_commit(&tmp_path, dst, expected_size, expected_sha256)
+        });
+        match result {
+            Ok(()) => return Ok(()),
+            Err(err) => {
+                let _ = std::fs::remove_file(&tmp_path);
+                last_error = Some(err.to_string());
+                if attempt < 5 {
+                    std::thread::sleep(std::time::Duration::from_secs((1_u64 << attempt).min(20)));
+                }
+            }
+        }
+    }
+
+    Err(EngineError::InstallFailed(format!(
+        "model download failed after 5 attempts for {url}: {}",
+        last_error.unwrap_or_else(|| "unknown error".to_string())
+    )))
+}
+
+fn download_atomic_ureq(url: &str, tmp_path: &Path) -> Result<()> {
     let resp = ureq::get(url)
         .call()
         .map_err(|e| EngineError::InstallFailed(format!("model download failed: {url} ({e})")))?;
@@ -340,8 +374,6 @@ fn download_atomic(url: &str, dst: &Path, expected_size: u64, expected_sha256: &
 
     let mut reader = resp.into_body().into_reader();
     let mut file = std::fs::File::create(&tmp_path)?;
-    let mut hasher = Sha256::new();
-    let mut total = 0_u64;
     let mut buf = [0u8; 1024 * 64];
     loop {
         let n = reader.read(&mut buf)?;
@@ -349,10 +381,58 @@ fn download_atomic(url: &str, dst: &Path, expected_size: u64, expected_sha256: &
             break;
         }
         file.write_all(&buf[..n])?;
-        hasher.update(&buf[..n]);
-        total += n as u64;
     }
     file.flush()?;
+    Ok(())
+}
+
+fn download_atomic_curl(url: &str, tmp_path: &Path) -> Result<()> {
+    let curl_program = if cfg!(windows) { "curl.exe" } else { "curl" };
+    let output = crate::cmd::command(curl_program)
+        .arg("-L")
+        .arg("--fail")
+        .arg("--silent")
+        .arg("--show-error")
+        .arg("--retry")
+        .arg("5")
+        .arg("--retry-all-errors")
+        .arg("--retry-delay")
+        .arg("2")
+        .arg("--connect-timeout")
+        .arg("30")
+        .arg("--speed-limit")
+        .arg("1024")
+        .arg("--speed-time")
+        .arg("60")
+        .arg("--output")
+        .arg(tmp_path)
+        .arg(url)
+        .output()
+        .map_err(|e| EngineError::InstallFailed(format!("could not launch curl: {e}")))?;
+
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
+        return Err(EngineError::InstallFailed(format!(
+            "curl exited with status {}{}",
+            output.status,
+            if stderr.is_empty() {
+                String::new()
+            } else {
+                format!(": {stderr}")
+            }
+        )));
+    }
+
+    Ok(())
+}
+
+fn verify_download_and_commit(
+    tmp_path: &Path,
+    dst: &Path,
+    expected_size: u64,
+    expected_sha256: &str,
+) -> Result<()> {
+    let total = std::fs::metadata(tmp_path).map(|m| m.len()).unwrap_or(0);
 
     if total != expected_size {
         let _ = std::fs::remove_file(&tmp_path);
@@ -363,7 +443,7 @@ fn download_atomic(url: &str, dst: &Path, expected_size: u64, expected_sha256: &
         });
     }
 
-    let actual_sha256 = hex::encode(hasher.finalize());
+    let actual_sha256 = sha256_file_hex(tmp_path)?;
     if !eq_hex_case_insensitive(&actual_sha256, expected_sha256) {
         let _ = std::fs::remove_file(&tmp_path);
         return Err(EngineError::HashMismatch {
