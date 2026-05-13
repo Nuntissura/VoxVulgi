@@ -1311,8 +1311,43 @@ base = f"https://github.com/{{repo}}/releases/download/{{release}}"
 checksum_url = f"{{base}}/checksum.json"
 archive_url = f"{{base}}/{{model_name}}.tar.gz"
 
-with urllib.request.urlopen(checksum_url) as resp:
-    index = json.loads(resp.read().decode("utf-8"))
+def sleep_before_retry(attempt):
+    time.sleep(min(2 ** attempt, 20))
+
+def read_url(url, label, attempts=5):
+    last_exc = None
+    for attempt in range(1, attempts + 1):
+        try:
+            with urllib.request.urlopen(url, timeout=60) as resp:
+                return resp.read()
+        except Exception as exc:
+            last_exc = exc
+            if attempt < attempts:
+                sleep_before_retry(attempt)
+    raise RuntimeError("%s download failed after %s attempts: %s" % (label, attempts, last_exc))
+
+def download_url_to_file(url, path, label, attempts=5):
+    last_exc = None
+    for attempt in range(1, attempts + 1):
+        try:
+            with urllib.request.urlopen(url, timeout=60) as resp, open(path, "wb") as f:
+                while True:
+                    chunk = resp.read(1024 * 1024)
+                    if not chunk:
+                        break
+                    f.write(chunk)
+            return
+        except Exception as exc:
+            last_exc = exc
+            try:
+                os.unlink(path)
+            except Exception:
+                pass
+            if attempt < attempts:
+                sleep_before_retry(attempt)
+    raise RuntimeError("%s download failed after %s attempts: %s" % (label, attempts, last_exc))
+
+index = json.loads(read_url(checksum_url, "checksum").decode("utf-8"))
 expected = index.get(model_name)
 if not expected:
     raise RuntimeError("checksum.json missing 2stems entry")
@@ -1321,12 +1356,7 @@ tmp = tempfile.NamedTemporaryFile(delete=False, suffix=".tar.gz")
 tmp_path = tmp.name
 tmp.close()
 try:
-    with urllib.request.urlopen(archive_url) as resp, open(tmp_path, "wb") as f:
-        while True:
-            chunk = resp.read(1024 * 1024)
-            if not chunk:
-                break
-            f.write(chunk)
+    download_url_to_file(archive_url, tmp_path, "model archive")
 
     h = hashlib.sha256()
     with open(tmp_path, "rb") as f:
@@ -1503,8 +1533,43 @@ base = f"https://github.com/{{repo}}/releases/download/{{release}}"
 checksum_url = f"{{base}}/checksum.json"
 archive_url = f"{{base}}/{{model_name}}.tar.gz"
 
-with urllib.request.urlopen(checksum_url) as resp:
-    index = json.loads(resp.read().decode("utf-8"))
+def sleep_before_retry(attempt):
+    time.sleep(min(2 ** attempt, 20))
+
+def read_url(url, label, attempts=5):
+    last_exc = None
+    for attempt in range(1, attempts + 1):
+        try:
+            with urllib.request.urlopen(url, timeout=60) as resp:
+                return resp.read()
+        except Exception as exc:
+            last_exc = exc
+            if attempt < attempts:
+                sleep_before_retry(attempt)
+    raise RuntimeError("%s download failed after %s attempts: %s" % (label, attempts, last_exc))
+
+def download_url_to_file(url, path, label, attempts=5):
+    last_exc = None
+    for attempt in range(1, attempts + 1):
+        try:
+            with urllib.request.urlopen(url, timeout=60) as resp, open(path, "wb") as f:
+                while True:
+                    chunk = resp.read(1024 * 1024)
+                    if not chunk:
+                        break
+                    f.write(chunk)
+            return
+        except Exception as exc:
+            last_exc = exc
+            try:
+                os.unlink(path)
+            except Exception:
+                pass
+            if attempt < attempts:
+                sleep_before_retry(attempt)
+    raise RuntimeError("%s download failed after %s attempts: %s" % (label, attempts, last_exc))
+
+index = json.loads(read_url(checksum_url, "checksum").decode("utf-8"))
 expected = index.get(model_name)
 if not expected:
     raise RuntimeError("checksum.json missing 2stems entry")
@@ -1513,12 +1578,7 @@ tmp = tempfile.NamedTemporaryFile(delete=False, suffix=".tar.gz")
 tmp_path = tmp.name
 tmp.close()
 try:
-    with urllib.request.urlopen(archive_url) as resp, open(tmp_path, "wb") as f:
-        while True:
-            chunk = resp.read(1024 * 1024)
-            if not chunk:
-                break
-            f.write(chunk)
+    download_url_to_file(archive_url, tmp_path, "model archive")
 
     h = hashlib.sha256()
     with open(tmp_path, "rb") as f:
