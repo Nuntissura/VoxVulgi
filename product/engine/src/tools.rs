@@ -3,6 +3,7 @@ use crate::{pinned_dependency_manifest, vendor_patches};
 use crate::{EngineError, Result};
 use serde::{Deserialize, Serialize};
 use std::io::Write;
+use std::path::{Path, PathBuf};
 
 #[derive(Debug, Clone, Serialize)]
 pub struct FfmpegToolsStatus {
@@ -37,13 +38,68 @@ pub fn install_ffmpeg_tools(paths: &AppPaths) -> Result<FfmpegToolsStatus> {
 
     let download_url = ffmpeg_sidecar::download::ffmpeg_download_url()
         .map_err(|e| EngineError::InstallFailed(e.to_string()))?;
-    let archive_path =
-        ffmpeg_sidecar::download::download_ffmpeg_package(download_url, &destination)
-            .map_err(|e| EngineError::InstallFailed(e.to_string()))?;
+    let archive_path = match ffmpeg_sidecar::download::download_ffmpeg_package(
+        download_url,
+        &destination,
+    ) {
+        Ok(path) => path,
+        Err(primary_err) => download_ffmpeg_package_with_curl(download_url, &destination).map_err(
+            |fallback_err| {
+                EngineError::InstallFailed(format!(
+                    "ffmpeg download failed: {primary_err}; curl fallback failed: {fallback_err}"
+                ))
+            },
+        )?,
+    };
     ffmpeg_sidecar::download::unpack_ffmpeg(&archive_path, &destination)
         .map_err(|e| EngineError::InstallFailed(e.to_string()))?;
 
     Ok(ffmpeg_tools_status(paths))
+}
+
+fn download_ffmpeg_package_with_curl(url: &str, download_dir: &Path) -> Result<PathBuf> {
+    let filename = Path::new(url).file_name().ok_or_else(|| {
+        EngineError::InstallFailed("could not derive ffmpeg filename".to_string())
+    })?;
+    let archive_path = download_dir.join(filename);
+
+    let _ = std::fs::remove_file(&archive_path);
+
+    let curl_program = if cfg!(windows) { "curl.exe" } else { "curl" };
+    let output = crate::cmd::command(curl_program)
+        .arg("-L")
+        .arg("--fail")
+        .arg("--retry")
+        .arg("3")
+        .arg("--retry-delay")
+        .arg("2")
+        .arg("--output")
+        .arg(&archive_path)
+        .arg(url)
+        .output()
+        .map_err(|e| EngineError::InstallFailed(format!("could not launch curl: {e}")))?;
+
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
+        return Err(EngineError::InstallFailed(format!(
+            "curl exited with status {}{}",
+            output.status,
+            if stderr.is_empty() {
+                String::new()
+            } else {
+                format!(": {stderr}")
+            }
+        )));
+    }
+
+    if !archive_path.exists() {
+        return Err(EngineError::InstallFailed(format!(
+            "curl did not create ffmpeg archive: {}",
+            archive_path.to_string_lossy()
+        )));
+    }
+
+    Ok(archive_path)
 }
 
 fn tool_version_first_line(program: impl AsRef<std::ffi::OsStr>) -> Option<String> {
