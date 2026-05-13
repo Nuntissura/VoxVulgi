@@ -60,6 +60,9 @@ Design goals:
 - Recurring UI polling should use shared non-overlapping visibility-aware loops, and mounted-but-hidden pages must suspend background refresh until active again.
 - Localization Studio artifact/runtime contracts should be serialized from Rust as typed metadata (`kind`, job type, variant, backend, container, rerun class) and consumed from shared frontend modules rather than reconstructed ad hoc from artifact IDs and filenames.
 - Localization Studio should provide a dedicated outputs browser/library layer that groups source media, working artifacts, and exported deliverables for the active item instead of relying only on scattered path fields/buttons.
+- Localization Studio's primary home surface should be a setup-first workbench backed by the existing localization feature root from Options. The operator-visible setup owns source selection, subtitle/dub output target choices, a source-copy export checkbox, Start/Stop controls, and percentage progress.
+- The localization run orchestrator owns voice-cloning runtime preflight. When a dub continuation reaches the voice-preserving stage and the managed OpenVoice/Kokoro pack is missing, the orchestrator queues the Phase 2 voice setup job with the original localization request embedded as a resume payload. The setup job re-enters the localization run after successful installation, so UI surfaces only need to show `voice_setup` as a normal queued stage rather than sending operators to Diagnostics.
+- Localization exports should place user-facing files together under the resolved item output folder with language-marked filenames and an optional copied source media file.
 - Explicit consent mechanisms must not be implemented.
 - Anti-abuse controls must not be included.
 - These features must not appear in development or the final product. Users must comply with all local regulations.
@@ -244,6 +247,8 @@ Recommended outputs per item:
 - Run diarization model to label time spans by speaker.
 - Merge with ASR segments to produce speaker-attributed captions.
 - Phase 2 baseline: `diarize_local_v1` (resemblyzer partial embeddings + clustering) writes `speaker` labels into subtitle JSON. In Windows "full" installers this pack is bundled; explicit install remains for slim/dev paths.
+- Diarization jobs accept an explicit speaker-count request: `auto`, `exact`, or `range`. The request is serialized into direct diarization jobs and localization-run continuations, constrains baseline clustering, is passed to pyannote BYO as `num_speakers` / `min_speakers` / `max_speakers`, and is recorded in `derived/items/<item_id>/diarize/diarization_report*.json`.
+- Subtitle JSON v1 still stores one speaker label per subtitle segment. Overlap ratios, label confidence, and multi-label ownership remain future schema work; pyannote exclusive diarization output can be used as the assignment source when available.
 
 ### 5.4 Translate CC (JA/KO -> EN)
 
@@ -306,7 +311,8 @@ Phase 2 preview implementation notes (current):
   - deliverable/export surface.
 - The localization-run orchestrator should use one shared next-stage decision point instead of scattered ad hoc follow-on queues.
   - translated English tracks without speaker labels should continue to diarization first,
-  - translated English tracks with missing cloned-speaker references should stop at the voice-plan checkpoint with explicit missing-speaker notes,
+  - translated English tracks with missing cloned-speaker references should generate/apply source-reference candidates before stopping,
+  - only speakers still missing usable references after source extraction should stop at the voice-plan checkpoint with explicit missing-speaker notes,
   - once the voice plan is ready, dubbing can continue through mix and mux.
 - The voice-plan checkpoint should expose an assisted reference-acquisition lane:
   - use diarized subtitle spans and source media audio to build candidate per-speaker reference bundles,

@@ -27,6 +27,7 @@ Rules:
 - Don't mix unrelated work in one WP.
 - If scope changes, update the WP first, then code.
 - `DONE` requires a proof bundle and verification that meets `governance/workflow/PROOF_STANDARD.md`.
+- Builds and UI-impacting changes must follow `build_rules.md`.
 - Do not vibecode medium- or high-difficulty technical implementations.
 - For medium- or high-difficulty technical work, research the current code path and relevant primary sources first, then translate that into governed implementation scope before coding.
 
@@ -36,6 +37,7 @@ Rules:
 - Technical architecture decisions: `governance/spec/TECHNICAL_DESIGN.md`
 - Desktop release build history and included WPs: `governance/release/BUILD_CHANGELOG.md`
 - Delivery phases and milestones: `governance/workflow/ROADMAP.md`
+- Build verification and UI construction rules: `build_rules.md`
 - AI agent behavior + safety rules: `MODEL_BEHAVIOR.md`
 
 ## 4) Two engines approach (recommended)
@@ -57,6 +59,7 @@ Pick the first real implementation WP from `governance/workflow/ROADMAP.md` and 
 
 ## 7) Desktop build traceability
 
+- Follow `build_rules.md` for headless visual/app-boundary verification and the no-new-cards UI rule.
 - Every desktop target build must:
   - increment the desktop semantic version,
   - append an entry in `governance/release/BUILD_CHANGELOG.md`,

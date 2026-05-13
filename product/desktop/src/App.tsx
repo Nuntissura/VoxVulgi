@@ -7,7 +7,18 @@ import html2canvas from "html2canvas";
 import "./App.css";
 import { useDesktopActivity, usePageActivity, usePollingLoop } from "./lib/activity";
 import { diagnosticsTrace } from "./lib/diagnosticsTrace";
+import {
+  buildDiarizationSpeakerCountRequest,
+  clampDiarizationSpeakerCount,
+  DIARIZATION_EXACT_SPEAKERS_KEY,
+  DIARIZATION_MAX_SPEAKERS_KEY,
+  DIARIZATION_MIN_SPEAKERS_KEY,
+  DIARIZATION_SPEAKER_COUNT_MODE_KEY,
+  parseDiarizationSpeakerCountMode,
+  type DiarizationSpeakerCountMode,
+} from "./lib/diarizationSpeakerCount";
 import { openPathBestEffort, revealPath } from "./lib/pathOpener";
+import { joinPath } from "./lib/pathUtils";
 import { featureRootStatus, useSharedDownloadDirStatus } from "./lib/sharedDownloadDir";
 import { safeLocalStorageGet, safeLocalStorageSet } from "./lib/persist";
 
@@ -126,6 +137,7 @@ type ShellAppInfo = {
 };
 
 type AsrLang = "auto" | "ja" | "ko";
+type LocalizationOutputChoice = "none" | "en" | "multiple";
 
 type StartupPhase = {
   id: string;
@@ -156,8 +168,16 @@ type HomeLibraryItem = {
   id: string;
   created_at_ms: number;
   source_type: string;
+  source_uri?: string;
   title: string;
   media_path: string;
+  duration_ms?: number | null;
+  width?: number | null;
+  height?: number | null;
+  container?: string | null;
+  video_codec?: string | null;
+  audio_codec?: string | null;
+  thumbnail_path?: string | null;
 };
 
 type HomeJobRow = {
@@ -210,6 +230,7 @@ type RecentLocalizationItemStatus = {
   summary: string;
   detail: string;
   running: boolean;
+  active_job_id: string | null;
   working_dir: string;
   preview_mp4_path: string | null;
   stage_label: string | null;
@@ -258,6 +279,10 @@ type ResizeDirection = "East" | "North" | "NorthEast" | "NorthWest" | "South" | 
 type ShellWindowMode = "floating" | "maximized" | "fullscreen";
 
 const ACTIVE_PAGE_KEY = "voxvulgi.v1.shell.active_page";
+const LOCALIZATION_HOME_LEGACY_KEY = "voxvulgi.v1.localization.legacy_home";
+const LOCALIZATION_SUBTITLE_OUTPUT_KEY = "voxvulgi.v1.localization_setup.subtitle_output";
+const LOCALIZATION_DUB_OUTPUT_KEY = "voxvulgi.v1.localization_setup.dub_output";
+const LOCALIZATION_INCLUDE_SOURCE_COPY_KEY = "voxvulgi.v1.editor.export_include_source_copy";
 const SHELL_MODE_TOLERANCE_PX = 20;
 const LOCALIZATION_HOME_STAGES = [
   {
@@ -292,6 +317,8 @@ function localizationJobTypeLabel(jobType: string | null | undefined): string {
       return "Translate to English";
     case "diarize_local_v1":
       return "Label speakers";
+    case "install_phase2_packs_v1":
+      return "Prepare voice cloning";
     case "dub_voice_preserving_v1":
       return "Dub speech generation";
     case "mix_dub_preview_v1":
@@ -367,6 +394,113 @@ function LocalizationStatusMeter({
       ) : null}
     </div>
   );
+}
+
+const localizationThumbnailDataUrlCache = new Map<string, string>();
+
+function LocalizationThumbnail({
+  item,
+  width = 104,
+  height = 58,
+}: {
+  item: HomeLibraryItem;
+  width?: number;
+  height?: number;
+}) {
+  const cacheKey = `${item.id}|${item.thumbnail_path ?? ""}`;
+  const [src, setSrc] = useState<string>(() => localizationThumbnailDataUrlCache.get(cacheKey) ?? "");
+
+  useEffect(() => {
+    let alive = true;
+    const cached = localizationThumbnailDataUrlCache.get(cacheKey);
+    if (cached) {
+      setSrc(cached);
+      return () => {
+        alive = false;
+      };
+    }
+
+    setSrc("");
+    invoke<string | null>("library_thumbnail_data_url", { itemId: item.id })
+      .then((next) => {
+        if (!alive) return;
+        const normalized = (next ?? "").trim();
+        if (normalized) {
+          localizationThumbnailDataUrlCache.set(cacheKey, normalized);
+          setSrc(normalized);
+        }
+      })
+      .catch(() => {
+        if (alive) setSrc("");
+      });
+
+    return () => {
+      alive = false;
+    };
+  }, [cacheKey, item.id]);
+
+  if (src) {
+    return (
+      <img
+        className="loc-setup-thumb"
+        alt=""
+        src={src}
+        loading="lazy"
+        style={{ width, height }}
+      />
+    );
+  }
+
+  return (
+    <div className="loc-setup-thumb loc-setup-thumb-empty" aria-hidden="true" style={{ width, height }}>
+      Video
+    </div>
+  );
+}
+
+function sanitizeOutputStem(raw: string): string {
+  const cleaned = raw.replace(/[<>:"/\\|?*]/g, "").trim();
+  return cleaned || "voxvulgi-output";
+}
+
+function stemFromMediaPath(path: string): string {
+  const name = fileNameFromPath(path);
+  if (!name) return "";
+  const dot = name.lastIndexOf(".");
+  return dot > 0 ? name.slice(0, dot) : name;
+}
+
+function extensionFromMediaPath(path: string): string {
+  const name = fileNameFromPath(path);
+  const dot = name.lastIndexOf(".");
+  const ext = dot > 0 ? name.slice(dot + 1).trim() : "";
+  return ext || "mp4";
+}
+
+function localizationOutputStem(item: HomeLibraryItem | null | undefined): string {
+  if (!item) return "voxvulgi-output";
+  return sanitizeOutputStem(stemFromMediaPath(item.media_path) || item.title || "voxvulgi-output");
+}
+
+function localizationExportDirForItem(root: string | null | undefined, item: HomeLibraryItem | null | undefined): string {
+  const cleanRoot = (root ?? "").trim();
+  if (!cleanRoot || !item) return "";
+  return joinPath(cleanRoot, localizationOutputStem(item));
+}
+
+function localizationSourceCopyPath(exportDir: string, item: HomeLibraryItem | null | undefined): string {
+  if (!exportDir || !item) return "";
+  return joinPath(exportDir, `${localizationOutputStem(item)}.source.${extensionFromMediaPath(item.media_path)}`);
+}
+
+function localizationSubtitlePath(exportDir: string, item: HomeLibraryItem | null | undefined): string {
+  if (!exportDir || !item) return "";
+  return joinPath(exportDir, `${localizationOutputStem(item)}.sub-en.srt`);
+}
+
+function localizationDubPath(exportDir: string, item: HomeLibraryItem | null | undefined): string {
+  if (!exportDir || !item) return "";
+  return joinPath(exportDir, `${localizationOutputStem(item)}.dub-en.mp4`);
 }
 
 const FLOATING_RESIZE_HANDLES: Array<{
@@ -453,6 +587,10 @@ function summarizeRecentLocalizationItem(
   jobs: HomeJobRow[],
 ): RecentLocalizationItemStatus {
   const failedJobsCount = jobs.filter((job) => job.status === "failed").length;
+  const runningJob =
+    jobs.find((job) => job.status === "running") ??
+    jobs.find((job) => job.status === "queued") ??
+    null;
   if (outputs?.terminal_state && outputs.terminal_summary) {
     const previewPath = outputs.mux_dub_preview_v1_mp4_exists
       ? outputs.mux_dub_preview_v1_mp4_path
@@ -463,6 +601,7 @@ function summarizeRecentLocalizationItem(
       summary: outputs.terminal_summary,
       detail: outputs.terminal_detail ?? outputs.derived_item_dir,
       running: outputs.terminal_state === "running",
+      active_job_id: runningJob?.id ?? null,
       working_dir: outputs.derived_item_dir,
       preview_mp4_path: previewPath,
       stage_label: outputs.terminal_stage_label ?? null,
@@ -471,10 +610,6 @@ function summarizeRecentLocalizationItem(
       failed_jobs_count: failedJobsCount,
     };
   }
-  const runningJob =
-    jobs.find((job) => job.status === "running") ??
-    jobs.find((job) => job.status === "queued") ??
-    null;
   const failedJob =
     jobs.find((job) => job.status === "failed") ??
     null;
@@ -489,6 +624,7 @@ function summarizeRecentLocalizationItem(
       summary: "Preview MP4 ready",
       detail: outputs.mux_dub_preview_v1_mp4_path,
       running: false,
+      active_job_id: null,
       working_dir: outputs.derived_item_dir,
       preview_mp4_path: outputs.mux_dub_preview_v1_mp4_path,
       stage_label: "Mux preview MP4",
@@ -506,6 +642,7 @@ function summarizeRecentLocalizationItem(
       summary: `${label} ${Math.round((runningJob.progress ?? 0) * 100)}%`,
       detail: running ? "Running" : "Queued",
       running: true,
+      active_job_id: runningJob.id ?? null,
       working_dir: outputs?.derived_item_dir ?? "",
       preview_mp4_path: null,
       stage_label: label,
@@ -522,6 +659,7 @@ function summarizeRecentLocalizationItem(
       summary: `Last failed: ${label}`,
       detail: summarizeErrorMessage(failedJob.error),
       running: false,
+      active_job_id: null,
       working_dir: outputs?.derived_item_dir ?? "",
       preview_mp4_path: null,
       stage_label: label,
@@ -539,6 +677,7 @@ function summarizeRecentLocalizationItem(
       summary: `${verb}: ${label}`,
       detail: latestJob.status,
       running: false,
+      active_job_id: null,
       working_dir: outputs?.derived_item_dir ?? "",
       preview_mp4_path: null,
       stage_label: label,
@@ -553,6 +692,7 @@ function summarizeRecentLocalizationItem(
     summary: "Imported / not started",
     detail: "Open the item to start the staged localization run.",
     running: false,
+    active_job_id: null,
     working_dir: outputs?.derived_item_dir ?? "",
     preview_mp4_path: null,
     stage_label: "Ready to start",
@@ -607,10 +747,68 @@ function LocalizationStudioHome({
     auto_diarize: boolean;
     auto_dub_preview: boolean;
   } | null>(null);
+  const [selectedWorkbenchItemId, setSelectedWorkbenchItemId] = useState<string | null>(null);
+  const [workbenchCleared, setWorkbenchCleared] = useState(false);
+  const [subtitleOutput, setSubtitleOutput] = useState<LocalizationOutputChoice>(() => {
+    const raw = safeLocalStorageGet(LOCALIZATION_SUBTITLE_OUTPUT_KEY);
+    return raw === "none" || raw === "multiple" ? raw : "en";
+  });
+  const [dubOutput, setDubOutput] = useState<LocalizationOutputChoice>(() => {
+    const raw = safeLocalStorageGet(LOCALIZATION_DUB_OUTPUT_KEY);
+    return raw === "none" || raw === "multiple" ? raw : "en";
+  });
+  const [includeSourceCopy, setIncludeSourceCopy] = useState(() => {
+    const raw = safeLocalStorageGet(LOCALIZATION_INCLUDE_SOURCE_COPY_KEY);
+    return raw === null ? true : raw === "1";
+  });
+  const [speakerCountMode, setSpeakerCountMode] = useState<DiarizationSpeakerCountMode>(() =>
+    parseDiarizationSpeakerCountMode(safeLocalStorageGet(DIARIZATION_SPEAKER_COUNT_MODE_KEY)),
+  );
+  const [exactSpeakers, setExactSpeakers] = useState(() =>
+    clampDiarizationSpeakerCount(Number(safeLocalStorageGet(DIARIZATION_EXACT_SPEAKERS_KEY)), 2),
+  );
+  const [minSpeakers, setMinSpeakers] = useState(() =>
+    clampDiarizationSpeakerCount(Number(safeLocalStorageGet(DIARIZATION_MIN_SPEAKERS_KEY)), 2),
+  );
+  const [maxSpeakers, setMaxSpeakers] = useState(() =>
+    clampDiarizationSpeakerCount(Number(safeLocalStorageGet(DIARIZATION_MAX_SPEAKERS_KEY)), 4),
+  );
+  const speakerCountRequest = useMemo(
+    () => buildDiarizationSpeakerCountRequest(speakerCountMode, exactSpeakers, minSpeakers, maxSpeakers),
+    [speakerCountMode, exactSpeakers, minSpeakers, maxSpeakers],
+  );
 
   useEffect(() => {
     safeLocalStorageSet("voxvulgi.v1.settings.asr_lang", asrLang);
   }, [asrLang]);
+
+  useEffect(() => {
+    safeLocalStorageSet(LOCALIZATION_SUBTITLE_OUTPUT_KEY, subtitleOutput);
+  }, [subtitleOutput]);
+
+  useEffect(() => {
+    safeLocalStorageSet(LOCALIZATION_DUB_OUTPUT_KEY, dubOutput);
+  }, [dubOutput]);
+
+  useEffect(() => {
+    safeLocalStorageSet(LOCALIZATION_INCLUDE_SOURCE_COPY_KEY, includeSourceCopy ? "1" : "0");
+  }, [includeSourceCopy]);
+
+  useEffect(() => {
+    safeLocalStorageSet(DIARIZATION_SPEAKER_COUNT_MODE_KEY, speakerCountMode);
+  }, [speakerCountMode]);
+
+  useEffect(() => {
+    safeLocalStorageSet(DIARIZATION_EXACT_SPEAKERS_KEY, String(exactSpeakers));
+  }, [exactSpeakers]);
+
+  useEffect(() => {
+    safeLocalStorageSet(DIARIZATION_MIN_SPEAKERS_KEY, String(minSpeakers));
+  }, [minSpeakers]);
+
+  useEffect(() => {
+    safeLocalStorageSet(DIARIZATION_MAX_SPEAKERS_KEY, String(maxSpeakers));
+  }, [maxSpeakers]);
 
   useEffect(() => {
     invoke<any>("config_batch_on_import_get")
@@ -665,6 +863,7 @@ function LocalizationStudioHome({
               summary: "Status unavailable",
               detail: "Refresh the item inside Localization Studio for current stage/output state.",
               running: false,
+              active_job_id: null,
               working_dir: "",
               preview_mp4_path: null,
               stage_label: null,
@@ -748,6 +947,8 @@ function LocalizationStudioHome({
           .filter((item) => fileNameFromPath(item.media_path).toLowerCase() === pendingFileName)
           .sort((a, b) => (b.created_at_ms ?? 0) - (a.created_at_ms ?? 0))[0];
       if (match) {
+        setSelectedWorkbenchItemId(match.id);
+        setWorkbenchCleared(false);
         setPendingImportPath(null);
         setPendingImportJob(null);
         setNotice(
@@ -801,10 +1002,19 @@ function LocalizationStudioHome({
   }
 
   async function startLocalizationRun(itemId: string) {
+    if (subtitleOutput === "multiple" || dubOutput === "multiple") {
+      setError("Multiple target languages are not implemented in this build yet. Choose English or None.");
+      return;
+    }
+    if (subtitleOutput === "none" && dubOutput === "none") {
+      setError("Choose at least one output: English subtitles, English dub, or both.");
+      return;
+    }
     setLocalizationRunBusy(true);
     setError(null);
     setNotice(null);
     try {
+      const outputMode = dubOutput === "en" ? "dub" : "subtitles";
       const summary = await invoke<LocalizationRunQueueSummary>("jobs_enqueue_localization_run_v1", {
         request: {
           item_id: itemId,
@@ -812,10 +1022,14 @@ function LocalizationStudioHome({
           separation_backend: null,
           queue_qc: false,
           queue_export_pack: false,
+          output_mode: outputMode,
+          speaker_count: speakerCountRequest,
         },
       });
       setNotice(
-        summary.queued_jobs.length
+        summary.stage === "voice_setup"
+          ? "Preparing voice cloning for this run. This is a one-time setup; localization will continue automatically when it finishes."
+          : summary.queued_jobs.length
           ? `Queued ${summary.queued_jobs.length} localization job(s). Current stage: ${summary.stage}.`
           : `Localization run is waiting at stage ${summary.stage}. ${summary.notes[0] ?? "No new jobs were queued."}`,
       );
@@ -826,6 +1040,38 @@ function LocalizationStudioHome({
     } finally {
       setLocalizationRunBusy(false);
     }
+  }
+
+  async function stopLocalizationRun(itemId: string) {
+    const status = recentItemStatuses[itemId] ?? null;
+    const jobId = status?.active_job_id?.trim();
+    if (!jobId) {
+      setNotice("No active localization job id is available here. Open Jobs/Queue for the full job list.");
+      onOpenJobs();
+      return;
+    }
+    setBusy(true);
+    setError(null);
+    setNotice(null);
+    try {
+      await invoke("jobs_cancel", { jobId, job_id: jobId });
+      setNotice("Stop requested for the active localization job.");
+      const items = await refreshRecentItems();
+      await refreshRecentItemStatuses(items);
+    } catch (e) {
+      setError(String(e));
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  function clearWorkbench() {
+    setSelectedWorkbenchItemId(null);
+    setWorkbenchCleared(true);
+    setPendingImportPath(null);
+    setPendingImportJob(null);
+    setNotice("Workbench cleared. Existing source media, exports, jobs, and library metadata were not deleted.");
+    setError(null);
   }
 
   async function clearFailedRunsForItem(itemId: string, itemTitle: string) {
@@ -905,7 +1151,12 @@ function LocalizationStudioHome({
     [recentItems],
   );
   const recentHomeItems = useMemo(() => prioritizedRecentItems.slice(0, 6), [prioritizedRecentItems]);
-  const currentHomeItem = currentEditorItem ?? prioritizedRecentItems[0] ?? null;
+  const selectedWorkbenchItem = selectedWorkbenchItemId
+    ? prioritizedRecentItems.find((item) => item.id === selectedWorkbenchItemId) ?? null
+    : null;
+  const currentHomeItem = workbenchCleared
+    ? null
+    : currentEditorItem ?? selectedWorkbenchItem ?? prioritizedRecentItems[0] ?? null;
   const currentHomeStatus = currentHomeItem ? recentItemStatuses[currentHomeItem.id] ?? null : null;
   const latestPreviewItem =
     prioritizedRecentItems.find((item) => Boolean(recentItemStatuses[item.id]?.preview_mp4_path)) ??
@@ -922,6 +1173,355 @@ function LocalizationStudioHome({
     return Boolean(status) && !status.running && !status.preview_mp4_path;
   }).length;
   const uiBusy = busy || localizationRunBusy;
+  const localizationRootDir = localizationRoot?.current_dir ?? localizationRoot?.default_dir ?? "";
+  const currentExportDir = localizationExportDirForItem(localizationRootDir, currentHomeItem);
+  const currentSourceCopyPath = localizationSourceCopyPath(currentExportDir, currentHomeItem);
+  const currentSubtitlePath = localizationSubtitlePath(currentExportDir, currentHomeItem);
+  const currentDubPath = localizationDubPath(currentExportDir, currentHomeItem);
+  const currentProgressPct =
+    typeof currentHomeStatus?.progress_pct === "number"
+      ? Math.max(0, Math.min(100, Math.round(currentHomeStatus.progress_pct * 100)))
+      : currentHomeStatus?.preview_mp4_path
+        ? 100
+        : 0;
+  const successfulHomeItems = prioritizedRecentItems
+    .filter((item) => {
+      const status = recentItemStatuses[item.id];
+      return Boolean(status?.preview_mp4_path || status?.state === "export_ready");
+    })
+    .slice(0, 8);
+  const setupFirstHome = safeLocalStorageGet(LOCALIZATION_HOME_LEGACY_KEY) !== "1";
+
+  if (setupFirstHome) {
+    return (
+      <div
+        className={`loc-setup-shell${compact ? " loc-setup-shell-compact" : ""}`}
+        onDragOver={(e) => {
+          e.preventDefault();
+          setDragOver(true);
+        }}
+        onDragLeave={() => setDragOver(false)}
+        onDrop={handleDrop}
+      >
+        {dragOver ? (
+          <div className="loc-setup-drop-overlay">
+            <div>Drop media files to import</div>
+          </div>
+        ) : null}
+        {error ? <div className="error">{error}</div> : null}
+        {notice ? <div className="loc-setup-notice">{notice}</div> : null}
+
+        <section className="loc-setup-workbench" aria-label="Localization setup">
+          <div className="loc-setup-header">
+            <div>
+              <div className="loc-home-eyebrow">Localization Studio</div>
+              <h2>Set up localization</h2>
+            </div>
+            <button type="button" disabled={uiBusy && !pendingImportJob} onClick={clearWorkbench}>
+              Clear workbench
+            </button>
+          </div>
+
+          <div className="loc-setup-source-row">
+            <div className="loc-setup-source-main">
+              {currentHomeItem ? <LocalizationThumbnail item={currentHomeItem} /> : null}
+              <div className="loc-setup-source-copy">
+                <div className="loc-setup-label">Source</div>
+                <div className="loc-setup-title">
+                  {currentHomeItem?.title || "No file selected"}
+                </div>
+                <div className="loc-setup-path">
+                  {currentHomeItem?.media_path ||
+                    "Select or drop a video/audio file. Import adds it to this workbench only."}
+                </div>
+              </div>
+            </div>
+            <div className="loc-setup-actions">
+              <button type="button" disabled={uiBusy} onClick={() => importLocalMedia().catch(() => undefined)}>
+                Select file
+              </button>
+              <button
+                type="button"
+                disabled={uiBusy || !currentHomeItem?.media_path}
+                onClick={() => {
+                  openPathBestEffort(currentHomeItem?.media_path ?? "").catch(() => undefined);
+                }}
+              >
+                Open file
+              </button>
+            </div>
+          </div>
+
+          <div className="loc-setup-grid">
+            <label>
+              <span>Source language</span>
+              <select
+                value={asrLang}
+                disabled={uiBusy}
+                onChange={(e) => setAsrLang(e.currentTarget.value as AsrLang)}
+              >
+                <option value="auto">Auto detect</option>
+                <option value="ja">Japanese</option>
+                <option value="ko">Korean</option>
+              </select>
+            </label>
+            <label className="loc-setup-speakers-control">
+              <span>Speakers</span>
+              <select
+                value={speakerCountMode}
+                disabled={uiBusy}
+                onChange={(e) => setSpeakerCountMode(e.currentTarget.value as DiarizationSpeakerCountMode)}
+              >
+                <option value="auto">Auto detect</option>
+                <option value="exact">Exact count</option>
+                <option value="range">Min/max range</option>
+              </select>
+              {speakerCountMode === "exact" ? (
+                <input
+                  type="number"
+                  min={1}
+                  max={16}
+                  value={exactSpeakers}
+                  disabled={uiBusy}
+                  aria-label="Exact speaker count"
+                  onChange={(e) =>
+                    setExactSpeakers(clampDiarizationSpeakerCount(Number(e.currentTarget.value), 2))
+                  }
+                />
+              ) : null}
+              {speakerCountMode === "range" ? (
+                <div className="loc-setup-speaker-range">
+                  <input
+                    type="number"
+                    min={1}
+                    max={16}
+                    value={minSpeakers}
+                    disabled={uiBusy}
+                    aria-label="Minimum speakers"
+                    onChange={(e) =>
+                      setMinSpeakers(clampDiarizationSpeakerCount(Number(e.currentTarget.value), 2))
+                    }
+                  />
+                  <input
+                    type="number"
+                    min={1}
+                    max={16}
+                    value={maxSpeakers}
+                    disabled={uiBusy}
+                    aria-label="Maximum speakers"
+                    onChange={(e) =>
+                      setMaxSpeakers(clampDiarizationSpeakerCount(Number(e.currentTarget.value), 4))
+                    }
+                  />
+                </div>
+              ) : null}
+            </label>
+            <label>
+              <span>Subtitles</span>
+              <select
+                value={subtitleOutput}
+                disabled={uiBusy}
+                onChange={(e) => setSubtitleOutput(e.currentTarget.value as LocalizationOutputChoice)}
+              >
+                <option value="none">None</option>
+                <option value="en">English</option>
+                <option value="multiple">Multiple...</option>
+              </select>
+            </label>
+            <label>
+              <span>Dub</span>
+              <select
+                value={dubOutput}
+                disabled={uiBusy}
+                onChange={(e) => setDubOutput(e.currentTarget.value as LocalizationOutputChoice)}
+              >
+                <option value="none">None</option>
+                <option value="en">English</option>
+                <option value="multiple">Multiple...</option>
+              </select>
+            </label>
+          </div>
+
+          <div className="loc-setup-output-row">
+            <div>
+              <div className="loc-setup-label">Output folder</div>
+              <div className="loc-setup-path">
+                {currentExportDir || localizationRootDir || "Localization output folder is not ready yet."}
+              </div>
+              {includeSourceCopy && currentSourceCopyPath ? (
+                <div className="loc-setup-hint">Source copy path: {currentSourceCopyPath}</div>
+              ) : null}
+              {subtitleOutput === "en" && currentSubtitlePath ? (
+                <div className="loc-setup-hint">Subtitle path: {currentSubtitlePath}</div>
+              ) : null}
+              {dubOutput === "en" && currentDubPath ? (
+                <div className="loc-setup-hint">Dub path: {currentDubPath}</div>
+              ) : null}
+            </div>
+            <div className="loc-setup-actions">
+              <button
+                type="button"
+                disabled={uiBusy || !localizationRootDir}
+                onClick={() => {
+                  revealPath(localizationRootDir).catch(() => undefined);
+                }}
+              >
+                Open
+              </button>
+              <button type="button" disabled={uiBusy} onClick={onOpenOptions}>
+                Change in Options
+              </button>
+            </div>
+          </div>
+
+          <label className="loc-setup-check">
+            <input
+              type="checkbox"
+              checked={includeSourceCopy}
+              disabled={uiBusy}
+              onChange={(e) => setIncludeSourceCopy(e.currentTarget.checked)}
+            />
+            <span>Include source copy in output folder</span>
+          </label>
+
+          <div className="loc-setup-run-row">
+            <div className="loc-setup-actions">
+              <button
+                type="button"
+                disabled={uiBusy || !currentHomeItem || currentHomeStatus?.running || !!pendingImportPath}
+                onClick={() => currentHomeItem && void startLocalizationRun(currentHomeItem.id)}
+              >
+                Start localization
+              </button>
+              <button
+                type="button"
+                disabled={busy || !currentHomeItem || !currentHomeStatus?.running}
+                onClick={() => currentHomeItem && void stopLocalizationRun(currentHomeItem.id)}
+              >
+                Stop
+              </button>
+              <button type="button" disabled={uiBusy} onClick={onOpenJobs}>
+                Jobs/Queue
+              </button>
+            </div>
+            <div className="loc-setup-progress-wrap">
+              <div className="loc-setup-progress-meta">
+                <span>{currentHomeStatus?.stage_label ?? "Ready"}</span>
+                <span>{currentProgressPct}%</span>
+              </div>
+              <div className="loc-setup-progress" aria-label={`Progress ${currentProgressPct}%`}>
+                <div
+                  style={{
+                    width: `${Math.max(currentHomeStatus?.running ? 8 : 0, currentProgressPct)}%`,
+                  }}
+                />
+              </div>
+            </div>
+          </div>
+
+          {pendingImportJob ? (
+            <div className="loc-setup-hint">
+              Import status: {pendingImportJob.status}, {Math.round((pendingImportJob.progress ?? 0) * 100)}%
+            </div>
+          ) : null}
+          <div className="loc-setup-hint">
+            Current supported target is English. Multiple-language selection is reserved until the
+            backend supports multiple target tracks in one run.
+          </div>
+        </section>
+
+        {!compact ? (
+          <section className="loc-setup-history" aria-label="Successful localization jobs">
+            <div className="loc-setup-history-header">
+              <div>
+                <div className="loc-home-eyebrow">Successful jobs</div>
+                <h2>Latest usable outputs</h2>
+              </div>
+              <button
+                type="button"
+                disabled={uiBusy || recentItemsBusy}
+                onClick={() => {
+                  void refreshRecentItems().then((items) => refreshRecentItemStatuses(items));
+                }}
+              >
+                Refresh
+              </button>
+            </div>
+
+            {successfulHomeItems.length ? (
+              <div className="loc-setup-job-list">
+                {successfulHomeItems.map((item) => {
+                  const status = recentItemStatuses[item.id];
+                  const exportDir = localizationExportDirForItem(localizationRootDir, item);
+                  const subtitlePath = localizationSubtitlePath(exportDir, item);
+                  const dubPath = status?.preview_mp4_path ?? localizationDubPath(exportDir, item);
+                  return (
+                    <div key={item.id} className="loc-setup-job-row">
+                      <LocalizationThumbnail item={item} width={112} height={64} />
+                      <div className="loc-setup-job-main">
+                        <div className="loc-setup-title">{item.title || "Untitled media"}</div>
+                        <div className="loc-setup-path">{exportDir || status?.working_dir || item.media_path}</div>
+                        <div className="loc-setup-job-meta">
+                          <span>Subtitles: English</span>
+                          <span>Dub: English</span>
+                          <span>{localizationHomeStateLabel(status)}</span>
+                        </div>
+                      </div>
+                      <div className="loc-setup-job-actions">
+                        <button type="button" disabled={uiBusy || !item.media_path} onClick={() => openPathBestEffort(item.media_path).catch(() => undefined)}>
+                          Open file
+                        </button>
+                        <button type="button" disabled={uiBusy || !exportDir} onClick={() => revealPath(exportDir).catch(() => undefined)}>
+                          Open folder
+                        </button>
+                        <button type="button" disabled={uiBusy || !subtitlePath} onClick={() => revealPath(subtitlePath).catch(() => undefined)}>
+                          Open sub location
+                        </button>
+                        <button type="button" disabled={uiBusy || !dubPath} onClick={() => openPathBestEffort(dubPath).catch(() => undefined)}>
+                          Open dub
+                        </button>
+                        <button type="button" disabled={uiBusy || !status?.working_dir} onClick={() => revealPath(status?.working_dir ?? "").catch(() => undefined)}>
+                          Open job
+                        </button>
+                      </div>
+                    </div>
+                  );
+                })}
+              </div>
+            ) : (
+              <div className="loc-setup-empty">
+                {recentItemsBusy
+                  ? "Loading successful localization jobs..."
+                  : "No successful localization outputs yet. Finished preview jobs will appear here with file and folder actions."}
+              </div>
+            )}
+
+            {recentHomeItems.length ? (
+              <details className="loc-setup-recent-drawer">
+                <summary>Load another recent workbench item</summary>
+                <div className="loc-setup-recent-list">
+                  {recentHomeItems.map((item) => (
+                    <button
+                      type="button"
+                      key={item.id}
+                      onClick={() => {
+                        setSelectedWorkbenchItemId(item.id);
+                        setWorkbenchCleared(false);
+                        setNotice(null);
+                        setError(null);
+                      }}
+                    >
+                      {item.title || fileNameFromPath(item.media_path) || "Untitled media"}
+                    </button>
+                  ))}
+                </div>
+              </details>
+            ) : null}
+          </section>
+        ) : null}
+      </div>
+    );
+  }
 
   return (
     <div

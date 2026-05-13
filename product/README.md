@@ -52,6 +52,7 @@ The app installs runtime tools/models into its app-data folder (local-first; exp
 - The mixed dubbed audio track is `derived/items/<item_id>/dub_preview/mix_dub_preview_v1.wav`.
 - The muxed preview video defaults to `derived/items/<item_id>/dub_preview/mux_dub_preview_v1.mp4`.
 - Exporting from Localization Studio copies user-facing deliverables into the app-managed localization export folder by default instead of writing next to the source media file.
+- The export set can include an operator-selected source-media copy, and language-marked names use the source stem, for example `<source>.source.<ext>`, `<source>.sub-en.srt`, `<source>.sub-en.vtt`, and `<source>.dub-en.mp4`.
 - The default yt-dlp preset now prefers MP4-compatible formats and requests MP4 merge/remux when the toolchain can do that without re-encoding.
 
 ## In-app image archive batch

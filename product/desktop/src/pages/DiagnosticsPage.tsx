@@ -74,6 +74,9 @@ type Phase2InstallLatestState = {
   exists: boolean;
   path: string;
   state: any | null;
+  active?: boolean;
+  stale?: boolean;
+  job_status?: string | null;
 };
 
 type SpleeterPackStatus = {
@@ -614,6 +617,25 @@ function modelExpectedStateLabel(model: ModelInventoryItem): string {
 
 function shortId(value: string): string {
   return value.length > 10 ? value.slice(0, 10) : value;
+}
+
+function phase2StepStatus(step: any): string {
+  return String(step?.status ?? "").trim().toLowerCase();
+}
+
+function phase2StepIsActive(step: any): boolean {
+  const status = phase2StepStatus(step);
+  return status === "queued" || status === "running";
+}
+
+function phase2StepIsComplete(step: any): boolean {
+  const status = phase2StepStatus(step);
+  return status === "done" || status === "succeeded" || status === "skipped";
+}
+
+function phase2StepIsProblem(step: any): boolean {
+  const status = phase2StepStatus(step);
+  return status === "failed" || status === "interrupted" || status === "canceled" || status === "stale";
 }
 
 function formatCpuPercent(value: number | null): string {
@@ -1168,16 +1190,22 @@ export function DiagnosticsPage({ visible = true }: { visible?: boolean }) {
   }, [phase2Latest]);
 
   const phase2HasActive = useMemo(() => {
-    return phase2Steps.some((s) => s?.status === "queued" || s?.status === "running");
-  }, [phase2Steps]);
+    return Boolean(phase2Latest?.active) || phase2Steps.some(phase2StepIsActive);
+  }, [phase2Latest?.active, phase2Steps]);
+
+  const phase2HasProblem = useMemo(() => {
+    return Boolean(phase2Latest?.stale) || phase2Steps.some(phase2StepIsProblem);
+  }, [phase2Latest?.stale, phase2Steps]);
 
   const phase2SummaryLabel =
     sectionStatus.phase2.state === "loading" && !phase2Latest
       ? "Checking..."
       : phase2HasActive
         ? "Installing..."
-        : phase2Steps.length > 0 && phase2Steps.every((s: any) => s?.status === "succeeded")
+        : phase2Steps.length > 0 && phase2Steps.every(phase2StepIsComplete)
           ? "Installed"
+          : phase2HasProblem
+            ? "Interrupted"
           : "Not installed";
 
   const ffmpegSummaryLabel =
@@ -3144,7 +3172,7 @@ export function DiagnosticsPage({ visible = true }: { visible?: boolean }) {
 
         <div className="kv">
           <div className="k">Live progress</div>
-          <div className="v">{phase2HasActive ? "updating…" : "idle"}</div>
+          <div className="v">{phase2HasActive ? "updating..." : phase2HasProblem ? "interrupted" : "idle"}</div>
         </div>
 
         <div className="table-wrap">

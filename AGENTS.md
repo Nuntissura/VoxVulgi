@@ -2,6 +2,7 @@
 
 ## Desktop Build Output Policy
 
+- Follow `build_rules.md` for build verification and UI construction rules: built surfaces must be inspected visually and through backend or frontend navigation/interaction without popping up the app window or hijacking the operator keyboard/mouse, and new UI must not introduce more cards.
 - For desktop release builds, use `governance/scripts/build_desktop_target.ps1` (or `npm run build:desktop:target` from `product/desktop`).
 - Desktop installer builds must refresh the bundled offline payload so Phase 1 + Phase 2 dependencies are included in the installer resources.
 - Every desktop target build must increment the desktop semantic version.

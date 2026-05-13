@@ -1,6 +1,6 @@
 # VoxVulgi â€” Task Board
 
-Last updated: 2026-04-27
+Last updated: 2026-05-13
 
 This is the single source of truth for work status.
 
@@ -227,3 +227,9 @@ This is the single source of truth for work status.
 | WP-0210 | Bridge and visual debugger reliability | IN_PROGRESS | Codex | Stop the StrictMode async-listener race that doubled every snapshot/dump capture; add an `agent_bridge.json` PID/start-time sidecar and clean both files up on Tauri exit so a stale port file no longer silently misleads agents. |
 | WP-0211 | Localization editor master-detail layout | IN_PROGRESS | Codex | Replace the 13-card editor stack with one panel: item header strip + left rail of 8 stages + right pane that renders only the selected stage. Strip card chrome, delete First Dub Guide / Reusable Tools / Advanced Tools redundancy. Per operator: "single panel, not a fan of the card system." |
 | WP-0212 | Safe Mode pill placement and exit-rehydrate notice | IN_PROGRESS | Codex | Replace the always-visible top-bar "Recovery" pill with a smaller end-of-topbar Safe Mode toggle ("Safe Mode ON" / "Safe Mode OFF") and surface an in-app dismissable notice on exit warning that a restart is required to rehydrate bundled assets skipped during Safe Mode startup. |
+| WP-0213 | Build rules: headless verification and no cards | REVIEW | Codex | Created `build_rules.md`, linked it from `PROJECT_CODEX.md`, and pointed agent notes at the headless visual/app-boundary verification rule plus the no-new-cards UI rule. |
+| WP-0214 | Localization setup-first workbench and export bundle | IN_PROGRESS | Codex | Setup-first home, source-copy export, language-marked filenames, successful-output rows, and subtitle-only run mode are implemented; build/checks pass, pending visual smoke after the running WebView reloads the rebuilt frontend. |
+| WP-0215 | Localization multi-speaker diarization controls | REVIEW | Codex | Speaker-count controls now flow through setup-first runs, editor runs, direct diarization, baseline/pyannote execution, and diarization reports; build/checks and headless snapshot proof captured. |
+| WP-0216 | Localization automatic voice-reference continuation | REVIEW | Codex | Auto source-reference generation/apply now runs before voice-plan pause and queues dub when references are ready; live item repaired to the next blocker, missing voice-preserving TTS pack. |
+| WP-0217 | Diagnostics voice-pack installer stale-state truth | REVIEW | Codex | Phase 2 install state is now normalized against the job DB so interrupted installs do not keep showing `Installing...`; successful `done` steps also count as complete. |
+| WP-0218 | Localization voice setup as start-flow UX | REVIEW | Codex | English dub runs now queue one-time voice-cloning setup from the localization orchestrator and resume automatically after setup; Start surfaces plain-language voice setup status instead of sending operators to Diagnostics. |

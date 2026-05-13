@@ -349,6 +349,9 @@ struct Phase2InstallLatestState {
     exists: bool,
     path: String,
     state: Option<serde_json::Value>,
+    active: bool,
+    stale: bool,
+    job_status: Option<String>,
 }
 
 #[derive(Debug, Clone, serde::Serialize)]
@@ -787,6 +790,149 @@ fn now_epoch_ms_i64() -> i64 {
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap_or_default()
         .as_millis() as i64
+}
+
+fn job_status_as_str(status: &jobs::JobStatus) -> &'static str {
+    match status {
+        jobs::JobStatus::Queued => "queued",
+        jobs::JobStatus::Running => "running",
+        jobs::JobStatus::Succeeded => "succeeded",
+        jobs::JobStatus::Failed => "failed",
+        jobs::JobStatus::Canceled => "canceled",
+    }
+}
+
+fn phase2_step_status_is_active(status: &str) -> bool {
+    matches!(status, "queued" | "running")
+}
+
+fn phase2_latest_state_has_active_steps(state: &serde_json::Value) -> bool {
+    state
+        .get("steps")
+        .and_then(|steps| steps.as_array())
+        .map(|steps| {
+            steps.iter().any(|step| {
+                step.get("status")
+                    .and_then(|value| value.as_str())
+                    .map(phase2_step_status_is_active)
+                    .unwrap_or(false)
+            })
+        })
+        .unwrap_or(false)
+}
+
+fn mark_phase2_active_steps_terminal(
+    state: &mut serde_json::Value,
+    status: &str,
+    finished_at_ms: Option<i64>,
+    message: &str,
+) {
+    let finished_at_ms = finished_at_ms.unwrap_or_else(now_epoch_ms_i64);
+    if let Some(steps) = state.get_mut("steps").and_then(|value| value.as_array_mut()) {
+        for step in steps {
+            let current_status = step
+                .get("status")
+                .and_then(|value| value.as_str())
+                .unwrap_or("");
+            if !phase2_step_status_is_active(current_status) {
+                continue;
+            }
+            if let Some(obj) = step.as_object_mut() {
+                obj.insert("status".to_string(), serde_json::json!(status));
+                obj.insert("finished_at_ms".to_string(), serde_json::json!(finished_at_ms));
+                obj.insert("error".to_string(), serde_json::json!(message));
+            }
+        }
+    }
+    if let Some(obj) = state.as_object_mut() {
+        obj.insert("normalized_at_ms".to_string(), serde_json::json!(now_epoch_ms_i64()));
+        obj.insert("normalization_note".to_string(), serde_json::json!(message));
+    }
+}
+
+fn normalize_phase2_latest_state(
+    paths: &AppPaths,
+    mut state: serde_json::Value,
+) -> (serde_json::Value, bool, bool, Option<String>) {
+    let active = phase2_latest_state_has_active_steps(&state);
+    if !active {
+        return (state, false, false, None);
+    }
+
+    let Some(job_id) = state
+        .get("job_id")
+        .and_then(|value| value.as_str())
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+    else {
+        mark_phase2_active_steps_terminal(
+            &mut state,
+            "stale",
+            None,
+            "Installer state is stale; no matching job id was recorded.",
+        );
+        return (state, false, true, None);
+    };
+
+    match jobs::get_job(paths, job_id) {
+        Ok(Some(job)) => {
+            let job_status = job_status_as_str(&job.status).to_string();
+            match job.status {
+                jobs::JobStatus::Queued | jobs::JobStatus::Running => {
+                    (state, true, false, Some(job_status))
+                }
+                jobs::JobStatus::Succeeded => {
+                    mark_phase2_active_steps_terminal(
+                        &mut state,
+                        "done",
+                        job.finished_at_ms,
+                        "Installer job finished after this state file stopped updating.",
+                    );
+                    (state, false, false, Some(job_status))
+                }
+                jobs::JobStatus::Failed => {
+                    let detail = job
+                        .error
+                        .as_deref()
+                        .unwrap_or("Installer job failed before this state file could finish.");
+                    let status = if detail.to_ascii_lowercase().contains("interrupted") {
+                        "interrupted"
+                    } else {
+                        "failed"
+                    };
+                    mark_phase2_active_steps_terminal(&mut state, status, job.finished_at_ms, detail);
+                    (state, false, true, Some(job_status))
+                }
+                jobs::JobStatus::Canceled => {
+                    mark_phase2_active_steps_terminal(
+                        &mut state,
+                        "canceled",
+                        job.finished_at_ms,
+                        "Installer job was canceled before this state file could finish.",
+                    );
+                    (state, false, true, Some(job_status))
+                }
+            }
+        }
+        Ok(None) => {
+            mark_phase2_active_steps_terminal(
+                &mut state,
+                "stale",
+                None,
+                "Installer state is stale; the matching job was not found.",
+            );
+            (state, false, true, None)
+        }
+        Err(err) => {
+            mark_phase2_active_steps_terminal(
+                &mut state,
+                "stale",
+                None,
+                &format!("Installer state could not be checked against the job database: {err}"),
+            );
+            (state, false, true, None)
+        }
+    }
 }
 
 fn startup_phase_label(phase_id: &str) -> &'static str {
@@ -1443,7 +1589,7 @@ fn apply_offline_bundle_if_present(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use voxvulgi_engine::{config, paths::AppPaths};
+    use voxvulgi_engine::{config, db, paths::AppPaths};
 
     #[test]
     fn verify_offline_payload_integrity_accepts_matching_bytes_and_hash() {
@@ -1482,6 +1628,46 @@ mod tests {
 
         let err = verify_offline_payload_integrity(&manifest, &payload).expect_err("mismatch");
         assert!(err.contains("sha256 mismatch"));
+    }
+
+    #[test]
+    fn phase2_latest_state_marks_interrupted_steps_when_job_failed() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let paths = AppPaths::new(dir.path().to_path_buf());
+        let job = jobs::enqueue_dummy_sleep(&paths, 1).expect("enqueue");
+        let finished_at_ms = now_epoch_ms_i64();
+        let conn = db::open(&paths).expect("db");
+        db::migrate(&conn).expect("migrate");
+        conn.execute(
+            "UPDATE job SET status='failed', error='interrupted by app shutdown', finished_at_ms=?1 WHERE id=?2",
+            (finished_at_ms, &job.id),
+        )
+        .expect("mark failed");
+
+        let state = serde_json::json!({
+            "schema_version": 1,
+            "job_id": job.id,
+            "steps": [
+                { "id": "portable_python_win64", "status": "done", "error": null },
+                { "id": "python_toolchain", "status": "running", "error": null },
+                { "id": "tts_voice_preserving_local_v1", "status": "queued", "error": null }
+            ]
+        });
+
+        let (normalized, active, stale, job_status) =
+            normalize_phase2_latest_state(&paths, state);
+        assert!(!active);
+        assert!(stale);
+        assert_eq!(job_status.as_deref(), Some("failed"));
+
+        let statuses = normalized
+            .get("steps")
+            .and_then(|value| value.as_array())
+            .expect("steps")
+            .iter()
+            .map(|step| step.get("status").and_then(|value| value.as_str()).unwrap_or(""))
+            .collect::<Vec<_>>();
+        assert_eq!(statuses, vec!["done", "interrupted", "interrupted"]);
     }
 
     #[test]
@@ -3745,6 +3931,49 @@ async fn item_export_mux_preview_mp4(
 }
 
 #[tauri::command]
+async fn item_export_source_media(
+    state: State<'_, AppState>,
+    item_id: Option<String>,
+    itemId: Option<String>,
+    out_path: Option<String>,
+    outPath: Option<String>,
+) -> Result<ExportedFile, String> {
+    let paths = state.paths.clone();
+    let item_id = item_id
+        .or(itemId)
+        .map(|v| v.trim().to_string())
+        .filter(|v| !v.is_empty())
+        .ok_or_else(|| "missing required key itemId".to_string())?;
+    let out_path = out_path
+        .or(outPath)
+        .map(|v| v.trim().to_string())
+        .filter(|v| !v.is_empty())
+        .ok_or_else(|| "missing required key outPath".to_string())?;
+
+    tauri::async_runtime::spawn_blocking(move || {
+        let item = library::get_item_by_id(&paths, &item_id).map_err(|e| e.to_string())?;
+        let src = std::path::PathBuf::from(&item.media_path);
+        if !src.is_file() {
+            return Err(format!("source media not found: {}", item.media_path));
+        }
+        let dst = std::path::PathBuf::from(&out_path);
+        if let Some(parent) = dst.parent() {
+            if !parent.as_os_str().is_empty() {
+                std::fs::create_dir_all(parent).map_err(|e| e.to_string())?;
+            }
+        }
+        std::fs::copy(&src, &dst).map_err(|e| e.to_string())?;
+        let bytes = std::fs::metadata(&dst).map(|m| m.len()).unwrap_or(0);
+        Ok(ExportedFile {
+            out_path: dst.to_string_lossy().to_string(),
+            file_bytes: bytes,
+        })
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
+#[tauri::command]
 async fn diagnostics_storage_breakdown(
     state: State<'_, AppState>,
 ) -> Result<diagnostics::StorageBreakdown, String> {
@@ -4417,16 +4646,23 @@ async fn tools_phase2_packs_install_latest_state(
                 exists: false,
                 path: path.to_string_lossy().to_string(),
                 state: None,
+                active: false,
+                stale: false,
+                job_status: None,
             });
         }
 
         let bytes = std::fs::read(&path).map_err(|e| e.to_string())?;
         let parsed: serde_json::Value =
             serde_json::from_slice(&bytes).map_err(|e| e.to_string())?;
+        let (state, active, stale, job_status) = normalize_phase2_latest_state(&paths, parsed);
         Ok(Phase2InstallLatestState {
             exists: true,
             path: path.to_string_lossy().to_string(),
-            state: Some(parsed),
+            state: Some(state),
+            active,
+            stale,
+            job_status,
         })
     })
     .await
@@ -6192,6 +6428,8 @@ fn jobs_enqueue_diarize_local_v1(
     source_track_id: Option<String>,
     sourceTrackId: Option<String>,
     backend: Option<String>,
+    speaker_count: Option<jobs::DiarizationSpeakerCountRequest>,
+    speakerCount: Option<jobs::DiarizationSpeakerCountRequest>,
 ) -> Result<jobs::JobRow, String> {
     let item_id = item_id
         .or(itemId)
@@ -6204,8 +6442,14 @@ fn jobs_enqueue_diarize_local_v1(
         .filter(|v| !v.is_empty())
         .ok_or_else(|| "missing required key sourceTrackId".to_string())?;
 
-    jobs::enqueue_diarize_local_v1_with_backend(&state.paths, item_id, source_track_id, backend)
-        .map_err(|e| e.to_string())
+    jobs::enqueue_diarize_local_v1_with_backend_and_speaker_count(
+        &state.paths,
+        item_id,
+        source_track_id,
+        backend,
+        speaker_count.or(speakerCount).unwrap_or_default(),
+    )
+    .map_err(|e| e.to_string())
 }
 
 #[tauri::command]
@@ -6991,6 +7235,7 @@ pub fn run() {
             voice_cast_packs_list,
             voice_cast_packs_promote_benchmark_candidate_default,
             voice_cast_packs_update,
+            item_export_source_media,
             subtitles_export_doc_srt,
             subtitles_export_doc_vtt,
             subtitles_list_tracks,

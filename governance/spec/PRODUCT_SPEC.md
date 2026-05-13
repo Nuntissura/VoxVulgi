@@ -175,6 +175,7 @@ Initial language focus: **Korean + Japanese → English**.
 ### 5.1 Multi-speaker segmentation
 
 - Speaker diarization (label Speaker 1/2/3...).
+- Localization Studio must let the operator choose diarization speaker-count intent before labeling speakers: automatic detection, exact count, or a min/max range. That intent should flow through both direct diarization and full localization runs.
 - UI to map speaker labels to:
   - a TTS voice (MVP-safe approach), or
   - a voice-preserved model (advanced).
@@ -214,9 +215,10 @@ Initial language focus: **Korean + Japanese → English**.
   - verify whether the result was actually voice-preserved or plain TTS fallback.
 - Localization Studio should expose that basic promise as one obvious operator lane before the deeper reusable-asset surfaces:
   - a dedicated `Reusable Voice Basics` surface should let the operator choose a speaker, capture or apply source references, save reusable voice memory, apply saved reusable voice, and continue the dubbed preview without detouring through cast packs, character profiles, benchmark-default setup, or backend research surfaces first.
-- The explicit `Start / continue localization run` action should advance automatically only until the next real operator checkpoint.
+- The explicit `Start / continue localization run` action should advance automatically until the next real operator checkpoint.
   - If speaker labels are missing, it should queue diarization rather than jumping straight into dubbing.
-  - If speaker labels exist but the voice plan is incomplete, it should pause at the speaker/reference stage and tell the operator which speakers still need references or Standard TTS routing.
+  - If speaker labels exist but clone references are missing, it should first generate and attach source-media voice samples for those speakers.
+  - It should pause at the speaker/reference stage only when source-sample extraction fails or a speaker still lacks a usable clone reference.
   - Localization Studio should also provide an assisted bridge out of that checkpoint by letting operators generate candidate speaker-reference bundles from the current source media after diarization, review/apply them, and then continue the staged run without manual file hunting.
 - Direct speech-to-speech research systems may inform future R&D and benchmark lanes, but they should not replace the default shipped operator path until they meet the same packaging, inspectability, and operator-control standard as the staged cascade.
 - Keyboard shortcuts for common Localization Studio actions:
@@ -399,6 +401,10 @@ Current implementation status:
 - Shared download/export roots must persist without temporary "missing folder" states.
 - Operators should be able to reveal files or parent folders anywhere the app creates an output or artifact.
 - Localization exports must be easy to find, with a predictable default folder map and direct open/reveal actions for both source files and generated deliverables.
+- Localization Studio should open as a setup-first workbench: select or drop a source file, choose subtitle and dub target outputs, confirm the Options-linked output folder, optionally include a source copy, then use one Start/Stop control with visible percentage progress.
+- When English dubbing is selected, Localization Studio must treat voice-cloning runtime setup as part of the Start workflow. If the local voice-cloning packages are missing, Start queues the one-time setup in plain operator language and the run continues automatically after setup succeeds; operators should not have to discover or manually install voice packs from Diagnostics.
+- Successful Localization outputs should be listed as thumbnail rows with direct actions for source file, output folder, subtitle location, dub file, and job/working folder.
+- Localization deliverable filenames should keep the source stem and add target markers such as `.source.<ext>`, `.sub-en.srt`, `.sub-en.vtt`, and `.dub-en.<ext>`.
 - Generic cache/history cleanup must never silently remove Localization Studio deliverables, benchmark/report history, or custom output folders.
 - Default preview/download video outputs should be MP4 wherever the local toolchain can merge/remux cleanly.
 - Default archive image outputs should prefer JPEG where practical.

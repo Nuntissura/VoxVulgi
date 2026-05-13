@@ -4,6 +4,16 @@ import { confirm, open, save } from "@tauri-apps/plugin-dialog";
 import { usePageActivity, usePollingLoop } from "../lib/activity";
 import { diagnosticsTrace } from "../lib/diagnosticsTrace";
 import {
+  buildDiarizationSpeakerCountRequest,
+  clampDiarizationSpeakerCount,
+  DIARIZATION_EXACT_SPEAKERS_KEY,
+  DIARIZATION_MAX_SPEAKERS_KEY,
+  DIARIZATION_MIN_SPEAKERS_KEY,
+  DIARIZATION_SPEAKER_COUNT_MODE_KEY,
+  parseDiarizationSpeakerCountMode,
+  type DiarizationSpeakerCountMode,
+} from "../lib/diarizationSpeakerCount";
+import {
   artifactPreferredVideoPreviewMode,
   artifactSupportsRerun,
   canonicalTtsBackendId,
@@ -72,6 +82,12 @@ type JobRow = {
   finished_at_ms?: number | null;
   logs_path?: string;
   params_json?: string;
+};
+
+type TtsVoicePreservingLocalV1PackStatus = {
+  installed: boolean;
+  openvoice_version: string | null;
+  cosyvoice_version: string | null;
 };
 
 type ItemOutputs = {
@@ -153,6 +169,13 @@ function stemFromPath(path: string): string {
   const dot = fileName.lastIndexOf(".");
   if (dot <= 0) return fileName;
   return fileName.slice(0, dot);
+}
+
+function extensionFromPath(path: string): string {
+  const fileName = fileNameFromPath(path);
+  const dot = fileName.lastIndexOf(".");
+  if (dot <= 0) return "mp4";
+  return fileName.slice(dot + 1).trim() || "mp4";
 }
 
 function trimOrNull(value: string | null | undefined): string | null {
@@ -1376,6 +1399,22 @@ export function SubtitleEditorPage({
       return "baseline";
     },
   );
+  const [speakerCountMode, setSpeakerCountMode] = useState<DiarizationSpeakerCountMode>(() =>
+    parseDiarizationSpeakerCountMode(safeLocalStorageGet(DIARIZATION_SPEAKER_COUNT_MODE_KEY)),
+  );
+  const [exactSpeakers, setExactSpeakers] = useState(() =>
+    clampDiarizationSpeakerCount(Number(safeLocalStorageGet(DIARIZATION_EXACT_SPEAKERS_KEY)), 2),
+  );
+  const [minSpeakers, setMinSpeakers] = useState(() =>
+    clampDiarizationSpeakerCount(Number(safeLocalStorageGet(DIARIZATION_MIN_SPEAKERS_KEY)), 2),
+  );
+  const [maxSpeakers, setMaxSpeakers] = useState(() =>
+    clampDiarizationSpeakerCount(Number(safeLocalStorageGet(DIARIZATION_MAX_SPEAKERS_KEY)), 4),
+  );
+  const speakerCountRequest = useMemo(
+    () => buildDiarizationSpeakerCountRequest(speakerCountMode, exactSpeakers, minSpeakers, maxSpeakers),
+    [speakerCountMode, exactSpeakers, minSpeakers, maxSpeakers],
+  );
   const [ttsJobId, setTtsJobId] = useState<string | null>(null);
   const [ttsJobStatus, setTtsJobStatus] = useState<JobStatus | null>(null);
   const [ttsJobError, setTtsJobError] = useState<string | null>(null);
@@ -1456,6 +1495,10 @@ export function SubtitleEditorPage({
   });
   const [exportIncludeDubPreview, setExportIncludeDubPreview] = useState(() => {
     const raw = safeLocalStorageGet("voxvulgi.v1.editor.export_include_dub_preview");
+    return raw === null ? true : raw === "1";
+  });
+  const [exportIncludeSourceCopy, setExportIncludeSourceCopy] = useState(() => {
+    const raw = safeLocalStorageGet("voxvulgi.v1.editor.export_include_source_copy");
     return raw === null ? true : raw === "1";
   });
   const [exportDubContainer, setExportDubContainer] = useState<"auto" | "mp4" | "mkv">(() => {
@@ -1649,6 +1692,22 @@ export function SubtitleEditorPage({
   }, [diarizationBackend]);
 
   useEffect(() => {
+    safeLocalStorageSet(DIARIZATION_SPEAKER_COUNT_MODE_KEY, speakerCountMode);
+  }, [speakerCountMode]);
+
+  useEffect(() => {
+    safeLocalStorageSet(DIARIZATION_EXACT_SPEAKERS_KEY, String(exactSpeakers));
+  }, [exactSpeakers]);
+
+  useEffect(() => {
+    safeLocalStorageSet(DIARIZATION_MIN_SPEAKERS_KEY, String(minSpeakers));
+  }, [minSpeakers]);
+
+  useEffect(() => {
+    safeLocalStorageSet(DIARIZATION_MAX_SPEAKERS_KEY, String(maxSpeakers));
+  }, [maxSpeakers]);
+
+  useEffect(() => {
     safeLocalStorageSet("voxvulgi.v1.editor.separation_backend", separationBackend);
   }, [separationBackend]);
 
@@ -1737,6 +1796,13 @@ export function SubtitleEditorPage({
       exportIncludeDubPreview ? "1" : "0",
     );
   }, [exportIncludeDubPreview]);
+
+  useEffect(() => {
+    safeLocalStorageSet(
+      "voxvulgi.v1.editor.export_include_source_copy",
+      exportIncludeSourceCopy ? "1" : "0",
+    );
+  }, [exportIncludeSourceCopy]);
 
   useEffect(() => {
     safeLocalStorageSet("voxvulgi.v1.editor.export_dub_container", exportDubContainer);
@@ -2538,6 +2604,8 @@ export function SubtitleEditorPage({
 
   const localizationRunStages = useMemo(() => {
     const stageJob = (jobType: string) => latestItemJobByType.get(jobType) ?? null;
+    const voiceSetupJob = stageJob("install_phase2_packs_v1");
+    const dubJob = stageJob("dub_voice_preserving_v1");
     return [
       {
         id: "asr",
@@ -2595,13 +2663,15 @@ export function SubtitleEditorPage({
               artifact.id.startsWith("tts_voice_preserving_manifest_variant_")),
         ),
         detail:
-          stageJob("dub_voice_preserving_v1")?.status === "running"
-            ? `Running ${Math.round((stageJob("dub_voice_preserving_v1")?.progress ?? 0) * 100)}%`
-            : stageJob("dub_voice_preserving_v1")
-              ? `Last job: ${stageJob("dub_voice_preserving_v1")?.status ?? "unknown"}`
+          voiceSetupJob?.status === "running" || voiceSetupJob?.status === "queued"
+            ? `Preparing voice cloning ${Math.round((voiceSetupJob.progress ?? 0) * 100)}%`
+            : dubJob?.status === "running"
+              ? `Running ${Math.round((dubJob.progress ?? 0) * 100)}%`
+              : dubJob
+                ? `Last job: ${dubJob.status ?? "unknown"}`
               : activeVoiceCloneTruth
                 ? `Current truth: ${activeVoiceCloneTruth.label}${activeVoiceCloneTruth.detail ? ` (${activeVoiceCloneTruth.detail})` : ""}`
-              : "Render the English dub segments with the managed or selected backend.",
+                : "Render the English dub segments with the managed or selected backend.",
       },
       {
         id: "mix",
@@ -3119,17 +3189,17 @@ export function SubtitleEditorPage({
 
   const exportSrtPreviewPath = useMemo(() => {
     if (!effectiveExportDirPreview) return "";
-    return joinPath(effectiveExportDirPreview, `${sourceBaseStem}.srt`);
+    return joinPath(effectiveExportDirPreview, `${sourceBaseStem}.sub-en.srt`);
   }, [effectiveExportDirPreview, sourceBaseStem]);
 
   const exportVttPreviewPath = useMemo(() => {
     if (!effectiveExportDirPreview) return "";
-    return joinPath(effectiveExportDirPreview, `${sourceBaseStem}.vtt`);
+    return joinPath(effectiveExportDirPreview, `${sourceBaseStem}.sub-en.vtt`);
   }, [effectiveExportDirPreview, sourceBaseStem]);
 
   const exportDubPreviewPath = useMemo(() => {
     if (!effectiveExportDirPreview) return "";
-    return joinPath(effectiveExportDirPreview, `${sourceBaseStem}.dub_preview.${getPreferredMuxExportExt()}`);
+    return joinPath(effectiveExportDirPreview, `${sourceBaseStem}.dub-en.${getPreferredMuxExportExt()}`);
   }, [
     effectiveExportDirPreview,
     sourceBaseStem,
@@ -3137,6 +3207,13 @@ export function SubtitleEditorPage({
     outputs?.mux_dub_preview_v1_mp4_exists,
     outputs?.mux_dub_preview_v1_mkv_exists,
   ]);
+  const exportSourceCopyPreviewPath = useMemo(() => {
+    if (!effectiveExportDirPreview || !item?.media_path) return "";
+    return joinPath(
+      effectiveExportDirPreview,
+      `${sourceBaseStem}.source.${extensionFromPath(item.media_path)}`,
+    );
+  }, [effectiveExportDirPreview, item?.media_path, sourceBaseStem]);
 
   const localizationOutputEntries = useMemo<LocalizationOutputEntry[]>(() => {
     const next: LocalizationOutputEntry[] = [];
@@ -3281,6 +3358,18 @@ export function SubtitleEditorPage({
         : null,
     );
     push(
+      exportSourceCopyPreviewPath
+        ? {
+            id: "deliverable-source-copy",
+            group: "Deliverables",
+            title: "Source copy export",
+            path: exportSourceCopyPreviewPath,
+            kind: "file",
+            status_hint: "Optional source-media copy kept beside subtitle and dub outputs.",
+          }
+        : null,
+    );
+    push(
       exportSrtPreviewPath
         ? {
             id: "deliverable-srt",
@@ -3322,6 +3411,7 @@ export function SubtitleEditorPage({
     effectiveExportDirPreview,
     exportDubPreviewPath,
     exportSrtPreviewPath,
+    exportSourceCopyPreviewPath,
     exportUseCustomDir,
     exportVttPreviewPath,
     item?.media_path,
@@ -3583,6 +3673,7 @@ export function SubtitleEditorPage({
       separation_backend: separationBackend,
       queue_qc: localizationRunQueueQc,
       queue_export_pack: localizationRunQueueExportPack,
+      speaker_count: speakerCountRequest,
     });
     try {
       const summary = await invoke<LocalizationRunQueueSummary>("jobs_enqueue_localization_run_v1", {
@@ -3592,11 +3683,14 @@ export function SubtitleEditorPage({
           separation_backend: separationBackend,
           queue_qc: localizationRunQueueQc,
           queue_export_pack: localizationRunQueueExportPack,
+          speaker_count: speakerCountRequest,
         },
       });
       setLocalizationRunSummary(summary);
       setNotice(
-        summary.queued_jobs.length
+        summary.stage === "voice_setup"
+          ? "Preparing voice cloning for this run. This is a one-time setup; localization will continue automatically when it finishes."
+          : summary.queued_jobs.length
           ? `Queued localization run at stage ${summary.stage}. ${summary.queued_jobs.length} job(s) added to batch ${summary.batch_id}.`
           : `Localization run is waiting at stage ${summary.stage}. ${summary.notes[0] ?? "No new jobs were queued."}`,
       );
@@ -3733,6 +3827,7 @@ export function SubtitleEditorPage({
         itemId,
         sourceTrackId: trackId,
         backend: diarizationBackend === "baseline" ? null : diarizationBackend,
+        speakerCount: speakerCountRequest,
       });
       setDiarizeJobId(job.id);
       setDiarizeJobStatus(job.status);
@@ -4070,17 +4165,54 @@ export function SubtitleEditorPage({
   async function enqueueDubVoicePreservingV1() {
     if (!trackId) return;
 
+    setBusy(true);
+    setError(null);
+    setNotice(null);
+    try {
+      const pack = await invoke<TtsVoicePreservingLocalV1PackStatus>(
+        "tools_tts_voice_preserving_local_v1_status",
+      );
+      if (!pack.installed) {
+        const summary = await invoke<LocalizationRunQueueSummary>("jobs_enqueue_localization_run_v1", {
+          request: {
+            item_id: itemId,
+            asr_lang: asrLang,
+            separation_backend: separationBackend,
+            queue_qc: localizationRunQueueQc,
+            queue_export_pack: localizationRunQueueExportPack,
+            output_mode: "dub",
+            speaker_count: speakerCountRequest,
+          },
+        });
+        setLocalizationRunSummary(summary);
+        setNotice(
+          summary.stage === "voice_setup"
+            ? "Preparing voice cloning for this run. This is a one-time setup; localization will continue automatically when it finishes."
+            : `Queued localization run at stage ${summary.stage}.`,
+        );
+        refreshItemJobs().catch(() => undefined);
+        refreshTracks().catch(() => undefined);
+        refreshArtifacts().catch(() => undefined);
+        refreshOutputs().catch(() => undefined);
+        return;
+      }
+    } catch (e) {
+      setError(String(e));
+      setBusy(false);
+      return;
+    }
+
     // WP-0187: Pre-flight check
     const preflight = checkCloneReadiness();
     if (!preflight.ready) {
       const msg = `Clone pre-flight check:\n${preflight.warnings.join("\n")}\n\nProceed anyway?`;
       const proceed = await confirm(msg, { title: "Voice cloning readiness", kind: "warning" });
-      if (!proceed) return;
+      if (!proceed) {
+        setBusy(false);
+        return;
+      }
     }
 
-    setBusy(true);
-    setError(null);
-    setNotice(null);
     logDiagnosticsEvent("localization.enqueue_dub_voice_preserving");
     try {
       const targetTrackId = await ensureEnglishLocalizationTrackSelected();
@@ -5638,6 +5770,7 @@ export function SubtitleEditorPage({
     setError(null);
     setNotice(null);
     logDiagnosticsEvent("localization.export_selected.start", {
+      export_source_copy: exportIncludeSourceCopy,
       export_srt: exportIncludeSrt,
       export_vtt: exportIncludeVtt,
       export_dub_preview: exportIncludeDubPreview,
@@ -5648,14 +5781,25 @@ export function SubtitleEditorPage({
       const outDir = resolveExportDir();
       const created: string[] = [];
 
+      if (exportIncludeSourceCopy) {
+        if (!exportSourceCopyPreviewPath) {
+          throw new Error("Source copy export path is unavailable.");
+        }
+        const result = await invoke<ExportedFile>("item_export_source_media", {
+          itemId,
+          outPath: exportSourceCopyPreviewPath,
+        });
+        created.push(result.out_path);
+      }
+
       if (exportIncludeSrt) {
-        const outPath = joinPath(outDir, `${sourceBaseStem}.srt`);
+        const outPath = joinPath(outDir, `${sourceBaseStem}.sub-en.srt`);
         await invoke("subtitles_export_doc_srt", { doc, outPath });
         created.push(outPath);
       }
 
       if (exportIncludeVtt) {
-        const outPath = joinPath(outDir, `${sourceBaseStem}.vtt`);
+        const outPath = joinPath(outDir, `${sourceBaseStem}.sub-en.vtt`);
         await invoke("subtitles_export_doc_vtt", { doc, outPath });
         created.push(outPath);
       }
@@ -5669,7 +5813,7 @@ export function SubtitleEditorPage({
         if (dubExt === "mkv" && !next.mux_dub_preview_v1_mkv_exists) {
           throw new Error("MKV mux preview not found. Run 'Mux preview' with MKV first.");
         }
-        const outPath = joinPath(outDir, `${sourceBaseStem}.dub_preview.${dubExt}`);
+        const outPath = joinPath(outDir, `${sourceBaseStem}.dub-en.${dubExt}`);
         const result = await invoke<ExportedFile>("item_export_mux_preview_mp4", {
           itemId,
           outPath,
@@ -5697,7 +5841,7 @@ export function SubtitleEditorPage({
 
   async function exportSrt() {
     if (!doc) return;
-    const suggested = exportSrtPreviewPath || `${sourceBaseStem}.srt`;
+    const suggested = exportSrtPreviewPath || `${sourceBaseStem}.sub-en.srt`;
     const out = await save({ defaultPath: suggested });
     if (!out || typeof out !== "string") return;
     setBusy(true);
@@ -5716,7 +5860,7 @@ export function SubtitleEditorPage({
 
   async function exportVtt() {
     if (!doc) return;
-    const suggested = exportVttPreviewPath || `${sourceBaseStem}.vtt`;
+    const suggested = exportVttPreviewPath || `${sourceBaseStem}.sub-en.vtt`;
     const out = await save({ defaultPath: suggested });
     if (!out || typeof out !== "string") return;
     setBusy(true);
@@ -5880,7 +6024,7 @@ export function SubtitleEditorPage({
       }
 
       const suggested =
-        exportDubPreviewPath || `${sourceBaseStem}.dub_preview.${preferredExt}`;
+        exportDubPreviewPath || `${sourceBaseStem}.dub-en.${preferredExt}`;
 
       const out = await save({
         title: `Export muxed preview (${preferredExt.toUpperCase()})`,
@@ -6181,6 +6325,58 @@ export function SubtitleEditorPage({
                   <option value="baseline">Backend: baseline</option>
                   <option value="pyannote_byo_v1">Backend: pyannote (BYO)</option>
                 </select>
+                <select
+                  value={speakerCountMode}
+                  disabled={busy}
+                  onChange={(e) => setSpeakerCountMode(e.currentTarget.value as DiarizationSpeakerCountMode)}
+                  title="Speaker count mode"
+                >
+                  <option value="auto">Speakers: auto</option>
+                  <option value="exact">Speakers: exact</option>
+                  <option value="range">Speakers: range</option>
+                </select>
+                {speakerCountMode === "exact" ? (
+                  <input
+                    className="loc-speaker-count-input"
+                    type="number"
+                    min={1}
+                    max={16}
+                    value={exactSpeakers}
+                    disabled={busy}
+                    aria-label="Exact speaker count"
+                    onChange={(e) =>
+                      setExactSpeakers(clampDiarizationSpeakerCount(Number(e.currentTarget.value), 2))
+                    }
+                  />
+                ) : null}
+                {speakerCountMode === "range" ? (
+                  <span className="loc-speaker-count-range">
+                    <input
+                      className="loc-speaker-count-input"
+                      type="number"
+                      min={1}
+                      max={16}
+                      value={minSpeakers}
+                      disabled={busy}
+                      aria-label="Minimum speakers"
+                      onChange={(e) =>
+                        setMinSpeakers(clampDiarizationSpeakerCount(Number(e.currentTarget.value), 2))
+                      }
+                    />
+                    <input
+                      className="loc-speaker-count-input"
+                      type="number"
+                      min={1}
+                      max={16}
+                      value={maxSpeakers}
+                      disabled={busy}
+                      aria-label="Maximum speakers"
+                      onChange={(e) =>
+                        setMaxSpeakers(clampDiarizationSpeakerCount(Number(e.currentTarget.value), 4))
+                      }
+                    />
+                  </span>
+                ) : null}
                 <button
                   type="button"
                   disabled={busy || !trackId}
@@ -6779,6 +6975,15 @@ export function SubtitleEditorPage({
           <div className="v">{effectiveExportDirPreview || "-"}</div>
         </div>
         <div className="row" style={{ marginTop: 10, flexWrap: "wrap", alignItems: "center" }}>
+          <label style={{ display: "flex", alignItems: "center", gap: 8 }}>
+            <input
+              type="checkbox"
+              checked={exportIncludeSourceCopy}
+              disabled={busy || !item?.media_path}
+              onChange={(e) => setExportIncludeSourceCopy(e.currentTarget.checked)}
+            />
+            <span>Source copy</span>
+          </label>
           <label style={{ display: "flex", alignItems: "center", gap: 8 }}>
             <input
               type="checkbox"

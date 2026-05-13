@@ -2,10 +2,10 @@ use crate::paths::AppPaths;
 use crate::{
     asr, cmd, config, db, ffmpeg, image_batch, library, persistence, speakers, subscriptions,
     subtitle_tracks, subtitles, tools, translate, voice_backend_adapters, voice_cast_packs,
-    voice_plans, voice_templates, EngineError, Result,
+    voice_plans, voice_reference_candidates, voice_templates, EngineError, Result,
 };
 use regex::Regex;
-use rusqlite::params;
+use rusqlite::{params, OptionalExtension};
 use scraper::{Html, Selector};
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet, VecDeque};
@@ -46,6 +46,7 @@ const YT_DLP_DOWNLOAD_TIMEOUT_SECS: u64 = 7200;
 const EXTERNAL_CMD_POLL_INTERVAL_MS: u64 = 200;
 const YT_DLP_BOOTSTRAP_TIMEOUT_SECS: u64 = 180;
 const EXPERIMENTAL_VOICE_BACKEND_TIMEOUT_SECS: u64 = 7200;
+const DIARIZATION_SPEAKER_COUNT_MAX: u32 = 16;
 #[cfg(windows)]
 const YT_DLP_WINDOWS_DOWNLOAD_URL: &str =
     "https://github.com/yt-dlp/yt-dlp/releases/latest/download/yt-dlp.exe";
@@ -306,7 +307,10 @@ struct ImportLocalParams {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
-struct InstallPhase2PacksV1Params {}
+struct InstallPhase2PacksV1Params {
+    #[serde(default)]
+    resume_localization_run: Option<LocalizationRunRequest>,
+}
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct AsrLocalParams {
@@ -336,6 +340,8 @@ struct DiarizeLocalV1Params {
     source_track_id: String,
     #[serde(default)]
     backend: Option<String>,
+    #[serde(default)]
+    speaker_count: DiarizationSpeakerCountRequest,
     #[serde(default)]
     batch_on_import: bool,
     #[serde(default)]
@@ -468,9 +474,44 @@ pub struct SpeakerRenderOverride {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct DiarizationSpeakerCountRequest {
+    #[serde(default)]
+    pub mode: Option<String>,
+    #[serde(default, alias = "exactSpeakers")]
+    pub exact_speakers: Option<u32>,
+    #[serde(default, alias = "minSpeakers")]
+    pub min_speakers: Option<u32>,
+    #[serde(default, alias = "maxSpeakers")]
+    pub max_speakers: Option<u32>,
+}
+
+impl DiarizationSpeakerCountRequest {
+    fn has_operator_value(&self) -> bool {
+        self.mode
+            .as_deref()
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .is_some()
+            || self.exact_speakers.is_some()
+            || self.min_speakers.is_some()
+            || self.max_speakers.is_some()
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+struct NormalizedDiarizationSpeakerCount {
+    mode: String,
+    exact_speakers: Option<u32>,
+    min_speakers: Option<u32>,
+    max_speakers: Option<u32>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
 struct LocalizationPipelineOptions {
     #[serde(default)]
     auto_pipeline: bool,
+    #[serde(default)]
+    output_mode: Option<String>,
     #[serde(default)]
     source_track_id: Option<String>,
     #[serde(default)]
@@ -485,6 +526,8 @@ struct LocalizationPipelineOptions {
     tts_backend_id: Option<String>,
     #[serde(default)]
     speaker_overrides: Vec<SpeakerRenderOverride>,
+    #[serde(default, alias = "speakerCount")]
+    speaker_count: DiarizationSpeakerCountRequest,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -522,9 +565,13 @@ pub struct LocalizationRunRequest {
     pub asr_lang: Option<String>,
     pub separation_backend: Option<String>,
     #[serde(default)]
+    pub output_mode: Option<String>,
+    #[serde(default)]
     pub queue_export_pack: bool,
     #[serde(default)]
     pub queue_qc: bool,
+    #[serde(default, alias = "speakerCount")]
+    pub speaker_count: DiarizationSpeakerCountRequest,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -619,7 +666,15 @@ pub struct VoiceAbPreviewQueueSummary {
 #[derive(Debug, Clone, Deserialize)]
 struct DiarizeLocalV1Output {
     schema_version: Option<u32>,
+    #[serde(default)]
+    algorithm: Option<String>,
+    #[serde(default)]
+    speaker_count: Option<serde_json::Value>,
+    #[serde(default)]
+    observed_speakers: Vec<String>,
     segments: Vec<DiarizeLocalV1Segment>,
+    #[serde(default)]
+    exclusive_segments: Vec<DiarizeLocalV1Segment>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -1240,6 +1295,7 @@ pub fn enqueue_diarize_local_v1(
         item_id: item_id.clone(),
         source_track_id,
         backend: None,
+        speaker_count: DiarizationSpeakerCountRequest::default(),
         batch_on_import: false,
         pipeline: None,
     })?;
@@ -1253,6 +1309,22 @@ pub fn enqueue_diarize_local_v1_with_backend(
     source_track_id: String,
     backend: Option<String>,
 ) -> Result<JobRow> {
+    enqueue_diarize_local_v1_with_backend_and_speaker_count(
+        paths,
+        item_id,
+        source_track_id,
+        backend,
+        DiarizationSpeakerCountRequest::default(),
+    )
+}
+
+pub fn enqueue_diarize_local_v1_with_backend_and_speaker_count(
+    paths: &AppPaths,
+    item_id: String,
+    source_track_id: String,
+    backend: Option<String>,
+    speaker_count: DiarizationSpeakerCountRequest,
+) -> Result<JobRow> {
     let backend = backend
         .map(|v| v.trim().to_string())
         .filter(|v| !v.is_empty());
@@ -1260,6 +1332,7 @@ pub fn enqueue_diarize_local_v1_with_backend(
         item_id: item_id.clone(),
         source_track_id,
         backend,
+        speaker_count,
         batch_on_import: false,
         pipeline: None,
     })?;
@@ -1368,6 +1441,7 @@ fn enqueue_experimental_voice_backend_render_v1_with_batch_id(
         batch_on_import: false,
         pipeline: Some(LocalizationPipelineOptions {
             auto_pipeline,
+            output_mode: Some("dub".to_string()),
             source_track_id: Some(source_track_id),
             separation_backend: normalize_separation_backend(separation_backend.as_deref()),
             queue_export_pack,
@@ -1375,6 +1449,7 @@ fn enqueue_experimental_voice_backend_render_v1_with_batch_id(
             variant_label: normalize_variant_label(variant_label.as_deref()),
             tts_backend_id: Some(backend_id),
             speaker_overrides: Vec::new(),
+            speaker_count: DiarizationSpeakerCountRequest::default(),
         }),
     })?;
     enqueue_with_type_item_and_batch_id(
@@ -1597,6 +1672,7 @@ pub fn enqueue_localization_batch_v1(
 
         let pipeline = LocalizationPipelineOptions {
             auto_pipeline: true,
+            output_mode: Some("dub".to_string()),
             source_track_id: Some(track.id.clone()),
             separation_backend: separation_backend.clone(),
             queue_export_pack: request.queue_export_pack,
@@ -1604,6 +1680,7 @@ pub fn enqueue_localization_batch_v1(
             variant_label: None,
             tts_backend_id: Some("openvoice_v2".to_string()),
             speaker_overrides: Vec::new(),
+            speaker_count: DiarizationSpeakerCountRequest::default(),
         };
 
         let outcome = queue_localization_continuation_from_track(
@@ -1779,6 +1856,282 @@ fn decide_localization_next_stage(
     Ok(LocalizationNextStageDecision::Translate)
 }
 
+fn localization_output_mode(raw: Option<&str>) -> Result<String> {
+    let value = raw
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .unwrap_or("dub")
+        .to_lowercase();
+    match value.as_str() {
+        "dub" | "subtitles" => Ok(value),
+        _ => Err(EngineError::InstallFailed(format!(
+            "unsupported localization output mode: {value}"
+        ))),
+    }
+}
+
+fn clamp_diarization_speaker_count(raw: Option<u32>) -> Option<u32> {
+    raw.filter(|value| *value > 0)
+        .map(|value| value.min(DIARIZATION_SPEAKER_COUNT_MAX))
+}
+
+fn normalize_diarization_speaker_count(
+    request: &DiarizationSpeakerCountRequest,
+) -> Result<NormalizedDiarizationSpeakerCount> {
+    let mode = request
+        .mode
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .unwrap_or("auto")
+        .to_lowercase();
+
+    match mode.as_str() {
+        "auto" => Ok(NormalizedDiarizationSpeakerCount {
+            mode,
+            exact_speakers: None,
+            min_speakers: None,
+            max_speakers: None,
+        }),
+        "exact" => Ok(NormalizedDiarizationSpeakerCount {
+            mode,
+            exact_speakers: Some(
+                clamp_diarization_speaker_count(request.exact_speakers).unwrap_or(2),
+            ),
+            min_speakers: None,
+            max_speakers: None,
+        }),
+        "range" => {
+            let mut min_speakers =
+                clamp_diarization_speaker_count(request.min_speakers).unwrap_or(2);
+            let mut max_speakers =
+                clamp_diarization_speaker_count(request.max_speakers).unwrap_or(4);
+            if min_speakers > max_speakers {
+                std::mem::swap(&mut min_speakers, &mut max_speakers);
+            }
+            Ok(NormalizedDiarizationSpeakerCount {
+                mode,
+                exact_speakers: None,
+                min_speakers: Some(min_speakers),
+                max_speakers: Some(max_speakers),
+            })
+        }
+        other => Err(EngineError::InstallFailed(format!(
+            "unsupported diarization speaker count mode: {other}"
+        ))),
+    }
+}
+
+fn diarization_speaker_count_filename_suffix(
+    speaker_count: &NormalizedDiarizationSpeakerCount,
+) -> String {
+    match speaker_count.mode.as_str() {
+        "exact" => speaker_count
+            .exact_speakers
+            .map(|value| format!(".exact-{value}"))
+            .unwrap_or_default(),
+        "range" => match (speaker_count.min_speakers, speaker_count.max_speakers) {
+            (Some(min_speakers), Some(max_speakers)) => {
+                format!(".range-{min_speakers}-{max_speakers}")
+            }
+            _ => String::new(),
+        },
+        _ => String::new(),
+    }
+}
+
+fn effective_diarization_speaker_count_request(
+    params: &DiarizeLocalV1Params,
+) -> DiarizationSpeakerCountRequest {
+    if params.speaker_count.has_operator_value() {
+        return params.speaker_count.clone();
+    }
+    params
+        .pipeline
+        .as_ref()
+        .map(|pipeline| pipeline.speaker_count.clone())
+        .unwrap_or_default()
+}
+
+#[derive(Debug, Clone, Default)]
+struct AutoVoiceReferenceOutcome {
+    applied_speakers: Vec<String>,
+    failed_speakers: Vec<String>,
+    notes: Vec<String>,
+}
+
+fn auto_apply_source_voice_references_for_missing_speakers(
+    paths: &AppPaths,
+    item_id: &str,
+    track_id: &str,
+    missing_speakers: &[String],
+) -> AutoVoiceReferenceOutcome {
+    let mut outcome = AutoVoiceReferenceOutcome::default();
+    for speaker_key in missing_speakers {
+        let speaker_key = speaker_key.trim();
+        if speaker_key.is_empty() {
+            continue;
+        }
+        match voice_reference_candidates::generate_reference_candidates(
+            paths,
+            voice_reference_candidates::VoiceReferenceCandidateGenerationRequest {
+                item_id: item_id.to_string(),
+                track_id: Some(track_id.to_string()),
+                speaker_key: Some(speaker_key.to_string()),
+                missing_only: true,
+            },
+        ) {
+            Ok(report) => {
+                let bundle = report
+                    .bundles
+                    .iter()
+                    .find(|bundle| bundle.speaker_key == speaker_key);
+                if !bundle
+                    .map(|bundle| bundle.candidate_exists)
+                    .unwrap_or(false)
+                {
+                    outcome.failed_speakers.push(speaker_key.to_string());
+                    outcome.notes.push(format!(
+                        "Source voice-reference generation did not produce a usable sample for {speaker_key}."
+                    ));
+                    continue;
+                }
+                match voice_reference_candidates::apply_reference_candidate(
+                    paths,
+                    item_id,
+                    speaker_key,
+                    "append",
+                ) {
+                    Ok(_) => {
+                        outcome.applied_speakers.push(speaker_key.to_string());
+                        if let Some(bundle) = bundle {
+                            outcome.notes.push(format!(
+                                "Generated and attached a source voice sample for {speaker_key} ({} clip(s), {} ms).",
+                                bundle.clip_count, bundle.total_duration_ms
+                            ));
+                        } else {
+                            outcome.notes.push(format!(
+                                "Generated and attached a source voice sample for {speaker_key}."
+                            ));
+                        }
+                    }
+                    Err(err) => {
+                        outcome.failed_speakers.push(speaker_key.to_string());
+                        outcome.notes.push(format!(
+                            "Generated a source voice sample for {speaker_key}, but applying it failed: {err}."
+                        ));
+                    }
+                }
+            }
+            Err(err) => {
+                outcome.failed_speakers.push(speaker_key.to_string());
+                outcome.notes.push(format!(
+                    "Source voice-reference generation failed for {speaker_key}: {err}."
+                ));
+            }
+        }
+    }
+    outcome
+}
+
+fn localization_resume_request_for_dub(
+    item_id: &str,
+    pipeline: &LocalizationPipelineOptions,
+) -> LocalizationRunRequest {
+    LocalizationRunRequest {
+        item_id: item_id.to_string(),
+        asr_lang: None,
+        separation_backend: pipeline.separation_backend.clone(),
+        output_mode: Some("dub".to_string()),
+        queue_export_pack: pipeline.queue_export_pack,
+        queue_qc: pipeline.queue_qc,
+        speaker_count: pipeline.speaker_count.clone(),
+    }
+}
+
+fn queue_voice_setup_for_localization(
+    paths: &AppPaths,
+    item: &library::LibraryItem,
+    track: &subtitle_tracks::SubtitleTrackRow,
+    pipeline: &LocalizationPipelineOptions,
+    batch_id: Option<String>,
+    source_track_id: Option<String>,
+    translated_track_id: Option<String>,
+    mut notes: Vec<String>,
+) -> Result<LocalizationContinuationOutcome> {
+    let params_json = serde_json::to_string(&InstallPhase2PacksV1Params {
+        resume_localization_run: Some(localization_resume_request_for_dub(&item.id, pipeline)),
+    })?;
+    let queued_job = enqueue_with_type_item_and_batch_id(
+        paths,
+        JobType::InstallPhase2PacksV1,
+        params_json,
+        Some(item.id.clone()),
+        batch_id,
+    )?;
+    notes.push(
+        "Voice cloning needs a one-time setup. VoxVulgi queued it and will continue this localization run automatically when setup finishes."
+            .to_string(),
+    );
+    Ok(LocalizationContinuationOutcome {
+        stage: "voice_setup".to_string(),
+        source_track_id,
+        translated_track_id: translated_track_id.or_else(|| Some(track.id.clone())),
+        queued_jobs: vec![queued_job],
+        notes,
+    })
+}
+
+fn queue_dub_or_voice_setup_for_localization(
+    paths: &AppPaths,
+    item: &library::LibraryItem,
+    track: &subtitle_tracks::SubtitleTrackRow,
+    pipeline: LocalizationPipelineOptions,
+    batch_id: Option<String>,
+    source_track_id: Option<String>,
+    translated_track_id: Option<String>,
+    mut notes: Vec<String>,
+) -> Result<LocalizationContinuationOutcome> {
+    let pack = tools::tts_voice_preserving_local_v1_pack_status(paths);
+    if !pack.installed {
+        return queue_voice_setup_for_localization(
+            paths,
+            item,
+            track,
+            &pipeline,
+            batch_id,
+            source_track_id,
+            translated_track_id,
+            notes,
+        );
+    }
+
+    let params_json = serde_json::to_string(&DubVoicePreservingV1Params {
+        item_id: item.id.clone(),
+        source_track_id: track.id.clone(),
+        batch_on_import: false,
+        pipeline: Some(LocalizationPipelineOptions {
+            source_track_id: Some(track.id.clone()),
+            ..pipeline
+        }),
+    })?;
+    let queued_job = enqueue_with_type_item_and_batch_id(
+        paths,
+        JobType::DubVoicePreservingV1,
+        params_json,
+        Some(item.id.clone()),
+        batch_id,
+    )?;
+    notes.push("VoxVulgi queued the dubbing pipeline.".to_string());
+    Ok(LocalizationContinuationOutcome {
+        stage: "dub".to_string(),
+        source_track_id,
+        translated_track_id: translated_track_id.or_else(|| Some(track.id.clone())),
+        queued_jobs: vec![queued_job],
+        notes,
+    })
+}
+
 fn queue_localization_continuation_from_track(
     paths: &AppPaths,
     item: &library::LibraryItem,
@@ -1801,6 +2154,22 @@ fn queue_localization_continuation_from_track(
     let track_stats = subtitle_document_segment_stats(&track_doc);
     if track_stats.usable_segment_count == 0 {
         return Ok(empty_track_continuation_outcome(track, track_stats));
+    }
+
+    let output_mode = localization_output_mode(pipeline.output_mode.as_deref())?;
+    if output_mode == "subtitles"
+        && track.kind == "translated"
+        && normalize_lang_tag(Some(&track.lang)) == Some("eng")
+    {
+        return Ok(LocalizationContinuationOutcome {
+            stage: "subtitles".to_string(),
+            source_track_id,
+            translated_track_id: Some(track.id.clone()),
+            queued_jobs: Vec::new(),
+            notes: vec![
+                "English subtitles are ready; no dubbing stages were requested.".to_string(),
+            ],
+        });
     }
 
     match decide_localization_next_stage(paths, &item.id, track)? {
@@ -1838,6 +2207,7 @@ fn queue_localization_continuation_from_track(
                 item_id: item.id.clone(),
                 source_track_id: track.id.clone(),
                 backend: None,
+                speaker_count: pipeline.speaker_count.clone(),
                 batch_on_import: false,
                 pipeline: Some(LocalizationPipelineOptions {
                     source_track_id: Some(track.id.clone()),
@@ -1862,47 +2232,80 @@ fn queue_localization_continuation_from_track(
                 ],
             })
         }
-        LocalizationNextStageDecision::VoicePlanBlocked { missing_speakers } => Ok(
-            LocalizationContinuationOutcome {
+        LocalizationNextStageDecision::VoicePlanBlocked { missing_speakers } => {
+            let mut notes = Vec::new();
+            if pipeline.auto_pipeline && output_mode == "dub" {
+                let auto_refs = auto_apply_source_voice_references_for_missing_speakers(
+                    paths,
+                    &item.id,
+                    &track.id,
+                    &missing_speakers,
+                );
+                notes.extend(auto_refs.notes);
+                let still_missing = missing_voice_plan_speakers(paths, &item.id, &track.id)?;
+                if still_missing.is_empty() {
+                    if auto_refs.applied_speakers.is_empty() {
+                        notes.push(
+                            "Voice references are ready, so VoxVulgi can start the dubbing pipeline."
+                                .to_string(),
+                        );
+                    } else {
+                        notes.push(format!(
+                            "Source voice samples are ready for {}; VoxVulgi can start the dubbing pipeline.",
+                            auto_refs.applied_speakers.join(", ")
+                        ));
+                    }
+                    return queue_dub_or_voice_setup_for_localization(
+                        paths,
+                        item,
+                        track,
+                        pipeline,
+                        batch_id,
+                        source_track_id,
+                        Some(track.id.clone()),
+                        notes,
+                    );
+                }
+                notes.push(format!(
+                    "Voice-preserving dubbing still needs usable source voice samples for: {}.",
+                    still_missing.join(", ")
+                ));
+                if !auto_refs.failed_speakers.is_empty() {
+                    notes.push(format!(
+                        "Automatic source-reference generation failed for: {}.",
+                        auto_refs.failed_speakers.join(", ")
+                    ));
+                }
+            } else {
+                notes.push(format!(
+                    "Voice-preserving dubbing is waiting for speaker references or Standard TTS routing for: {}.",
+                    missing_speakers.join(", ")
+                ));
+            }
+            Ok(LocalizationContinuationOutcome {
                 stage: "voice_plan".to_string(),
                 source_track_id,
                 translated_track_id: Some(track.id.clone()),
                 queued_jobs: Vec::new(),
-                notes: vec![format!(
-                    "Voice-preserving dubbing is waiting for speaker references or Standard TTS routing for: {}.",
-                    missing_speakers.join(", ")
-                )],
-            },
-        ),
+                notes,
+            })
+        }
         LocalizationNextStageDecision::Dub => {
-            let params_json = serde_json::to_string(&DubVoicePreservingV1Params {
-                item_id: item.id.clone(),
-                source_track_id: track.id.clone(),
-                batch_on_import: false,
-                pipeline: Some(LocalizationPipelineOptions {
-                    source_track_id: Some(track.id.clone()),
-                    ..pipeline
-                }),
-            })?;
-            let queued_job = enqueue_with_type_item_and_batch_id(
+            queue_dub_or_voice_setup_for_localization(
                 paths,
-                JobType::DubVoicePreservingV1,
-                params_json,
-                Some(item.id.clone()),
+                item,
+                track,
+                pipeline,
                 batch_id,
-            )?;
-            Ok(LocalizationContinuationOutcome {
-                stage: "dub".to_string(),
                 source_track_id,
-                translated_track_id: Some(track.id.clone()),
-                queued_jobs: vec![queued_job],
-                notes: vec![
-                    "Translated English track and speaker voice plan are ready, so VoxVulgi queued the dubbing pipeline."
+                Some(track.id.clone()),
+                vec![
+                    "Translated English track and speaker voice plan are ready for dubbing."
                         .to_string(),
                     "Mix will use a separated background when available, otherwise it will fall back to the source-audio review path."
                         .to_string(),
                 ],
-            })
+            )
         }
     }
 }
@@ -1929,6 +2332,7 @@ pub fn enqueue_localization_run_v1(
         .map(|value| value.to_string());
     let pipeline = LocalizationPipelineOptions {
         auto_pipeline: true,
+        output_mode: Some(localization_output_mode(request.output_mode.as_deref())?),
         source_track_id: translated_track
             .as_ref()
             .map(|track| track.id.clone())
@@ -1939,6 +2343,7 @@ pub fn enqueue_localization_run_v1(
         variant_label: None,
         tts_backend_id: Some("openvoice_v2".to_string()),
         speaker_overrides: Vec::new(),
+        speaker_count: request.speaker_count.clone(),
     };
 
     if let Some(track) = translated_track.clone() {
@@ -2137,6 +2542,7 @@ pub fn enqueue_voice_ab_preview_v1(
             batch_on_import: false,
             pipeline: Some(LocalizationPipelineOptions {
                 auto_pipeline: true,
+                output_mode: Some("dub".to_string()),
                 source_track_id: Some(source_track_id.clone()),
                 separation_backend: separation_backend.clone(),
                 queue_export_pack: request.queue_export_pack,
@@ -2144,6 +2550,7 @@ pub fn enqueue_voice_ab_preview_v1(
                 variant_label: Some(variant_label),
                 tts_backend_id: Some("openvoice_v2".to_string()),
                 speaker_overrides: vec![override_value],
+                speaker_count: DiarizationSpeakerCountRequest::default(),
             }),
         })?;
         queued_jobs.push(enqueue_with_type_item_and_batch_id(
@@ -2498,6 +2905,40 @@ LIMIT ?1 OFFSET ?2
         .collect::<rusqlite::Result<Vec<_>>>()?;
 
     Ok(rows)
+}
+
+pub fn get_job(paths: &AppPaths, job_id: &str) -> Result<Option<JobRow>> {
+    let job_id = job_id.trim();
+    if job_id.is_empty() {
+        return Ok(None);
+    }
+
+    let conn = db::open(paths)?;
+    db::migrate(&conn)?;
+
+    conn.query_row(
+        r#"
+SELECT
+  id,
+  item_id,
+  batch_id,
+  type,
+  status,
+  progress,
+  error,
+  created_at_ms,
+  started_at_ms,
+  finished_at_ms,
+  logs_path,
+  params_json
+FROM job
+WHERE id=?1
+"#,
+        [job_id],
+        job_row_from_query_row,
+    )
+    .optional()
+    .map_err(Into::into)
 }
 
 pub fn active_youtube_subscription_refresh_ids(paths: &AppPaths) -> Result<HashSet<String>> {
@@ -2901,14 +3342,11 @@ pub fn clear_failed_jobs_for_item(
     let conn = db::open(paths)?;
     db::migrate(&conn)?;
 
-    let mut stmt = conn.prepare(
-        "SELECT id, logs_path FROM job WHERE item_id=?1 AND status=?2",
-    )?;
+    let mut stmt = conn.prepare("SELECT id, logs_path FROM job WHERE item_id=?1 AND status=?2")?;
     let failed: Vec<(String, String)> = stmt
-        .query_map(
-            params![item_id, JobStatus::Failed.as_str()],
-            |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)),
-        )?
+        .query_map(params![item_id, JobStatus::Failed.as_str()], |row| {
+            Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+        })?
         .collect::<rusqlite::Result<Vec<_>>>()?;
     drop(stmt);
     drop(conn);
@@ -4151,6 +4589,7 @@ INSERT INTO subtitle_track (
                             item_id: item.id.clone(),
                             source_track_id: track_id.clone(),
                             backend: None,
+                            speaker_count: DiarizationSpeakerCountRequest::default(),
                             batch_on_import: true,
                             pipeline: None,
                         })?;
@@ -4512,6 +4951,8 @@ INSERT INTO subtitle_track (
         JobType::DiarizeLocalV1 => {
             set_progress(paths, job_id, 0.05)?;
             let p: DiarizeLocalV1Params = serde_json::from_str(params_json)?;
+            let speaker_count_request = effective_diarization_speaker_count_request(&p);
+            let speaker_count = normalize_diarization_speaker_count(&speaker_count_request)?;
 
             if is_canceled(paths, job_id)? {
                 log_line(paths, job_id, "info", "job_canceled", serde_json::json!({}))?;
@@ -4526,7 +4967,8 @@ INSERT INTO subtitle_track (
                 serde_json::json!({
                     "item_id": &p.item_id,
                     "source_track_id": &p.source_track_id,
-                    "backend": p.backend
+                    "backend": p.backend,
+                    "speaker_count": &speaker_count
                 }),
             )?;
 
@@ -4549,7 +4991,10 @@ INSERT INTO subtitle_track (
                 job_id,
                 "info",
                 "diarize_backend_selected",
-                serde_json::json!({ "backend": backend_for_log }),
+                serde_json::json!({
+                    "backend": backend_for_log,
+                    "speaker_count": &speaker_count
+                }),
             )?;
 
             if !use_pyannote {
@@ -4605,11 +5050,16 @@ INSERT INTO subtitle_track (
                 return Ok(());
             }
 
+            let speaker_count_suffix = diarization_speaker_count_filename_suffix(&speaker_count);
             let diarization_json_path = if use_pyannote {
-                diarize_dir.join("diarization_pyannote_byo_v1.json")
+                diarize_dir.join(format!(
+                    "diarization_pyannote_byo_v1{speaker_count_suffix}.json"
+                ))
             } else {
-                diarize_dir.join("diarization.json")
+                diarize_dir.join(format!("diarization{speaker_count_suffix}.json"))
             };
+            let diarization_report_path =
+                diarize_dir.join(format!("diarization_report{speaker_count_suffix}.json"));
             let created_by = if use_pyannote {
                 "diarize:pyannote_byo_v1".to_string()
             } else {
@@ -4674,7 +5124,7 @@ INSERT INTO subtitle_track (
                             .map(|v| v.trim().to_string())
                             .filter(|v| !v.is_empty())
                     })
-                    .unwrap_or_else(|| "pyannote/speaker-diarization-3.1".to_string());
+                    .unwrap_or_else(|| "pyannote/speaker-diarization-community-1".to_string());
 
                 let token = config::read_optional_diarization_backend_token(paths)?;
                 let needs_token = status
@@ -4701,6 +5151,7 @@ INSERT INTO subtitle_track (
                         "diarization_json_path": &diarization_json_path,
                         "backend": "pyannote_byo_v1",
                         "pipeline": &pipeline,
+                        "speaker_count": &speaker_count,
                         "note": "This backend may download gated models during explicit runs, depending on your configuration."
                     }),
                 )?;
@@ -4730,23 +5181,58 @@ def main() -> None:
     ap.add_argument("--audio", required=True)
     ap.add_argument("--output", required=True)
     ap.add_argument("--pipeline", required=True)
+    ap.add_argument("--speaker-count-mode", default="auto")
+    ap.add_argument("--exact-speakers", type=int, default=0)
+    ap.add_argument("--min-speakers", type=int, default=0)
+    ap.add_argument("--max-speakers", type=int, default=0)
     args = ap.parse_args()
 
     token = os.environ.get("HF_TOKEN") or os.environ.get("HUGGINGFACE_HUB_TOKEN") or os.environ.get("PYANNOTE_TOKEN")
     pipeline = load_pipeline(args.pipeline, token)
 
-    diar = pipeline(args.audio)
-    segments = []
-    for turn, _, speaker in diar.itertracks(yield_label=True):
-        segments.append(
-            {
-                "start_ms": int(round(float(turn.start) * 1000.0)),
-                "end_ms": int(round(float(turn.end) * 1000.0)),
-                "speaker": str(speaker),
-            }
-        )
+    kwargs = {}
+    mode = (args.speaker_count_mode or "auto").strip().lower()
+    if mode == "exact" and args.exact_speakers > 0:
+        kwargs["num_speakers"] = int(args.exact_speakers)
+    elif mode == "range":
+        if args.min_speakers > 0:
+            kwargs["min_speakers"] = int(args.min_speakers)
+        if args.max_speakers > 0:
+            kwargs["max_speakers"] = int(args.max_speakers)
 
-    out = {"schema_version": 1, "algorithm": "pyannote_byo_v1", "segments": segments}
+    result = pipeline(args.audio, **kwargs) if kwargs else pipeline(args.audio)
+    diar = getattr(result, "speaker_diarization", result)
+    exclusive = getattr(result, "exclusive_speaker_diarization", None)
+
+    def annotation_to_segments(annotation):
+        values = []
+        for turn, _, speaker in annotation.itertracks(yield_label=True):
+            values.append(
+                {
+                    "start_ms": int(round(float(turn.start) * 1000.0)),
+                    "end_ms": int(round(float(turn.end) * 1000.0)),
+                    "speaker": str(speaker),
+                }
+            )
+        return values
+
+    segments = annotation_to_segments(diar)
+    exclusive_segments = annotation_to_segments(exclusive) if exclusive is not None else []
+    observed_speakers = sorted({segment["speaker"] for segment in (exclusive_segments or segments)})
+
+    out = {
+        "schema_version": 1,
+        "algorithm": "pyannote_byo_v1",
+        "speaker_count": {
+            "mode": mode,
+            "exact_speakers": int(args.exact_speakers) if args.exact_speakers > 0 else None,
+            "min_speakers": int(args.min_speakers) if args.min_speakers > 0 else None,
+            "max_speakers": int(args.max_speakers) if args.max_speakers > 0 else None,
+        },
+        "observed_speakers": observed_speakers,
+        "segments": segments,
+        "exclusive_segments": exclusive_segments,
+    }
     with open(args.output, "w", encoding="utf-8") as f:
         json.dump(out, f, ensure_ascii=False, indent=2)
         f.write("\n")
@@ -4762,6 +5248,18 @@ if __name__ == "__main__":
                 py_cmd.arg("--audio").arg(&audio_path);
                 py_cmd.arg("--output").arg(&diarization_json_path);
                 py_cmd.arg("--pipeline").arg(&pipeline);
+                py_cmd
+                    .arg("--speaker-count-mode")
+                    .arg(speaker_count.mode.as_str());
+                if let Some(value) = speaker_count.exact_speakers {
+                    py_cmd.arg("--exact-speakers").arg(value.to_string());
+                }
+                if let Some(value) = speaker_count.min_speakers {
+                    py_cmd.arg("--min-speakers").arg(value.to_string());
+                }
+                if let Some(value) = speaker_count.max_speakers {
+                    py_cmd.arg("--max-speakers").arg(value.to_string());
+                }
                 py_cmd.env("PYTHONNOUSERSITE", "1");
                 py_cmd.env(
                     "XDG_CACHE_HOME",
@@ -4825,17 +5323,38 @@ except Exception as e:
     raise RuntimeError("scikit-learn is required for clustering; install diarization pack") from e
 
 
-def choose_k(X, k_min=2, k_max=4):
+def normalize_count_bounds(n, mode, exact_speakers, min_speakers, max_speakers):
+    mode = (mode or "auto").strip().lower()
+    if mode == "exact" and exact_speakers > 0:
+        exact = max(1, min(int(exact_speakers), n))
+        return mode, exact, exact
+    if mode == "range":
+        lower = int(min_speakers) if min_speakers > 0 else 2
+        upper = int(max_speakers) if max_speakers > 0 else 4
+        lower = max(1, min(lower, n))
+        upper = max(1, min(upper, n))
+        if lower > upper:
+            lower, upper = upper, lower
+        return mode, lower, upper
+    return "auto", min(2, n), min(4, n)
+
+
+def choose_k(X, mode="auto", exact_speakers=0, min_speakers=0, max_speakers=0):
     n = X.shape[0]
     if n < 2:
         return 1, np.zeros((n,), dtype=np.int64)
+
+    _, k_min, k_max = normalize_count_bounds(n, mode, exact_speakers, min_speakers, max_speakers)
+    if k_min == k_max:
+        if k_min <= 1:
+            return 1, np.zeros((n,), dtype=np.int64)
+        return k_min, AgglomerativeClustering(n_clusters=k_min).fit_predict(X).astype(np.int64)
 
     best_k = 1
     best_score = -1.0
     best_labels = np.zeros((n,), dtype=np.int64)
 
-    upper = min(k_max, n)
-    for k in range(k_min, upper + 1):
+    for k in range(max(2, k_min), k_max + 1):
         labels = AgglomerativeClustering(n_clusters=k).fit_predict(X)
         uniq = np.unique(labels)
         if uniq.shape[0] < 2:
@@ -4895,6 +5414,10 @@ def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--input", required=True)
     ap.add_argument("--output", required=True)
+    ap.add_argument("--speaker-count-mode", default="auto")
+    ap.add_argument("--exact-speakers", type=int, default=0)
+    ap.add_argument("--min-speakers", type=int, default=0)
+    ap.add_argument("--max-speakers", type=int, default=0)
     args = ap.parse_args()
 
     wav, sr = sf.read(args.input)
@@ -4909,12 +5432,29 @@ def main():
     _, partial_embeds, partial_slices = encoder.embed_utterance(wav, return_partials=True)
 
     X = np.array(partial_embeds, dtype=np.float32)
-    _, labels = choose_k(X, k_min=2, k_max=4)
+    if X.shape[0] == 0:
+        labels = np.zeros((0,), dtype=np.int64)
+    else:
+        _, labels = choose_k(
+            X,
+            mode=args.speaker_count_mode,
+            exact_speakers=args.exact_speakers,
+            min_speakers=args.min_speakers,
+            max_speakers=args.max_speakers,
+        )
     segments = slices_to_segments(list(partial_slices), labels, int(sr))
+    observed_speakers = sorted({segment["speaker"] for segment in segments})
 
     out = {
         "schema_version": 1,
         "algorithm": "resemblyzer_partials_cluster_v1",
+        "speaker_count": {
+            "mode": (args.speaker_count_mode or "auto").strip().lower(),
+            "exact_speakers": int(args.exact_speakers) if args.exact_speakers > 0 else None,
+            "min_speakers": int(args.min_speakers) if args.min_speakers > 0 else None,
+            "max_speakers": int(args.max_speakers) if args.max_speakers > 0 else None,
+        },
+        "observed_speakers": observed_speakers,
         "segments": segments,
     }
 
@@ -4936,7 +5476,8 @@ if __name__ == "__main__":
                     serde_json::json!( {
                         "audio_path": &audio_path,
                         "diarization_json_path": &diarization_json_path,
-                        "backend": "resemblyzer_partials_cluster_v1"
+                        "backend": "resemblyzer_partials_cluster_v1",
+                        "speaker_count": &speaker_count
                     } ),
                 )?;
 
@@ -4944,6 +5485,18 @@ if __name__ == "__main__":
                 py_cmd.arg(&script_path);
                 py_cmd.arg("--input").arg(&audio_path);
                 py_cmd.arg("--output").arg(&diarization_json_path);
+                py_cmd
+                    .arg("--speaker-count-mode")
+                    .arg(speaker_count.mode.as_str());
+                if let Some(value) = speaker_count.exact_speakers {
+                    py_cmd.arg("--exact-speakers").arg(value.to_string());
+                }
+                if let Some(value) = speaker_count.min_speakers {
+                    py_cmd.arg("--min-speakers").arg(value.to_string());
+                }
+                if let Some(value) = speaker_count.max_speakers {
+                    py_cmd.arg("--max-speakers").arg(value.to_string());
+                }
                 py_cmd.env("PYTHONNOUSERSITE", "1");
                 py_cmd.env(
                     "XDG_CACHE_HOME",
@@ -4971,12 +5524,22 @@ if __name__ == "__main__":
             let diar_bytes = std::fs::read(&diarization_json_path)?;
             let diar: DiarizeLocalV1Output = serde_json::from_slice(&diar_bytes)?;
             let _ = diar.schema_version;
+            let assignment_segments = if diar.exclusive_segments.is_empty() {
+                &diar.segments
+            } else {
+                &diar.exclusive_segments
+            };
+            let assignment_source = if diar.exclusive_segments.is_empty() {
+                "segments"
+            } else {
+                "exclusive_segments"
+            };
 
             let mut labeled = source_doc.clone();
             for seg in &mut labeled.segments {
                 let mut best_speaker: Option<&str> = None;
                 let mut best_overlap = 0_i64;
-                for d in &diar.segments {
+                for d in assignment_segments {
                     let overlap = std::cmp::min(seg.end_ms, d.end_ms)
                         - std::cmp::max(seg.start_ms, d.start_ms);
                     if overlap > best_overlap {
@@ -5052,6 +5615,64 @@ INSERT INTO subtitle_track (
                 ],
             )?;
 
+            let mut observed_speakers = assignment_segments
+                .iter()
+                .map(|segment| segment.speaker.trim().to_string())
+                .filter(|speaker| !speaker.is_empty())
+                .collect::<Vec<_>>();
+            observed_speakers.sort();
+            observed_speakers.dedup();
+            if observed_speakers.is_empty() && !diar.observed_speakers.is_empty() {
+                observed_speakers = diar.observed_speakers.clone();
+                observed_speakers.sort();
+                observed_speakers.dedup();
+            }
+            let labeled_segment_count = labeled
+                .segments
+                .iter()
+                .filter(|segment| {
+                    segment
+                        .speaker
+                        .as_deref()
+                        .map(str::trim)
+                        .filter(|speaker| !speaker.is_empty())
+                        .is_some()
+                })
+                .count();
+            let unlabeled_segment_count =
+                labeled.segments.len().saturating_sub(labeled_segment_count);
+            let diarization_report = serde_json::json!({
+                "schema_version": 1,
+                "job_id": job_id,
+                "item_id": &item.id,
+                "source_track_id": &p.source_track_id,
+                "output_track_id": &track_id,
+                "backend": backend_for_log,
+                "algorithm": diar.algorithm.as_deref().unwrap_or(backend_for_log),
+                "requested_backend": requested_backend,
+                "speaker_count": &speaker_count,
+                "script_speaker_count": &diar.speaker_count,
+                "assignment_source": assignment_source,
+                "diarization_json_path": diarization_json_path.to_string_lossy().to_string(),
+                "subtitle_json_path": json_path.to_string_lossy().to_string(),
+                "raw_turn_count": diar.segments.len(),
+                "exclusive_turn_count": diar.exclusive_segments.len(),
+                "assignment_turn_count": assignment_segments.len(),
+                "observed_speakers": &observed_speakers,
+                "observed_speaker_count": observed_speakers.len(),
+                "subtitle_segment_count": labeled.segments.len(),
+                "labeled_segment_count": labeled_segment_count,
+                "unlabeled_segment_count": unlabeled_segment_count,
+                "limitations": [
+                    "Current subtitle schema stores one speaker label per subtitle segment.",
+                    "Overlap/confidence ratios are not persisted yet."
+                ],
+            });
+            std::fs::write(
+                &diarization_report_path,
+                format!("{}\n", serde_json::to_string_pretty(&diarization_report)?),
+            )?;
+
             log_line(
                 paths,
                 job_id,
@@ -5061,7 +5682,10 @@ INSERT INTO subtitle_track (
                     "track_id": track_id,
                     "json_path": json_path,
                     "diarization_json_path": diarization_json_path,
+                    "diarization_report_path": diarization_report_path,
                     "segments": diar.segments.len(),
+                    "assignment_source": assignment_source,
+                    "observed_speaker_count": observed_speakers.len(),
                 }),
             )?;
 
@@ -8951,7 +9575,7 @@ ORDER BY created_at_ms ASC
             )?;
         }
         JobType::InstallPhase2PacksV1 => {
-            let _p: InstallPhase2PacksV1Params =
+            let p: InstallPhase2PacksV1Params =
                 serde_json::from_str(params_json).unwrap_or_default();
 
             if is_canceled(paths, job_id)? {
@@ -9181,6 +9805,41 @@ ORDER BY created_at_ms ASC
                     "install_root": &install_root
                 }),
             )?;
+
+            if let Some(resume_request) = p.resume_localization_run {
+                if is_canceled(paths, job_id)? {
+                    log_line(paths, job_id, "info", "job_canceled", serde_json::json!({}))?;
+                    return Ok(());
+                }
+                log_line(
+                    paths,
+                    job_id,
+                    "info",
+                    "install_phase2_resume_localization_begin",
+                    serde_json::json!({
+                        "item_id": &resume_request.item_id,
+                        "output_mode": &resume_request.output_mode,
+                    }),
+                )?;
+                let summary = enqueue_localization_run_v1(paths, resume_request)?;
+                log_line(
+                    paths,
+                    job_id,
+                    "info",
+                    "install_phase2_resume_localization_queued",
+                    serde_json::json!({
+                        "batch_id": summary.batch_id,
+                        "item_id": summary.item_id,
+                        "stage": summary.stage,
+                        "queued_jobs": summary.queued_jobs.iter().map(|job| {
+                            serde_json::json!({
+                                "id": job.id,
+                                "job_type": job.job_type,
+                            })
+                        }).collect::<Vec<_>>(),
+                    }),
+                )?;
+            }
         }
         JobType::DummySleep => {
             let p: DummySleepParams = serde_json::from_str(params_json)?;
@@ -14442,6 +15101,10 @@ mod tests {
     }
 
     fn seed_item_only(paths: &AppPaths, item_id: &str, title: &str) {
+        seed_item_with_media(paths, item_id, title, &format!("D:/media/{item_id}.mp4"));
+    }
+
+    fn seed_item_with_media(paths: &AppPaths, item_id: &str, title: &str, media_path: &str) {
         let conn = db::open(paths).expect("open db");
         db::migrate(&conn).expect("migrate");
         conn.execute(
@@ -14452,7 +15115,7 @@ mod tests {
                 "file",
                 format!("file://{item_id}"),
                 title,
-                format!("D:/media/{item_id}.mp4")
+                media_path
             ],
         )
         .expect("insert item");
@@ -14633,8 +15296,10 @@ mod tests {
                 item_id: "item-1".to_string(),
                 asr_lang: Some("ko".to_string()),
                 separation_backend: Some("demucs".to_string()),
+                output_mode: None,
                 queue_export_pack: true,
                 queue_qc: true,
+                speaker_count: DiarizationSpeakerCountRequest::default(),
             },
         )
         .expect("queue");
@@ -14665,8 +15330,10 @@ mod tests {
                 item_id: "item-1".to_string(),
                 asr_lang: Some("ja".to_string()),
                 separation_backend: None,
+                output_mode: None,
                 queue_export_pack: false,
                 queue_qc: false,
+                speaker_count: DiarizationSpeakerCountRequest::default(),
             },
         )
         .expect("queue summary");
@@ -14696,8 +15363,10 @@ mod tests {
                 item_id: "item-1".to_string(),
                 asr_lang: Some("ko".to_string()),
                 separation_backend: None,
+                output_mode: None,
                 queue_export_pack: false,
                 queue_qc: false,
+                speaker_count: DiarizationSpeakerCountRequest::default(),
             },
         )
         .expect("queue summary");
@@ -14727,8 +15396,15 @@ mod tests {
                 item_id: "item-1".to_string(),
                 asr_lang: Some("ko".to_string()),
                 separation_backend: None,
+                output_mode: None,
                 queue_export_pack: false,
                 queue_qc: false,
+                speaker_count: DiarizationSpeakerCountRequest {
+                    mode: Some("exact".to_string()),
+                    exact_speakers: Some(3),
+                    min_speakers: None,
+                    max_speakers: None,
+                },
             },
         )
         .expect("queue");
@@ -14736,6 +15412,36 @@ mod tests {
         assert_eq!(summary.stage, "diarize");
         assert_eq!(summary.queued_jobs.len(), 1);
         assert_eq!(summary.queued_jobs[0].job_type, "diarize_local_v1");
+        let params: DiarizeLocalV1Params =
+            serde_json::from_str(&summary.queued_jobs[0].params_json).expect("diarize params");
+        assert_eq!(params.speaker_count.mode.as_deref(), Some("exact"));
+        assert_eq!(params.speaker_count.exact_speakers, Some(3));
+    }
+
+    #[test]
+    fn enqueue_localization_run_v1_stops_at_english_subtitles_when_requested() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let paths = AppPaths::new(dir.path().to_path_buf());
+        seed_item_only(&paths, "item-1", "Item 1");
+        seed_subtitle_track_named(&paths, "item-1", "track-en", "translated", "eng", 1, &[]);
+
+        let summary = enqueue_localization_run_v1(
+            &paths,
+            LocalizationRunRequest {
+                item_id: "item-1".to_string(),
+                asr_lang: Some("ko".to_string()),
+                separation_backend: None,
+                output_mode: Some("subtitles".to_string()),
+                queue_export_pack: false,
+                queue_qc: false,
+                speaker_count: DiarizationSpeakerCountRequest::default(),
+            },
+        )
+        .expect("queue");
+
+        assert_eq!(summary.stage, "subtitles");
+        assert!(summary.queued_jobs.is_empty());
+        assert!(summary.notes.iter().any(|note| note.contains("no dubbing")));
     }
 
     #[test]
@@ -14759,8 +15465,10 @@ mod tests {
                 item_id: "item-1".to_string(),
                 asr_lang: Some("ko".to_string()),
                 separation_backend: None,
+                output_mode: None,
                 queue_export_pack: false,
                 queue_qc: false,
+                speaker_count: DiarizationSpeakerCountRequest::default(),
             },
         )
         .expect("queue");
@@ -14775,7 +15483,69 @@ mod tests {
     }
 
     #[test]
-    fn enqueue_localization_run_v1_queues_dub_when_voice_plan_is_ready() {
+    fn enqueue_localization_run_v1_auto_generates_source_reference_before_voice_setup() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let paths = AppPaths::new(dir.path().to_path_buf());
+        let media_path = dir.path().join("source.wav");
+        write_sine_wav(&media_path, 16_000, 2_500);
+        seed_item_with_media(&paths, "item-1", "Item 1", &media_path.to_string_lossy());
+        seed_subtitle_track_named(
+            &paths,
+            "item-1",
+            "track-en",
+            "translated",
+            "eng",
+            1,
+            &["S1"],
+        );
+
+        let summary = enqueue_localization_run_v1(
+            &paths,
+            LocalizationRunRequest {
+                item_id: "item-1".to_string(),
+                asr_lang: Some("ko".to_string()),
+                separation_backend: None,
+                output_mode: None,
+                queue_export_pack: false,
+                queue_qc: true,
+                speaker_count: DiarizationSpeakerCountRequest::default(),
+            },
+        )
+        .expect("queue");
+
+        assert_eq!(summary.stage, "voice_setup");
+        assert_eq!(summary.queued_jobs.len(), 1);
+        assert_eq!(summary.queued_jobs[0].job_type, "install_phase2_packs_v1");
+        assert!(
+            summary
+                .notes
+                .iter()
+                .any(|note| note.contains("Generated and attached a source voice sample for S1")),
+            "expected generated-reference note, got {:?}",
+            summary.notes
+        );
+
+        let settings = speakers::list_item_speaker_settings(&paths, "item-1").expect("settings");
+        let s1 = settings
+            .iter()
+            .find(|setting| setting.speaker_key == "S1")
+            .expect("S1 setting");
+        assert_eq!(s1.render_mode.as_deref(), Some("clone"));
+        assert_eq!(s1.tts_voice_profile_paths.len(), 1);
+        assert!(Path::new(&s1.tts_voice_profile_paths[0]).exists());
+
+        let params: InstallPhase2PacksV1Params =
+            serde_json::from_str(&summary.queued_jobs[0].params_json).expect("install params");
+        let resume = params
+            .resume_localization_run
+            .expect("resume localization request");
+        assert_eq!(resume.item_id, "item-1");
+        assert_eq!(resume.output_mode.as_deref(), Some("dub"));
+        assert!(resume.queue_qc);
+    }
+
+    #[test]
+    fn enqueue_localization_run_v1_queues_voice_setup_when_voice_plan_is_ready_and_pack_missing() {
         let dir = tempfile::tempdir().expect("tempdir");
         let paths = AppPaths::new(dir.path().to_path_buf());
         seed_item_only(&paths, "item-1", "Item 1");
@@ -14811,15 +15581,35 @@ mod tests {
                 item_id: "item-1".to_string(),
                 asr_lang: Some("ko".to_string()),
                 separation_backend: None,
+                output_mode: None,
                 queue_export_pack: false,
                 queue_qc: true,
+                speaker_count: DiarizationSpeakerCountRequest::default(),
             },
         )
         .expect("queue");
 
-        assert_eq!(summary.stage, "dub");
+        assert_eq!(summary.stage, "voice_setup");
         assert_eq!(summary.queued_jobs.len(), 1);
-        assert_eq!(summary.queued_jobs[0].job_type, "dub_voice_preserving_v1");
+        assert_eq!(summary.queued_jobs[0].job_type, "install_phase2_packs_v1");
+        assert!(
+            summary
+                .notes
+                .iter()
+                .any(|note| note.contains("will continue this localization run automatically")),
+            "expected automatic continuation note, got {:?}",
+            summary.notes
+        );
+
+        let params: InstallPhase2PacksV1Params =
+            serde_json::from_str(&summary.queued_jobs[0].params_json).expect("install params");
+        assert_eq!(
+            params
+                .resume_localization_run
+                .expect("resume localization request")
+                .item_id,
+            "item-1"
+        );
     }
 
     #[test]
@@ -16271,12 +17061,7 @@ EOF
         assert_eq!(code, "Cx4Qd9vIBTh");
     }
 
-    fn seed_job_row(
-        paths: &AppPaths,
-        id: &str,
-        item_id: &str,
-        status: JobStatus,
-    ) {
+    fn seed_job_row(paths: &AppPaths, id: &str, item_id: &str, status: JobStatus) {
         let logs_path = paths
             .job_logs_dir()
             .join(format!("{id}.jsonl"))
