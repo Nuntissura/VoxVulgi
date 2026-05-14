@@ -8,6 +8,7 @@
 
 # Offline full-bundle payload (generated locally; can be multi-GB)
 /offline/manifest.json
+/offline/payload_inputs.json
 /offline/payload.zip
 /offline/tools/
 /offline/models/

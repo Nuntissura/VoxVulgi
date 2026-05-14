@@ -21,8 +21,11 @@ From `product/desktop/`:
 From `product/desktop/`:
 
 - Build with managed target folder: `npm run build:desktop:target`
-- Default build refreshes the bundled offline payload (Phase 1 + Phase 2 dependencies) before packaging installers.
-- Optional fast rebuild without refreshing payload: `npm run build:desktop:target:no-prep`
+- Default build validates and reuses the existing bundled offline payload when it matches the pinned dependency inputs.
+- Refresh the bundled offline payload explicitly with `npm run build:desktop:target:refresh`.
+- Force a clean dependency refresh with `npm run build:desktop:target:force-refresh`.
+- Validate the current payload without bumping/building with `npm run build:desktop:payload:validate`.
+- Legacy fast rebuild alias: `npm run build:desktop:target:no-prep` validates/reuses the existing payload and refuses stale or missing payloads.
 - Build artifacts are written to `build_target/Current`
 - Previous builds are archived to `build_target/old_versions`
 
