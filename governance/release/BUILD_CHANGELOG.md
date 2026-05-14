@@ -147,3 +147,12 @@ This changelog tracks desktop installer builds produced by `governance/scripts/b
   - `product/desktop/build_target/Current/release/bundle/nsis/VoxVulgi_0.1.14_x64-setup.exe`
   - `product/desktop/build_target/Current/release/bundle/msi/VoxVulgi_0.1.14_x64_en-US.msi`
 - Notes: WP-0212 Safe Mode pill placement and exit-rehydrate notice
+
+## 0.1.15 - 2026-05-13T23:56:13Z
+- Work Packets: `WP-0213`, `WP-0214`, `WP-0215`, `WP-0216`, `WP-0217`, `WP-0218`
+- Commit: `07700da`
+- Offline Bundle ID: `offline_full_win64_20260513_232818`
+- Artifacts:
+  - `product/desktop/build_target/Current/release/bundle/nsis/VoxVulgi_0.1.15_x64-setup.exe`
+  - `product/desktop/build_target/Current/release/bundle/msi/VoxVulgi_0.1.15_x64_en-US.msi`
+- Notes: Localization Studio setup-first workbench, multi-speaker controls, automatic voice reference continuation, voice setup Start flow, and headless build rules.
