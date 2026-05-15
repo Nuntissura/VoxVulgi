@@ -43,6 +43,9 @@ const META_KEY_JOBS_QUEUE_PAUSED: &str = "jobs_queue_paused";
 const META_KEY_JOBS_MAX_CONCURRENCY: &str = "jobs_max_concurrency";
 const YT_DLP_EXPAND_TIMEOUT_SECS: u64 = 900;
 const YT_DLP_DOWNLOAD_TIMEOUT_SECS: u64 = 7200;
+const YT_DLP_ARCHIVE_CONCURRENT_FRAGMENTS: &str = "4";
+const YT_DLP_ARCHIVE_THROTTLED_RATE: &str = "100K";
+const YT_DLP_ARCHIVE_FILE_ACCESS_RETRIES: &str = "10";
 const EXTERNAL_CMD_POLL_INTERVAL_MS: u64 = 200;
 const YT_DLP_BOOTSTRAP_TIMEOUT_SECS: u64 = 180;
 const EXPERIMENTAL_VOICE_BACKEND_TIMEOUT_SECS: u64 = 7200;
@@ -59,6 +62,15 @@ pub struct JobLogRetentionPolicy {
     pub max_backups: usize,
     pub max_age_days: u64,
     pub total_cap_bytes: u64,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct YoutubeAuthPreflightResult {
+    pub ok: bool,
+    pub url: String,
+    pub title: Option<String>,
+    pub message: String,
+    pub checked_at_ms: i64,
 }
 
 pub fn job_log_retention_policy() -> JobLogRetentionPolicy {
@@ -2652,6 +2664,67 @@ pub fn enqueue_youtube_subscription_refresh_v1(
     Ok(job)
 }
 
+pub fn youtube_auth_preflight(
+    paths: &AppPaths,
+    url: Option<String>,
+) -> Result<YoutubeAuthPreflightResult> {
+    let url = normalize_direct_url(
+        url.as_deref()
+            .unwrap_or("https://www.youtube.com/watch?v=BaW_jenozKcj"),
+    )?;
+    if !is_youtube_url(&url) {
+        return Err(EngineError::InstallFailed(
+            "YouTube auth preflight requires a youtube.com or youtu.be URL".to_string(),
+        ));
+    }
+
+    let Some(auth_cookie) = resolve_global_youtube_auth_cookie(paths) else {
+        return Ok(YoutubeAuthPreflightResult {
+            ok: false,
+            url,
+            title: None,
+            message: "No saved global YouTube cookies were found.".to_string(),
+            checked_at_ms: now_ms(),
+        });
+    };
+
+    let cookie_file = write_auth_cookie_as_netscape_temp_file(paths, &url, &auth_cookie)?;
+    let mut args =
+        build_youtube_auth_preflight_args(&url, cookie_file.to_string_lossy().as_ref());
+    let js_runtime_available = append_yt_dlp_runtime_args(paths, &mut args, &url, true);
+    let output_res = run_yt_dlp(paths, &args, None, 90);
+    let _ = std::fs::remove_file(cookie_file);
+
+    match output_res {
+        Ok(output) => {
+            let title = String::from_utf8_lossy(&output.stdout)
+                .lines()
+                .map(str::trim)
+                .find(|line| !line.is_empty())
+                .map(str::to_string);
+            Ok(YoutubeAuthPreflightResult {
+                ok: true,
+                url,
+                title: title.clone(),
+                message: title
+                    .map(|value| format!("YouTube accepted the saved cookies for: {value}"))
+                    .unwrap_or_else(|| "YouTube accepted the saved cookies.".to_string()),
+                checked_at_ms: now_ms(),
+            })
+        }
+        Err(err) => {
+            let err = augment_yt_dlp_error(&url, err, false, true, js_runtime_available);
+            Ok(YoutubeAuthPreflightResult {
+                ok: false,
+                url,
+                title: None,
+                message: err.to_string(),
+                checked_at_ms: now_ms(),
+            })
+        }
+    }
+}
+
 fn enqueue_download_direct_url_batch_raw_with_subscription(
     paths: &AppPaths,
     urls: Vec<String>,
@@ -2717,6 +2790,11 @@ fn enqueue_download_targets_batch_with_subscription(
     let batch_id = batch_id.or_else(|| Some(Uuid::new_v4().to_string()));
     let mut jobs: Vec<JobRow> = Vec::with_capacity(targets.len());
     for target in targets {
+        let output_path_template = if subscription_id.is_some() {
+            ".".to_string()
+        } else {
+            preset.path_template.clone()
+        };
         let params_json = serde_json::to_string(&DownloadDirectUrlParams {
             url: target.url,
             provider: target.provider.to_string(),
@@ -2726,7 +2804,7 @@ fn enqueue_download_targets_batch_with_subscription(
             use_browser_cookies,
             subscription_id: subscription_id.clone(),
             preset_id: Some(preset.id.clone()),
-            output_path_template: Some(preset.path_template.clone()),
+            output_path_template: Some(output_path_template),
             filename_template: Some(preset.filename_template.clone()),
             format_preference: preset.format_preference.clone(),
             quality_preference: preset.quality_preference.clone(),
@@ -11494,6 +11572,26 @@ fn yt_dlp_failure_hint(
             "Browser-cookie access failed because Chrome's cookie database was locked. Turn off browser cookies for this run or close Chrome and retry.".to_string(),
         );
     }
+    if lower.contains("failed to decrypt with dpapi") {
+        return Some(
+            "Browser-cookie access failed because Windows would not let yt-dlp decrypt the Chromium cookie store. Use a fresh exported YouTube cookies.txt/Netscape cookie file, or use a browser/profile that yt-dlp can read.".to_string(),
+        );
+    }
+    if is_youtube_url(url) && lower.contains("sign in to confirm") {
+        if auth_cookie_present {
+            return Some(
+                "VoxVulgi saved YouTube cookies were supplied, but YouTube rejected them. Re-export a fresh YouTube-only Netscape cookies.txt from the logged-in browser session and run the auth preflight before queueing another subscription batch.".to_string(),
+            );
+        }
+        if using_browser_cookies {
+            return Some(
+                "VoxVulgi asked yt-dlp to read browser cookies, but YouTube still rejected the request. Export a fresh YouTube-only Netscape cookies.txt instead of relying on live Chromium cookie access.".to_string(),
+            );
+        }
+        return Some(
+            "YouTube requested sign-in and this run did not have usable cookies. Add a fresh YouTube cookie export or enable a working browser-cookie source before retrying.".to_string(),
+        );
+    }
     if is_youtube_url(url) && lower.contains("the page needs to be reloaded") {
         let runtime_hint = if js_runtime_available {
             " VoxVulgi already supplied a JavaScript runtime for this run, so retrying after a bundled yt-dlp refresh is the next safe step."
@@ -11530,6 +11628,48 @@ fn yt_dlp_failure_hint(
         ));
     }
     None
+}
+
+fn append_yt_dlp_archive_download_options(args: &mut Vec<String>, subtitle_mode: Option<&str>) {
+    args.push("-N".to_string());
+    args.push(YT_DLP_ARCHIVE_CONCURRENT_FRAGMENTS.to_string());
+    args.push("--throttled-rate".to_string());
+    args.push(YT_DLP_ARCHIVE_THROTTLED_RATE.to_string());
+    args.push("--file-access-retries".to_string());
+    args.push(YT_DLP_ARCHIVE_FILE_ACCESS_RETRIES.to_string());
+
+    match normalize_non_empty(subtitle_mode)
+        .as_deref()
+        .map(str::to_ascii_lowercase)
+        .as_deref()
+    {
+        Some("auto") | Some("embed") | Some("auto_srt") | Some("auto-srt") => {
+            args.push("--write-subs".to_string());
+            args.push("--write-auto-subs".to_string());
+            args.push("--convert-subs".to_string());
+            args.push("srt".to_string());
+        }
+        Some("manual") | Some("subs") | Some("srt") | Some("sidecar") => {
+            args.push("--write-subs".to_string());
+            args.push("--convert-subs".to_string());
+            args.push("srt".to_string());
+        }
+        _ => {}
+    }
+}
+
+fn build_youtube_auth_preflight_args(url: &str, cookie_file: &str) -> Vec<String> {
+    vec![
+        "--socket-timeout".to_string(),
+        "30".to_string(),
+        "--skip-download".to_string(),
+        "--no-warnings".to_string(),
+        "--cookies".to_string(),
+        cookie_file.to_string(),
+        "--print".to_string(),
+        "title".to_string(),
+        url.to_string(),
+    ]
 }
 
 fn yt_dlp_failure_program_detail(line: &str) -> &str {
@@ -13132,13 +13272,7 @@ fn download_yt_dlp_url_to_library(
         }
     }
 
-    if matches!(
-        normalize_non_empty(subtitle_mode).as_deref(),
-        Some("auto") | Some("embed")
-    ) {
-        args.push("--write-subs".to_string());
-        args.push("--write-auto-subs".to_string());
-    }
+    append_yt_dlp_archive_download_options(&mut args, subtitle_mode);
 
     if !is_playlist_candidate_url(url) {
         args.insert(0, "--no-playlist".to_string());
@@ -16957,6 +17091,47 @@ EOF
     }
 
     #[test]
+    fn subscription_download_jobs_use_subscription_folder_as_container() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let paths = AppPaths::new(dir.path().to_path_buf());
+        db::ensure_schema(&paths).expect("schema");
+
+        let output_dir = dir
+            .path()
+            .join("[[]] WEEEKLY [[]] (ZOA) [FANCAM]")
+            .to_string_lossy()
+            .to_string();
+        let jobs = enqueue_download_direct_url_batch_raw_with_subscription(
+            &paths,
+            vec!["https://www.youtube.com/watch?v=AAAA1111AAA".to_string()],
+            Some(DOWNLOAD_PROVIDER_YOUTUBE_YT_DLP.to_string()),
+            None,
+            Some(output_dir),
+            Some(false),
+            None,
+            Some("parent-job".to_string()),
+            Some("subscription-1".to_string()),
+        )
+        .expect("enqueue subscription child");
+
+        let conn = db::open(&paths).expect("open");
+        db::migrate(&conn).expect("migrate");
+        let params_json: String = conn
+            .query_row(
+                "SELECT params_json FROM job WHERE id=?1",
+                [jobs[0].id.clone()],
+                |row| row.get(0),
+            )
+            .expect("params");
+        let params: DownloadDirectUrlParams =
+            serde_json::from_str(&params_json).expect("parse params");
+
+        assert_eq!(params.subscription_id.as_deref(), Some("subscription-1"));
+        assert_eq!(params.output_path_template.as_deref(), Some("."));
+        assert_eq!(params.filename_template.as_deref(), Some("{title}_{id}"));
+    }
+
+    #[test]
     fn convert_download_template_to_ytdlp_sanitizes_unsafe_literals() {
         let rendered = convert_download_template_to_ytdlp("{title}:*?");
         assert_eq!(rendered, "%(title).80B___");
@@ -17001,6 +17176,70 @@ EOF
         assert!(strip_browser_cookie_args(&mut args));
         assert!(!args.iter().any(|value| value == "--cookies-from-browser"));
         assert!(!args.iter().any(|value| value == "chrome"));
+    }
+
+    #[test]
+    fn append_yt_dlp_archive_download_options_adds_fast_retry_and_srt_sidecar_args() {
+        let mut args = Vec::new();
+
+        append_yt_dlp_archive_download_options(&mut args, Some("auto"));
+
+        assert!(args.windows(2).any(|pair| pair == ["-N", "4"]));
+        assert!(args
+            .windows(2)
+            .any(|pair| pair == ["--throttled-rate", "100K"]));
+        assert!(args
+            .windows(2)
+            .any(|pair| pair == ["--file-access-retries", "10"]));
+        assert!(args.iter().any(|value| value == "--write-subs"));
+        assert!(args.iter().any(|value| value == "--write-auto-subs"));
+        assert!(args.windows(2).any(|pair| pair == ["--convert-subs", "srt"]));
+    }
+
+    #[test]
+    fn append_yt_dlp_archive_download_options_can_write_manual_srt_sidecars_without_auto_subs() {
+        let mut args = Vec::new();
+
+        append_yt_dlp_archive_download_options(&mut args, Some("manual"));
+
+        assert!(args.iter().any(|value| value == "--write-subs"));
+        assert!(!args.iter().any(|value| value == "--write-auto-subs"));
+        assert!(args.windows(2).any(|pair| pair == ["--convert-subs", "srt"]));
+    }
+
+    #[test]
+    fn yt_dlp_failure_hint_explains_rejected_saved_youtube_cookies() {
+        let hint = yt_dlp_failure_hint(
+            "https://www.youtube.com/watch?v=Y1I5KHIMaEo",
+            "ERROR: [youtube] Y1I5KHIMaEo: Sign in to confirm you're not a bot",
+            false,
+            true,
+            true,
+        )
+        .expect("hint");
+
+        assert!(hint.contains("saved YouTube cookies were supplied"));
+        assert!(hint.contains("rejected them"));
+    }
+
+    #[test]
+    fn build_youtube_auth_preflight_args_uses_metadata_only_cookie_probe() {
+        let args = build_youtube_auth_preflight_args(
+            "https://www.youtube.com/watch?v=Y1I5KHIMaEo",
+            "C:\\temp\\cookies.txt",
+        );
+
+        assert!(args.iter().any(|value| value == "--skip-download"));
+        assert!(args.windows(2).any(|pair| pair == ["--print", "title"]));
+        assert!(args
+            .windows(2)
+            .any(|pair| pair == ["--cookies", "C:\\temp\\cookies.txt"]));
+        assert!(args
+            .windows(2)
+            .any(|pair| pair == ["--socket-timeout", "30"]));
+        assert!(args
+            .iter()
+            .any(|value| value == "https://www.youtube.com/watch?v=Y1I5KHIMaEo"));
     }
 
     #[test]

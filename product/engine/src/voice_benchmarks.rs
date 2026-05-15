@@ -314,7 +314,7 @@ fn build_candidate_reports(
 
     let mut out = Vec::new();
     for spec in specs {
-        let candidate_dir = temp_root.join(&spec.candidate_id);
+        let candidate_dir = temp_root.join(sanitize_benchmark_path_component(&spec.candidate_id));
         std::fs::create_dir_all(&candidate_dir)?;
         let (voice_report, voice_issues) =
             jobs::collect_voice_qc(paths, item_id, &spec.segments, &candidate_dir)?;
@@ -1289,6 +1289,33 @@ fn candidate_id(backend_id: &str, variant_label: Option<&str>) -> String {
     match variant_label {
         Some(label) => format!("{backend_id}:{label}"),
         None => backend_id.to_string(),
+    }
+}
+
+fn sanitize_benchmark_path_component(value: &str) -> String {
+    let mut out = String::with_capacity(value.len());
+    let mut prev_underscore = false;
+    for ch in value.chars() {
+        let mapped = if ch.is_ascii_alphanumeric() || matches!(ch, '-' | '_') {
+            ch
+        } else {
+            '_'
+        };
+        if mapped == '_' {
+            if prev_underscore {
+                continue;
+            }
+            prev_underscore = true;
+        } else {
+            prev_underscore = false;
+        }
+        out.push(mapped);
+    }
+    let out = out.trim_matches('_');
+    if out.is_empty() {
+        "candidate".to_string()
+    } else {
+        out.to_string()
     }
 }
 

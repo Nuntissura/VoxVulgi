@@ -4497,6 +4497,14 @@ fn config_youtube_auth_set(
 }
 
 #[tauri::command]
+fn config_youtube_auth_preflight(
+    state: State<'_, AppState>,
+    url: Option<String>,
+) -> Result<jobs::YoutubeAuthPreflightResult, String> {
+    jobs::youtube_auth_preflight(&state.paths, url).map_err(|e| e.to_string())
+}
+
+#[tauri::command]
 fn config_diarization_optional_status(
     state: State<'_, AppState>,
 ) -> Result<config::OptionalDiarizationBackendStatus, String> {
@@ -7101,6 +7109,7 @@ pub fn run() {
             config_batch_on_import_get,
             config_batch_on_import_set,
             config_youtube_auth_get,
+            config_youtube_auth_preflight,
             config_youtube_auth_set,
             config_diarization_optional_clear_token,
             config_diarization_optional_set,

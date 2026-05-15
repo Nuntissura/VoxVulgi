@@ -239,7 +239,7 @@ fn main() -> Result<()> {
     let runner = jobs::start_runner(paths.clone())?;
 
     let import_job =
-        jobs::enqueue_import_local(&paths, media_path.to_string_lossy().to_string(), true)?;
+        jobs::enqueue_import_local(&paths, media_path.to_string_lossy().to_string(), true, true)?;
     wait_for_job(&paths, &import_job.id, Duration::from_secs(20 * 60))?;
 
     let canonical_media = std::fs::canonicalize(&media_path)?;
@@ -260,6 +260,7 @@ fn main() -> Result<()> {
             output_mode: None,
             queue_export_pack: false,
             queue_qc: false,
+            speaker_count: jobs::DiarizationSpeakerCountRequest::default(),
         },
     )?;
     wait_for_batch_to_idle(&paths, &first_run.batch_id, Duration::from_secs(90 * 60))?;
@@ -308,6 +309,7 @@ fn main() -> Result<()> {
             output_mode: None,
             queue_export_pack: false,
             queue_qc: true,
+            speaker_count: jobs::DiarizationSpeakerCountRequest::default(),
         },
     )?;
     let final_batch =

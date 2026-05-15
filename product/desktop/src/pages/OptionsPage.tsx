@@ -51,6 +51,8 @@ export function OptionsPage() {
 
   const [authJson, setAuthJson] = useState("");
   const [authBusy, setAuthBusy] = useState(false);
+  const [authPreflightBusy, setAuthPreflightBusy] = useState(false);
+  const [authPreflightUrl, setAuthPreflightUrl] = useState("https://www.youtube.com/watch?v=BaW_jenozKcj");
   const [authMessage, setAuthMessage] = useState("");
 
   useEffect(() => {
@@ -76,6 +78,21 @@ export function OptionsPage() {
       setAuthMessage(`Error saving cookies: ${String(e)}`);
     } finally {
       setAuthBusy(false);
+    }
+  }
+
+  async function runYoutubeAuthPreflight() {
+    setAuthPreflightBusy(true);
+    setAuthMessage("");
+    try {
+      const result = await invoke<{ ok: boolean; message: string }>("config_youtube_auth_preflight", {
+        url: authPreflightUrl.trim() || null,
+      });
+      setAuthMessage(result.message || (result.ok ? "YouTube auth preflight passed." : "YouTube auth preflight failed."));
+    } catch (e) {
+      setAuthMessage(`Error testing cookies: ${String(e)}`);
+    } finally {
+      setAuthPreflightBusy(false);
     }
   }
 
@@ -168,7 +185,7 @@ export function OptionsPage() {
         <div style={{ marginBottom: 8 }}>
           <strong>How to export cookies:</strong> Install a browser extension like
           "EditThisCookie" or "Get cookies.txt", visit youtube.com while logged in,
-          export cookies as JSON, then paste below.
+          export cookies as JSON or Netscape cookies.txt, then paste below.
         </div>
         <textarea
           style={{ width: "100%", height: 120, fontFamily: "monospace", fontSize: 13, marginBottom: 8 }}
@@ -185,6 +202,22 @@ export function OptionsPage() {
           <button type="button" disabled={authBusy} onClick={() => { setAuthJson(""); }}>
             Clear
           </button>
+        </div>
+        <div style={{ marginTop: 12 }}>
+          <label>
+            <span style={{ display: "block", fontWeight: 600, marginBottom: 4 }}>Preflight URL</span>
+            <input
+              style={{ width: "100%" }}
+              value={authPreflightUrl}
+              onChange={(e) => setAuthPreflightUrl(e.currentTarget.value)}
+              disabled={authPreflightBusy}
+            />
+          </label>
+          <div className="row" style={{ marginTop: 8 }}>
+            <button type="button" disabled={authBusy || authPreflightBusy} onClick={runYoutubeAuthPreflight}>
+              Test saved YouTube cookies
+            </button>
+          </div>
         </div>
       </div>
 
