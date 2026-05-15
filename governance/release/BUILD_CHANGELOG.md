@@ -156,3 +156,12 @@ This changelog tracks desktop installer builds produced by `governance/scripts/b
   - `product/desktop/build_target/Current/release/bundle/nsis/VoxVulgi_0.1.15_x64-setup.exe`
   - `product/desktop/build_target/Current/release/bundle/msi/VoxVulgi_0.1.15_x64_en-US.msi`
 - Notes: Localization Studio setup-first workbench, multi-speaker controls, automatic voice reference continuation, voice setup Start flow, and headless build rules.
+
+## 0.1.16 - 2026-05-15T02:33:46Z
+- Work Packets: `WP-0195`
+- Commit: `5b267de`
+- Offline Bundle ID: `offline_full_win64_20260513_232818`
+- Artifacts:
+  - `product/desktop/build_target/Current/release/bundle/nsis/VoxVulgi_0.1.16_x64-setup.exe`
+  - `product/desktop/build_target/Current/release/bundle/msi/VoxVulgi_0.1.16_x64_en-US.msi`
+- Notes: Desktop target build via build_desktop_target.ps1.
