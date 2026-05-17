@@ -19,6 +19,7 @@ pub struct InstagramSubscriptionRow {
     pub folder_map: String,
     pub output_dir_override: Option<String>,
     pub use_browser_cookies: bool,
+    pub browser_cookie_source: Option<String>,
     pub auth_session_configured: bool,
     pub active: bool,
     pub refresh_interval_minutes: i64,
@@ -36,6 +37,8 @@ pub struct InstagramSubscriptionUpsert {
     pub output_dir_override: Option<String>,
     pub use_browser_cookies: bool,
     #[serde(default)]
+    pub browser_cookie_source: Option<String>,
+    #[serde(default)]
     pub auth_session_input: Option<String>,
     #[serde(default)]
     pub clear_auth_session: bool,
@@ -44,8 +47,8 @@ pub struct InstagramSubscriptionUpsert {
 }
 
 pub fn list_instagram_subscriptions(paths: &AppPaths) -> Result<Vec<InstagramSubscriptionRow>> {
-    let conn = db::open(paths)?;
-    db::migrate(&conn)?;
+    // WP-0224: read-only connection bypasses the job-runner write queue.
+    let conn = db::open_readonly(paths)?;
 
     let mut stmt = conn.prepare(
         r#"
@@ -56,6 +59,7 @@ SELECT
   folder_map,
   output_dir_override,
   use_browser_cookies,
+  browser_cookie_source,
   active,
   refresh_interval_minutes,
   last_queued_at_ms,
@@ -93,10 +97,11 @@ SET
   folder_map = ?3,
   output_dir_override = ?4,
   use_browser_cookies = ?5,
-  active = ?6,
-  refresh_interval_minutes = ?7,
-  updated_at_ms = ?8
-WHERE id = ?9
+  browser_cookie_source = ?6,
+  active = ?7,
+  refresh_interval_minutes = ?8,
+  updated_at_ms = ?9
+WHERE id = ?10
 "#,
             params![
                 normalized.title,
@@ -104,6 +109,7 @@ WHERE id = ?9
                 normalized.folder_map,
                 normalized.output_dir_override,
                 bool_to_i64(normalized.use_browser_cookies),
+                normalized.browser_cookie_source,
                 bool_to_i64(normalized.active),
                 normalized.refresh_interval_minutes,
                 now,
@@ -124,17 +130,19 @@ INSERT INTO instagram_subscription (
   folder_map,
   output_dir_override,
   use_browser_cookies,
+  browser_cookie_source,
   active,
   refresh_interval_minutes,
   last_queued_at_ms,
   created_at_ms,
   updated_at_ms
-) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, NULL, ?9, ?9)
+) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, NULL, ?10, ?10)
 ON CONFLICT(source_url) DO UPDATE SET
   title = excluded.title,
   folder_map = excluded.folder_map,
   output_dir_override = excluded.output_dir_override,
   use_browser_cookies = excluded.use_browser_cookies,
+  browser_cookie_source = excluded.browser_cookie_source,
   active = excluded.active,
   refresh_interval_minutes = excluded.refresh_interval_minutes,
   updated_at_ms = excluded.updated_at_ms
@@ -146,6 +154,7 @@ ON CONFLICT(source_url) DO UPDATE SET
                 normalized.folder_map,
                 normalized.output_dir_override,
                 bool_to_i64(normalized.use_browser_cookies),
+                normalized.browser_cookie_source,
                 bool_to_i64(normalized.active),
                 normalized.refresh_interval_minutes,
                 now,
@@ -234,6 +243,7 @@ fn queue_subscription_internal(
         auth_cookie,
         Some(output_dir),
         Some(sub.use_browser_cookies),
+        sub.browser_cookie_source.clone(),
     )?;
 
     let conn = db::open(paths)?;
@@ -318,7 +328,28 @@ fn normalize_upsert(
         clear_auth_session: req.clear_auth_session,
         active: req.active,
         refresh_interval_minutes: normalize_refresh_interval_minutes(req.refresh_interval_minutes),
+        browser_cookie_source: normalize_instagram_browser_cookie_source(
+            req.use_browser_cookies,
+            req.browser_cookie_source.as_deref(),
+        )?,
     })
+}
+
+fn normalize_instagram_browser_cookie_source(
+    use_browser_cookies: bool,
+    source: Option<&str>,
+) -> Result<Option<String>> {
+    if !use_browser_cookies {
+        return Ok(None);
+    }
+    jobs::normalize_browser_cookie_source(source)?.map_or_else(
+        || {
+            Err(EngineError::InstallFailed(
+                "browser cookies are enabled, but no browser was selected. Choose Chrome, Firefox, Edge, or Opera.".to_string(),
+            ))
+        },
+        |browser| Ok(Some(browser)),
+    )
 }
 
 fn normalize_refresh_interval_minutes(value: Option<i64>) -> i64 {
@@ -419,12 +450,13 @@ fn row_to_subscription(row: &rusqlite::Row<'_>) -> rusqlite::Result<InstagramSub
         folder_map: row.get(3)?,
         output_dir_override: row.get(4)?,
         use_browser_cookies: i64_to_bool(row.get::<_, i64>(5)?),
+        browser_cookie_source: row.get(6)?,
         auth_session_configured: false,
-        active: i64_to_bool(row.get::<_, i64>(6)?),
-        refresh_interval_minutes: row.get(7)?,
-        last_queued_at_ms: row.get(8)?,
-        created_at_ms: row.get(9)?,
-        updated_at_ms: row.get(10)?,
+        active: i64_to_bool(row.get::<_, i64>(7)?),
+        refresh_interval_minutes: row.get(8)?,
+        last_queued_at_ms: row.get(9)?,
+        created_at_ms: row.get(10)?,
+        updated_at_ms: row.get(11)?,
     })
 }
 
@@ -441,6 +473,7 @@ SELECT
   folder_map,
   output_dir_override,
   use_browser_cookies,
+  browser_cookie_source,
   active,
   refresh_interval_minutes,
   last_queued_at_ms,
@@ -468,6 +501,7 @@ SELECT
   folder_map,
   output_dir_override,
   use_browser_cookies,
+  browser_cookie_source,
   active,
   refresh_interval_minutes,
   last_queued_at_ms,
@@ -509,6 +543,7 @@ struct NormalizedInstagramSubscriptionInput {
     folder_map: String,
     output_dir_override: Option<String>,
     use_browser_cookies: bool,
+    browser_cookie_source: Option<String>,
     auth_session_input: Option<String>,
     clear_auth_session: bool,
     active: bool,
@@ -537,6 +572,7 @@ mod tests {
                 folder_map: Some("example_profile".to_string()),
                 output_dir_override: None,
                 use_browser_cookies: true,
+                browser_cookie_source: Some("firefox".to_string()),
                 auth_session_input: None,
                 clear_auth_session: false,
                 active: true,
@@ -586,6 +622,7 @@ mod tests {
                 folder_map: Some("authprofile".to_string()),
                 output_dir_override: None,
                 use_browser_cookies: false,
+                browser_cookie_source: None,
                 auth_session_input: Some("sessionid=abc123".to_string()),
                 clear_auth_session: false,
                 active: true,

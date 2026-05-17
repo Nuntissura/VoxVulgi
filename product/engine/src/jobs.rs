@@ -1,8 +1,9 @@
 use crate::paths::AppPaths;
 use crate::{
     asr, cmd, config, db, ffmpeg, image_batch, library, persistence, speakers, subscriptions,
-    subtitle_tracks, subtitles, tools, translate, voice_backend_adapters, voice_cast_packs,
-    voice_plans, voice_reference_candidates, voice_templates, EngineError, Result,
+    subtitle_tracks, subtitles, tools, translate, video_libraries, voice_backend_adapters,
+    voice_cast_packs, voice_plans, voice_reference_candidates, voice_templates, EngineError,
+    Result,
 };
 use regex::Regex;
 use rusqlite::{params, OptionalExtension};
@@ -995,6 +996,8 @@ struct DownloadDirectUrlParams {
     #[serde(default)]
     use_browser_cookies: bool,
     #[serde(default)]
+    browser_cookie_source: Option<String>,
+    #[serde(default)]
     subscription_id: Option<String>,
     #[serde(default)]
     preset_id: Option<String>,
@@ -1244,6 +1247,68 @@ pub fn enqueue_import_local(
 pub fn enqueue_install_phase2_packs_v1(paths: &AppPaths) -> Result<JobRow> {
     let params_json = serde_json::to_string(&InstallPhase2PacksV1Params::default())?;
     enqueue(paths, JobType::InstallPhase2PacksV1, params_json)
+}
+
+/// WP-0227: return true when the app should auto-enqueue a Phase2 voice-pack
+/// install at startup. Reasons to auto-install:
+///   * No `latest.json` exists yet (fresh install — packs never attempted).
+///   * Some step in `latest.json` is not `done`/`skipped` (interrupted or
+///     failed previous run — voice packs are not fully operational).
+/// Reasons to suppress:
+///   * A Phase2 install job is already `queued` or `running` (don't double up).
+///   * The job DB is unreachable (be conservative and skip — startup will
+///     try again next launch).
+pub fn should_auto_install_phase2(paths: &AppPaths) -> Result<bool> {
+    // Conservative bail-out: any DB problem means we let startup continue
+    // without re-installing. Operator can always click Install manually.
+    let conn = match db::open_readonly(paths) {
+        Ok(c) => c,
+        Err(_) => return Ok(false),
+    };
+    let active_count: i64 = match conn.query_row(
+        "SELECT COUNT(*) FROM job WHERE type = ?1 AND status IN (?2, ?3)",
+        params![
+            JobType::InstallPhase2PacksV1.as_str(),
+            JobStatus::Queued.as_str(),
+            JobStatus::Running.as_str(),
+        ],
+        |row| row.get(0),
+    ) {
+        Ok(n) => n,
+        Err(_) => return Ok(false),
+    };
+    if active_count > 0 {
+        return Ok(false);
+    }
+
+    let latest_path = paths
+        .install_logs_dir()
+        .join("phase2")
+        .join("latest.json");
+    if !latest_path.exists() {
+        return Ok(true);
+    }
+
+    let raw = match std::fs::read_to_string(&latest_path) {
+        Ok(s) => s,
+        Err(_) => return Ok(true),
+    };
+    let parsed: serde_json::Value = match serde_json::from_str(&raw) {
+        Ok(v) => v,
+        Err(_) => return Ok(true),
+    };
+    let steps = match parsed.get("steps").and_then(|s| s.as_array()) {
+        Some(arr) if !arr.is_empty() => arr,
+        _ => return Ok(true),
+    };
+    let has_pending = steps.iter().any(|s| {
+        let status = s
+            .get("status")
+            .and_then(|v| v.as_str())
+            .unwrap_or("");
+        status != "done" && status != "skipped"
+    });
+    Ok(has_pending)
 }
 
 pub fn enqueue_dummy_sleep(paths: &AppPaths, seconds: u64) -> Result<JobRow> {
@@ -2588,6 +2653,7 @@ pub fn enqueue_download_direct_url_batch(
     auth_cookie: Option<String>,
     output_dir: Option<String>,
     use_browser_cookies: Option<bool>,
+    browser_cookie_source: Option<String>,
     preset_id: Option<String>,
 ) -> Result<Vec<JobRow>> {
     enqueue_download_direct_url_batch_raw(
@@ -2597,6 +2663,7 @@ pub fn enqueue_download_direct_url_batch(
         auth_cookie,
         output_dir,
         use_browser_cookies,
+        browser_cookie_source,
         preset_id,
         None,
     )
@@ -2609,6 +2676,7 @@ pub fn enqueue_download_direct_url_batch_raw(
     auth_cookie: Option<String>,
     output_dir: Option<String>,
     use_browser_cookies: Option<bool>,
+    browser_cookie_source: Option<String>,
     preset_id: Option<String>,
     batch_id: Option<String>,
 ) -> Result<Vec<JobRow>> {
@@ -2619,6 +2687,7 @@ pub fn enqueue_download_direct_url_batch_raw(
         auth_cookie,
         output_dir,
         use_browser_cookies,
+        browser_cookie_source,
         preset_id,
         batch_id,
         None,
@@ -2689,8 +2758,7 @@ pub fn youtube_auth_preflight(
     };
 
     let cookie_file = write_auth_cookie_as_netscape_temp_file(paths, &url, &auth_cookie)?;
-    let mut args =
-        build_youtube_auth_preflight_args(&url, cookie_file.to_string_lossy().as_ref());
+    let mut args = build_youtube_auth_preflight_args(&url, cookie_file.to_string_lossy().as_ref());
     let js_runtime_available = append_yt_dlp_runtime_args(paths, &mut args, &url, true);
     let output_res = run_yt_dlp(paths, &args, None, 90);
     let _ = std::fs::remove_file(cookie_file);
@@ -2732,6 +2800,7 @@ fn enqueue_download_direct_url_batch_raw_with_subscription(
     auth_cookie: Option<String>,
     output_dir: Option<String>,
     use_browser_cookies: Option<bool>,
+    browser_cookie_source: Option<String>,
     preset_id: Option<String>,
     batch_id: Option<String>,
     subscription_id: Option<String>,
@@ -2739,6 +2808,8 @@ fn enqueue_download_direct_url_batch_raw_with_subscription(
     let auth_cookie = normalize_auth_cookie(auth_cookie)?;
     let output_dir = normalize_output_dir(output_dir);
     let use_browser_cookies = use_browser_cookies.unwrap_or(false);
+    let browser_cookie_source =
+        browser_cookie_source_for_request(use_browser_cookies, browser_cookie_source.as_deref())?;
     let urls = normalize_direct_urls(urls)?;
     if urls.is_empty() {
         return Err(EngineError::InstallFailed(
@@ -2771,6 +2842,7 @@ fn enqueue_download_direct_url_batch_raw_with_subscription(
         auth_cookie,
         output_dir,
         use_browser_cookies,
+        browser_cookie_source,
         &preset,
         batch_id,
         subscription_id,
@@ -2783,6 +2855,7 @@ fn enqueue_download_targets_batch_with_subscription(
     auth_cookie: Option<String>,
     output_dir: Option<String>,
     use_browser_cookies: bool,
+    browser_cookie_source: Option<String>,
     preset: &config::DownloadPreset,
     batch_id: Option<String>,
     subscription_id: Option<String>,
@@ -2802,6 +2875,7 @@ fn enqueue_download_targets_batch_with_subscription(
             output_subdir: None,
             output_dir: output_dir.clone(),
             use_browser_cookies,
+            browser_cookie_source: browser_cookie_source.clone(),
             subscription_id: subscription_id.clone(),
             preset_id: Some(preset.id.clone()),
             output_path_template: Some(output_path_template),
@@ -2840,10 +2914,13 @@ pub fn enqueue_download_instagram_batch(
     auth_cookie: Option<String>,
     output_dir: Option<String>,
     use_browser_cookies: Option<bool>,
+    browser_cookie_source: Option<String>,
 ) -> Result<Vec<JobRow>> {
     let auth_cookie = normalize_auth_cookie(auth_cookie)?;
     let output_dir = normalize_output_dir(output_dir);
     let use_browser_cookies = use_browser_cookies.unwrap_or(false);
+    let browser_cookie_source =
+        browser_cookie_source_for_request(use_browser_cookies, browser_cookie_source.as_deref())?;
     let normalized_urls = normalize_direct_urls(urls)?;
     if normalized_urls.is_empty() {
         return Err(EngineError::InstallFailed(
@@ -2868,6 +2945,7 @@ pub fn enqueue_download_instagram_batch(
         auth_cookie,
         output_dir,
         Some(use_browser_cookies),
+        browser_cookie_source,
         None,
         None,
     )
@@ -2937,8 +3015,8 @@ pub fn enqueue_download_image_batch(
 }
 
 pub fn list_jobs(paths: &AppPaths, limit: usize, offset: usize) -> Result<Vec<JobRow>> {
-    let conn = db::open(paths)?;
-    db::migrate(&conn)?;
+    // WP-0226: read-only connection bypasses job-runner write queue.
+    let conn = db::open_readonly(paths)?;
 
     let mut stmt = conn.prepare(
         r#"
@@ -2991,8 +3069,8 @@ pub fn get_job(paths: &AppPaths, job_id: &str) -> Result<Option<JobRow>> {
         return Ok(None);
     }
 
-    let conn = db::open(paths)?;
-    db::migrate(&conn)?;
+    // WP-0226: read-only connection bypasses job-runner write queue.
+    let conn = db::open_readonly(paths)?;
 
     conn.query_row(
         r#"
@@ -3060,8 +3138,8 @@ pub fn list_jobs_for_item(
         return Err(EngineError::InstallFailed("item_id is empty".to_string()));
     }
 
-    let conn = db::open(paths)?;
-    db::migrate(&conn)?;
+    // WP-0226: read-only connection bypasses job-runner write queue.
+    let conn = db::open_readonly(paths)?;
 
     let mut stmt = conn.prepare(
         r#"
@@ -3110,16 +3188,16 @@ LIMIT ?2 OFFSET ?3
 }
 
 pub fn get_queue_control(paths: &AppPaths) -> Result<JobQueueControlState> {
-    let conn = db::open(paths)?;
-    db::migrate(&conn)?;
+    // WP-0226: read-only connection bypasses job-runner write queue.
+    let conn = db::open_readonly(paths)?;
     Ok(JobQueueControlState {
         paused: is_queue_paused_conn(&conn)?,
     })
 }
 
 pub fn get_runtime_settings(paths: &AppPaths) -> Result<JobRuntimeSettings> {
-    let conn = db::open(paths)?;
-    db::migrate(&conn)?;
+    // WP-0226: read-only connection bypasses job-runner write queue.
+    let conn = db::open_readonly(paths)?;
     Ok(JobRuntimeSettings {
         max_concurrency: get_max_concurrency_conn(&conn)?,
     })
@@ -4189,6 +4267,10 @@ fn execute_job(paths: &AppPaths, job_id: &str, type_str: &str, params_json: &str
             let mut output_dir = normalize_output_dir(p.output_dir);
             let output_subdir = normalize_output_subdir(p.output_subdir);
             let use_browser_cookies = p.use_browser_cookies;
+            let browser_cookie_source = browser_cookie_source_for_request(
+                use_browser_cookies,
+                p.browser_cookie_source.as_deref(),
+            )?;
             if output_dir.is_none() && output_subdir.is_none() {
                 output_dir = Some(default_direct_job_output_dir(
                     paths, provider, &url, job_id,
@@ -4220,6 +4302,7 @@ fn execute_job(paths: &AppPaths, job_id: &str, type_str: &str, params_json: &str
                 output_dir.as_deref(),
                 output_subdir.as_deref(),
                 use_browser_cookies,
+                browser_cookie_source.as_deref(),
                 p.output_path_template.as_deref(),
                 p.filename_template.as_deref(),
                 p.format_preference.as_deref(),
@@ -4371,6 +4454,7 @@ fn execute_job(paths: &AppPaths, job_id: &str, type_str: &str, params_json: &str
                     auth_cookie.clone(),
                     Some(output_dir.to_string_lossy().to_string()),
                     Some(sub.use_browser_cookies && auth_cookie.is_none()),
+                    sub.browser_cookie_source.clone(),
                     sub.preset_id.clone(),
                     Some(job_id.to_string()),
                     Some(sub.id.clone()),
@@ -9677,7 +9761,11 @@ ORDER BY created_at_ms ASC
                 std::fs::create_dir_all(parent)?;
             }
 
-            #[derive(Debug, Clone, Serialize)]
+            // WP-0227: added Deserialize so we can load the previous
+            // latest.json on this new install run and preserve any steps that
+            // already finished. Without this, every install starts from
+            // scratch even after the previous attempt got 5 of 7 steps done.
+            #[derive(Debug, Clone, Serialize, serde::Deserialize)]
             struct Phase2InstallStep {
                 id: String,
                 title: String,
@@ -9690,7 +9778,7 @@ ORDER BY created_at_ms ASC
                 log_path: String,
             }
 
-            #[derive(Debug, Clone, Serialize)]
+            #[derive(Debug, Clone, Serialize, serde::Deserialize)]
             struct Phase2InstallState {
                 schema_version: u32,
                 job_id: String,
@@ -9719,17 +9807,67 @@ ORDER BY created_at_ms ASC
 
             let started_at_ms = now_ms();
             let plan = tools::phase2_packs_install_plan();
+
+            // WP-0227: load any previous install state from `latest.json` so
+            // resumed installs (the dominant real-world case — installs get
+            // interrupted by app shutdown after one or two steps complete)
+            // skip already-done steps instead of redoing them. Each pack's
+            // own install function is also idempotent in principle, but the
+            // big downloads (Kokoro voice weights, OpenVoice converter
+            // ~1 GB) take long enough that re-running them is the difference
+            // between "voice packs work on launch N+1" and "user gives up".
+            let prior_done_steps: std::collections::HashMap<String, Phase2InstallStep> =
+                std::fs::read_to_string(&latest_path)
+                    .ok()
+                    .and_then(|raw| serde_json::from_str::<Phase2InstallState>(&raw).ok())
+                    .map(|prior| {
+                        prior
+                            .steps
+                            .into_iter()
+                            .filter(|s| s.status == "done")
+                            .map(|s| (s.id.clone(), s))
+                            .collect()
+                    })
+                    .unwrap_or_default();
+
             let mut steps: Vec<Phase2InstallStep> = Vec::new();
             for item in plan {
                 let log_path = install_root.join(format!("{}.log", item.id));
+                if !item.supported {
+                    steps.push(Phase2InstallStep {
+                        id: item.id,
+                        title: item.title,
+                        status: "skipped".to_string(),
+                        started_at_ms: None,
+                        finished_at_ms: None,
+                        estimated_bytes: item.estimated_bytes,
+                        delta_bytes: None,
+                        error: None,
+                        log_path: log_path.to_string_lossy().to_string(),
+                    });
+                    continue;
+                }
+                // WP-0227: carry forward a previous successful run for this
+                // pack so we don't redo work that already cost the operator
+                // minutes of install time.
+                if let Some(prior) = prior_done_steps.get(&item.id) {
+                    steps.push(Phase2InstallStep {
+                        id: item.id,
+                        title: item.title,
+                        status: "done".to_string(),
+                        started_at_ms: prior.started_at_ms,
+                        finished_at_ms: prior.finished_at_ms,
+                        estimated_bytes: item.estimated_bytes,
+                        delta_bytes: prior.delta_bytes,
+                        error: None,
+                        log_path: log_path.to_string_lossy().to_string(),
+                    });
+                    continue;
+                }
                 steps.push(Phase2InstallStep {
                     id: item.id,
                     title: item.title,
-                    status: if item.supported {
-                        "queued".to_string()
-                    } else {
-                        "skipped".to_string()
-                    },
+                    status: "queued".to_string(),
                     started_at_ms: None,
                     finished_at_ms: None,
                     estimated_bytes: item.estimated_bytes,
@@ -9754,7 +9892,13 @@ ORDER BY created_at_ms ASC
                 .filter(|s| s.status != "skipped")
                 .count()
                 .max(1);
-            let mut completed_steps = 0_usize;
+            // WP-0227: seed the completed counter with resumed steps so
+            // progress reflects reality from the start of the run.
+            let mut completed_steps = state
+                .steps
+                .iter()
+                .filter(|s| s.status == "done")
+                .count();
 
             for step_index in 0..state.steps.len() {
                 if is_canceled(paths, job_id)? {
@@ -9762,6 +9906,11 @@ ORDER BY created_at_ms ASC
                     return Ok(());
                 }
                 if state.steps[step_index].status == "skipped" {
+                    continue;
+                }
+                // WP-0227: skip steps that the resume logic already marked
+                // done from a previous run.
+                if state.steps[step_index].status == "done" {
                     continue;
                 }
 
@@ -11521,6 +11670,36 @@ fn use_browser_cookies_for_url(url: &str, requested: bool) -> bool {
     requested
 }
 
+pub fn normalize_browser_cookie_source(value: Option<&str>) -> Result<Option<String>> {
+    let Some(raw) = value.map(str::trim).filter(|v| !v.is_empty()) else {
+        return Ok(None);
+    };
+    let normalized = raw.to_ascii_lowercase();
+    match normalized.as_str() {
+        "chrome" | "firefox" | "edge" | "opera" => Ok(Some(normalized)),
+        _ => Err(EngineError::InstallFailed(format!(
+            "unsupported browser cookie source: {raw}. Choose chrome, firefox, edge, or opera."
+        ))),
+    }
+}
+
+fn browser_cookie_source_for_request(
+    use_browser_cookies: bool,
+    source: Option<&str>,
+) -> Result<Option<String>> {
+    if !use_browser_cookies {
+        return Ok(None);
+    }
+    normalize_browser_cookie_source(source)?.map_or_else(
+        || {
+            Err(EngineError::InstallFailed(
+                "browser cookies are enabled, but no browser was selected. Choose Chrome, Firefox, Edge, or Opera.".to_string(),
+            ))
+        },
+        |value| Ok(Some(value)),
+    )
+}
+
 fn yt_dlp_youtube_player_clients(
     auth_cookie_present: bool,
     js_runtime_available: bool,
@@ -12333,6 +12512,7 @@ fn download_url_to_library(
     output_dir: Option<&str>,
     output_subdir: Option<&str>,
     use_browser_cookies: bool,
+    browser_cookie_source: Option<&str>,
     output_path_template: Option<&str>,
     filename_template: Option<&str>,
     format_preference: Option<&str>,
@@ -12348,6 +12528,7 @@ fn download_url_to_library(
             output_dir,
             output_subdir,
             use_browser_cookies,
+            browser_cookie_source,
             output_path_template,
             filename_template,
             format_preference,
@@ -12383,6 +12564,7 @@ fn download_url_to_library(
                 output_dir,
                 output_subdir,
                 use_browser_cookies,
+                browser_cookie_source,
                 output_path_template,
                 filename_template,
                 format_preference,
@@ -12529,9 +12711,15 @@ fn build_yt_dlp_output_template(
     output_path_template: Option<&str>,
     filename_template: Option<&str>,
 ) -> String {
+    // WP-0220 follow-up (operator report 2026-05-17): default no longer
+    // prefixes the path with %(extractor)s so single-video YouTube downloads
+    // land in `<library_root>/<channel>/<file>` instead of
+    // `<library_root>/youtube/<channel>/<file>`. Falls back to uploader for
+    // platforms without a `channel` field (Instagram) and finally `misc` if
+    // neither exists, so the segment is never the literal string "NA".
     let path_template = normalize_non_empty(output_path_template)
         .map(|value| convert_download_template_to_ytdlp(&value))
-        .unwrap_or_else(|| "%(extractor)s/%(channel)s".to_string());
+        .unwrap_or_else(|| "%(channel,uploader|misc)s".to_string());
 
     let mut file_template = normalize_non_empty(filename_template)
         .map(|value| convert_download_template_to_ytdlp(&value))
@@ -12578,7 +12766,11 @@ fn default_direct_job_output_dir(
     } else {
         DEFAULT_VIDEO_OUTPUT_SUBDIR
     };
-    let base_dir = paths.effective_download_dir()?;
+    let base_dir = if category == DEFAULT_VIDEO_OUTPUT_SUBDIR {
+        video_libraries::selected_video_library_root(paths)?
+    } else {
+        paths.effective_download_dir()?
+    };
     if !base_dir.exists() {
         return Err(EngineError::InstallFailed(format!(
             "download folder not found: {}. Choose an existing folder or create a new one from Library.",
@@ -12591,10 +12783,18 @@ fn default_direct_job_output_dir(
             base_dir.to_string_lossy()
         )));
     }
-    ensure_default_download_subdirs(&base_dir)?;
-    let out = base_dir
-        .join(category)
-        .join(default_job_folder_name(job_id));
+    if category == DEFAULT_VIDEO_OUTPUT_SUBDIR {
+        std::fs::create_dir_all(&base_dir)?;
+    } else {
+        ensure_default_download_subdirs(&base_dir)?;
+    }
+    let out = if category == DEFAULT_VIDEO_OUTPUT_SUBDIR {
+        base_dir.join(default_job_folder_name(job_id))
+    } else {
+        base_dir
+            .join(category)
+            .join(default_job_folder_name(job_id))
+    };
     Ok(out.to_string_lossy().to_string())
 }
 
@@ -12658,6 +12858,7 @@ fn download_direct_http_url_to_library(
                 output_dir,
                 output_subdir,
                 use_browser_cookies_for_url(&candidate, false),
+                None,
                 output_path_template,
                 filename_template,
                 format_preference,
@@ -13226,6 +13427,7 @@ fn download_yt_dlp_url_to_library(
     output_dir: Option<&str>,
     output_subdir: Option<&str>,
     use_browser_cookies: bool,
+    browser_cookie_source: Option<&str>,
     output_path_template: Option<&str>,
     filename_template: Option<&str>,
     format_preference: Option<&str>,
@@ -13301,7 +13503,10 @@ fn download_yt_dlp_url_to_library(
     let mut using_browser_cookies = false;
     if use_browser_cookies_for_url(url, use_browser_cookies) && !using_cookie_file {
         args.push("--cookies-from-browser".to_string());
-        args.push("chrome".to_string());
+        args.push(
+            browser_cookie_source_for_request(true, browser_cookie_source)?
+                .expect("browser source checked"),
+        );
         using_browser_cookies = true;
     }
     let js_runtime_available =
@@ -17016,6 +17221,7 @@ EOF
             None,
             None,
             None,
+            None,
         )
         .expect("enqueue instagram batch");
         assert_eq!(jobs.len(), 1);
@@ -17109,6 +17315,7 @@ EOF
             Some(output_dir),
             Some(false),
             None,
+            None,
             Some("parent-job".to_string()),
             Some("subscription-1".to_string()),
         )
@@ -17179,6 +17386,28 @@ EOF
     }
 
     #[test]
+    fn browser_cookie_source_accepts_supported_browsers_and_rejects_defaultless_true() {
+        assert_eq!(
+            normalize_browser_cookie_source(Some("firefox")).expect("firefox"),
+            Some("firefox".to_string())
+        );
+        assert_eq!(
+            normalize_browser_cookie_source(Some("EDGE")).expect("edge"),
+            Some("edge".to_string())
+        );
+        assert!(normalize_browser_cookie_source(Some("safari")).is_err());
+        assert!(browser_cookie_source_for_request(true, None).is_err());
+        assert_eq!(
+            browser_cookie_source_for_request(true, Some("opera")).expect("opera"),
+            Some("opera".to_string())
+        );
+        assert_eq!(
+            browser_cookie_source_for_request(false, None).expect("off"),
+            None
+        );
+    }
+
+    #[test]
     fn append_yt_dlp_archive_download_options_adds_fast_retry_and_srt_sidecar_args() {
         let mut args = Vec::new();
 
@@ -17193,7 +17422,9 @@ EOF
             .any(|pair| pair == ["--file-access-retries", "10"]));
         assert!(args.iter().any(|value| value == "--write-subs"));
         assert!(args.iter().any(|value| value == "--write-auto-subs"));
-        assert!(args.windows(2).any(|pair| pair == ["--convert-subs", "srt"]));
+        assert!(args
+            .windows(2)
+            .any(|pair| pair == ["--convert-subs", "srt"]));
     }
 
     #[test]
@@ -17204,7 +17435,9 @@ EOF
 
         assert!(args.iter().any(|value| value == "--write-subs"));
         assert!(!args.iter().any(|value| value == "--write-auto-subs"));
-        assert!(args.windows(2).any(|pair| pair == ["--convert-subs", "srt"]));
+        assert!(args
+            .windows(2)
+            .any(|pair| pair == ["--convert-subs", "srt"]));
     }
 
     #[test]

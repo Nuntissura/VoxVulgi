@@ -3,7 +3,7 @@ use crate::Result;
 use rusqlite::{Connection, OpenFlags};
 use std::time::Duration;
 
-const CURRENT_SCHEMA_VERSION: u32 = 11;
+const CURRENT_SCHEMA_VERSION: u32 = 14;
 
 struct MigrationStep {
     version: u32,
@@ -20,8 +20,20 @@ const MIGRATION_STEPS: &[MigrationStep] = &[
         apply: apply_schema_v10,
     },
     MigrationStep {
-        version: CURRENT_SCHEMA_VERSION,
+        version: 11,
         apply: apply_schema_v11,
+    },
+    MigrationStep {
+        version: 12,
+        apply: apply_schema_v12,
+    },
+    MigrationStep {
+        version: 13,
+        apply: apply_schema_v13,
+    },
+    MigrationStep {
+        version: CURRENT_SCHEMA_VERSION,
+        apply: apply_schema_v14,
     },
 ];
 
@@ -38,8 +50,32 @@ pub fn open(paths: &AppPaths) -> Result<Connection> {
 
     conn.busy_timeout(Duration::from_secs(10))?;
     conn.pragma_update(None, "journal_mode", "WAL")?;
+    // WP-0223: with WAL journal mode, synchronous=NORMAL is the recommended
+    // setting per https://www.sqlite.org/pragma.html#pragma_synchronous —
+    // still crash-safe but skips per-transaction fsync. Eliminates the
+    // checkpoint-stall pattern where job-runner UPDATEs forced read queries
+    // (subscription list, library list) to wait seconds under load.
+    conn.pragma_update(None, "synchronous", "NORMAL")?;
     conn.pragma_update(None, "foreign_keys", "ON")?;
 
+    Ok(conn)
+}
+
+// WP-0224: read-only connection used by UI list commands so they bypass
+// the job-runner write queue. The DB schema must already be migrated by an
+// earlier `open() + migrate()` (the app does this in startup). Read-only
+// callers must NOT call `db::migrate(&conn)` — the connection cannot write,
+// and the schema is already up to date when the app reaches the UI.
+pub fn open_readonly(paths: &AppPaths) -> Result<Connection> {
+    paths.ensure_dirs()?;
+
+    let db_path = paths.db_dir().join("app.sqlite");
+    let conn = Connection::open_with_flags(
+        db_path,
+        OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_FULL_MUTEX,
+    )?;
+
+    conn.busy_timeout(Duration::from_secs(10))?;
     Ok(conn)
 }
 
@@ -645,6 +681,51 @@ CREATE INDEX IF NOT EXISTS idx_localization_workspace_selected
     Ok(())
 }
 
+fn apply_schema_v12(conn: &Connection) -> Result<()> {
+    conn.execute_batch(
+        r#"
+CREATE TABLE IF NOT EXISTS video_library (
+  id TEXT PRIMARY KEY,
+  name TEXT NOT NULL,
+  root_path TEXT NOT NULL UNIQUE,
+  active INTEGER NOT NULL DEFAULT 1,
+  kind TEXT NOT NULL DEFAULT 'custom',
+  created_at_ms INTEGER NOT NULL,
+  updated_at_ms INTEGER NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_video_library_active_updated
+  ON video_library(active, updated_at_ms DESC, name COLLATE NOCASE);
+"#,
+    )?;
+    ensure_column(conn, "youtube_subscription", "library_id", "TEXT")?;
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_youtube_subscription_library ON youtube_subscription(library_id)",
+        [],
+    )?;
+    Ok(())
+}
+
+fn apply_schema_v13(conn: &Connection) -> Result<()> {
+    ensure_column(
+        conn,
+        "youtube_subscription",
+        "browser_cookie_source",
+        "TEXT",
+    )?;
+    Ok(())
+}
+
+fn apply_schema_v14(conn: &Connection) -> Result<()> {
+    ensure_column(
+        conn,
+        "instagram_subscription",
+        "browser_cookie_source",
+        "TEXT",
+    )?;
+    Ok(())
+}
+
 fn ensure_column(conn: &Connection, table: &str, column: &str, column_def: &str) -> Result<()> {
     let mut stmt = conn.prepare(&format!("PRAGMA table_info({table})"))?;
     let mut rows = stmt.query([])?;
@@ -757,6 +838,34 @@ CREATE TABLE IF NOT EXISTS job (
             has_refresh_interval,
             "refresh_interval_minutes column should exist after migrate"
         );
+    }
+
+    #[test]
+    fn migrate_creates_video_library_registry_and_subscription_binding() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let paths = AppPaths::new(dir.path().to_path_buf());
+        let conn = open(&paths).expect("open");
+        migrate(&conn).expect("migrate");
+
+        let video_library_table: Option<String> = conn
+            .query_row(
+                "SELECT name FROM sqlite_master WHERE type='table' AND name='video_library'",
+                [],
+                |row| row.get(0),
+            )
+            .optional()
+            .expect("query video_library table");
+        assert_eq!(video_library_table.as_deref(), Some("video_library"));
+
+        let mut col_stmt = conn
+            .prepare("PRAGMA table_info(youtube_subscription)")
+            .expect("table_info");
+        let cols = col_stmt
+            .query_map([], |row| row.get::<_, String>(1))
+            .expect("query")
+            .collect::<rusqlite::Result<Vec<_>>>()
+            .expect("collect");
+        assert!(cols.iter().any(|col| col == "library_id"));
     }
 
     #[test]

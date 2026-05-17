@@ -1802,6 +1802,27 @@ export function DiagnosticsPage({ visible = true }: { visible?: boolean }) {
     }
   }
 
+  // WP-0221: capture a self-contained freeze report. Same payload as
+  // vvfreeze.cmd (which hits the same /agent/freeze_dump path). Use the
+  // button while the app is responsive; use vvfreeze.cmd when it isn't.
+  async function captureFreezeReport() {
+    setError(null);
+    setNotice(null);
+    try {
+      const result = await invoke<{
+        path: string;
+        latest_path: string;
+        trace_rows_included: number;
+      }>("agent_freeze_dump_now", { note: "Diagnostics page button" });
+      setNotice(
+        `Freeze report written: ${result.latest_path} (${result.trace_rows_included} trace rows). ` +
+          `Timestamped copy: ${result.path}`,
+      );
+    } catch (e) {
+      setError(`Capture freeze report failed: ${String(e)}`);
+    }
+  }
+
   async function clearCache() {
     const ok = await confirm("Clear cache directory? This will not delete library media.", {
       title: "Clear cache",
@@ -2452,6 +2473,70 @@ export function DiagnosticsPage({ visible = true }: { visible?: boolean }) {
                   <td colSpan={6}>No trace rows yet.</td>
                 </tr>
               )}
+            </tbody>
+          </table>
+        </div>
+
+        <h3 style={{ marginTop: 18, marginBottom: 6 }}>Freeze events (WP-0221)</h3>
+        <div style={{ color: "#4b5563", marginBottom: 6 }}>
+          Filtered view of UI freeze evidence: Worker-detected WebView main-thread hangs
+          (<code>freeze_detected</code> / <code>freeze_recovered</code>), OS-thread scheduling
+          starvation (<code>event_loop_skew</code>), and slow Tauri commands above 500&nbsp;ms
+          (<code>command_slow</code>). Older rows beyond the recent-trace window remain in the
+          trace folder.
+        </div>
+        <div className="row" style={{ flexWrap: "wrap", marginBottom: 6 }}>
+          <button type="button" onClick={captureFreezeReport}>
+            Capture freeze report now
+          </button>
+          <span style={{ color: "#6b7280", alignSelf: "center", fontSize: 13 }}>
+            Or run <code>vvfreeze.cmd</code> from the repo root (works while the app is
+            unresponsive). Latest report:{" "}
+            <code>
+              %APPDATA%\com.voxvulgi.voxvulgi\diagnostics\traces\freeze_reports\freeze_report_latest.json
+            </code>
+          </span>
+        </div>
+        <div className="table-wrap">
+          <table>
+            <thead>
+              <tr>
+                <th>Time</th>
+                <th>Event</th>
+                <th>Level</th>
+                <th>Details</th>
+              </tr>
+            </thead>
+            <tbody>
+              {(() => {
+                const freezeEvents = recentTrace.filter((e) =>
+                  e.event === "freeze_detected" ||
+                  e.event === "freeze_recovered" ||
+                  e.event === "event_loop_skew" ||
+                  e.event === "command_slow",
+                );
+                if (freezeEvents.length === 0) {
+                  return (
+                    <tr>
+                      <td colSpan={4}>
+                        No freeze events in the recent trace window. The detector is
+                        observation-only; an empty list during normal use is the expected
+                        steady state.
+                      </td>
+                    </tr>
+                  );
+                }
+                return [...freezeEvents].reverse().map((entry, index) => (
+                  <tr key={`freeze-${entry.ts_ms}-${entry.event}-${index}`}>
+                    <td>{formatTs(entry.ts_ms)}</td>
+                    <td>{entry.event}</td>
+                    <td>{entry.level}</td>
+                    <td style={{ maxWidth: 520, wordBreak: "break-word" }}>
+                      {formatTraceDetails(entry.details)}
+                    </td>
+                  </tr>
+                ));
+              })()}
             </tbody>
           </table>
         </div>

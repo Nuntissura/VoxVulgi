@@ -19,8 +19,8 @@ pub struct SubtitleTrackRow {
 }
 
 pub fn list_tracks(paths: &AppPaths, item_id: &str) -> Result<Vec<SubtitleTrackRow>> {
-    let conn = db::open(paths)?;
-    db::migrate(&conn)?;
+    // WP-0226: read-only connection bypasses job-runner write queue.
+    let conn = db::open_readonly(paths)?;
 
     let mut stmt = conn.prepare(
         r#"
@@ -58,8 +58,8 @@ ORDER BY kind ASC, lang ASC, version DESC
 }
 
 pub fn get_track(paths: &AppPaths, track_id: &str) -> Result<SubtitleTrackRow> {
-    let conn = db::open(paths)?;
-    db::migrate(&conn)?;
+    // WP-0226: read-only connection bypasses job-runner write queue.
+    let conn = db::open_readonly(paths)?;
 
     conn.query_row(
         r#"

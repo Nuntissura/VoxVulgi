@@ -165,3 +165,93 @@ This changelog tracks desktop installer builds produced by `governance/scripts/b
   - `product/desktop/build_target/Current/release/bundle/nsis/VoxVulgi_0.1.16_x64-setup.exe`
   - `product/desktop/build_target/Current/release/bundle/msi/VoxVulgi_0.1.16_x64_en-US.msi`
 - Notes: Desktop target build via build_desktop_target.ps1.
+
+## 0.1.17 - 2026-05-15T18:52:42Z
+- Work Packets: `WP-0220`
+- Commit: `fafbe71`
+- Offline Bundle ID: `offline_full_win64_20260513_232818`
+- Artifacts:
+  - `product/desktop/build_target/Current/release/bundle/nsis/VoxVulgi_0.1.17_x64-setup.exe`
+  - `product/desktop/build_target/Current/release/bundle/msi/VoxVulgi_0.1.17_x64_en-US.msi`
+- Notes: WP-0220 multi-library video archive, Options advanced recovery move, Video Archiver tab split, and explicit browser-cookie source selection.
+
+## 0.1.18 - 2026-05-17T11:50:51Z
+- Work Packets: `WP-0221`
+- Commit: `fafbe71`
+- Offline Bundle ID: `offline_full_win64_20260513_232818`
+- Artifacts:
+  - `product/desktop/build_target/Current/release/bundle/nsis/VoxVulgi_0.1.18_x64-setup.exe`
+  - `product/desktop/build_target/Current/release/bundle/msi/VoxVulgi_0.1.18_x64_en-US.msi`
+- Notes: WP-0221 freeze diagnostic instrumentation: Worker heartbeat, process-scheduling skew detector, per-command timing on 8 suspect commands, /agent/freeze_event endpoint, and Diagnostics 'Freeze events' subsection.
+
+## 0.1.19 - 2026-05-17T12:32:36Z
+- Work Packets: `WP-0220`, `WP-0221`, `WP-0222`
+- Commit: `fafbe71`
+- Offline Bundle ID: `offline_full_win64_20260513_232818`
+- Artifacts:
+  - `product/desktop/build_target/Current/release/bundle/nsis/VoxVulgi_0.1.19_x64-setup.exe`
+  - `product/desktop/build_target/Current/release/bundle/msi/VoxVulgi_0.1.19_x64_en-US.msi`
+- Notes: WP-0221 freeze-report bundling (POST /agent/freeze_dump, vvfreeze.cmd, agent_freeze_dump_now, CLAUDE.md/AGENTS.md docs), WP-0220 single-video subfolder default fix (jobs.rs:12589 -> %(channel,uploader|misc)s), WP-0222 reveal exit-code-1 truthfulness.
+
+## 0.1.20 - 2026-05-17T15:19:13Z
+- Work Packets: `WP-0221`
+- Commit: `fafbe71`
+- Offline Bundle ID: `offline_full_win64_20260513_232818`
+- Artifacts:
+  - `product/desktop/build_target/Current/release/bundle/nsis/VoxVulgi_0.1.20_x64-setup.exe`
+  - `product/desktop/build_target/Current/release/bundle/msi/VoxVulgi_0.1.20_x64_en-US.msi`
+- Notes: WP-0221 v0.1.20 diagnostic upgrade: Worker liveness heartbeat (worker_alive every 30s), freeze threshold lowered 500ms -> 250ms, agent_handle_freeze_event whitelist updated. Use to determine whether prior absence of freeze_detected rows was due to a dead Worker or to UI-thread freezes the JS Worker cannot see.
+
+## 0.1.21 - 2026-05-17T16:14:19Z
+- Work Packets: `WP-0221`, `WP-0223`
+- Commit: `fafbe71`
+- Offline Bundle ID: `offline_full_win64_20260513_232818`
+- Artifacts:
+  - `product/desktop/build_target/Current/release/bundle/nsis/VoxVulgi_0.1.21_x64-setup.exe`
+  - `product/desktop/build_target/Current/release/bundle/msi/VoxVulgi_0.1.21_x64_en-US.msi`
+- Notes: WP-0223 SQLite contention fix (PRAGMA synchronous=NORMAL + list_youtube_subscriptions N+1 -> single GROUP_CONCAT query). WP-0221 Worker install fix (explicit new URL syntax, install-step telemetry, main-thread fallback heartbeat main_thread_alive every 30s).
+
+## 0.1.22 - 2026-05-17T16:38:57Z
+- Work Packets: `WP-0221`, `WP-0223`
+- Commit: `fafbe71`
+- Offline Bundle ID: `offline_full_win64_20260513_232818`
+- Artifacts:
+  - `product/desktop/build_target/Current/release/bundle/nsis/VoxVulgi_0.1.22_x64-setup.exe`
+  - `product/desktop/build_target/Current/release/bundle/msi/VoxVulgi_0.1.22_x64_en-US.msi`
+- Notes: v0.1.22: fix Worker bundling (revert to Vite ?worker shorthand which emits proper .js chunk; v0.1.21 used new URL(...ts) which Vite treated as asset copy and shipped unprocessed TypeScript). All other v0.1.21 content preserved: PRAGMA synchronous=NORMAL, list_youtube_subscriptions GROUP_CONCAT JOIN, install-step telemetry, main_thread_alive heartbeat.
+
+## 0.1.23 - 2026-05-17T17:51:52Z
+- Work Packets: `WP-0221`, `WP-0223`, `WP-0224`
+- Commit: `fafbe71`
+- Offline Bundle ID: `offline_full_win64_20260513_232818`
+- Artifacts:
+  - `product/desktop/build_target/Current/release/bundle/nsis/VoxVulgi_0.1.23_x64-setup.exe`
+  - `product/desktop/build_target/Current/release/bundle/msi/VoxVulgi_0.1.23_x64_en-US.msi`
+- Notes: WP-0224 v0.1.23 freeze fix: agent bridge CORS unblock (Access-Control-Allow-Origin + OPTIONS preflight) so freeze-detector Worker can actually post; db::open_readonly bypasses job-runner write queue for the 5 UI list functions (library_list, list_localization_workspace_items, instagram_subscriptions_list, youtube_subscriptions_list, youtube_subscription_groups_list).
+
+## 0.1.24 - 2026-05-17T20:05:38Z
+- Work Packets: `WP-0221`, `WP-0223`, `WP-0224`, `WP-0226`
+- Commit: `fafbe71`
+- Offline Bundle ID: `offline_full_win64_20260513_232818`
+- Artifacts:
+  - `product/desktop/build_target/Current/release/bundle/nsis/VoxVulgi_0.1.24_x64-setup.exe`
+  - `product/desktop/build_target/Current/release/bundle/msi/VoxVulgi_0.1.24_x64_en-US.msi`
+- Notes: WP-0226 v0.1.24 comprehensive read-only UI sweep: 10 engine pure-read functions now use db::open_readonly (jobs::list_jobs, jobs::get_job, jobs::list_jobs_for_item, jobs::get_queue_control, jobs::get_runtime_settings, library::get_item_by_id, subtitle_tracks::list_tracks, subtitle_tracks::get_track, video_libraries::get_video_library_by_id) bypassing the job-runner write queue. InvokeTimer added to library_get, jobs_list, jobs_list_for_item, jobs_queue_control_get, jobs_runtime_settings_get so any residual slow Jobs path is visible in the next freeze trace.
+
+## 0.1.25 - 2026-05-17T20:49:11Z
+- Work Packets: `WP-0221`, `WP-0223`, `WP-0224`, `WP-0226`, `WP-0227`
+- Commit: `fafbe71`
+- Offline Bundle ID: `offline_full_win64_20260513_232818`
+- Artifacts:
+  - `product/desktop/build_target/Current/release/bundle/nsis/VoxVulgi_0.1.25_x64-setup.exe`
+  - `product/desktop/build_target/Current/release/bundle/msi/VoxVulgi_0.1.25_x64_en-US.msi`
+- Notes: WP-0227 v0.1.25 voice pack auto-install + resume: Phase2 install job handler now reads prior latest.json and carries forward done steps so resumed installs don't redo 5-15 minutes of work; startup-phase background thread auto-enqueues install when packs aren't fully done (Safe Mode suppresses). Trace rows phase2_auto_install_enqueue / _failed. Bundles WP-0226 read-only sweep already in source.
+
+## 0.1.26 - 2026-05-17T21:55:54Z
+- Work Packets: `WP-0221`, `WP-0223`, `WP-0224`, `WP-0226`, `WP-0227`, `WP-0228`
+- Commit: `fafbe71`
+- Offline Bundle ID: `offline_full_win64_20260513_232818`
+- Artifacts:
+  - `product/desktop/build_target/Current/release/bundle/nsis/VoxVulgi_0.1.26_x64-setup.exe`
+  - `product/desktop/build_target/Current/release/bundle/msi/VoxVulgi_0.1.26_x64_en-US.msi`
+- Notes: WP-0228 EMERGENCY ROLLBACK of WP-0227 auto-install: operator reported v0.1.25 became unusable due to background install contention. Auto-enqueue thread removed from lib.rs. Resume logic in jobs.rs kept (safe; helps manual installs). v0.1.26 = v0.1.24 + Phase2 install resume logic + freeze diagnostic infrastructure.

@@ -109,6 +109,8 @@ A timed-out health check on a stale port file is the most common false-negative 
 | `POST` | `/agent/navigate` | `{"page":"video_ingest"}` | Switches the active page. Valid pages: `localization`, `video_ingest`, `instagram_archive`, `image_archive`, `media_library`, `jobs`, `diagnostics`, `options`. |
 | `POST` | `/agent/snapshot` | `{"subfolder":"WP-0171","label":"jobs_page"}` | Captures a snapshot via html2canvas and returns `{"path":"..."}`. Blocks up to 30 seconds. |
 | `POST` | `/agent/dump` | `{"subfolder":"WP-0209","label":"after_run"}` | Writes a JSON state dump (URL, viewport, `.content` scroll, filtered `voxvulgi.*` localStorage, mounted `loc-*` element ids, last 200 console entries) and returns `{"path":"..."}`. Blocks up to 10 seconds. (WP-0209) |
+| `POST` | `/agent/freeze_event` | `{"event":"freeze_detected","details":{...},"level":"warn"}` | Worker-only ingress used by the freeze detector. Accepted `event` values: `freeze_detected`, `freeze_recovered`, `worker_alive` (the v0.1.20 liveness heartbeat, fires every 30 s). Appends a row to `diagnostics_trace.jsonl`. Returns `{"status":"ok"}`. (WP-0221) |
+| `POST` | `/agent/freeze_dump` | `{"limit":1000,"note":"..."}` | Bundles app version, pid, bridge port, agent state, and the recent trace tail into a single JSON report. Writes a timestamped file plus `freeze_report_latest.json` under the trace dir's `freeze_reports/` subfolder. Returns `{"path","latest_path","trace_rows_included"}`. Runs on the bridge thread, so it works even when the WebView is frozen. (WP-0221) |
 
 ### Example (from a terminal or agent script)
 
@@ -127,3 +129,48 @@ curl -s -X POST http://127.0.0.1:$PORT/agent/dump     -d '{"subfolder":"audit","
 - `window.__voxVulgiNavigate(page)` — switch page programmatically.
 - `window.__voxVulgiRequestSnapshot(subfolder?, label?)` — capture snapshot (returns path).
 - `window.__voxVulgiRequestDump(subfolder?, label?)` — write paired JSON state dump (returns path). The dump file is `<label>_<ts>.dump.json` next to the snapshot under the same subfolder.
+
+## Freeze Report (WP-0221)
+
+The app continuously records UI freeze evidence (Worker-driven main-thread heartbeat + OS-thread scheduling skew + per-command timing for the most-suspect Tauri commands). Any agent investigating a freeze should read the freeze report directly — no operator relay required.
+
+### Where the data lives (works on v0.1.18+)
+
+- **Self-contained report**: `%APPDATA%\com.voxvulgi.voxvulgi\diagnostics\traces\freeze_reports\freeze_report_latest.json`
+  - Overwritten each time the dump is triggered. **This is the canonical path agents should `Read` first.**
+  - A timestamped sibling `freeze_report_<ts>.json` is kept alongside for history.
+- **Raw continuous trace**: `%APPDATA%\com.voxvulgi.voxvulgi\diagnostics\traces\diagnostics_trace.jsonl`
+  - JSON Lines, one row per event. Freeze-related event names: `freeze_detected`, `freeze_recovered`, `worker_alive` (v0.1.20+), `event_loop_skew`, `command_slow`, `command_completed`, `freeze_report_written`.
+- Both paths follow the diagnostics trace dir override (`config/diagnostics_trace_dir.txt`); if the operator moved the trace folder, the freeze reports moved with it.
+
+### How the operator (or an agent) triggers a fresh dump
+
+- **From a terminal, while the app is frozen or responsive**: run `vvfreeze.cmd` at the repo root. It reads `agent_bridge_port.txt`, verifies the pid (per WP-0210), POSTs `/agent/freeze_dump`, and prints the resulting paths. Works while the WebView main thread is hung because the bridge runs on its own thread.
+- **From inside the app**: Diagnostics → "Diagnostics trace" → "Freeze events" → "Capture freeze report now". Equivalent Tauri command: `invoke("agent_freeze_dump_now", { note })`.
+- **Direct HTTP**: `POST http://127.0.0.1:<bridge_port>/agent/freeze_dump` with body `{"limit": 1000, "note": "..."}` (both fields optional).
+
+### Report payload schema
+
+```json
+{
+  "wp": "WP-0221",
+  "generated_at_ms": 1715900000000,
+  "app_version": "0.1.18",
+  "pid": 12345,
+  "bridge_port": 51234,
+  "agent_state": { "current_page": "diagnostics", "editor_item_id": null, "safe_mode": false },
+  "note": "operator note or null",
+  "trace_limit_requested": 1000,
+  "recent_trace_count": 137,
+  "recent_trace": [ /* DiagnosticsTraceEntry rows, oldest first */ ]
+}
+```
+
+### Recommended agent flow
+
+1. Operator says "I just ran vvfreeze" (or clicked the button). Read `freeze_report_latest.json` with the absolute APPDATA path above.
+2. **Sanity check the Worker first (v0.1.20+)**: grep for `worker_alive` rows in `recent_trace`. They should appear every ~30 seconds. If they are entirely missing while `runtime_sample` rows are still ticking, the freeze-detector Worker silently failed to install — the absence of `freeze_detected` rows in older traces does not mean "no freeze happened", it means "the Worker never ran". Surface that as a separate bug rather than diagnosing the freeze itself.
+3. Scan `recent_trace` for `freeze_detected` / `freeze_recovered` pairs to get freeze duration and surrounding context (last window event, current page, in-flight ping id). The threshold is **250 ms** as of v0.1.20 (was 500 ms in v0.1.18 / v0.1.19), so short stalls are now visible.
+4. Cross-reference timestamps with `command_completed` / `command_slow` rows from the same trace window to identify which Tauri command was in flight when the freeze started.
+5. `event_loop_skew` rows indicate process-level scheduling starvation (SMB stall on UNC paths, AV scan, DLL loader lock) — these are often the upstream cause of a freeze that masquerades as a Tauri command stall.
+6. If `worker_alive` rows are present **but** there are no `freeze_detected` rows during a freeze the operator observed, the JS event loop is not the blocked thread. Suspect the WebView UI / GPU compositor layer (the app uses `transparent: true, decorations: false` in `tauri.conf.json`, a frameless+transparent config that has known DWM-compositor stalls on Windows under load). That class of freeze needs a different probe than the JS Worker — log it for the next diagnostic build.

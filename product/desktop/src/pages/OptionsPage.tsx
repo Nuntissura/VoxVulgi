@@ -9,6 +9,7 @@ import {
   getStoredDesktopFontScalePct,
 } from "../lib/fontScale";
 import { openPathBestEffort } from "../lib/pathOpener";
+import { safeLocalStorageGet, safeLocalStorageSet } from "../lib/persist";
 import {
   featureRootStatus,
   refreshSharedDownloadDirStatus,
@@ -54,6 +55,28 @@ export function OptionsPage() {
   const [authPreflightBusy, setAuthPreflightBusy] = useState(false);
   const [authPreflightUrl, setAuthPreflightUrl] = useState("https://www.youtube.com/watch?v=BaW_jenozKcj");
   const [authMessage, setAuthMessage] = useState("");
+  const [legacyRecoveryRoot, setLegacyRecoveryRoot] = useState(() => {
+    return safeLocalStorageGet("voxvulgi.v1.library.legacy_archive_root") ?? "";
+  });
+  const [legacyRecoveryInstallPath, setLegacyRecoveryInstallPath] = useState(() => {
+    return (
+      safeLocalStorageGet("voxvulgi.v1.library.legacy_archive_install_path") ??
+      "C:\\Program Files\\4KDownload\\4kvideodownloaderplus"
+    );
+  });
+  const [legacyRecoveryMaxDepth, setLegacyRecoveryMaxDepth] = useState(() => {
+    const raw = safeLocalStorageGet("voxvulgi.v1.library.legacy_archive_max_depth");
+    const parsed = raw ? Number(raw) : NaN;
+    return Number.isFinite(parsed) && parsed >= 1 ? Math.round(parsed) : 4;
+  });
+  const [legacyRecoveryMaxFiles, setLegacyRecoveryMaxFiles] = useState(() => {
+    const raw = safeLocalStorageGet("voxvulgi.v1.library.legacy_archive_max_files");
+    const parsed = raw ? Number(raw) : NaN;
+    return Number.isFinite(parsed) && parsed >= 1 ? Math.round(parsed) : 15000;
+  });
+  const [legacyRecoveryBusy, setLegacyRecoveryBusy] = useState(false);
+  const [legacyRecoveryMessage, setLegacyRecoveryMessage] = useState("");
+  const [legacyRecoveryReportPath, setLegacyRecoveryReportPath] = useState("");
 
   useEffect(() => {
     invoke<any>("config_youtube_auth_get")
@@ -62,6 +85,31 @@ export function OptionsPage() {
       })
       .catch((err) => console.error("Failed to load auth config", err));
   }, []);
+
+  useEffect(() => {
+    safeLocalStorageSet("voxvulgi.v1.library.legacy_archive_root", legacyRecoveryRoot);
+  }, [legacyRecoveryRoot]);
+
+  useEffect(() => {
+    safeLocalStorageSet(
+      "voxvulgi.v1.library.legacy_archive_install_path",
+      legacyRecoveryInstallPath,
+    );
+  }, [legacyRecoveryInstallPath]);
+
+  useEffect(() => {
+    safeLocalStorageSet(
+      "voxvulgi.v1.library.legacy_archive_max_depth",
+      String(legacyRecoveryMaxDepth),
+    );
+  }, [legacyRecoveryMaxDepth]);
+
+  useEffect(() => {
+    safeLocalStorageSet(
+      "voxvulgi.v1.library.legacy_archive_max_files",
+      String(legacyRecoveryMaxFiles),
+    );
+  }, [legacyRecoveryMaxFiles]);
 
   async function saveYoutubeAuth() {
     setAuthBusy(true);
@@ -116,6 +164,100 @@ export function OptionsPage() {
     const selected = await chooseFolder(`Select ${title.toLowerCase()}`);
     if (!selected) return;
     await setFeatureDownloadDir(feature, selected);
+  }
+
+  async function chooseLegacyRecoveryRoot() {
+    const selected = await chooseFolder("Select legacy video archive root");
+    if (!selected) return;
+    setLegacyRecoveryRoot(selected);
+  }
+
+  async function chooseLegacyRecoveryInstallPath() {
+    const selected = await chooseFolder("Select 4K Video Downloader+ install or data folder");
+    if (!selected) return;
+    setLegacyRecoveryInstallPath(selected);
+  }
+
+  async function runLegacyRecovery<T>(
+    action: () => Promise<T>,
+    summarize: (summary: T) => string,
+  ) {
+    setLegacyRecoveryBusy(true);
+    setLegacyRecoveryMessage("");
+    try {
+      const summary = await action();
+      setLegacyRecoveryMessage(summarize(summary));
+    } catch (e) {
+      setLegacyRecoveryMessage(`Error: ${String(e)}`);
+    } finally {
+      setLegacyRecoveryBusy(false);
+    }
+  }
+
+  async function analyzeLegacyRecoveryRoot() {
+    const root = legacyRecoveryRoot.trim();
+    if (!root) {
+      setLegacyRecoveryMessage("Error: choose a legacy archive root first.");
+      return;
+    }
+    await runLegacyRecovery(
+      () =>
+        invoke<any>("legacy_archive_analyze", {
+          rootPath: root,
+          installPath: legacyRecoveryInstallPath.trim() || null,
+          maxDepth: Math.max(1, Math.min(16, Math.round(legacyRecoveryMaxDepth))),
+          maxFiles: Math.max(1, Math.min(100000, Math.round(legacyRecoveryMaxFiles))),
+        }),
+      (summary) => {
+        setLegacyRecoveryReportPath(summary.local_report_path || "");
+        return `Analyzed ${summary.media_file_count} sampled media file(s), ${summary.managed_container_count} managed 4KVDP container(s), ${summary.unmatched_top_level_dirs} unmatched top-level folder(s).`;
+      },
+    );
+  }
+
+  async function importLegacyRecoveryState() {
+    const root = legacyRecoveryRoot.trim();
+    if (!root) {
+      setLegacyRecoveryMessage("Error: choose a legacy archive root first.");
+      return;
+    }
+    await runLegacyRecovery(
+      () =>
+        invoke<any>("youtube_subscriptions_import_4kvdp_state", {
+          rootDir: root,
+          sqlitePath: legacyRecoveryInstallPath.trim() || null,
+        }),
+      (summary) =>
+        `Imported ${summary.imported_sources} source(s): ${summary.imported_subscription_sources} subscription(s), ${summary.imported_playlist_sources} playlist(s), ${summary.updated} updated.`,
+    );
+  }
+
+  async function importLegacyRecoveryExportDir() {
+    const selected = await chooseFolder("Select exported 4KVDP subscription folder");
+    if (!selected) return;
+    await runLegacyRecovery(
+      () => invoke<any>("youtube_subscriptions_import_4kvdp_dir", { dir: selected }),
+      (summary) =>
+        `Imported ${summary.imported_subscriptions} exported subscription(s), seeded ${summary.archive_seeded_entries} archive entrie(s).`,
+    );
+  }
+
+  async function indexLegacyRecoveryDownloads() {
+    const root = legacyRecoveryRoot.trim();
+    if (!root) {
+      setLegacyRecoveryMessage("Error: choose a legacy archive root first.");
+      return;
+    }
+    await runLegacyRecovery(
+      () =>
+        invoke<any>("youtube_subscriptions_import_existing_downloads", {
+          scanDir: root,
+          maxDepth: Math.max(1, Math.min(16, Math.round(legacyRecoveryMaxDepth))),
+          maxFiles: Math.max(1, Math.min(100000, Math.round(legacyRecoveryMaxFiles))),
+        }),
+      (summary) =>
+        `Scanned ${summary.discovered_media_files} file(s); imported ${summary.imported_items}, skipped ${summary.skipped_existing_items}, failures ${summary.failures}.`,
+    );
   }
 
   function updateFontScale(nextValue: number) {
@@ -218,6 +360,106 @@ export function OptionsPage() {
               Test saved YouTube cookies
             </button>
           </div>
+        </div>
+      </div>
+
+      <div className="card">
+        <h2>Advanced Recovery</h2>
+        <div style={{ color: "#4b5563", marginTop: 6, marginBottom: 12 }}>
+          Legacy 4K Video Downloader+ recovery and read-only import tools live here. These actions
+          analyze, import subscription metadata, seed archive state, and index existing media
+          without moving or deleting the legacy files.
+        </div>
+        <div className="row">
+          <label style={{ display: "flex", alignItems: "center", gap: 8, flex: 1 }}>
+            <span>Legacy archive root</span>
+            <input
+              value={legacyRecoveryRoot}
+              disabled={legacyRecoveryBusy}
+              onChange={(e) => setLegacyRecoveryRoot(e.currentTarget.value)}
+              placeholder="Absolute local or NAS folder path"
+              style={{ width: "100%" }}
+            />
+          </label>
+          <button type="button" disabled={legacyRecoveryBusy} onClick={chooseLegacyRecoveryRoot}>
+            Choose folder
+          </button>
+        </div>
+        <div className="row">
+          <label style={{ display: "flex", alignItems: "center", gap: 8, flex: 1 }}>
+            <span>4KVDP app/state folder</span>
+            <input
+              value={legacyRecoveryInstallPath}
+              disabled={legacyRecoveryBusy}
+              onChange={(e) => setLegacyRecoveryInstallPath(e.currentTarget.value)}
+              placeholder="Optional install or app-state folder"
+              style={{ width: "100%" }}
+            />
+          </label>
+          <button
+            type="button"
+            disabled={legacyRecoveryBusy}
+            onClick={chooseLegacyRecoveryInstallPath}
+          >
+            Choose folder
+          </button>
+        </div>
+        <div className="row">
+          <label style={{ display: "flex", alignItems: "center", gap: 8 }}>
+            <span>Max depth</span>
+            <input
+              type="number"
+              min={1}
+              max={16}
+              value={legacyRecoveryMaxDepth}
+              disabled={legacyRecoveryBusy}
+              onChange={(e) => setLegacyRecoveryMaxDepth(Number(e.currentTarget.value) || 1)}
+              style={{ width: 96 }}
+            />
+          </label>
+          <label style={{ display: "flex", alignItems: "center", gap: 8 }}>
+            <span>Max files</span>
+            <input
+              type="number"
+              min={1}
+              max={100000}
+              value={legacyRecoveryMaxFiles}
+              disabled={legacyRecoveryBusy}
+              onChange={(e) => setLegacyRecoveryMaxFiles(Number(e.currentTarget.value) || 1)}
+              style={{ width: 128 }}
+            />
+          </label>
+        </div>
+        {legacyRecoveryMessage ? (
+          <div
+            style={{
+              marginTop: 8,
+              color: legacyRecoveryMessage.startsWith("Error") ? "#dc2626" : "#166534",
+            }}
+          >
+            {legacyRecoveryMessage}
+          </div>
+        ) : null}
+        <div className="row">
+          <button type="button" disabled={legacyRecoveryBusy} onClick={analyzeLegacyRecoveryRoot}>
+            Analyze root
+          </button>
+          <button type="button" disabled={legacyRecoveryBusy} onClick={importLegacyRecoveryState}>
+            Import 4KVDP app state
+          </button>
+          <button type="button" disabled={legacyRecoveryBusy} onClick={importLegacyRecoveryExportDir}>
+            Import 4KVDP export
+          </button>
+          <button type="button" disabled={legacyRecoveryBusy} onClick={indexLegacyRecoveryDownloads}>
+            Index existing downloads
+          </button>
+          <button
+            type="button"
+            disabled={legacyRecoveryBusy || !legacyRecoveryReportPath}
+            onClick={() => openPathBestEffort(legacyRecoveryReportPath).catch(() => undefined)}
+          >
+            Open report
+          </button>
         </div>
       </div>
 

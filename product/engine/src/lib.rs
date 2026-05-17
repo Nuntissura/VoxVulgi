@@ -20,6 +20,7 @@ pub mod subtitles;
 pub mod tools;
 pub mod translate;
 pub mod vendor_patches;
+pub mod video_libraries;
 pub mod voice_backend_adapters;
 pub mod voice_backends;
 pub mod voice_benchmarks;

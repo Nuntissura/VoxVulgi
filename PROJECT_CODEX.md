@@ -39,6 +39,7 @@ Rules:
 - Delivery phases and milestones: `governance/workflow/ROADMAP.md`
 - Build verification and UI construction rules: `build_rules.md`
 - AI agent behavior + safety rules: `MODEL_BEHAVIOR.md`
+- Agent bridge HTTP API, visual debugger, freeze-report tooling (WP-0221): `AGENTS.md` (mirrored in `CLAUDE.md`)
 
 ## 4) Two engines approach (recommended)
 
@@ -81,3 +82,15 @@ Pick the first real implementation WP from `governance/workflow/ROADMAP.md` and 
 - Canonical source of truth:
   - `governance/spec/PRODUCT_SPEC.md` (installer clarity requirement)
   - `governance/spec/TECHNICAL_DESIGN.md` (installer maintenance mode implementation policy)
+
+## 9) Operator and agent diagnostics (WP-0221)
+
+The app exposes a localhost-only agent bridge and a freeze-detector pipeline so that an agent can inspect runtime state and freeze evidence without operator relay. Full details live in `AGENTS.md` / `CLAUDE.md` under "Headless Agent Bridge" and "Freeze Report (WP-0221)". Quick index:
+
+- **Trigger a freeze report from a terminal (works while the WebView is frozen):** run `vvfreeze.cmd` at the repo root.
+- **Canonical report path the next agent reads:** `%APPDATA%\com.voxvulgi.voxvulgi\diagnostics\traces\freeze_reports\freeze_report_latest.json`.
+- **Raw continuous trace:** `%APPDATA%\com.voxvulgi.voxvulgi\diagnostics\traces\diagnostics_trace.jsonl`.
+- **From inside the app:** Diagnostics → "Diagnostics trace" → "Freeze events" → "Capture freeze report now" button.
+- **Worker sanity check (v0.1.20+):** any freeze investigation starts by confirming `worker_alive` rows are present every ~30 s in the trace. If they are missing while `runtime_sample` rows continue, the JS freeze-detector Worker silently failed to install and the absence of `freeze_detected` rows is a Worker bug, not a quiet runtime.
+
+Do not invent parallel diagnostic surfaces; extend the existing freeze-detector pipeline and add new event names to the existing trace so agents and the Diagnostics page keep working without re-discovery.

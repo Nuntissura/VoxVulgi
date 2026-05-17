@@ -16,6 +16,10 @@ use tauri_runtime::ResizeDirection as TauriResizeDirection;
 static AGENT_APP_HANDLE: OnceLock<tauri::AppHandle> = OnceLock::new();
 static AGENT_BRIDGE_STATE: OnceLock<Arc<Mutex<AgentBridgeInner>>> = OnceLock::new();
 static AGENT_BRIDGE_FILES_DIR: OnceLock<std::path::PathBuf> = OnceLock::new();
+// WP-0221: exposed so the freeze-detector Worker can POST to /agent/freeze_event
+// without relying on Tauri IPC (which routes through the WebView main thread we
+// are trying to observe).
+static AGENT_BRIDGE_PORT: OnceLock<u16> = OnceLock::new();
 
 #[derive(Debug, Default)]
 struct AgentBridgeInner {
@@ -44,6 +48,7 @@ fn spawn_agent_bridge(app_data_dir: &std::path::Path) {
             Ok(addr) => addr.port(),
             Err(_) => return,
         };
+        let _ = AGENT_BRIDGE_PORT.set(port);
         let _ = std::fs::write(&port_file, port.to_string());
         // Sidecar with PID + start time so agents can detect a stale port file
         // (e.g., after a crash) without hitting the network and timing out.
@@ -118,17 +123,31 @@ fn handle_agent_request(stream: &mut std::net::TcpStream) {
     }
     let body_str = String::from_utf8_lossy(&body);
 
-    let (status, response_body) = match (method, path) {
-        ("GET", "/agent/health") => ("200 OK", r#"{"status":"ok"}"#.to_string()),
-        ("GET", "/agent/state") => ("200 OK", agent_handle_state()),
-        ("POST", "/agent/navigate") => agent_handle_navigate(&body_str),
-        ("POST", "/agent/snapshot") => agent_handle_snapshot(&body_str),
-        ("POST", "/agent/dump") => agent_handle_dump(&body_str),
-        _ => ("404 Not Found", r#"{"error":"not found"}"#.to_string()),
+    // WP-0224: handle CORS preflight (OPTIONS) for every route — Workers in
+    // the WebView post `Content-Type: application/json` which triggers a
+    // browser preflight. Returning 404 here was silently blocking the
+    // follow-up POST and producing the v0.1.18-v0.1.22 "Worker alive but
+    // never reaches the bridge" pattern.
+    let (status, response_body) = if method == "OPTIONS" {
+        ("204 No Content", String::new())
+    } else {
+        match (method, path) {
+            ("GET", "/agent/health") => ("200 OK", r#"{"status":"ok"}"#.to_string()),
+            ("GET", "/agent/state") => ("200 OK", agent_handle_state()),
+            ("POST", "/agent/navigate") => agent_handle_navigate(&body_str),
+            ("POST", "/agent/snapshot") => agent_handle_snapshot(&body_str),
+            ("POST", "/agent/dump") => agent_handle_dump(&body_str),
+            ("POST", "/agent/freeze_event") => agent_handle_freeze_event(&body_str),
+            ("POST", "/agent/freeze_dump") => agent_handle_freeze_dump(&body_str),
+            _ => ("404 Not Found", r#"{"error":"not found"}"#.to_string()),
+        }
     };
 
+    // WP-0224: add CORS headers to every response so the freeze-detector
+    // Worker (origin `http://tauri.localhost`) can POST to the bridge on
+    // `127.0.0.1:<port>`. Localhost-only listener means `*` is safe.
     let response = format!(
-        "HTTP/1.1 {}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+        "HTTP/1.1 {}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nAccess-Control-Allow-Origin: *\r\nAccess-Control-Allow-Methods: GET, POST, OPTIONS\r\nAccess-Control-Allow-Headers: Content-Type\r\nAccess-Control-Max-Age: 86400\r\nConnection: close\r\n\r\n{}",
         status,
         response_body.len(),
         response_body
@@ -321,13 +340,197 @@ fn agent_handle_dump(body: &str) -> (&'static str, String) {
         }
     }
 }
+
+// WP-0221: Freeze-event ingress for the Worker-driven freeze detector.
+// The freeze-detector Worker runs on its own browser thread and POSTs here
+// when the WebView main thread stops answering pings, so the report path
+// must not depend on Tauri IPC (which routes through the very thread we are
+// trying to observe).
+fn agent_handle_freeze_event(body: &str) -> (&'static str, String) {
+    let parsed: serde_json::Value = match serde_json::from_str(body) {
+        Ok(v) => v,
+        Err(_) => return ("400 Bad Request", r#"{"error":"invalid json"}"#.to_string()),
+    };
+
+    let event = parsed
+        .get("event")
+        .and_then(|v| v.as_str())
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .unwrap_or("freeze_detected")
+        .to_string();
+    if event != "freeze_detected"
+        && event != "freeze_recovered"
+        && event != "worker_alive"
+    {
+        return (
+            "400 Bad Request",
+            r#"{"error":"event must be freeze_detected, freeze_recovered, or worker_alive"}"#
+                .to_string(),
+        );
+    }
+
+    let details = parsed
+        .get("details")
+        .cloned()
+        .unwrap_or(serde_json::Value::Null);
+    let level = parsed
+        .get("level")
+        .and_then(|v| v.as_str())
+        .filter(|s| !s.is_empty())
+        .unwrap_or("warn")
+        .to_string();
+
+    if let Some(app) = AGENT_APP_HANDLE.get() {
+        if let Some(state) = app.try_state::<AppState>() {
+            append_diagnostics_trace_row_best_effort(&state.paths, &event, details, &level);
+        }
+    }
+
+    ("200 OK", r#"{"status":"ok"}"#.to_string())
+}
+
+// WP-0221: Freeze report bundling. POSTed by `vvfreeze.cmd` (or the Diagnostics
+// page button) to capture a single self-contained JSON report that an agent
+// can read without operator relay. Runs on the bridge thread so it works
+// even while the WebView main thread is frozen.
+//
+// Output layout (under the active diagnostics trace dir):
+//   freeze_reports/freeze_report_<ts>.json   (timestamped, kept)
+//   freeze_reports/freeze_report_latest.json (overwritten each call, the
+//                                             stable path agents should read)
+//
+// Request body (all optional):
+//   { "limit": <usize, default 1000, clamped 1..=5000>,
+//     "note":  "<free-form operator note saved into the report>" }
+fn agent_handle_freeze_dump(body: &str) -> (&'static str, String) {
+    let parsed: serde_json::Value = serde_json::from_str(body).unwrap_or(serde_json::json!({}));
+    let limit = parsed
+        .get("limit")
+        .and_then(|v| v.as_u64())
+        .map(|v| v as usize)
+        .unwrap_or(1000)
+        .clamp(1, 5000);
+    let note = parsed
+        .get("note")
+        .and_then(|v| v.as_str())
+        .map(str::to_string);
+
+    let app = match AGENT_APP_HANDLE.get() {
+        Some(a) => a,
+        None => {
+            return (
+                "503 Service Unavailable",
+                r#"{"error":"app handle unavailable"}"#.to_string(),
+            )
+        }
+    };
+    let state = match app.try_state::<AppState>() {
+        Some(s) => s,
+        None => {
+            return (
+                "503 Service Unavailable",
+                r#"{"error":"app state unavailable"}"#.to_string(),
+            )
+        }
+    };
+    let paths = state.paths.clone();
+
+    let trace_dir = match paths.effective_diagnostics_trace_dir() {
+        Ok(d) => d,
+        Err(e) => {
+            return (
+                "500 Internal Server Error",
+                format!(r#"{{"error":"trace dir: {}"}}"#, e),
+            )
+        }
+    };
+    let out_dir = trace_dir.join("freeze_reports");
+    if let Err(e) = std::fs::create_dir_all(&out_dir) {
+        return (
+            "500 Internal Server Error",
+            format!(r#"{{"error":"create dir: {}"}}"#, e),
+        );
+    }
+
+    let recent_trace =
+        read_recent_diagnostics_trace_entries(&paths, limit).unwrap_or_default();
+
+    let (current_page, editor_item_id, safe_mode) = {
+        let s = agent_bridge_state().lock().unwrap();
+        (
+            s.current_page.clone(),
+            s.editor_item_id.clone(),
+            s.safe_mode,
+        )
+    };
+
+    let report = serde_json::json!({
+        "wp": "WP-0221",
+        "generated_at_ms": now_epoch_ms_i64(),
+        "app_version": env!("CARGO_PKG_VERSION"),
+        "pid": std::process::id(),
+        "bridge_port": AGENT_BRIDGE_PORT.get().copied(),
+        "agent_state": {
+            "current_page": current_page,
+            "editor_item_id": editor_item_id,
+            "safe_mode": safe_mode,
+        },
+        "note": note,
+        "trace_limit_requested": limit,
+        "recent_trace_count": recent_trace.len(),
+        "recent_trace": recent_trace,
+    });
+    let body = match serde_json::to_string_pretty(&report) {
+        Ok(s) => s,
+        Err(e) => {
+            return (
+                "500 Internal Server Error",
+                format!(r#"{{"error":"serialize: {}"}}"#, e),
+            )
+        }
+    };
+
+    let ts = now_epoch_ms_i64();
+    let timestamped = out_dir.join(format!("freeze_report_{}.json", ts));
+    let latest = out_dir.join("freeze_report_latest.json");
+    if let Err(e) = std::fs::write(&timestamped, body.as_bytes()) {
+        return (
+            "500 Internal Server Error",
+            format!(r#"{{"error":"write timestamped: {}"}}"#, e),
+        );
+    }
+    let _ = std::fs::write(&latest, body.as_bytes());
+
+    append_diagnostics_trace_row_best_effort(
+        &paths,
+        "freeze_report_written",
+        serde_json::json!({
+            "timestamped_path": timestamped.to_string_lossy().to_string(),
+            "latest_path": latest.to_string_lossy().to_string(),
+            "trace_rows_included": recent_trace.len(),
+        }),
+        "info",
+    );
+
+    (
+        "200 OK",
+        serde_json::json!({
+            "path": timestamped.to_string_lossy().to_string(),
+            "latest_path": latest.to_string_lossy().to_string(),
+            "trace_rows_included": recent_trace.len(),
+        })
+        .to_string(),
+    )
+}
+
 use voxvulgi_engine::models::ModelStore;
 use voxvulgi_engine::paths::AppPaths;
 use voxvulgi_engine::{
     config, db, diagnostics, instagram_subscriptions, jobs, library, speakers, subscriptions,
     subtitle_tracks, subtitles, tools, translate, voice_backend_adapters, voice_backends,
     voice_benchmarks, voice_cast_packs, voice_cleanup, voice_library, voice_plans,
-    voice_reference_candidates, voice_reference_curation, voice_templates,
+    video_libraries, voice_reference_candidates, voice_reference_curation, voice_templates,
 };
 
 #[derive(Debug, Clone, serde::Deserialize)]
@@ -1008,6 +1211,87 @@ fn append_diagnostics_trace_row_best_effort(
     level: &str,
 ) {
     let _ = append_diagnostics_trace_row(paths, event.to_string(), details, level.to_string());
+}
+
+// WP-0221: RAII timer for instrumented Tauri commands. Construct at the top of
+// a command; on drop it records elapsed_ms. A `command_slow` row is also
+// emitted when elapsed >= 500 ms so the trace identifies any single hang
+// without flooding on fast calls.
+struct InvokeTimer {
+    paths: AppPaths,
+    name: &'static str,
+    started: std::time::Instant,
+    started_at_ms: i64,
+}
+
+impl InvokeTimer {
+    fn start(paths: AppPaths, name: &'static str) -> Self {
+        Self {
+            paths,
+            name,
+            started: std::time::Instant::now(),
+            started_at_ms: now_epoch_ms_i64(),
+        }
+    }
+}
+
+impl Drop for InvokeTimer {
+    fn drop(&mut self) {
+        let elapsed_ms = self.started.elapsed().as_millis() as u64;
+        append_diagnostics_trace_row_best_effort(
+            &self.paths,
+            "command_completed",
+            serde_json::json!({
+                "cmd": self.name,
+                "started_at_ms": self.started_at_ms,
+                "elapsed_ms": elapsed_ms,
+            }),
+            "info",
+        );
+        if elapsed_ms >= 500 {
+            append_diagnostics_trace_row_best_effort(
+                &self.paths,
+                "command_slow",
+                serde_json::json!({
+                    "cmd": self.name,
+                    "elapsed_ms": elapsed_ms,
+                }),
+                "warn",
+            );
+        }
+    }
+}
+
+// WP-0221: Process-scheduling skew heartbeat. Spawned on a dedicated OS thread
+// at app boot. Sleeps for `target_interval_ms` and measures wall-clock vs
+// expected. If the process is starved (hung syscall, SMB stall, AV scan,
+// DLL loader lock, OS thrash), the actual interval exceeds expected by more
+// than `skew_threshold_ms` and we emit one `event_loop_skew` trace row.
+fn spawn_event_loop_skew_heartbeat(paths: AppPaths) {
+    const TARGET_INTERVAL_MS: u64 = 250;
+    const SKEW_THRESHOLD_MS: u64 = 500;
+    std::thread::spawn(move || {
+        let mut last = std::time::Instant::now();
+        loop {
+            std::thread::sleep(Duration::from_millis(TARGET_INTERVAL_MS));
+            let now = std::time::Instant::now();
+            let elapsed_ms = now.duration_since(last).as_millis() as u64;
+            last = now;
+            let skew_ms = elapsed_ms.saturating_sub(TARGET_INTERVAL_MS);
+            if skew_ms >= SKEW_THRESHOLD_MS {
+                append_diagnostics_trace_row_best_effort(
+                    &paths,
+                    "event_loop_skew",
+                    serde_json::json!({
+                        "target_interval_ms": TARGET_INTERVAL_MS,
+                        "actual_interval_ms": elapsed_ms,
+                        "skew_ms": skew_ms,
+                    }),
+                    "warn",
+                );
+            }
+        }
+    });
 }
 
 fn read_recent_diagnostics_trace_entries(
@@ -2047,12 +2331,27 @@ fn shell_reveal_target(path: &std::path::Path) -> Result<(), String> {
     #[cfg(target_os = "windows")]
     {
         let mut command = std::process::Command::new("explorer");
+        let is_select = !path.is_dir();
         if path.is_dir() {
             command.arg(path.as_os_str());
         } else {
             command.arg("/select,").arg(path.as_os_str());
         }
-        return run_shell_command(&mut command, "reveal path");
+        // WP-0222: explorer.exe /select,<file> returns exit code 1 even when
+        // it successfully opens Explorer and selects the file. Treat exit 1
+        // as success only for the /select, call path; folder-only reveals
+        // keep strict success semantics.
+        let status = command
+            .status()
+            .map_err(|e| format!("reveal path: {e}"))?;
+        if !status.success() {
+            let code = status.code();
+            if is_select && code == Some(1) {
+                return Ok(());
+            }
+            return Err(format!("reveal path failed with exit code {:?}", code));
+        }
+        return Ok(());
     }
 
     #[cfg(target_os = "macos")]
@@ -4141,7 +4440,30 @@ fn safe_mode_status(state: State<'_, AppState>) -> Result<SafeModeStatus, String
 
 #[tauri::command]
 fn startup_status(state: State<'_, AppState>) -> Result<StartupStatus, String> {
+    let _timer = InvokeTimer::start(state.paths.clone(), "startup_status");
     current_startup_status(&state)
+}
+
+// WP-0221: expose the agent-bridge port to the frontend so the freeze-detector
+// Worker can POST `/agent/freeze_event` directly (bypassing Tauri IPC, which
+// routes through the WebView main thread we are trying to observe).
+#[tauri::command]
+fn agent_bridge_port() -> Option<u16> {
+    AGENT_BRIDGE_PORT.get().copied()
+}
+
+// WP-0221: in-app trigger for the freeze-report dump (the same one
+// `POST /agent/freeze_dump` produces). Useful when the app is still
+// responsive enough to click; for unresponsive states use `vvfreeze.cmd`
+// at the repo root, which hits the agent bridge on its own thread.
+#[tauri::command]
+fn agent_freeze_dump_now(note: Option<String>) -> Result<serde_json::Value, String> {
+    let body = serde_json::json!({ "limit": 1000, "note": note }).to_string();
+    let (status, response) = agent_handle_freeze_dump(&body);
+    if !status.starts_with("200") {
+        return Err(response);
+    }
+    serde_json::from_str(&response).map_err(|e| e.to_string())
 }
 
 #[tauri::command]
@@ -5884,6 +6206,7 @@ fn library_list(
     limit: usize,
     offset: usize,
 ) -> Result<Vec<library::LibraryItem>, String> {
+    let _timer = InvokeTimer::start(state.paths.clone(), "library_list");
     library::list_items(&state.paths, limit, offset).map_err(|e| e.to_string())
 }
 
@@ -5902,6 +6225,7 @@ fn library_get(
     state: State<'_, AppState>,
     item_id: String,
 ) -> Result<library::LibraryItem, String> {
+    let _timer = InvokeTimer::start(state.paths.clone(), "library_get");
     library::get_item_by_id(&state.paths, &item_id).map_err(|e| e.to_string())
 }
 
@@ -5909,6 +6233,7 @@ fn library_get(
 fn youtube_subscriptions_list(
     state: State<'_, AppState>,
 ) -> Result<Vec<subscriptions::YoutubeSubscriptionRow>, String> {
+    let _timer = InvokeTimer::start(state.paths.clone(), "youtube_subscriptions_list");
     subscriptions::list_youtube_subscriptions(&state.paths).map_err(|e| e.to_string())
 }
 
@@ -5935,8 +6260,52 @@ fn youtube_subscriptions_upsert(
 }
 
 #[tauri::command]
+fn youtube_subscriptions_set_library(
+    state: State<'_, AppState>,
+    id: String,
+    library_id: Option<String>,
+) -> Result<subscriptions::YoutubeSubscriptionRow, String> {
+    subscriptions::set_youtube_subscription_library(&state.paths, &id, library_id.as_deref())
+        .map_err(|e| e.to_string())
+}
+
+#[tauri::command]
 fn youtube_subscriptions_delete(state: State<'_, AppState>, id: String) -> Result<(), String> {
     subscriptions::delete_youtube_subscription(&state.paths, &id).map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+fn video_libraries_list(
+    state: State<'_, AppState>,
+) -> Result<Vec<video_libraries::VideoLibraryRow>, String> {
+    let _timer = InvokeTimer::start(state.paths.clone(), "video_libraries_list");
+    video_libraries::list_video_libraries(&state.paths).map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+fn video_libraries_upsert(
+    state: State<'_, AppState>,
+    library: video_libraries::VideoLibraryUpsert,
+) -> Result<video_libraries::VideoLibraryRow, String> {
+    let _timer = InvokeTimer::start(state.paths.clone(), "video_libraries_upsert");
+    video_libraries::upsert_video_library(&state.paths, library).map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+fn video_libraries_set_active(
+    state: State<'_, AppState>,
+    id: String,
+) -> Result<video_libraries::VideoLibraryRow, String> {
+    let _timer = InvokeTimer::start(state.paths.clone(), "video_libraries_set_active");
+    video_libraries::set_active_video_library(&state.paths, &id).map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+fn video_libraries_remove(
+    state: State<'_, AppState>,
+    id: String,
+) -> Result<Vec<video_libraries::VideoLibraryRow>, String> {
+    video_libraries::remove_video_library(&state.paths, &id).map_err(|e| e.to_string())
 }
 
 #[tauri::command]
@@ -6021,6 +6390,7 @@ async fn youtube_subscriptions_import_4kvdp_state(
 fn youtube_subscription_groups_list(
     state: State<'_, AppState>,
 ) -> Result<Vec<subscriptions::YoutubeSubscriptionGroupRow>, String> {
+    let _timer = InvokeTimer::start(state.paths.clone(), "youtube_subscription_groups_list");
     subscriptions::list_youtube_subscription_groups(&state.paths).map_err(|e| e.to_string())
 }
 
@@ -6176,6 +6546,7 @@ fn instagram_subscriptions_queue_one(
 fn instagram_subscriptions_queue_all_active(
     state: State<'_, AppState>,
 ) -> Result<Vec<jobs::JobRow>, String> {
+    let _timer = InvokeTimer::start(state.paths.clone(), "instagram_subscriptions_queue_all_active");
     instagram_subscriptions::queue_all_active_instagram_subscriptions(&state.paths)
         .map_err(|e| e.to_string())
 }
@@ -6287,6 +6658,7 @@ async fn jobs_list(
     limit: usize,
     offset: usize,
 ) -> Result<Vec<jobs::JobRow>, String> {
+    let _timer = InvokeTimer::start(state.paths.clone(), "jobs_list");
     let paths = state.paths.clone();
     tauri::async_runtime::spawn_blocking(move || {
         jobs::list_jobs(&paths, limit, offset).map_err(|e| e.to_string())
@@ -6303,6 +6675,7 @@ async fn jobs_list_for_item(
     limit: usize,
     offset: usize,
 ) -> Result<Vec<jobs::JobRow>, String> {
+    let _timer = InvokeTimer::start(state.paths.clone(), "jobs_list_for_item");
     let item_id = item_id
         .or(itemId)
         .map(|v| v.trim().to_string())
@@ -6346,6 +6719,7 @@ fn jobs_enqueue_download_batch(
     auth_cookie: Option<String>,
     output_dir: Option<String>,
     use_browser_cookies: Option<bool>,
+    browser_cookie_source: Option<String>,
     preset_id: Option<String>,
 ) -> Result<Vec<jobs::JobRow>, String> {
     jobs::enqueue_download_direct_url_batch(
@@ -6354,6 +6728,7 @@ fn jobs_enqueue_download_batch(
         auth_cookie,
         output_dir,
         use_browser_cookies,
+        browser_cookie_source,
         preset_id,
     )
     .map_err(|e| e.to_string())
@@ -6366,6 +6741,7 @@ fn jobs_enqueue_instagram_batch(
     auth_cookie: Option<String>,
     output_dir: Option<String>,
     use_browser_cookies: Option<bool>,
+    browser_cookie_source: Option<String>,
 ) -> Result<Vec<jobs::JobRow>, String> {
     jobs::enqueue_download_instagram_batch(
         &state.paths,
@@ -6373,6 +6749,7 @@ fn jobs_enqueue_instagram_batch(
         auth_cookie,
         output_dir,
         use_browser_cookies,
+        browser_cookie_source,
     )
     .map_err(|e| e.to_string())
 }
@@ -6715,6 +7092,7 @@ fn jobs_cancel_all(state: State<'_, AppState>) -> Result<usize, String> {
 fn jobs_queue_control_get(
     state: State<'_, AppState>,
 ) -> Result<jobs::JobQueueControlState, String> {
+    let _timer = InvokeTimer::start(state.paths.clone(), "jobs_queue_control_get");
     jobs::get_queue_control(&state.paths).map_err(|e| e.to_string())
 }
 
@@ -6730,6 +7108,7 @@ fn jobs_queue_control_set(
 fn jobs_runtime_settings_get(
     state: State<'_, AppState>,
 ) -> Result<jobs::JobRuntimeSettings, String> {
+    let _timer = InvokeTimer::start(state.paths.clone(), "jobs_runtime_settings_get");
     jobs::get_runtime_settings(&state.paths).map_err(|e| e.to_string())
 }
 
@@ -7066,6 +7445,19 @@ pub fn run() {
                     "info",
                 );
             });
+            // WP-0221: process-scheduling skew heartbeat for freeze diagnosis.
+            spawn_event_loop_skew_heartbeat(paths.clone());
+            // WP-0228 (v0.1.26): WP-0227's auto-enqueue of the Phase2
+            // voice-pack install on startup was a net regression for this
+            // operator. The install's disk + subprocess load made the rest
+            // of the app unusable while it ran ("freezes all the time, have
+            // not touched it once because nothing happens because of
+            // freeze"). The auto-enqueue is removed; voice-pack install
+            // returns to being explicitly operator-triggered from the
+            // Diagnostics page. The WP-0227 resume logic in the install
+            // job handler is kept — when the operator does click Install,
+            // it correctly carries forward any previously-completed steps
+            // rather than restarting from scratch.
             app.manage(AppState {
                 paths,
                 runner,
@@ -7098,6 +7490,8 @@ pub fn run() {
             diagnostics_trace_dir_use_default,
             diagnostics_trace_recent,
             diagnostics_trace_write_event,
+            agent_bridge_port,
+            agent_freeze_dump_now,
             safe_mode_set,
             safe_mode_status,
             startup_status,
@@ -7128,7 +7522,12 @@ pub fn run() {
             youtube_subscriptions_list,
             youtube_subscriptions_output_dir,
             youtube_subscriptions_upsert,
+            youtube_subscriptions_set_library,
             youtube_subscriptions_delete,
+            video_libraries_list,
+            video_libraries_upsert,
+            video_libraries_set_active,
+            video_libraries_remove,
             youtube_subscriptions_import_existing_downloads,
             legacy_archive_analyze,
             youtube_subscriptions_queue_one,

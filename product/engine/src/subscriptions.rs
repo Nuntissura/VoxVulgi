@@ -1,5 +1,5 @@
 use crate::paths::AppPaths;
-use crate::{db, jobs, library, EngineError, Result};
+use crate::{db, jobs, library, video_libraries, EngineError, Result};
 use csv::ReaderBuilder;
 use regex::Regex;
 use rusqlite::{params, OpenFlags};
@@ -39,7 +39,9 @@ pub struct YoutubeSubscriptionRow {
     pub source_url: String,
     pub folder_map: String,
     pub output_dir_override: Option<String>,
+    pub library_id: Option<String>,
     pub use_browser_cookies: bool,
+    pub browser_cookie_source: Option<String>,
     pub auth_session_configured: bool,
     pub active: bool,
     pub preset_id: Option<String>,
@@ -61,7 +63,11 @@ pub struct YoutubeSubscriptionUpsert {
     pub source_url: String,
     pub folder_map: Option<String>,
     pub output_dir_override: Option<String>,
+    #[serde(default)]
+    pub library_id: Option<String>,
     pub use_browser_cookies: bool,
+    #[serde(default)]
+    pub browser_cookie_source: Option<String>,
     #[serde(default)]
     pub auth_session_input: Option<String>,
     #[serde(default)]
@@ -213,6 +219,8 @@ struct YoutubeSubscriptionsExportEntry {
     folder_map: Option<String>,
     output_dir_override: Option<String>,
     use_browser_cookies: bool,
+    #[serde(default)]
+    browser_cookie_source: Option<String>,
     active: bool,
     #[serde(default)]
     preset_id: Option<String>,
@@ -223,36 +231,58 @@ struct YoutubeSubscriptionsExportEntry {
 }
 
 pub fn list_youtube_subscriptions(paths: &AppPaths) -> Result<Vec<YoutubeSubscriptionRow>> {
-    let conn = db::open(paths)?;
-    db::migrate(&conn)?;
+    // WP-0224: read-only connection bypasses the job-runner write queue.
+    let conn = db::open_readonly(paths)?;
 
+    // WP-0223: replaced N+1 (one main SELECT + one hydrate query per row)
+    // with a single SELECT that GROUP_CONCATs group_ids via a correlated
+    // subquery. With 50 subscriptions this cuts ~51 DB round-trips to 1.
+    // Newline is the separator because subscription/group IDs are UUIDs
+    // (hex + dashes only), so it cannot collide with a real id character.
     let mut stmt = conn.prepare(
         r#"
 SELECT
-  id,
-  title,
-  source_url,
-  folder_map,
-  output_dir_override,
-  use_browser_cookies,
-  active,
-  preset_id,
-  refresh_interval_minutes,
-  last_queued_at_ms,
-  last_error_at_ms,
-  consecutive_failures,
-  next_allowed_refresh_at_ms,
-  created_at_ms,
-  updated_at_ms
-FROM youtube_subscription
-ORDER BY active DESC, updated_at_ms DESC, created_at_ms DESC
+  s.id,
+  s.title,
+  s.source_url,
+  s.folder_map,
+  s.output_dir_override,
+  s.library_id,
+  s.browser_cookie_source,
+  s.use_browser_cookies,
+  s.active,
+  s.preset_id,
+  s.refresh_interval_minutes,
+  s.last_queued_at_ms,
+  s.last_error_at_ms,
+  s.consecutive_failures,
+  s.next_allowed_refresh_at_ms,
+  s.created_at_ms,
+  s.updated_at_ms,
+  COALESCE(
+    (SELECT GROUP_CONCAT(m.group_id, char(10))
+     FROM youtube_subscription_group_member m
+     WHERE m.subscription_id = s.id),
+    ''
+  ) AS group_ids_concat
+FROM youtube_subscription s
+ORDER BY s.active DESC, s.updated_at_ms DESC, s.created_at_ms DESC
 "#,
     )?;
 
     let rows = stmt
-        .query_map([], row_to_subscription)?
+        .query_map([], |row| {
+            let mut subscription = row_to_subscription(row)?;
+            let concat: String = row.get(17)?;
+            if !concat.is_empty() {
+                let mut ids: Vec<String> =
+                    concat.split('\n').map(String::from).collect();
+                ids.sort();
+                subscription.group_ids = ids;
+            }
+            Ok(subscription)
+        })?
         .collect::<rusqlite::Result<Vec<_>>>()?;
-    let rows = hydrate_group_ids(&conn, rows)?;
     Ok(hydrate_auth_session_flags(paths, rows))
 }
 
@@ -267,6 +297,7 @@ pub fn upsert_youtube_subscription(
     let now = now_ms();
     let input_id = normalized.id.clone();
     let mut updated_existing = false;
+    validate_video_library_id(&conn, normalized.library_id.as_deref())?;
 
     if let Some(id) = input_id.as_deref() {
         let changed = conn.execute(
@@ -277,18 +308,22 @@ SET
   source_url = ?2,
   folder_map = ?3,
   output_dir_override = ?4,
-  use_browser_cookies = ?5,
-  active = ?6,
-  preset_id = ?7,
-  refresh_interval_minutes = ?8,
-  updated_at_ms = ?9
-WHERE id = ?10
+  library_id = ?5,
+  browser_cookie_source = ?6,
+  use_browser_cookies = ?7,
+  active = ?8,
+  preset_id = ?9,
+  refresh_interval_minutes = ?10,
+  updated_at_ms = ?11
+WHERE id = ?12
 "#,
             params![
                 &normalized.title,
                 &normalized.source_url,
                 &normalized.folder_map,
                 &normalized.output_dir_override,
+                &normalized.library_id,
+                &normalized.browser_cookie_source,
                 bool_to_i64(normalized.use_browser_cookies),
                 bool_to_i64(normalized.active),
                 &normalized.preset_id,
@@ -312,6 +347,8 @@ INSERT INTO youtube_subscription (
   source_url,
   folder_map,
   output_dir_override,
+  library_id,
+  browser_cookie_source,
   use_browser_cookies,
   active,
   preset_id,
@@ -322,11 +359,13 @@ INSERT INTO youtube_subscription (
   next_allowed_refresh_at_ms,
   created_at_ms,
   updated_at_ms
-) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, NULL, NULL, 0, NULL, ?10, ?10)
+) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, NULL, NULL, 0, NULL, ?12, ?12)
 ON CONFLICT(source_url) DO UPDATE SET
   title = excluded.title,
   folder_map = excluded.folder_map,
   output_dir_override = excluded.output_dir_override,
+  library_id = COALESCE(excluded.library_id, youtube_subscription.library_id),
+  browser_cookie_source = excluded.browser_cookie_source,
   use_browser_cookies = excluded.use_browser_cookies,
   active = excluded.active,
   preset_id = excluded.preset_id,
@@ -339,6 +378,8 @@ ON CONFLICT(source_url) DO UPDATE SET
                 &normalized.source_url,
                 &normalized.folder_map,
                 &normalized.output_dir_override,
+                &normalized.library_id,
+                &normalized.browser_cookie_source,
                 bool_to_i64(normalized.use_browser_cookies),
                 bool_to_i64(normalized.active),
                 &normalized.preset_id,
@@ -370,6 +411,49 @@ pub fn delete_youtube_subscription(paths: &AppPaths, id: &str) -> Result<()> {
     conn.execute("DELETE FROM youtube_subscription WHERE id = ?1", [id])?;
     jobs::remove_auth_cookie_secret_path(&paths.youtube_subscription_cookie_secret_path(id));
     Ok(())
+}
+
+pub fn set_youtube_subscription_library(
+    paths: &AppPaths,
+    id: &str,
+    library_id: Option<&str>,
+) -> Result<YoutubeSubscriptionRow> {
+    let conn = db::open(paths)?;
+    db::migrate(&conn)?;
+    let normalized_library_id = library_id
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(ToOwned::to_owned);
+    if let Some(target_id) = normalized_library_id.as_deref() {
+        let exists: Option<i64> = conn
+            .query_row(
+                "SELECT active FROM video_library WHERE id = ?1",
+                params![target_id],
+                |row| row.get(0),
+            )
+            .optional()?;
+        if exists != Some(1) {
+            return Err(EngineError::InstallFailed(format!(
+                "video library not found or disabled: {target_id}"
+            )));
+        }
+    }
+    let changed = conn.execute(
+        "UPDATE youtube_subscription SET library_id = ?1, updated_at_ms = ?2 WHERE id = ?3",
+        params![normalized_library_id, now_ms(), id],
+    )?;
+    if changed == 0 {
+        return Err(EngineError::InstallFailed(format!(
+            "subscription not found: {id}"
+        )));
+    }
+    let row = subscription_by_id_conn(&conn, id)?.ok_or_else(|| {
+        EngineError::InstallFailed(format!("subscription not found after update: {id}"))
+    })?;
+    let mut hydrated = hydrate_group_ids(&conn, vec![row])?;
+    let mut row = hydrated.pop().expect("one subscription row");
+    row.auth_session_configured = youtube_subscription_has_auth_session(paths, &row.id);
+    Ok(row)
 }
 
 pub fn get_youtube_subscription_by_id(
@@ -410,6 +494,8 @@ SELECT
   source_url,
   folder_map,
   output_dir_override,
+  library_id,
+  browser_cookie_source,
   use_browser_cookies,
   active,
   preset_id,
@@ -469,8 +555,8 @@ fn is_subscription_backoff_ready(sub: &YoutubeSubscriptionRow, now_ms_value: i64
 pub fn list_youtube_subscription_groups(
     paths: &AppPaths,
 ) -> Result<Vec<YoutubeSubscriptionGroupRow>> {
-    let conn = db::open(paths)?;
-    db::migrate(&conn)?;
+    // WP-0224: read-only connection bypasses the job-runner write queue.
+    let conn = db::open_readonly(paths)?;
     list_groups_conn(&conn)
 }
 
@@ -1213,6 +1299,7 @@ pub fn export_youtube_subscriptions_json(
                 folder_map: Some(row.folder_map.clone()),
                 output_dir_override: row.output_dir_override.clone(),
                 use_browser_cookies: row.use_browser_cookies,
+                browser_cookie_source: row.browser_cookie_source.clone(),
                 active: row.active,
                 preset_id: row.preset_id.clone(),
                 group_ids: row.group_ids.clone(),
@@ -1261,7 +1348,9 @@ pub fn import_youtube_subscriptions_json(
             source_url: raw.source_url.clone(),
             folder_map: raw.folder_map.clone(),
             output_dir_override: raw.output_dir_override.clone(),
+            library_id: None,
             use_browser_cookies: raw.use_browser_cookies,
+            browser_cookie_source: raw.browser_cookie_source.clone(),
             auth_session_input: None,
             clear_auth_session: false,
             active: raw.active,
@@ -1280,6 +1369,8 @@ INSERT INTO youtube_subscription (
   source_url,
   folder_map,
   output_dir_override,
+  library_id,
+  browser_cookie_source,
   use_browser_cookies,
   active,
   preset_id,
@@ -1290,11 +1381,13 @@ INSERT INTO youtube_subscription (
   next_allowed_refresh_at_ms,
   created_at_ms,
   updated_at_ms
-) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, NULL, NULL, 0, NULL, ?10, ?10)
+) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, NULL, NULL, 0, NULL, ?12, ?12)
 ON CONFLICT(source_url) DO UPDATE SET
   title = excluded.title,
   folder_map = excluded.folder_map,
   output_dir_override = excluded.output_dir_override,
+  library_id = COALESCE(excluded.library_id, youtube_subscription.library_id),
+  browser_cookie_source = excluded.browser_cookie_source,
   use_browser_cookies = excluded.use_browser_cookies,
   active = excluded.active,
   preset_id = excluded.preset_id,
@@ -1307,6 +1400,8 @@ ON CONFLICT(source_url) DO UPDATE SET
                 normalized.source_url,
                 normalized.folder_map,
                 normalized.output_dir_override,
+                normalized.library_id,
+                normalized.browser_cookie_source,
                 bool_to_i64(normalized.use_browser_cookies),
                 bool_to_i64(normalized.active),
                 normalized.preset_id,
@@ -1447,7 +1542,9 @@ pub fn import_youtube_subscriptions_4kvdp_dir(
             source_url: source_url.clone(),
             folder_map: Some(folder_map),
             output_dir_override,
+            library_id: None,
             use_browser_cookies: false,
+            browser_cookie_source: None,
             auth_session_input: None,
             clear_auth_session: false,
             active,
@@ -1466,6 +1563,8 @@ INSERT INTO youtube_subscription (
   source_url,
   folder_map,
   output_dir_override,
+  library_id,
+  browser_cookie_source,
   use_browser_cookies,
   active,
   preset_id,
@@ -1476,11 +1575,13 @@ INSERT INTO youtube_subscription (
   next_allowed_refresh_at_ms,
   created_at_ms,
   updated_at_ms
-) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, NULL, NULL, 0, NULL, ?10, ?10)
+) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, NULL, NULL, 0, NULL, ?12, ?12)
 ON CONFLICT(source_url) DO UPDATE SET
   title = excluded.title,
   folder_map = excluded.folder_map,
   output_dir_override = excluded.output_dir_override,
+  library_id = COALESCE(excluded.library_id, youtube_subscription.library_id),
+  browser_cookie_source = excluded.browser_cookie_source,
   use_browser_cookies = excluded.use_browser_cookies,
   active = excluded.active,
   preset_id = excluded.preset_id,
@@ -1493,6 +1594,8 @@ ON CONFLICT(source_url) DO UPDATE SET
                 normalized.source_url,
                 normalized.folder_map,
                 normalized.output_dir_override,
+                normalized.library_id,
+                normalized.browser_cookie_source,
                 bool_to_i64(normalized.use_browser_cookies),
                 bool_to_i64(normalized.active),
                 normalized.preset_id,
@@ -1625,7 +1728,9 @@ pub fn import_youtube_subscriptions_4kvdp_state(
             source_url: source_url.clone(),
             folder_map: Some(default_folder_map(raw.title.as_str(), &source_url)),
             output_dir_override: Some(resolved_dir.path.to_string_lossy().to_string()),
+            library_id: None,
             use_browser_cookies: false,
+            browser_cookie_source: None,
             auth_session_input: None,
             clear_auth_session: false,
             active: raw.active,
@@ -1644,6 +1749,8 @@ INSERT INTO youtube_subscription (
   source_url,
   folder_map,
   output_dir_override,
+  library_id,
+  browser_cookie_source,
   use_browser_cookies,
   active,
   preset_id,
@@ -1654,11 +1761,13 @@ INSERT INTO youtube_subscription (
   next_allowed_refresh_at_ms,
   created_at_ms,
   updated_at_ms
-) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, NULL, NULL, 0, NULL, ?10, ?10)
+) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, NULL, NULL, 0, NULL, ?12, ?12)
 ON CONFLICT(source_url) DO UPDATE SET
   title = excluded.title,
   folder_map = excluded.folder_map,
   output_dir_override = excluded.output_dir_override,
+  library_id = COALESCE(excluded.library_id, youtube_subscription.library_id),
+  browser_cookie_source = excluded.browser_cookie_source,
   use_browser_cookies = excluded.use_browser_cookies,
   active = excluded.active,
   preset_id = excluded.preset_id,
@@ -1671,6 +1780,8 @@ ON CONFLICT(source_url) DO UPDATE SET
                 normalized.source_url,
                 normalized.folder_map,
                 normalized.output_dir_override,
+                normalized.library_id,
+                normalized.browser_cookie_source,
                 bool_to_i64(normalized.use_browser_cookies),
                 bool_to_i64(normalized.active),
                 normalized.preset_id,
@@ -2123,11 +2234,15 @@ pub fn youtube_subscription_output_dir(
         return Ok(p);
     }
 
-    let base_dir = paths.effective_download_dir()?;
-    Ok(base_dir
-        .join("video")
-        .join("subscriptions")
-        .join(sanitize_folder_map(&sub.folder_map)))
+    let library_root = if let Some(library_id) = sub.library_id.as_deref() {
+        match video_libraries::get_video_library_by_id(paths, library_id)? {
+            Some(library) => PathBuf::from(library.root_path),
+            None => video_libraries::default_video_library_root(paths)?,
+        }
+    } else {
+        video_libraries::default_video_library_root(paths)?
+    };
+    Ok(library_root.join(sanitize_folder_map(&sub.folder_map)))
 }
 
 fn legacy_output_youtube_subscription_archive_path(
@@ -2595,6 +2710,8 @@ SELECT
   source_url,
   folder_map,
   output_dir_override,
+  library_id,
+  browser_cookie_source,
   use_browser_cookies,
   active,
   preset_id,
@@ -2626,6 +2743,8 @@ SELECT
   source_url,
   folder_map,
   output_dir_override,
+  library_id,
+  browser_cookie_source,
   use_browser_cookies,
   active,
   preset_id,
@@ -2657,6 +2776,15 @@ fn normalize_upsert(req: YoutubeSubscriptionUpsert) -> Result<NormalizedSubscrip
         .filter(|v| !v.is_empty())
         .unwrap_or_else(|| default_folder_map(&title, &source_url));
     let output_dir_override = normalize_output_dir(req.output_dir_override);
+    let library_id = req
+        .library_id
+        .as_deref()
+        .map(|v| v.trim().to_string())
+        .filter(|v| !v.is_empty());
+    let browser_cookie_source = normalize_subscription_browser_cookie_source(
+        req.use_browser_cookies,
+        req.browser_cookie_source.as_deref(),
+    )?;
     let preset_id = req
         .preset_id
         .as_deref()
@@ -2680,7 +2808,9 @@ fn normalize_upsert(req: YoutubeSubscriptionUpsert) -> Result<NormalizedSubscrip
         source_url,
         folder_map,
         output_dir_override,
+        library_id,
         use_browser_cookies: req.use_browser_cookies,
+        browser_cookie_source,
         auth_session_input: jobs::normalize_auth_cookie(req.auth_session_input)?,
         clear_auth_session: req.clear_auth_session,
         active: req.active,
@@ -2688,6 +2818,42 @@ fn normalize_upsert(req: YoutubeSubscriptionUpsert) -> Result<NormalizedSubscrip
         group_ids,
         refresh_interval_minutes: normalize_refresh_interval_minutes(req.refresh_interval_minutes),
     })
+}
+
+fn normalize_subscription_browser_cookie_source(
+    use_browser_cookies: bool,
+    source: Option<&str>,
+) -> Result<Option<String>> {
+    if !use_browser_cookies {
+        return Ok(None);
+    }
+    jobs::normalize_browser_cookie_source(source)?.map_or_else(
+        || {
+            Err(EngineError::InstallFailed(
+                "browser cookies are enabled, but no browser was selected. Choose Chrome, Firefox, Edge, or Opera.".to_string(),
+            ))
+        },
+        |browser| Ok(Some(browser)),
+    )
+}
+
+fn validate_video_library_id(conn: &rusqlite::Connection, library_id: Option<&str>) -> Result<()> {
+    let Some(library_id) = library_id else {
+        return Ok(());
+    };
+    let exists: Option<i64> = conn
+        .query_row(
+            "SELECT active FROM video_library WHERE id = ?1",
+            params![library_id],
+            |row| row.get(0),
+        )
+        .optional()?;
+    if exists != Some(1) {
+        return Err(EngineError::InstallFailed(format!(
+            "video library not found or disabled: {library_id}"
+        )));
+    }
+    Ok(())
 }
 
 fn normalize_refresh_interval_minutes(value: Option<i64>) -> i64 {
@@ -2740,13 +2906,16 @@ fn normalize_youtube_url(raw: String) -> Result<String> {
 fn sanitize_folder_map(input: &str) -> String {
     let mut out = String::with_capacity(input.len());
     for ch in input.chars() {
-        if ch.is_ascii_alphanumeric() || ch == '-' || ch == '_' || ch == '.' {
-            out.push(ch);
-        } else {
+        if ch.is_control() || matches!(ch, '<' | '>' | ':' | '"' | '/' | '\\' | '|' | '?' | '*') {
             out.push('_');
+        } else {
+            out.push(ch);
         }
     }
-    let mut trimmed = out.trim_matches(|ch| ch == '_' || ch == '.').to_string();
+    let mut trimmed = out
+        .trim()
+        .trim_matches(|ch| ch == '_' || ch == '.')
+        .to_string();
     if trimmed.len() > 80 {
         trimmed.truncate(80);
     }
@@ -2790,17 +2959,19 @@ fn row_to_subscription(row: &rusqlite::Row<'_>) -> rusqlite::Result<YoutubeSubsc
         source_url: row.get(2)?,
         folder_map: row.get(3)?,
         output_dir_override: row.get(4)?,
-        use_browser_cookies: i64_to_bool(row.get::<_, i64>(5)?),
+        library_id: row.get(5)?,
+        browser_cookie_source: row.get(6)?,
+        use_browser_cookies: i64_to_bool(row.get::<_, i64>(7)?),
         auth_session_configured: false,
-        active: i64_to_bool(row.get::<_, i64>(6)?),
-        preset_id: row.get(7)?,
-        refresh_interval_minutes: row.get(8)?,
-        last_queued_at_ms: row.get(9)?,
-        last_error_at_ms: row.get(10)?,
-        consecutive_failures: row.get(11)?,
-        next_allowed_refresh_at_ms: row.get(12)?,
-        created_at_ms: row.get(13)?,
-        updated_at_ms: row.get(14)?,
+        active: i64_to_bool(row.get::<_, i64>(8)?),
+        preset_id: row.get(9)?,
+        refresh_interval_minutes: row.get(10)?,
+        last_queued_at_ms: row.get(11)?,
+        last_error_at_ms: row.get(12)?,
+        consecutive_failures: row.get(13)?,
+        next_allowed_refresh_at_ms: row.get(14)?,
+        created_at_ms: row.get(15)?,
+        updated_at_ms: row.get(16)?,
         group_ids: Vec::new(),
     })
 }
@@ -2831,7 +3002,9 @@ struct NormalizedSubscriptionInput {
     source_url: String,
     folder_map: String,
     output_dir_override: Option<String>,
+    library_id: Option<String>,
     use_browser_cookies: bool,
+    browser_cookie_source: Option<String>,
     auth_session_input: Option<String>,
     clear_auth_session: bool,
     active: bool,
@@ -2873,7 +3046,9 @@ mod tests {
                 source_url: "https://www.youtube.com/@example/videos".to_string(),
                 folder_map: Some("example_map".to_string()),
                 output_dir_override: None,
+                library_id: None,
                 use_browser_cookies: false,
+                browser_cookie_source: None,
                 auth_session_input: None,
                 clear_auth_session: false,
                 active: true,
@@ -2896,6 +3071,7 @@ mod tests {
                     "folder_map": "updated_map",
                     "output_dir_override": null,
                     "use_browser_cookies": true,
+                    "browser_cookie_source": "firefox",
                     "active": true,
                     "refresh_interval_minutes": 90
                 },
@@ -2933,6 +3109,7 @@ mod tests {
         assert_eq!(updated.title, "Updated title");
         assert_eq!(updated.folder_map, "updated_map");
         assert!(updated.use_browser_cookies);
+        assert_eq!(updated.browser_cookie_source.as_deref(), Some("firefox"));
         assert_eq!(updated.refresh_interval_minutes, 90);
     }
 
@@ -2953,7 +3130,9 @@ mod tests {
                 source_url: "https://www.youtube.com/watch?v=abc123".to_string(),
                 folder_map: Some("mapped_channel".to_string()),
                 output_dir_override: None,
+                library_id: None,
                 use_browser_cookies: false,
+                browser_cookie_source: None,
                 auth_session_input: None,
                 clear_auth_session: false,
                 active: true,
@@ -2984,9 +3163,112 @@ mod tests {
             .to_ascii_lowercase();
         assert!(
             output_dir.contains("video")
-                && output_dir.contains("subscriptions")
-                && output_dir.contains("mapped_channel"),
+                && output_dir.contains("mapped_channel")
+                && !output_dir.contains("youtube"),
             "expected mapped subscription folder in output_dir, got {output_dir}"
+        );
+    }
+
+    #[test]
+    fn subscription_output_uses_bound_video_library_without_youtube_layer() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let paths = AppPaths::new(dir.path().join("app_state"));
+        crate::db::ensure_schema(&paths).expect("schema");
+
+        let library_root = dir.path().join("NAS Library");
+        std::fs::create_dir_all(&library_root).expect("mkdir library");
+        let library = crate::video_libraries::upsert_video_library(
+            &paths,
+            crate::video_libraries::VideoLibraryUpsert {
+                id: None,
+                name: "NAS".to_string(),
+                root_path: library_root.to_string_lossy().to_string(),
+                set_active: true,
+            },
+        )
+        .expect("save library");
+
+        let sub = upsert_youtube_subscription(
+            &paths,
+            YoutubeSubscriptionUpsert {
+                id: None,
+                title: "Weekly ZOA".to_string(),
+                source_url: "https://www.youtube.com/@weekly/videos".to_string(),
+                folder_map: Some("[[]] WEEEKLY [[]] (ZOA) [FANCAM]".to_string()),
+                output_dir_override: None,
+                library_id: None,
+                use_browser_cookies: false,
+                browser_cookie_source: None,
+                auth_session_input: None,
+                clear_auth_session: false,
+                active: true,
+                preset_id: None,
+                group_ids: Vec::new(),
+                refresh_interval_minutes: Some(DEFAULT_REFRESH_INTERVAL_MINUTES),
+            },
+        )
+        .expect("upsert sub");
+        let sub = set_youtube_subscription_library(&paths, &sub.id, Some(&library.id))
+            .expect("bind library");
+
+        let output_dir = youtube_subscription_output_dir(&paths, &sub).expect("output dir");
+        assert_eq!(
+            output_dir.file_name().and_then(|value| value.to_str()),
+            Some("[[]] WEEEKLY [[]] (ZOA) [FANCAM]")
+        );
+        assert!(
+            !output_dir
+                .components()
+                .any(|component| component.as_os_str().to_string_lossy() == "youtube"),
+            "subscription output should not add a youtube folder layer"
+        );
+    }
+
+    #[test]
+    fn subscription_output_override_still_wins_over_bound_library() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let paths = AppPaths::new(dir.path().join("app_state"));
+        crate::db::ensure_schema(&paths).expect("schema");
+        let override_dir = dir.path().join("legacy_target");
+        let library_root = dir.path().join("new_library");
+        std::fs::create_dir_all(&override_dir).expect("mkdir override");
+        std::fs::create_dir_all(&library_root).expect("mkdir library");
+        let library = crate::video_libraries::upsert_video_library(
+            &paths,
+            crate::video_libraries::VideoLibraryUpsert {
+                id: None,
+                name: "New library".to_string(),
+                root_path: library_root.to_string_lossy().to_string(),
+                set_active: true,
+            },
+        )
+        .expect("save library");
+        let sub = upsert_youtube_subscription(
+            &paths,
+            YoutubeSubscriptionUpsert {
+                id: None,
+                title: "Pinned legacy".to_string(),
+                source_url: "https://www.youtube.com/@legacy/videos".to_string(),
+                folder_map: Some("legacy".to_string()),
+                output_dir_override: Some(override_dir.to_string_lossy().to_string()),
+                library_id: None,
+                use_browser_cookies: false,
+                browser_cookie_source: None,
+                auth_session_input: None,
+                clear_auth_session: false,
+                active: true,
+                preset_id: None,
+                group_ids: Vec::new(),
+                refresh_interval_minutes: Some(DEFAULT_REFRESH_INTERVAL_MINUTES),
+            },
+        )
+        .expect("upsert sub");
+        let sub = set_youtube_subscription_library(&paths, &sub.id, Some(&library.id))
+            .expect("bind library");
+
+        assert_eq!(
+            youtube_subscription_output_dir(&paths, &sub).expect("output dir"),
+            override_dir
         );
     }
 
@@ -3004,7 +3286,9 @@ mod tests {
                 source_url: "https://www.youtube.com/@auth/videos".to_string(),
                 folder_map: None,
                 output_dir_override: None,
+                library_id: None,
                 use_browser_cookies: false,
+                browser_cookie_source: None,
                 auth_session_input: Some(r#"[{"name":"SAPISID","value":"cookie123"}]"#.to_string()),
                 clear_auth_session: false,
                 active: true,
@@ -3033,6 +3317,36 @@ mod tests {
     }
 
     #[test]
+    fn upsert_persists_browser_cookie_source_for_recurring_refresh() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let paths = AppPaths::new(dir.path().to_path_buf());
+        crate::db::ensure_schema(&paths).expect("schema");
+
+        let sub = upsert_youtube_subscription(
+            &paths,
+            YoutubeSubscriptionUpsert {
+                id: None,
+                title: "Browser source".to_string(),
+                source_url: "https://www.youtube.com/@browser/videos".to_string(),
+                folder_map: None,
+                output_dir_override: None,
+                library_id: None,
+                use_browser_cookies: true,
+                browser_cookie_source: Some("firefox".to_string()),
+                auth_session_input: None,
+                clear_auth_session: false,
+                active: true,
+                preset_id: None,
+                group_ids: Vec::new(),
+                refresh_interval_minutes: Some(DEFAULT_REFRESH_INTERVAL_MINUTES),
+            },
+        )
+        .expect("upsert");
+
+        assert_eq!(sub.browser_cookie_source.as_deref(), Some("firefox"));
+    }
+
+    #[test]
     fn upsert_clamps_refresh_interval_minutes() {
         let dir = tempfile::tempdir().expect("tempdir");
         let paths = AppPaths::new(dir.path().to_path_buf());
@@ -3046,7 +3360,9 @@ mod tests {
                 source_url: "https://www.youtube.com/@low/videos".to_string(),
                 folder_map: None,
                 output_dir_override: None,
+                library_id: None,
                 use_browser_cookies: false,
+                browser_cookie_source: None,
                 auth_session_input: None,
                 clear_auth_session: false,
                 active: true,
@@ -3066,7 +3382,9 @@ mod tests {
                 source_url: "https://www.youtube.com/@high/videos".to_string(),
                 folder_map: None,
                 output_dir_override: None,
+                library_id: None,
                 use_browser_cookies: false,
+                browser_cookie_source: None,
                 auth_session_input: None,
                 clear_auth_session: false,
                 active: true,
@@ -3093,7 +3411,9 @@ mod tests {
                 source_url: "https://www.youtube.com/@due/videos".to_string(),
                 folder_map: None,
                 output_dir_override: None,
+                library_id: None,
                 use_browser_cookies: false,
+                browser_cookie_source: None,
                 auth_session_input: None,
                 clear_auth_session: false,
                 active: true,
@@ -3111,7 +3431,9 @@ mod tests {
                 source_url: "https://www.youtube.com/@notdue/videos".to_string(),
                 folder_map: None,
                 output_dir_override: None,
+                library_id: None,
                 use_browser_cookies: false,
+                browser_cookie_source: None,
                 auth_session_input: None,
                 clear_auth_session: false,
                 active: true,
@@ -3472,7 +3794,9 @@ CREATE TABLE subscription_entries (
                 source_url: "https://www.youtube.com/@legacy/videos".to_string(),
                 folder_map: Some("legacy_nas_sub".to_string()),
                 output_dir_override: Some(legacy_output_dir.to_string_lossy().to_string()),
+                library_id: None,
                 use_browser_cookies: false,
+                browser_cookie_source: None,
                 auth_session_input: None,
                 clear_auth_session: false,
                 active: true,
@@ -3527,7 +3851,9 @@ CREATE TABLE subscription_entries (
                 source_url: "https://www.youtube.com/watch?v=dQw4w9WgXcQ".to_string(),
                 folder_map: Some("backoff".to_string()),
                 output_dir_override: None,
+                library_id: None,
                 use_browser_cookies: false,
+                browser_cookie_source: None,
                 auth_session_input: None,
                 clear_auth_session: false,
                 active: true,

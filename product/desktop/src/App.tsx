@@ -21,6 +21,7 @@ import { openPathBestEffort, revealPath } from "./lib/pathOpener";
 import { joinPath } from "./lib/pathUtils";
 import { featureRootStatus, useSharedDownloadDirStatus } from "./lib/sharedDownloadDir";
 import { safeLocalStorageGet, safeLocalStorageSet } from "./lib/persist";
+import { installFreezeDetector, setFreezeDetectorPage } from "./lib/freezeDetector";
 
 // ---------------------------------------------------------------------------
 // Visual debugger console buffer (WP-0209)
@@ -2242,8 +2243,19 @@ function App() {
     document.title = version ? `VoxVulgi v${version}` : "VoxVulgi";
   }, [appInfo?.app_version]);
 
+  // WP-0221: seed the freeze detector with the initial page on mount and
+  // refresh it on every page change (covers entry paths that don't go
+  // through switchPage, e.g. agent-bridge navigate emissions).
+  useEffect(() => {
+    setFreezeDetectorPage(page);
+  }, [page]);
+
   useEffect(() => {
     installConsoleBuffer();
+    // WP-0221: spawn the Worker-driven freeze detector. Best-effort: any
+    // failure is swallowed inside the installer with a console warning so
+    // the app never depends on the detector for boot.
+    void installFreezeDetector();
     const handleKeyDown = async (e: KeyboardEvent) => {
       if (e.shiftKey && (e.ctrlKey || e.metaKey) && e.key.toLowerCase() === "s") {
         e.preventDefault();
@@ -2591,6 +2603,9 @@ function App() {
   function switchPage(next: AppPage, details?: Record<string, unknown>) {
     setVisitedPages((prev) => (prev[next] ? prev : { ...prev, [next]: true }));
     setPage(next);
+    // WP-0221: keep freeze-detector context aware of the current page so
+    // freeze records identify which surface was active at the freeze moment.
+    setFreezeDetectorPage(next);
     void diagnosticsTrace("panel_switch", { page: next, ...(details ?? {}) });
   }
 

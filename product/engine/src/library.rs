@@ -152,8 +152,11 @@ pub fn ensure_thumbnail_path(paths: &AppPaths, item_id: &str) -> Result<Option<P
 }
 
 pub fn list_items(paths: &AppPaths, limit: usize, offset: usize) -> Result<Vec<LibraryItem>> {
-    let conn = db::open(paths)?;
-    db::migrate(&conn)?;
+    // WP-0224: read-only connection bypasses the job-runner write queue so
+    // Library page mount stops blocking behind running jobs. Schema is
+    // already migrated by `db::ensure_schema` at startup, so we skip the
+    // per-call `migrate()` (it requires a writer anyway).
+    let conn = db::open_readonly(paths)?;
 
     let mut stmt = conn.prepare(
         r#"
@@ -189,8 +192,8 @@ pub fn list_localization_workspace_items(
     limit: usize,
     offset: usize,
 ) -> Result<Vec<LibraryItem>> {
-    let conn = db::open(paths)?;
-    db::migrate(&conn)?;
+    // WP-0224: read-only connection (see list_items above).
+    let conn = db::open_readonly(paths)?;
 
     let mut stmt = conn.prepare(
         r#"
@@ -223,8 +226,8 @@ LIMIT ?1 OFFSET ?2
 }
 
 pub fn get_item_by_id(paths: &AppPaths, item_id: &str) -> Result<LibraryItem> {
-    let conn = db::open(paths)?;
-    db::migrate(&conn)?;
+    // WP-0226: read-only connection bypasses job-runner write queue.
+    let conn = db::open_readonly(paths)?;
 
     conn.query_row(
         r#"
