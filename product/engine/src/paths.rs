@@ -343,6 +343,13 @@ impl AppPaths {
         self.python_toolchain_dir().join("models")
     }
 
+    /// WP-0234: per-pack install-state journal directory.
+    /// One JSON file per pack, recording the most recent install outcome so the next
+    /// install can detect mid-crash or failed states and force a clean reinstall.
+    pub fn python_install_state_dir(&self) -> PathBuf {
+        self.python_toolchain_dir().join("install_state")
+    }
+
     pub fn batch_on_import_rules_path(&self) -> PathBuf {
         self.config_dir().join("batch_on_import_rules.json")
     }

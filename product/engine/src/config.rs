@@ -3,6 +3,14 @@ use crate::{persistence, EngineError, Result};
 use serde::{Deserialize, Serialize};
 use std::path::Path;
 
+const DEFAULT_YT_DLP_CONCURRENT_FRAGMENTS: u32 = 4;
+const DEFAULT_YT_DLP_FRAGMENT_RETRIES: u32 = 3;
+const DEFAULT_YT_DLP_RETRIES: u32 = 3;
+const DEFAULT_YT_DLP_FILE_ACCESS_RETRIES: u32 = 10;
+const DEFAULT_YT_DLP_THROTTLED_RATE: &str = "100K";
+const DEFAULT_YT_DLP_SLEEP_INTERVAL_SECS: u32 = 0;
+const DEFAULT_YT_DLP_SLEEP_REQUESTS: u32 = 0;
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct BatchOnImportRules {
     pub auto_asr: bool,
@@ -155,6 +163,20 @@ pub struct DownloadPreset {
     pub format_preference: Option<String>,
     pub quality_preference: Option<String>,
     pub subtitle_mode: Option<String>,
+    #[serde(default)]
+    pub yt_dlp_concurrent_fragments: u32,
+    #[serde(default)]
+    pub yt_dlp_throttled_rate: Option<String>,
+    #[serde(default)]
+    pub yt_dlp_file_access_retries: u32,
+    #[serde(default)]
+    pub yt_dlp_retries: u32,
+    #[serde(default)]
+    pub yt_dlp_fragment_retries: u32,
+    #[serde(default)]
+    pub yt_dlp_sleep_interval: u32,
+    #[serde(default)]
+    pub yt_dlp_sleep_requests: u32,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -173,6 +195,13 @@ impl Default for DownloadPresetsConfig {
             format_preference: Some("bv*[ext=mp4]+ba[ext=m4a]/b[ext=mp4]/bv*+ba/b".to_string()),
             quality_preference: Some("best".to_string()),
             subtitle_mode: Some("auto".to_string()),
+            yt_dlp_concurrent_fragments: DEFAULT_YT_DLP_CONCURRENT_FRAGMENTS,
+            yt_dlp_throttled_rate: Some(DEFAULT_YT_DLP_THROTTLED_RATE.to_string()),
+            yt_dlp_file_access_retries: DEFAULT_YT_DLP_FILE_ACCESS_RETRIES,
+            yt_dlp_retries: DEFAULT_YT_DLP_RETRIES,
+            yt_dlp_fragment_retries: DEFAULT_YT_DLP_FRAGMENT_RETRIES,
+            yt_dlp_sleep_interval: DEFAULT_YT_DLP_SLEEP_INTERVAL_SECS,
+            yt_dlp_sleep_requests: DEFAULT_YT_DLP_SLEEP_REQUESTS,
         };
         Self {
             default_preset_id: Some(preset.id.clone()),
@@ -248,6 +277,34 @@ fn normalize_download_presets_config(
                 .subtitle_mode
                 .map(|v| v.trim().to_string())
                 .filter(|v| !v.is_empty()),
+            yt_dlp_concurrent_fragments: normalize_positive_u32_with_fallback(
+                preset.yt_dlp_concurrent_fragments,
+                DEFAULT_YT_DLP_CONCURRENT_FRAGMENTS,
+            ),
+            yt_dlp_throttled_rate: normalize_presets_text_value(
+                preset.yt_dlp_throttled_rate,
+                DEFAULT_YT_DLP_THROTTLED_RATE,
+            ),
+            yt_dlp_file_access_retries: normalize_positive_u32_with_fallback(
+                preset.yt_dlp_file_access_retries,
+                DEFAULT_YT_DLP_FILE_ACCESS_RETRIES,
+            ),
+            yt_dlp_retries: normalize_positive_u32_with_fallback(
+                preset.yt_dlp_retries,
+                DEFAULT_YT_DLP_RETRIES,
+            ),
+            yt_dlp_fragment_retries: normalize_positive_u32_with_fallback(
+                preset.yt_dlp_fragment_retries,
+                DEFAULT_YT_DLP_FRAGMENT_RETRIES,
+            ),
+            yt_dlp_sleep_interval: normalize_positive_u32_with_fallback(
+                preset.yt_dlp_sleep_interval,
+                DEFAULT_YT_DLP_SLEEP_INTERVAL_SECS,
+            ),
+            yt_dlp_sleep_requests: normalize_positive_u32_with_fallback(
+                preset.yt_dlp_sleep_requests,
+                DEFAULT_YT_DLP_SLEEP_REQUESTS,
+            ),
         });
     }
     if cleaned.is_empty() {
@@ -265,6 +322,21 @@ fn normalize_download_presets_config(
     config.presets = cleaned;
     config.default_preset_id = default_id;
     Ok(config)
+}
+
+fn normalize_positive_u32_with_fallback(value: u32, fallback: u32) -> u32 {
+    if value == 0 {
+        fallback
+    } else {
+        value
+    }
+}
+
+fn normalize_presets_text_value(value: Option<String>, fallback: &str) -> Option<String> {
+    value
+        .map(|raw| raw.trim().to_string())
+        .filter(|raw| !raw.is_empty())
+        .or_else(|| Some(fallback.to_string()))
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

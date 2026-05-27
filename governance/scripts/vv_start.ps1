@@ -1,9 +1,13 @@
 [CmdletBinding()]
-param()
+param(
+    [switch]$RequireAcknowledgement,
+    [switch]$NoAcknowledgementContract
+)
 
 $ErrorActionPreference = "Stop"
 
 $repoRoot = Split-Path -Parent (Split-Path -Parent $PSScriptRoot)
+$includeAcknowledgementContract = $RequireAcknowledgement -or (-not $NoAcknowledgementContract)
 $files = @(
     @{
         Name = "PROJECT_CODEX.md"
@@ -38,6 +42,19 @@ $null = $builder.AppendLine("1. PROJECT_CODEX.md")
 $null = $builder.AppendLine("2. MODEL_BEHAVIOR.md")
 $null = $builder.AppendLine("3. AGENTS.md")
 $null = $builder.AppendLine()
+
+if ($includeAcknowledgementContract) {
+    $null = $builder.AppendLine("## REQUIRED AGENT ACKNOWLEDGEMENT")
+    $null = $builder.AppendLine()
+    $null = $builder.AppendLine("Use this acknowledgement before any status summary.")
+    $null = $builder.AppendLine("Acknowledged VoxVulgi repo rules. I have read PROJECT_CODEX.md, MODEL_BEHAVIOR.md, and AGENTS.md, and I will follow them for this session.")
+    $null = $builder.AppendLine()
+    $null = $builder.AppendLine("Required next-response checks:")
+    $null = $builder.AppendLine("- Confirm the required authority surfaces were read, not merely detected.")
+    $null = $builder.AppendLine("- Check whether CLAUDE.md exists when working in this repo; if AGENTS.md and CLAUDE.md drift, surface the drift instead of auto-rewriting either file.")
+    $null = $builder.AppendLine("- Do not report only that vvstart ran, that files exist, or that the command completed.")
+    $null = $builder.AppendLine()
+}
 
 foreach ($file in $files) {
     $content = Get-Content -LiteralPath $file.Path -Raw -Encoding UTF8

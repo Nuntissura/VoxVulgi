@@ -5,6 +5,8 @@ param(
   [switch]$RefreshOfflinePayload,
   [switch]$ForceRefreshOfflinePayload,
   [switch]$ValidateOfflinePayloadOnly,
+  [switch]$SkipWarmupGate,
+  [string]$SkipWarmupGateReason,
   [string[]]$WorkPackets,
   [string]$BuildNotes,
   [Parameter(ValueFromRemainingArguments = $true)]
@@ -37,7 +39,24 @@ function Get-FileSha256Hex([string]$Path) {
   if (-not (Test-Path -LiteralPath $Path -PathType Leaf)) {
     throw "Cannot hash missing file: $Path"
   }
-  return (Get-FileHash -LiteralPath $Path -Algorithm SHA256).Hash.ToUpperInvariant()
+  # WP-0245: use .NET directly instead of Get-FileHash. The 60+ minute
+  # warmup gate Python subprocess can mutate the parent shell's
+  # $env:PSModulePath, after which Microsoft.PowerShell.Utility cmdlets
+  # (including Get-FileHash) become "not recognized" in the same session.
+  # Repro: 2026-05-22 build of v0.1.51 failed at line 160 after a 3700s
+  # warmup gate run that itself succeeded with all 6 packs OK.
+  $stream = [System.IO.File]::OpenRead($Path)
+  try {
+    $sha = [System.Security.Cryptography.SHA256]::Create()
+    try {
+      $bytes = $sha.ComputeHash($stream)
+      return ([BitConverter]::ToString($bytes) -replace '-','').ToUpperInvariant()
+    } finally {
+      $sha.Dispose()
+    }
+  } finally {
+    $stream.Dispose()
+  }
 }
 
 function Get-JsonVersion([string]$Path) {
@@ -423,6 +442,24 @@ try {
     $transcriptStarted = $true
   } catch {
     Write-Warning "Could not start transcript log at ${logFile}: $($_.Exception.Message)"
+  }
+
+  # WP-0233: pack warmup gate. Catches resolver / lockfile / install regressions on the
+  # developer side BEFORE we let an installer go out. Release builds may skip the gate
+  # only with -SkipWarmupGate AND -SkipWarmupGateReason (so the skip has a trail).
+  if ($SkipWarmupGate) {
+    if ([string]::IsNullOrWhiteSpace($SkipWarmupGateReason)) {
+      throw "-SkipWarmupGate requires -SkipWarmupGateReason '<reason>' so the skip is auditable in the build log."
+    }
+    Step "WP-0233 pack warmup gate SKIPPED - reason: $SkipWarmupGateReason"
+    Write-Host "WARNING: skipping the pack warmup gate means resolver / lockfile drift will not be caught before this build ships."
+  } else {
+    Step "WP-0233 pack warmup gate (pre-build)"
+    $gateScript = Join-Path $PSScriptRoot 'pack_warmup_gate.ps1'
+    & $gateScript
+    if ($LASTEXITCODE -ne 0) {
+      throw "Pack warmup gate failed (exit $LASTEXITCODE). See report under product\desktop\build_target\tool_artifacts\pack_warmup_gate\<ts>\report.md. Use -SkipWarmupGate -SkipWarmupGateReason '<reason>' only if you know what you are doing."
+    }
   }
 
   $offlineState = Test-OfflinePayloadState -RepoRoot $repoRoot

@@ -195,6 +195,10 @@ pub fn queue_instagram_subscription(paths: &AppPaths, id: &str) -> Result<Vec<jo
 }
 
 pub fn queue_all_active_instagram_subscriptions(paths: &AppPaths) -> Result<Vec<jobs::JobRow>> {
+    if jobs::get_queue_control(paths)?.paused {
+        return Ok(Vec::new());
+    }
+
     let rows = list_instagram_subscriptions(paths)?;
     let now = now_ms();
     let mut queued_jobs: Vec<jobs::JobRow> = Vec::new();
@@ -646,5 +650,42 @@ mod tests {
             jobs::read_auth_cookie_secret_path(&paths.job_cookie_secret_path(&queued[0].id))
                 .expect("job auth secret");
         assert_eq!(job_secret, "sessionid=abc123");
+    }
+
+    #[test]
+    fn queue_all_active_instagram_subscriptions_respects_paused_queue() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let paths = AppPaths::new(dir.path().to_path_buf());
+        crate::db::ensure_schema(&paths).expect("schema");
+
+        upsert_instagram_subscription(
+            &paths,
+            InstagramSubscriptionUpsert {
+                id: None,
+                title: "Paused profile".to_string(),
+                source_url: "https://www.instagram.com/pausedprofile/".to_string(),
+                folder_map: Some("pausedprofile".to_string()),
+                output_dir_override: None,
+                use_browser_cookies: true,
+                browser_cookie_source: Some("firefox".to_string()),
+                auth_session_input: None,
+                clear_auth_session: false,
+                active: true,
+                refresh_interval_minutes: Some(60),
+            },
+        )
+        .expect("upsert");
+        jobs::set_queue_paused(&paths, true).expect("pause queue");
+
+        let queued = queue_all_active_instagram_subscriptions(&paths).expect("queue all");
+
+        assert!(
+            queued.is_empty(),
+            "paused queue must not auto-enqueue Instagram jobs"
+        );
+        assert!(
+            jobs::list_jobs(&paths, 10, 0).expect("jobs").is_empty(),
+            "paused queue must not create hidden jobs"
+        );
     }
 }

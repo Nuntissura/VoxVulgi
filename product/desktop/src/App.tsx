@@ -28,6 +28,7 @@ import { installFreezeDetector, setFreezeDetectorPage } from "./lib/freezeDetect
 // ---------------------------------------------------------------------------
 type ConsoleBufferEntry = { ts_ms: number; level: "log" | "warn" | "error"; args: string };
 const CONSOLE_BUFFER_MAX = 200;
+const VISUAL_DEBUGGER_CAPTURE_TIMEOUT_MS = 25_000;
 const consoleBuffer: ConsoleBufferEntry[] = [];
 let consolePatched = false;
 
@@ -92,6 +93,53 @@ function buildVisualDebuggerDump(): Record<string, unknown> {
     mounted_section_ids: mountedSectionIds,
     console_buffer: consoleBuffer.slice(),
   };
+}
+
+function getVisualDebuggerCaptureTarget(): HTMLElement {
+  return document.querySelector<HTMLElement>(".app-shell") ?? document.body;
+}
+
+async function withVisualDebuggerTimeout<T>(
+  promise: Promise<T>,
+  timeoutMs: number,
+  label: string,
+): Promise<T> {
+  let timeoutId: number | null = null;
+  const timeout = new Promise<never>((_, reject) => {
+    timeoutId = window.setTimeout(() => {
+      reject(new Error(`${label} timed out after ${timeoutMs}ms`));
+    }, timeoutMs);
+  });
+  try {
+    return await Promise.race([promise, timeout]);
+  } finally {
+    if (timeoutId !== null) {
+      window.clearTimeout(timeoutId);
+    }
+  }
+}
+
+function captureVisualDebuggerCanvas(): Promise<HTMLCanvasElement> {
+  const target = getVisualDebuggerCaptureTarget();
+  const rect = target.getBoundingClientRect();
+  const width = Math.max(1, Math.ceil(rect.width || window.innerWidth || 1));
+  const height = Math.max(1, Math.ceil(rect.height || window.innerHeight || 1));
+  return withVisualDebuggerTimeout(
+    html2canvas(target, {
+      backgroundColor: null,
+      imageTimeout: 3_000,
+      logging: false,
+      scale: 1,
+      width,
+      height,
+      windowWidth: Math.max(width, window.innerWidth),
+      windowHeight: Math.max(height, window.innerHeight),
+      scrollX: 0,
+      scrollY: 0,
+    }),
+    VISUAL_DEBUGGER_CAPTURE_TIMEOUT_MS,
+    "visual debugger snapshot",
+  );
 }
 
 const DiagnosticsPage = lazy(async () => {
@@ -199,6 +247,7 @@ type PendingImportJobRow = {
 };
 
 type HomeItemOutputs = {
+  item_id?: string;
   source_media_path?: string;
   source_media_exists?: boolean;
   derived_item_dir: string;
@@ -223,6 +272,7 @@ type HomeItemOutputs = {
   terminal_error?: string | null;
   deliverable_path?: string | null;
   deliverable_exists?: boolean;
+  recent_jobs?: HomeJobRow[];
 };
 
 type RecentLocalizationItemStatus = {
@@ -245,6 +295,17 @@ type LocalizationRunQueueSummary = {
   stage: string;
   queued_jobs: Array<{ id: string; type: string }>;
   notes: string[];
+};
+
+type LocalizationVoicePackStatus = {
+  installed: boolean;
+  repair_required?: boolean;
+  status_detail?: string;
+};
+
+type LocalizationVoiceSetupStatus = {
+  neural: LocalizationVoicePackStatus;
+  voice: LocalizationVoicePackStatus;
 };
 
 type LocalizationSectionId =
@@ -285,6 +346,9 @@ const LOCALIZATION_SUBTITLE_OUTPUT_KEY = "voxvulgi.v1.localization_setup.subtitl
 const LOCALIZATION_DUB_OUTPUT_KEY = "voxvulgi.v1.localization_setup.dub_output";
 const LOCALIZATION_INCLUDE_SOURCE_COPY_KEY = "voxvulgi.v1.editor.export_include_source_copy";
 const SHELL_MODE_TOLERANCE_PX = 20;
+const INSTAGRAM_SUBSCRIPTION_HEARTBEAT_INTERVAL_MS = 300_000;
+const INSTAGRAM_SUBSCRIPTION_HEARTBEAT_INITIAL_DELAY_MS = 60_000;
+const LOCALIZATION_WORKBENCH_LOADING_NOTICE = "Workbench is still loading. Retrying automatically.";
 const LOCALIZATION_HOME_STAGES = [
   {
     title: "Import or pick media",
@@ -342,6 +406,43 @@ function summarizeErrorMessage(raw: string | null | undefined, limit = 180): str
     .find(Boolean);
   if (!firstLine) return "No error detail recorded.";
   return firstLine.length > limit ? `${firstLine.slice(0, limit - 1)}…` : firstLine;
+}
+
+function isDatabaseBusyMessage(raw: string | null | undefined): boolean {
+  return /database (is )?(locked|busy)|database_locked|database_busy/i.test(raw ?? "");
+}
+
+function voicePackNeedsAction(status: LocalizationVoicePackStatus | null | undefined): boolean {
+  return !status?.installed || Boolean(status.repair_required);
+}
+
+function voiceSetupReady(status: LocalizationVoiceSetupStatus | null): boolean {
+  return Boolean(
+    status?.neural.installed &&
+      status?.voice.installed &&
+      !status.neural.repair_required &&
+      !status.voice.repair_required,
+  );
+}
+
+function voiceSetupPrimaryText(status: LocalizationVoiceSetupStatus | null): string {
+  if (!status) return "Checking voice cloning setup...";
+  if (voiceSetupReady(status)) return "Voice cloning is ready";
+  if (status.neural.repair_required || status.voice.repair_required) return "Repair voice cloning";
+  return "Set up voice cloning";
+}
+
+function voiceSetupDetailText(status: LocalizationVoiceSetupStatus | null): string {
+  if (!status) {
+    return "Checking the local speech engine before enabling English dub runs.";
+  }
+  if (voiceSetupReady(status)) {
+    return "English dubbing can use local voice cloning for one or more speakers.";
+  }
+  if (status.neural.repair_required || status.voice.repair_required) {
+    return "The voice tools were installed before, but this machine is missing files or has an older package set. Repair queues a tracked setup job and keeps your media and preferences.";
+  }
+  return "One-time setup queues the local speech tools needed for English dubs. Subtitles can still run without this.";
 }
 
 function LocalizationStatusMeter({
@@ -504,6 +605,35 @@ function localizationDubPath(exportDir: string, item: HomeLibraryItem | null | u
   return joinPath(exportDir, `${localizationOutputStem(item)}.dub-en.mp4`);
 }
 
+function localizationActualSubtitlePath(outputs: HomeItemOutputs | null | undefined): string {
+  return (
+    outputs?.latest_translated_en_track_path?.trim() ||
+    outputs?.latest_source_track_path?.trim() ||
+    ""
+  );
+}
+
+function localizationActualDubPath(
+  outputs: HomeItemOutputs | null | undefined,
+  status: RecentLocalizationItemStatus | null | undefined,
+): string {
+  if (outputs?.mux_dub_preview_v1_mp4_exists && outputs.mux_dub_preview_v1_mp4_path.trim()) {
+    return outputs.mux_dub_preview_v1_mp4_path;
+  }
+  if (outputs?.mix_dub_preview_v1_wav_exists && outputs.mix_dub_preview_v1_wav_path.trim()) {
+    return outputs.mix_dub_preview_v1_wav_path;
+  }
+  return status?.preview_mp4_path?.trim() || "";
+}
+
+function localizationActualWorkFolder(
+  outputs: HomeItemOutputs | null | undefined,
+  status: RecentLocalizationItemStatus | null | undefined,
+  exportDir: string,
+): string {
+  return outputs?.derived_item_dir?.trim() || status?.working_dir?.trim() || exportDir;
+}
+
 const FLOATING_RESIZE_HANDLES: Array<{
   direction: ResizeDirection;
   className: string;
@@ -539,11 +669,12 @@ function localizationHomeStateLabel(status: RecentLocalizationItemStatus | null 
   if (status.running) return "Running";
   if (status.state === "export_ready") return "Export ready";
   if (status.state === "preview_ready" || status.preview_mp4_path) return "Preview ready";
+  if (status.state === "dub_needs_separation") return "Needs separation";
   if (status.state === "dub_audio_ready") return "Dub audio ready";
   if (status.state === "speaker_labels_ready") return "Speakers ready";
   if (status.state === "translation_ready") return "Translation ready";
   if (status.state === "captions_ready") return "Captions ready";
-  if (status.last_error) return "Needs repair";
+  if (status.last_error) return "Retry needed";
   if (status.summary === "Imported / not started" || status.state === "imported_only") return "Ready to start";
   return "Needs next step";
 }
@@ -593,7 +724,7 @@ function summarizeRecentLocalizationItem(
     jobs.find((job) => job.status === "queued") ??
     null;
   if (outputs?.terminal_state && outputs.terminal_summary) {
-    const previewPath = outputs.mux_dub_preview_v1_mp4_exists
+    const previewPath = outputs.deliverable_exists && outputs.mux_dub_preview_v1_mp4_exists
       ? outputs.mux_dub_preview_v1_mp4_path
       : null;
     return {
@@ -722,16 +853,22 @@ function LocalizationStudioHome({
   compact?: boolean;
   visible?: boolean;
 }) {
-  const pageActive = usePageActivity(visible);
+  const pageVisible = visible !== false;
+  const pageActive = usePageActivity(pageVisible);
   const [busy, setBusy] = useState(false);
   const [localizationRunBusy, setLocalizationRunBusy] = useState(false);
+  const [voicePackBusy, setVoicePackBusy] = useState(false);
   const [notice, setNotice] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const [voiceSetupStatus, setVoiceSetupStatus] = useState<LocalizationVoiceSetupStatus | null>(null);
+  const [voiceSetupStatusError, setVoiceSetupStatusError] = useState<string | null>(null);
+  const [voiceSetupJob, setVoiceSetupJob] = useState<PendingImportJobRow | null>(null);
   const [recentItems, setRecentItems] = useState<HomeLibraryItem[]>([]);
   const [recentItemsBusy, setRecentItemsBusy] = useState(false);
   const [recentItemStatuses, setRecentItemStatuses] = useState<
     Record<string, RecentLocalizationItemStatus>
   >({});
+  const [recentItemOutputsById, setRecentItemOutputsById] = useState<Record<string, HomeItemOutputs>>({});
   const [pendingImportPath, setPendingImportPath] = useState<string | null>(null);
   const [pendingImportJob, setPendingImportJob] = useState<PendingImportJobRow | null>(null);
   const [asrLang, setAsrLang] = useState<AsrLang>(() => {
@@ -811,6 +948,117 @@ function LocalizationStudioHome({
     safeLocalStorageSet(DIARIZATION_MAX_SPEAKERS_KEY, String(maxSpeakers));
   }, [maxSpeakers]);
 
+  const refreshVoiceSetupStatus = useCallback(async () => {
+    try {
+      const [neural, voice] = await Promise.all([
+        invoke<LocalizationVoicePackStatus>("tools_tts_neural_local_v1_status"),
+        invoke<LocalizationVoicePackStatus>("tools_tts_voice_preserving_local_v1_status"),
+      ]);
+      const next = { neural, voice };
+      setVoiceSetupStatus(next);
+      setVoiceSetupStatusError(null);
+      return next;
+    } catch (e) {
+      const message = String(e);
+      setVoiceSetupStatusError(message);
+      return null;
+    }
+  }, []);
+
+  useEffect(() => {
+    if (!pageVisible) return;
+    void refreshVoiceSetupStatus();
+  }, [pageVisible, refreshVoiceSetupStatus]);
+
+  // WP-0245: detect a paused job queue so a user who clicked "Pause all"
+  // earlier (or whose queue stayed paused after a prior session) cannot be
+  // silently blocked — the Hearin and Miyeon dub jobs both sat in `queued`
+  // forever in field evidence because the queue was paused and the lag on
+  // the Jobs page hid the banner that would have surfaced it.
+  const [queuePaused, setQueuePaused] = useState(false);
+  const [queueResumeBusy, setQueueResumeBusy] = useState(false);
+  const refreshQueuePaused = useCallback(async () => {
+    try {
+      const control = await invoke<{ paused: boolean }>("jobs_queue_control_get");
+      setQueuePaused(Boolean(control?.paused));
+    } catch {
+      // best effort; don't surface as an error on the Localization page
+    }
+  }, []);
+  useEffect(() => {
+    if (!pageVisible) return;
+    void refreshQueuePaused();
+  }, [pageVisible, refreshQueuePaused]);
+  const resumeQueue = useCallback(async () => {
+    setQueueResumeBusy(true);
+    try {
+      const state = await invoke<{ paused: boolean }>("jobs_queue_control_set", {
+        paused: false,
+      });
+      setQueuePaused(Boolean(state?.paused));
+      setNotice("Queue resumed. Pending dub and voice-pack jobs will start running.");
+    } catch (e) {
+      setError(`Could not resume the queue: ${String(e)}`);
+    } finally {
+      setQueueResumeBusy(false);
+    }
+  }, []);
+
+  async function queueVoiceCloningSetup(action: "setup" | "repair") {
+    setVoicePackBusy(true);
+    setError(null);
+    setNotice(null);
+    try {
+      const job = await invoke<PendingImportJobRow>("jobs_enqueue_install_phase2_packs_v1");
+      setVoiceSetupJob(job);
+      setNotice(
+        action === "repair"
+          ? "Voice cloning repair queued. Jobs/Queue shows live progress and keeps a recovery record."
+          : "Voice cloning setup queued. Jobs/Queue shows live progress and keeps a recovery record.",
+      );
+      void diagnosticsTrace("localization_voice_setup_queued", {
+        action,
+        job_id: job.id,
+        status: job.status,
+      });
+    } catch (e) {
+      setError(`Could not queue voice cloning ${action}: ${String(e)}`);
+    } finally {
+      setVoicePackBusy(false);
+    }
+  }
+
+  async function refreshVoiceSetupJob() {
+    const jobId = voiceSetupJob?.id;
+    if (!jobId) return;
+    const jobs = await invoke<PendingImportJobRow[]>("jobs_list", { limit: 80, offset: 0 }).catch(
+      () => [],
+    );
+    const next = jobs.find((job) => job.id === jobId) ?? voiceSetupJob;
+    setVoiceSetupJob(next);
+    if (next.status === "succeeded") {
+      await refreshVoiceSetupStatus();
+      setNotice("Voice cloning setup finished. You can start English dub runs now.");
+      setVoiceSetupJob(null);
+    } else if (next.status === "failed") {
+      await refreshVoiceSetupStatus();
+      setError(next.error ? `Voice cloning setup failed: ${summarizeErrorMessage(next.error)}` : "Voice cloning setup failed.");
+      setVoiceSetupJob(null);
+    } else if (next.status === "canceled") {
+      setNotice("Voice cloning setup was canceled.");
+      setVoiceSetupJob(null);
+    }
+  }
+
+  usePollingLoop(
+    refreshVoiceSetupJob,
+    {
+      enabled: pageActive && Boolean(voiceSetupJob?.id),
+      intervalMs: 2500,
+      initialDelayMs: 1200,
+    },
+  );
+
   useEffect(() => {
     invoke<any>("config_batch_on_import_get")
       .then((rules) => setBatchRules(rules))
@@ -825,9 +1073,17 @@ function LocalizationStudioHome({
         offset: 0,
       });
       setRecentItems(items ?? []);
+      setNotice((current) => (current === LOCALIZATION_WORKBENCH_LOADING_NOTICE ? null : current));
+      setError((current) => (isDatabaseBusyMessage(current) ? null : current));
       return items ?? [];
     } catch (e) {
-      setError(String(e));
+      const message = String(e);
+      if (isDatabaseBusyMessage(message)) {
+        setError(null);
+        setNotice(LOCALIZATION_WORKBENCH_LOADING_NOTICE);
+      } else {
+        setError(message);
+      }
       return [];
     } finally {
       setRecentItemsBusy(false);
@@ -835,56 +1091,86 @@ function LocalizationStudioHome({
   }, []);
 
   const refreshRecentItemStatuses = useCallback(async (items: HomeLibraryItem[]) => {
-    const pairs = await Promise.all(
-      items.map(async (item) => {
-        try {
-          const [outputs, jobs] = await Promise.all([
-            invoke<HomeItemOutputs>("item_outputs", { itemId: item.id }),
-            invoke<HomeJobRow[]>("jobs_list_for_item", { itemId: item.id, limit: 40, offset: 0 }),
-          ]);
-          const summary = summarizeRecentLocalizationItem(
-            outputs ?? null,
-            [...(jobs ?? [])].sort(
-              (a, b) => (b.created_at_ms ?? 0) - (a.created_at_ms ?? 0),
-            ),
-          );
-          return [
-            item.id,
-            {
-              ...summary,
-              item_id: item.id,
-            } satisfies RecentLocalizationItemStatus,
-          ] as const;
-        } catch {
-          return [
-            item.id,
-            {
-              item_id: item.id,
-              state: null,
-              summary: "Status unavailable",
-              detail: "Refresh the item inside Localization Studio for current stage/output state.",
-              running: false,
-              active_job_id: null,
-              working_dir: "",
-              preview_mp4_path: null,
-              stage_label: null,
-              progress_pct: null,
-              last_error: null,
-              failed_jobs_count: 0,
-            } satisfies RecentLocalizationItemStatus,
-          ] as const;
-        }
-      }),
-    );
+    if (items.length === 0) return;
+    let outputsById = new Map<string, HomeItemOutputs>();
+    try {
+      const outputs = await invoke<HomeItemOutputs[]>("localization_home_item_outputs", {
+        itemIds: items.map((item) => item.id),
+      });
+      outputsById = new Map(
+        (outputs ?? [])
+          .filter((output) => Boolean(output.item_id))
+          .map((output) => [String(output.item_id), output]),
+      );
+      if (outputsById.size > 0) {
+        setRecentItemOutputsById((prev) => ({
+          ...prev,
+          ...Object.fromEntries(outputsById),
+        }));
+      }
+    } catch {
+      outputsById = new Map();
+    }
+    const pairs = items.map((item) => {
+      const outputs = outputsById.get(item.id) ?? null;
+      if (!outputs) {
+        return [
+          item.id,
+          {
+            item_id: item.id,
+            state: null,
+            summary: "Status unavailable",
+            detail: "Refresh the item inside Localization Studio for current stage/output state.",
+            running: false,
+            active_job_id: null,
+            working_dir: "",
+            preview_mp4_path: null,
+            stage_label: null,
+            progress_pct: null,
+            last_error: null,
+            failed_jobs_count: 0,
+          } satisfies RecentLocalizationItemStatus,
+        ] as const;
+      }
+      const summary = summarizeRecentLocalizationItem(
+        outputs,
+        [...(outputs.recent_jobs ?? [])].sort(
+          (a, b) => (b.created_at_ms ?? 0) - (a.created_at_ms ?? 0),
+        ),
+      );
+      return [
+        item.id,
+        {
+          ...summary,
+          item_id: item.id,
+        } satisfies RecentLocalizationItemStatus,
+      ] as const;
+    });
     if (pairs.length === 0) return;
     setRecentItemStatuses((prev) => ({ ...prev, ...Object.fromEntries(pairs) }));
   }, []);
 
   useEffect(() => {
+    if (!pageVisible) return;
     void refreshRecentItems().then((items) => {
       void refreshRecentItemStatuses(items);
     });
-  }, [refreshRecentItems, refreshRecentItemStatuses]);
+  }, [pageVisible, refreshRecentItems, refreshRecentItemStatuses]);
+
+  usePollingLoop(
+    async () => {
+      const items = await refreshRecentItems();
+      await refreshRecentItemStatuses(items);
+    },
+    {
+      enabled:
+        pageVisible &&
+        notice === LOCALIZATION_WORKBENCH_LOADING_NOTICE &&
+        !recentItemsBusy,
+      intervalMs: 3000,
+      initialDelayMs: 1500,
+    },
+  );
 
   usePollingLoop(
     async () => {
@@ -1011,6 +1297,14 @@ function LocalizationStudioHome({
       setError("Choose at least one output: English subtitles, English dub, or both.");
       return;
     }
+    if (voiceSetupBlocksDubRun) {
+      setError(
+        voiceSetupStatus
+          ? "Voice cloning needs setup or repair before English dub runs can start. Use the voice cloning setup section above, or choose Subtitles only."
+          : "Checking voice cloning setup before starting an English dub. Try again in a moment, or choose Subtitles only.",
+      );
+      return;
+    }
     setLocalizationRunBusy(true);
     setError(null);
     setNotice(null);
@@ -1063,6 +1357,26 @@ function LocalizationStudioHome({
       setError(String(e));
     } finally {
       setBusy(false);
+    }
+  }
+
+  async function openLocalizationPath(
+    label: string,
+    path: string | null | undefined,
+    mode: "open" | "reveal" = "open",
+  ) {
+    const target = (path ?? "").trim();
+    if (!target) {
+      setError(`${label} is not available yet.`);
+      return;
+    }
+    setError(null);
+    try {
+      const result = mode === "reveal" ? await revealPath(target) : await openPathBestEffort(target);
+      const openedPath = typeof result === "string" ? result : result.path;
+      setNotice(`${label}: ${mode === "reveal" ? "opened location" : "opened"} ${openedPath}`);
+    } catch (e) {
+      setError(`${label} could not be opened: ${String(e)}`);
     }
   }
 
@@ -1173,7 +1487,28 @@ function LocalizationStudioHome({
     const status = recentItemStatuses[item.id];
     return Boolean(status) && !status.running && !status.preview_mp4_path;
   }).length;
-  const uiBusy = busy || localizationRunBusy;
+  const voiceSetupIsReady = voiceSetupReady(voiceSetupStatus);
+  const voiceSetupHasRepair = Boolean(
+    voiceSetupStatus?.neural.repair_required || voiceSetupStatus?.voice.repair_required,
+  );
+  const voiceSetupNeedsAction = Boolean(
+    !voiceSetupStatus || voicePackNeedsAction(voiceSetupStatus.neural) || voicePackNeedsAction(voiceSetupStatus.voice),
+  );
+  const voiceSetupBlocksDubRun = dubOutput === "en" && voiceSetupNeedsAction;
+  const voiceSetupActionText = voiceSetupPrimaryText(voiceSetupStatus);
+  const voiceSetupJobProgressPct = voiceSetupJob
+    ? Math.max(0, Math.min(100, Math.round((voiceSetupJob.progress ?? 0) * 100)))
+    : null;
+  const voiceSetupChecking = !voiceSetupStatus && !voiceSetupStatusError;
+  const voiceSetupActionDisabled = voicePackBusy || Boolean(voiceSetupJob) || voiceSetupChecking;
+  const voiceSetupButtonText = voiceSetupJob
+    ? "Setup queued"
+    : voiceSetupChecking
+      ? "Checking..."
+      : voiceSetupHasRepair
+        ? "Repair voice cloning"
+        : "Set up voice cloning";
+  const uiBusy = busy || localizationRunBusy || voicePackBusy;
   const localizationRootDir = localizationRoot?.current_dir ?? localizationRoot?.default_dir ?? "";
   const currentExportDir = localizationExportDirForItem(localizationRootDir, currentHomeItem);
   const currentSourceCopyPath = localizationSourceCopyPath(currentExportDir, currentHomeItem);
@@ -1212,6 +1547,37 @@ function LocalizationStudioHome({
         {error ? <div className="error">{error}</div> : null}
         {notice ? <div className="loc-setup-notice">{notice}</div> : null}
 
+        {queuePaused ? (
+          <div
+            className="loc-setup-notice"
+            role="alert"
+            data-testid="loc-queue-paused-banner"
+            style={{
+              background: "#5c3a00",
+              color: "#fff5e0",
+              borderLeft: "4px solid #ffa726",
+              display: "flex",
+              alignItems: "center",
+              justifyContent: "space-between",
+              gap: 12,
+              padding: "10px 14px",
+            }}
+          >
+            <div>
+              <strong>Job queue is paused.</strong> Any "Start" you click here
+              will sit in the queue until you resume — including the
+              Hearin/Miyeon dub run and the voice-pack install.
+            </div>
+            <button
+              type="button"
+              onClick={() => void resumeQueue()}
+              disabled={queueResumeBusy}
+            >
+              {queueResumeBusy ? "Resuming..." : "Resume queue"}
+            </button>
+          </div>
+        ) : null}
+
         <section className="loc-setup-workbench" aria-label="Localization setup">
           <div className="loc-setup-header">
             <div>
@@ -1222,6 +1588,69 @@ function LocalizationStudioHome({
               Clear workbench
             </button>
           </div>
+
+          {dubOutput === "en" || voiceSetupNeedsAction ? (
+            <div
+              className={`loc-setup-voice ${voiceSetupIsReady ? "loc-setup-voice-ready" : "loc-setup-voice-needs-action"}`}
+            >
+              <div className="loc-setup-voice-main">
+                <div className="loc-setup-label">Voice cloning</div>
+                <div className="loc-setup-title">{voiceSetupActionText}</div>
+                <div className="loc-setup-path">{voiceSetupDetailText(voiceSetupStatus)}</div>
+                {voiceSetupStatusError ? (
+                  <div className="loc-setup-hint">Setup status could not be checked: {summarizeErrorMessage(voiceSetupStatusError)}</div>
+                ) : null}
+                {voiceSetupStatus ? (
+                  <div className="loc-setup-voice-details">
+                    <span title={voiceSetupStatus.neural.status_detail ?? ""}>
+                      Speech engine: {voiceSetupStatus.neural.installed && !voiceSetupStatus.neural.repair_required ? "ready" : "needs setup"}
+                    </span>
+                    <span title={voiceSetupStatus.voice.status_detail ?? ""}>
+                      Voice cloning: {voiceSetupStatus.voice.installed && !voiceSetupStatus.voice.repair_required ? "ready" : "needs setup"}
+                    </span>
+                  </div>
+                ) : null}
+                {voiceSetupJob ? (
+                  <div className="loc-setup-progress-wrap">
+                    <div className="loc-setup-progress-meta">
+                      <span>Voice setup job: {voiceSetupJob.status}</span>
+                      <span>{voiceSetupJobProgressPct}%</span>
+                    </div>
+                    <div className="loc-setup-progress" aria-label={`Voice setup progress ${voiceSetupJobProgressPct}%`}>
+                      <div style={{ width: `${Math.max(voiceSetupJob.status === "running" ? 8 : 0, voiceSetupJobProgressPct ?? 0)}%` }} />
+                    </div>
+                  </div>
+                ) : null}
+              </div>
+              <div className="loc-setup-actions">
+                {!voiceSetupIsReady ? (
+                  <button
+                    type="button"
+                    disabled={voiceSetupActionDisabled}
+                    title={
+                      voiceSetupHasRepair
+                        ? "Queue a tracked repair of the missing or stale voice-cloning runtime while keeping existing media and preferences."
+                        : "Queue a tracked install of the local voice-cloning runtime used for English dubs."
+                    }
+                    onClick={() =>
+                      void queueVoiceCloningSetup(voiceSetupHasRepair ? "repair" : "setup")
+                    }
+                  >
+                    {voiceSetupButtonText}
+                  </button>
+                ) : null}
+                <button type="button" disabled={voicePackBusy} onClick={() => void refreshVoiceSetupStatus()}>
+                  Refresh
+                </button>
+                <button type="button" disabled={voicePackBusy} onClick={onOpenJobs}>
+                  Jobs/Queue
+                </button>
+                <button type="button" disabled={voicePackBusy} onClick={onOpenOptions}>
+                  Advanced setup options
+                </button>
+              </div>
+            </div>
+          ) : null}
 
           <div className="loc-setup-source-row">
             <div className="loc-setup-source-main">
@@ -1244,9 +1673,7 @@ function LocalizationStudioHome({
               <button
                 type="button"
                 disabled={uiBusy || !currentHomeItem?.media_path}
-                onClick={() => {
-                  openPathBestEffort(currentHomeItem?.media_path ?? "").catch(() => undefined);
-                }}
+                onClick={() => void openLocalizationPath("Source file", currentHomeItem?.media_path)}
               >
                 Open file
               </button>
@@ -1363,9 +1790,7 @@ function LocalizationStudioHome({
               <button
                 type="button"
                 disabled={uiBusy || !localizationRootDir}
-                onClick={() => {
-                  revealPath(localizationRootDir).catch(() => undefined);
-                }}
+                onClick={() => void openLocalizationPath("Localization root", localizationRootDir, "reveal")}
               >
                 Open
               </button>
@@ -1389,7 +1814,18 @@ function LocalizationStudioHome({
             <div className="loc-setup-actions">
               <button
                 type="button"
-                disabled={uiBusy || !currentHomeItem || currentHomeStatus?.running || !!pendingImportPath}
+                disabled={
+                  uiBusy ||
+                  !currentHomeItem ||
+                  currentHomeStatus?.running ||
+                  !!pendingImportPath ||
+                  voiceSetupBlocksDubRun
+                }
+                title={
+                  voiceSetupBlocksDubRun
+                    ? "Set up or repair voice cloning before starting an English dub."
+                    : "Start the selected localization run."
+                }
                 onClick={() => currentHomeItem && void startLocalizationRun(currentHomeItem.id)}
               >
                 Start localization
@@ -1453,15 +1889,17 @@ function LocalizationStudioHome({
               <div className="loc-setup-job-list">
                 {successfulHomeItems.map((item) => {
                   const status = recentItemStatuses[item.id];
+                  const outputs = recentItemOutputsById[item.id] ?? null;
                   const exportDir = localizationExportDirForItem(localizationRootDir, item);
-                  const subtitlePath = localizationSubtitlePath(exportDir, item);
-                  const dubPath = status?.preview_mp4_path ?? localizationDubPath(exportDir, item);
+                  const workFolder = localizationActualWorkFolder(outputs, status, exportDir);
+                  const subtitlePath = localizationActualSubtitlePath(outputs);
+                  const dubPath = localizationActualDubPath(outputs, status);
                   return (
                     <div key={item.id} className="loc-setup-job-row">
                       <LocalizationThumbnail item={item} width={112} height={64} />
                       <div className="loc-setup-job-main">
                         <div className="loc-setup-title">{item.title || "Untitled media"}</div>
-                        <div className="loc-setup-path">{exportDir || status?.working_dir || item.media_path}</div>
+                        <div className="loc-setup-path">{workFolder || item.media_path}</div>
                         <div className="loc-setup-job-meta">
                           <span>Subtitles: English</span>
                           <span>Dub: English</span>
@@ -1469,19 +1907,19 @@ function LocalizationStudioHome({
                         </div>
                       </div>
                       <div className="loc-setup-job-actions">
-                        <button type="button" disabled={uiBusy || !item.media_path} onClick={() => openPathBestEffort(item.media_path).catch(() => undefined)}>
+                        <button type="button" disabled={uiBusy || !item.media_path} onClick={() => void openLocalizationPath("Source file", item.media_path)}>
                           Open file
                         </button>
-                        <button type="button" disabled={uiBusy || !exportDir} onClick={() => revealPath(exportDir).catch(() => undefined)}>
+                        <button type="button" disabled={uiBusy || !workFolder} onClick={() => void openLocalizationPath("Localization folder", workFolder, "reveal")}>
                           Open folder
                         </button>
-                        <button type="button" disabled={uiBusy || !subtitlePath} onClick={() => revealPath(subtitlePath).catch(() => undefined)}>
+                        <button type="button" disabled={uiBusy || !subtitlePath} onClick={() => void openLocalizationPath("Subtitle file", subtitlePath, "reveal")}>
                           Open sub location
                         </button>
-                        <button type="button" disabled={uiBusy || !dubPath} onClick={() => openPathBestEffort(dubPath).catch(() => undefined)}>
+                        <button type="button" disabled={uiBusy || !dubPath} onClick={() => void openLocalizationPath("Dub preview", dubPath)}>
                           Open dub
                         </button>
-                        <button type="button" disabled={uiBusy || !status?.working_dir} onClick={() => revealPath(status?.working_dir ?? "").catch(() => undefined)}>
+                        <button type="button" disabled={uiBusy || !status?.working_dir} onClick={() => void openLocalizationPath("Job folder", status?.working_dir, "reveal")}>
                           Open job
                         </button>
                       </div>
@@ -1671,7 +2109,12 @@ function LocalizationStudioHome({
                 <>
                   <button
                     type="button"
-                    disabled={uiBusy || currentHomeStatus?.running || !!pendingImportPath}
+                    disabled={uiBusy || currentHomeStatus?.running || !!pendingImportPath || voiceSetupBlocksDubRun}
+                    title={
+                      voiceSetupBlocksDubRun
+                        ? "Set up or repair voice cloning before starting an English dub."
+                        : "Start the selected localization run."
+                    }
                     onClick={() => void startLocalizationRun(currentHomeItem.id)}
                   >
                     Start localization run
@@ -1733,7 +2176,12 @@ function LocalizationStudioHome({
                   <div className="row" style={{ marginTop: 0, flexWrap: "wrap" }}>
                     <button
                       type="button"
-                      disabled={uiBusy || currentHomeStatus?.running || !!pendingImportPath}
+                      disabled={uiBusy || currentHomeStatus?.running || !!pendingImportPath || voiceSetupBlocksDubRun}
+                      title={
+                        voiceSetupBlocksDubRun
+                          ? "Set up or repair voice cloning before starting an English dub."
+                          : "Start the selected localization run."
+                      }
                       onClick={() => void startLocalizationRun(currentHomeItem.id)}
                     >
                       Start localization run
@@ -1819,7 +2267,18 @@ function LocalizationStudioHome({
                 </button>
                 <button
                   type="button"
-                  disabled={uiBusy || !currentHomeItem || currentHomeStatus?.running || !!pendingImportPath}
+                  disabled={
+                    uiBusy ||
+                    !currentHomeItem ||
+                    currentHomeStatus?.running ||
+                    !!pendingImportPath ||
+                    voiceSetupBlocksDubRun
+                  }
+                  title={
+                    voiceSetupBlocksDubRun
+                      ? "Set up or repair voice cloning before starting an English dub."
+                      : "Start the selected localization run."
+                  }
                   onClick={() => currentHomeItem && void startLocalizationRun(currentHomeItem.id)}
                 >
                   Start localization run
@@ -2260,7 +2719,7 @@ function App() {
       if (e.shiftKey && (e.ctrlKey || e.metaKey) && e.key.toLowerCase() === "s") {
         e.preventDefault();
         try {
-          const canvas = await html2canvas(document.body);
+          const canvas = await captureVisualDebuggerCanvas();
           const base64Data = canvas.toDataURL("image/png");
           const absPath = await invoke<string>("admin_save_snapshot", {
             base64Data,
@@ -2280,7 +2739,7 @@ function App() {
     // @ts-ignore
     window.__voxVulgiRequestSnapshot = async (subfolder?: string, label?: string) => {
       try {
-        const canvas = await html2canvas(document.body);
+        const canvas = await captureVisualDebuggerCanvas();
         const base64Data = canvas.toDataURL("image/png");
         return await invoke<string>("admin_save_snapshot", {
           base64Data,
@@ -2388,7 +2847,7 @@ function App() {
                 });
               }
             }
-            const canvas = await html2canvas(document.body);
+            const canvas = await captureVisualDebuggerCanvas();
             const base64Data = canvas.toDataURL("image/png");
             const absPath = await invoke<string>("admin_save_snapshot", {
               base64Data,
@@ -2498,16 +2957,6 @@ function App() {
     },
   );
 
-  useEffect(() => {
-    if (!startup) return;
-    const startupSettled =
-      startup.offline_bundle_state === "ready" ||
-      startup.offline_bundle_state === "skipped_safe_mode" ||
-      startup.offline_bundle_state === "error";
-    if (!startupSettled) return;
-    setVisitedPages((prev) => (prev.diagnostics ? prev : { ...prev, diagnostics: true }));
-  }, [startup]);
-
   usePollingLoop(
     async () => {
       try {
@@ -2527,9 +2976,9 @@ function App() {
       }
     },
     {
-      enabled: !safeMode?.enabled && desktopActivity.active,
-      intervalMs: 60_000,
-      initialDelayMs: 12_000,
+      enabled: !safeMode?.enabled && desktopActivity.active && page === "instagram_archive",
+      intervalMs: INSTAGRAM_SUBSCRIPTION_HEARTBEAT_INTERVAL_MS,
+      initialDelayMs: INSTAGRAM_SUBSCRIPTION_HEARTBEAT_INITIAL_DELAY_MS,
     },
   );
 

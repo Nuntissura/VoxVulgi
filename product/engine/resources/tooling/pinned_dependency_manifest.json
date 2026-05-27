@@ -1,6 +1,13 @@
 {
   "schema_version": 1,
   "allow_unpinned_fallback_env": "VOXVULGI_ALLOW_UNPINNED_FALLBACK",
+  "lockfiles": {
+    "demucs": "lockfiles/demucs.lock.json",
+    "diarization": "lockfiles/diarization.lock.json",
+    "tts_preview": "lockfiles/tts_preview.lock.json",
+    "tts_neural_local_v1": "lockfiles/tts_neural_local_v1.lock.json",
+    "tts_voice_preserving_local_v1": "lockfiles/tts_voice_preserving_local_v1.lock.json"
+  },
   "yt_dlp_windows": {
     "version": "2026.03.17",
     "url": "https://github.com/yt-dlp/yt-dlp/releases/download/2026.03.17/yt-dlp.exe",
@@ -81,19 +88,29 @@
       "kokoro==0.9.4",
       "numpy==1.26.4",
       "soundfile==0.13.1",
-      "torch==2.10.0"
+      "torch==2.10.0",
+      "transformers==5.8.1",
+      "huggingface_hub==1.5.0"
     ],
     "unpinned_fallback": [
       "kokoro",
       "numpy",
       "soundfile",
-      "torch"
+      "torch",
+      "transformers",
+      "huggingface_hub"
+    ],
+    "warmup_recovery_force_reinstall": [
+      "transformers==5.8.1",
+      "huggingface_hub==1.5.0",
+      "kokoro==0.9.4"
     ]
   },
   "tts_voice_preserving_local_v1": {
     "openvoice_git_spec": "git+https://github.com/myshell-ai/OpenVoice.git@74a1d147b17a8c3092dd5430504bd83ef6c7eb23",
     "pinned_dependencies": [
       "huggingface_hub==1.5.0",
+      "numpy==1.26.4",
       "librosa==0.11.0",
       "soundfile==0.13.1",
       "inflect==7.5.0",

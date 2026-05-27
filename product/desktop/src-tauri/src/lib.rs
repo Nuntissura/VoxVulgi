@@ -1,13 +1,30 @@
 use base64::Engine as _;
+#[cfg(target_os = "windows")]
+use raw_window_handle::{HasWindowHandle, RawWindowHandle};
 use sha2::{Digest, Sha256};
 use std::sync::{
     atomic::{AtomicBool, Ordering},
     Arc, Mutex, OnceLock,
 };
-use std::time::Duration;
+use std::time::{Duration, Instant};
 use sysinfo::{ProcessesToUpdate, System};
 use tauri::{Emitter, Manager, State};
 use tauri_runtime::ResizeDirection as TauriResizeDirection;
+#[cfg(target_os = "windows")]
+use windows_sys::Win32::{
+    Foundation::{HWND, RECT},
+    Graphics::Gdi::{
+        BitBlt, CreateCompatibleBitmap, CreateCompatibleDC, DeleteDC, DeleteObject, GetDIBits,
+        GetWindowDC, ReleaseDC, SelectObject, BITMAPINFO, BITMAPINFOHEADER, BI_RGB, DIB_RGB_COLORS,
+        HGDIOBJ, RGBQUAD, SRCCOPY,
+    },
+    UI::WindowsAndMessaging::GetWindowRect,
+};
+
+#[cfg(target_os = "windows")]
+extern "system" {
+    fn PrintWindow(hwnd: HWND, hdcblt: windows_sys::Win32::Graphics::Gdi::HDC, nflags: u32) -> i32;
+}
 
 // ---------------------------------------------------------------------------
 // Agent Bridge — localhost HTTP API for headless agent control (WP-0171)
@@ -69,7 +86,9 @@ fn spawn_agent_bridge(app_data_dir: &std::path::Path) {
                 Ok(mut stream) => {
                     let _ = stream.set_read_timeout(Some(Duration::from_secs(5)));
                     let _ = stream.set_write_timeout(Some(Duration::from_secs(5)));
-                    handle_agent_request(&mut stream);
+                    std::thread::spawn(move || {
+                        handle_agent_request(&mut stream);
+                    });
                 }
                 Err(_) => continue,
             }
@@ -243,6 +262,222 @@ fn agent_handle_navigate(body: &str) -> (&'static str, String) {
     )
 }
 
+fn build_snapshot_artifact_path(
+    subfolder: Option<&str>,
+    label: Option<&str>,
+    extension: &str,
+    fallback_label: &str,
+) -> Result<std::path::PathBuf, String> {
+    let mut snapshots_dir = std::env::current_dir().unwrap_or_default();
+    while !snapshots_dir.join("governance").exists() && snapshots_dir.parent().is_some() {
+        snapshots_dir = snapshots_dir.parent().unwrap().to_path_buf();
+    }
+    let mut target_dir = snapshots_dir.join("governance").join("snapshots");
+    if let Some(sub) = subfolder {
+        let sanitized = sub.replace(['/', '\\', ':', '*', '?', '"', '<', '>', '|'], "_");
+        if !sanitized.is_empty() {
+            target_dir = target_dir.join(sanitized);
+        }
+    }
+    if !target_dir.exists() {
+        std::fs::create_dir_all(&target_dir)
+            .map_err(|e| format!("Failed to create snapshot dir: {}", e))?;
+    }
+
+    let label_part = label
+        .map(|l| l.replace(['/', '\\', ':', '*', '?', '"', '<', '>', '|', ' '], "_"))
+        .filter(|l| !l.is_empty());
+    let file_name = match label_part {
+        Some(l) => format!("{}_{}.{}", l, now_epoch_ms_i64(), extension),
+        None => format!("{}_{}.{}", fallback_label, now_epoch_ms_i64(), extension),
+    };
+    Ok(target_dir.join(file_name))
+}
+
+#[cfg(target_os = "windows")]
+fn try_native_agent_snapshot(subfolder: &str, label: &str) -> Result<String, String> {
+    let app = AGENT_APP_HANDLE
+        .get()
+        .ok_or_else(|| "agent app handle is unavailable".to_string())?;
+    let window = app
+        .get_webview_window("main")
+        .ok_or_else(|| "main webview window is unavailable".to_string())?;
+    let handle = window.window_handle().map_err(|e| e.to_string())?;
+    let hwnd = match handle.as_raw() {
+        RawWindowHandle::Win32(handle) => handle.hwnd.get() as HWND,
+        _ => return Err("native snapshot is only implemented for Win32 windows".to_string()),
+    };
+    capture_hwnd_snapshot_png(hwnd, subfolder, label)
+}
+
+#[cfg(not(target_os = "windows"))]
+fn try_native_agent_snapshot(_subfolder: &str, _label: &str) -> Result<String, String> {
+    Err("native snapshot is not implemented on this platform".to_string())
+}
+
+fn native_snapshot_has_visual_content(rgba: &[u8]) -> bool {
+    let pixel_count = rgba.len() / 4;
+    if pixel_count == 0 {
+        return false;
+    }
+
+    let visible_pixels = rgba
+        .chunks_exact(4)
+        .filter(|px| px[0] > 12 || px[1] > 12 || px[2] > 12)
+        .count();
+    let minimum_visible_pixels = (pixel_count / 100).max(32);
+    visible_pixels >= minimum_visible_pixels
+}
+
+fn emit_agent_snapshot_request(subfolder: &str, label: &str, scroll_top: Option<f64>) {
+    if let Some(app) = AGENT_APP_HANDLE.get() {
+        let _ = app.emit(
+            "agent-snapshot-request",
+            serde_json::json!({
+                "subfolder": subfolder,
+                "label": label,
+                "scroll_top": scroll_top,
+            }),
+        );
+    }
+}
+
+#[cfg(target_os = "windows")]
+fn capture_hwnd_snapshot_png(hwnd: HWND, subfolder: &str, label: &str) -> Result<String, String> {
+    if hwnd.is_null() {
+        return Err("window handle is null".to_string());
+    }
+    let mut rect = RECT {
+        left: 0,
+        top: 0,
+        right: 0,
+        bottom: 0,
+    };
+    let got_rect = unsafe { GetWindowRect(hwnd, &mut rect as *mut RECT) };
+    if got_rect == 0 {
+        return Err("GetWindowRect failed".to_string());
+    }
+    let width = rect.right.saturating_sub(rect.left);
+    let height = rect.bottom.saturating_sub(rect.top);
+    if width <= 0 || height <= 0 {
+        return Err(format!("invalid window capture size: {width}x{height}"));
+    }
+
+    let window_dc = unsafe { GetWindowDC(hwnd) };
+    if window_dc.is_null() {
+        return Err("GetWindowDC failed".to_string());
+    }
+    let memory_dc = unsafe { CreateCompatibleDC(window_dc) };
+    if memory_dc.is_null() {
+        unsafe {
+            ReleaseDC(hwnd, window_dc);
+        }
+        return Err("CreateCompatibleDC failed".to_string());
+    }
+    let bitmap = unsafe { CreateCompatibleBitmap(window_dc, width, height) };
+    if bitmap.is_null() {
+        unsafe {
+            DeleteDC(memory_dc);
+            ReleaseDC(hwnd, window_dc);
+        }
+        return Err("CreateCompatibleBitmap failed".to_string());
+    }
+
+    let previous = unsafe { SelectObject(memory_dc, bitmap as HGDIOBJ) };
+    const PW_RENDERFULLCONTENT: u32 = 0x0000_0002;
+    let printed = unsafe { PrintWindow(hwnd, memory_dc, PW_RENDERFULLCONTENT) };
+    if printed == 0 {
+        let copied = unsafe { BitBlt(memory_dc, 0, 0, width, height, window_dc, 0, 0, SRCCOPY) };
+        if copied == 0 {
+            unsafe {
+                SelectObject(memory_dc, previous);
+                DeleteObject(bitmap as HGDIOBJ);
+                DeleteDC(memory_dc);
+                ReleaseDC(hwnd, window_dc);
+            }
+            return Err("PrintWindow and BitBlt both failed".to_string());
+        }
+    }
+
+    let mut bitmap_info = BITMAPINFO {
+        bmiHeader: BITMAPINFOHEADER {
+            biSize: std::mem::size_of::<BITMAPINFOHEADER>() as u32,
+            biWidth: width,
+            biHeight: -height,
+            biPlanes: 1,
+            biBitCount: 32,
+            biCompression: BI_RGB,
+            biSizeImage: (width as u32)
+                .saturating_mul(height as u32)
+                .saturating_mul(4),
+            biXPelsPerMeter: 0,
+            biYPelsPerMeter: 0,
+            biClrUsed: 0,
+            biClrImportant: 0,
+        },
+        bmiColors: [RGBQUAD {
+            rgbBlue: 0,
+            rgbGreen: 0,
+            rgbRed: 0,
+            rgbReserved: 0,
+        }],
+    };
+    let mut bgra = vec![0u8; (width as usize) * (height as usize) * 4];
+    let scanlines = unsafe {
+        GetDIBits(
+            memory_dc,
+            bitmap,
+            0,
+            height as u32,
+            bgra.as_mut_ptr() as *mut core::ffi::c_void,
+            &mut bitmap_info as *mut BITMAPINFO,
+            DIB_RGB_COLORS,
+        )
+    };
+
+    unsafe {
+        SelectObject(memory_dc, previous);
+        DeleteObject(bitmap as HGDIOBJ);
+        DeleteDC(memory_dc);
+        ReleaseDC(hwnd, window_dc);
+    }
+
+    if scanlines == 0 {
+        return Err("GetDIBits failed".to_string());
+    }
+
+    let mut rgba = Vec::with_capacity(bgra.len());
+    for px in bgra.chunks_exact(4) {
+        rgba.push(px[2]);
+        rgba.push(px[1]);
+        rgba.push(px[0]);
+        rgba.push(px[3]);
+    }
+    if !native_snapshot_has_visual_content(&rgba) {
+        return Err("native snapshot was blank; falling back to frontend renderer".to_string());
+    }
+
+    let path = build_snapshot_artifact_path(Some(subfolder), Some(label), "png", "snapshot")?;
+    let file = std::fs::File::create(&path)
+        .map_err(|e| format!("Failed to create native snapshot: {e}"))?;
+    let writer = std::io::BufWriter::new(file);
+    let mut encoder = png::Encoder::new(writer, width as u32, height as u32);
+    encoder.set_color(png::ColorType::Rgba);
+    encoder.set_depth(png::BitDepth::Eight);
+    let mut png_writer = encoder
+        .write_header()
+        .map_err(|e| format!("Failed to start PNG snapshot: {e}"))?;
+    png_writer
+        .write_image_data(&rgba)
+        .map_err(|e| format!("Failed to write PNG snapshot: {e}"))?;
+
+    let abs_path = std::fs::canonicalize(&path)
+        .unwrap_or(path)
+        .to_string_lossy()
+        .to_string();
+    Ok(abs_path)
+}
+
 fn agent_handle_snapshot(body: &str) -> (&'static str, String) {
     let parsed: serde_json::Value = serde_json::from_str(body).unwrap_or(serde_json::json!({}));
     let subfolder = parsed
@@ -260,6 +495,15 @@ fn agent_handle_snapshot(body: &str) -> (&'static str, String) {
         .or_else(|| parsed.get("scrollTop"))
         .and_then(|v| v.as_f64());
 
+    if scroll_top.is_none() {
+        if let Ok(path) = try_native_agent_snapshot(&subfolder, &label) {
+            return (
+                "200 OK",
+                format!(r#"{{"path":"{}"}}"#, path.replace('\\', "\\\\")),
+            );
+        }
+    }
+
     let (tx, rx) = std::sync::mpsc::channel::<String>();
 
     {
@@ -267,31 +511,29 @@ fn agent_handle_snapshot(body: &str) -> (&'static str, String) {
         state.snapshot_tx = Some(tx);
     }
 
-    if let Some(app) = AGENT_APP_HANDLE.get() {
-        let _ = app.emit(
-            "agent-snapshot-request",
-            serde_json::json!({
-                "subfolder": subfolder,
-                "label": label,
-                "scroll_top": scroll_top,
-            }),
-        );
-    }
-
-    // Wait for frontend to complete the snapshot (up to 30 seconds for heavy pages under load)
-    match rx.recv_timeout(Duration::from_secs(30)) {
-        Ok(path) => (
-            "200 OK",
-            format!(r#"{{"path":"{}"}}"#, path.replace('\\', "\\\\")),
-        ),
-        Err(_) => {
-            // Clear stale sender so late-arriving captures don't contaminate the next request
-            let mut state = agent_bridge_state().lock().unwrap();
-            state.snapshot_tx = None;
-            (
-                "504 Gateway Timeout",
-                r#"{"error":"snapshot timed out (30s)"}"#.to_string(),
-            )
+    // Wait for frontend to complete the snapshot (up to 30 seconds for heavy pages under load).
+    // Re-emit periodically because the bridge can be available before the WebView has registered
+    // its listener during startup; a single early emit is otherwise lost.
+    let started_at = Instant::now();
+    loop {
+        emit_agent_snapshot_request(&subfolder, &label, scroll_top);
+        match rx.recv_timeout(Duration::from_secs(5)) {
+            Ok(path) => {
+                return (
+                    "200 OK",
+                    format!(r#"{{"path":"{}"}}"#, path.replace('\\', "\\\\")),
+                )
+            }
+            Err(_) if started_at.elapsed() < Duration::from_secs(30) => continue,
+            Err(_) => {
+                // Clear stale sender so late-arriving captures don't contaminate the next request
+                let mut state = agent_bridge_state().lock().unwrap();
+                state.snapshot_tx = None;
+                return (
+                    "504 Gateway Timeout",
+                    r#"{"error":"snapshot timed out (30s)"}"#.to_string(),
+                );
+            }
         }
     }
 }
@@ -359,10 +601,7 @@ fn agent_handle_freeze_event(body: &str) -> (&'static str, String) {
         .filter(|s| !s.is_empty())
         .unwrap_or("freeze_detected")
         .to_string();
-    if event != "freeze_detected"
-        && event != "freeze_recovered"
-        && event != "worker_alive"
-    {
+    if event != "freeze_detected" && event != "freeze_recovered" && event != "worker_alive" {
         return (
             "400 Bad Request",
             r#"{"error":"event must be freeze_detected, freeze_recovered, or worker_alive"}"#
@@ -453,8 +692,7 @@ fn agent_handle_freeze_dump(body: &str) -> (&'static str, String) {
         );
     }
 
-    let recent_trace =
-        read_recent_diagnostics_trace_entries(&paths, limit).unwrap_or_default();
+    let recent_trace = read_recent_diagnostics_trace_entries(&paths, limit).unwrap_or_default();
 
     let (current_page, editor_item_id, safe_mode) = {
         let s = agent_bridge_state().lock().unwrap();
@@ -528,9 +766,9 @@ use voxvulgi_engine::models::ModelStore;
 use voxvulgi_engine::paths::AppPaths;
 use voxvulgi_engine::{
     config, db, diagnostics, instagram_subscriptions, jobs, library, speakers, subscriptions,
-    subtitle_tracks, subtitles, tools, translate, voice_backend_adapters, voice_backends,
-    voice_benchmarks, voice_cast_packs, voice_cleanup, voice_library, voice_plans,
-    video_libraries, voice_reference_candidates, voice_reference_curation, voice_templates,
+    subtitle_tracks, subtitles, tools, translate, video_libraries, voice_backend_adapters,
+    voice_backends, voice_benchmarks, voice_cast_packs, voice_cleanup, voice_library, voice_plans,
+    voice_reference_candidates, voice_reference_curation, voice_templates,
 };
 
 #[derive(Debug, Clone, serde::Deserialize)]
@@ -966,6 +1204,7 @@ struct ItemOutputs {
     terminal_error: Option<String>,
     deliverable_path: Option<String>,
     deliverable_exists: bool,
+    recent_jobs: Vec<jobs::JobRow>,
 }
 
 #[derive(Debug, Clone, serde::Serialize)]
@@ -1031,7 +1270,10 @@ fn mark_phase2_active_steps_terminal(
     message: &str,
 ) {
     let finished_at_ms = finished_at_ms.unwrap_or_else(now_epoch_ms_i64);
-    if let Some(steps) = state.get_mut("steps").and_then(|value| value.as_array_mut()) {
+    if let Some(steps) = state
+        .get_mut("steps")
+        .and_then(|value| value.as_array_mut())
+    {
         for step in steps {
             let current_status = step
                 .get("status")
@@ -1042,13 +1284,19 @@ fn mark_phase2_active_steps_terminal(
             }
             if let Some(obj) = step.as_object_mut() {
                 obj.insert("status".to_string(), serde_json::json!(status));
-                obj.insert("finished_at_ms".to_string(), serde_json::json!(finished_at_ms));
+                obj.insert(
+                    "finished_at_ms".to_string(),
+                    serde_json::json!(finished_at_ms),
+                );
                 obj.insert("error".to_string(), serde_json::json!(message));
             }
         }
     }
     if let Some(obj) = state.as_object_mut() {
-        obj.insert("normalized_at_ms".to_string(), serde_json::json!(now_epoch_ms_i64()));
+        obj.insert(
+            "normalized_at_ms".to_string(),
+            serde_json::json!(now_epoch_ms_i64()),
+        );
         obj.insert("normalization_note".to_string(), serde_json::json!(message));
     }
 }
@@ -1103,7 +1351,12 @@ fn normalize_phase2_latest_state(
                     } else {
                         "failed"
                     };
-                    mark_phase2_active_steps_terminal(&mut state, status, job.finished_at_ms, detail);
+                    mark_phase2_active_steps_terminal(
+                        &mut state,
+                        status,
+                        job.finished_at_ms,
+                        detail,
+                    );
                     (state, false, true, Some(job_status))
                 }
                 jobs::JobStatus::Canceled => {
@@ -1211,6 +1464,41 @@ fn append_diagnostics_trace_row_best_effort(
     level: &str,
 ) {
     let _ = append_diagnostics_trace_row(paths, event.to_string(), details, level.to_string());
+}
+
+fn trace_database_command_error(
+    paths: &AppPaths,
+    command: &'static str,
+    message: String,
+) -> String {
+    let lower = message.to_ascii_lowercase();
+    let event = if lower.contains("database is locked")
+        || lower.contains("database table is locked")
+        || lower.contains("sqlite_locked")
+    {
+        Some("database_locked")
+    } else if lower.contains("database is busy")
+        || lower.contains("database busy")
+        || lower.contains("sqlite_busy")
+    {
+        Some("database_busy")
+    } else {
+        None
+    };
+
+    if let Some(event) = event {
+        append_diagnostics_trace_row_best_effort(
+            paths,
+            event,
+            serde_json::json!({
+                "cmd": command,
+                "error": message,
+            }),
+            "warn",
+        );
+    }
+
+    message
 }
 
 // WP-0221: RAII timer for instrumented Tauri commands. Construct at the top of
@@ -1627,6 +1915,51 @@ fn write_offline_bundle_marker(
     Ok(())
 }
 
+#[derive(Debug, Clone, Copy)]
+struct OfflineBundleRuntimeReadyFlags {
+    ffmpeg_installed: bool,
+    ytdlp_available: bool,
+    js_runtime_available: bool,
+    portable_python_installed: bool,
+    venv_ready: bool,
+    diarization_installed: bool,
+    neural_tts_installed: bool,
+    voice_preserving_installed: bool,
+}
+
+fn offline_bundle_runtime_ready_from_flags(flags: OfflineBundleRuntimeReadyFlags) -> bool {
+    flags.ffmpeg_installed
+        && flags.ytdlp_available
+        && flags.js_runtime_available
+        && flags.portable_python_installed
+        && flags.venv_ready
+        && flags.diarization_installed
+        && flags.neural_tts_installed
+        && flags.voice_preserving_installed
+}
+
+fn offline_bundle_runtime_already_ready(paths: &AppPaths) -> bool {
+    let ffmpeg = tools::ffmpeg_tools_status(paths);
+    let ytdlp = tools::ytdlp_tools_status(paths);
+    let js_runtime = tools::js_runtime_tools_status(paths);
+    let python = tools::python_toolchain_status(paths);
+    let portable_python = tools::portable_python_status(paths);
+    let diarization = tools::diarization_pack_status(paths);
+    let neural_tts = tools::tts_neural_local_v1_pack_status(paths);
+    let voice_preserving = tools::tts_voice_preserving_local_v1_pack_status(paths);
+
+    offline_bundle_runtime_ready_from_flags(OfflineBundleRuntimeReadyFlags {
+        ffmpeg_installed: ffmpeg.installed,
+        ytdlp_available: ytdlp.available,
+        js_runtime_available: js_runtime.available,
+        portable_python_installed: portable_python.installed,
+        venv_ready: python.venv_exists && python.venv_python_version.is_some(),
+        diarization_installed: diarization.installed,
+        neural_tts_installed: neural_tts.installed,
+        voice_preserving_installed: voice_preserving.installed,
+    })
+}
+
 fn copy_tree_best_effort(
     src_root: &std::path::Path,
     dst_root: &std::path::Path,
@@ -1803,7 +2136,18 @@ fn apply_offline_bundle_if_present(
         ));
     }
 
+    patch_venv_pyvenv_cfg_best_effort(paths)?;
+
     if offline_bundle_already_applied(paths, &manifest.bundle_id) {
+        return Ok(());
+    }
+
+    if offline_bundle_runtime_already_ready(paths) {
+        write_offline_bundle_marker(paths, &bundle_root, &manifest.bundle_id)?;
+        eprintln!(
+            "offline bundle: runtime already ready; recorded bundle_id={} without rehydrating payload",
+            manifest.bundle_id,
+        );
         return Ok(());
     }
 
@@ -1915,6 +2259,36 @@ mod tests {
     }
 
     #[test]
+    fn offline_bundle_runtime_ready_requires_localization_voice_runtime() {
+        let ready = OfflineBundleRuntimeReadyFlags {
+            ffmpeg_installed: true,
+            ytdlp_available: true,
+            js_runtime_available: true,
+            portable_python_installed: true,
+            venv_ready: true,
+            diarization_installed: true,
+            neural_tts_installed: true,
+            voice_preserving_installed: true,
+        };
+
+        assert!(offline_bundle_runtime_ready_from_flags(ready));
+
+        let mut missing_voice = ready;
+        missing_voice.voice_preserving_installed = false;
+        assert!(!offline_bundle_runtime_ready_from_flags(missing_voice));
+
+        let mut missing_diarization = ready;
+        missing_diarization.diarization_installed = false;
+        assert!(!offline_bundle_runtime_ready_from_flags(
+            missing_diarization
+        ));
+
+        let mut missing_python = ready;
+        missing_python.venv_ready = false;
+        assert!(!offline_bundle_runtime_ready_from_flags(missing_python));
+    }
+
+    #[test]
     fn phase2_latest_state_marks_interrupted_steps_when_job_failed() {
         let dir = tempfile::tempdir().expect("tempdir");
         let paths = AppPaths::new(dir.path().to_path_buf());
@@ -1938,8 +2312,7 @@ mod tests {
             ]
         });
 
-        let (normalized, active, stale, job_status) =
-            normalize_phase2_latest_state(&paths, state);
+        let (normalized, active, stale, job_status) = normalize_phase2_latest_state(&paths, state);
         assert!(!active);
         assert!(stale);
         assert_eq!(job_status.as_deref(), Some("failed"));
@@ -1949,7 +2322,11 @@ mod tests {
             .and_then(|value| value.as_array())
             .expect("steps")
             .iter()
-            .map(|step| step.get("status").and_then(|value| value.as_str()).unwrap_or(""))
+            .map(|step| {
+                step.get("status")
+                    .and_then(|value| value.as_str())
+                    .unwrap_or("")
+            })
             .collect::<Vec<_>>();
         assert_eq!(statuses, vec!["done", "interrupted", "interrupted"]);
     }
@@ -2341,9 +2718,7 @@ fn shell_reveal_target(path: &std::path::Path) -> Result<(), String> {
         // it successfully opens Explorer and selects the file. Treat exit 1
         // as success only for the /select, call path; folder-only reveals
         // keep strict success semantics.
-        let status = command
-            .status()
-            .map_err(|e| format!("reveal path: {e}"))?;
+        let status = command.status().map_err(|e| format!("reveal path: {e}"))?;
         if !status.success() {
             let code = status.code();
             if is_select && code == Some(1) {
@@ -3058,7 +3433,7 @@ struct TrackAvailabilitySummary {
 }
 
 fn summarize_tracks_for_outputs(
-    paths: &AppPaths,
+    _paths: &AppPaths,
     tracks: &[subtitle_tracks::SubtitleTrackRow],
     include: impl Fn(&subtitle_tracks::SubtitleTrackRow) -> bool,
 ) -> TrackAvailabilitySummary {
@@ -3072,7 +3447,8 @@ fn summarize_tracks_for_outputs(
             latest_version = track.version;
             summary.latest_track_path = Some(track.path.clone());
         }
-        if let Ok(doc) = subtitle_tracks::load_document(paths, &track.id) {
+        if let Ok(doc) = subtitle_tracks::load_document_from_path(std::path::Path::new(&track.path))
+        {
             summary.usable_segment_count += subtitles::usable_segment_count(&doc);
             for speaker in doc
                 .segments
@@ -3090,12 +3466,32 @@ fn summarize_tracks_for_outputs(
     summary
 }
 
+fn latest_mix_job_used_source_audio_fallback(jobs: &[jobs::JobRow]) -> bool {
+    let latest_mix = jobs
+        .iter()
+        .filter(|job| {
+            job.job_type == "mix_dub_preview_v1" && matches!(job.status, jobs::JobStatus::Succeeded)
+        })
+        .max_by_key(|job| job.finished_at_ms.unwrap_or(job.created_at_ms));
+    let Some(job) = latest_mix else {
+        return false;
+    };
+    let log_path = job.logs_path.trim();
+    if log_path.is_empty() {
+        return false;
+    }
+    std::fs::read_to_string(log_path)
+        .map(|text| text.contains("source_audio_fallback"))
+        .unwrap_or(false)
+}
+
 #[allow(clippy::too_many_arguments)]
 fn localization_terminal_outcome(
     jobs: &[jobs::JobRow],
     source: &TrackAvailabilitySummary,
     translated_en: &TrackAvailabilitySummary,
     mix_exists: bool,
+    source_audio_fallback_mix: bool,
     mux_mp4_path: &std::path::Path,
     mux_mp4_exists: bool,
     mux_mkv_path: &std::path::Path,
@@ -3135,6 +3531,19 @@ fn localization_terminal_outcome(
             ),
             Some(label),
             Some(job.progress.clamp(0.0, 1.0)),
+            None,
+            None,
+            false,
+        );
+    }
+
+    if source_audio_fallback_mix && (mix_exists || mux_mp4_exists || mux_mkv_exists) {
+        return (
+            "dub_needs_separation".to_string(),
+            "Needs clean background separation".to_string(),
+            "The existing dub preview was mixed over the original source audio. Run source separation so the English dub is mixed over a clean background instead of the Korean voice track.".to_string(),
+            Some("Separate background".to_string()),
+            None,
             None,
             None,
             false,
@@ -3183,7 +3592,7 @@ fn localization_terminal_outcome(
             format!("Failed before deliverable: {label}"),
             detail.clone(),
             Some(label),
-            Some(job.progress.clamp(0.0, 1.0)),
+            None,
             Some(detail),
             None,
             false,
@@ -3263,36 +3672,31 @@ fn localization_terminal_outcome(
     )
 }
 
-#[tauri::command]
-fn item_outputs(
-    state: State<'_, AppState>,
-    item_id: Option<String>,
-    itemId: Option<String>,
-) -> Result<ItemOutputs, String> {
-    let item_id = item_id
-        .or(itemId)
-        .map(|v| v.trim().to_string())
-        .filter(|v| !v.is_empty())
-        .ok_or_else(|| "missing required key itemId".to_string())?;
+fn build_item_outputs(paths: &AppPaths, item_id: &str) -> Result<ItemOutputs, String> {
+    let item_id = item_id.trim().to_string();
+    if item_id.is_empty() {
+        return Err("missing required key itemId".to_string());
+    }
 
-    let item = library::get_item_by_id(&state.paths, &item_id).map_err(|e| e.to_string())?;
-    let item_dir = state.paths.derived_item_dir(&item_id);
+    let item = library::get_item_by_id(paths, &item_id).map_err(|e| e.to_string())?;
+    let item_dir = paths.derived_item_dir(&item_id);
     let dub_preview_dir = item_dir.join("dub_preview");
     let mix_path = dub_preview_dir.join("mix_dub_preview_v1.wav");
     let mux_mp4_path = dub_preview_dir.join("mux_dub_preview_v1.mp4");
     let mux_mkv_path = dub_preview_dir.join("mux_dub_preview_v1.mkv");
     let export_pack_path = item_dir.join("exports").join("export_pack_v1.zip");
-    let tracks = subtitle_tracks::list_tracks(&state.paths, &item_id).unwrap_or_default();
+    let tracks = subtitle_tracks::list_tracks(paths, &item_id).unwrap_or_default();
     let source_summary =
-        summarize_tracks_for_outputs(&state.paths, &tracks, |track| track.kind == "source");
-    let translated_en_summary = summarize_tracks_for_outputs(&state.paths, &tracks, |track| {
+        summarize_tracks_for_outputs(paths, &tracks, |track| track.kind == "source");
+    let translated_en_summary = summarize_tracks_for_outputs(paths, &tracks, |track| {
         track.kind == "translated" && is_english_lang_tag(&track.lang)
     });
-    let item_jobs = jobs::list_jobs_for_item(&state.paths, &item_id, 80, 0).unwrap_or_default();
+    let item_jobs = jobs::list_jobs_for_item(paths, &item_id, 80, 0).unwrap_or_default();
     let mix_exists = mix_path.exists();
     let mux_mp4_exists = mux_mp4_path.exists();
     let mux_mkv_exists = mux_mkv_path.exists();
     let export_pack_exists = export_pack_path.exists();
+    let source_audio_fallback_mix = latest_mix_job_used_source_audio_fallback(&item_jobs);
     let (
         terminal_state,
         terminal_summary,
@@ -3307,6 +3711,7 @@ fn item_outputs(
         &source_summary,
         &translated_en_summary,
         mix_exists,
+        source_audio_fallback_mix,
         &mux_mp4_path,
         mux_mp4_exists,
         &mux_mkv_path,
@@ -3315,6 +3720,7 @@ fn item_outputs(
         export_pack_exists,
         &item_dir,
     );
+    let recent_jobs = item_jobs.iter().take(40).cloned().collect();
 
     Ok(ItemOutputs {
         item_id,
@@ -3345,7 +3751,373 @@ fn item_outputs(
         terminal_error,
         deliverable_path,
         deliverable_exists,
+        recent_jobs,
     })
+}
+
+fn job_status_from_db(value: &str) -> jobs::JobStatus {
+    match value {
+        "queued" => jobs::JobStatus::Queued,
+        "running" => jobs::JobStatus::Running,
+        "succeeded" => jobs::JobStatus::Succeeded,
+        "canceled" => jobs::JobStatus::Canceled,
+        _ => jobs::JobStatus::Failed,
+    }
+}
+
+fn query_localization_home_jobs_by_item(
+    conn: &rusqlite::Connection,
+    item_ids: &[String],
+) -> Result<std::collections::BTreeMap<String, Vec<jobs::JobRow>>, String> {
+    if item_ids.is_empty() {
+        return Ok(std::collections::BTreeMap::new());
+    }
+    let placeholders = std::iter::repeat("?")
+        .take(item_ids.len())
+        .collect::<Vec<_>>()
+        .join(",");
+    let sql = format!(
+        r#"
+SELECT
+  id,
+  item_id,
+  batch_id,
+  type,
+  status,
+  progress,
+  error,
+  created_at_ms,
+  started_at_ms,
+  finished_at_ms,
+  logs_path,
+  params_json
+FROM job
+WHERE item_id IN ({placeholders})
+ORDER BY item_id ASC, created_at_ms DESC
+"#
+    );
+    let mut stmt = conn.prepare(&sql).map_err(|e| e.to_string())?;
+    let rows = stmt
+        .query_map(
+            rusqlite::params_from_iter(item_ids.iter().map(String::as_str)),
+            |row| {
+                let status_str: String = row.get(4)?;
+                Ok(jobs::JobRow {
+                    id: row.get(0)?,
+                    item_id: row.get(1)?,
+                    batch_id: row.get(2)?,
+                    job_type: row.get(3)?,
+                    status: job_status_from_db(&status_str),
+                    progress: row.get(5)?,
+                    error: row.get(6)?,
+                    created_at_ms: row.get(7)?,
+                    started_at_ms: row.get(8)?,
+                    finished_at_ms: row.get(9)?,
+                    logs_path: row.get(10)?,
+                    params_json: row.get(11)?,
+                })
+            },
+        )
+        .map_err(|e| e.to_string())?;
+
+    let mut by_item = std::collections::BTreeMap::<String, Vec<jobs::JobRow>>::new();
+    for row in rows {
+        let job = row.map_err(|e| e.to_string())?;
+        let Some(item_id) = job.item_id.clone() else {
+            continue;
+        };
+        let entry = by_item.entry(item_id).or_default();
+        if entry.len() < 80 {
+            entry.push(job);
+        }
+    }
+    Ok(by_item)
+}
+
+fn query_localization_home_tracks_by_item(
+    conn: &rusqlite::Connection,
+    item_ids: &[String],
+) -> Result<std::collections::BTreeMap<String, Vec<subtitle_tracks::SubtitleTrackRow>>, String> {
+    if item_ids.is_empty() {
+        return Ok(std::collections::BTreeMap::new());
+    }
+    let placeholders = std::iter::repeat("?")
+        .take(item_ids.len())
+        .collect::<Vec<_>>()
+        .join(",");
+    let sql = format!(
+        r#"
+SELECT
+  id,
+  item_id,
+  kind,
+  lang,
+  format,
+  path,
+  created_by,
+  version
+FROM subtitle_track
+WHERE item_id IN ({placeholders})
+ORDER BY item_id ASC, kind ASC, lang ASC, version DESC
+"#
+    );
+    let mut stmt = conn.prepare(&sql).map_err(|e| e.to_string())?;
+    let rows = stmt
+        .query_map(
+            rusqlite::params_from_iter(item_ids.iter().map(String::as_str)),
+            |row| {
+                Ok(subtitle_tracks::SubtitleTrackRow {
+                    id: row.get(0)?,
+                    item_id: row.get(1)?,
+                    kind: row.get(2)?,
+                    lang: row.get(3)?,
+                    format: row.get(4)?,
+                    path: row.get(5)?,
+                    created_by: row.get(6)?,
+                    version: row.get(7)?,
+                })
+            },
+        )
+        .map_err(|e| e.to_string())?;
+
+    let mut by_item =
+        std::collections::BTreeMap::<String, Vec<subtitle_tracks::SubtitleTrackRow>>::new();
+    for row in rows {
+        let track = row.map_err(|e| e.to_string())?;
+        by_item
+            .entry(track.item_id.clone())
+            .or_default()
+            .push(track);
+    }
+    Ok(by_item)
+}
+
+fn build_localization_home_item_outputs(
+    paths: &AppPaths,
+    item_id: &str,
+    tracks: &[subtitle_tracks::SubtitleTrackRow],
+    item_jobs: &[jobs::JobRow],
+) -> ItemOutputs {
+    let item_dir = paths.derived_item_dir(item_id);
+    let dub_preview_dir = item_dir.join("dub_preview");
+    let mix_path = dub_preview_dir.join("mix_dub_preview_v1.wav");
+    let mux_mp4_path = dub_preview_dir.join("mux_dub_preview_v1.mp4");
+    let mux_mkv_path = dub_preview_dir.join("mux_dub_preview_v1.mkv");
+    let export_pack_path = item_dir.join("exports").join("export_pack_v1.zip");
+    let source_summary =
+        summarize_tracks_for_outputs(paths, tracks, |track| track.kind == "source");
+    let translated_en_summary = summarize_tracks_for_outputs(paths, tracks, |track| {
+        track.kind == "translated" && is_english_lang_tag(&track.lang)
+    });
+    let item_jobs = item_jobs.iter().take(80).cloned().collect::<Vec<_>>();
+    let mix_exists = mix_path.exists();
+    let mux_mp4_exists = mux_mp4_path.exists();
+    let mux_mkv_exists = mux_mkv_path.exists();
+    let export_pack_exists = export_pack_path.exists();
+    let source_audio_fallback_mix = latest_mix_job_used_source_audio_fallback(&item_jobs);
+    let (
+        terminal_state,
+        terminal_summary,
+        terminal_detail,
+        terminal_stage_label,
+        terminal_progress,
+        terminal_error,
+        deliverable_path,
+        deliverable_exists,
+    ) = localization_terminal_outcome(
+        &item_jobs,
+        &source_summary,
+        &translated_en_summary,
+        mix_exists,
+        source_audio_fallback_mix,
+        &mux_mp4_path,
+        mux_mp4_exists,
+        &mux_mkv_path,
+        mux_mkv_exists,
+        &export_pack_path,
+        export_pack_exists,
+        &item_dir,
+    );
+
+    ItemOutputs {
+        item_id: item_id.to_string(),
+        source_media_path: String::new(),
+        source_media_exists: false,
+        derived_item_dir: item_dir.to_string_lossy().to_string(),
+        dub_preview_dir: dub_preview_dir.to_string_lossy().to_string(),
+        source_track_count: source_summary.track_count,
+        source_usable_segment_count: source_summary.usable_segment_count,
+        latest_source_track_path: source_summary.latest_track_path,
+        translated_en_track_count: translated_en_summary.track_count,
+        translated_en_usable_segment_count: translated_en_summary.usable_segment_count,
+        translated_en_speaker_count: translated_en_summary.speaker_count,
+        latest_translated_en_track_path: translated_en_summary.latest_track_path,
+        mix_dub_preview_v1_wav_path: mix_path.to_string_lossy().to_string(),
+        mix_dub_preview_v1_wav_exists: mix_exists,
+        mux_dub_preview_v1_mp4_path: mux_mp4_path.to_string_lossy().to_string(),
+        mux_dub_preview_v1_mp4_exists: mux_mp4_exists,
+        mux_dub_preview_v1_mkv_path: mux_mkv_path.to_string_lossy().to_string(),
+        mux_dub_preview_v1_mkv_exists: mux_mkv_exists,
+        export_pack_v1_zip_path: export_pack_path.to_string_lossy().to_string(),
+        export_pack_v1_zip_exists: export_pack_exists,
+        terminal_state,
+        terminal_summary,
+        terminal_detail,
+        terminal_stage_label,
+        terminal_progress,
+        terminal_error,
+        deliverable_path,
+        deliverable_exists,
+        recent_jobs: item_jobs.iter().take(40).cloned().collect(),
+    }
+}
+
+#[tauri::command]
+#[allow(non_snake_case)]
+async fn item_outputs(
+    state: State<'_, AppState>,
+    item_id: Option<String>,
+    itemId: Option<String>,
+) -> Result<ItemOutputs, String> {
+    let _timer = InvokeTimer::start(state.paths.clone(), "item_outputs");
+    let item_id = item_id
+        .or(itemId)
+        .map(|v| v.trim().to_string())
+        .filter(|v| !v.is_empty())
+        .ok_or_else(|| "missing required key itemId".to_string())?;
+    let paths = state.paths.clone();
+    let trace_paths = paths.clone();
+    let result = tauri::async_runtime::spawn_blocking(move || build_item_outputs(&paths, &item_id))
+        .await
+        .map_err(|e| e.to_string())?;
+    result.map_err(|e| trace_database_command_error(&trace_paths, "item_outputs", e))
+}
+
+#[tauri::command]
+#[allow(non_snake_case)]
+async fn localization_home_item_outputs(
+    state: State<'_, AppState>,
+    item_ids: Option<Vec<String>>,
+    itemIds: Option<Vec<String>>,
+) -> Result<Vec<ItemOutputs>, String> {
+    let _timer = InvokeTimer::start(state.paths.clone(), "localization_home_item_outputs");
+    let item_ids: Vec<String> = item_ids
+        .or(itemIds)
+        .unwrap_or_default()
+        .into_iter()
+        .map(|v| v.trim().to_string())
+        .filter(|v| !v.is_empty())
+        .take(40)
+        .collect();
+    if item_ids.is_empty() {
+        return Ok(Vec::new());
+    }
+    let paths = state.paths.clone();
+    let trace_paths = paths.clone();
+    let result = tauri::async_runtime::spawn_blocking(move || {
+        let conn = db::open_readonly(&paths).map_err(|e| e.to_string())?;
+        let jobs_by_item = query_localization_home_jobs_by_item(&conn, &item_ids)?;
+        let tracks_by_item = query_localization_home_tracks_by_item(&conn, &item_ids)?;
+        let outputs = item_ids
+            .iter()
+            .map(|item_id| {
+                let jobs = jobs_by_item.get(item_id).map(Vec::as_slice).unwrap_or(&[]);
+                let tracks = tracks_by_item
+                    .get(item_id)
+                    .map(Vec::as_slice)
+                    .unwrap_or(&[]);
+                build_localization_home_item_outputs(&paths, item_id, tracks, jobs)
+            })
+            .collect();
+        Ok(outputs)
+    })
+    .await
+    .map_err(|e| e.to_string())?;
+    result.map_err(|e| {
+        trace_database_command_error(&trace_paths, "localization_home_item_outputs", e)
+    })
+}
+
+// WP-0245: batched read for the Jobs page and other panels that previously
+// fanned out per-item `library_get` invokes from a `Promise.all`. One Tauri
+// dispatch, one read-only connection, one `SELECT … WHERE id IN (...)`.
+// Missing ids are silently skipped; order is not guaranteed to match input
+// (callers index by `LibraryItem.id`).
+#[tauri::command]
+#[allow(non_snake_case)]
+async fn library_get_many(
+    state: State<'_, AppState>,
+    item_ids: Option<Vec<String>>,
+    itemIds: Option<Vec<String>>,
+) -> Result<Vec<library::LibraryItem>, String> {
+    let _timer = InvokeTimer::start(state.paths.clone(), "library_get_many");
+    let ids: Vec<String> = item_ids
+        .or(itemIds)
+        .unwrap_or_default()
+        .into_iter()
+        .map(|v| v.trim().to_string())
+        .filter(|v| !v.is_empty())
+        .take(200)
+        .collect();
+    if ids.is_empty() {
+        return Ok(Vec::new());
+    }
+    let paths = state.paths.clone();
+    let trace_paths = paths.clone();
+    let result = tauri::async_runtime::spawn_blocking(move || {
+        let id_refs: Vec<&str> = ids.iter().map(String::as_str).collect();
+        library::list_items_by_ids(&paths, &id_refs).map_err(|e| e.to_string())
+    })
+    .await
+    .map_err(|e| e.to_string())?;
+    result.map_err(|e| trace_database_command_error(&trace_paths, "library_get_many", e))
+}
+
+// WP-0245: batched equivalent of `item_outputs` for panels (Jobs, Library)
+// that previously fanned out one Tauri dispatch per visible item. Uses one
+// read-only SQLite connection and bounded batch queries for the whole request.
+// Order of returned vec matches input order.
+#[tauri::command]
+#[allow(non_snake_case)]
+async fn item_outputs_many(
+    state: State<'_, AppState>,
+    item_ids: Option<Vec<String>>,
+    itemIds: Option<Vec<String>>,
+) -> Result<Vec<ItemOutputs>, String> {
+    let _timer = InvokeTimer::start(state.paths.clone(), "item_outputs_many");
+    let ids: Vec<String> = item_ids
+        .or(itemIds)
+        .unwrap_or_default()
+        .into_iter()
+        .map(|v| v.trim().to_string())
+        .filter(|v| !v.is_empty())
+        .take(200)
+        .collect();
+    if ids.is_empty() {
+        return Ok(Vec::new());
+    }
+    let paths = state.paths.clone();
+    let trace_paths = paths.clone();
+    let result = tauri::async_runtime::spawn_blocking(move || {
+        let conn = db::open_readonly(&paths).map_err(|e| e.to_string())?;
+        let jobs_by_item = query_localization_home_jobs_by_item(&conn, &ids)?;
+        let tracks_by_item = query_localization_home_tracks_by_item(&conn, &ids)?;
+        let outputs = ids
+            .iter()
+            .map(|item_id| {
+                let jobs = jobs_by_item.get(item_id).map(Vec::as_slice).unwrap_or(&[]);
+                let tracks = tracks_by_item
+                    .get(item_id)
+                    .map(Vec::as_slice)
+                    .unwrap_or(&[]);
+                build_localization_home_item_outputs(&paths, item_id, tracks, jobs)
+            })
+            .collect();
+        Ok::<Vec<ItemOutputs>, String>(outputs)
+    })
+    .await
+    .map_err(|e| e.to_string())?;
+    result.map_err(|e| trace_database_command_error(&trace_paths, "item_outputs_many", e))
 }
 
 #[tauri::command]
@@ -5037,8 +5809,16 @@ async fn tools_spleeter_status(
 }
 
 #[tauri::command]
-fn tools_spleeter_install(state: State<'_, AppState>) -> Result<tools::SpleeterPackStatus, String> {
-    tools::install_spleeter_pack(&state.paths).map_err(|e| e.to_string())
+async fn tools_spleeter_install(
+    state: State<'_, AppState>,
+) -> Result<tools::SpleeterPackStatus, String> {
+    let _timer = InvokeTimer::start(state.paths.clone(), "tools_spleeter_install");
+    let paths = state.paths.clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        tools::install_spleeter_pack(&paths).map_err(|e| e.to_string())
+    })
+    .await
+    .map_err(|e| e.to_string())?
 }
 
 #[tauri::command]
@@ -5052,8 +5832,16 @@ async fn tools_demucs_status(
 }
 
 #[tauri::command]
-fn tools_demucs_install(state: State<'_, AppState>) -> Result<tools::DemucsPackStatus, String> {
-    tools::install_demucs_pack(&state.paths).map_err(|e| e.to_string())
+async fn tools_demucs_install(
+    state: State<'_, AppState>,
+) -> Result<tools::DemucsPackStatus, String> {
+    let _timer = InvokeTimer::start(state.paths.clone(), "tools_demucs_install");
+    let paths = state.paths.clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        tools::install_demucs_pack(&paths).map_err(|e| e.to_string())
+    })
+    .await
+    .map_err(|e| e.to_string())?
 }
 
 #[tauri::command]
@@ -5067,10 +5855,16 @@ async fn tools_diarization_status(
 }
 
 #[tauri::command]
-fn tools_diarization_install(
+async fn tools_diarization_install(
     state: State<'_, AppState>,
 ) -> Result<tools::DiarizationPackStatus, String> {
-    tools::install_diarization_pack(&state.paths).map_err(|e| e.to_string())
+    let _timer = InvokeTimer::start(state.paths.clone(), "tools_diarization_install");
+    let paths = state.paths.clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        tools::install_diarization_pack(&paths).map_err(|e| e.to_string())
+    })
+    .await
+    .map_err(|e| e.to_string())?
 }
 
 #[tauri::command]
@@ -5084,10 +5878,16 @@ async fn tools_tts_preview_status(
 }
 
 #[tauri::command]
-fn tools_tts_preview_install(
+async fn tools_tts_preview_install(
     state: State<'_, AppState>,
 ) -> Result<tools::TtsPreviewPackStatus, String> {
-    tools::install_tts_preview_pack(&state.paths).map_err(|e| e.to_string())
+    let _timer = InvokeTimer::start(state.paths.clone(), "tools_tts_preview_install");
+    let paths = state.paths.clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        tools::install_tts_preview_pack(&paths).map_err(|e| e.to_string())
+    })
+    .await
+    .map_err(|e| e.to_string())?
 }
 
 #[tauri::command]
@@ -5101,10 +5901,16 @@ async fn tools_tts_neural_local_v1_status(
 }
 
 #[tauri::command]
-fn tools_tts_neural_local_v1_install(
+async fn tools_tts_neural_local_v1_install(
     state: State<'_, AppState>,
 ) -> Result<tools::TtsNeuralLocalV1PackStatus, String> {
-    tools::install_tts_neural_local_v1_pack(&state.paths).map_err(|e| e.to_string())
+    let _timer = InvokeTimer::start(state.paths.clone(), "tools_tts_neural_local_v1_install");
+    let paths = state.paths.clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        tools::install_tts_neural_local_v1_pack(&paths).map_err(|e| e.to_string())
+    })
+    .await
+    .map_err(|e| e.to_string())?
 }
 
 #[tauri::command]
@@ -5120,10 +5926,19 @@ async fn tools_tts_voice_preserving_local_v1_status(
 }
 
 #[tauri::command]
-fn tools_tts_voice_preserving_local_v1_install(
+async fn tools_tts_voice_preserving_local_v1_install(
     state: State<'_, AppState>,
 ) -> Result<tools::TtsVoicePreservingLocalV1PackStatus, String> {
-    tools::install_tts_voice_preserving_local_v1_pack(&state.paths).map_err(|e| e.to_string())
+    let _timer = InvokeTimer::start(
+        state.paths.clone(),
+        "tools_tts_voice_preserving_local_v1_install",
+    );
+    let paths = state.paths.clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        tools::install_tts_voice_preserving_local_v1_pack(&paths).map_err(|e| e.to_string())
+    })
+    .await
+    .map_err(|e| e.to_string())?
 }
 
 #[tauri::command]
@@ -6207,7 +7022,8 @@ fn library_list(
     offset: usize,
 ) -> Result<Vec<library::LibraryItem>, String> {
     let _timer = InvokeTimer::start(state.paths.clone(), "library_list");
-    library::list_items(&state.paths, limit, offset).map_err(|e| e.to_string())
+    library::list_items(&state.paths, limit, offset)
+        .map_err(|e| trace_database_command_error(&state.paths, "library_list", e.to_string()))
 }
 
 #[tauri::command]
@@ -6226,15 +7042,23 @@ fn library_get(
     item_id: String,
 ) -> Result<library::LibraryItem, String> {
     let _timer = InvokeTimer::start(state.paths.clone(), "library_get");
-    library::get_item_by_id(&state.paths, &item_id).map_err(|e| e.to_string())
+    library::get_item_by_id(&state.paths, &item_id)
+        .map_err(|e| trace_database_command_error(&state.paths, "library_get", e.to_string()))
 }
 
 #[tauri::command]
-fn youtube_subscriptions_list(
+async fn youtube_subscriptions_list(
     state: State<'_, AppState>,
 ) -> Result<Vec<subscriptions::YoutubeSubscriptionRow>, String> {
     let _timer = InvokeTimer::start(state.paths.clone(), "youtube_subscriptions_list");
-    subscriptions::list_youtube_subscriptions(&state.paths).map_err(|e| e.to_string())
+    let paths = state.paths.clone();
+    let trace_paths = paths.clone();
+    let result = tauri::async_runtime::spawn_blocking(move || {
+        subscriptions::list_youtube_subscriptions(&paths).map_err(|e| e.to_string())
+    })
+    .await
+    .map_err(|e| e.to_string())?;
+    result.map_err(|e| trace_database_command_error(&trace_paths, "youtube_subscriptions_list", e))
 }
 
 #[tauri::command]
@@ -6275,11 +7099,18 @@ fn youtube_subscriptions_delete(state: State<'_, AppState>, id: String) -> Resul
 }
 
 #[tauri::command]
-fn video_libraries_list(
+async fn video_libraries_list(
     state: State<'_, AppState>,
 ) -> Result<Vec<video_libraries::VideoLibraryRow>, String> {
     let _timer = InvokeTimer::start(state.paths.clone(), "video_libraries_list");
-    video_libraries::list_video_libraries(&state.paths).map_err(|e| e.to_string())
+    let paths = state.paths.clone();
+    let trace_paths = paths.clone();
+    let result = tauri::async_runtime::spawn_blocking(move || {
+        video_libraries::list_video_libraries(&paths).map_err(|e| e.to_string())
+    })
+    .await
+    .map_err(|e| e.to_string())?;
+    result.map_err(|e| trace_database_command_error(&trace_paths, "video_libraries_list", e))
 }
 
 #[tauri::command]
@@ -6387,11 +7218,20 @@ async fn youtube_subscriptions_import_4kvdp_state(
 }
 
 #[tauri::command]
-fn youtube_subscription_groups_list(
+async fn youtube_subscription_groups_list(
     state: State<'_, AppState>,
 ) -> Result<Vec<subscriptions::YoutubeSubscriptionGroupRow>, String> {
     let _timer = InvokeTimer::start(state.paths.clone(), "youtube_subscription_groups_list");
-    subscriptions::list_youtube_subscription_groups(&state.paths).map_err(|e| e.to_string())
+    let paths = state.paths.clone();
+    let trace_paths = paths.clone();
+    let result = tauri::async_runtime::spawn_blocking(move || {
+        subscriptions::list_youtube_subscription_groups(&paths).map_err(|e| e.to_string())
+    })
+    .await
+    .map_err(|e| e.to_string())?;
+    result.map_err(|e| {
+        trace_database_command_error(&trace_paths, "youtube_subscription_groups_list", e)
+    })
 }
 
 #[tauri::command]
@@ -6447,16 +7287,33 @@ fn youtube_subscriptions_seed_archive_scan(
 fn youtube_subscriptions_archive_stats(
     state: State<'_, AppState>,
 ) -> Result<std::collections::HashMap<String, usize>, String> {
-    subscriptions::youtube_subscriptions_archive_stats(&state.paths).map_err(|e| e.to_string())
+    let _timer = InvokeTimer::start(state.paths.clone(), "youtube_subscriptions_archive_stats");
+    subscriptions::youtube_subscriptions_archive_stats(&state.paths).map_err(|e| {
+        trace_database_command_error(
+            &state.paths,
+            "youtube_subscriptions_archive_stats",
+            e.to_string(),
+        )
+    })
 }
 
 #[tauri::command]
 fn youtube_subscriptions_active_refresh_ids(
     state: State<'_, AppState>,
 ) -> Result<Vec<String>, String> {
+    let _timer = InvokeTimer::start(
+        state.paths.clone(),
+        "youtube_subscriptions_active_refresh_ids",
+    );
     jobs::active_youtube_subscription_refresh_ids(&state.paths)
         .map(|s| s.into_iter().collect())
-        .map_err(|e| e.to_string())
+        .map_err(|e| {
+            trace_database_command_error(
+                &state.paths,
+                "youtube_subscriptions_active_refresh_ids",
+                e.to_string(),
+            )
+        })
 }
 
 #[tauri::command]
@@ -6515,7 +7372,9 @@ async fn legacy_archive_analyze(
 fn instagram_subscriptions_list(
     state: State<'_, AppState>,
 ) -> Result<Vec<instagram_subscriptions::InstagramSubscriptionRow>, String> {
-    instagram_subscriptions::list_instagram_subscriptions(&state.paths).map_err(|e| e.to_string())
+    instagram_subscriptions::list_instagram_subscriptions(&state.paths).map_err(|e| {
+        trace_database_command_error(&state.paths, "instagram_subscriptions_list", e.to_string())
+    })
 }
 
 #[tauri::command]
@@ -6546,9 +7405,17 @@ fn instagram_subscriptions_queue_one(
 fn instagram_subscriptions_queue_all_active(
     state: State<'_, AppState>,
 ) -> Result<Vec<jobs::JobRow>, String> {
-    let _timer = InvokeTimer::start(state.paths.clone(), "instagram_subscriptions_queue_all_active");
-    instagram_subscriptions::queue_all_active_instagram_subscriptions(&state.paths)
-        .map_err(|e| e.to_string())
+    let _timer = InvokeTimer::start(
+        state.paths.clone(),
+        "instagram_subscriptions_queue_all_active",
+    );
+    instagram_subscriptions::queue_all_active_instagram_subscriptions(&state.paths).map_err(|e| {
+        trace_database_command_error(
+            &state.paths,
+            "instagram_subscriptions_queue_all_active",
+            e.to_string(),
+        )
+    })
 }
 
 #[tauri::command]
@@ -6660,11 +7527,13 @@ async fn jobs_list(
 ) -> Result<Vec<jobs::JobRow>, String> {
     let _timer = InvokeTimer::start(state.paths.clone(), "jobs_list");
     let paths = state.paths.clone();
-    tauri::async_runtime::spawn_blocking(move || {
+    let trace_paths = paths.clone();
+    let result = tauri::async_runtime::spawn_blocking(move || {
         jobs::list_jobs(&paths, limit, offset).map_err(|e| e.to_string())
     })
     .await
-    .map_err(|e| e.to_string())?
+    .map_err(|e| e.to_string())?;
+    result.map_err(|e| trace_database_command_error(&trace_paths, "jobs_list", e))
 }
 
 #[tauri::command]
@@ -6682,11 +7551,13 @@ async fn jobs_list_for_item(
         .filter(|v| !v.is_empty())
         .ok_or_else(|| "missing required key itemId".to_string())?;
     let paths = state.paths.clone();
-    tauri::async_runtime::spawn_blocking(move || {
+    let trace_paths = paths.clone();
+    let result = tauri::async_runtime::spawn_blocking(move || {
         jobs::list_jobs_for_item(&paths, &item_id, limit, offset).map_err(|e| e.to_string())
     })
     .await
-    .map_err(|e| e.to_string())?
+    .map_err(|e| e.to_string())?;
+    result.map_err(|e| trace_database_command_error(&trace_paths, "jobs_list_for_item", e))
 }
 
 #[tauri::command]
@@ -7093,7 +7964,9 @@ fn jobs_queue_control_get(
     state: State<'_, AppState>,
 ) -> Result<jobs::JobQueueControlState, String> {
     let _timer = InvokeTimer::start(state.paths.clone(), "jobs_queue_control_get");
-    jobs::get_queue_control(&state.paths).map_err(|e| e.to_string())
+    jobs::get_queue_control(&state.paths).map_err(|e| {
+        trace_database_command_error(&state.paths, "jobs_queue_control_get", e.to_string())
+    })
 }
 
 #[tauri::command]
@@ -7109,7 +7982,9 @@ fn jobs_runtime_settings_get(
     state: State<'_, AppState>,
 ) -> Result<jobs::JobRuntimeSettings, String> {
     let _timer = InvokeTimer::start(state.paths.clone(), "jobs_runtime_settings_get");
-    jobs::get_runtime_settings(&state.paths).map_err(|e| e.to_string())
+    jobs::get_runtime_settings(&state.paths).map_err(|e| {
+        trace_database_command_error(&state.paths, "jobs_runtime_settings_get", e.to_string())
+    })
 }
 
 #[tauri::command]
@@ -7426,6 +8301,7 @@ pub fn run() {
             }
             set_startup_phase(&startup, &paths, "db_schema", "running", None);
             db::ensure_schema(&paths)?;
+            video_libraries::ensure_default_video_library(&paths)?;
             set_startup_phase(&startup, &paths, "db_schema", "ready", None);
             if safe_mode_enabled {
                 let _ = jobs::set_queue_paused(&paths, true);
@@ -7480,6 +8356,9 @@ pub fn run() {
             diagnostics_generate_licensing_report,
             diagnostics_storage_breakdown,
             item_outputs,
+            item_outputs_many,
+            localization_home_item_outputs,
+            library_get_many,
             library_thumbnail_data_url,
             item_artifacts_list_v1,
             item_export_mux_preview_mp4,

@@ -464,6 +464,13 @@ type DownloadPreset = {
   format_preference: string | null;
   quality_preference: string | null;
   subtitle_mode: string | null;
+  yt_dlp_concurrent_fragments: number;
+  yt_dlp_throttled_rate: string | null;
+  yt_dlp_file_access_retries: number;
+  yt_dlp_retries: number;
+  yt_dlp_fragment_retries: number;
+  yt_dlp_sleep_interval: number;
+  yt_dlp_sleep_requests: number;
 };
 
 type DownloadPresetsConfig = {
@@ -513,13 +520,36 @@ type YoutubeSubscriptionsImport4kvdpStateSummary = {
   group_names: string[];
 };
 
-export function LibraryPage({ mode = "all" }: LibraryPageProps) {
+const DEFAULT_PRESET_YT_DLP_CONCURRENT_FRAGMENTS = 4;
+const DEFAULT_PRESET_YT_DLP_THROTTLED_RATE = "100K";
+const DEFAULT_PRESET_YT_DLP_FILE_ACCESS_RETRIES = 10;
+const DEFAULT_PRESET_YT_DLP_RETRIES = 3;
+const DEFAULT_PRESET_YT_DLP_FRAGMENT_RETRIES = 3;
+const DEFAULT_PRESET_YT_DLP_SLEEP_INTERVAL = 0;
+const DEFAULT_PRESET_YT_DLP_SLEEP_REQUESTS = 0;
+
+function normalizePositiveInt(
+  value: string,
+  fallback: number,
+  min: number,
+  max: number,
+): number {
+  const parsed = Number.parseInt(value, 10);
+  if (!Number.isFinite(parsed)) return fallback;
+  if (parsed < min) return min;
+  if (parsed > max) return max;
+  return parsed;
+}
+
+export function LibraryPage({ mode = "all", visible = true }: LibraryPageProps) {
   const maxBatchUrls = 1500;
   const maxInstagramBatchUrls = 1500;
   const maxImageBatchUrls = 1500;
   const libraryPageSize = 200;
   const libraryViewportHeight = "min(72vh, 960px)";
   const libraryLoadMoreThresholdPx = 240;
+  const ACTIVE_REFRESH_IDS_DEFER_MS = 5_000;
+  const ARCHIVE_STATS_DEFER_MS = 15_000;
   const minSubscriptionRefreshIntervalMinutes = 5;
   const maxSubscriptionRefreshIntervalMinutes = 10080;
   const showVideoIngest = mode === "all" || mode === "video_ingest";
@@ -731,6 +761,26 @@ export function LibraryPage({ mode = "all" }: LibraryPageProps) {
   );
   const [presetQualityPreference, setPresetQualityPreference] = useState("best");
   const [presetSubtitleMode, setPresetSubtitleMode] = useState("auto");
+  const [presetYtDlpConcurrentFragments, setPresetYtDlpConcurrentFragments] =
+    useState(`${DEFAULT_PRESET_YT_DLP_CONCURRENT_FRAGMENTS}`);
+  const [presetYtDlpThrottledRate, setPresetYtDlpThrottledRate] = useState(
+    DEFAULT_PRESET_YT_DLP_THROTTLED_RATE,
+  );
+  const [presetYtDlpFileAccessRetries, setPresetYtDlpFileAccessRetries] = useState(
+    `${DEFAULT_PRESET_YT_DLP_FILE_ACCESS_RETRIES}`,
+  );
+  const [presetYtDlpRetries, setPresetYtDlpRetries] = useState(
+    `${DEFAULT_PRESET_YT_DLP_RETRIES}`,
+  );
+  const [presetYtDlpFragmentRetries, setPresetYtDlpFragmentRetries] = useState(
+    `${DEFAULT_PRESET_YT_DLP_FRAGMENT_RETRIES}`,
+  );
+  const [presetYtDlpSleepInterval, setPresetYtDlpSleepInterval] = useState(
+    `${DEFAULT_PRESET_YT_DLP_SLEEP_INTERVAL}`,
+  );
+  const [presetYtDlpSleepRequests, setPresetYtDlpSleepRequests] = useState(
+    `${DEFAULT_PRESET_YT_DLP_SLEEP_REQUESTS}`,
+  );
   const [legacyArchiveRoot, setLegacyArchiveRoot] = useState(() => {
     return safeLocalStorageGet("voxvulgi.v1.library.legacy_archive_root") ?? "";
   });
@@ -997,6 +1047,22 @@ export function LibraryPage({ mode = "all" }: LibraryPageProps) {
     [items],
   );
 
+  const refreshArchiveStats = useCallback(async () => {
+    if (!showVideoIngest) return;
+    const nextArchiveStats = await invoke<Record<string, number>>(
+      "youtube_subscriptions_archive_stats",
+    ).catch(() => ({}));
+    setArchiveStats(nextArchiveStats);
+  }, [showVideoIngest]);
+
+  const refreshActiveRefreshIds = useCallback(async () => {
+    if (!showVideoIngest) return;
+    const nextActiveRefreshIds = await invoke<string[]>(
+      "youtube_subscriptions_active_refresh_ids",
+    ).catch(() => []);
+    setActiveRefreshSubIds(new Set(nextActiveRefreshIds));
+  }, [showVideoIngest]);
+
   const refresh = useCallback(async () => {
     setError(null);
     const wantsItems = showMediaLibrary || showInstagramArchive;
@@ -1011,8 +1077,6 @@ export function LibraryPage({ mode = "all" }: LibraryPageProps) {
       nextPresets,
       nextVideoLibraries,
       nextInstagramSubscriptions,
-      nextArchiveStats,
-      nextActiveRefreshIds,
     ] = await Promise.all([
       wantsItems
         ? invoke<LibraryItem[]>("library_list", {
@@ -1038,12 +1102,6 @@ export function LibraryPage({ mode = "all" }: LibraryPageProps) {
       wantsInstagram
         ? invoke<InstagramSubscriptionRow[]>("instagram_subscriptions_list").catch(() => [])
         : Promise.resolve([] as InstagramSubscriptionRow[]),
-      wantsVideo
-        ? invoke<Record<string, number>>("youtube_subscriptions_archive_stats").catch(() => ({}))
-        : Promise.resolve({} as Record<string, number>),
-      wantsVideo
-        ? invoke<string[]>("youtube_subscriptions_active_refresh_ids").catch(() => [])
-        : Promise.resolve([] as string[]),
     ]);
     setItems(nextItems);
     setItemsOffset(nextItems.length);
@@ -1054,8 +1112,6 @@ export function LibraryPage({ mode = "all" }: LibraryPageProps) {
     setSubscriptionGroups(nextGroups);
     setVideoLibraries(nextVideoLibraries);
     setInstagramSubscriptions(nextInstagramSubscriptions);
-    setArchiveStats(nextArchiveStats);
-    setActiveRefreshSubIds(new Set(nextActiveRefreshIds));
     if (nextPresets) {
       setDownloadPresets(nextPresets);
       setUrlBatchPresetId((current) => current || nextPresets.default_preset_id || "");
@@ -1288,9 +1344,24 @@ export function LibraryPage({ mode = "all" }: LibraryPageProps) {
   }, []);
 
   useEffect(() => {
+    if (!visible) return;
     refresh().catch((e) => setError(String(e)));
     void refreshSharedDownloadDirStatus();
-  }, [refresh]);
+  }, [refresh, visible]);
+
+  useEffect(() => {
+    if (!visible || !showVideoIngest) return;
+    const activeRefreshTimer = window.setTimeout(() => {
+      void refreshActiveRefreshIds();
+    }, ACTIVE_REFRESH_IDS_DEFER_MS);
+    const archiveStatsTimer = window.setTimeout(() => {
+      void refreshArchiveStats();
+    }, ARCHIVE_STATS_DEFER_MS);
+    return () => {
+      window.clearTimeout(activeRefreshTimer);
+      window.clearTimeout(archiveStatsTimer);
+    };
+  }, [visible, showVideoIngest, refreshActiveRefreshIds, refreshArchiveStats]);
 
   useEffect(() => {
     safeLocalStorageSet("voxvulgi.v1.settings.asr_lang", asrLang);
@@ -2301,6 +2372,13 @@ export function LibraryPage({ mode = "all" }: LibraryPageProps) {
     setPresetFormatPreference(preset.format_preference ?? "");
     setPresetQualityPreference(preset.quality_preference ?? "");
     setPresetSubtitleMode(preset.subtitle_mode ?? "auto");
+    setPresetYtDlpConcurrentFragments(`${preset.yt_dlp_concurrent_fragments}`);
+    setPresetYtDlpThrottledRate(preset.yt_dlp_throttled_rate ?? DEFAULT_PRESET_YT_DLP_THROTTLED_RATE);
+    setPresetYtDlpFileAccessRetries(`${preset.yt_dlp_file_access_retries}`);
+    setPresetYtDlpRetries(`${preset.yt_dlp_retries}`);
+    setPresetYtDlpFragmentRetries(`${preset.yt_dlp_fragment_retries}`);
+    setPresetYtDlpSleepInterval(`${preset.yt_dlp_sleep_interval}`);
+    setPresetYtDlpSleepRequests(`${preset.yt_dlp_sleep_requests}`);
   }
 
   function resetPresetEditor() {
@@ -2311,6 +2389,13 @@ export function LibraryPage({ mode = "all" }: LibraryPageProps) {
     setPresetFormatPreference("bv*[ext=mp4]+ba[ext=m4a]/b[ext=mp4]/bv*+ba/b");
     setPresetQualityPreference("best");
     setPresetSubtitleMode("auto");
+    setPresetYtDlpConcurrentFragments(`${DEFAULT_PRESET_YT_DLP_CONCURRENT_FRAGMENTS}`);
+    setPresetYtDlpThrottledRate(DEFAULT_PRESET_YT_DLP_THROTTLED_RATE);
+    setPresetYtDlpFileAccessRetries(`${DEFAULT_PRESET_YT_DLP_FILE_ACCESS_RETRIES}`);
+    setPresetYtDlpRetries(`${DEFAULT_PRESET_YT_DLP_RETRIES}`);
+    setPresetYtDlpFragmentRetries(`${DEFAULT_PRESET_YT_DLP_FRAGMENT_RETRIES}`);
+    setPresetYtDlpSleepInterval(`${DEFAULT_PRESET_YT_DLP_SLEEP_INTERVAL}`);
+    setPresetYtDlpSleepRequests(`${DEFAULT_PRESET_YT_DLP_SLEEP_REQUESTS}`);
   }
 
   async function savePreset() {
@@ -2331,6 +2416,43 @@ export function LibraryPage({ mode = "all" }: LibraryPageProps) {
         format_preference: presetFormatPreference.trim() || null,
         quality_preference: presetQualityPreference.trim() || null,
         subtitle_mode: presetSubtitleMode.trim() || null,
+        yt_dlp_concurrent_fragments: normalizePositiveInt(
+          presetYtDlpConcurrentFragments,
+          DEFAULT_PRESET_YT_DLP_CONCURRENT_FRAGMENTS,
+          1,
+          128,
+        ),
+        yt_dlp_throttled_rate: presetYtDlpThrottledRate.trim() || DEFAULT_PRESET_YT_DLP_THROTTLED_RATE,
+        yt_dlp_file_access_retries: normalizePositiveInt(
+          presetYtDlpFileAccessRetries,
+          DEFAULT_PRESET_YT_DLP_FILE_ACCESS_RETRIES,
+          0,
+          1000,
+        ),
+        yt_dlp_retries: normalizePositiveInt(
+          presetYtDlpRetries,
+          DEFAULT_PRESET_YT_DLP_RETRIES,
+          1,
+          1000,
+        ),
+        yt_dlp_fragment_retries: normalizePositiveInt(
+          presetYtDlpFragmentRetries,
+          DEFAULT_PRESET_YT_DLP_FRAGMENT_RETRIES,
+          1,
+          1000,
+        ),
+        yt_dlp_sleep_interval: normalizePositiveInt(
+          presetYtDlpSleepInterval,
+          DEFAULT_PRESET_YT_DLP_SLEEP_INTERVAL,
+          0,
+          86400,
+        ),
+        yt_dlp_sleep_requests: normalizePositiveInt(
+          presetYtDlpSleepRequests,
+          DEFAULT_PRESET_YT_DLP_SLEEP_REQUESTS,
+          0,
+          10000,
+        ),
       };
 
       const nextPresets = current.presets.filter((preset) => preset.id !== id);
@@ -3228,6 +3350,87 @@ export function LibraryPage({ mode = "all" }: LibraryPageProps) {
               <option value="embed">embed</option>
               <option value="">off</option>
             </select>
+          </label>
+        </div>
+        <div className="row">
+          <label style={{ display: "flex", alignItems: "center", gap: 8 }}>
+            <span>Retries</span>
+            <input
+              type="number"
+              min={1}
+              value={presetYtDlpRetries}
+              disabled={busy}
+              onChange={(e) => setPresetYtDlpRetries(e.currentTarget.value)}
+              placeholder="3"
+            />
+          </label>
+          <label style={{ display: "flex", alignItems: "center", gap: 8 }}>
+            <span>Frag retries</span>
+            <input
+              type="number"
+              min={1}
+              value={presetYtDlpFragmentRetries}
+              disabled={busy}
+              onChange={(e) => setPresetYtDlpFragmentRetries(e.currentTarget.value)}
+              placeholder="3"
+            />
+          </label>
+          <label style={{ display: "flex", alignItems: "center", gap: 8 }}>
+            <span>File-access retries</span>
+            <input
+              type="number"
+              min={0}
+              value={presetYtDlpFileAccessRetries}
+              disabled={busy}
+              onChange={(e) => setPresetYtDlpFileAccessRetries(e.currentTarget.value)}
+              placeholder="10"
+            />
+          </label>
+        </div>
+        <div className="row">
+          <label style={{ display: "flex", alignItems: "center", gap: 8 }}>
+            <span>Concurrent fragments</span>
+            <input
+              type="number"
+              min={1}
+              value={presetYtDlpConcurrentFragments}
+              disabled={busy}
+              onChange={(e) => setPresetYtDlpConcurrentFragments(e.currentTarget.value)}
+              placeholder={String(DEFAULT_PRESET_YT_DLP_CONCURRENT_FRAGMENTS)}
+            />
+          </label>
+          <label style={{ display: "flex", alignItems: "center", gap: 8, flex: 1 }}>
+            <span>Throttled rate</span>
+            <input
+              value={presetYtDlpThrottledRate}
+              disabled={busy}
+              onChange={(e) => setPresetYtDlpThrottledRate(e.currentTarget.value)}
+              placeholder={DEFAULT_PRESET_YT_DLP_THROTTLED_RATE}
+            />
+          </label>
+        </div>
+        <div className="row">
+          <label style={{ display: "flex", alignItems: "center", gap: 8 }}>
+            <span>Sleep interval (s)</span>
+            <input
+              type="number"
+              min={0}
+              value={presetYtDlpSleepInterval}
+              disabled={busy}
+              onChange={(e) => setPresetYtDlpSleepInterval(e.currentTarget.value)}
+              placeholder={`${DEFAULT_PRESET_YT_DLP_SLEEP_INTERVAL}`}
+            />
+          </label>
+          <label style={{ display: "flex", alignItems: "center", gap: 8 }}>
+            <span>Sleep requests</span>
+            <input
+              type="number"
+              min={0}
+              value={presetYtDlpSleepRequests}
+              disabled={busy}
+              onChange={(e) => setPresetYtDlpSleepRequests(e.currentTarget.value)}
+              placeholder={`${DEFAULT_PRESET_YT_DLP_SLEEP_REQUESTS}`}
+            />
           </label>
         </div>
         <div className="row">

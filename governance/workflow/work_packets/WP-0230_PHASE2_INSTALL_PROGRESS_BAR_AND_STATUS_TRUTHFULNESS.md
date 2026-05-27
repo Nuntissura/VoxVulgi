@@ -2,7 +2,11 @@
 
 ## Status
 
-BACKLOG
+IN_PROGRESS
+
+## Owner
+
+Claude
 
 ## Base Scope
 
@@ -13,6 +17,29 @@ BACKLOG
 - Make the live status text truthful: when a Phase2 install job is actively running, the headline must say "Installing voice packs — step X of Y" and NOT "interrupted".
 - Update the per-pack table to show a per-row spinner / hourglass on the `running` row so the operator can see where in the chain the work currently is.
 - Out of scope: per-pack sub-progress (no pip parsing). Out of scope: progress notifications outside the Diagnostics page (e.g., header banner — could be a follow-up).
+
+## Scope Decision (2026-05-18 23:50)
+
+The pre-extension WP scope (frontend truthfulness — progress bar + 5 honest headline states + per-pack icons + elapsed time on running row) is implementable in one session against today's `tools_phase2_packs_install_latest_state` data without any backend changes.
+
+The extension below (live bytes/sec/ETA from pip stdout + HF tqdm) requires switching `run_python_checked` from `.output()` (post-completion capture) to `.spawn()` + a reader thread + a new event channel + new state fields on each step. That is its own WP-sized effort and is carved out as **WP-0230b** rather than half-implemented here.
+
+This WP delivers the truthfulness half today; WP-0230b delivers the byte-level streaming half later.
+
+## Scope Extension (2026-05-18)
+
+Operator follow-up 2026-05-18: "we are sure the downloading happens? this is the selling feature. and the app must stay non technical and user freindly". The original WP-0230 scope (top-level progress bar + truthful badge) is necessary but insufficient — for non-technical users to trust the install, the progress must show *real bytes / sec / ETA* during the long Python-wheel-and-model-download steps. Promote the previously-out-of-scope item:
+
+- In scope (added): parse pip's stdout for download lines (`Downloading <name> (<size>): <bytes>/<bytes> [<percent>%]`) and emit progress events to the frontend so the per-pack row shows bytes downloaded + speed + ETA during pip install.
+- In scope (added): hook Hugging Face `hf_hub_download` via the `tqdm` callback (kwarg supported as of `huggingface_hub>=0.20`) to surface model-weight download progress with the same bytes/speed/ETA shape.
+- In scope (added): the same progress feed is consumed by the WP-0235 first-run setup flow, not only Diagnostics — so the user-friendly entry point benefits from the truthful progress without duplicate UI.
+- Still out of scope: header-banner-during-install, notifications-tray progress.
+
+This extension is what makes the install path feel honest to a non-technical user. Without it, even after WP-0237 (bundled wheels) the model-weight download would still look like the old "stuck" state.
+
+## Notes
+
+- 2026-05-18: Frontend truthfulness slice landed (progress bar + 5-state headline + per-row elapsed counter on running step). TypeScript + vite build clean, 13 contract tests pass, 175 engine tests unchanged. Live bytes/sec/ETA streaming carved out as WP-0230b. Proof bundle: `product/desktop/build_target/tool_artifacts/wp_runs/WP-0230/20260518_235218/summary.md`. WP stays IN_PROGRESS pending operator-relayed visual verification on a real install run.
 
 ## Operator Request Preserved
 

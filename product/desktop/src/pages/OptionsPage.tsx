@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { open } from "@tauri-apps/plugin-dialog";
 import {
@@ -20,6 +20,93 @@ import {
   useDefaultSharedDownloadDir,
   useSharedDownloadDirStatus,
 } from "../lib/sharedDownloadDir";
+
+type DownloadPreset = {
+  id: string;
+  title: string;
+  path_template: string;
+  filename_template: string;
+  format_preference: string | null;
+  quality_preference: string | null;
+  subtitle_mode: string | null;
+  yt_dlp_concurrent_fragments: number;
+  yt_dlp_throttled_rate: string | null;
+  yt_dlp_file_access_retries: number;
+  yt_dlp_retries: number;
+  yt_dlp_fragment_retries: number;
+  yt_dlp_sleep_interval: number;
+  yt_dlp_sleep_requests: number;
+};
+
+type DownloadPresetsConfig = {
+  default_preset_id: string | null;
+  presets: DownloadPreset[];
+};
+
+type DownloaderProfileId = "aggressive" | "balanced" | "gentle" | "conservative";
+
+const DOWNLOADER_PROFILES: Array<{
+  id: DownloaderProfileId;
+  label: string;
+  description: string;
+  concurrent_fragments: number;
+  throttled_rate: string;
+  retries: number;
+  fragment_retries: number;
+  file_access_retries: number;
+  sleep_interval: number;
+  sleep_requests: number;
+}> = [
+  {
+    id: "aggressive",
+    label: "Aggressive",
+    description: "Current defaults; faster throughput and more concurrent fragment workers.",
+    concurrent_fragments: 4,
+    throttled_rate: "100K",
+    retries: 3,
+    fragment_retries: 3,
+    file_access_retries: 10,
+    sleep_interval: 0,
+    sleep_requests: 0,
+  },
+  {
+    id: "balanced",
+    label: "Balanced",
+    description: "Moderate download pressure while keeping recoverability.",
+    concurrent_fragments: 2,
+    throttled_rate: "80K",
+    retries: 4,
+    fragment_retries: 4,
+    file_access_retries: 12,
+    sleep_interval: 2,
+    sleep_requests: 0,
+  },
+  {
+    id: "gentle",
+    label: "Gentle",
+    description: "Lower concurrency and stronger retry behavior for stricter limits.",
+    concurrent_fragments: 1,
+    throttled_rate: "40K",
+    retries: 5,
+    fragment_retries: 5,
+    file_access_retries: 16,
+    sleep_interval: 4,
+    sleep_requests: 3,
+  },
+  {
+    id: "conservative",
+    label: "Conservative",
+    description:
+      "Reduced burst pressure for frequent 429/403 blocks. Slower startup, fewer retries per fragment, and paced request flow.",
+    concurrent_fragments: 1,
+    throttled_rate: "20K",
+    retries: 8,
+    fragment_retries: 8,
+    file_access_retries: 22,
+    sleep_interval: 8,
+    sleep_requests: 6,
+  },
+];
 
 const FEATURE_ROOTS: Array<{ key: FeatureRootKey; title: string; description: string }> = [
   {
@@ -55,6 +142,16 @@ export function OptionsPage() {
   const [authPreflightBusy, setAuthPreflightBusy] = useState(false);
   const [authPreflightUrl, setAuthPreflightUrl] = useState("https://www.youtube.com/watch?v=BaW_jenozKcj");
   const [authMessage, setAuthMessage] = useState("");
+  const [downloadPresets, setDownloadPresets] = useState<DownloadPresetsConfig | null>(null);
+  const [downloaderBusy, setDownloaderBusy] = useState(false);
+  const [downloaderMessage, setDownloaderMessage] = useState("");
+  const [downloaderConcurrentFragments, setDownloaderConcurrentFragments] = useState("4");
+  const [downloaderThrottledRate, setDownloaderThrottledRate] = useState("100K");
+  const [downloaderFileAccessRetries, setDownloaderFileAccessRetries] = useState("10");
+  const [downloaderRetries, setDownloaderRetries] = useState("3");
+  const [downloaderFragmentRetries, setDownloaderFragmentRetries] = useState("3");
+  const [downloaderSleepInterval, setDownloaderSleepInterval] = useState("0");
+  const [downloaderSleepRequests, setDownloaderSleepRequests] = useState("0");
   const [legacyRecoveryRoot, setLegacyRecoveryRoot] = useState(() => {
     return safeLocalStorageGet("voxvulgi.v1.library.legacy_archive_root") ?? "";
   });
@@ -85,6 +182,157 @@ export function OptionsPage() {
       })
       .catch((err) => console.error("Failed to load auth config", err));
   }, []);
+
+  useEffect(() => {
+    invoke<DownloadPresetsConfig>("download_presets_get")
+      .then((config) => {
+        setDownloadPresets(config);
+      })
+      .catch((err) => {
+        console.error("Failed to load download presets", err);
+      });
+  }, []);
+
+  const defaultDownloaderPreset = useMemo(() => {
+    if (!downloadPresets) return null;
+    const byDefault = downloadPresets.presets.find(
+      (preset) => preset.id === downloadPresets.default_preset_id,
+    );
+    if (byDefault) return byDefault;
+    return downloadPresets.presets[0] ?? null;
+  }, [downloadPresets]);
+
+  const inferredDownloaderProfile = useMemo(() => {
+    if (!defaultDownloaderPreset) return "custom";
+    for (const profile of DOWNLOADER_PROFILES) {
+      if (
+        defaultDownloaderPreset.yt_dlp_concurrent_fragments === profile.concurrent_fragments &&
+        defaultDownloaderPreset.yt_dlp_file_access_retries === profile.file_access_retries &&
+        defaultDownloaderPreset.yt_dlp_retries === profile.retries &&
+        defaultDownloaderPreset.yt_dlp_fragment_retries === profile.fragment_retries &&
+        (defaultDownloaderPreset.yt_dlp_throttled_rate ?? "") === profile.throttled_rate &&
+        defaultDownloaderPreset.yt_dlp_sleep_interval === profile.sleep_interval &&
+        defaultDownloaderPreset.yt_dlp_sleep_requests === profile.sleep_requests
+      ) {
+        return profile.id;
+      }
+    }
+    return "custom";
+  }, [defaultDownloaderPreset]);
+
+  useEffect(() => {
+    const preset = defaultDownloaderPreset;
+    if (!preset) return;
+    setDownloaderConcurrentFragments(String(preset.yt_dlp_concurrent_fragments));
+    setDownloaderThrottledRate(preset.yt_dlp_throttled_rate ?? "");
+    setDownloaderFileAccessRetries(String(preset.yt_dlp_file_access_retries));
+    setDownloaderRetries(String(preset.yt_dlp_retries));
+    setDownloaderFragmentRetries(String(preset.yt_dlp_fragment_retries));
+    setDownloaderSleepInterval(String(preset.yt_dlp_sleep_interval));
+    setDownloaderSleepRequests(String(preset.yt_dlp_sleep_requests));
+  }, [defaultDownloaderPreset]);
+
+  function clampPositiveInteger(value: string, min: number, max: number) {
+    const parsed = Number.parseInt(value, 10);
+    if (!Number.isFinite(parsed)) return min;
+    if (parsed < min) return min;
+    if (parsed > max) return max;
+    return parsed;
+  }
+
+  function withDownloaderPreset(nextPreset: DownloadPreset) {
+    if (!downloadPresets) return;
+    const defaultId = downloadPresets.default_preset_id ?? downloadPresets.presets[0]?.id ?? null;
+    if (!defaultId) return;
+    const presets = downloadPresets.presets.map((preset) =>
+      preset.id === defaultId ? nextPreset : preset,
+    );
+    return {
+      default_preset_id: defaultId,
+      presets,
+    };
+  }
+
+  async function applyDownloaderProfile(profileId: DownloaderProfileId) {
+    const preset = defaultDownloaderPreset;
+    if (!preset) return;
+    const profile = DOWNLOADER_PROFILES.find((candidate) => candidate.id === profileId);
+    if (!profile) return;
+
+    const nextPreset: DownloadPreset = {
+      ...preset,
+      yt_dlp_concurrent_fragments: profile.concurrent_fragments,
+      yt_dlp_throttled_rate: profile.throttled_rate,
+      yt_dlp_file_access_retries: profile.file_access_retries,
+      yt_dlp_retries: profile.retries,
+      yt_dlp_fragment_retries: profile.fragment_retries,
+      yt_dlp_sleep_interval: profile.sleep_interval,
+      yt_dlp_sleep_requests: profile.sleep_requests,
+    };
+
+    const nextConfig = withDownloaderPreset(nextPreset);
+    if (!nextConfig) return;
+
+    try {
+      setDownloaderBusy(true);
+      setDownloaderMessage("");
+      const saved = await invoke<DownloadPresetsConfig>("download_presets_set", {
+        config_value: nextConfig,
+        configValue: nextConfig,
+      });
+      setDownloadPresets(saved);
+      setDownloaderMessage(`Applied "${profile.label}" YouTube downloader profile.`);
+    } catch (e) {
+      setDownloaderMessage(`Error applying profile: ${String(e)}`);
+    } finally {
+      setDownloaderBusy(false);
+    }
+  }
+
+  async function applyCustomDownloaderSettings() {
+    const preset = defaultDownloaderPreset;
+    if (!preset) return;
+    const concurrentFragments = clampPositiveInteger(downloaderConcurrentFragments, 1, 32);
+    const throttledRate = downloaderThrottledRate.trim();
+    const sleepInterval = clampPositiveInteger(downloaderSleepInterval, 0, 86400);
+    const sleepRequests = clampPositiveInteger(downloaderSleepRequests, 0, 10000);
+    const fileAccessRetries = clampPositiveInteger(downloaderFileAccessRetries, 1, 1000);
+    const retries = clampPositiveInteger(downloaderRetries, 0, 1000);
+    const fragmentRetries = clampPositiveInteger(downloaderFragmentRetries, 0, 1000);
+    if (!throttledRate) {
+      setDownloaderMessage("Error: throttled rate is required.");
+      return;
+    }
+
+    const nextPreset: DownloadPreset = {
+      ...preset,
+      yt_dlp_concurrent_fragments: concurrentFragments,
+      yt_dlp_throttled_rate: throttledRate,
+      yt_dlp_file_access_retries: fileAccessRetries,
+      yt_dlp_retries: retries,
+      yt_dlp_fragment_retries: fragmentRetries,
+      yt_dlp_sleep_interval: sleepInterval,
+      yt_dlp_sleep_requests: sleepRequests,
+    };
+
+    const nextConfig = withDownloaderPreset(nextPreset);
+    if (!nextConfig) return;
+
+    try {
+      setDownloaderBusy(true);
+      setDownloaderMessage("");
+      const saved = await invoke<DownloadPresetsConfig>("download_presets_set", {
+        config_value: nextConfig,
+        configValue: nextConfig,
+      });
+      setDownloadPresets(saved);
+      setDownloaderMessage("Saved custom YouTube downloader settings.");
+    } catch (e) {
+      setDownloaderMessage(`Error saving settings: ${String(e)}`);
+    } finally {
+      setDownloaderBusy(false);
+    }
+  }
 
   useEffect(() => {
     safeLocalStorageSet("voxvulgi.v1.library.legacy_archive_root", legacyRecoveryRoot);
@@ -460,6 +708,151 @@ export function OptionsPage() {
           >
             Open report
           </button>
+        </div>
+      </div>
+
+      <div className="card">
+        <h2>YouTube downloader aggressiveness</h2>
+        <div style={{ color: "#4b5563", marginTop: 6, marginBottom: 12 }}>
+          These values update the default download preset used for new URLs and subscriptions that
+          do not override preset selection.
+        </div>
+        <div style={{ color: "#4b5563", marginTop: 6, marginBottom: 12 }}>
+          If YouTube blocks requests quickly, start with <strong>Conservative</strong> and keep
+          <strong> Sleep interval</strong> and <strong>Sleep requests</strong> enabled.
+        </div>
+        <div className="kv">
+          <div className="k">Default preset</div>
+          <div className="v">
+            {defaultDownloaderPreset ? defaultDownloaderPreset.title : "Loading preset..."}
+          </div>
+        </div>
+        <div className="kv">
+          <div className="k">Current preset profile</div>
+          <div className="v">
+            {inferredDownloaderProfile === "aggressive"
+              ? "Aggressive"
+              : inferredDownloaderProfile === "balanced"
+                ? "Balanced"
+                : inferredDownloaderProfile === "gentle"
+                  ? "Gentle"
+                  : inferredDownloaderProfile === "conservative"
+                    ? "Conservative"
+                  : "Custom"}
+          </div>
+        </div>
+        <div className="row" style={{ marginTop: 8 }}>
+          {DOWNLOADER_PROFILES.map((profile) => (
+            <button
+              type="button"
+              key={profile.id}
+              disabled={downloaderBusy || !downloadPresets}
+              onClick={() => applyDownloaderProfile(profile.id)}
+              style={{ maxWidth: 220 }}
+            >
+              Use {profile.label}
+            </button>
+          ))}
+        </div>
+        <div style={{ color: "#4b5563", marginTop: 8, marginBottom: 8 }}>
+          {DOWNLOADER_PROFILES.map((profile) => (
+            <div key={`${profile.id}-description`} style={{ marginTop: 6 }}>
+              <strong>{profile.label}:</strong> {profile.description}
+            </div>
+          ))}
+        </div>
+        <div
+          style={{ marginTop: 12, marginBottom: 12, borderTop: "1px solid #e5e7eb", paddingTop: 12 }}
+        >
+          <h3 style={{ margin: "0 0 8px" }}>Custom preset values</h3>
+          <div className="row" style={{ flexWrap: "wrap", gap: 8 }}>
+            <label style={{ display: "flex", alignItems: "center", gap: 8 }}>
+              <span>Concurrent fragments</span>
+              <input
+                type="number"
+                min={1}
+                max={32}
+                value={downloaderConcurrentFragments}
+                onChange={(e) => setDownloaderConcurrentFragments(e.currentTarget.value)}
+                disabled={downloaderBusy}
+              />
+            </label>
+            <label style={{ display: "flex", alignItems: "center", gap: 8 }}>
+              <span>Throttled rate</span>
+              <input
+                type="text"
+                value={downloaderThrottledRate}
+                onChange={(e) => setDownloaderThrottledRate(e.currentTarget.value)}
+                disabled={downloaderBusy}
+                placeholder="ex: 100K"
+              />
+            </label>
+            <label style={{ display: "flex", alignItems: "center", gap: 8 }}>
+              <span>Sleep interval (s)</span>
+              <input
+                type="number"
+                min={0}
+                max={86400}
+                value={downloaderSleepInterval}
+                onChange={(e) => setDownloaderSleepInterval(e.currentTarget.value)}
+                disabled={downloaderBusy}
+              />
+            </label>
+            <label style={{ display: "flex", alignItems: "center", gap: 8 }}>
+              <span>Sleep requests</span>
+              <input
+                type="number"
+                min={0}
+                max={10000}
+                value={downloaderSleepRequests}
+                onChange={(e) => setDownloaderSleepRequests(e.currentTarget.value)}
+                disabled={downloaderBusy}
+              />
+            </label>
+            <label style={{ display: "flex", alignItems: "center", gap: 8 }}>
+              <span>Retries</span>
+              <input
+                type="number"
+                min={0}
+                max={1000}
+                value={downloaderRetries}
+                onChange={(e) => setDownloaderRetries(e.currentTarget.value)}
+                disabled={downloaderBusy}
+              />
+            </label>
+            <label style={{ display: "flex", alignItems: "center", gap: 8 }}>
+              <span>Frag retries</span>
+              <input
+                type="number"
+                min={0}
+                max={1000}
+                value={downloaderFragmentRetries}
+                onChange={(e) => setDownloaderFragmentRetries(e.currentTarget.value)}
+                disabled={downloaderBusy}
+              />
+            </label>
+            <label style={{ display: "flex", alignItems: "center", gap: 8 }}>
+              <span>File-access retries</span>
+              <input
+                type="number"
+                min={1}
+                max={1000}
+                value={downloaderFileAccessRetries}
+                onChange={(e) => setDownloaderFileAccessRetries(e.currentTarget.value)}
+                disabled={downloaderBusy}
+              />
+            </label>
+          </div>
+          <div className="row" style={{ marginTop: 12 }}>
+            <button type="button" disabled={downloaderBusy || !downloadPresets} onClick={applyCustomDownloaderSettings}>
+              Save custom downloader settings
+            </button>
+          </div>
+          {downloaderMessage ? (
+            <div style={{ marginTop: 8, color: downloaderMessage.startsWith("Error") ? "#dc2626" : "#166534" }}>
+              {downloaderMessage}
+            </div>
+          ) : null}
         </div>
       </div>
 

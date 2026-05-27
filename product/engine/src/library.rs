@@ -259,6 +259,41 @@ WHERE id=?1
     })
 }
 
+/// WP-0245: batched read for the Jobs page and other panels that previously
+/// fanned out per-item `get_item_by_id` calls. One read-only connection, one
+/// `SELECT … WHERE id IN (...)`. Order of the returned vec is not guaranteed
+/// to match input order; callers should index by `LibraryItem.id`. Missing
+/// ids are silently skipped (no error). Caller is expected to bound the input
+/// length; we still defensively cap at 500 to stay clear of SQLite's default
+/// 999 bound-parameter limit.
+pub fn list_items_by_ids(paths: &AppPaths, ids: &[&str]) -> Result<Vec<LibraryItem>> {
+    if ids.is_empty() {
+        return Ok(Vec::new());
+    }
+    const MAX_IDS: usize = 500;
+    let ids = if ids.len() > MAX_IDS {
+        &ids[..MAX_IDS]
+    } else {
+        ids
+    };
+
+    let conn = db::open_readonly(paths)?;
+    let placeholders = (0..ids.len()).map(|_| "?").collect::<Vec<_>>().join(",");
+    let sql = format!(
+        "SELECT id, created_at_ms, source_type, source_uri, title, media_path, \
+         duration_ms, width, height, container, video_codec, audio_codec, thumbnail_path \
+         FROM library_item WHERE id IN ({placeholders})"
+    );
+    let mut stmt = conn.prepare(&sql)?;
+    let items = stmt
+        .query_map(
+            rusqlite::params_from_iter(ids.iter()),
+            library_item_from_row,
+        )?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+    Ok(items)
+}
+
 pub fn get_item_by_canonical_media_path(
     paths: &AppPaths,
     media_path: &Path,
@@ -837,5 +872,45 @@ INSERT INTO library_item (
             stored.is_none(),
             "stale thumbnail reference should be cleared"
         );
+    }
+
+    #[test]
+    fn list_items_by_ids_returns_empty_for_empty_input() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let paths = AppPaths::new(dir.path().to_path_buf());
+        paths.ensure_dirs().expect("dirs");
+        db::ensure_schema(&paths).expect("schema");
+
+        let items = list_items_by_ids(&paths, &[]).expect("list");
+        assert!(items.is_empty());
+    }
+
+    #[test]
+    fn list_items_by_ids_skips_missing_ids_and_returns_present() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let paths = AppPaths::new(dir.path().to_path_buf());
+        paths.ensure_dirs().expect("dirs");
+        db::ensure_schema(&paths).expect("schema");
+
+        let conn = db::open(&paths).expect("db");
+        db::migrate(&conn).expect("migrate");
+        for (id, title) in [("aaa", "Alpha"), ("bbb", "Beta"), ("ccc", "Gamma")] {
+            conn.execute(
+                r#"
+INSERT INTO library_item (
+  id, created_at_ms, source_type, source_uri, title, media_path,
+  duration_ms, width, height, container, video_codec, audio_codec, thumbnail_path
+) VALUES (?1, ?2, ?3, ?4, ?5, ?6, NULL, NULL, NULL, NULL, NULL, NULL, NULL)
+"#,
+                params![id, 1_i64, "local_file", "uri", title, "media"],
+            )
+            .expect("insert");
+        }
+
+        let items = list_items_by_ids(&paths, &["aaa", "missing", "ccc"]).expect("list");
+        assert_eq!(items.len(), 2, "should skip the missing id silently");
+        let mut titles: Vec<String> = items.iter().map(|i| i.title.clone()).collect();
+        titles.sort();
+        assert_eq!(titles, vec!["Alpha".to_string(), "Gamma".to_string()]);
     }
 }

@@ -91,6 +91,95 @@ fn wait_for_batch_to_idle(
     }
 }
 
+fn item_jobs(paths: &AppPaths, item_id: &str) -> Result<Vec<jobs::JobRow>> {
+    let mut rows = jobs::list_jobs(paths, 1000, 0)?
+        .into_iter()
+        .filter(|job| job.item_id.as_deref() == Some(item_id))
+        .collect::<Vec<_>>();
+    rows.sort_by_key(|job| job.created_at_ms);
+    Ok(rows)
+}
+
+fn wait_for_item_jobs_to_settle(
+    paths: &AppPaths,
+    item_id: &str,
+    timeout: Duration,
+) -> Result<Vec<jobs::JobRow>> {
+    let start = Instant::now();
+    let mut idle_since: Option<Instant> = None;
+    let mut last_signature: Option<(usize, i64, usize)> = None;
+
+    loop {
+        let rows = item_jobs(paths, item_id)?;
+        if let Some(failed) = rows
+            .iter()
+            .find(|job| matches!(job.status, jobs::JobStatus::Failed))
+        {
+            return Err(EngineError::InstallFailed(format!(
+                "item job {} failed at {}: {}",
+                failed.id,
+                failed.job_type,
+                failed
+                    .error
+                    .clone()
+                    .unwrap_or_else(|| "(no error)".to_string())
+            )));
+        }
+
+        let active = rows.iter().any(|job| {
+            matches!(
+                job.status,
+                jobs::JobStatus::Queued | jobs::JobStatus::Running
+            )
+        });
+        let signature = (
+            rows.len(),
+            rows.iter().map(|job| job.created_at_ms).max().unwrap_or(0),
+            rows.iter()
+                .filter(|job| {
+                    matches!(
+                        job.status,
+                        jobs::JobStatus::Succeeded | jobs::JobStatus::Canceled
+                    )
+                })
+                .count(),
+        );
+
+        if !active {
+            if last_signature.as_ref() == Some(&signature) {
+                if idle_since
+                    .map(|since| since.elapsed() >= Duration::from_millis(1500))
+                    .unwrap_or(false)
+                {
+                    return Ok(rows);
+                }
+            } else {
+                idle_since = Some(Instant::now());
+                last_signature = Some(signature);
+            }
+        } else {
+            idle_since = None;
+            last_signature = Some(signature);
+        }
+
+        if start.elapsed() > timeout {
+            return Err(EngineError::InstallFailed(format!(
+                "timeout waiting for item jobs to settle for {item_id}"
+            )));
+        }
+        thread::sleep(Duration::from_millis(700));
+    }
+}
+
+fn latest_succeeded_item_job<'a>(
+    rows: &'a [jobs::JobRow],
+    job_type: &str,
+) -> Option<&'a jobs::JobRow> {
+    rows.iter()
+        .filter(|job| job.job_type == job_type && matches!(job.status, jobs::JobStatus::Succeeded))
+        .max_by_key(|job| job.finished_at_ms.unwrap_or(job.created_at_ms))
+}
+
 fn ensure_model_installed(store: &ModelStore, model_id: &str) -> Result<()> {
     let inv = store.inventory()?;
     let model = inv
@@ -177,19 +266,124 @@ fn speaker_keys_for_track(paths: &AppPaths, track_id: &str) -> Result<Vec<String
     Ok(speakers)
 }
 
+fn validate_observed_speaker_count(
+    speaker_keys: &[String],
+    requested: &jobs::DiarizationSpeakerCountRequest,
+) -> Result<()> {
+    let observed = speaker_keys.len() as u32;
+    if let Some(exact) = requested.exact_speakers {
+        if observed != exact {
+            return Err(EngineError::InstallFailed(format!(
+                "expected exactly {exact} speaker label(s), observed {observed}: {}",
+                speaker_keys.join(", ")
+            )));
+        }
+    }
+    if let Some(min) = requested.min_speakers {
+        if observed < min {
+            return Err(EngineError::InstallFailed(format!(
+                "expected at least {min} speaker label(s), observed {observed}: {}",
+                speaker_keys.join(", ")
+            )));
+        }
+    }
+    if let Some(max) = requested.max_speakers {
+        if observed > max {
+            return Err(EngineError::InstallFailed(format!(
+                "expected at most {max} speaker label(s), observed {observed}: {}",
+                speaker_keys.join(", ")
+            )));
+        }
+    }
+    Ok(())
+}
+
 #[derive(Serialize)]
 struct ProofSummary {
+    media_path: String,
+    proof_label: String,
     item_id: String,
     first_stage: String,
     second_stage: String,
     source_track_id: String,
     translated_track_id: String,
     speaker_keys: Vec<String>,
+    speaker_count: jobs::DiarizationSpeakerCountRequest,
     voice_preserving_report: String,
     mix_wav: String,
     mux_mp4: String,
     app_base_dir: String,
     deliverables_dir: String,
+}
+
+fn env_u32(name: &str) -> Option<u32> {
+    std::env::var(name)
+        .ok()
+        .and_then(|value| value.trim().parse::<u32>().ok())
+        .filter(|value| *value > 0)
+}
+
+fn env_trimmed(name: &str) -> Option<String> {
+    std::env::var(name)
+        .ok()
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty())
+}
+
+fn diarization_speaker_count_from_env() -> jobs::DiarizationSpeakerCountRequest {
+    let exact_speakers = env_u32("VOXVULGI_SMOKE_EXACT_SPEAKERS");
+    let min_speakers = env_u32("VOXVULGI_SMOKE_MIN_SPEAKERS");
+    let max_speakers = env_u32("VOXVULGI_SMOKE_MAX_SPEAKERS");
+    let mode = env_trimmed("VOXVULGI_SMOKE_SPEAKER_COUNT_MODE").or_else(|| {
+        if exact_speakers.is_some() {
+            Some("exact".to_string())
+        } else if min_speakers.is_some() || max_speakers.is_some() {
+            Some("range".to_string())
+        } else {
+            None
+        }
+    });
+
+    jobs::DiarizationSpeakerCountRequest {
+        mode,
+        exact_speakers,
+        min_speakers,
+        max_speakers,
+    }
+}
+
+fn safe_label(raw: &str) -> String {
+    let mut label = raw
+        .chars()
+        .map(|ch| {
+            if ch.is_ascii_alphanumeric() || ch == '-' || ch == '_' {
+                ch.to_ascii_lowercase()
+            } else {
+                '_'
+            }
+        })
+        .collect::<String>();
+    while label.contains("__") {
+        label = label.replace("__", "_");
+    }
+    label = label.trim_matches('_').to_string();
+    if label.is_empty() {
+        "sample".to_string()
+    } else {
+        label
+    }
+}
+
+fn proof_label_for_media(media_path: &Path) -> String {
+    env_trimmed("VOXVULGI_SMOKE_LABEL")
+        .map(|value| safe_label(&value))
+        .unwrap_or_else(|| {
+            let stem = media_path
+                .file_stem()
+                .and_then(|value| value.to_str())
+                .unwrap_or("sample");
+            safe_label(stem)
+        })
 }
 
 fn main() -> Result<()> {
@@ -206,6 +400,8 @@ fn main() -> Result<()> {
                 .join("[4K] Queen is here ðŸ˜ Miyeon so cute ðŸ’• (ENG SUB).mp4")
         });
     let proof_dir = std::env::var("VOXVULGI_PROOF_DIR").ok().map(PathBuf::from);
+    let proof_label = proof_label_for_media(&media_path);
+    let speaker_count = diarization_speaker_count_from_env();
 
     let paths = AppPaths::new(base_dir.clone());
     paths.ensure_dirs()?;
@@ -260,7 +456,7 @@ fn main() -> Result<()> {
             output_mode: None,
             queue_export_pack: false,
             queue_qc: false,
-            speaker_count: jobs::DiarizationSpeakerCountRequest::default(),
+            speaker_count: speaker_count.clone(),
         },
     )?;
     wait_for_batch_to_idle(&paths, &first_run.batch_id, Duration::from_secs(90 * 60))?;
@@ -274,6 +470,7 @@ fn main() -> Result<()> {
                 .to_string(),
         ));
     }
+    validate_observed_speaker_count(&speaker_keys, &speaker_count)?;
 
     let generated_refs = voice_reference_candidates::generate_reference_candidates(
         &paths,
@@ -300,43 +497,6 @@ fn main() -> Result<()> {
         )?;
     }
 
-    let second_run = jobs::enqueue_localization_run_v1(
-        &paths,
-        jobs::LocalizationRunRequest {
-            item_id: item.id.clone(),
-            asr_lang: Some("ko".to_string()),
-            separation_backend: None,
-            output_mode: None,
-            queue_export_pack: false,
-            queue_qc: true,
-            speaker_count: jobs::DiarizationSpeakerCountRequest::default(),
-        },
-    )?;
-    let final_batch =
-        wait_for_batch_to_idle(&paths, &second_run.batch_id, Duration::from_secs(90 * 60))?;
-
-    let voice_job = final_batch
-        .iter()
-        .find(|job| job.job_type == "dub_voice_preserving_v1")
-        .ok_or_else(|| {
-            EngineError::InstallFailed("dub job missing from second batch".to_string())
-        })?;
-    let _mix_job = final_batch
-        .iter()
-        .find(|job| job.job_type == "mix_dub_preview_v1")
-        .ok_or_else(|| {
-            EngineError::InstallFailed("mix job missing from second batch".to_string())
-        })?;
-    let _mux_job = final_batch
-        .iter()
-        .find(|job| job.job_type == "mux_dub_preview_v1")
-        .ok_or_else(|| {
-            EngineError::InstallFailed("mux job missing from second batch".to_string())
-        })?;
-
-    let voice_report = paths
-        .job_artifacts_dir(&voice_job.id)
-        .join("tts_voice_preserving_report.json");
     let mix_wav = paths
         .derived_item_dir(&item.id)
         .join("dub_preview")
@@ -345,6 +505,42 @@ fn main() -> Result<()> {
         .derived_item_dir(&item.id)
         .join("dub_preview")
         .join("mux_dub_preview_v1.mp4");
+    let mut second_stage = "auto_resume".to_string();
+    let mut final_jobs =
+        wait_for_item_jobs_to_settle(&paths, &item.id, Duration::from_secs(90 * 60))?;
+
+    if !mix_wav.exists() || !mux_mp4.exists() {
+        let second_run = jobs::enqueue_localization_run_v1(
+            &paths,
+            jobs::LocalizationRunRequest {
+                item_id: item.id.clone(),
+                asr_lang: Some("ko".to_string()),
+                separation_backend: None,
+                output_mode: None,
+                queue_export_pack: false,
+                queue_qc: true,
+                speaker_count: speaker_count.clone(),
+            },
+        )?;
+        second_stage = second_run.stage;
+        final_jobs = wait_for_item_jobs_to_settle(&paths, &item.id, Duration::from_secs(90 * 60))?;
+    }
+
+    let voice_job =
+        latest_succeeded_item_job(&final_jobs, "dub_voice_preserving_v1").ok_or_else(|| {
+            EngineError::InstallFailed("dub job missing from settled item jobs".to_string())
+        })?;
+    let _mix_job =
+        latest_succeeded_item_job(&final_jobs, "mix_dub_preview_v1").ok_or_else(|| {
+            EngineError::InstallFailed("mix job missing from settled item jobs".to_string())
+        })?;
+    let _mux_job =
+        latest_succeeded_item_job(&final_jobs, "mux_dub_preview_v1").ok_or_else(|| {
+            EngineError::InstallFailed("mux job missing from settled item jobs".to_string())
+        })?;
+    let voice_report = paths
+        .job_artifacts_dir(&voice_job.id)
+        .join("tts_voice_preserving_report.json");
 
     if !mix_wav.exists() || !wav_peak_is_non_silent(&mix_wav)? {
         return Err(EngineError::InstallFailed(format!(
@@ -370,20 +566,26 @@ fn main() -> Result<()> {
         let deliverables_dir = proof_dir.join("deliverables");
         std::fs::create_dir_all(&deliverables_dir)?;
 
-        let copied_mp4 = deliverables_dir.join("queen_localization_run_preview.mp4");
-        let copied_wav = deliverables_dir.join("queen_localization_run_preview.wav");
-        let copied_report = deliverables_dir.join("tts_voice_preserving_report.json");
+        let copied_mp4 =
+            deliverables_dir.join(format!("{proof_label}_localization_run_preview.mp4"));
+        let copied_wav =
+            deliverables_dir.join(format!("{proof_label}_localization_run_preview.wav"));
+        let copied_report =
+            deliverables_dir.join(format!("{proof_label}_tts_voice_preserving_report.json"));
         std::fs::copy(&mux_mp4, &copied_mp4)?;
         std::fs::copy(&mix_wav, &copied_wav)?;
         std::fs::copy(&voice_report, &copied_report)?;
 
         let summary = ProofSummary {
+            media_path: media_path.to_string_lossy().to_string(),
+            proof_label,
             item_id: item.id.clone(),
             first_stage: first_run.stage,
-            second_stage: second_run.stage,
+            second_stage,
             source_track_id: source_track.id.clone(),
             translated_track_id: translated_track.id.clone(),
             speaker_keys,
+            speaker_count,
             voice_preserving_report: copied_report.to_string_lossy().to_string(),
             mix_wav: copied_wav.to_string_lossy().to_string(),
             mux_mp4: copied_mp4.to_string_lossy().to_string(),

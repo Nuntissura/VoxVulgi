@@ -112,13 +112,34 @@ type TtsPreviewPackStatus = {
 
 type TtsNeuralLocalV1PackStatus = {
   installed: boolean;
+  repair_required?: boolean;
+  status_detail?: string;
   package_version: string | null;
+  transformers_version?: string | null;
+  huggingface_hub_version?: string | null;
+  expected_lockfile_sha?: string | null;
+  installed_lockfile_sha?: string | null;
+  version_mismatches?: Array<{
+    package: string;
+    expected: string;
+    installed: string | null;
+  }>;
 };
 
 type TtsVoicePreservingLocalV1PackStatus = {
   installed: boolean;
+  repair_required?: boolean;
+  status_detail?: string;
+  kokoro_version?: string | null;
   openvoice_version: string | null;
   cosyvoice_version: string | null;
+  expected_lockfile_sha?: string | null;
+  installed_lockfile_sha?: string | null;
+  version_mismatches?: Array<{
+    package: string;
+    expected: string;
+    installed: string | null;
+  }>;
 };
 
 type VoiceBackendCatalogEntry = {
@@ -638,6 +659,94 @@ function phase2StepIsProblem(step: any): boolean {
   return status === "failed" || status === "interrupted" || status === "canceled" || status === "stale";
 }
 
+// WP-0230: honest progress helpers. Truthful summary of "how far along is the install"
+// derived entirely from existing step state (no backend changes needed for this slice).
+function phase2CompletedCount(steps: any[]): number {
+  return steps.filter(phase2StepIsComplete).length;
+}
+
+function phase2RunningStep(steps: any[]): any | null {
+  return steps.find((s) => phase2StepStatus(s) === "running") ?? null;
+}
+
+// Compact duration formatter for the "running for Xm Ys" label. Returns "-" when the
+// timestamp is missing so the UI never shows NaN.
+function phase2FormatElapsedSeconds(seconds: number): string {
+  if (!Number.isFinite(seconds) || seconds < 0) return "-";
+  if (seconds < 1) return "<1s";
+  const total = Math.floor(seconds);
+  const m = Math.floor(total / 60);
+  const s = total % 60;
+  if (m <= 0) return `${s}s`;
+  if (m < 60) return `${m}m ${s}s`;
+  const h = Math.floor(m / 60);
+  const mm = m % 60;
+  return `${h}h ${mm}m`;
+}
+
+function phase2ElapsedSinceMs(startedAtMs: any, nowMs: number): number | null {
+  if (typeof startedAtMs !== "number" || !Number.isFinite(startedAtMs) || startedAtMs <= 0) {
+    return null;
+  }
+  return Math.max(0, (nowMs - startedAtMs) / 1000);
+}
+
+// One of five honest headline states. Replaces the previous "updating..." / "interrupted"
+// / "idle" three-word badge that lied when the install had simply not started yet.
+function phase2HeadlineState(
+  steps: any[],
+  hasActive: boolean,
+  hasProblem: boolean,
+  isLoading: boolean,
+):
+  | { kind: "loading" }
+  | { kind: "not_started" }
+  | { kind: "queued" }
+  | { kind: "running"; stepIndex: number; total: number; stepTitle: string; runningStep: any }
+  | { kind: "interrupted"; completed: number; total: number }
+  | { kind: "all_done"; total: number } {
+  if (isLoading) return { kind: "loading" };
+  const total = steps.length;
+  if (total === 0) return { kind: "not_started" };
+  if (steps.every(phase2StepIsComplete)) return { kind: "all_done", total };
+  const running = phase2RunningStep(steps);
+  if (running) {
+    // 1-based index into the steps array so the user sees "step 3 of 5", not "step 2 of 5".
+    const stepIndex = steps.indexOf(running) + 1;
+    const stepTitle = String(running?.title ?? running?.id ?? "(unnamed step)");
+    return { kind: "running", stepIndex, total, stepTitle, runningStep: running };
+  }
+  if (hasActive) {
+    // Active per the backend, but no step is in `running` status: must be queued/about to start.
+    return { kind: "queued" };
+  }
+  if (hasProblem) {
+    return { kind: "interrupted", completed: phase2CompletedCount(steps), total };
+  }
+  // No active, no problem, not all-done — likely transient state where we have a stale
+  // plan but no real progress. Treat as not_started so the UI doesn't lie.
+  return { kind: "not_started" };
+}
+
+function phase2HeadlineText(
+  state: ReturnType<typeof phase2HeadlineState>,
+): string {
+  switch (state.kind) {
+    case "loading":
+      return "Checking install state…";
+    case "not_started":
+      return "Voice packs not installed yet";
+    case "queued":
+      return "Queued — waiting to start";
+    case "running":
+      return `Installing — step ${state.stepIndex} of ${state.total}: ${state.stepTitle}`;
+    case "interrupted":
+      return `Interrupted — ${state.completed} of ${state.total} packs installed. Click Install to resume.`;
+    case "all_done":
+      return `All ${state.total} voice packs installed`;
+  }
+}
+
 function formatCpuPercent(value: number | null): string {
   if (value === null || !Number.isFinite(value)) return "-";
   return `${value.toFixed(1)}%`;
@@ -1079,6 +1188,7 @@ export function DiagnosticsPage({ visible = true }: { visible?: boolean }) {
   }, [updateSectionStatus]);
 
   useEffect(() => {
+    if (!visible) return;
     setError(null);
     const timers: number[] = [];
     const buildRaf = window.requestAnimationFrame(() => void loadBuildSection());
@@ -1093,6 +1203,7 @@ export function DiagnosticsPage({ visible = true }: { visible?: boolean }) {
       timers.forEach((id) => window.clearTimeout(id));
     };
   }, [
+    visible,
     loadBuildSection,
     loadJobsSection,
     loadPhase2Section,
@@ -1196,6 +1307,34 @@ export function DiagnosticsPage({ visible = true }: { visible?: boolean }) {
   const phase2HasProblem = useMemo(() => {
     return Boolean(phase2Latest?.stale) || phase2Steps.some(phase2StepIsProblem);
   }, [phase2Latest?.stale, phase2Steps]);
+
+  // WP-0230: ticking "now" so the elapsed-time label on the running step updates
+  // while the install is in flight. Ticks only when there's something to count.
+  const [phase2NowMs, setPhase2NowMs] = useState<number>(Date.now());
+  useEffect(() => {
+    if (!phase2HasActive) return;
+    const id = window.setInterval(() => setPhase2NowMs(Date.now()), 1000);
+    return () => window.clearInterval(id);
+  }, [phase2HasActive]);
+
+  const phase2HeadlineKind = useMemo(
+    () =>
+      phase2HeadlineState(
+        phase2Steps,
+        phase2HasActive,
+        phase2HasProblem,
+        sectionStatus.phase2.state === "loading" && !phase2Latest,
+      ),
+    [phase2Steps, phase2HasActive, phase2HasProblem, sectionStatus.phase2.state, phase2Latest],
+  );
+  const phase2HeadlineLabel = useMemo(
+    () => phase2HeadlineText(phase2HeadlineKind),
+    [phase2HeadlineKind],
+  );
+  const phase2CompletedSteps = useMemo(
+    () => phase2CompletedCount(phase2Steps),
+    [phase2Steps],
+  );
 
   const phase2SummaryLabel =
     sectionStatus.phase2.state === "loading" && !phase2Latest
@@ -1392,7 +1531,11 @@ export function DiagnosticsPage({ visible = true }: { visible?: boolean }) {
   async function installTtsNeuralLocalV1Pack() {
     setBusy(true);
     setError(null);
-    setNotice("Installing Neural TTS local pack (Kokoro).");
+    setNotice(
+      ttsNeuralLocalV1?.repair_required
+        ? "Repairing Neural TTS local pack so installed packages match the current lockfile."
+        : "Installing Neural TTS local pack (Kokoro).",
+    );
     try {
       await invoke<TtsNeuralLocalV1PackStatus>("tools_tts_neural_local_v1_install");
       await refresh();
@@ -1406,7 +1549,11 @@ export function DiagnosticsPage({ visible = true }: { visible?: boolean }) {
   async function installTtsVoicePreservingLocalV1Pack() {
     setBusy(true);
     setError(null);
-    setNotice("Installing voice-preserving TTS pack (OpenVoice/CosyVoice).");
+    setNotice(
+      ttsVoicePreservingLocalV1?.repair_required
+        ? "Repairing voice-preserving TTS pack so OpenVoice and model files match the current lockfile."
+        : "Installing voice-preserving TTS pack (OpenVoice/CosyVoice).",
+    );
     try {
       await invoke<TtsVoicePreservingLocalV1PackStatus>("tools_tts_voice_preserving_local_v1_install");
       await refresh();
@@ -2762,18 +2909,46 @@ export function DiagnosticsPage({ visible = true }: { visible?: boolean }) {
 
         <div className="kv">
           <div className="k">TTS preview (neural local)</div>
-          <div className="v">{ttsNeuralLocalV1?.installed ? "installed" : "not installed"}</div>
+          <div className="v">
+            {ttsNeuralLocalV1?.installed
+              ? "installed"
+              : ttsNeuralLocalV1?.repair_required
+                ? "repair needed"
+                : "not installed"}
+          </div>
         </div>
         <div className="kv">
           <div className="k">Kokoro</div>
           <div className="v">{ttsNeuralLocalV1?.package_version ?? "-"}</div>
         </div>
+        <div className="kv">
+          <div className="k">Transformers</div>
+          <div className="v">{ttsNeuralLocalV1?.transformers_version ?? "-"}</div>
+        </div>
+        <div className="kv">
+          <div className="k">Hugging Face Hub</div>
+          <div className="v">{ttsNeuralLocalV1?.huggingface_hub_version ?? "-"}</div>
+        </div>
+        {ttsNeuralLocalV1?.status_detail ? (
+          <div className="kv">
+            <div className="k">Neural TTS status</div>
+            <div className="v">{ttsNeuralLocalV1.status_detail}</div>
+          </div>
+        ) : null}
 
         <div className="kv">
           <div className="k">TTS voice-preserving (local)</div>
           <div className="v">
-            {ttsVoicePreservingLocalV1?.installed ? "installed" : "not installed"}
+            {ttsVoicePreservingLocalV1?.installed
+              ? "installed"
+              : ttsVoicePreservingLocalV1?.repair_required
+                ? "repair needed"
+                : "not installed"}
           </div>
+        </div>
+        <div className="kv">
+          <div className="k">Kokoro base</div>
+          <div className="v">{ttsVoicePreservingLocalV1?.kokoro_version ?? "-"}</div>
         </div>
         <div className="kv">
           <div className="k">OpenVoice</div>
@@ -2783,6 +2958,12 @@ export function DiagnosticsPage({ visible = true }: { visible?: boolean }) {
           <div className="k">CosyVoice</div>
           <div className="v">{ttsVoicePreservingLocalV1?.cosyvoice_version ?? "-"}</div>
         </div>
+        {ttsVoicePreservingLocalV1?.status_detail ? (
+          <div className="kv">
+            <div className="k">Voice-preserving status</div>
+            <div className="v">{ttsVoicePreservingLocalV1.status_detail}</div>
+          </div>
+        ) : null}
         <div className="kv">
           <div className="k">Voice backend recommendation</div>
           <div className="v">
@@ -3211,15 +3392,24 @@ export function DiagnosticsPage({ visible = true }: { visible?: boolean }) {
             type="button"
             disabled={busy || !!ttsNeuralLocalV1?.installed}
             onClick={installTtsNeuralLocalV1Pack}
+            title={ttsNeuralLocalV1?.status_detail ?? "Install the local Kokoro TTS runtime."}
           >
-            Install neural TTS (Kokoro) pack
+            {ttsNeuralLocalV1?.repair_required
+              ? "Repair neural TTS (Kokoro) pack"
+              : "Install neural TTS (Kokoro) pack"}
           </button>
           <button
             type="button"
             disabled={busy || !!ttsVoicePreservingLocalV1?.installed}
             onClick={installTtsVoicePreservingLocalV1Pack}
+            title={
+              ttsVoicePreservingLocalV1?.status_detail ??
+              "Install OpenVoice and local voice-preserving dubbing assets."
+            }
           >
-            Install voice-preserving TTS pack
+            {ttsVoicePreservingLocalV1?.repair_required
+              ? "Repair voice-preserving TTS pack"
+              : "Install voice-preserving TTS pack"}
           </button>
           <button type="button" disabled={busy} onClick={() => refresh()}>
             Refresh
@@ -3255,9 +3445,27 @@ export function DiagnosticsPage({ visible = true }: { visible?: boolean }) {
           <div className="v">{phase2Latest?.path ?? "-"}</div>
         </div>
 
+        {/* WP-0230: honest progress — a real <progress> bar driven by the existing
+            step state, plus a 5-state headline that never lies (no more permanent
+            "interrupted" label when nothing has even been attempted). */}
         <div className="kv">
           <div className="k">Live progress</div>
-          <div className="v">{phase2HasActive ? "updating..." : phase2HasProblem ? "interrupted" : "idle"}</div>
+          <div className="v">
+            <div>{phase2HeadlineLabel}</div>
+            {phase2Steps.length > 0 && (
+              <div style={{ marginTop: 6 }}>
+                <progress
+                  value={phase2CompletedSteps}
+                  max={phase2Steps.length}
+                  style={{ width: 260, verticalAlign: "middle" }}
+                  aria-label={`Installed ${phase2CompletedSteps} of ${phase2Steps.length} voice packs`}
+                />
+                <span style={{ marginLeft: 8, color: "#4b5563" }}>
+                  {phase2CompletedSteps} / {phase2Steps.length}
+                </span>
+              </div>
+            )}
+          </div>
         </div>
 
         <div className="table-wrap">
@@ -3275,10 +3483,26 @@ export function DiagnosticsPage({ visible = true }: { visible?: boolean }) {
             </thead>
             <tbody>
               {phase2Steps.length ? (
-                phase2Steps.map((step: any) => (
+                phase2Steps.map((step: any) => {
+                  const statusText = String(step?.status ?? "-");
+                  const isRunning = phase2StepStatus(step) === "running";
+                  // WP-0230: append a live elapsed counter to the running row's status so
+                  // the operator can tell "still working" from "hung". Ticks every 1s via
+                  // phase2NowMs above.
+                  const elapsed = isRunning
+                    ? phase2ElapsedSinceMs(step?.started_at_ms, phase2NowMs)
+                    : null;
+                  return (
                   <tr key={String(step?.id ?? step?.title ?? Math.random())}>
                     <td>{String(step?.title ?? step?.id ?? "-")}</td>
-                    <td>{String(step?.status ?? "-")}</td>
+                    <td>
+                      {statusText}
+                      {elapsed !== null && (
+                        <span style={{ color: "#4b5563", marginLeft: 6 }}>
+                          ({phase2FormatElapsedSeconds(elapsed)})
+                        </span>
+                      )}
+                    </td>
                     <td>{formatTs(Number.isFinite(step?.started_at_ms) ? step.started_at_ms : null)}</td>
                     <td>
                       {formatTs(
@@ -3301,7 +3525,8 @@ export function DiagnosticsPage({ visible = true }: { visible?: boolean }) {
                       </div>
                     </td>
                   </tr>
-                ))
+                );
+                })
               ) : phase2Plan?.length ? (
                 phase2Plan.map((p) => (
                   <tr key={p.id}>

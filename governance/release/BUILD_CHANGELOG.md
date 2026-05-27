@@ -255,3 +255,210 @@ This changelog tracks desktop installer builds produced by `governance/scripts/b
   - `product/desktop/build_target/Current/release/bundle/nsis/VoxVulgi_0.1.26_x64-setup.exe`
   - `product/desktop/build_target/Current/release/bundle/msi/VoxVulgi_0.1.26_x64_en-US.msi`
 - Notes: WP-0228 EMERGENCY ROLLBACK of WP-0227 auto-install: operator reported v0.1.25 became unusable due to background install contention. Auto-enqueue thread removed from lib.rs. Resume logic in jobs.rs kept (safe; helps manual installs). v0.1.26 = v0.1.24 + Phase2 install resume logic + freeze diagnostic infrastructure.
+
+## 0.1.27 - 2026-05-19T00:52:19Z
+- Work Packets: `WP-0230`, `WP-0231`, `WP-0232`, `WP-0233`, `WP-0234`, `WP-0239`
+- Commit: `521447b`
+- Offline Bundle ID: `offline_full_win64_20260519_001043`
+- Artifacts:
+  - `product/desktop/build_target/Current/release/bundle/nsis/VoxVulgi_0.1.27_x64-setup.exe`
+  - `product/desktop/build_target/Current/release/bundle/msi/VoxVulgi_0.1.27_x64_en-US.msi`
+- Notes: v0.1.27: voice-pack reliability sweep (WP-0231 Kokoro hf_hub pin + recovery; WP-0232 hashed lockfiles + --require-hashes install path with include_str bundling fix; WP-0233 pack warmup gate binary + wrapper + build hook; WP-0234 install-state journal + auto force-reinstall; WP-0230 progress UI truthfulness). Offline payload adopted from a successful out-of-band direct prep run (the in-script cargo-run path was being killed early; payload itself built from current code at 2026-05-19 02:10).
+
+## 0.1.28 - 2026-05-20T16:17:36Z
+- Work Packets: `WP-0241`
+- Commit: `521447b`
+- Offline Bundle ID: `offline_full_win64_20260519_001043`
+- Artifacts:
+  - `product/desktop/build_target/Current/release/bundle/nsis/VoxVulgi_0.1.28_x64-setup.exe`
+  - `product/desktop/build_target/Current/release/bundle/msi/VoxVulgi_0.1.28_x64_en-US.msi`
+- Notes: v0.1.28 emergency freeze containment for WP-0241: stop App from pre-mounting hidden Diagnostics after startup and gate Diagnostics initial probe fan-out behind visible=true. Reuses the verified v0.1.27 offline payload; no payload refresh. Pack warmup gate intentionally skipped for this UI-only emergency build because the gate invokes the Python pack probes implicated in the operator freeze report.
+
+## 0.1.29 - 2026-05-20T21:46:02Z
+- Work Packets: `WP-0243`
+- Commit: `521447b`
+- Offline Bundle ID: `offline_full_win64_20260519_001043`
+- Artifacts:
+  - `product/desktop/build_target/Current/release/bundle/nsis/VoxVulgi_0.1.29_x64-setup.exe`
+  - `product/desktop/build_target/Current/release/bundle/msi/VoxVulgi_0.1.29_x64_en-US.msi`
+- Notes: v0.1.29 emergency freeze containment for WP-0243: gate Instagram subscription heartbeat to the Instagram page, split Jobs active polling into a lightweight job snapshot, bound Jobs context hydration, shorten read-only SQLite busy waits, and emit database_locked/database_busy trace rows.
+
+## 0.1.30 - 2026-05-20T23:13:59Z
+- Work Packets: `WP-0244`
+- Commit: `521447b`
+- Offline Bundle ID: `offline_full_win64_20260519_001043`
+- Artifacts:
+  - `product/desktop/build_target/Current/release/bundle/nsis/VoxVulgi_0.1.30_x64-setup.exe`
+  - `product/desktop/build_target/Current/release/bundle/msi/VoxVulgi_0.1.30_x64_en-US.msi`
+- Notes: WP-0244 moves Video Archiver startup list/status commands to read-only DB paths, makes archive stats non-invasive, bootstraps default video library during startup, and adds missing command timing/DB lock traces.
+
+## 0.1.31 - 2026-05-20T23:57:44Z
+- Work Packets: `WP-0244`
+- Commit: `521447b`
+- Offline Bundle ID: `offline_full_win64_20260519_001043`
+- Artifacts:
+  - `product/desktop/build_target/Current/release/bundle/nsis/VoxVulgi_0.1.31_x64-setup.exe`
+  - `product/desktop/build_target/Current/release/bundle/msi/VoxVulgi_0.1.31_x64_en-US.msi`
+- Notes: WP-0244 v0.1.31 adds Video Archiver base-refresh deferral so archive stats and active refresh id probes no longer block first paint; keeps read-only DB/startup command containment from v0.1.30.
+
+## 0.1.33 - 2026-05-21T01:22:55Z
+- Work Packets: `WP-0244`
+- Commit: `521447b`
+- Offline Bundle ID: `offline_full_win64_20260519_001043`
+- Artifacts:
+  - `product/desktop/build_target/Current/release/bundle/nsis/VoxVulgi_0.1.33_x64-setup.exe`
+  - `product/desktop/build_target/Current/release/bundle/msi/VoxVulgi_0.1.33_x64_en-US.msi`
+- Notes: WP-0244 final build removes archive stats from SQLite entirely, keeps Video Archiver deferred badge/status probes, and preserves read-only startup list commands to reduce DB lock/freezing during app startup.
+
+## 0.1.34 - 2026-05-21T02:18:36Z
+- Work Packets: `WP-0244`
+- Commit: `521447b`
+- Offline Bundle ID: `offline_full_win64_20260519_001043`
+- Artifacts:
+  - `product/desktop/build_target/Current/release/bundle/nsis/VoxVulgi_0.1.34_x64-setup.exe`
+  - `product/desktop/build_target/Current/release/bundle/msi/VoxVulgi_0.1.34_x64_en-US.msi`
+- Notes: WP-0244 final build moves Video Archiver visible SQLite list commands off the synchronous Tauri command lane, removes archive stats from SQLite entirely, and keeps deferred badge/status probes.
+
+## 0.1.35 - 2026-05-21T18:53:54Z
+- Work Packets: `WP-0235`
+- Commit: `521447b`
+- Offline Bundle ID: `offline_full_win64_20260521_181537`
+- Artifacts:
+  - `product/desktop/build_target/Current/release/bundle/nsis/VoxVulgi_0.1.35_x64-setup.exe`
+  - `product/desktop/build_target/Current/release/bundle/msi/VoxVulgi_0.1.35_x64_en-US.msi`
+- Notes: WP-0235 Localization Studio setup/repair entry now queues the durable Phase 2 voice-pack install job from the page, avoids foreground setup confirmation dialogs, shows checking/queued states, and keeps Jobs/Queue as the progress and recovery surface. Runtime voice-cloning proof for Haerin single-speaker and Queen multi-speaker samples is captured in WP-0235 proof folders; this build reuses the newly validated offline payload offline_full_win64_20260521_181537.
+
+## 0.1.36 - 2026-05-21T22:43:07Z
+- Work Packets: `WP-0235`
+- Commit: `521447b`
+- Offline Bundle ID: `offline_full_win64_20260521_181537`
+- Artifacts:
+  - `product/desktop/build_target/Current/release/bundle/nsis/VoxVulgi_0.1.36_x64-setup.exe`
+  - `product/desktop/build_target/Current/release/bundle/msi/VoxVulgi_0.1.36_x64_en-US.msi`
+- Notes: WP-0235 runtime hardening: stale voice-pack install receipts no longer block runnable local voice cloning, the agent bridge handles visual-debug waits without starving health/state probes, and vvwatch flags stale freeze reports.
+
+## 0.1.37 - 2026-05-21T23:31:50Z
+- Work Packets: `WP-0235`
+- Commit: `521447b`
+- Offline Bundle ID: `offline_full_win64_20260521_181537`
+- Artifacts:
+  - `product/desktop/build_target/Current/release/bundle/nsis/VoxVulgi_0.1.37_x64-setup.exe`
+  - `product/desktop/build_target/Current/release/bundle/msi/VoxVulgi_0.1.37_x64_en-US.msi`
+- Notes: WP-0235 runtime hardening v0.1.37: Localization readiness loads for visible headless/background pages, transient DB startup locks retry without a permanent red banner, stale voice-pack install receipts no longer block runnable local voice cloning, the agent bridge handles visual-debug waits without starving health/state probes, and vvwatch flags stale freeze reports.
+
+## 0.1.38 - 2026-05-22T00:21:01Z
+- Work Packets: `WP-0235`
+- Commit: `521447b`
+- Offline Bundle ID: `offline_full_win64_20260521_181537`
+- Artifacts:
+  - `product/desktop/build_target/Current/release/bundle/nsis/VoxVulgi_0.1.38_x64-setup.exe`
+  - `product/desktop/build_target/Current/release/bundle/msi/VoxVulgi_0.1.38_x64_en-US.msi`
+- Notes: WP-0235 runtime hardening v0.1.38: startup skips the expensive offline payload walk when the localization and voice-preserving runtime is already ready, preventing the shell from staying at 75% loading on a stale bundle marker while preserving the runtime-ready gate.
+
+## 0.1.40 - 2026-05-22T02:15:02Z
+- Work Packets: `WP-0235`, `WP-0242`
+- Commit: `521447b`
+- Offline Bundle ID: `offline_full_win64_20260521_181537`
+- Artifacts:
+  - `product/desktop/build_target/Current/release/bundle/nsis/VoxVulgi_0.1.40_x64-setup.exe`
+  - `product/desktop/build_target/Current/release/bundle/msi/VoxVulgi_0.1.40_x64_en-US.msi`
+- Notes: WP-0235/WP-0242 current Localization setup and watcher evidence build: vvwatch flags stale installed builds and separates stale app-data requirements from current bundled lockfile failures; current build is needed for installed-app bridge proof.
+
+## 0.1.41 - 2026-05-22T03:20:09Z
+- Work Packets: `WP-0235`, `WP-0242`
+- Commit: `521447b`
+- Offline Bundle ID: `offline_full_win64_20260521_181537`
+- Artifacts:
+  - `product/desktop/build_target/Current/release/bundle/nsis/VoxVulgi_0.1.41_x64-setup.exe`
+  - `product/desktop/build_target/Current/release/bundle/msi/VoxVulgi_0.1.41_x64_en-US.msi`
+- Notes: WP-0235/WP-0242 startup and watcher hardening build: diarization status no longer instantiates Resemblyzer VoiceEncoder during startup/status checks, and vvwatch no longer treats stale freeze-report app_version as the live app version.
+
+## 0.1.42 - 2026-05-22T04:09:01Z
+- Work Packets: `WP-0235`, `WP-0242`
+- Commit: `521447b`
+- Offline Bundle ID: `offline_full_win64_20260521_181537`
+- Artifacts:
+  - `product/desktop/build_target/Current/release/bundle/nsis/VoxVulgi_0.1.42_x64-setup.exe`
+  - `product/desktop/build_target/Current/release/bundle/msi/VoxVulgi_0.1.42_x64_en-US.msi`
+- Notes: WP-0235/WP-0242 final startup/status hardening build: diarization status is now metadata/lockfile-only during startup and no longer runs VoiceEncoder or importlib find_spec probes; full runtime validation remains in install/repair and actual diarization execution.
+
+## 0.1.43 - 2026-05-22T04:58:48Z
+- Work Packets: `WP-0235`, `WP-0242`
+- Commit: `521447b`
+- Offline Bundle ID: `offline_full_win64_20260521_181537`
+- Artifacts:
+  - `product/desktop/build_target/Current/release/bundle/nsis/VoxVulgi_0.1.43_x64-setup.exe`
+  - `product/desktop/build_target/Current/release/bundle/msi/VoxVulgi_0.1.43_x64_en-US.msi`
+- Notes: WP-0235/WP-0242 final startup-gate hardening build: diarization installed status now reflects metadata presence so startup does not force offline hydration for lockfile receipt drift; lockfile drift remains visible as Diagnostics repair guidance.
+
+## 0.1.44 - 2026-05-22T06:44:47Z
+- Work Packets: `WP-0235`, `WP-0242`
+- Commit: `521447b`
+- Offline Bundle ID: `offline_full_win64_20260521_181537`
+- Artifacts:
+  - `product/desktop/build_target/Current/release/bundle/nsis/VoxVulgi_0.1.44_x64-setup.exe`
+  - `product/desktop/build_target/Current/release/bundle/msi/VoxVulgi_0.1.44_x64_en-US.msi`
+- Notes: WP-0235/WP-0242 follow-up: Localization home no longer renders stale failed dub progress as active work and labels historic failures as retry-needed; vvwatch now handles SQLite WAL/SHM files disappearing during probes.
+
+## 0.1.45 - 2026-05-22T07:27:19Z
+- Work Packets: `WP-0235`, `WP-0242`
+- Commit: `521447b`
+- Offline Bundle ID: `offline_full_win64_20260521_181537`
+- Artifacts:
+  - `product/desktop/build_target/Current/release/bundle/nsis/VoxVulgi_0.1.45_x64-setup.exe`
+  - `product/desktop/build_target/Current/release/bundle/msi/VoxVulgi_0.1.45_x64_en-US.msi`
+- Notes: WP-0235/WP-0242 follow-up: Localization home now hydrates recent item status through a batched output/status command and reuses already-read recent job rows instead of launching a second jobs_list_for_item query per item.
+
+## 0.1.46 - 2026-05-22T08:06:48Z
+- Work Packets: `WP-0235`, `WP-0242`
+- Commit: `521447b`
+- Offline Bundle ID: `offline_full_win64_20260521_181537`
+- Artifacts:
+  - `product/desktop/build_target/Current/release/bundle/nsis/VoxVulgi_0.1.46_x64-setup.exe`
+  - `product/desktop/build_target/Current/release/bundle/msi/VoxVulgi_0.1.46_x64_en-US.msi`
+- Notes: WP-0235/WP-0242 follow-up: Localization home status hydration now uses one bounded read-only DB pass for recent jobs/tracks and builds lightweight home outputs without looping through the full item_outputs path per recent item.
+
+## 0.1.47 - 2026-05-22T09:56:45Z
+- Work Packets: `WP-0171`, `WP-0209`, `WP-0235`, `WP-0242`
+- Commit: `521447b`
+- Offline Bundle ID: `offline_full_win64_20260521_181537`
+- Artifacts:
+  - `product/desktop/build_target/Current/release/bundle/nsis/VoxVulgi_0.1.47_x64-setup.exe`
+  - `product/desktop/build_target/Current/release/bundle/msi/VoxVulgi_0.1.47_x64_en-US.msi`
+- Notes: WP-0171/WP-0209/WP-0235/WP-0242 follow-up: Visual debugger snapshots now capture the bounded app shell viewport with html2canvas time and image-load limits instead of directly rendering document.body, improving headless visual proof reliability under load.
+
+## 0.1.48 - 2026-05-22T11:49:23Z
+- Work Packets: `WP-0171`, `WP-0209`, `WP-0235`, `WP-0242`
+- Commit: `521447b`
+- Offline Bundle ID: `offline_full_win64_20260521_181537`
+- Artifacts:
+  - `product/desktop/build_target/Current/release/bundle/nsis/VoxVulgi_0.1.48_x64-setup.exe`
+  - `product/desktop/build_target/Current/release/bundle/msi/VoxVulgi_0.1.48_x64_en-US.msi`
+- Notes: WP-0171/WP-0209/WP-0235/WP-0242 follow-up: Agent bridge snapshots try a Windows native PrintWindow capture first and keep the bounded html2canvas path as fallback, so visual proof can work even when the WebView main thread is slow or blocked.
+
+## 0.1.49 - 2026-05-22T12:42:47Z
+- Work Packets: `WP-0171`, `WP-0209`, `WP-0235`, `WP-0242`
+- Commit: `521447b`
+- Offline Bundle ID: `offline_full_win64_20260521_181537`
+- Artifacts:
+  - `product/desktop/build_target/Current/release/bundle/nsis/VoxVulgi_0.1.49_x64-setup.exe`
+  - `product/desktop/build_target/Current/release/bundle/msi/VoxVulgi_0.1.49_x64_en-US.msi`
+- Notes: WP-0171/WP-0209/WP-0235/WP-0242 follow-up: Agent bridge native screenshots now reject blank minimized-window captures and fall back to the bounded frontend renderer, preserving readable visual proof without keyboard or mouse automation.
+
+## 0.1.50 - 2026-05-22T13:33:48Z
+- Work Packets: `WP-0171`, `WP-0209`, `WP-0235`, `WP-0242`
+- Commit: `521447b`
+- Offline Bundle ID: `offline_full_win64_20260521_181537`
+- Artifacts:
+  - `product/desktop/build_target/Current/release/bundle/nsis/VoxVulgi_0.1.50_x64-setup.exe`
+  - `product/desktop/build_target/Current/release/bundle/msi/VoxVulgi_0.1.50_x64_en-US.msi`
+- Notes: WP-0171/WP-0209/WP-0235/WP-0242 follow-up: Agent bridge snapshots now reject blank native captures and retry frontend fallback emits every five seconds during the 30 second window so startup listener races do not lose the request.
+
+## 0.1.51 - 2026-05-22T23:38:50Z
+- Work Packets: `WP-0245`
+- Commit: `521447b`
+- Offline Bundle ID: `offline_full_win64_20260521_181537`
+- Artifacts:
+  - `product/desktop/build_target/Current/release/bundle/nsis/VoxVulgi_0.1.51_x64-setup.exe`
+  - `product/desktop/build_target/Current/release/bundle/msi/VoxVulgi_0.1.51_x64_en-US.msi`
+- Notes: WP-0245: Jobs page no longer fans out per-item `library_get`/`item_outputs` (replaced by batched `library_get_many` + `item_outputs_many` Tauri commands) — v0.1.50 freeze trace had 672+227 slow rows from this pattern. All six pack-install Tauri commands now async + `InvokeTimer`-traced so reinstalls leave forensic evidence and don't block the IPC dispatcher. Localization Studio surfaces a "Job queue is paused" banner with one-click Resume so a silently-paused queue can never again hide running work. Build script's `Get-FileSha256Hex` switched to .NET SHA256 because the 60+ min WP-0233 warmup gate subprocess corrupts `$env:PSModulePath`. Warmup gate was skipped on this build (auditable reason recorded in log); the same v0.1.51 manifest passed the gate at 2026-05-22 23:59 (all 6 packs OK).

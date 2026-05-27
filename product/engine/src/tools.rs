@@ -1,9 +1,16 @@
+use crate::pack_install_state;
 use crate::paths::AppPaths;
+use crate::python_lockfile::{self, PythonLockfile};
 use crate::{pinned_dependency_manifest, vendor_patches};
 use crate::{EngineError, Result};
 use serde::{Deserialize, Serialize};
-use std::io::Write;
+use std::collections::HashMap;
+use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
+
+const PYTHON_COMMAND_TIMEOUT_SECS: u64 = 30 * 60;
+const PYTHON_POST_INSTALL_VERSION_CHECK_RETRIES: usize = 10;
+const PYTHON_POST_INSTALL_VERSION_CHECK_DELAY_MS: u64 = 2_000;
 
 #[derive(Debug, Clone, Serialize)]
 pub struct FfmpegToolsStatus {
@@ -504,6 +511,477 @@ fn pip_install_args<'a>(prefix: &[&'a str], packages: &'a [String]) -> Vec<&'a s
     args
 }
 
+/// WP-0232 (shipping fix): return the bundled lockfile content for the given pack.
+///
+/// The lockfile JSON is baked into the engine binary at compile time via
+/// `include_str!` in `python_lockfile.rs`, so this works on every end-user install
+/// regardless of where the exe lives or whether the source tree exists. Returns
+/// `None` for packs without a bundled lockfile (currently only spleeter — its pin set
+/// is unbuildable on Py 3.11 per the WP-0232 manifest-defect note).
+fn locate_pack_lockfile(pack_name: &str) -> Option<&'static str> {
+    python_lockfile::bundled_lockfile_for_pack(pack_name)
+}
+
+/// WP-0232: install a Python pack from its hashed lockfile.
+/// WP-0234: also journals install state and promotes `--upgrade` to `--force-reinstall`
+/// when the prior install attempt is recorded as crashed (in_progress without finish) or
+/// failed. Recovers the venv from bad state without an operator-visible "Repair" click.
+///
+/// Renders the lockfile to a `requirements.txt` and runs
+/// `pip install --require-hashes --no-deps {--upgrade|--force-reinstall} -r <file>`.
+/// The resolver is bypassed entirely; pip just downloads each pinned URL and verifies
+/// the sha256. Any wheel that fails the hash check causes pip to exit non-zero
+/// immediately.
+fn install_pack_from_lockfile(
+    paths: &AppPaths,
+    python: &Path,
+    pack_name: &str,
+    lockfile_json: &str,
+    error_prefix: &str,
+) -> Result<()> {
+    let lockfile = PythonLockfile::from_bundled_str(pack_name, lockfile_json).map_err(|e| {
+        EngineError::InstallFailed(format!(
+            "{error_prefix}: failed to parse bundled lockfile for {pack_name}: {e}"
+        ))
+    })?;
+    let rendered = lockfile.render_hashed_requirements().map_err(|e| {
+        EngineError::InstallFailed(format!(
+            "{error_prefix}: failed to render lockfile for {pack_name}: {e}"
+        ))
+    })?;
+
+    // Write the rendered requirements to a temp file inside the venv tooling dir so the
+    // path is short and stable; pip on Windows occasionally barfs on TEMP paths with
+    // spaces in them, and APPDATA paths often have spaces.
+    let req_dir = paths.python_models_dir().join(".lockfile_requirements");
+    std::fs::create_dir_all(&req_dir).map_err(|e| {
+        EngineError::InstallFailed(format!(
+            "{error_prefix}: failed to create requirements dir {}: {e}",
+            req_dir.display()
+        ))
+    })?;
+    let req_path = req_dir.join(format!("{pack_name}.requirements.txt"));
+    std::fs::write(&req_path, rendered.as_bytes()).map_err(|e| {
+        EngineError::InstallFailed(format!(
+            "{error_prefix}: failed to write requirements file {}: {e}",
+            req_path.display()
+        ))
+    })?;
+
+    // WP-0234: decide upgrade mode based on prior install state.
+    let lockfile_sha = pack_install_state::lockfile_sha_of(&rendered);
+    let prior = pack_install_state::load(paths, pack_name);
+    let version_drift_before_install =
+        !lockfile_source_pin_mismatches(python, pack_name).is_empty();
+    let force = prior.last_outcome.requires_force_reinstall() || version_drift_before_install;
+    let install_mode_flag = if force {
+        "--force-reinstall"
+    } else {
+        "--upgrade"
+    };
+    if force {
+        cleanup_stale_distribution_metadata(python, pack_name);
+    }
+    let _ = pack_install_state::mark_started(paths, pack_name, &lockfile_sha);
+
+    let req_path_str = req_path.to_string_lossy().to_string();
+    let args: [&str; 8] = [
+        "-m",
+        "pip",
+        "install",
+        "--require-hashes",
+        "--no-deps",
+        install_mode_flag,
+        "-r",
+        req_path_str.as_str(),
+    ];
+    let mut result = run_python_checked(
+        paths,
+        python,
+        &args,
+        &format!("{error_prefix}: pip install --require-hashes failed for {pack_name}"),
+    );
+    if result.is_ok() {
+        let mismatches = lockfile_source_pin_mismatches_with_retries(python, pack_name);
+        if let Some(first) = mismatches.first() {
+            result = Err(EngineError::InstallFailed(format!(
+                "{error_prefix}: post-install version check failed for {pack_name}: {} expected {}, installed {}",
+                first.package,
+                first.expected,
+                first.installed.as_deref().unwrap_or("missing")
+            )));
+        }
+    }
+
+    match &result {
+        Ok(()) => {
+            let _ = pack_install_state::mark_completed(paths, pack_name, &lockfile_sha);
+        }
+        Err(err) => {
+            let _ = pack_install_state::mark_failed(paths, pack_name, &err.to_string());
+        }
+    }
+    result
+}
+
+fn current_lockfile_sha(pack_name: &str) -> Option<String> {
+    let lockfile_json = locate_pack_lockfile(pack_name)?;
+    let lockfile = PythonLockfile::from_bundled_str(pack_name, lockfile_json).ok()?;
+    let rendered = lockfile.render_hashed_requirements().ok()?;
+    Some(pack_install_state::lockfile_sha_of(&rendered))
+}
+
+fn pack_install_satisfied(paths: &AppPaths, pack_name: &str) -> bool {
+    let Some(expected_sha) = current_lockfile_sha(pack_name) else {
+        return false;
+    };
+    pack_install_state::load(paths, pack_name).is_completed_with_lockfile(&expected_sha)
+}
+
+fn pack_lockfile_runtime_ready(lockfile_ready: bool, versions_ready: bool) -> bool {
+    lockfile_ready || versions_ready
+}
+
+fn pack_install_state_shas(paths: &AppPaths, pack_name: &str) -> (Option<String>, Option<String>) {
+    let expected_lockfile_sha = current_lockfile_sha(pack_name);
+    let state = pack_install_state::load(paths, pack_name);
+    let installed_lockfile_sha = if state.lockfile_sha.is_empty() {
+        None
+    } else {
+        Some(state.lockfile_sha)
+    };
+    (expected_lockfile_sha, installed_lockfile_sha)
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct PythonPackageVersionMismatch {
+    pub package: String,
+    pub expected: String,
+    pub installed: Option<String>,
+}
+
+fn lockfile_source_pin_versions(pack_name: &str) -> Vec<(String, String)> {
+    let Some(lockfile_json) = locate_pack_lockfile(pack_name) else {
+        return Vec::new();
+    };
+    let Ok(lockfile) = PythonLockfile::from_bundled_str(pack_name, lockfile_json) else {
+        return Vec::new();
+    };
+
+    lockfile
+        .source_pins
+        .iter()
+        .filter_map(|pin| {
+            let (name, version) = pin.split_once("==")?;
+            Some((name.trim().to_string(), version.trim().to_string()))
+        })
+        .collect()
+}
+
+fn normalize_python_package_name(name: &str) -> String {
+    name.to_ascii_lowercase()
+        .replace('_', "-")
+        .replace('.', "-")
+}
+
+fn status_pin_names(pack_name: &str) -> Option<&'static [&'static str]> {
+    match pack_name {
+        "tts_neural_local_v1" => Some(&[
+            "kokoro",
+            "numpy",
+            "torch",
+            "transformers",
+            "huggingface-hub",
+        ]),
+        "tts_voice_preserving_local_v1" => Some(&[
+            "huggingface-hub",
+            "numpy",
+            "librosa",
+            "soundfile",
+            "inflect",
+            "unidecode",
+            "eng-to-ipa",
+            "pypinyin",
+            "cn2an",
+            "jieba",
+        ]),
+        "diarization" => Some(&[
+            "resemblyzer",
+            "numpy",
+            "scikit-learn",
+            "librosa",
+            "numba",
+            "llvmlite",
+            "webrtcvad",
+            "soundfile",
+        ]),
+        _ => None,
+    }
+}
+
+fn python_site_packages_dir(python: &std::path::Path) -> Option<PathBuf> {
+    let scripts_dir = python.parent()?;
+    let venv_dir = scripts_dir.parent()?;
+    let site_packages = venv_dir.join("Lib").join("site-packages");
+    if site_packages.is_dir() {
+        Some(site_packages)
+    } else {
+        None
+    }
+}
+
+fn dist_info_distribution_name(file_name: &str) -> Option<String> {
+    dist_info_distribution_name_and_version(file_name).map(|(name, _)| name)
+}
+
+fn dist_info_distribution_name_and_version(file_name: &str) -> Option<(String, String)> {
+    let stem = file_name.strip_suffix(".dist-info")?;
+    let (name, _) = stem.rsplit_once('-')?;
+    let version = stem.rsplit_once('-')?.1.to_string();
+    Some((normalize_python_package_name(name), version))
+}
+
+fn dist_info_name_matches_package(dist_name: &str, package_name: &str) -> bool {
+    dist_name == package_name
+        || dist_name
+            .strip_prefix('~')
+            .map(|backup_name| package_name.ends_with(backup_name))
+            .unwrap_or(false)
+}
+
+fn quarantine_python_artifact(path: &std::path::Path, quarantine_dir: &std::path::Path) {
+    let _ = std::fs::create_dir_all(quarantine_dir);
+    let file_name = path
+        .file_name()
+        .map(|name| name.to_string_lossy().to_string())
+        .unwrap_or_else(|| "python_artifact".to_string());
+    let mut dest = quarantine_dir.join(format!("{}_{}", now_ms(), file_name));
+    let mut counter = 0;
+    while dest.exists() {
+        counter += 1;
+        dest = quarantine_dir.join(format!("{}_{}_{}", now_ms(), counter, file_name));
+    }
+    if std::fs::rename(path, &dest).is_err() {
+        let _ = std::fs::remove_dir_all(path);
+    }
+}
+
+fn cleanup_stale_distribution_metadata(python: &std::path::Path, pack_name: &str) {
+    let Some(site_packages) = python_site_packages_dir(python) else {
+        return;
+    };
+    let mismatches = lockfile_source_pin_mismatches(python, pack_name);
+    let mut packages = if mismatches.is_empty() {
+        lockfile_source_pin_versions(pack_name)
+            .into_iter()
+            .map(|(name, _)| name)
+            .collect::<Vec<_>>()
+    } else {
+        mismatches
+            .into_iter()
+            .map(|mismatch| mismatch.package)
+            .collect::<Vec<_>>()
+    };
+    if let Some(status_names) = status_pin_names(pack_name) {
+        let normalized_status_names = status_names
+            .iter()
+            .map(|name| normalize_python_package_name(name))
+            .collect::<Vec<_>>();
+        packages.retain(|name| {
+            let normalized = normalize_python_package_name(name);
+            normalized_status_names
+                .iter()
+                .any(|status_name| status_name == &normalized)
+        });
+    }
+    let normalized_packages = packages
+        .iter()
+        .map(|name| normalize_python_package_name(name))
+        .collect::<Vec<_>>();
+    let Ok(entries) = std::fs::read_dir(site_packages) else {
+        return;
+    };
+    let quarantine_dir = python_site_packages_dir(python)
+        .unwrap_or_else(|| PathBuf::from("."))
+        .join("_voxvulgi_stale_python_artifacts");
+    for entry in entries.flatten() {
+        let Ok(file_type) = entry.file_type() else {
+            continue;
+        };
+        if !file_type.is_dir() {
+            continue;
+        }
+        let file_name = entry.file_name().to_string_lossy().to_string();
+        let normalized_file_name = normalize_python_package_name(&file_name);
+        let dist_name = dist_info_distribution_name(&file_name);
+        let matches_target = normalized_packages.iter().any(|package_name| {
+            dist_name
+                .as_ref()
+                .map(|dist_name| dist_info_name_matches_package(dist_name, package_name))
+                .unwrap_or(false)
+                || normalized_file_name == *package_name
+                || normalized_file_name
+                    .strip_prefix('~')
+                    .map(|backup_name| package_name.ends_with(backup_name))
+                    .unwrap_or(false)
+        });
+        if matches_target {
+            quarantine_python_artifact(&entry.path(), &quarantine_dir);
+        }
+    }
+}
+
+fn python_distribution_versions(
+    python: &std::path::Path,
+    distributions: &[String],
+) -> HashMap<String, Option<String>> {
+    if distributions.is_empty() {
+        return HashMap::new();
+    }
+    let names_json = serde_json::to_string(distributions).unwrap_or_else(|_| "[]".to_string());
+    let code = format!(
+        "import importlib.metadata as m, json\n\
+         names = {names_json}\n\
+         out = {{}}\n\
+         for name in names:\n\
+             try:\n\
+                 out[name] = m.version(name)\n\
+             except Exception:\n\
+                 out[name] = None\n\
+         print(json.dumps(out))\n"
+    );
+    let output = match crate::cmd::command(python)
+        .args(["-c", &code])
+        .env("PYTHONNOUSERSITE", "1")
+        .output()
+    {
+        Ok(output) => output,
+        Err(_) => {
+            return distributions
+                .iter()
+                .map(|name| {
+                    (
+                        name.clone(),
+                        python_distribution_version_from_site_packages(python, name),
+                    )
+                })
+                .collect()
+        }
+    };
+    if !output.status.success() {
+        return distributions
+            .iter()
+            .map(|name| {
+                (
+                    name.clone(),
+                    python_distribution_version_from_site_packages(python, name),
+                )
+            })
+            .collect();
+    }
+    let text = String::from_utf8_lossy(&output.stdout);
+    let mut parsed = serde_json::from_str::<HashMap<String, Option<String>>>(&text)
+        .unwrap_or_else(|_| HashMap::new());
+    for name in distributions {
+        if parsed.get(name).and_then(|value| value.as_ref()).is_none() {
+            if let Some(version) = python_distribution_version_from_site_packages(python, name) {
+                parsed.insert(name.clone(), Some(version));
+            }
+        }
+    }
+    parsed
+}
+
+fn python_distribution_version_from_site_packages(
+    python: &std::path::Path,
+    distribution: &str,
+) -> Option<String> {
+    let site_packages = python_site_packages_dir(python)?;
+    let wanted = normalize_python_package_name(distribution);
+    let entries = std::fs::read_dir(site_packages).ok()?;
+    for entry in entries.flatten() {
+        let file_name = entry.file_name().to_string_lossy().to_string();
+        let Some((dist_name, folder_version)) = dist_info_distribution_name_and_version(&file_name)
+        else {
+            continue;
+        };
+        if !dist_info_name_matches_package(&dist_name, &wanted) {
+            continue;
+        }
+        let metadata_path = entry.path().join("METADATA");
+        if let Ok(metadata) = std::fs::read_to_string(metadata_path) {
+            for line in metadata.lines() {
+                if let Some(version) = line.strip_prefix("Version:") {
+                    let trimmed = version.trim();
+                    if !trimmed.is_empty() {
+                        return Some(trimmed.to_string());
+                    }
+                }
+            }
+        }
+        if !folder_version.trim().is_empty() {
+            return Some(folder_version);
+        }
+    }
+    None
+}
+
+fn lockfile_source_pin_mismatches(
+    python: &std::path::Path,
+    pack_name: &str,
+) -> Vec<PythonPackageVersionMismatch> {
+    let mut pins = lockfile_source_pin_versions(pack_name);
+    if let Some(status_names) = status_pin_names(pack_name) {
+        let normalized_status_names = status_names
+            .iter()
+            .map(|name| normalize_python_package_name(name))
+            .collect::<Vec<_>>();
+        pins.retain(|(name, _)| {
+            let normalized = normalize_python_package_name(name);
+            normalized_status_names
+                .iter()
+                .any(|status_name| status_name == &normalized)
+        });
+    }
+    let names = pins
+        .iter()
+        .map(|(name, _)| name.clone())
+        .collect::<Vec<_>>();
+    let installed_versions = python_distribution_versions(python, &names);
+
+    pins.into_iter()
+        .filter_map(|(package, expected)| {
+            let installed = installed_versions.get(&package).cloned().flatten();
+            if installed.as_deref() == Some(expected.as_str()) {
+                None
+            } else {
+                Some(PythonPackageVersionMismatch {
+                    package,
+                    expected,
+                    installed,
+                })
+            }
+        })
+        .collect()
+}
+
+fn lockfile_source_pin_mismatches_with_retries(
+    python: &std::path::Path,
+    pack_name: &str,
+) -> Vec<PythonPackageVersionMismatch> {
+    let mut mismatches = lockfile_source_pin_mismatches(python, pack_name);
+    for _ in 0..PYTHON_POST_INSTALL_VERSION_CHECK_RETRIES {
+        if mismatches.is_empty() {
+            return mismatches;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(
+            PYTHON_POST_INSTALL_VERSION_CHECK_DELAY_MS,
+        ));
+        mismatches = lockfile_source_pin_mismatches(python, pack_name);
+    }
+    mismatches
+}
+
 fn tool_version_first_line_with_arg(
     program: impl AsRef<std::ffi::OsStr>,
     arg: &str,
@@ -628,6 +1106,22 @@ pub fn phase2_packs_install_plan() -> Vec<Phase2PackPlanItem> {
             estimated_bytes: None,
         },
     ]
+}
+
+pub fn phase2_pack_step_satisfied(paths: &AppPaths, step_id: &str) -> bool {
+    match step_id {
+        "portable_python_win64" => python_toolchain_status(paths).base_available,
+        "python_toolchain" => python_toolchain_status(paths).venv_python_version.is_some(),
+        "spleeter" => spleeter_pack_status(paths).installed,
+        "demucs" => demucs_pack_status(paths).installed,
+        "diarization" => diarization_pack_status(paths).installed,
+        "tts_preview" => tts_preview_pack_status(paths).installed,
+        "tts_neural_local_v1" => tts_neural_local_v1_pack_status(paths).installed,
+        "tts_voice_preserving_local_v1" => {
+            tts_voice_preserving_local_v1_pack_status(paths).installed
+        }
+        _ => false,
+    }
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -1916,19 +2410,32 @@ pub fn install_demucs_pack(paths: &AppPaths) -> Result<DemucsPackStatus> {
         "pip bootstrap failed",
     );
 
+    // WP-0232: prefer the hashed lockfile if bundled. Legacy pinned-spec path retained
+    // as a fallback when no lockfile is on disk.
+    let pinned_install = match locate_pack_lockfile("demucs") {
+        Some(lockfile_path) => install_pack_from_lockfile(
+            paths,
+            &venv_python,
+            "demucs",
+            lockfile_path,
+            "demucs-infer install",
+        ),
+        None => run_python_checked(
+            paths,
+            &venv_python,
+            &[
+                "-m",
+                "pip",
+                "install",
+                "--prefer-binary",
+                pin.pinned_spec.as_str(),
+            ],
+            "pip install demucs-infer failed (pinned, legacy path; no lockfile bundled)",
+        ),
+    };
+
     // Prefer an inference-only distribution (smaller surface area than full training stack).
-    if let Err(err) = run_python_checked(
-        paths,
-        &venv_python,
-        &[
-            "-m",
-            "pip",
-            "install",
-            "--prefer-binary",
-            pin.pinned_spec.as_str(),
-        ],
-        "pip install demucs-infer failed (pinned)",
-    ) {
+    if let Err(err) = pinned_install {
         if !pinned_dependency_manifest::allow_unpinned_fallback() {
             return Err(unpinned_fallback_disabled_error(
                 "demucs-infer install",
@@ -2023,22 +2530,30 @@ pub fn diarization_pack_status(paths: &AppPaths) -> DiarizationPackStatus {
         };
     }
 
-    let resemblyzer_version = python_distribution_version(&venv_python, "Resemblyzer")
-        .or_else(|| python_module_version(&venv_python, "resemblyzer"));
-    let numpy_version = python_distribution_version(&venv_python, "numpy")
-        .or_else(|| python_module_version(&venv_python, "numpy"));
-    let sklearn_version = python_distribution_version(&venv_python, "scikit-learn")
-        .or_else(|| python_module_version(&venv_python, "sklearn"));
-    let librosa_version = python_distribution_version(&venv_python, "librosa")
-        .or_else(|| python_module_version(&venv_python, "librosa"));
-    let numba_version = python_distribution_version(&venv_python, "numba")
-        .or_else(|| python_module_version(&venv_python, "numba"));
-    let llvmlite_version = python_distribution_version(&venv_python, "llvmlite")
-        .or_else(|| python_module_version(&venv_python, "llvmlite"));
-    let webrtcvad_version = python_distribution_version(&venv_python, "webrtcvad")
-        .or_else(|| python_module_version(&venv_python, "webrtcvad"));
-    let soundfile_version = python_distribution_version(&venv_python, "soundfile")
-        .or_else(|| python_module_version(&venv_python, "soundfile"));
+    let distribution_names = [
+        "Resemblyzer",
+        "numpy",
+        "scikit-learn",
+        "librosa",
+        "numba",
+        "llvmlite",
+        "webrtcvad",
+        "soundfile",
+    ]
+    .iter()
+    .map(|name| (*name).to_string())
+    .collect::<Vec<_>>();
+    let versions = python_distribution_versions(&venv_python, &distribution_names);
+    let version_for = |name: &str| versions.get(name).cloned().flatten();
+
+    let resemblyzer_version = version_for("Resemblyzer");
+    let numpy_version = version_for("numpy");
+    let sklearn_version = version_for("scikit-learn");
+    let librosa_version = version_for("librosa");
+    let numba_version = version_for("numba");
+    let llvmlite_version = version_for("llvmlite");
+    let webrtcvad_version = version_for("webrtcvad");
+    let soundfile_version = version_for("soundfile");
 
     let package_presence = [
         resemblyzer_version.as_ref(),
@@ -2052,32 +2567,68 @@ pub fn diarization_pack_status(paths: &AppPaths) -> DiarizationPackStatus {
     ];
     let any_present = package_presence.iter().any(|value| value.is_some());
     let all_required_present = package_presence.iter().all(|value| value.is_some());
-    let runtime_validation_error = match validate_diarization_runtime(paths, &venv_python) {
-        Ok(()) => None,
-        Err(err) => Some(err.to_string()),
-    };
+    let lockfile_ready = pack_install_satisfied(paths, "diarization");
+    let version_mismatches = lockfile_source_pin_mismatches(&venv_python, "diarization");
+    let versions_ready = version_mismatches.is_empty();
+    let lockfile_runtime_ready = pack_lockfile_runtime_ready(lockfile_ready, versions_ready);
+    let (_, installed_lockfile_sha) = pack_install_state_shas(paths, "diarization");
+    let receipt_stale = !lockfile_ready && versions_ready && installed_lockfile_sha.is_some();
 
-    let installed = all_required_present && runtime_validation_error.is_none();
+    let installed = all_required_present;
+    let repair_required = if installed {
+        !lockfile_runtime_ready || !versions_ready
+    } else {
+        any_present || installed_lockfile_sha.is_some()
+    };
     let (state, repair_required, status_detail) = if installed {
         (
             "installed".to_string(),
-            false,
-            "Diarization runtime imports and VoiceEncoder warmup passed.".to_string(),
+            repair_required,
+            if !versions_ready {
+                let first = &version_mismatches[0];
+                format!(
+                    "Diarization packages are present, but installed package versions do not match the bundled lockfile. First mismatch: {} requires {}, installed {}. Run Install/Repair to refresh the pack; startup remains unblocked because package metadata is present.",
+                    first.package,
+                    first.expected,
+                    first.installed.as_deref().unwrap_or("missing")
+                )
+            } else if receipt_stale {
+                "Diarization is ready; the install receipt journal is stale but installed package versions match the bundled dependency lockfile. Full runtime validation runs during install/repair and diarization jobs.".to_string()
+            } else {
+                "Diarization package metadata matches the bundled dependency lockfile. Full runtime validation runs during install/repair and diarization jobs.".to_string()
+            },
         )
     } else if any_present {
         (
             "broken".to_string(),
-            true,
-            runtime_validation_error.clone().unwrap_or_else(|| {
+            repair_required,
+            if !all_required_present {
                 "One or more required diarization packages are missing.".to_string()
-            }),
+            } else if !versions_ready {
+                let first = &version_mismatches[0];
+                format!(
+                    "Installed package versions do not match the Diarization lockfile. First mismatch: {} requires {}, installed {}. Run Install/Repair to refresh the pack.",
+                    first.package,
+                    first.expected,
+                    first.installed.as_deref().unwrap_or("missing")
+                )
+            } else if !lockfile_runtime_ready {
+                "Installed packages do not match the current Diarization lockfile. Run Install/Repair to refresh the pack.".to_string()
+            } else {
+                "Diarization packages are not ready.".to_string()
+            },
         )
     } else {
         (
             "not_installed".to_string(),
-            false,
+            repair_required,
             "Diarization packages are not installed in the managed venv.".to_string(),
         )
+    };
+    let runtime_validation_error = if installed {
+        None
+    } else {
+        Some(status_detail.clone())
     };
 
     DiarizationPackStatus {
@@ -2122,13 +2673,25 @@ pub fn install_diarization_pack(paths: &AppPaths) -> Result<DiarizationPackStatu
         );
     }
 
-    let pinned_args = pip_install_args(&["-m", "pip", "install", "--upgrade"], &pin.pinned);
-    let install_err = run_python_checked(
-        paths,
-        &venv_python,
-        &pinned_args,
-        "pip install diarization dependencies failed (pinned)",
-    );
+    // WP-0232: prefer the hashed lockfile; legacy fallback path retained.
+    let install_err = match locate_pack_lockfile("diarization") {
+        Some(lockfile_path) => install_pack_from_lockfile(
+            paths,
+            &venv_python,
+            "diarization",
+            lockfile_path,
+            "diarization dependency install",
+        ),
+        None => {
+            let pinned_args = pip_install_args(&["-m", "pip", "install", "--upgrade"], &pin.pinned);
+            run_python_checked(
+                paths,
+                &venv_python,
+                &pinned_args,
+                "pip install diarization dependencies failed (pinned, legacy path; no lockfile bundled)",
+            )
+        }
+    };
     if let Err(err) = install_err {
         if !pinned_dependency_manifest::allow_unpinned_fallback() {
             return Err(unpinned_fallback_disabled_error(
@@ -2187,12 +2750,23 @@ pub fn install_tts_preview_pack(paths: &AppPaths) -> Result<TtsPreviewPackStatus
     let venv_python = python_venv_python_path(paths)?;
     let pin = &pinned_dependency_manifest::manifest().tts_preview;
 
-    if let Err(err) = run_python_checked(
-        paths,
-        &venv_python,
-        &["-m", "pip", "install", pin.pinned[0].as_str()],
-        "pip install pyttsx3 failed (pinned)",
-    ) {
+    // WP-0232: prefer the hashed lockfile; legacy fallback path retained.
+    let pinned_install = match locate_pack_lockfile("tts_preview") {
+        Some(lockfile_path) => install_pack_from_lockfile(
+            paths,
+            &venv_python,
+            "tts_preview",
+            lockfile_path,
+            "pyttsx3 install",
+        ),
+        None => run_python_checked(
+            paths,
+            &venv_python,
+            &["-m", "pip", "install", pin.pinned[0].as_str()],
+            "pip install pyttsx3 failed (pinned, legacy path; no lockfile bundled)",
+        ),
+    };
+    if let Err(err) = pinned_install {
         if !pinned_dependency_manifest::allow_unpinned_fallback() {
             return Err(unpinned_fallback_disabled_error("pyttsx3 install", &err));
         }
@@ -2219,7 +2793,14 @@ pub fn install_tts_preview_pack(paths: &AppPaths) -> Result<TtsPreviewPackStatus
 #[derive(Debug, Clone, Serialize)]
 pub struct TtsNeuralLocalV1PackStatus {
     pub installed: bool,
+    pub repair_required: bool,
+    pub status_detail: String,
     pub package_version: Option<String>,
+    pub transformers_version: Option<String>,
+    pub huggingface_hub_version: Option<String>,
+    pub expected_lockfile_sha: Option<String>,
+    pub installed_lockfile_sha: Option<String>,
+    pub version_mismatches: Vec<PythonPackageVersionMismatch>,
 }
 
 fn kokoro_warmup_probe_path(paths: &AppPaths) -> std::path::PathBuf {
@@ -2229,18 +2810,70 @@ fn kokoro_warmup_probe_path(paths: &AppPaths) -> std::path::PathBuf {
 pub fn tts_neural_local_v1_pack_status(paths: &AppPaths) -> TtsNeuralLocalV1PackStatus {
     let venv_dir = paths.python_venv_dir();
     let venv_python = venv_python_path(&venv_dir);
+    let (expected_lockfile_sha, installed_lockfile_sha) =
+        pack_install_state_shas(paths, "tts_neural_local_v1");
     if !venv_python.exists() {
         return TtsNeuralLocalV1PackStatus {
             installed: false,
+            repair_required: false,
+            status_detail: "Python environment is not installed yet.".to_string(),
             package_version: None,
+            transformers_version: None,
+            huggingface_hub_version: None,
+            expected_lockfile_sha,
+            installed_lockfile_sha,
+            version_mismatches: Vec::new(),
         };
     }
 
-    let package_version = python_module_version(&venv_python, "kokoro");
+    let package_version = python_distribution_version(&venv_python, "kokoro");
+    let transformers_version = python_distribution_version(&venv_python, "transformers");
+    let huggingface_hub_version = python_distribution_version(&venv_python, "huggingface-hub")
+        .or_else(|| python_distribution_version(&venv_python, "huggingface_hub"));
     let warmup_ready = kokoro_warmup_probe_path(paths).exists();
+    let lockfile_ready = pack_install_satisfied(paths, "tts_neural_local_v1");
+    let version_mismatches = lockfile_source_pin_mismatches(&venv_python, "tts_neural_local_v1");
+    let versions_ready = version_mismatches.is_empty();
+    let lockfile_runtime_ready = pack_lockfile_runtime_ready(lockfile_ready, versions_ready);
+    let receipt_stale = !lockfile_ready && versions_ready && installed_lockfile_sha.is_some();
+    let installed =
+        package_version.is_some() && warmup_ready && lockfile_runtime_ready && versions_ready;
+    let repair_required =
+        !installed && (package_version.is_some() || installed_lockfile_sha.is_some());
+    let status_detail = if installed {
+        if receipt_stale {
+            "Neural TTS is ready; the install receipt journal is stale but installed package versions match the bundled dependency lockfile.".to_string()
+        } else {
+            "Neural TTS is ready and matches the bundled dependency lockfile.".to_string()
+        }
+    } else if package_version.is_none() {
+        "Kokoro is not installed in the managed Python environment.".to_string()
+    } else if !warmup_ready {
+        "Kokoro is installed, but its local model warmup has not completed.".to_string()
+    } else if !lockfile_runtime_ready {
+        "Installed packages do not match the current Neural TTS lockfile. Run Install/Repair to refresh the pack.".to_string()
+    } else if !versions_ready {
+        let first = &version_mismatches[0];
+        format!(
+            "Installed package versions do not match the Neural TTS lockfile. First mismatch: {} requires {}, installed {}. Run Install/Repair to refresh the pack.",
+            first.package,
+            first.expected,
+            first.installed.as_deref().unwrap_or("missing")
+        )
+    } else {
+        "Neural TTS is not ready.".to_string()
+    };
+
     TtsNeuralLocalV1PackStatus {
-        installed: package_version.is_some() && warmup_ready,
+        installed,
+        repair_required,
+        status_detail,
         package_version,
+        transformers_version,
+        huggingface_hub_version,
+        expected_lockfile_sha,
+        installed_lockfile_sha,
+        version_mismatches,
     }
 }
 
@@ -2269,13 +2902,31 @@ pub fn install_tts_neural_local_v1_pack(paths: &AppPaths) -> Result<TtsNeuralLoc
         "pip upgrade click/typer compatibility for neural TTS failed",
     );
 
-    let pinned_args = pip_install_args(&["-m", "pip", "install"], &pin.pinned);
-    let install_err = run_python_checked(
-        paths,
-        &venv_python,
-        &pinned_args,
-        "pip install neural TTS dependencies failed (pinned)",
-    );
+    // WP-0232: prefer the hashed lockfile path when present. The lockfile resolves the
+    // entire dep tree at build time; pip just downloads exact wheels and verifies sha256.
+    // Eliminates the WP-0231 class of resolver-drift bug.
+    //
+    // WP-0231 fallback: if no lockfile is bundled (older offline payload, dev tree),
+    // fall back to the legacy `pip install --upgrade <pinned list>` path so the install
+    // is never silently bypassed.
+    let install_err = match locate_pack_lockfile("tts_neural_local_v1") {
+        Some(lockfile_path) => install_pack_from_lockfile(
+            paths,
+            &venv_python,
+            "tts_neural_local_v1",
+            lockfile_path,
+            "neural TTS dependency install",
+        ),
+        None => {
+            let pinned_args = pip_install_args(&["-m", "pip", "install", "--upgrade"], &pin.pinned);
+            run_python_checked(
+                paths,
+                &venv_python,
+                &pinned_args,
+                "pip install neural TTS dependencies failed (pinned, legacy path; no lockfile bundled)",
+            )
+        }
+    };
     if let Err(err) = install_err {
         if !pinned_dependency_manifest::allow_unpinned_fallback() {
             return Err(unpinned_fallback_disabled_error(
@@ -2283,7 +2934,10 @@ pub fn install_tts_neural_local_v1_pack(paths: &AppPaths) -> Result<TtsNeuralLoc
                 &err,
             ));
         }
-        let fallback_args = pip_install_args(&["-m", "pip", "install"], &pin.unpinned_fallback);
+        let fallback_args = pip_install_args(
+            &["-m", "pip", "install", "--upgrade"],
+            &pin.unpinned_fallback,
+        );
         run_python_checked(
             paths,
             &venv_python,
@@ -2292,25 +2946,62 @@ pub fn install_tts_neural_local_v1_pack(paths: &AppPaths) -> Result<TtsNeuralLoc
         )?;
     }
 
-    run_python_checked_with_retries(
+    let warmup_args: [&str; 2] = [
+        "-c",
+        concat!(
+            "from kokoro import KPipeline; ",
+            "pipeline = KPipeline(lang_code='a'); ",
+            "result = next(iter(pipeline('warmup', voice='af_heart'))); ",
+            "audio = getattr(result, 'audio', None); ",
+            "nested = getattr(result, 'output', None) if audio is None else None; ",
+            "audio = getattr(nested, 'audio', None) if audio is None and nested is not None else audio; ",
+            "assert audio is not None, 'kokoro warmup produced no audio'; ",
+            "print('ok')",
+        ),
+    ];
+
+    let warmup_result = run_python_checked_with_retries(
         paths,
         &venv_python,
-        &[
-            "-c",
-            concat!(
-                "from kokoro import KPipeline; ",
-                "pipeline = KPipeline(lang_code='a'); ",
-                "result = next(iter(pipeline('warmup', voice='af_heart'))); ",
-                "audio = getattr(result, 'audio', None); ",
-                "nested = getattr(result, 'output', None) if audio is None else None; ",
-                "audio = getattr(nested, 'audio', None) if audio is None and nested is not None else audio; ",
-                "assert audio is not None, 'kokoro warmup produced no audio'; ",
-                "print('ok')",
-            ),
-        ],
+        &warmup_args,
         "neural TTS warmup failed",
-        5,
-    )?;
+        2,
+    );
+
+    if let Err(initial_err) = warmup_result {
+        // WP-0231: one-shot self-heal. If the warmup probe still fails after the retry loop,
+        // it almost always means the venv has a coherent-looking pip resolve but a stale
+        // package version on disk (transformers / huggingface_hub / kokoro). Force-reinstall
+        // only those three so unrelated installed packs (Spleeter, diarization, TTS preview)
+        // are not disturbed, then retry the warmup once.
+        if !pin.warmup_recovery_force_reinstall.is_empty() {
+            let recovery_args = pip_install_args(
+                &["-m", "pip", "install", "--force-reinstall", "--no-deps"],
+                &pin.warmup_recovery_force_reinstall,
+            );
+            let recovery_install = run_python_checked(
+                paths,
+                &venv_python,
+                &recovery_args,
+                "neural TTS warmup recovery reinstall failed",
+            );
+            if let Err(recovery_err) = recovery_install {
+                return Err(EngineError::InstallFailed(format!(
+                    "{initial_err} (recovery reinstall also failed: {recovery_err})"
+                )));
+            }
+            run_python_checked(
+                paths,
+                &venv_python,
+                &warmup_args,
+                &format!(
+                    "neural TTS warmup still failing after recovery reinstall ({initial_err})"
+                ),
+            )?;
+        } else {
+            return Err(initial_err);
+        }
+    }
 
     let warmup_probe = kokoro_warmup_probe_path(paths);
     if let Some(parent) = warmup_probe.parent() {
@@ -2319,6 +3010,14 @@ pub fn install_tts_neural_local_v1_pack(paths: &AppPaths) -> Result<TtsNeuralLoc
     std::fs::write(&warmup_probe, "ok\n")?;
 
     let status = tts_neural_local_v1_pack_status(paths);
+    if !status.installed {
+        let _ =
+            pack_install_state::mark_failed(paths, "tts_neural_local_v1", &status.status_detail);
+        return Err(EngineError::InstallFailed(format!(
+            "neural TTS installation completed but status check failed: {}",
+            status.status_detail
+        )));
+    }
     let _ = generate_pack_integrity_manifest(paths);
     Ok(status)
 }
@@ -2326,12 +3025,17 @@ pub fn install_tts_neural_local_v1_pack(paths: &AppPaths) -> Result<TtsNeuralLoc
 #[derive(Debug, Clone, Serialize)]
 pub struct TtsVoicePreservingLocalV1PackStatus {
     pub installed: bool,
+    pub repair_required: bool,
+    pub status_detail: String,
     pub kokoro_version: Option<String>,
     pub openvoice_version: Option<String>,
     pub cosyvoice_version: Option<String>,
     pub openvoice_models_dir: String,
     pub openvoice_models_installed: bool,
     pub openvoice_patch_applied: bool,
+    pub expected_lockfile_sha: Option<String>,
+    pub installed_lockfile_sha: Option<String>,
+    pub version_mismatches: Vec<PythonPackageVersionMismatch>,
 }
 
 pub fn tts_voice_preserving_local_v1_pack_status(
@@ -2342,43 +3046,118 @@ pub fn tts_voice_preserving_local_v1_pack_status(
         .join("openvoice_v2")
         .to_string_lossy()
         .to_string();
+    let (expected_lockfile_sha, installed_lockfile_sha) =
+        pack_install_state_shas(paths, "tts_voice_preserving_local_v1");
 
     let venv_dir = paths.python_venv_dir();
     let venv_python = venv_python_path(&venv_dir);
     if !venv_python.exists() {
         return TtsVoicePreservingLocalV1PackStatus {
             installed: false,
+            repair_required: false,
+            status_detail: "Python environment is not installed yet.".to_string(),
             kokoro_version: None,
             openvoice_version: None,
             cosyvoice_version: None,
             openvoice_models_dir,
             openvoice_models_installed: false,
             openvoice_patch_applied: false,
+            expected_lockfile_sha,
+            installed_lockfile_sha,
+            version_mismatches: Vec::new(),
         };
     }
 
-    let kokoro_version = python_module_version(&venv_python, "kokoro");
-    let openvoice_version = python_module_version(&venv_python, "openvoice");
-    let cosyvoice_version = python_module_version(&venv_python, "cosyvoice");
+    let kokoro_version = python_distribution_version(&venv_python, "kokoro");
+    let openvoice_runtime_available = python_module_available(&venv_python, "openvoice.api");
+    let cosyvoice_runtime_available = python_module_available(&venv_python, "cosyvoice");
+    let openvoice_version = python_distribution_version(&venv_python, "MyShell-OpenVoice")
+        .or_else(|| python_distribution_version(&venv_python, "openvoice"))
+        .or_else(|| openvoice_runtime_available.then(|| "installed (module only)".to_string()));
+    let cosyvoice_version = python_distribution_version(&venv_python, "cosyvoice")
+        .or_else(|| cosyvoice_runtime_available.then(|| "installed (module only)".to_string()));
     let openvoice_patch_applied =
         vendor_patches::openvoice_api_patch_applied(&venv_python).unwrap_or(false);
     let kokoro_warmup_ready = kokoro_warmup_probe_path(paths).exists();
+    let kokoro_lockfile_ready = pack_install_satisfied(paths, "tts_neural_local_v1");
+    let neural_base_status = tts_neural_local_v1_pack_status(paths);
+    let lockfile_ready = pack_install_satisfied(paths, "tts_voice_preserving_local_v1");
+    let version_mismatches =
+        lockfile_source_pin_mismatches(&venv_python, "tts_voice_preserving_local_v1");
+    let versions_ready = version_mismatches.is_empty();
+    let lockfile_runtime_ready = pack_lockfile_runtime_ready(lockfile_ready, versions_ready);
+    let receipt_stale = !lockfile_ready && versions_ready && installed_lockfile_sha.is_some();
     let models_dir = std::path::PathBuf::from(&openvoice_models_dir);
     let openvoice_models_installed = models_dir.join("converter").join("config.json").exists()
         && models_dir.join("converter").join("checkpoint.pth").exists();
+    let installed = kokoro_version.is_some()
+        && kokoro_warmup_ready
+        && kokoro_lockfile_ready
+        && neural_base_status.installed
+        && openvoice_runtime_available
+        && openvoice_version.is_some()
+        && openvoice_models_installed
+        && openvoice_patch_applied
+        && lockfile_runtime_ready
+        && versions_ready;
+    let repair_required = !installed
+        && (kokoro_version.is_some()
+            || openvoice_version.is_some()
+            || installed_lockfile_sha.is_some());
+    let status_detail = if installed {
+        if receipt_stale {
+            "Voice-preserving dubbing is ready; the install receipt journal is stale but installed package versions match the bundled dependency lockfiles.".to_string()
+        } else {
+            "Voice-preserving dubbing is ready and matches the bundled dependency lockfiles."
+                .to_string()
+        }
+    } else if kokoro_version.is_none() {
+        "Kokoro base TTS is not installed; install Neural TTS first or run the full voice pack install.".to_string()
+    } else if !kokoro_warmup_ready {
+        "Kokoro base TTS is installed, but its local model warmup has not completed.".to_string()
+    } else if !kokoro_lockfile_ready {
+        "Kokoro base TTS does not match the current Neural TTS lockfile. Run Install/Repair to refresh the pack.".to_string()
+    } else if !neural_base_status.installed {
+        format!(
+            "Kokoro base TTS needs repair before voice preservation can run: {}",
+            neural_base_status.status_detail
+        )
+    } else if !openvoice_runtime_available {
+        "OpenVoice runtime module openvoice.api is missing from the managed Python environment."
+            .to_string()
+    } else if openvoice_version.is_none() {
+        "OpenVoice is not installed in the managed Python environment.".to_string()
+    } else if !openvoice_models_installed {
+        "OpenVoice converter model files are missing.".to_string()
+    } else if !openvoice_patch_applied {
+        "OpenVoice runtime patch is missing.".to_string()
+    } else if !lockfile_runtime_ready {
+        "Installed packages do not match the current OpenVoice lockfile. Run Install/Repair to refresh the pack.".to_string()
+    } else if !versions_ready {
+        let first = &version_mismatches[0];
+        format!(
+            "Installed package versions do not match the OpenVoice lockfile. First mismatch: {} requires {}, installed {}. Run Install/Repair to refresh the pack.",
+            first.package,
+            first.expected,
+            first.installed.as_deref().unwrap_or("missing")
+        )
+    } else {
+        "Voice-preserving dubbing is not ready.".to_string()
+    };
 
     TtsVoicePreservingLocalV1PackStatus {
-        installed: kokoro_version.is_some()
-            && kokoro_warmup_ready
-            && openvoice_version.is_some()
-            && openvoice_models_installed
-            && openvoice_patch_applied,
+        installed,
+        repair_required,
+        status_detail,
         kokoro_version,
         openvoice_version,
         cosyvoice_version,
         openvoice_models_dir,
         openvoice_models_installed,
         openvoice_patch_applied,
+        expected_lockfile_sha,
+        installed_lockfile_sha,
+        version_mismatches,
     }
 }
 
@@ -2427,16 +3206,30 @@ pub fn install_tts_voice_preserving_local_v1_pack(
         )));
     }
 
-    let pinned_args = pip_install_args(
-        &["-m", "pip", "install", "--upgrade"],
-        &pin.pinned_dependencies,
-    );
-    let deps_err = run_python_checked(
-        paths,
-        &venv_python,
-        &pinned_args,
-        "pip install OpenVoice dependencies failed (pinned)",
-    );
+    // WP-0232: prefer the hashed lockfile for OpenVoice's pinned deps. The OpenVoice
+    // git+ install above runs with `--no-deps` so it does not appear in this lockfile;
+    // this step only installs the pinned_dependencies list.
+    let deps_err = match locate_pack_lockfile("tts_voice_preserving_local_v1") {
+        Some(lockfile_path) => install_pack_from_lockfile(
+            paths,
+            &venv_python,
+            "tts_voice_preserving_local_v1",
+            lockfile_path,
+            "OpenVoice dependency install",
+        ),
+        None => {
+            let pinned_args = pip_install_args(
+                &["-m", "pip", "install", "--upgrade"],
+                &pin.pinned_dependencies,
+            );
+            run_python_checked(
+                paths,
+                &venv_python,
+                &pinned_args,
+                "pip install OpenVoice dependencies failed (pinned, legacy path; no lockfile bundled)",
+            )
+        }
+    };
     if let Err(err) = deps_err {
         if !pinned_dependency_manifest::allow_unpinned_fallback() {
             return Err(unpinned_fallback_disabled_error(
@@ -2568,8 +3361,18 @@ print("openvoice_converter_warmup_ok")
 
     let status = tts_voice_preserving_local_v1_pack_status(paths);
     if !status.installed {
+        let _ = pack_install_state::mark_failed(
+            paths,
+            "tts_voice_preserving_local_v1",
+            &status.status_detail,
+        );
         return Err(EngineError::InstallFailed(status_error.unwrap_or_else(
-            || "voice-preserving pack installation completed but status check failed".to_string(),
+            || {
+                format!(
+                    "voice-preserving pack installation completed but status check failed: {}",
+                    status.status_detail
+                )
+            },
         )));
     }
 
@@ -2681,6 +3484,17 @@ fn python_module_version(python: &std::path::Path, module: &str) -> Option<Strin
     })
 }
 
+fn python_module_available(python: &std::path::Path, module: &str) -> bool {
+    let code = format!(
+        "import importlib.util\ntry:\n    found = importlib.util.find_spec({module:?}) is not None\nexcept Exception:\n    found = False\nraise SystemExit(0 if found else 1)\n"
+    );
+    crate::cmd::command(python)
+        .args(["-c", &code])
+        .status()
+        .map(|status| status.success())
+        .unwrap_or(false)
+}
+
 fn python_distribution_version(python: &std::path::Path, distribution: &str) -> Option<String> {
     let code = format!("import importlib.metadata as m\nprint(m.version({distribution:?}))\n");
     let output = crate::cmd::command(python)
@@ -2747,18 +3561,53 @@ fn run_python_checked(
     cmd.env("HF_HUB_DOWNLOAD_TIMEOUT", "300");
     cmd.env("HF_HUB_ETAG_TIMEOUT", "30");
 
-    let output = cmd
-        .output()
+    cmd.stdout(std::process::Stdio::piped());
+    cmd.stderr(std::process::Stdio::piped());
+
+    let mut child = cmd
+        .spawn()
         .map_err(|e| EngineError::InstallFailed(format!("{error_prefix}: {e}")))?;
-    if !output.status.success() {
-        let stderr = String::from_utf8_lossy(&output.stderr);
-        return Err(EngineError::InstallFailed(format!(
-            "{error_prefix} (code={:?}): {}",
-            output.status.code(),
-            stderr.trim()
-        )));
+    let started = std::time::Instant::now();
+    loop {
+        if let Some(status) = child
+            .try_wait()
+            .map_err(|e| EngineError::InstallFailed(format!("{error_prefix}: {e}")))?
+        {
+            let mut stderr = Vec::new();
+            if let Some(mut pipe) = child.stderr.take() {
+                let _ = pipe.read_to_end(&mut stderr);
+            }
+            if let Some(mut pipe) = child.stdout.take() {
+                let mut stdout = Vec::new();
+                let _ = pipe.read_to_end(&mut stdout);
+            }
+            if !status.success() {
+                let stderr = String::from_utf8_lossy(&stderr);
+                return Err(EngineError::InstallFailed(format!(
+                    "{error_prefix} (code={:?}): {}",
+                    status.code(),
+                    stderr.trim()
+                )));
+            }
+            return Ok(());
+        }
+
+        if started.elapsed() > std::time::Duration::from_secs(PYTHON_COMMAND_TIMEOUT_SECS) {
+            let _ = child.kill();
+            let output = child
+                .wait_with_output()
+                .map_err(|e| EngineError::InstallFailed(format!("{error_prefix}: {e}")))?;
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            let stderr = stderr.trim();
+            return Err(EngineError::InstallFailed(format!(
+                "{error_prefix} timed out after {PYTHON_COMMAND_TIMEOUT_SECS}s{}{}",
+                if stderr.is_empty() { "" } else { ": " },
+                stderr
+            )));
+        }
+
+        std::thread::sleep(std::time::Duration::from_millis(500));
     }
-    Ok(())
 }
 
 fn run_python_checked_with_retries(
@@ -2809,5 +3658,12 @@ mod tests {
                 "validation script should exercise {required}"
             );
         }
+    }
+
+    #[test]
+    fn pack_lockfile_runtime_ready_allows_stale_receipt_when_versions_match() {
+        assert!(pack_lockfile_runtime_ready(true, true));
+        assert!(pack_lockfile_runtime_ready(false, true));
+        assert!(!pack_lockfile_runtime_ready(false, false));
     }
 }

@@ -587,6 +587,40 @@ code {
   margin: 2px 0 0;
 }
 
+.loc-setup-voice {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 16px;
+  min-width: 0;
+  padding: 12px 0;
+  border-top: 1px solid rgba(103, 118, 136, 0.24);
+  border-bottom: 1px solid rgba(103, 118, 136, 0.24);
+}
+
+.loc-setup-voice-main {
+  display: grid;
+  gap: 4px;
+  min-width: 0;
+}
+
+.loc-setup-voice-ready .loc-setup-title {
+  color: #166534;
+}
+
+.loc-setup-voice-needs-action .loc-setup-title {
+  color: #92400e;
+}
+
+.loc-setup-voice-details {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px 14px;
+  margin-top: 4px;
+  color: #526479;
+  font-size: 0.82rem;
+}
+
 .loc-setup-source-main {
   display: flex;
   align-items: center;
@@ -1412,6 +1446,7 @@ img {
 
   .loc-setup-header,
   .loc-setup-history-header,
+  .loc-setup-voice,
   .loc-setup-source-row,
   .loc-setup-output-row,
   .loc-setup-run-row,

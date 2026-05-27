@@ -4,6 +4,7 @@ use rusqlite::{Connection, OpenFlags};
 use std::time::Duration;
 
 const CURRENT_SCHEMA_VERSION: u32 = 14;
+const READ_ONLY_BUSY_TIMEOUT_MS: u64 = 750;
 
 struct MigrationStep {
     version: u32,
@@ -75,7 +76,7 @@ pub fn open_readonly(paths: &AppPaths) -> Result<Connection> {
         OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_FULL_MUTEX,
     )?;
 
-    conn.busy_timeout(Duration::from_secs(10))?;
+    conn.busy_timeout(Duration::from_millis(READ_ONLY_BUSY_TIMEOUT_MS))?;
     Ok(conn)
 }
 

@@ -44,9 +44,11 @@ const META_KEY_JOBS_QUEUE_PAUSED: &str = "jobs_queue_paused";
 const META_KEY_JOBS_MAX_CONCURRENCY: &str = "jobs_max_concurrency";
 const YT_DLP_EXPAND_TIMEOUT_SECS: u64 = 900;
 const YT_DLP_DOWNLOAD_TIMEOUT_SECS: u64 = 7200;
-const YT_DLP_ARCHIVE_CONCURRENT_FRAGMENTS: &str = "4";
+const YT_DLP_RETRIES: u32 = 3;
+const YT_DLP_FRAGMENT_RETRIES: u32 = 3;
 const YT_DLP_ARCHIVE_THROTTLED_RATE: &str = "100K";
-const YT_DLP_ARCHIVE_FILE_ACCESS_RETRIES: &str = "10";
+const YT_DLP_ARCHIVE_CONCURRENT_FRAGMENTS_U32: u32 = 4;
+const YT_DLP_ARCHIVE_FILE_ACCESS_RETRIES_U32: u32 = 10;
 const EXTERNAL_CMD_POLL_INTERVAL_MS: u64 = 200;
 const YT_DLP_BOOTSTRAP_TIMEOUT_SECS: u64 = 180;
 const EXPERIMENTAL_VOICE_BACKEND_TIMEOUT_SECS: u64 = 7200;
@@ -441,6 +443,8 @@ struct SeparateAudioSpleeterParams {
     item_id: String,
     #[serde(default)]
     batch_on_import: bool,
+    #[serde(default)]
+    pipeline: Option<LocalizationPipelineOptions>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -448,6 +452,8 @@ struct SeparateAudioDemucsV1Params {
     item_id: String,
     #[serde(default)]
     batch_on_import: bool,
+    #[serde(default)]
+    pipeline: Option<LocalizationPipelineOptions>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -1010,6 +1016,20 @@ struct DownloadDirectUrlParams {
     #[serde(default)]
     quality_preference: Option<String>,
     #[serde(default)]
+    yt_dlp_retries: u32,
+    #[serde(default)]
+    yt_dlp_fragment_retries: u32,
+    #[serde(default)]
+    yt_dlp_concurrent_fragments: u32,
+    #[serde(default)]
+    yt_dlp_throttled_rate: Option<String>,
+    #[serde(default)]
+    yt_dlp_file_access_retries: u32,
+    #[serde(default)]
+    yt_dlp_sleep_interval: u32,
+    #[serde(default)]
+    yt_dlp_sleep_requests: u32,
+    #[serde(default)]
     subtitle_mode: Option<String>,
 }
 
@@ -1020,6 +1040,8 @@ struct YoutubeSubscriptionRefreshV1Params {
     max_items: Option<usize>,
     #[serde(default)]
     output_dir: Option<String>,
+    #[serde(default)]
+    preset_id: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -1281,10 +1303,7 @@ pub fn should_auto_install_phase2(paths: &AppPaths) -> Result<bool> {
         return Ok(false);
     }
 
-    let latest_path = paths
-        .install_logs_dir()
-        .join("phase2")
-        .join("latest.json");
+    let latest_path = paths.install_logs_dir().join("phase2").join("latest.json");
     if !latest_path.exists() {
         return Ok(true);
     }
@@ -1302,10 +1321,7 @@ pub fn should_auto_install_phase2(paths: &AppPaths) -> Result<bool> {
         _ => return Ok(true),
     };
     let has_pending = steps.iter().any(|s| {
-        let status = s
-            .get("status")
-            .and_then(|v| v.as_str())
-            .unwrap_or("");
+        let status = s.get("status").and_then(|v| v.as_str()).unwrap_or("");
         status != "done" && status != "skipped"
     });
     Ok(has_pending)
@@ -1611,6 +1627,7 @@ pub fn enqueue_separate_audio_spleeter(paths: &AppPaths, item_id: String) -> Res
     let params_json = serde_json::to_string(&SeparateAudioSpleeterParams {
         item_id: item_id.clone(),
         batch_on_import: false,
+        pipeline: None,
     })?;
     enqueue_with_type_and_item_id(
         paths,
@@ -1624,6 +1641,7 @@ pub fn enqueue_separate_audio_demucs_v1(paths: &AppPaths, item_id: String) -> Re
     let params_json = serde_json::to_string(&SeparateAudioDemucsV1Params {
         item_id: item_id.clone(),
         batch_on_import: false,
+        pipeline: None,
     })?;
     enqueue_with_type_and_item_id(
         paths,
@@ -2700,6 +2718,7 @@ pub fn enqueue_youtube_subscription_refresh_v1(
     output_dir: Option<String>,
     batch_id: Option<String>,
     auth_cookie: Option<String>,
+    preset_id: Option<String>,
 ) -> Result<JobRow> {
     let trimmed = subscription_id.trim();
     if trimmed.is_empty() {
@@ -2713,6 +2732,7 @@ pub fn enqueue_youtube_subscription_refresh_v1(
         subscription_id: trimmed.to_string(),
         max_items: None,
         output_dir,
+        preset_id,
     })?;
     let job = enqueue_with_type_item_and_batch_id(
         paths,
@@ -2882,6 +2902,13 @@ fn enqueue_download_targets_batch_with_subscription(
             filename_template: Some(preset.filename_template.clone()),
             format_preference: preset.format_preference.clone(),
             quality_preference: preset.quality_preference.clone(),
+            yt_dlp_retries: preset.yt_dlp_retries,
+            yt_dlp_fragment_retries: preset.yt_dlp_fragment_retries,
+            yt_dlp_concurrent_fragments: preset.yt_dlp_concurrent_fragments,
+            yt_dlp_throttled_rate: preset.yt_dlp_throttled_rate.clone(),
+            yt_dlp_file_access_retries: preset.yt_dlp_file_access_retries,
+            yt_dlp_sleep_interval: preset.yt_dlp_sleep_interval,
+            yt_dlp_sleep_requests: preset.yt_dlp_sleep_requests,
             subtitle_mode: preset.subtitle_mode.clone(),
         })?;
         let job = enqueue_with_type_item_and_batch_id(
@@ -3098,8 +3125,9 @@ WHERE id=?1
 }
 
 pub fn active_youtube_subscription_refresh_ids(paths: &AppPaths) -> Result<HashSet<String>> {
-    let conn = db::open(paths)?;
-    db::migrate(&conn)?;
+    // UI status read: use a read-only connection so Video Archiver refreshes do
+    // not contend with the runner's writer path.
+    let conn = db::open_readonly(paths)?;
 
     let mut stmt = conn.prepare(
         r#"
@@ -3955,6 +3983,210 @@ fn mix_output_exists(paths: &AppPaths, item_id: &str) -> bool {
         .exists()
 }
 
+fn localization_pipeline_wants_clean_dub(pipeline: &LocalizationPipelineOptions) -> bool {
+    pipeline.auto_pipeline
+        && localization_output_mode(pipeline.output_mode.as_deref())
+            .map(|mode| mode == "dub")
+            .unwrap_or(true)
+}
+
+fn preferred_clean_dub_separation_backend(pipeline: &LocalizationPipelineOptions) -> String {
+    normalize_separation_backend(pipeline.separation_backend.as_deref())
+        .unwrap_or_else(|| "spleeter".to_string())
+}
+
+fn item_has_active_separation_job(paths: &AppPaths, item_id: &str) -> bool {
+    item_has_active_job(paths, item_id, JobType::SeparateAudioSpleeter.as_str()).unwrap_or(false)
+        || item_has_active_job(paths, item_id, JobType::SeparateAudioDemucsV1.as_str())
+            .unwrap_or(false)
+}
+
+fn remove_generated_file_if_exists(path: &Path) -> Result<()> {
+    if path.exists() {
+        std::fs::remove_file(path)?;
+    }
+    Ok(())
+}
+
+fn clear_generated_dub_preview_outputs_for_remix(
+    paths: &AppPaths,
+    item_id: &str,
+    variant_label: Option<&str>,
+) -> Result<()> {
+    let dub_dir = dub_variant_dir(
+        &paths.derived_item_dir(item_id),
+        normalize_variant_label(variant_label).as_deref(),
+    );
+    remove_generated_file_if_exists(&dub_dir.join("mix_dub_preview_v1.wav"))?;
+    remove_generated_file_if_exists(&dub_dir.join("speech_dub_preview_v1.wav"))?;
+    remove_generated_file_if_exists(&dub_dir.join("mux_dub_preview_v1.mp4"))?;
+    remove_generated_file_if_exists(&dub_dir.join("mux_dub_preview_v1.mkv"))?;
+    Ok(())
+}
+
+fn queue_clean_dub_mix_followup(
+    paths: &AppPaths,
+    item: &library::LibraryItem,
+    track: &subtitle_tracks::SubtitleTrackRow,
+    pipeline: &LocalizationPipelineOptions,
+    batch_id: Option<String>,
+    variant_label: Option<String>,
+    batch_on_import: bool,
+) -> Result<Option<JobRow>> {
+    if item_has_active_job(paths, &item.id, JobType::MixDubPreviewV1.as_str()).unwrap_or(false) {
+        return Ok(None);
+    }
+    let params_json = serde_json::to_string(&MixDubPreviewV1Params {
+        item_id: item.id.clone(),
+        ducking_strength: None,
+        loudness_target_lufs: None,
+        timing_fit_enabled: None,
+        timing_fit_min_factor: None,
+        timing_fit_max_factor: None,
+        batch_on_import,
+        pipeline: Some(LocalizationPipelineOptions {
+            source_track_id: Some(track.id.clone()),
+            variant_label,
+            ..pipeline.clone()
+        }),
+    })?;
+    let queued = enqueue_with_type_item_and_batch_id(
+        paths,
+        JobType::MixDubPreviewV1,
+        params_json,
+        Some(item.id.clone()),
+        batch_id,
+    )?;
+    Ok(Some(queued))
+}
+
+fn queue_clean_dub_separation_followup(
+    paths: &AppPaths,
+    item: &library::LibraryItem,
+    pipeline: &LocalizationPipelineOptions,
+    batch_id: Option<String>,
+    variant_label: Option<String>,
+) -> Result<Option<JobRow>> {
+    if item_has_active_separation_job(paths, &item.id) {
+        return Ok(None);
+    }
+
+    clear_generated_dub_preview_outputs_for_remix(paths, &item.id, variant_label.as_deref())?;
+
+    let backend = preferred_clean_dub_separation_backend(pipeline);
+    let pipeline = Some(LocalizationPipelineOptions {
+        variant_label,
+        ..pipeline.clone()
+    });
+    let (job_type, params_json) = if backend == "demucs" {
+        (
+            JobType::SeparateAudioDemucsV1,
+            serde_json::to_string(&SeparateAudioDemucsV1Params {
+                item_id: item.id.clone(),
+                batch_on_import: true,
+                pipeline,
+            })?,
+        )
+    } else {
+        (
+            JobType::SeparateAudioSpleeter,
+            serde_json::to_string(&SeparateAudioSpleeterParams {
+                item_id: item.id.clone(),
+                batch_on_import: true,
+                pipeline,
+            })?,
+        )
+    };
+    let queued = enqueue_with_type_item_and_batch_id(
+        paths,
+        job_type,
+        params_json,
+        Some(item.id.clone()),
+        batch_id,
+    )?;
+    Ok(Some(queued))
+}
+
+fn queue_post_voice_preserving_dub_followup(
+    paths: &AppPaths,
+    item: &library::LibraryItem,
+    track: &subtitle_tracks::SubtitleTrackRow,
+    pipeline: &LocalizationPipelineOptions,
+    batch_id: Option<String>,
+    variant_label: Option<String>,
+) -> Result<Option<JobRow>> {
+    if separation_background_exists(paths, &item.id) {
+        return queue_clean_dub_mix_followup(
+            paths,
+            item,
+            track,
+            pipeline,
+            batch_id,
+            variant_label,
+            false,
+        );
+    }
+
+    if localization_pipeline_wants_clean_dub(pipeline) {
+        return queue_clean_dub_separation_followup(paths, item, pipeline, batch_id, variant_label);
+    }
+
+    queue_clean_dub_mix_followup(paths, item, track, pipeline, batch_id, variant_label, false)
+}
+
+fn queue_mix_after_successful_separation(
+    paths: &AppPaths,
+    item: &library::LibraryItem,
+    batch_on_import: bool,
+    pipeline: Option<&LocalizationPipelineOptions>,
+    batch_id: Option<String>,
+) -> Result<Option<JobRow>> {
+    let auto_clean_dub = pipeline.is_some_and(localization_pipeline_wants_clean_dub);
+    let batch_rule_enabled = if batch_on_import {
+        config::load_batch_on_import_rules(paths)
+            .unwrap_or_default()
+            .auto_dub_preview
+            && !mix_output_exists(paths, &item.id)
+    } else {
+        false
+    };
+    if !(auto_clean_dub || batch_rule_enabled) {
+        return Ok(None);
+    }
+    if !tts_manifest_exists(paths, &item.id)
+        || item_has_active_job(paths, &item.id, JobType::MixDubPreviewV1.as_str()).unwrap_or(false)
+    {
+        return Ok(None);
+    }
+
+    if auto_clean_dub {
+        clear_generated_dub_preview_outputs_for_remix(
+            paths,
+            &item.id,
+            pipeline.and_then(|value| value.variant_label.as_deref()),
+        )?;
+    }
+
+    let params_json = serde_json::to_string(&MixDubPreviewV1Params {
+        item_id: item.id.clone(),
+        ducking_strength: None,
+        loudness_target_lufs: None,
+        timing_fit_enabled: None,
+        timing_fit_min_factor: None,
+        timing_fit_max_factor: None,
+        batch_on_import: batch_rule_enabled && !auto_clean_dub,
+        pipeline: pipeline.cloned(),
+    })?;
+    let queued = enqueue_with_type_item_and_batch_id(
+        paths,
+        JobType::MixDubPreviewV1,
+        params_json,
+        Some(item.id.clone()),
+        batch_id,
+    )?;
+    Ok(Some(queued))
+}
+
 fn mux_output_exists(paths: &AppPaths, item_id: &str) -> bool {
     let dir = paths.derived_item_dir(item_id).join("dub_preview");
     dir.join("mux_dub_preview_v1.mp4").exists() || dir.join("mux_dub_preview_v1.mkv").exists()
@@ -4205,6 +4437,7 @@ fn execute_job(paths: &AppPaths, job_id: &str, type_str: &str, params_json: &str
                     let params_json = serde_json::to_string(&SeparateAudioSpleeterParams {
                         item_id: item.id.clone(),
                         batch_on_import: true,
+                        pipeline: None,
                     })?;
                     let _ = enqueue_with_type_item_and_batch_id(
                         paths,
@@ -4307,6 +4540,13 @@ fn execute_job(paths: &AppPaths, job_id: &str, type_str: &str, params_json: &str
                 p.filename_template.as_deref(),
                 p.format_preference.as_deref(),
                 p.quality_preference.as_deref(),
+                p.yt_dlp_retries,
+                p.yt_dlp_fragment_retries,
+                p.yt_dlp_concurrent_fragments,
+                p.yt_dlp_throttled_rate.as_deref(),
+                p.yt_dlp_file_access_retries,
+                p.yt_dlp_sleep_interval,
+                p.yt_dlp_sleep_requests,
                 p.subtitle_mode.as_deref(),
             )?;
             set_progress(paths, job_id, 0.70)?;
@@ -4455,7 +4695,7 @@ fn execute_job(paths: &AppPaths, job_id: &str, type_str: &str, params_json: &str
                     Some(output_dir.to_string_lossy().to_string()),
                     Some(sub.use_browser_cookies && auth_cookie.is_none()),
                     sub.browser_cookie_source.clone(),
-                    sub.preset_id.clone(),
+                    p.preset_id.clone().or_else(|| sub.preset_id.clone()),
                     Some(job_id.to_string()),
                     Some(sub.id.clone()),
                 )?;
@@ -7541,31 +7781,14 @@ if __name__ == "__main__":
 
             if pipeline.auto_pipeline {
                 let batch_id = job_batch_id(paths, job_id).ok().flatten();
-                if !item_has_active_job(paths, &item.id, JobType::MixDubPreviewV1.as_str())
-                    .unwrap_or(false)
-                {
-                    let params_json = serde_json::to_string(&MixDubPreviewV1Params {
-                        item_id: item.id.clone(),
-                        ducking_strength: None,
-                        loudness_target_lufs: None,
-                        timing_fit_enabled: None,
-                        timing_fit_min_factor: None,
-                        timing_fit_max_factor: None,
-                        batch_on_import: false,
-                        pipeline: Some(LocalizationPipelineOptions {
-                            source_track_id: Some(source_track.id.clone()),
-                            variant_label: variant_label.clone(),
-                            ..pipeline.clone()
-                        }),
-                    })?;
-                    let _ = enqueue_with_type_item_and_batch_id(
-                        paths,
-                        JobType::MixDubPreviewV1,
-                        params_json,
-                        Some(item.id.clone()),
-                        batch_id.clone(),
-                    )?;
-                }
+                let _ = queue_post_voice_preserving_dub_followup(
+                    paths,
+                    &item,
+                    &source_track,
+                    &pipeline,
+                    batch_id,
+                    variant_label.clone(),
+                )?;
             }
         }
         JobType::ExperimentalVoiceBackendRenderV1 => {
@@ -7616,6 +7839,12 @@ if __name__ == "__main__":
                     "mode": background_mode
                 }),
             )?;
+            if used_source_audio_fallback && localization_pipeline_wants_clean_dub(&pipeline) {
+                return Err(EngineError::InstallFailed(
+                    "Clean English dub preview needs a separated background stem. VoxVulgi will not mix the original source audio into an automatic localization dub; run Spleeter or Demucs separation first."
+                        .to_string(),
+                ));
+            }
 
             let preferred_backend_id =
                 resolve_pipeline_tts_backend_preference(paths, &item.id, Some(&pipeline));
@@ -8436,34 +8665,14 @@ if __name__ == "__main__":
                     serde_json::json!({ "vocals_path": &vocals_dst, "background_path": &background_dst }),
                 )?;
 
-                if p.batch_on_import {
-                    let rules = config::load_batch_on_import_rules(paths).unwrap_or_default();
-                    if rules.auto_dub_preview
-                        && tts_manifest_exists(paths, &item.id)
-                        && !mix_output_exists(paths, &item.id)
-                        && !item_has_active_job(paths, &item.id, JobType::MixDubPreviewV1.as_str())
-                            .unwrap_or(false)
-                    {
-                        let batch_id = job_batch_id(paths, job_id).ok().flatten();
-                        let params_json = serde_json::to_string(&MixDubPreviewV1Params {
-                            item_id: item.id.clone(),
-                            ducking_strength: None,
-                            loudness_target_lufs: None,
-                            timing_fit_enabled: None,
-                            timing_fit_min_factor: None,
-                            timing_fit_max_factor: None,
-                            batch_on_import: true,
-                            pipeline: None,
-                        })?;
-                        let _ = enqueue_with_type_item_and_batch_id(
-                            paths,
-                            JobType::MixDubPreviewV1,
-                            params_json,
-                            Some(item.id.clone()),
-                            batch_id,
-                        )?;
-                    }
-                }
+                let batch_id = job_batch_id(paths, job_id).ok().flatten();
+                let _ = queue_mix_after_successful_separation(
+                    paths,
+                    &item,
+                    p.batch_on_import,
+                    p.pipeline.as_ref(),
+                    batch_id,
+                )?;
 
                 return Ok(());
             }
@@ -8781,34 +8990,14 @@ if __name__ == "__main__":
                 }),
             )?;
 
-            if p.batch_on_import {
-                let rules = config::load_batch_on_import_rules(paths).unwrap_or_default();
-                if rules.auto_dub_preview
-                    && tts_manifest_exists(paths, &item.id)
-                    && !mix_output_exists(paths, &item.id)
-                    && !item_has_active_job(paths, &item.id, JobType::MixDubPreviewV1.as_str())
-                        .unwrap_or(false)
-                {
-                    let batch_id = job_batch_id(paths, job_id).ok().flatten();
-                    let params_json = serde_json::to_string(&MixDubPreviewV1Params {
-                        item_id: item.id.clone(),
-                        ducking_strength: None,
-                        loudness_target_lufs: None,
-                        timing_fit_enabled: None,
-                        timing_fit_min_factor: None,
-                        timing_fit_max_factor: None,
-                        batch_on_import: true,
-                        pipeline: None,
-                    })?;
-                    let _ = enqueue_with_type_item_and_batch_id(
-                        paths,
-                        JobType::MixDubPreviewV1,
-                        params_json,
-                        Some(item.id.clone()),
-                        batch_id,
-                    )?;
-                }
-            }
+            let batch_id = job_batch_id(paths, job_id).ok().flatten();
+            let _ = queue_mix_after_successful_separation(
+                paths,
+                &item,
+                p.batch_on_import,
+                p.pipeline.as_ref(),
+                batch_id,
+            )?;
         }
         JobType::SeparateAudioDemucsV1 => {
             set_progress(paths, job_id, 0.05)?;
@@ -8863,34 +9052,14 @@ if __name__ == "__main__":
                     serde_json::json!({ "vocals_path": &vocals_dst, "background_path": &background_dst }),
                 )?;
 
-                if p.batch_on_import {
-                    let rules = config::load_batch_on_import_rules(paths).unwrap_or_default();
-                    if rules.auto_dub_preview
-                        && tts_manifest_exists(paths, &item.id)
-                        && !mix_output_exists(paths, &item.id)
-                        && !item_has_active_job(paths, &item.id, JobType::MixDubPreviewV1.as_str())
-                            .unwrap_or(false)
-                    {
-                        let batch_id = job_batch_id(paths, job_id).ok().flatten();
-                        let params_json = serde_json::to_string(&MixDubPreviewV1Params {
-                            item_id: item.id.clone(),
-                            ducking_strength: None,
-                            loudness_target_lufs: None,
-                            timing_fit_enabled: None,
-                            timing_fit_min_factor: None,
-                            timing_fit_max_factor: None,
-                            batch_on_import: true,
-                            pipeline: None,
-                        })?;
-                        let _ = enqueue_with_type_item_and_batch_id(
-                            paths,
-                            JobType::MixDubPreviewV1,
-                            params_json,
-                            Some(item.id.clone()),
-                            batch_id,
-                        )?;
-                    }
-                }
+                let batch_id = job_batch_id(paths, job_id).ok().flatten();
+                let _ = queue_mix_after_successful_separation(
+                    paths,
+                    &item,
+                    p.batch_on_import,
+                    p.pipeline.as_ref(),
+                    batch_id,
+                )?;
 
                 return Ok(());
             }
@@ -9035,34 +9204,14 @@ if __name__ == "__main__":
                 serde_json::json!({ "vocals_path": &vocals_dst, "background_path": &background_dst }),
             )?;
 
-            if p.batch_on_import {
-                let rules = config::load_batch_on_import_rules(paths).unwrap_or_default();
-                if rules.auto_dub_preview
-                    && tts_manifest_exists(paths, &item.id)
-                    && !mix_output_exists(paths, &item.id)
-                    && !item_has_active_job(paths, &item.id, JobType::MixDubPreviewV1.as_str())
-                        .unwrap_or(false)
-                {
-                    let batch_id = job_batch_id(paths, job_id).ok().flatten();
-                    let params_json = serde_json::to_string(&MixDubPreviewV1Params {
-                        item_id: item.id.clone(),
-                        ducking_strength: None,
-                        loudness_target_lufs: None,
-                        timing_fit_enabled: None,
-                        timing_fit_min_factor: None,
-                        timing_fit_max_factor: None,
-                        batch_on_import: true,
-                        pipeline: None,
-                    })?;
-                    let _ = enqueue_with_type_item_and_batch_id(
-                        paths,
-                        JobType::MixDubPreviewV1,
-                        params_json,
-                        Some(item.id.clone()),
-                        batch_id,
-                    )?;
-                }
-            }
+            let batch_id = job_batch_id(paths, job_id).ok().flatten();
+            let _ = queue_mix_after_successful_separation(
+                paths,
+                &item,
+                p.batch_on_import,
+                p.pipeline.as_ref(),
+                batch_id,
+            )?;
         }
         JobType::CleanVocalsV1 => {
             set_progress(paths, job_id, 0.05)?;
@@ -9847,10 +9996,14 @@ ORDER BY created_at_ms ASC
                     });
                     continue;
                 }
-                // WP-0227: carry forward a previous successful run for this
-                // pack so we don't redo work that already cost the operator
-                // minutes of install time.
-                if let Some(prior) = prior_done_steps.get(&item.id) {
+                // WP-0227: carry forward a previous successful run only when
+                // the current pack state still satisfies the current lockfile.
+                // WP-0245: stale "done" rows must not mask a broken or older
+                // Python environment after the bundled dependency set changes.
+                if let Some(prior) = prior_done_steps
+                    .get(&item.id)
+                    .filter(|_| tools::phase2_pack_step_satisfied(paths, &item.id))
+                {
                     steps.push(Phase2InstallStep {
                         id: item.id,
                         title: item.title,
@@ -9894,11 +10047,7 @@ ORDER BY created_at_ms ASC
                 .max(1);
             // WP-0227: seed the completed counter with resumed steps so
             // progress reflects reality from the start of the run.
-            let mut completed_steps = state
-                .steps
-                .iter()
-                .filter(|s| s.status == "done")
-                .count();
+            let mut completed_steps = state.steps.iter().filter(|s| s.status == "done").count();
 
             for step_index in 0..state.steps.len() {
                 if is_canceled(paths, job_id)? {
@@ -11809,13 +11958,42 @@ fn yt_dlp_failure_hint(
     None
 }
 
-fn append_yt_dlp_archive_download_options(args: &mut Vec<String>, subtitle_mode: Option<&str>) {
+fn append_yt_dlp_archive_download_options(
+    args: &mut Vec<String>,
+    subtitle_mode: Option<&str>,
+    concurrent_fragments: u32,
+    throttled_rate: &str,
+    file_access_retries: u32,
+    sleep_interval: u32,
+    sleep_requests: u32,
+) {
+    let concurrent_fragments = normalize_positive_u32(
+        concurrent_fragments,
+        YT_DLP_ARCHIVE_CONCURRENT_FRAGMENTS_U32,
+    )
+    .to_string();
+    let file_access_retries =
+        normalize_positive_u32(file_access_retries, YT_DLP_ARCHIVE_FILE_ACCESS_RETRIES_U32)
+            .to_string();
+
     args.push("-N".to_string());
-    args.push(YT_DLP_ARCHIVE_CONCURRENT_FRAGMENTS.to_string());
+    args.push(concurrent_fragments);
     args.push("--throttled-rate".to_string());
-    args.push(YT_DLP_ARCHIVE_THROTTLED_RATE.to_string());
+    args.push(
+        normalize_non_empty(Some(throttled_rate))
+            .unwrap_or_else(|| YT_DLP_ARCHIVE_THROTTLED_RATE.to_string()),
+    );
     args.push("--file-access-retries".to_string());
-    args.push(YT_DLP_ARCHIVE_FILE_ACCESS_RETRIES.to_string());
+    args.push(file_access_retries);
+
+    if sleep_interval > 0 {
+        args.push("--sleep-interval".to_string());
+        args.push(sleep_interval.to_string());
+    }
+    if sleep_requests > 0 {
+        args.push("--sleep-requests".to_string());
+        args.push(sleep_requests.to_string());
+    }
 
     match normalize_non_empty(subtitle_mode)
         .as_deref()
@@ -12517,6 +12695,13 @@ fn download_url_to_library(
     filename_template: Option<&str>,
     format_preference: Option<&str>,
     quality_preference: Option<&str>,
+    yt_dlp_retries: u32,
+    yt_dlp_fragment_retries: u32,
+    yt_dlp_concurrent_fragments: u32,
+    yt_dlp_throttled_rate: Option<&str>,
+    yt_dlp_file_access_retries: u32,
+    yt_dlp_sleep_interval: u32,
+    yt_dlp_sleep_requests: u32,
     subtitle_mode: Option<&str>,
 ) -> Result<PathBuf> {
     if provider == DOWNLOAD_PROVIDER_YOUTUBE_YT_DLP {
@@ -12533,6 +12718,13 @@ fn download_url_to_library(
             filename_template,
             format_preference,
             quality_preference,
+            yt_dlp_retries,
+            yt_dlp_fragment_retries,
+            yt_dlp_concurrent_fragments,
+            yt_dlp_throttled_rate,
+            yt_dlp_file_access_retries,
+            yt_dlp_sleep_interval,
+            yt_dlp_sleep_requests,
             subtitle_mode,
         );
     }
@@ -12548,6 +12740,13 @@ fn download_url_to_library(
         filename_template,
         format_preference,
         quality_preference,
+        yt_dlp_retries,
+        yt_dlp_fragment_retries,
+        yt_dlp_concurrent_fragments,
+        yt_dlp_throttled_rate,
+        yt_dlp_file_access_retries,
+        yt_dlp_sleep_interval,
+        yt_dlp_sleep_requests,
         subtitle_mode,
     ) {
         Ok(path) => Ok(path),
@@ -12557,20 +12756,27 @@ fn download_url_to_library(
             }
             // Fallback for webpage URLs and hosts that need extractor logic.
             match download_yt_dlp_url_to_library(
-                paths,
-                url,
-                job_id,
-                auth_cookie,
-                output_dir,
-                output_subdir,
-                use_browser_cookies,
-                browser_cookie_source,
-                output_path_template,
-                filename_template,
-                format_preference,
-                quality_preference,
-                subtitle_mode,
-            ) {
+                    paths,
+                    url,
+                    job_id,
+                    auth_cookie,
+                    output_dir,
+                    output_subdir,
+                    use_browser_cookies,
+                    browser_cookie_source,
+                    output_path_template,
+                    filename_template,
+                    format_preference,
+                    quality_preference,
+                    yt_dlp_retries,
+                    yt_dlp_fragment_retries,
+                    yt_dlp_concurrent_fragments,
+                    yt_dlp_throttled_rate,
+                    yt_dlp_file_access_retries,
+                    yt_dlp_sleep_interval,
+                    yt_dlp_sleep_requests,
+                    subtitle_mode,
+                ) {
                 Ok(path) => Ok(path),
                 Err(yt_err) => Err(EngineError::InstallFailed(format!(
                     "direct download failed for {} ({direct_err}); yt-dlp fallback failed ({yt_err})",
@@ -12662,6 +12868,14 @@ fn normalize_non_empty(value: Option<&str>) -> Option<String> {
     value
         .map(|v| v.trim().to_string())
         .filter(|v| !v.is_empty())
+}
+
+fn normalize_positive_u32(value: u32, fallback: u32) -> u32 {
+    if value == 0 {
+        fallback
+    } else {
+        value
+    }
 }
 
 fn parse_quality_limit(value: &str) -> Option<u32> {
@@ -12809,6 +13023,13 @@ fn download_direct_http_url_to_library(
     filename_template: Option<&str>,
     format_preference: Option<&str>,
     quality_preference: Option<&str>,
+    yt_dlp_retries: u32,
+    yt_dlp_fragment_retries: u32,
+    yt_dlp_concurrent_fragments: u32,
+    yt_dlp_throttled_rate: Option<&str>,
+    yt_dlp_file_access_retries: u32,
+    yt_dlp_sleep_interval: u32,
+    yt_dlp_sleep_requests: u32,
     subtitle_mode: Option<&str>,
 ) -> Result<PathBuf> {
     let mut last_err = match download_direct_media_asset(
@@ -12863,6 +13084,13 @@ fn download_direct_http_url_to_library(
                 filename_template,
                 format_preference,
                 quality_preference,
+                yt_dlp_retries,
+                yt_dlp_fragment_retries,
+                yt_dlp_concurrent_fragments,
+                yt_dlp_throttled_rate,
+                yt_dlp_file_access_retries,
+                yt_dlp_sleep_interval,
+                yt_dlp_sleep_requests,
                 subtitle_mode,
             ) {
                 Ok(path) => return Ok(path),
@@ -13432,8 +13660,29 @@ fn download_yt_dlp_url_to_library(
     filename_template: Option<&str>,
     format_preference: Option<&str>,
     quality_preference: Option<&str>,
+    yt_dlp_retries: u32,
+    yt_dlp_fragment_retries: u32,
+    yt_dlp_concurrent_fragments: u32,
+    yt_dlp_throttled_rate: Option<&str>,
+    yt_dlp_file_access_retries: u32,
+    yt_dlp_sleep_interval: u32,
+    yt_dlp_sleep_requests: u32,
     subtitle_mode: Option<&str>,
 ) -> Result<PathBuf> {
+    let yt_dlp_retries = normalize_positive_u32(yt_dlp_retries, YT_DLP_RETRIES);
+    let yt_dlp_fragment_retries =
+        normalize_positive_u32(yt_dlp_fragment_retries, YT_DLP_FRAGMENT_RETRIES);
+    let yt_dlp_concurrent_fragments = normalize_positive_u32(
+        yt_dlp_concurrent_fragments,
+        YT_DLP_ARCHIVE_CONCURRENT_FRAGMENTS_U32,
+    );
+    let yt_dlp_file_access_retries = normalize_positive_u32(
+        yt_dlp_file_access_retries,
+        YT_DLP_ARCHIVE_FILE_ACCESS_RETRIES_U32,
+    );
+    let yt_dlp_throttled_rate = normalize_non_empty(yt_dlp_throttled_rate)
+        .unwrap_or_else(|| YT_DLP_ARCHIVE_THROTTLED_RATE.to_string());
+
     let downloads_dir = resolve_downloads_dir_with_override(paths, output_dir, output_subdir)?;
     let template = build_yt_dlp_output_template(job_id, output_path_template, filename_template);
 
@@ -13441,9 +13690,9 @@ fn download_yt_dlp_url_to_library(
         "--socket-timeout".to_string(),
         "30".to_string(),
         "--retries".to_string(),
-        "3".to_string(),
+        yt_dlp_retries.to_string(),
         "--fragment-retries".to_string(),
-        "3".to_string(),
+        yt_dlp_fragment_retries.to_string(),
         "--no-warnings".to_string(),
         "--ignore-errors".to_string(),
         "--restrict-filenames".to_string(),
@@ -13474,7 +13723,15 @@ fn download_yt_dlp_url_to_library(
         }
     }
 
-    append_yt_dlp_archive_download_options(&mut args, subtitle_mode);
+    append_yt_dlp_archive_download_options(
+        &mut args,
+        subtitle_mode,
+        yt_dlp_concurrent_fragments,
+        &yt_dlp_throttled_rate,
+        yt_dlp_file_access_retries,
+        yt_dlp_sleep_interval,
+        yt_dlp_sleep_requests,
+    );
 
     if !is_playlist_candidate_url(url) {
         args.insert(0, "--no-playlist".to_string());
@@ -15952,6 +16209,48 @@ mod tests {
     }
 
     #[test]
+    fn post_voice_preserving_followup_queues_separation_before_mix_without_background() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let paths = AppPaths::new(dir.path().to_path_buf());
+        seed_item_and_track_named(&paths, "item-1", "track-en", "Item 1");
+        let item = library::get_item_by_id(&paths, "item-1").expect("item");
+        let track = subtitle_tracks::get_track(&paths, "track-en").expect("track");
+        let pipeline = LocalizationPipelineOptions {
+            auto_pipeline: true,
+            output_mode: Some("dub".to_string()),
+            source_track_id: Some("track-en".to_string()),
+            separation_backend: Some("demucs".to_string()),
+            queue_export_pack: false,
+            queue_qc: false,
+            variant_label: None,
+            tts_backend_id: Some("openvoice_v2".to_string()),
+            speaker_overrides: Vec::new(),
+            speaker_count: DiarizationSpeakerCountRequest::default(),
+        };
+
+        let queued = queue_post_voice_preserving_dub_followup(
+            &paths,
+            &item,
+            &track,
+            &pipeline,
+            Some("batch-1".to_string()),
+            None,
+        )
+        .expect("followup")
+        .expect("queued followup");
+
+        assert_eq!(queued.job_type, "separate_audio_demucs_v1");
+        let params: SeparateAudioDemucsV1Params =
+            serde_json::from_str(&queued.params_json).expect("params");
+        assert_eq!(params.item_id, "item-1");
+        assert!(params.batch_on_import);
+        assert!(params.pipeline.expect("pipeline").auto_pipeline);
+
+        let jobs = list_jobs_for_item(&paths, "item-1", 20, 0).expect("jobs");
+        assert!(!jobs.iter().any(|job| job.job_type == "mix_dub_preview_v1"));
+    }
+
+    #[test]
     fn select_tts_manifest_candidate_prefers_requested_backend() {
         let dir = tempfile::tempdir().expect("tempdir");
         let paths = AppPaths::new(dir.path().to_path_buf());
@@ -17411,7 +17710,15 @@ EOF
     fn append_yt_dlp_archive_download_options_adds_fast_retry_and_srt_sidecar_args() {
         let mut args = Vec::new();
 
-        append_yt_dlp_archive_download_options(&mut args, Some("auto"));
+        append_yt_dlp_archive_download_options(
+            &mut args,
+            Some("auto"),
+            4,
+            YT_DLP_ARCHIVE_THROTTLED_RATE,
+            10,
+            0,
+            0,
+        );
 
         assert!(args.windows(2).any(|pair| pair == ["-N", "4"]));
         assert!(args
@@ -17428,16 +17735,80 @@ EOF
     }
 
     #[test]
+    fn append_yt_dlp_archive_download_options_adds_sleep_controls_when_set() {
+        let mut args = Vec::new();
+
+        append_yt_dlp_archive_download_options(
+            &mut args,
+            None,
+            4,
+            YT_DLP_ARCHIVE_THROTTLED_RATE,
+            10,
+            6,
+            0,
+        );
+
+        assert!(args
+            .windows(2)
+            .any(|pair| pair == ["--sleep-interval", "6"]));
+        assert!(!args
+            .windows(2)
+            .any(|pair| pair == ["--sleep-requests", "1"]));
+    }
+
+    #[test]
+    fn append_yt_dlp_archive_download_options_adds_sleep_requests_with_value() {
+        let mut args = Vec::new();
+
+        append_yt_dlp_archive_download_options(
+            &mut args,
+            None,
+            4,
+            YT_DLP_ARCHIVE_THROTTLED_RATE,
+            10,
+            0,
+            3,
+        );
+
+        assert!(args
+            .windows(2)
+            .any(|pair| pair == ["--sleep-requests", "3"]));
+    }
+
+    #[test]
     fn append_yt_dlp_archive_download_options_can_write_manual_srt_sidecars_without_auto_subs() {
         let mut args = Vec::new();
 
-        append_yt_dlp_archive_download_options(&mut args, Some("manual"));
+        append_yt_dlp_archive_download_options(
+            &mut args,
+            Some("manual"),
+            4,
+            YT_DLP_ARCHIVE_THROTTLED_RATE,
+            10,
+            0,
+            0,
+        );
 
         assert!(args.iter().any(|value| value == "--write-subs"));
         assert!(!args.iter().any(|value| value == "--write-auto-subs"));
         assert!(args
             .windows(2)
             .any(|pair| pair == ["--convert-subs", "srt"]));
+    }
+
+    #[test]
+    fn append_yt_dlp_archive_download_options_uses_custom_presets() {
+        let mut args = Vec::new();
+
+        append_yt_dlp_archive_download_options(&mut args, Some("auto"), 8, "256K", 18, 0, 0);
+
+        assert!(args.windows(2).any(|pair| pair == ["-N", "8"]));
+        assert!(args
+            .windows(2)
+            .any(|pair| pair == ["--throttled-rate", "256K"]));
+        assert!(args
+            .windows(2)
+            .any(|pair| pair == ["--file-access-retries", "18"]));
     }
 
     #[test]

@@ -151,6 +151,10 @@ type ExportedFile = {
   file_bytes: number;
 };
 
+const JOBS_PAGE_REFRESH_LIMIT = 80;
+const JOB_CONTEXT_HYDRATION_LIMIT = 25;
+const ACTIVE_JOBS_POLL_INTERVAL_MS = 2_500;
+
 function joinPath(dir: string, file: string): string {
   const d = dir.trim().replace(/[\\/]+$/, "");
   const f = file.trim().replace(/^[\\/]+/, "");
@@ -190,6 +194,31 @@ function summarizeGroupType(jobs: JobRow[]): string {
   if (!unique.length) return "-";
   if (unique.length === 1) return `${unique[0]} batch`;
   return "mixed batch";
+}
+
+function renderJobProgress(job: JobRow, outputs: ItemOutputs | null) {
+  const pct = Math.round((job.progress ?? 0) * 100);
+  const stage = outputs?.terminal_stage_label?.trim() || "";
+  const summary = outputs?.terminal_summary?.trim() || "";
+  const detail = outputs?.terminal_detail?.trim() || "";
+  const lines = [stage, summary]
+    .filter(Boolean)
+    .filter((line, index, all) => all.indexOf(line) === index);
+  return (
+    <div style={{ minWidth: 150 }}>
+      <div style={{ fontWeight: 600 }}>{pct}%</div>
+      {lines.length ? (
+        <div style={{ color: "#4b5563", fontSize: 12, lineHeight: 1.3 }}>
+          {lines.join(" | ")}
+        </div>
+      ) : null}
+      {detail && job.status !== "succeeded" ? (
+        <div style={{ color: "#4b5563", fontSize: 12, lineHeight: 1.3, wordBreak: "break-word" }}>
+          {detail}
+        </div>
+      ) : null}
+    </div>
+  );
 }
 
 function summarizeCreatedTs(jobs: JobRow[]): number | null {
@@ -293,17 +322,25 @@ export function JobsPage({ visible = true }: { visible?: boolean }) {
     setError(`${actionLabel} failed: ${String(error)}.${suffix}`);
   }
 
-  const refresh = useCallback(async () => {
-    const [next, control, runtime, youtubeSubscriptions, instagramSubscriptions] = await Promise.all([
-      invoke<JobRow[]>("jobs_list", { limit: 200, offset: 0 }),
+  const refreshJobsSnapshot = useCallback(async () => {
+    const next = await invoke<JobRow[]>("jobs_list", { limit: JOBS_PAGE_REFRESH_LIMIT, offset: 0 });
+    setJobs(next);
+  }, []);
+
+  const refreshQueueControls = useCallback(async () => {
+    const [control, runtime] = await Promise.all([
       invoke<JobQueueControlState>("jobs_queue_control_get"),
       invoke<JobRuntimeSettings>("jobs_runtime_settings_get"),
+    ]);
+    setQueuePaused(control.paused);
+    setMaxConcurrency(runtime.max_concurrency);
+  }, []);
+
+  const refreshSubscriptionLookups = useCallback(async () => {
+    const [youtubeSubscriptions, instagramSubscriptions] = await Promise.all([
       invoke<YoutubeSubscriptionRow[]>("youtube_subscriptions_list").catch(() => []),
       invoke<InstagramSubscriptionRow[]>("instagram_subscriptions_list").catch(() => []),
     ]);
-    setJobs(next);
-    setQueuePaused(control.paused);
-    setMaxConcurrency(runtime.max_concurrency);
     setYoutubeSubscriptionsById(
       Object.fromEntries(youtubeSubscriptions.map((subscription) => [subscription.id, subscription])),
     );
@@ -311,6 +348,14 @@ export function JobsPage({ visible = true }: { visible?: boolean }) {
       Object.fromEntries(instagramSubscriptions.map((subscription) => [subscription.id, subscription])),
     );
   }, []);
+
+  const refresh = useCallback(async () => {
+    await Promise.all([
+      refreshJobsSnapshot(),
+      refreshQueueControls(),
+      refreshSubscriptionLookups(),
+    ]);
+  }, [refreshJobsSnapshot, refreshQueueControls, refreshSubscriptionLookups]);
 
   useEffect(() => {
     if (!pageActive) return;
@@ -324,6 +369,7 @@ export function JobsPage({ visible = true }: { visible?: boolean }) {
   }, []);
 
   useEffect(() => {
+    if (!pageActive) return;
     let cancelled = false;
     const itemIds = Array.from(
       new Set(
@@ -331,7 +377,7 @@ export function JobsPage({ visible = true }: { visible?: boolean }) {
           .map((job) => job.item_id?.trim())
           .filter((value): value is string => Boolean(value)),
       ),
-    );
+    ).slice(0, JOB_CONTEXT_HYDRATION_LIMIT);
     if (!itemIds.length) {
       setJobItemsById({});
       return () => {
@@ -339,31 +385,30 @@ export function JobsPage({ visible = true }: { visible?: boolean }) {
       };
     }
 
-    Promise.all(
-      itemIds.map(async (itemId) => {
-        try {
-          return await invoke<LibraryItem>("library_get", { itemId });
-        } catch {
-          return null;
-        }
-      }),
-    ).then((items) => {
-      if (cancelled) return;
-      const next: Record<string, LibraryItem> = {};
-      for (const item of items) {
-        if (item) {
+    // WP-0245: single batched invoke replaces the prior `Promise.all(library_get
+    // per item)` fan-out. Previously a 50-job page fired 50 IPC dispatches per
+    // poll; the v0.1.50 freeze trace logged 672 slow `library_get` rows.
+    invoke<LibraryItem[]>("library_get_many", { itemIds })
+      .then((items) => {
+        if (cancelled) return;
+        const next: Record<string, LibraryItem> = {};
+        for (const item of items) {
           next[item.id] = item;
         }
-      }
-      setJobItemsById(next);
-    });
+        setJobItemsById(next);
+      })
+      .catch(() => {
+        if (cancelled) return;
+        setJobItemsById({});
+      });
 
     return () => {
       cancelled = true;
     };
-  }, [jobs]);
+  }, [jobs, pageActive]);
 
   useEffect(() => {
+    if (!pageActive) return;
     let cancelled = false;
     const itemIds = Array.from(
       new Set(
@@ -371,7 +416,7 @@ export function JobsPage({ visible = true }: { visible?: boolean }) {
           .map((job) => job.item_id?.trim())
           .filter((value): value is string => Boolean(value)),
       ),
-    );
+    ).slice(0, JOB_CONTEXT_HYDRATION_LIMIT);
     if (!itemIds.length) {
       setItemOutputsById({});
       return () => {
@@ -379,29 +424,26 @@ export function JobsPage({ visible = true }: { visible?: boolean }) {
       };
     }
 
-    Promise.all(
-      itemIds.map(async (itemId) => {
-        try {
-          return await invoke<ItemOutputs>("item_outputs", { itemId });
-        } catch {
-          return null;
-        }
-      }),
-    ).then((outputs) => {
-      if (cancelled) return;
-      const next: Record<string, ItemOutputs> = {};
-      for (const output of outputs) {
-        if (output) {
+    // WP-0245: single batched invoke replaces the prior `Promise.all(item_outputs
+    // per item)` fan-out. The v0.1.50 trace logged 227 slow `item_outputs` rows.
+    invoke<ItemOutputs[]>("item_outputs_many", { itemIds })
+      .then((outputs) => {
+        if (cancelled) return;
+        const next: Record<string, ItemOutputs> = {};
+        for (const output of outputs) {
           next[output.item_id] = output;
         }
-      }
-      setItemOutputsById(next);
-    });
+        setItemOutputsById(next);
+      })
+      .catch(() => {
+        if (cancelled) return;
+        setItemOutputsById({});
+      });
 
     return () => {
       cancelled = true;
     };
-  }, [jobs]);
+  }, [jobs, pageActive]);
 
   const hasActive = useMemo(
     () => jobs.some((job) => isActive(job.status)),
@@ -531,11 +573,11 @@ export function JobsPage({ visible = true }: { visible?: boolean }) {
 
   usePollingLoop(
     async () => {
-      await refresh().catch(() => undefined);
+      await refreshJobsSnapshot().catch(() => undefined);
     },
     {
       enabled: pageActive && hasActive,
-      intervalMs: 1000,
+      intervalMs: ACTIVE_JOBS_POLL_INTERVAL_MS,
     },
   );
 
@@ -621,12 +663,10 @@ export function JobsPage({ visible = true }: { visible?: boolean }) {
     setError(null);
     setNotice(null);
     try {
-      await Promise.all(
-        retryableIds.map((jobId) =>
-          invoke("jobs_retry", { jobId, job_id: jobId }),
-        ),
-      );
-      setNotice(`Retried ${retryableIds.length} job${retryableIds.length === 1 ? "" : "s"} in batch.`);
+      for (const jobId of retryableIds) {
+        await invoke("jobs_retry", { jobId, job_id: jobId });
+      }
+      setNotice(`Retried ${retryableIds.length} job${retryableIds.length === 1 ? "" : "s"} in batch. Retries were queued sequentially so active work keeps its queue slot.`);
       await refresh();
     } catch (e) {
       setError(String(e));
@@ -1000,7 +1040,7 @@ export function JobsPage({ visible = true }: { visible?: boolean }) {
           ) : null}
         </td>
         <td>{job.job_type}</td>
-        <td>{Math.round((job.progress ?? 0) * 100)}%</td>
+        <td>{renderJobProgress(job, itemOutputs)}</td>
         <td>{formatTs(job.created_at_ms)}</td>
         <td>{formatTs(job.started_at_ms)}</td>
         <td>{formatTs(job.finished_at_ms)}</td>
@@ -1178,6 +1218,10 @@ export function JobsPage({ visible = true }: { visible?: boolean }) {
           <button type="button" disabled={busy} onClick={applyConcurrency}>
             Apply concurrency
           </button>
+        </div>
+        <div style={{ color: "#4b5563", marginTop: 8, fontSize: 12 }}>
+          Concurrency is the number of jobs that may run in parallel. Retry creates new queued work;
+          it does not cancel older running jobs.
         </div>
       </div>
 

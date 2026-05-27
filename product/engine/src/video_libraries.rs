@@ -31,9 +31,7 @@ pub struct VideoLibraryUpsert {
 }
 
 pub fn list_video_libraries(paths: &AppPaths) -> Result<Vec<VideoLibraryRow>> {
-    let conn = db::open(paths)?;
-    db::migrate(&conn)?;
-    ensure_default_video_library_conn(paths, &conn)?;
+    let conn = db::open_readonly(paths)?;
     let selected_id = active_video_library_id_conn(&conn)?;
 
     let mut stmt = conn.prepare(
@@ -47,6 +45,12 @@ ORDER BY active DESC, updated_at_ms DESC, name COLLATE NOCASE
         .query_map([], |row| row_to_video_library(row, selected_id.as_deref()))?
         .collect::<rusqlite::Result<Vec<_>>>()?;
     Ok(rows)
+}
+
+pub fn ensure_default_video_library(paths: &AppPaths) -> Result<()> {
+    let conn = db::open(paths)?;
+    db::migrate(&conn)?;
+    ensure_default_video_library_conn(paths, &conn)
 }
 
 pub fn selected_video_library(paths: &AppPaths) -> Result<VideoLibraryRow> {
@@ -177,6 +181,7 @@ pub fn remove_video_library(paths: &AppPaths, id: &str) -> Result<Vec<VideoLibra
             )?;
         }
     }
+    ensure_default_video_library_conn(paths, &conn)?;
     drop(conn);
     list_video_libraries(paths)
 }
@@ -295,10 +300,11 @@ mod tests {
     use super::*;
 
     #[test]
-    fn list_bootstraps_default_library_without_creating_root() {
+    fn default_bootstrap_creates_default_library_without_creating_root() {
         let dir = tempfile::tempdir().expect("tempdir");
         let paths = AppPaths::new(dir.path().join("app_state"));
         crate::db::ensure_schema(&paths).expect("schema");
+        ensure_default_video_library(&paths).expect("default library");
 
         let rows = list_video_libraries(&paths).expect("list");
 

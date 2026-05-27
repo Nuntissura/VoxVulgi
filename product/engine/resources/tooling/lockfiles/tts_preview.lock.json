@@ -1,0 +1,43 @@
+{
+  "schema_version": 1,
+  "pack": "tts_preview",
+  "generated_at_utc": "2026-05-18T21:00:52.7001416Z",
+  "pip_version": "26.1.1",
+  "source_pins": [
+    "pyttsx3==2.90"
+  ],
+  "packages": [
+    {
+      "name": "comtypes",
+      "version": "1.4.16",
+      "url": "https://files.pythonhosted.org/packages/5f/7c/0eb685107290b6221c03c46d39214a4e42a124189691cb83ae3228257f46/comtypes-1.4.16-py3-none-any.whl",
+      "sha256": "e18d85179ff12955524c5a8c3bc09cb3c0d890f1da4d7123d14244c7b78f84c8",
+      "requested": false,
+      "is_direct": false
+    },
+    {
+      "name": "pypiwin32",
+      "version": "223",
+      "url": "https://files.pythonhosted.org/packages/d0/1b/2f292bbd742e369a100c91faa0483172cd91a1a422a6692055ac920946c5/pypiwin32-223-py3-none-any.whl",
+      "sha256": "67adf399debc1d5d14dffc1ab5acacb800da569754fafdc576b2a039485aa775",
+      "requested": false,
+      "is_direct": false
+    },
+    {
+      "name": "pyttsx3",
+      "version": "2.90",
+      "url": "https://files.pythonhosted.org/packages/33/9a/de4781245f5ad966646fd276259ef7cfd400ba3cf7d5db7c0d5aab310c20/pyttsx3-2.90-py3-none-any.whl",
+      "sha256": "a585b6d8cffc19bd92db1e0ccbd8aa9c6528dd2baa5a47045d6fed542a44aa19",
+      "requested": true,
+      "is_direct": false
+    },
+    {
+      "name": "pywin32",
+      "version": "311",
+      "url": "https://files.pythonhosted.org/packages/51/8f/9bb81dd5bb77d22243d33c8397f09377056d5c687aa6d4042bea7fbf8364/pywin32-311-cp311-cp311-win_amd64.whl",
+      "sha256": "3ce80b34b22b17ccbd937a6e78e7225d80c52f5ab9940fe0506a1a16f3dab503",
+      "requested": false,
+      "is_direct": false
+    }
+  ]
+}

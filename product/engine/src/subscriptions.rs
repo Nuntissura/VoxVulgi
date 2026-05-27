@@ -275,8 +275,7 @@ ORDER BY s.active DESC, s.updated_at_ms DESC, s.created_at_ms DESC
             let mut subscription = row_to_subscription(row)?;
             let concat: String = row.get(17)?;
             if !concat.is_empty() {
-                let mut ids: Vec<String> =
-                    concat.split('\n').map(String::from).collect();
+                let mut ids: Vec<String> = concat.split('\n').map(String::from).collect();
                 ids.sort();
                 subscription.group_ids = ids;
             }
@@ -2288,14 +2287,31 @@ pub fn load_youtube_subscription_archive_ids(
 }
 
 pub fn youtube_subscriptions_archive_stats(paths: &AppPaths) -> Result<HashMap<String, usize>> {
-    let subs = list_youtube_subscriptions(paths)?;
-    let mut stats = HashMap::with_capacity(subs.len());
-    for sub in &subs {
-        let count = match load_youtube_subscription_archive_ids(paths, sub) {
-            Ok(ids) => ids.len(),
-            Err(_) => 0,
+    let state_dir = paths.youtube_subscription_state_dir();
+    let entries = match std::fs::read_dir(&state_dir) {
+        Ok(entries) => entries,
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok(HashMap::new()),
+        Err(err) => return Err(err.into()),
+    };
+    let mut stats = HashMap::new();
+    for entry in entries {
+        let entry = entry?;
+        if !entry.file_type()?.is_dir() {
+            continue;
+        }
+        let id = match entry.file_name().into_string() {
+            Ok(value) => value,
+            Err(_) => continue,
         };
-        stats.insert(sub.id.clone(), count);
+        let archive_path = entry.path().join(YT_DLP_ARCHIVE_FILENAME);
+        let count = if archive_path.is_file() {
+            read_archive_file_ids(&archive_path)
+                .map(|ids| ids.len())
+                .unwrap_or(0)
+        } else {
+            0
+        };
+        stats.insert(id, count);
     }
     Ok(stats)
 }
@@ -2402,6 +2418,7 @@ fn queue_subscription_internal(
         Some(output_dir),
         batch_id,
         auth_cookie,
+        sub.preset_id.clone(),
     )?;
 
     let conn = db::open(paths)?;
@@ -3818,6 +3835,76 @@ CREATE TABLE subscription_entries (
         assert!(legacy_archive_path.is_file());
         assert!(archived_ids.contains("dQw4w9WgXcQ"));
         assert!(archived_ids.contains("5NV6Rdv1a3I"));
+    }
+
+    #[test]
+    fn archive_stats_do_not_migrate_legacy_output_archives() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let paths = AppPaths::new(dir.path().join("app_state"));
+        crate::db::ensure_schema(&paths).expect("schema");
+
+        let legacy_output_dir = dir.path().join("legacy_output");
+        std::fs::create_dir_all(&legacy_output_dir).expect("mkdir legacy output");
+        let legacy_archive_path = legacy_output_dir.join(YT_DLP_ARCHIVE_FILENAME);
+        std::fs::write(&legacy_archive_path, "youtube dQw4w9WgXcQ\n").expect("seed legacy archive");
+
+        let sub = upsert_youtube_subscription(
+            &paths,
+            YoutubeSubscriptionUpsert {
+                id: None,
+                title: "Legacy stats sub".to_string(),
+                source_url: "https://www.youtube.com/@legacy-stats/videos".to_string(),
+                folder_map: Some("legacy_stats".to_string()),
+                output_dir_override: Some(legacy_output_dir.to_string_lossy().to_string()),
+                library_id: None,
+                use_browser_cookies: false,
+                browser_cookie_source: None,
+                auth_session_input: None,
+                clear_auth_session: false,
+                active: true,
+                preset_id: None,
+                group_ids: Vec::new(),
+                refresh_interval_minutes: Some(DEFAULT_REFRESH_INTERVAL_MINUTES),
+            },
+        )
+        .expect("upsert sub");
+
+        let managed_archive_path =
+            youtube_subscription_archive_path(&paths, &sub).expect("archive path");
+        assert!(!managed_archive_path.exists());
+
+        let stats = youtube_subscriptions_archive_stats(&paths).expect("stats");
+
+        assert!(
+            !stats.contains_key(&sub.id),
+            "routine stats scan should omit DB-only subscriptions; the UI renders missing stats as zero"
+        );
+        assert!(
+            !managed_archive_path.exists(),
+            "routine stats refresh must not create or merge archive state"
+        );
+        assert!(
+            legacy_archive_path.exists(),
+            "legacy archive remains available for explicit queue/download migration"
+        );
+    }
+
+    #[test]
+    fn archive_stats_counts_managed_files_without_opening_subscription_db() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let paths = AppPaths::new(dir.path().join("app_state"));
+        let subscription_id = "sub-managed-only";
+        let archive_path = paths.youtube_subscription_archive_state_path(subscription_id);
+        std::fs::create_dir_all(archive_path.parent().expect("archive parent")).expect("mkdir");
+        std::fs::write(&archive_path, "youtube video-a\nvideo-b\n\n").expect("write archive");
+
+        let stats = youtube_subscriptions_archive_stats(&paths).expect("stats");
+
+        assert_eq!(stats.get(subscription_id), Some(&2));
+        assert!(
+            !paths.db_dir().join("app.sqlite").exists(),
+            "routine archive stats must not create or open the app database"
+        );
     }
 
     #[test]

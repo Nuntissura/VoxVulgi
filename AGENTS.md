@@ -174,3 +174,25 @@ The app continuously records UI freeze evidence (Worker-driven main-thread heart
 4. Cross-reference timestamps with `command_completed` / `command_slow` rows from the same trace window to identify which Tauri command was in flight when the freeze started.
 5. `event_loop_skew` rows indicate process-level scheduling starvation (SMB stall on UNC paths, AV scan, DLL loader lock) — these are often the upstream cause of a freeze that masquerades as a Tauri command stall.
 6. If `worker_alive` rows are present **but** there are no `freeze_detected` rows during a freeze the operator observed, the JS event loop is not the blocked thread. Suspect the WebView UI / GPU compositor layer (the app uses `transparent: true, decorations: false` in `tauri.conf.json`, a frameless+transparent config that has known DWM-compositor stalls on Windows under load). That class of freeze needs a different probe than the JS Worker — log it for the next diagnostic build.
+
+## Sibling External Watch (WP-0242)
+
+When the operator reports freezes and in-app diagnostics are insufficient, run the sibling monitor from the repo root:
+
+```powershell
+.\vvwatch.cmd -DurationSeconds 300 -IntervalSeconds 2
+```
+
+The monitor is out-of-process and writes to:
+
+```text
+%APPDATA%\com.voxvulgi.voxvulgi\diagnostics\external_watch\watch_<timestamp>\
+```
+
+Each run includes:
+
+- `samples.jsonl` with Windows process responsiveness, process tree, heavy child processes, bridge health/state, read-only DB probe, bounded NAS root path probe, Python package state, and latest freeze-report summary.
+- `summary.json` for machine reading.
+- `summary.md` for quick human/agent triage.
+
+Use `vvwatch.cmd` when the app itself may be frozen or when evidence must distinguish app UI hangs from DB locks, child process fan-out, bridge stalls, NAS stalls, and Python environment drift.

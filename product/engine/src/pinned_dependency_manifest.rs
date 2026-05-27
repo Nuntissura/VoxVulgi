@@ -1,4 +1,5 @@
 use serde::{Deserialize, Serialize};
+use std::collections::BTreeMap;
 use std::ffi::OsStr;
 use std::sync::OnceLock;
 
@@ -6,6 +7,11 @@ use std::sync::OnceLock;
 pub struct PinnedDependencyManifest {
     pub schema_version: u32,
     pub allow_unpinned_fallback_env: String,
+    /// WP-0232: per-pack relative path to a hashed lockfile under
+    /// `product/engine/resources/tooling/`. Packs without a lockfile entry continue to
+    /// use the legacy `pip install <pinned list>` path at install time.
+    #[serde(default)]
+    pub lockfiles: BTreeMap<String, String>,
     pub yt_dlp_windows: YtDlpWindowsPin,
     pub portable_python_windows: PortablePythonWindowsPin,
     pub deno_windows: DenoWindowsPin,
@@ -82,6 +88,8 @@ pub struct NeuralTtsPins {
     pub compatibility_upgrades: Vec<String>,
     pub pinned: Vec<String>,
     pub unpinned_fallback: Vec<String>,
+    #[serde(default)]
+    pub warmup_recovery_force_reinstall: Vec<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -168,6 +176,42 @@ mod tests {
                 .len(),
             3
         );
+        // WP-0231: Kokoro group must pin transformers + huggingface_hub so the venv state
+        // stays coherent at every install stage, not only after OpenVoice's pin runs.
+        assert!(manifest
+            .tts_neural_local_v1
+            .pinned
+            .iter()
+            .any(|pin| pin == "huggingface_hub==1.5.0"));
+        assert!(manifest
+            .tts_neural_local_v1
+            .pinned
+            .iter()
+            .any(|pin| pin == "transformers==5.8.1"));
+        assert!(manifest
+            .tts_neural_local_v1
+            .warmup_recovery_force_reinstall
+            .iter()
+            .any(|pin| pin.starts_with("transformers==")));
+        assert!(manifest
+            .tts_neural_local_v1
+            .warmup_recovery_force_reinstall
+            .iter()
+            .any(|pin| pin.starts_with("huggingface_hub==")));
+        assert!(manifest
+            .tts_neural_local_v1
+            .warmup_recovery_force_reinstall
+            .iter()
+            .any(|pin| pin.starts_with("kokoro==")));
+        // hf_hub pin must match between Kokoro and OpenVoice groups so neither one
+        // downgrades the venv on top of the other.
+        let openvoice_hf = manifest
+            .tts_voice_preserving_local_v1
+            .pinned_dependencies
+            .iter()
+            .find(|pin| pin.starts_with("huggingface_hub=="))
+            .expect("OpenVoice must pin huggingface_hub");
+        assert_eq!(openvoice_hf, "huggingface_hub==1.5.0");
     }
 
     #[test]

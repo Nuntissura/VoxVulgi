@@ -798,10 +798,12 @@ dependencies = [
 
 [[package]]
 name = "desktop"
-version = "0.1.26"
+version = "0.1.51"
 dependencies = [
  "base64 0.22.1",
  "hex",
+ "png",
+ "raw-window-handle",
  "rusqlite",
  "serde",
  "serde_json",
@@ -814,6 +816,7 @@ dependencies = [
  "tauri-runtime",
  "tempfile",
  "voxvulgi_engine",
+ "windows-sys 0.59.0",
  "zip 0.6.6",
 ]
 
