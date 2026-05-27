@@ -58,3 +58,6 @@ Test material/
 
 # Local audits/exports (may contain PII / user subscription history)
 governance/Audits/
+
+# Claude Code harness state (per-session id, pid, lock — machine-local)
+.claude/

@@ -256,9 +256,11 @@ This changelog tracks desktop installer builds produced by `governance/scripts/b
   - `product/desktop/build_target/Current/release/bundle/msi/VoxVulgi_0.1.26_x64_en-US.msi`
 - Notes: WP-0228 EMERGENCY ROLLBACK of WP-0227 auto-install: operator reported v0.1.25 became unusable due to background install contention. Auto-enqueue thread removed from lib.rs. Resume logic in jobs.rs kept (safe; helps manual installs). v0.1.26 = v0.1.24 + Phase2 install resume logic + freeze diagnostic infrastructure.
 
+> **Retrospective commit attribution (v0.1.27..v0.1.51):** these 23 builds were produced from the working tree between commits `521447b` (prior ship) and `fc5027e` (next ship). No per-build commit was taken at the time. All v0.1.27..v0.1.51 rows below cite `fc5027e` because that is the captured tree state; earlier builds in the series correspond to subsets of that tree.
+
 ## 0.1.27 - 2026-05-19T00:52:19Z
 - Work Packets: `WP-0230`, `WP-0231`, `WP-0232`, `WP-0233`, `WP-0234`, `WP-0239`
-- Commit: `521447b`
+- Commit: `fc5027e`
 - Offline Bundle ID: `offline_full_win64_20260519_001043`
 - Artifacts:
   - `product/desktop/build_target/Current/release/bundle/nsis/VoxVulgi_0.1.27_x64-setup.exe`
@@ -267,7 +269,7 @@ This changelog tracks desktop installer builds produced by `governance/scripts/b
 
 ## 0.1.28 - 2026-05-20T16:17:36Z
 - Work Packets: `WP-0241`
-- Commit: `521447b`
+- Commit: `fc5027e`
 - Offline Bundle ID: `offline_full_win64_20260519_001043`
 - Artifacts:
   - `product/desktop/build_target/Current/release/bundle/nsis/VoxVulgi_0.1.28_x64-setup.exe`
@@ -276,7 +278,7 @@ This changelog tracks desktop installer builds produced by `governance/scripts/b
 
 ## 0.1.29 - 2026-05-20T21:46:02Z
 - Work Packets: `WP-0243`
-- Commit: `521447b`
+- Commit: `fc5027e`
 - Offline Bundle ID: `offline_full_win64_20260519_001043`
 - Artifacts:
   - `product/desktop/build_target/Current/release/bundle/nsis/VoxVulgi_0.1.29_x64-setup.exe`
@@ -285,7 +287,7 @@ This changelog tracks desktop installer builds produced by `governance/scripts/b
 
 ## 0.1.30 - 2026-05-20T23:13:59Z
 - Work Packets: `WP-0244`
-- Commit: `521447b`
+- Commit: `fc5027e`
 - Offline Bundle ID: `offline_full_win64_20260519_001043`
 - Artifacts:
   - `product/desktop/build_target/Current/release/bundle/nsis/VoxVulgi_0.1.30_x64-setup.exe`
@@ -294,7 +296,7 @@ This changelog tracks desktop installer builds produced by `governance/scripts/b
 
 ## 0.1.31 - 2026-05-20T23:57:44Z
 - Work Packets: `WP-0244`
-- Commit: `521447b`
+- Commit: `fc5027e`
 - Offline Bundle ID: `offline_full_win64_20260519_001043`
 - Artifacts:
   - `product/desktop/build_target/Current/release/bundle/nsis/VoxVulgi_0.1.31_x64-setup.exe`
@@ -303,7 +305,7 @@ This changelog tracks desktop installer builds produced by `governance/scripts/b
 
 ## 0.1.33 - 2026-05-21T01:22:55Z
 - Work Packets: `WP-0244`
-- Commit: `521447b`
+- Commit: `fc5027e`
 - Offline Bundle ID: `offline_full_win64_20260519_001043`
 - Artifacts:
   - `product/desktop/build_target/Current/release/bundle/nsis/VoxVulgi_0.1.33_x64-setup.exe`
@@ -312,7 +314,7 @@ This changelog tracks desktop installer builds produced by `governance/scripts/b
 
 ## 0.1.34 - 2026-05-21T02:18:36Z
 - Work Packets: `WP-0244`
-- Commit: `521447b`
+- Commit: `fc5027e`
 - Offline Bundle ID: `offline_full_win64_20260519_001043`
 - Artifacts:
   - `product/desktop/build_target/Current/release/bundle/nsis/VoxVulgi_0.1.34_x64-setup.exe`
@@ -321,7 +323,7 @@ This changelog tracks desktop installer builds produced by `governance/scripts/b
 
 ## 0.1.35 - 2026-05-21T18:53:54Z
 - Work Packets: `WP-0235`
-- Commit: `521447b`
+- Commit: `fc5027e`
 - Offline Bundle ID: `offline_full_win64_20260521_181537`
 - Artifacts:
   - `product/desktop/build_target/Current/release/bundle/nsis/VoxVulgi_0.1.35_x64-setup.exe`
@@ -330,7 +332,7 @@ This changelog tracks desktop installer builds produced by `governance/scripts/b
 
 ## 0.1.36 - 2026-05-21T22:43:07Z
 - Work Packets: `WP-0235`
-- Commit: `521447b`
+- Commit: `fc5027e`
 - Offline Bundle ID: `offline_full_win64_20260521_181537`
 - Artifacts:
   - `product/desktop/build_target/Current/release/bundle/nsis/VoxVulgi_0.1.36_x64-setup.exe`
@@ -339,7 +341,7 @@ This changelog tracks desktop installer builds produced by `governance/scripts/b
 
 ## 0.1.37 - 2026-05-21T23:31:50Z
 - Work Packets: `WP-0235`
-- Commit: `521447b`
+- Commit: `fc5027e`
 - Offline Bundle ID: `offline_full_win64_20260521_181537`
 - Artifacts:
   - `product/desktop/build_target/Current/release/bundle/nsis/VoxVulgi_0.1.37_x64-setup.exe`
@@ -348,7 +350,7 @@ This changelog tracks desktop installer builds produced by `governance/scripts/b
 
 ## 0.1.38 - 2026-05-22T00:21:01Z
 - Work Packets: `WP-0235`
-- Commit: `521447b`
+- Commit: `fc5027e`
 - Offline Bundle ID: `offline_full_win64_20260521_181537`
 - Artifacts:
   - `product/desktop/build_target/Current/release/bundle/nsis/VoxVulgi_0.1.38_x64-setup.exe`
@@ -357,7 +359,7 @@ This changelog tracks desktop installer builds produced by `governance/scripts/b
 
 ## 0.1.40 - 2026-05-22T02:15:02Z
 - Work Packets: `WP-0235`, `WP-0242`
-- Commit: `521447b`
+- Commit: `fc5027e`
 - Offline Bundle ID: `offline_full_win64_20260521_181537`
 - Artifacts:
   - `product/desktop/build_target/Current/release/bundle/nsis/VoxVulgi_0.1.40_x64-setup.exe`
@@ -366,7 +368,7 @@ This changelog tracks desktop installer builds produced by `governance/scripts/b
 
 ## 0.1.41 - 2026-05-22T03:20:09Z
 - Work Packets: `WP-0235`, `WP-0242`
-- Commit: `521447b`
+- Commit: `fc5027e`
 - Offline Bundle ID: `offline_full_win64_20260521_181537`
 - Artifacts:
   - `product/desktop/build_target/Current/release/bundle/nsis/VoxVulgi_0.1.41_x64-setup.exe`
@@ -375,7 +377,7 @@ This changelog tracks desktop installer builds produced by `governance/scripts/b
 
 ## 0.1.42 - 2026-05-22T04:09:01Z
 - Work Packets: `WP-0235`, `WP-0242`
-- Commit: `521447b`
+- Commit: `fc5027e`
 - Offline Bundle ID: `offline_full_win64_20260521_181537`
 - Artifacts:
   - `product/desktop/build_target/Current/release/bundle/nsis/VoxVulgi_0.1.42_x64-setup.exe`
@@ -384,7 +386,7 @@ This changelog tracks desktop installer builds produced by `governance/scripts/b
 
 ## 0.1.43 - 2026-05-22T04:58:48Z
 - Work Packets: `WP-0235`, `WP-0242`
-- Commit: `521447b`
+- Commit: `fc5027e`
 - Offline Bundle ID: `offline_full_win64_20260521_181537`
 - Artifacts:
   - `product/desktop/build_target/Current/release/bundle/nsis/VoxVulgi_0.1.43_x64-setup.exe`
@@ -393,7 +395,7 @@ This changelog tracks desktop installer builds produced by `governance/scripts/b
 
 ## 0.1.44 - 2026-05-22T06:44:47Z
 - Work Packets: `WP-0235`, `WP-0242`
-- Commit: `521447b`
+- Commit: `fc5027e`
 - Offline Bundle ID: `offline_full_win64_20260521_181537`
 - Artifacts:
   - `product/desktop/build_target/Current/release/bundle/nsis/VoxVulgi_0.1.44_x64-setup.exe`
@@ -402,7 +404,7 @@ This changelog tracks desktop installer builds produced by `governance/scripts/b
 
 ## 0.1.45 - 2026-05-22T07:27:19Z
 - Work Packets: `WP-0235`, `WP-0242`
-- Commit: `521447b`
+- Commit: `fc5027e`
 - Offline Bundle ID: `offline_full_win64_20260521_181537`
 - Artifacts:
   - `product/desktop/build_target/Current/release/bundle/nsis/VoxVulgi_0.1.45_x64-setup.exe`
@@ -411,7 +413,7 @@ This changelog tracks desktop installer builds produced by `governance/scripts/b
 
 ## 0.1.46 - 2026-05-22T08:06:48Z
 - Work Packets: `WP-0235`, `WP-0242`
-- Commit: `521447b`
+- Commit: `fc5027e`
 - Offline Bundle ID: `offline_full_win64_20260521_181537`
 - Artifacts:
   - `product/desktop/build_target/Current/release/bundle/nsis/VoxVulgi_0.1.46_x64-setup.exe`
@@ -420,7 +422,7 @@ This changelog tracks desktop installer builds produced by `governance/scripts/b
 
 ## 0.1.47 - 2026-05-22T09:56:45Z
 - Work Packets: `WP-0171`, `WP-0209`, `WP-0235`, `WP-0242`
-- Commit: `521447b`
+- Commit: `fc5027e`
 - Offline Bundle ID: `offline_full_win64_20260521_181537`
 - Artifacts:
   - `product/desktop/build_target/Current/release/bundle/nsis/VoxVulgi_0.1.47_x64-setup.exe`
@@ -429,7 +431,7 @@ This changelog tracks desktop installer builds produced by `governance/scripts/b
 
 ## 0.1.48 - 2026-05-22T11:49:23Z
 - Work Packets: `WP-0171`, `WP-0209`, `WP-0235`, `WP-0242`
-- Commit: `521447b`
+- Commit: `fc5027e`
 - Offline Bundle ID: `offline_full_win64_20260521_181537`
 - Artifacts:
   - `product/desktop/build_target/Current/release/bundle/nsis/VoxVulgi_0.1.48_x64-setup.exe`
@@ -438,7 +440,7 @@ This changelog tracks desktop installer builds produced by `governance/scripts/b
 
 ## 0.1.49 - 2026-05-22T12:42:47Z
 - Work Packets: `WP-0171`, `WP-0209`, `WP-0235`, `WP-0242`
-- Commit: `521447b`
+- Commit: `fc5027e`
 - Offline Bundle ID: `offline_full_win64_20260521_181537`
 - Artifacts:
   - `product/desktop/build_target/Current/release/bundle/nsis/VoxVulgi_0.1.49_x64-setup.exe`
@@ -447,7 +449,7 @@ This changelog tracks desktop installer builds produced by `governance/scripts/b
 
 ## 0.1.50 - 2026-05-22T13:33:48Z
 - Work Packets: `WP-0171`, `WP-0209`, `WP-0235`, `WP-0242`
-- Commit: `521447b`
+- Commit: `fc5027e`
 - Offline Bundle ID: `offline_full_win64_20260521_181537`
 - Artifacts:
   - `product/desktop/build_target/Current/release/bundle/nsis/VoxVulgi_0.1.50_x64-setup.exe`
@@ -456,7 +458,7 @@ This changelog tracks desktop installer builds produced by `governance/scripts/b
 
 ## 0.1.51 - 2026-05-22T23:38:50Z
 - Work Packets: `WP-0245`
-- Commit: `521447b`
+- Commit: `fc5027e`
 - Offline Bundle ID: `offline_full_win64_20260521_181537`
 - Artifacts:
   - `product/desktop/build_target/Current/release/bundle/nsis/VoxVulgi_0.1.51_x64-setup.exe`
