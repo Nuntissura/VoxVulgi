@@ -599,3 +599,12 @@ This changelog tracks desktop installer builds produced by `governance/scripts/b
   - `product/desktop/build_target/Current/release/bundle/nsis/VoxVulgi_0.1.66_x64-setup.exe`
   - `product/desktop/build_target/Current/release/bundle/msi/VoxVulgi_0.1.66_x64_en-US.msi`
 - Notes: WP-0248 canonical batch target-health display: show videos downloaded/unresolved separately from historical attempts and skip already-downloaded targets on batch retry.
+
+## 0.1.67 - 2026-06-10T02:33:38Z
+- Work Packets: `WP-0250`
+- Commit: `8d03bf6`
+- Offline Bundle ID: `offline_full_win64_20260521_181537`
+- Artifacts:
+  - `product/desktop/build_target/Current/release/bundle/nsis/VoxVulgi_0.1.67_x64-setup.exe`
+  - `product/desktop/build_target/Current/release/bundle/msi/VoxVulgi_0.1.67_x64_en-US.msi`
+- Notes: WP-0250: disable WebView2 native window occlusion + renderer/background-tab freezing to stop idle-in-background renderer suspension freezes.
