@@ -530,6 +530,12 @@ Phase 1 implementation status (2026-02-22):
   - Pinterest board/folder crawl support should plug into the existing crawler-style image archive flow.
   - Instagram recurring archive targets should reuse the subscription/interval model already established for YouTube where practical.
 - Downloaded media is imported into `library_item`, provenance is persisted in `ingest_provenance`, and downloads are grouped via `job.batch_id` for UI batching.
+  - Jobs/Queue recovery truth must be derived from backend canonical job/batch queries, not from the current page of rendered rows.
+  - Retry operations should persist lineage for new attempts (`retry_of_job_id` / `retry_replacement_job_id` or equivalent) and use best-effort legacy inference only when explicit lineage is missing.
+  - Batch inspection APIs should return canonical health counts, latest-attempt state, retryable/unresolved counts, and attempt history for all matching batch rows.
+  - Deleting queue/history rows must remain separate from deleting media, library metadata, subscriptions, playlists, or third-party exports.
+  - YouTube auth uses the current global Options auth at execution/retry time for old queued/waiting/retried jobs. Cookie Editor `.js`/JSON exports, Netscape cookie text, cookie headers, and cookie-file paths are accepted inputs and normalized internally.
+  - Browser-cookie auth source selection defaults to Firefox when browser cookies are enabled without an explicit saved source; Chrome and Edge remain supported first-class alternatives, and existing Opera support remains valid.
   - Privacy hardening: cookie headers are not persisted in `job.params_json` and browser-cookie usage is opt-in via explicit Library toggles.
 
 Phase 1 extension status (2026-02-25):

@@ -360,7 +360,7 @@ Current implementation status:
   - translation side-by-side,
   - QC warnings (too fast, too long),
   - in-context help system: (?) button on every section heading that expands a help panel showing "What this does", "When to use it", "Steps", and "Key terms"; persistent "Show all help" toggle for learning mode.
-- **Jobs/Queue**: running/failed/completed, retry, logs link; developer-only test controls behind toggle; secondary actions grouped into expandable dropdown; "Clean up old jobs and logs" replaces "Flush cache".
+- **Jobs/Queue**: running/failed/completed, retry, logs link; developer-only test controls behind toggle; secondary actions grouped into expandable dropdown; "Clean up old jobs and logs" replaces "Flush cache". Jobs/Queue must be a trustworthy recovery and inspection surface for failed, retried, bundled, and batched downloads: it shows original title, URL, video ID, job ID, batch ID, source/output paths, retry lineage, attempt history, canonical batch health, and safe next actions. Batch truth comes from backend canonical summaries, not visible/rendered row counts.
 - **Diagnostics**: storage usage, logs export, version info, privacy settings.
 - **Diagnostics** should also surface a voice-backend catalog, backend readiness, and recommendation reasoning instead of only package versions.
 
@@ -373,7 +373,7 @@ Current implementation status:
 - **Instagram Archiver**: dedicated Instagram batch ingest workflow plus recurring archive targets. Quick/Advanced toggle (Quick shows batch + recent media; Advanced adds subscriptions).
 - **Image Archive**: dedicated crawler-based image archive ingest workflow. Quick/Advanced toggle (Quick shows URL + output; Advanced adds Pinterest crawler and crawl settings).
 - **Media Library**: renamed from ambiguous "Items"; browse imported media and hand off to Localization Studio. Includes search, source filter, type filter, sort, view mode, and group-by controls.
-- **Jobs/Queue**: execution state + retry/cancel + logs and output reveal. Developer tools behind toggle; per-job actions grouped into dropdown.
+- **Jobs/Queue**: execution state + retry/cancel + logs and output reveal. Developer tools behind toggle; per-job actions grouped into dropdown. Large batches must remain scrollable and inspectable, collapsed batch rows must still expose title/link/source context, and latest-attempt state should lead the display while historical failures remain available in attempt history.
 - **Diagnostics**: non-blocking, section-by-section loading with explicit readiness states, recent local trace rows, and startup/tool-lifecycle visibility.
 - Localization Studio artifact rows must receive typed runtime metadata from the bridge for rerun/status matching, rather than reconstructing artifact identity from filenames in the UI.
 
@@ -385,6 +385,7 @@ Current implementation status:
 - The Library subscription surface should treat mapped output folders and continuity tracking as separate concepts: output overrides decide where media lands, while dedupe / "already downloaded" state is app-managed and may be seeded or merged from legacy archive files.
 - **Instagram Archiver** is the dedicated home for direct Instagram archive runs plus recurring archive targets.
 - **Options** is the discoverable home for shared storage-root configuration and related global path behavior. Feature roots consolidated into a single table (Feature/Path/Status/Actions) instead of 4 separate cards. YouTube auth improved with help text and clear button.
+- Browser-cookie auth and recovery flows default to Firefox because that is the operator's current browser session, while Chrome and Edge remain supported browser-cookie sources.
 - **Localization Studio** Workflow Map buttons grouped into 4 categories (Captions & Translation, Voice & Dubbing, Quality & Review, Advanced) instead of a flat button row.
 - **Built-in visual debugger**: deterministic snapshot tool that captures the active worksurface to `governance/snapshots/` for AI orchestrators; supports subfolder and label for organized captures; triggered by Ctrl+Shift+S hotkey or `window.__voxVulgiRequestSnapshot()`.
 - **Headless agent bridge**: localhost-only HTTP server that lets AI agents navigate pages (`POST /agent/navigate`), capture snapshots (`POST /agent/snapshot`), read state (`GET /agent/state`), and check health (`GET /agent/health`) without stealing window focus; port written to `agent_bridge_port.txt` in app data on startup.

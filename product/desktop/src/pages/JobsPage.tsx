@@ -1,8 +1,15 @@
-import { Fragment, useCallback, useEffect, useMemo, useState } from "react";
+import { Fragment, useCallback, useEffect, useMemo, useState, type FormEvent } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { confirm, save } from "@tauri-apps/plugin-dialog";
 import { usePageActivity, usePollingLoop } from "../lib/activity";
 import { copyPathToClipboard, openPathBestEffort, requireOpenablePath, revealPath } from "../lib/pathOpener";
+import {
+  buildJobContextSummary,
+  safeParseJobParams,
+  stringOrNull,
+  summarizeJobGroupTargets,
+  type JobContextSummary,
+} from "../lib/archiverRuntime";
 
 type JobStatus = "queued" | "running" | "succeeded" | "failed" | "canceled";
 
@@ -19,6 +26,75 @@ type JobRow = {
   finished_at_ms: number | null;
   logs_path: string;
   params_json?: string;
+  target_title?: string | null;
+  retry_of_job_id?: string | null;
+  retry_replacement_job_id?: string | null;
+};
+
+type JobBatchHealthSummary = {
+  batch_id: string;
+  total_jobs: number;
+  canonical_targets: number;
+  queued_jobs: number;
+  running_jobs: number;
+  succeeded_jobs: number;
+  failed_jobs: number;
+  canceled_jobs: number;
+  blocked_jobs: number;
+  unknown_jobs: number;
+  retryable_targets: number;
+  active_targets: number;
+  succeeded_targets: number;
+  unresolved_targets: number;
+  missing_title_jobs: number;
+  no_output_jobs: number;
+  retried_jobs: number;
+  unretried_failed_jobs: number;
+};
+
+type JobAttemptInspectionRow = {
+  job: JobRow;
+  canonical_key: string;
+  source_title: string | null;
+  source_url: string | null;
+  video_id: string | null;
+  source_path: string | null;
+  filename: string | null;
+  output_path: string | null;
+  output_dir: string | null;
+  bundle_membership: string | null;
+  is_current_attempt: boolean;
+  current_attempt_job_id: string;
+  lineage_kind: string;
+  status_label: string;
+  can_delete: boolean;
+  can_retry: boolean;
+  blocked_by_youtube_auth: boolean;
+  has_output: boolean;
+};
+
+type JobBatchDetail = {
+  health: JobBatchHealthSummary;
+  attempts: JobAttemptInspectionRow[];
+};
+
+type JobDetail = {
+  selected_job_id: string;
+  batch_id: string | null;
+  current_attempt_job_id: string;
+  attempts: JobAttemptInspectionRow[];
+};
+
+type JobTitleBackfillSummary = {
+  scanned_jobs: number;
+  updated_jobs: number;
+  missing_titles: number;
+};
+
+type JobExportPayload = {
+  format: string;
+  item_count: number;
+  content: string;
 };
 
 type LibraryItem = {
@@ -42,13 +118,6 @@ type InstagramSubscriptionRow = {
   source_url: string;
   folder_map: string;
   output_dir_override: string | null;
-};
-
-type JobContextSummary = {
-  label: string;
-  detail: string | null;
-  target_path: string | null;
-  target_action_label: string | null;
 };
 
 type JobGroup = {
@@ -103,6 +172,26 @@ type JobCleanupSummary = {
   failed_paths: JobCleanupFailure[];
 };
 
+type ClearTerminalJobsSearchSummary = {
+  query: string;
+  matched_terminal_jobs: number;
+  removed_jobs: number;
+};
+
+type RetryBatchFailedSummary = {
+  batch_id: string;
+  matched_retryable_jobs: number;
+  queued_jobs: number;
+  reused_active_jobs: number;
+  failed_retries: number;
+  blocked_jobs: number;
+  skipped_succeeded_jobs: number;
+  skipped_active_jobs: number;
+  unresolved_jobs: number;
+  dry_run: boolean;
+  first_error: string | null;
+};
+
 type FfmpegToolsStatus = {
   installed: boolean;
   ffmpeg_path: string;
@@ -152,8 +241,18 @@ type ExportedFile = {
 };
 
 const JOBS_PAGE_REFRESH_LIMIT = 80;
+const JOBS_SEARCH_LIMIT = 500;
 const JOB_CONTEXT_HYDRATION_LIMIT = 25;
 const ACTIVE_JOBS_POLL_INTERVAL_MS = 2_500;
+type JobsFilter =
+  | "all"
+  | "failed"
+  | "auth_blocked"
+  | "retried"
+  | "unretried"
+  | "succeeded_retry"
+  | "missing_title"
+  | "no_output";
 
 function joinPath(dir: string, file: string): string {
   const d = dir.trim().replace(/[\\/]+$/, "");
@@ -175,6 +274,59 @@ function isActive(status: JobStatus): boolean {
   return status === "queued" || status === "running";
 }
 
+function isRetryable(status: JobStatus): boolean {
+  return status === "failed" || status === "canceled";
+}
+
+function isIndividuallyDeletable(status: JobStatus): boolean {
+  return status === "failed" || status === "canceled";
+}
+
+function isAuthBlockedJob(job: JobRow): boolean {
+  const error = (job.error ?? "").toLowerCase();
+  return (
+    error.includes("youtube auth is blocked") ||
+    error.includes("sign in to confirm") ||
+    error.includes("not a bot") ||
+    error.includes("youtube rejected") ||
+    error.includes("saved youtube cookies")
+  );
+}
+
+function isTransientDatabaseLock(error: unknown): boolean {
+  return String(error).includes("database is locked");
+}
+
+function sleep(ms: number): Promise<void> {
+  return new Promise((resolve) => window.setTimeout(resolve, ms));
+}
+
+function retrySummaryText(summary: RetryBatchFailedSummary): string {
+  const queuedText = summary.queued_jobs
+    ? `Queued ${summary.queued_jobs} retry${summary.queued_jobs === 1 ? "" : "ies"}`
+    : "No new retries queued";
+  const reusedText = summary.reused_active_jobs
+    ? `reused ${summary.reused_active_jobs} active target${summary.reused_active_jobs === 1 ? "" : "s"}`
+    : "no active duplicate targets";
+  const blockedText = summary.blocked_jobs ? `blocked ${summary.blocked_jobs}` : "blocked 0";
+  const skippedText = summary.skipped_succeeded_jobs
+    ? `skipped ${summary.skipped_succeeded_jobs} succeeded target${summary.skipped_succeeded_jobs === 1 ? "" : "s"}`
+    : "skipped 0 succeeded";
+  const unresolvedText = `unresolved ${summary.unresolved_jobs}`;
+  const failedText = summary.failed_retries ? `failed-to-enqueue ${summary.failed_retries}` : "failed-to-enqueue 0";
+  const firstErrorText = summary.first_error ? ` First error: ${summary.first_error}` : "";
+  return `${queuedText}; ${reusedText}; ${blockedText}; ${skippedText}; ${failedText}; ${unresolvedText}; canonical retryable ${summary.matched_retryable_jobs}.${firstErrorText}`;
+}
+
+function copyText(value: string | null | undefined): Promise<boolean> {
+  const text = (value ?? "").trim();
+  if (!text) return Promise.resolve(false);
+  return navigator.clipboard
+    ?.writeText(text)
+    .then(() => true)
+    .catch(() => false) ?? Promise.resolve(false);
+}
+
 function summarizeGroupStatus(jobs: JobRow[]): JobStatus {
   if (jobs.some((job) => job.status === "running")) return "running";
   if (jobs.some((job) => job.status === "queued")) return "queued";
@@ -187,6 +339,25 @@ function summarizeGroupProgress(jobs: JobRow[]): number {
   if (!jobs.length) return 0;
   const total = jobs.reduce((sum, job) => sum + (Number.isFinite(job.progress) ? job.progress : 0), 0);
   return Math.max(0, Math.min(1, total / jobs.length));
+}
+
+function summarizeBatchTargetStatus(health: JobBatchHealthSummary): "queued" | "running" | "succeeded" | "failed" {
+  if (health.running_jobs > 0) return "running";
+  if (health.queued_jobs > 0) return "queued";
+  return health.unresolved_targets > 0 ? "failed" : "succeeded";
+}
+
+function summarizeBatchTargetProgress(health: JobBatchHealthSummary): number {
+  if (health.canonical_targets <= 0) return 0;
+  return Math.max(0, Math.min(1, health.succeeded_targets / health.canonical_targets));
+}
+
+function batchTargetHealthText(health: JobBatchHealthSummary): string {
+  return `${health.canonical_targets} videos: ${health.succeeded_targets} downloaded / ${health.active_targets} queued or running / ${health.unresolved_targets} unresolved`;
+}
+
+function batchAttemptHealthText(health: JobBatchHealthSummary): string {
+  return `${health.total_jobs} attempts: ${health.succeeded_jobs} succeeded / ${health.failed_jobs} failed / ${health.canceled_jobs} canceled / ${health.blocked_jobs} auth-blocked`;
 }
 
 function summarizeGroupType(jobs: JobRow[]): string {
@@ -249,53 +420,6 @@ function parseExternalToolMissing(error: string | null): string | null {
   return tool ? tool.split(/\s+/)[0] : null;
 }
 
-function stringOrNull(value: unknown): string | null {
-  return typeof value === "string" && value.trim() ? value.trim() : null;
-}
-
-function stringArray(value: unknown): string[] {
-  return Array.isArray(value)
-    ? value.map((entry) => stringOrNull(entry)).filter((entry): entry is string => Boolean(entry))
-    : [];
-}
-
-function safeParseJobParams(job: JobRow): Record<string, unknown> | null {
-  if (!job.params_json?.trim()) return null;
-  try {
-    const parsed = JSON.parse(job.params_json) as Record<string, unknown>;
-    return parsed && typeof parsed === "object" ? parsed : null;
-  } catch {
-    return null;
-  }
-}
-
-function fileNameFromPath(path: string | null): string | null {
-  const normalized = (path ?? "").trim();
-  if (!normalized) return null;
-  const idx = Math.max(normalized.lastIndexOf("\\"), normalized.lastIndexOf("/"));
-  return idx >= 0 ? normalized.slice(idx + 1) : normalized;
-}
-
-function summarizeUrls(urls: string[]): string {
-  if (!urls.length) return "Direct download";
-  if (urls.length === 1) return urls[0];
-  return `${urls[0]} (+${urls.length - 1} more)`;
-}
-
-function summarizeGroupTargets(jobs: JobRow[], contexts: Record<string, JobContextSummary>): string {
-  const labels = Array.from(
-    new Set(
-      jobs
-        .map((job) => contexts[job.id]?.label?.trim())
-        .filter((value): value is string => Boolean(value)),
-    ),
-  );
-  if (!labels.length) return "-";
-  if (labels.length === 1) return labels[0];
-  if (labels.length === 2) return `${labels[0]} + ${labels[1]}`;
-  return `${labels[0]} + ${labels.length - 1} more`;
-}
-
 export function JobsPage({ visible = true }: { visible?: boolean }) {
   const pageActive = usePageActivity(visible);
   const [jobs, setJobs] = useState<JobRow[]>([]);
@@ -315,6 +439,10 @@ export function JobsPage({ visible = true }: { visible?: boolean }) {
   const [dummySeconds, setDummySeconds] = useState(10);
   const [queuePaused, setQueuePaused] = useState(false);
   const [maxConcurrency, setMaxConcurrency] = useState(4);
+  const [jobSearchQuery, setJobSearchQuery] = useState("");
+  const [jobsFilter, setJobsFilter] = useState<JobsFilter>("all");
+  const [batchDetailsById, setBatchDetailsById] = useState<Record<string, JobBatchDetail>>({});
+  const [selectedJobDetail, setSelectedJobDetail] = useState<JobDetail | null>(null);
 
   async function handlePathOpenFailure(path: string, error: unknown, actionLabel: string) {
     const copied = await copyPathToClipboard(path);
@@ -323,17 +451,27 @@ export function JobsPage({ visible = true }: { visible?: boolean }) {
   }
 
   const refreshJobsSnapshot = useCallback(async () => {
-    const next = await invoke<JobRow[]>("jobs_list", { limit: JOBS_PAGE_REFRESH_LIMIT, offset: 0 });
+    const query = jobSearchQuery.trim();
+    const next = query
+      ? await invoke<JobRow[]>("jobs_search", { query, limit: JOBS_SEARCH_LIMIT })
+      : await invoke<JobRow[]>("jobs_list", { limit: JOBS_PAGE_REFRESH_LIMIT, offset: 0 });
     setJobs(next);
-  }, []);
+    setError((current) => (current?.includes("database is locked") ? null : current));
+  }, [jobSearchQuery]);
 
-  const refreshQueueControls = useCallback(async () => {
+  const refreshQueueControls = useCallback(async function refreshQueueControls() {
     const [control, runtime] = await Promise.all([
-      invoke<JobQueueControlState>("jobs_queue_control_get"),
-      invoke<JobRuntimeSettings>("jobs_runtime_settings_get"),
+      invoke<JobQueueControlState>("jobs_queue_control_get").catch((err) => {
+        console.warn("jobs_queue_control_get failed", err);
+        return null;
+      }),
+      invoke<JobRuntimeSettings>("jobs_runtime_settings_get").catch((err) => {
+        console.warn("jobs_runtime_settings_get failed", err);
+        return null;
+      }),
     ]);
-    setQueuePaused(control.paused);
-    setMaxConcurrency(runtime.max_concurrency);
+    if (control) setQueuePaused(control.paused);
+    if (runtime) setMaxConcurrency(runtime.max_concurrency);
   }, []);
 
   const refreshSubscriptionLookups = useCallback(async () => {
@@ -349,12 +487,15 @@ export function JobsPage({ visible = true }: { visible?: boolean }) {
     );
   }, []);
 
-  const refresh = useCallback(async () => {
-    await Promise.all([
-      refreshJobsSnapshot(),
-      refreshQueueControls(),
-      refreshSubscriptionLookups(),
-    ]);
+  const refresh = useCallback(async function refresh() {
+    try {
+      await refreshJobsSnapshot();
+    } catch (e) {
+      if (!isTransientDatabaseLock(e)) throw e;
+      await sleep(1_500);
+      await refreshJobsSnapshot();
+    }
+    await Promise.all([refreshQueueControls(), refreshSubscriptionLookups()]);
   }, [refreshJobsSnapshot, refreshQueueControls, refreshSubscriptionLookups]);
 
   useEffect(() => {
@@ -449,12 +590,34 @@ export function JobsPage({ visible = true }: { visible?: boolean }) {
     () => jobs.some((job) => isActive(job.status)),
     [jobs],
   );
+  const terminalShownCount = useMemo(
+    () => jobs.filter((job) => isIndividuallyDeletable(job.status)).length,
+    [jobs],
+  );
+
+  const filteredJobs = useMemo(() => {
+    if (jobsFilter === "all") return jobs;
+    return jobs.filter((job) => {
+      if (jobsFilter === "failed") return job.status === "failed" || job.status === "canceled";
+      if (jobsFilter === "auth_blocked") return isAuthBlockedJob(job);
+      if (jobsFilter === "retried") return Boolean(job.retry_of_job_id || job.retry_replacement_job_id);
+      if (jobsFilter === "unretried") {
+        return isRetryable(job.status) && !job.retry_replacement_job_id;
+      }
+      if (jobsFilter === "succeeded_retry") return job.status === "succeeded" && Boolean(job.retry_of_job_id);
+      if (jobsFilter === "missing_title") {
+        return job.job_type === "download_direct_url" && !job.target_title;
+      }
+      if (jobsFilter === "no_output") return job.status === "succeeded" && !job.item_id;
+      return true;
+    });
+  }, [jobs, jobsFilter]);
 
   const groupedJobs = useMemo(() => {
     const byKey = new Map<string, JobGroup>();
     const groups: JobGroup[] = [];
 
-    for (const job of jobs) {
+    for (const job of filteredJobs) {
       const key = job.batch_id ? `batch:${job.batch_id}` : `job:${job.id}`;
       let group = byKey.get(key);
       if (!group) {
@@ -466,87 +629,18 @@ export function JobsPage({ visible = true }: { visible?: boolean }) {
     }
 
     return groups;
-  }, [jobs]);
+  }, [filteredJobs]);
 
   const jobContexts = useMemo(() => {
     const next: Record<string, JobContextSummary> = {};
     for (const job of jobs) {
       const item = job.item_id ? jobItemsById[job.item_id] : undefined;
-      if (item) {
-        const outputs = itemOutputsById[item.id];
-        const outcome = outputs?.terminal_summary?.trim();
-        const detail = [
-          outcome ? `Outcome: ${outcome}` : null,
-          item.source_uri || item.media_path || null,
-        ].filter(Boolean).join(" | ");
-        next[job.id] = {
-          label: item.title || fileNameFromPath(item.media_path) || item.id,
-          detail: detail || null,
-          target_path: item.media_path || null,
-          target_action_label: "Open media folder",
-        };
-        continue;
-      }
-
-      const params = safeParseJobParams(job);
-      if (job.job_type === "download_direct_url") {
-        const urls = stringArray(params?.urls);
-        const outputDir = stringOrNull(params?.output_dir);
-        next[job.id] = {
-          label: summarizeUrls(urls),
-          detail: outputDir ? `Target root: ${outputDir}` : null,
-          target_path: outputDir,
-          target_action_label: outputDir ? "Open target root" : null,
-        };
-        continue;
-      }
-
-      if (job.job_type === "youtube_subscription_refresh_v1") {
-        const subscriptionId = stringOrNull(params?.subscription_id);
-        const subscription = subscriptionId ? youtubeSubscriptionsById[subscriptionId] : undefined;
-        next[job.id] = {
-          label: subscription?.title || "YouTube subscription refresh",
-          detail: subscription?.source_url ?? null,
-          target_path: subscriptionId ?? null,
-          target_action_label: subscriptionId ? "Open subscription target" : null,
-        };
-        continue;
-      }
-
-      if (job.job_type === "download_image_batch") {
-        const urls = stringArray(params?.start_urls);
-        const outputDir = stringOrNull(params?.output_dir);
-        next[job.id] = {
-          label: summarizeUrls(urls),
-          detail: outputDir ? `Target root: ${outputDir}` : null,
-          target_path: outputDir,
-          target_action_label: outputDir ? "Open target root" : null,
-        };
-        continue;
-      }
-
-      if (job.job_type === "import_local") {
-        const path = stringOrNull(params?.path);
-        const reusedItemId = stringOrNull(params?.duplicate_of_item_id);
-        next[job.id] = {
-          label: fileNameFromPath(path) || "Import local file",
-          detail: reusedItemId ? `Reused existing Localization item ${reusedItemId}: ${path}` : path,
-          target_path: path,
-          target_action_label: path ? "Open source" : null,
-        };
-        continue;
-      }
-
-      const instagramSubscriptionId = stringOrNull(params?.instagram_subscription_id);
-      const instagramSubscription = instagramSubscriptionId
-        ? instagramSubscriptionsById[instagramSubscriptionId]
-        : undefined;
-      next[job.id] = {
-        label: instagramSubscription?.title || job.job_type,
-        detail: instagramSubscription?.source_url ?? null,
-        target_path: null,
-        target_action_label: null,
-      };
+      next[job.id] = buildJobContextSummary(job, {
+        item,
+        itemOutputs: item ? itemOutputsById[item.id] : null,
+        youtubeSubscriptionsById,
+        instagramSubscriptionsById,
+      });
     }
     return next;
   }, [instagramSubscriptionsById, itemOutputsById, jobItemsById, jobs, youtubeSubscriptionsById]);
@@ -571,6 +665,43 @@ export function JobsPage({ visible = true }: { visible?: boolean }) {
     });
   }, [groupedJobs]);
 
+  useEffect(() => {
+    if (!pageActive) return;
+    let cancelled = false;
+    const batchIds = Array.from(
+      new Set(
+        groupedJobs
+          .map((group) => group.batchId?.trim())
+          .filter((value): value is string => Boolean(value)),
+      ),
+    ).slice(0, 12);
+    if (!batchIds.length) {
+      setBatchDetailsById({});
+      return () => {
+        cancelled = true;
+      };
+    }
+
+    Promise.all(
+      batchIds.map((batchId) =>
+        invoke<JobBatchDetail>("jobs_batch_detail", { batchId, batch_id: batchId })
+          .then((detail) => [detail.health.batch_id, detail] as const)
+          .catch(() => null),
+      ),
+    ).then((entries) => {
+      if (cancelled) return;
+      const next: Record<string, JobBatchDetail> = {};
+      for (const entry of entries) {
+        if (entry) next[entry[0]] = entry[1];
+      }
+      setBatchDetailsById(next);
+    });
+
+    return () => {
+      cancelled = true;
+    };
+  }, [groupedJobs, pageActive]);
+
   usePollingLoop(
     async () => {
       await refreshJobsSnapshot().catch(() => undefined);
@@ -587,6 +718,69 @@ export function JobsPage({ visible = true }: { visible?: boolean }) {
     setNotice(null);
     try {
       await invoke("jobs_enqueue_dummy", { seconds: dummySeconds });
+      await refresh();
+    } catch (e) {
+      setError(String(e));
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function applyJobSearch(event?: FormEvent<HTMLFormElement>) {
+    event?.preventDefault();
+    setBusy(true);
+    setError(null);
+    setNotice(null);
+    try {
+      await refreshJobsSnapshot();
+    } catch (e) {
+      setError(String(e));
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function clearJobSearch() {
+    setJobSearchQuery("");
+    setBusy(true);
+    setError(null);
+    setNotice(null);
+    try {
+      const next = await invoke<JobRow[]>("jobs_list", { limit: JOBS_PAGE_REFRESH_LIMIT, offset: 0 });
+      setJobs(next);
+    } catch (e) {
+      setError(String(e));
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function deleteTerminalJobsMatchingSearch() {
+    const query = jobSearchQuery.trim();
+    if (!query) {
+      setError("Enter a Jobs search before deleting matching failed/canceled rows.");
+      return;
+    }
+    const ok = await confirm(
+      `Delete failed/canceled job-history rows matching "${query}"? The backend re-runs this search up to ${JOBS_SEARCH_LIMIT} rows. Media files, library items, subscriptions, playlists, and running/queued/succeeded jobs are not touched.`,
+      {
+        title: "Delete matching failed/canceled jobs",
+        kind: "warning",
+      },
+    );
+    if (!ok) return;
+
+    setBusy(true);
+    setError(null);
+    setNotice(null);
+    try {
+      const summary = await invoke<ClearTerminalJobsSearchSummary>("jobs_delete_terminal_matching_search", {
+        query,
+        limit: JOBS_SEARCH_LIMIT,
+      });
+      setNotice(
+        `Deleted ${summary.removed_jobs} failed/canceled job${summary.removed_jobs === 1 ? "" : "s"} matching "${summary.query}".`,
+      );
       await refresh();
     } catch (e) {
       setError(String(e));
@@ -645,7 +839,15 @@ export function JobsPage({ visible = true }: { visible?: boolean }) {
     setError(null);
     setNotice(null);
     try {
-      await invoke("jobs_retry", { jobId: normalized, job_id: normalized });
+      const retried = await invoke<JobRow>("jobs_retry", { jobId: normalized, job_id: normalized });
+      const reusedActive = jobs.some((job) => job.id === retried.id && isActive(job.status));
+      setNotice(
+        reusedActive
+          ? "Retry already has an active queued/running row for this target; using that row instead of adding a duplicate."
+          : queuePaused
+          ? "Retried job. Queue is paused; click Resume all to start queued retry work."
+          : "Retried job.",
+      );
       await refresh();
     } catch (e) {
       setError(String(e));
@@ -655,18 +857,180 @@ export function JobsPage({ visible = true }: { visible?: boolean }) {
   }
 
   async function retryGroup(group: JobGroup) {
+    if (group.batchId) {
+      setBusy(true);
+      setError(null);
+      setNotice(null);
+      try {
+        const dryRun = await invoke<RetryBatchFailedSummary>("jobs_retry_batch_failed_dry_run", {
+          batchId: group.batchId,
+          batch_id: group.batchId,
+        });
+        if (dryRun.matched_retryable_jobs === 0) {
+          setNotice(`No unresolved videos to retry. ${retrySummaryText(dryRun)}`);
+          return;
+        }
+        const ok = await confirm(`Retry failed batch?\n${retrySummaryText(dryRun)}`, {
+          title: "Retry failed batch",
+          kind: dryRun.blocked_jobs ? "warning" : "info",
+        });
+        if (!ok) return;
+        const summary = await invoke<RetryBatchFailedSummary>("jobs_retry_batch_failed", {
+          batchId: group.batchId,
+          batch_id: group.batchId,
+        });
+        setNotice(
+          queuePaused
+            ? `${retrySummaryText(summary)} Queue is paused; click Resume all to start queued retry work.`
+            : retrySummaryText(summary),
+        );
+        await refresh();
+      } catch (e) {
+        setError(String(e));
+      } finally {
+        setBusy(false);
+      }
+      return;
+    }
+
     const retryableIds = group.jobs
-      .filter((job) => job.status === "failed" || job.status === "canceled")
+      .filter((job) => isRetryable(job.status))
       .map((job) => job.id);
     if (!retryableIds.length) return;
     setBusy(true);
     setError(null);
     setNotice(null);
     try {
+      const activeBefore = new Set(jobs.filter((job) => isActive(job.status)).map((job) => job.id));
+      const returnedIds = new Set<string>();
+      let queuedCount = 0;
+      let reusedCount = 0;
       for (const jobId of retryableIds) {
-        await invoke("jobs_retry", { jobId, job_id: jobId });
+        const retried = await invoke<JobRow>("jobs_retry", { jobId, job_id: jobId });
+        if (activeBefore.has(retried.id) || returnedIds.has(retried.id)) {
+          reusedCount += 1;
+        } else {
+          queuedCount += 1;
+        }
+        returnedIds.add(retried.id);
       }
-      setNotice(`Retried ${retryableIds.length} job${retryableIds.length === 1 ? "" : "s"} in batch. Retries were queued sequentially so active work keeps its queue slot.`);
+      const queuedText = queuedCount
+        ? `Queued ${queuedCount} retry${queuedCount === 1 ? "" : "ies"}`
+        : "No new retries queued";
+      const reusedText = reusedCount
+        ? `reused ${reusedCount} already-active target${reusedCount === 1 ? "" : "s"}`
+        : "no duplicate active targets found";
+      setNotice(
+        queuePaused
+          ? `${queuedText}; ${reusedText}. Queue is paused; click Resume all to start queued retry work.`
+          : `${queuedText}; ${reusedText}. Retries were processed sequentially so active work keeps its queue slot.`,
+      );
+      await refresh();
+    } catch (e) {
+      setError(String(e));
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function inspectJob(jobId: string) {
+    setBusy(true);
+    setError(null);
+    try {
+      const detail = await invoke<JobDetail>("jobs_detail", { jobId, job_id: jobId });
+      setSelectedJobDetail(detail);
+    } catch (e) {
+      setError(String(e));
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function repairBatch(batchId: string) {
+    const ok = await confirm("Repair Batch will skip succeeded targets, avoid active duplicates, and retry unresolved failed/canceled targets when auth is not blocked.", {
+      title: "Repair Batch",
+      kind: "warning",
+    });
+    if (!ok) return;
+    setBusy(true);
+    setError(null);
+    setNotice(null);
+    try {
+      const summary = await invoke<RetryBatchFailedSummary>("jobs_repair_batch", { batchId, batch_id: batchId });
+      setNotice(retrySummaryText(summary));
+      await refresh();
+    } catch (e) {
+      setError(String(e));
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function backfillBatchTitles(batchId: string) {
+    setBusy(true);
+    setError(null);
+    setNotice(null);
+    try {
+      const summary = await invoke<JobTitleBackfillSummary>("jobs_backfill_titles_for_batch", {
+        batchId,
+        batch_id: batchId,
+        limit: 500,
+      });
+      setNotice(
+        `Title backfill scanned ${summary.scanned_jobs}, updated ${summary.updated_jobs}, still missing ${summary.missing_titles}.`,
+      );
+      await refresh();
+    } catch (e) {
+      setError(String(e));
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function exportUnresolvedBatch(batchId: string, format: "csv" | "json" | "urls") {
+    setBusy(true);
+    setError(null);
+    setNotice(null);
+    try {
+      const payload = await invoke<JobExportPayload>("jobs_export_unresolved_batch", {
+        batchId,
+        batch_id: batchId,
+        format,
+      });
+      const copied = await copyText(payload.content);
+      setNotice(
+        copied
+          ? `Copied ${payload.item_count} unresolved ${payload.format} item${payload.item_count === 1 ? "" : "s"} to clipboard.`
+          : `Prepared ${payload.item_count} unresolved ${payload.format} item${payload.item_count === 1 ? "" : "s"}, but clipboard copy failed.`,
+      );
+    } catch (e) {
+      setError(String(e));
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function deleteTerminalJob(job: JobRow) {
+    if (!isIndividuallyDeletable(job.status)) return;
+    const ok = await confirm(
+      `Delete failed/canceled job ${job.id.slice(0, 8)} from the queue history? Media files, library items, subscriptions, and batch siblings are not touched.`,
+      {
+        title: "Delete job",
+        kind: "warning",
+      },
+    );
+    if (!ok) return;
+
+    setBusy(true);
+    setError(null);
+    setNotice(null);
+    try {
+      const removed = await invoke<boolean>("jobs_delete_terminal", { jobId: job.id, job_id: job.id });
+      setNotice(
+        removed
+          ? `Deleted job ${job.id.slice(0, 8)} from queue history.`
+          : `Job ${job.id.slice(0, 8)} was already gone.`,
+      );
       await refresh();
     } catch (e) {
       setError(String(e));
@@ -1020,6 +1384,7 @@ export function JobsPage({ visible = true }: { visible?: boolean }) {
     const jobContext = jobContexts[job.id];
     const itemOutputs = job.item_id ? itemOutputsById[job.item_id] : null;
     const canOpenContextTarget = !job.item_id && Boolean(jobContext?.target_action_label);
+    const waitingForResume = queuePaused && job.status === "queued";
 
     return (
       <tr key={job.id} className={nested ? "batch-child-row" : undefined}>
@@ -1027,12 +1392,19 @@ export function JobsPage({ visible = true }: { visible?: boolean }) {
           {nested ? "\u251C\u2500 " : ""}
           {job.status}
           {job.error ? `: ${job.error}` : ""}
+          {waitingForResume ? (
+            <div style={{ color: "#7c2d12", fontSize: 12, lineHeight: 1.3 }}>
+              Waiting for Resume all
+            </div>
+          ) : null}
         </td>
         <td title={job.id}>
           <code>{job.item_id ? job.item_id.slice(0, 8) : job.id.slice(0, 8)}</code>
         </td>
         <td style={{ minWidth: 260, maxWidth: 420 }}>
-          <div style={{ fontWeight: 600 }}>{jobContext?.label ?? "-"}</div>
+          <div style={{ fontWeight: 600, overflowWrap: "anywhere", lineHeight: 1.3 }}>
+            {jobContext?.label ?? "-"}
+          </div>
           {jobContext?.detail ? (
             <div style={{ color: "#4b5563", fontSize: 12, lineHeight: 1.3, wordBreak: "break-word" }}>
               {jobContext.detail}
@@ -1055,10 +1427,17 @@ export function JobsPage({ visible = true }: { visible?: boolean }) {
             </button>
             <button
               type="button"
-              disabled={busy || job.status !== "failed"}
+              disabled={busy || !isRetryable(job.status)}
               onClick={() => retry(job.id)}
             >
               Retry
+            </button>
+            <button
+              type="button"
+              disabled={busy || !isIndividuallyDeletable(job.status)}
+              onClick={() => deleteTerminalJob(job)}
+            >
+              Delete
             </button>
             <details style={{ display: "inline" }}>
               <summary style={{ cursor: "pointer", fontSize: 13 }}>More…</summary>
@@ -1098,6 +1477,27 @@ export function JobsPage({ visible = true }: { visible?: boolean }) {
                 >
                   Open log
                 </button>
+                <button type="button" disabled={busy} onClick={() => inspectJob(job.id)}>
+                  Details
+                </button>
+                <button type="button" onClick={() => copyText(job.id).then((ok) => setNotice(ok ? "Copied job ID." : "Copy failed."))}>
+                  Copy job ID
+                </button>
+                {job.batch_id ? (
+                  <button type="button" onClick={() => copyText(job.batch_id).then((ok) => setNotice(ok ? "Copied batch ID." : "Copy failed."))}>
+                    Copy batch ID
+                  </button>
+                ) : null}
+                {jobContext?.detail ? (
+                  <button type="button" onClick={() => copyText(jobContext.detail).then((ok) => setNotice(ok ? "Copied source context." : "Copy failed."))}>
+                    Copy source
+                  </button>
+                ) : null}
+                {job.error ? (
+                  <button type="button" onClick={() => copyText(job.error).then((ok) => setNotice(ok ? "Copied error." : "Copy failed."))}>
+                    Copy error
+                  </button>
+                ) : null}
                 {canOpenContextTarget ? (
                   <button type="button" disabled={busy} onClick={() => openJobContextTarget(job)}>
                     {jobContext?.target_action_label}
@@ -1225,8 +1625,136 @@ export function JobsPage({ visible = true }: { visible?: boolean }) {
         </div>
       </div>
 
+      {selectedJobDetail ? (
+        <div className="card">
+          <div className="row" style={{ justifyContent: "space-between", marginTop: 0 }}>
+            <h2 style={{ margin: 0 }}>Job detail</h2>
+            <button type="button" onClick={() => setSelectedJobDetail(null)}>
+              Close
+            </button>
+          </div>
+          <div style={{ color: "#4b5563", fontSize: 12, marginTop: 8 }}>
+            Selected <code>{selectedJobDetail.selected_job_id}</code>. Current attempt{" "}
+            <code>{selectedJobDetail.current_attempt_job_id}</code>
+            {selectedJobDetail.batch_id ? (
+              <>
+                . Batch <code>{selectedJobDetail.batch_id}</code>
+              </>
+            ) : null}
+          </div>
+          <div className="table-wrap" style={{ maxHeight: 360, overflow: "auto", marginTop: 12 }}>
+            <table>
+              <thead>
+                <tr>
+                  <th>Truth</th>
+                  <th>IDs</th>
+                  <th>Source</th>
+                  <th>Output</th>
+                  <th>Error</th>
+                  <th>Actions</th>
+                </tr>
+              </thead>
+              <tbody>
+                {selectedJobDetail.attempts.map((attempt) => (
+                  <tr key={attempt.job.id}>
+                    <td>
+                      <strong>{attempt.status_label}</strong>
+                      <div style={{ color: "#4b5563", fontSize: 12 }}>
+                        {attempt.is_current_attempt ? "Current truth" : "Historical attempt"} / {attempt.lineage_kind}
+                      </div>
+                    </td>
+                    <td>
+                      <div>Job <code>{attempt.job.id.slice(0, 8)}</code></div>
+                      {attempt.job.batch_id ? <div>Batch <code>{attempt.job.batch_id.slice(0, 8)}</code></div> : null}
+                      {attempt.job.retry_of_job_id ? <div>Retry of <code>{attempt.job.retry_of_job_id.slice(0, 8)}</code></div> : null}
+                      {attempt.job.retry_replacement_job_id ? <div>Replaced by <code>{attempt.job.retry_replacement_job_id.slice(0, 8)}</code></div> : null}
+                    </td>
+                    <td style={{ minWidth: 260, maxWidth: 460, overflowWrap: "anywhere" }}>
+                      <div style={{ fontWeight: 600 }}>{attempt.source_title || "(missing title)"}</div>
+                      {attempt.source_url ? <div>{attempt.source_url}</div> : null}
+                      {attempt.video_id ? <div>Video ID: <code>{attempt.video_id}</code></div> : null}
+                      {attempt.source_path ? <div>Source path: <code>{attempt.source_path}</code></div> : null}
+                      {attempt.filename ? <div>Filename: <code>{attempt.filename}</code></div> : null}
+                    </td>
+                    <td style={{ minWidth: 220, maxWidth: 360, overflowWrap: "anywhere" }}>
+                      {attempt.output_path ? <div><code>{attempt.output_path}</code></div> : "(no output)"}
+                      {attempt.output_dir ? <div>Target root: <code>{attempt.output_dir}</code></div> : null}
+                    </td>
+                    <td style={{ minWidth: 240, maxWidth: 420, overflowWrap: "anywhere" }}>
+                      {attempt.job.error || "-"}
+                    </td>
+                    <td>
+                      <div className="row" style={{ marginTop: 0 }}>
+                        <button type="button" onClick={() => copyText(attempt.source_url).then((ok) => setNotice(ok ? "Copied URL." : "Copy failed."))}>
+                          Copy URL
+                        </button>
+                        <button type="button" onClick={() => copyText(attempt.video_id).then((ok) => setNotice(ok ? "Copied video ID." : "Copy failed."))}>
+                          Copy video ID
+                        </button>
+                        <button type="button" onClick={() => copyText(attempt.job.id).then((ok) => setNotice(ok ? "Copied job ID." : "Copy failed."))}>
+                          Copy job ID
+                        </button>
+                        <button type="button" onClick={() => copyText(attempt.output_path).then((ok) => setNotice(ok ? "Copied output path." : "Copy failed."))}>
+                          Copy output
+                        </button>
+                        <button type="button" onClick={() => copyText(attempt.job.error).then((ok) => setNotice(ok ? "Copied error." : "Copy failed."))}>
+                          Copy error
+                        </button>
+                      </div>
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        </div>
+      ) : null}
+
       <div className="card">
         <h2>Queue</h2>
+        <form className="row" style={{ marginTop: 0 }} onSubmit={applyJobSearch}>
+          <label style={{ display: "flex", alignItems: "center", gap: 8, minWidth: 360 }}>
+            <span>Find</span>
+            <input
+              type="search"
+              value={jobSearchQuery}
+              onChange={(event) => setJobSearchQuery(event.currentTarget.value)}
+              placeholder="Batch ID, job ID, URL, title, error"
+              style={{ minWidth: 300 }}
+            />
+          </label>
+          <button type="submit" disabled={busy}>
+            Search
+          </button>
+          <button type="button" disabled={busy || !jobSearchQuery.trim()} onClick={clearJobSearch}>
+            Clear
+          </button>
+          <label style={{ display: "flex", alignItems: "center", gap: 8 }}>
+            <span>Filter</span>
+            <select value={jobsFilter} onChange={(event) => setJobsFilter(event.currentTarget.value as JobsFilter)}>
+              <option value="all">All loaded</option>
+              <option value="failed">Failed/canceled</option>
+              <option value="auth_blocked">Blocked by YouTube auth</option>
+              <option value="retried">Retried</option>
+              <option value="unretried">Unretried failed</option>
+              <option value="succeeded_retry">Succeeded on retry</option>
+              <option value="missing_title">Missing title</option>
+              <option value="no_output">No output</option>
+            </select>
+          </label>
+          <button
+            type="button"
+            disabled={busy || !jobSearchQuery.trim() || terminalShownCount === 0}
+            onClick={deleteTerminalJobsMatchingSearch}
+          >
+            Delete failed/canceled shown ({terminalShownCount})
+          </button>
+        </form>
+        <div style={{ color: "#4b5563", marginTop: 6, fontSize: 12 }}>
+          {jobSearchQuery.trim()
+            ? `Showing up to ${JOBS_SEARCH_LIMIT} matching jobs; filter applies to loaded rows.`
+            : `Showing latest ${JOBS_PAGE_REFRESH_LIMIT} jobs; filter applies to loaded rows.`}
+        </div>
         <div className="table-wrap">
           <table>
             <thead>
@@ -1254,8 +1782,14 @@ export function JobsPage({ visible = true }: { visible?: boolean }) {
                   const progress = summarizeGroupProgress(group.jobs);
                   const activeCount = group.jobs.filter((job) => isActive(job.status)).length;
                   const retryableCount = group.jobs.filter(
-                    (job) => job.status === "failed" || job.status === "canceled",
+                    (job) => isRetryable(job.status),
                   ).length;
+                  const canonicalDetail = group.batchId ? batchDetailsById[group.batchId] : null;
+                  const health = canonicalDetail?.health ?? null;
+                  const displayedStatus = health ? summarizeBatchTargetStatus(health) : status;
+                  const displayedProgress = health ? summarizeBatchTargetProgress(health) : progress;
+                  const batchRetryableCount = health ? health.retryable_targets : retryableCount;
+                  const waitingForResume = queuePaused && status === "queued" && activeCount > 0;
                   const finishedCount = group.jobs.filter(
                     (job) =>
                       job.status === "succeeded" ||
@@ -1268,19 +1802,44 @@ export function JobsPage({ visible = true }: { visible?: boolean }) {
                     <Fragment key={group.key}>
                       <tr className="batch-row">
                         <td>
-                          {status} ({finishedCount}/{group.jobs.length} done)
+                          {displayedStatus}{" "}
+                          {health
+                            ? `(${health.succeeded_targets}/${health.canonical_targets} videos downloaded)`
+                            : `(${finishedCount}/${group.jobs.length} done)`}
+                          {waitingForResume ? (
+                            <div style={{ color: "#7c2d12", fontSize: 12, lineHeight: 1.3 }}>
+                              Waiting for Resume all
+                            </div>
+                          ) : null}
                         </td>
                         <td title={group.batchId ?? group.key}>
                           <code>{(group.batchId ?? group.key).slice(0, 8)}</code>
                         </td>
                         <td style={{ minWidth: 260, maxWidth: 420 }}>
-                          <div style={{ fontWeight: 600 }}>{summarizeGroupTargets(group.jobs, jobContexts)}</div>
+                          <div style={{ fontWeight: 600, overflowWrap: "anywhere", lineHeight: 1.3 }}>
+                            {summarizeJobGroupTargets(group.jobs, jobContexts)}
+                          </div>
                           <div style={{ color: "#4b5563", fontSize: 12 }}>
-                            {group.jobs.length} job{group.jobs.length === 1 ? "" : "s"} in this batch
+                            {health
+                              ? batchTargetHealthText(health)
+                              : `${group.jobs.length} loaded job${group.jobs.length === 1 ? "" : "s"} in this batch`}
+                          </div>
+                          {health ? (
+                            <div style={{ color: "#4b5563", fontSize: 12 }}>
+                              {batchAttemptHealthText(health)}. Loaded preview: {group.jobs.length}. Retryable unresolved videos: {health.retryable_targets}.
+                            </div>
+                          ) : null}
+                          {health ? (
+                            <div style={{ color: "#4b5563", fontSize: 12 }}>
+                              Attempt metadata: missing titles {health.missing_title_jobs}; no-output attempts {health.no_output_jobs}. Failed attempts can be historical after a video downloaded.
+                            </div>
+                          ) : null}
+                          <div style={{ color: "#4b5563", fontSize: 12 }}>
+                            Canonical batch ID: <code>{group.batchId ?? "-"}</code>
                           </div>
                         </td>
                         <td>{summarizeGroupType(group.jobs)}</td>
-                        <td>{Math.round(progress * 100)}%</td>
+                        <td>{Math.round(displayedProgress * 100)}%</td>
                         <td>{formatTs(summarizeCreatedTs(group.jobs))}</td>
                         <td>{formatTs(summarizeStartedTs(group.jobs))}</td>
                         <td>{formatTs(summarizeFinishedTs(group.jobs))}</td>
@@ -1307,11 +1866,27 @@ export function JobsPage({ visible = true }: { visible?: boolean }) {
                             </button>
                             <button
                               type="button"
-                              disabled={busy || retryableCount === 0}
+                              disabled={busy || (group.batchId ? batchRetryableCount === 0 : retryableCount === 0)}
                               onClick={() => retryGroup(group)}
                             >
-                              Retry failed ({retryableCount})
+                              {group.batchId ? `Retry unresolved (${batchRetryableCount})` : `Retry failed (${retryableCount})`}
                             </button>
+                            {group.batchId ? (
+                              <>
+                                <button type="button" disabled={busy} onClick={() => repairBatch(group.batchId ?? "")}>
+                                  Repair batch
+                                </button>
+                                <button type="button" disabled={busy} onClick={() => backfillBatchTitles(group.batchId ?? "")}>
+                                  Backfill titles
+                                </button>
+                                <button type="button" disabled={busy} onClick={() => exportUnresolvedBatch(group.batchId ?? "", "csv")}>
+                                  Export unresolved CSV
+                                </button>
+                                <button type="button" disabled={busy} onClick={() => exportUnresolvedBatch(group.batchId ?? "", "urls")}>
+                                  Copy unresolved URLs
+                                </button>
+                              </>
+                            ) : null}
                             <button
                               type="button"
                               disabled={!groupLogPath}

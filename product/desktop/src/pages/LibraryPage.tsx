@@ -4,6 +4,11 @@ import { confirm, open, save } from "@tauri-apps/plugin-dialog";
 import { copyPathToClipboard, openPathBestEffort, revealPath } from "../lib/pathOpener";
 import { safeLocalStorageGet, safeLocalStorageSet } from "../lib/persist";
 import {
+  filterYoutubeSingleVideoItems,
+  inferArchiverMediaKind,
+  isSingleVideoLibraryItem,
+} from "../lib/archiverRuntime";
+import {
   featureRootStatus,
   refreshSharedDownloadDirStatus,
   useSharedDownloadDirStatus,
@@ -27,12 +32,13 @@ type LibraryItem = {
 };
 
 const thumbnailDataUrlCache = new Map<string, string>();
+const DEFAULT_BROWSER_COOKIE_SOURCE = "firefox";
 const browserCookieSourceOptions = [
   { value: "", label: "Choose browser" },
+  { value: "firefox", label: "Firefox (default)" },
   { value: "chrome", label: "Chrome" },
-  { value: "firefox", label: "Firefox" },
-  { value: "opera", label: "Opera" },
   { value: "edge", label: "Edge" },
+  { value: "opera", label: "Opera" },
 ];
 
 function ThumbnailPreview({
@@ -123,14 +129,7 @@ function formatDuration(ms: number | null): string {
 }
 
 function inferMediaKind(item: LibraryItem): "video" | "image" | "audio" | "other" {
-  const path = (item.media_path ?? "").trim().toLowerCase();
-  const imageExts = [".jpg", ".jpeg", ".png", ".webp", ".gif", ".bmp"];
-  const audioExts = [".mp3", ".wav", ".flac", ".aac", ".m4a", ".ogg"];
-  if (imageExts.some((ext) => path.endsWith(ext))) return "image";
-  if (audioExts.some((ext) => path.endsWith(ext))) return "audio";
-  if (item.width || item.height || item.video_codec) return "video";
-  if (item.audio_codec) return "audio";
-  return "other";
+  return inferArchiverMediaKind(item);
 }
 
 function isInstagramLibraryItem(item: LibraryItem): boolean {
@@ -335,6 +334,12 @@ type YoutubeSubscriptionUpsert = {
   refresh_interval_minutes: number | null;
 };
 
+type YoutubeSubscriptionOutputPreview = {
+  path: string;
+  exists: boolean;
+  uses_output_override: boolean;
+};
+
 type YoutubeSubscriptionGroupRow = {
   id: string;
   name: string;
@@ -364,6 +369,23 @@ type VideoLibraryUpsert = {
   name: string;
   root_path: string;
   set_active: boolean;
+};
+
+type VideoLibraryBundleSummary = {
+  path: string;
+  libraries: number;
+  youtube_subscriptions: number;
+  library_items: number;
+};
+
+type VideoLibraryMetadataTransferSummary = {
+  source_library_id: string;
+  target_library_id: string;
+  mode: string;
+  items_matched: number;
+  items_copied: number;
+  items_moved: number;
+  subscriptions_moved: number;
 };
 
 type YoutubeSubscriptionArchiveSeedSummary = {
@@ -574,6 +596,7 @@ export function LibraryPage({ mode = "all", visible = true }: LibraryPageProps) 
   const [videoLibraries, setVideoLibraries] = useState<VideoLibraryRow[]>([]);
   const [videoLibraryName, setVideoLibraryName] = useState("");
   const [videoLibraryRoot, setVideoLibraryRoot] = useState("");
+  const [videoLibraryTransferTargetId, setVideoLibraryTransferTargetId] = useState("");
   const [subscriptions, setSubscriptions] = useState<YoutubeSubscriptionRow[]>([]);
   const [instagramSubscriptions, setInstagramSubscriptions] = useState<InstagramSubscriptionRow[]>(
     [],
@@ -602,15 +625,17 @@ export function LibraryPage({ mode = "all", visible = true }: LibraryPageProps) 
     return "auto";
   });
   const [urlBatchText, setUrlBatchText] = useState("");
-  const [urlBatchAuthCookie, setUrlBatchAuthCookie] = useState("");
   const [urlBatchOutputDir, setUrlBatchOutputDir] = useState(() => {
     return safeLocalStorageGet("voxvulgi.v1.library.url_batch_output_dir") ?? "";
   });
-  const [urlBatchUseBrowserCookies, setUrlBatchUseBrowserCookies] = useState(() => {
-    return safeLocalStorageGet("voxvulgi.v1.library.url_batch_use_browser_cookies") === "1";
+  const [youtubeSingleHistorySearch, setYoutubeSingleHistorySearch] = useState(() => {
+    return safeLocalStorageGet("voxvulgi.v1.library.youtube_single_history_search") ?? "";
   });
-  const [urlBatchBrowserCookieSource, setUrlBatchBrowserCookieSource] = useState(() => {
-    return safeLocalStorageGet("voxvulgi.v1.library.url_batch_browser_cookie_source") ?? "";
+  const [youtubeSingleHistoryDirection, setYoutubeSingleHistoryDirection] = useState<
+    "desc" | "asc"
+  >(() => {
+    const raw = safeLocalStorageGet("voxvulgi.v1.library.youtube_single_history_direction");
+    return raw === "asc" ? "asc" : "desc";
   });
   const [instagramBatchText, setInstagramBatchText] = useState("");
   const [instagramBatchAuthCookie, setInstagramBatchAuthCookie] = useState("");
@@ -621,7 +646,10 @@ export function LibraryPage({ mode = "all", visible = true }: LibraryPageProps) 
     return safeLocalStorageGet("voxvulgi.v1.library.instagram_batch_use_browser_cookies") === "1";
   });
   const [instagramBatchBrowserCookieSource, setInstagramBatchBrowserCookieSource] = useState(() => {
-    return safeLocalStorageGet("voxvulgi.v1.library.instagram_batch_browser_cookie_source") ?? "";
+    return (
+      safeLocalStorageGet("voxvulgi.v1.library.instagram_batch_browser_cookie_source") ||
+      DEFAULT_BROWSER_COOKIE_SOURCE
+    );
   });
   const [instagramSubscriptionEditId, setInstagramSubscriptionEditId] = useState<string | null>(
     null,
@@ -652,7 +680,7 @@ export function LibraryPage({ mode = "all", visible = true }: LibraryPageProps) 
       return (
         safeLocalStorageGet(
           "voxvulgi.v1.library.instagram_subscription_browser_cookie_source",
-        ) ?? ""
+        ) || DEFAULT_BROWSER_COOKIE_SOURCE
       );
     });
   const [instagramSubscriptionAuthSessionInput, setInstagramSubscriptionAuthSessionInput] =
@@ -719,15 +747,6 @@ export function LibraryPage({ mode = "all", visible = true }: LibraryPageProps) 
       safeLocalStorageGet("voxvulgi.v1.library.youtube_subscription_output_dir_override") ?? ""
     );
   });
-  const [subscriptionUseBrowserCookies, setSubscriptionUseBrowserCookies] = useState(() => {
-    return safeLocalStorageGet("voxvulgi.v1.library.youtube_subscription_use_browser_cookies") === "1";
-  });
-  const [subscriptionBrowserCookieSource, setSubscriptionBrowserCookieSource] = useState(() => {
-    return safeLocalStorageGet("voxvulgi.v1.library.youtube_subscription_browser_cookie_source") ?? "";
-  });
-  const [subscriptionAuthSessionInput, setSubscriptionAuthSessionInput] = useState("");
-  const [subscriptionClearAuthSession, setSubscriptionClearAuthSession] = useState(false);
-  const [subscriptionAuthSessionConfigured, setSubscriptionAuthSessionConfigured] = useState(false);
   const [subscriptionActive, setSubscriptionActive] = useState(() => {
     const raw = safeLocalStorageGet("voxvulgi.v1.library.youtube_subscription_active");
     return raw === null ? true : raw === "1";
@@ -754,7 +773,7 @@ export function LibraryPage({ mode = "all", visible = true }: LibraryPageProps) 
   const [groupName, setGroupName] = useState("");
   const [presetEditId, setPresetEditId] = useState<string | null>(null);
   const [presetTitle, setPresetTitle] = useState("");
-  const [presetPathTemplate, setPresetPathTemplate] = useState("{provider}/{channel}");
+  const [presetPathTemplate, setPresetPathTemplate] = useState("{channel}");
   const [presetFilenameTemplate, setPresetFilenameTemplate] = useState("{title}_{id}");
   const [presetFormatPreference, setPresetFormatPreference] = useState(
     "bv*[ext=mp4]+ba[ext=m4a]/b[ext=mp4]/bv*+ba/b",
@@ -834,6 +853,9 @@ export function LibraryPage({ mode = "all", visible = true }: LibraryPageProps) 
     const raw = safeLocalStorageGet("voxvulgi.v1.library.media_source_filter");
     if (raw === "youtube" || raw === "instagram" || raw === "local") return raw;
     return "all";
+  });
+  const [mediaLibrarySingleVideoOnly, setMediaLibrarySingleVideoOnly] = useState(() => {
+    return safeLocalStorageGet("voxvulgi.v1.library.media_single_video_only") === "1";
   });
   const [mediaLibrarySortBy, setMediaLibrarySortBy] = useState<"date" | "title">(() => {
     const raw = safeLocalStorageGet("voxvulgi.v1.library.media_sort_by");
@@ -930,6 +952,10 @@ export function LibraryPage({ mode = "all", visible = true }: LibraryPageProps) 
     () => videoLibraries.find((library) => library.selected) ?? videoLibraries[0] ?? null,
     [videoLibraries],
   );
+  const otherVideoLibraries = useMemo(
+    () => videoLibraries.filter((library) => library.id !== activeVideoLibrary?.id),
+    [activeVideoLibrary, videoLibraries],
+  );
   const defaultSubscriptionDownloadsDir = useMemo(
     () => activeVideoLibrary?.root_path || defaultVideoDownloadsDir,
     [activeVideoLibrary, defaultVideoDownloadsDir],
@@ -952,6 +978,9 @@ export function LibraryPage({ mode = "all", visible = true }: LibraryPageProps) 
     const filtered = items.filter((item) => {
       const mediaKind = inferMediaKind(item);
       if (mediaLibraryTypeFilter !== "all" && mediaKind !== mediaLibraryTypeFilter) {
+        return false;
+      }
+      if (mediaLibrarySingleVideoOnly && !isSingleVideoLibraryItem(item, effectiveDownloadRoot)) {
         return false;
       }
       if (mediaLibrarySourceFilter !== "all") {
@@ -985,10 +1014,22 @@ export function LibraryPage({ mode = "all", visible = true }: LibraryPageProps) 
     items,
     mediaLibrarySearch,
     mediaLibraryTypeFilter,
+    mediaLibrarySingleVideoOnly,
     mediaLibrarySourceFilter,
     mediaLibrarySortBy,
     mediaLibrarySortDirection,
+    effectiveDownloadRoot,
   ]);
+  const youtubeSingleVideoItems = useMemo(
+    () =>
+      filterYoutubeSingleVideoItems(
+        items,
+        youtubeSingleHistorySearch,
+        effectiveDownloadRoot,
+        youtubeSingleHistoryDirection,
+      ),
+    [effectiveDownloadRoot, items, youtubeSingleHistoryDirection, youtubeSingleHistorySearch],
+  );
   const mediaLibraryRows = useMemo(
     () =>
       filteredMediaItems.map((item) => ({
@@ -1065,7 +1106,8 @@ export function LibraryPage({ mode = "all", visible = true }: LibraryPageProps) 
 
   const refresh = useCallback(async () => {
     setError(null);
-    const wantsItems = showMediaLibrary || showInstagramArchive;
+    const wantsYoutubeSingleHistory = showVideoIngest && videoArchiverTab === "youtube_single";
+    const wantsItems = showMediaLibrary || showInstagramArchive || wantsYoutubeSingleHistory;
     const wantsVideo = showVideoIngest;
     const wantsInstagram = showInstagramArchive;
     const wantsBatchRules = showImportControls;
@@ -1078,7 +1120,9 @@ export function LibraryPage({ mode = "all", visible = true }: LibraryPageProps) 
       nextVideoLibraries,
       nextInstagramSubscriptions,
     ] = await Promise.all([
-      wantsItems
+      wantsYoutubeSingleHistory && !showMediaLibrary && !showInstagramArchive
+        ? invoke<LibraryItem[]>("library_list_youtube_video_candidates")
+        : wantsItems
         ? invoke<LibraryItem[]>("library_list", {
             limit: wantsInstagram && !showMediaLibrary ? 160 : libraryPageSize,
             offset: 0,
@@ -1105,7 +1149,7 @@ export function LibraryPage({ mode = "all", visible = true }: LibraryPageProps) 
     ]);
     setItems(nextItems);
     setItemsOffset(nextItems.length);
-    setItemsHasMore(!wantsInstagram && nextItems.length >= libraryPageSize);
+    setItemsHasMore(showMediaLibrary && !wantsInstagram && nextItems.length >= libraryPageSize);
     setItemsLoadingMore(false);
     if (nextRules) setBatchRules(nextRules);
     setSubscriptions(nextSubscriptions);
@@ -1123,6 +1167,7 @@ export function LibraryPage({ mode = "all", visible = true }: LibraryPageProps) 
     showInstagramArchive,
     showMediaLibrary,
     showVideoIngest,
+    videoArchiverTab,
   ]);
 
   const loadMoreItems = useCallback(async () => {
@@ -1262,6 +1307,138 @@ export function LibraryPage({ mode = "all", visible = true }: LibraryPageProps) 
     }
   }
 
+  async function exportVideoLibraryBundle() {
+    setBusy(true);
+    setError(null);
+    setNotice(null);
+    try {
+      const out = await save({
+        title: "Export video library bundle",
+        defaultPath: "video_library_bundle.json",
+        filters: [{ name: "JSON", extensions: ["json"] }],
+      });
+      if (!out || typeof out !== "string") return;
+      const summary = await invoke<VideoLibraryBundleSummary>("video_library_bundle_export", {
+        outPath: out,
+      });
+      setNotice(
+        `Exported ${summary.libraries} libraries, ${summary.youtube_subscriptions} subscriptions, and ${summary.library_items} media metadata rows.`,
+      );
+    } catch (e) {
+      setError(String(e));
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function importVideoLibraryBundle() {
+    setBusy(true);
+    setError(null);
+    setNotice(null);
+    try {
+      const selected = await open({
+        multiple: false,
+        directory: false,
+        title: "Import video library bundle",
+        filters: [{ name: "JSON", extensions: ["json"] }],
+      });
+      if (!selected || typeof selected !== "string") return;
+      const summary = await invoke<VideoLibraryBundleSummary>("video_library_bundle_import", {
+        inPath: selected,
+      });
+      setNotice(
+        `Imported ${summary.libraries} libraries, ${summary.youtube_subscriptions} subscriptions, and ${summary.library_items} media metadata rows.`,
+      );
+      await refresh();
+    } catch (e) {
+      setError(String(e));
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function transferVideoLibraryMetadata(
+    mode: "copy" | "move",
+    includeItems: boolean,
+    includeSubscriptions: boolean,
+  ) {
+    setBusy(true);
+    setError(null);
+    setNotice(null);
+    try {
+      if (!activeVideoLibrary) throw new Error("Choose an active source library first.");
+      const target = otherVideoLibraries.find(
+        (library) => library.id === videoLibraryTransferTargetId,
+      );
+      if (!target) throw new Error("Choose a different target library first.");
+      const ok = await confirm(
+        `This will ${mode} VoxVulgi metadata from "${activeVideoLibrary.name}" to "${target.name}". Media files are not moved, copied, deleted, or overwritten.`,
+        {
+          title: mode === "copy" ? "Copy library metadata" : "Move library metadata",
+          kind: mode === "copy" ? "info" : "warning",
+          okLabel: mode === "copy" ? "Copy metadata" : "Move metadata",
+          cancelLabel: "Cancel",
+        },
+      );
+      if (!ok) return;
+      const summary = await invoke<VideoLibraryMetadataTransferSummary>(
+        "video_library_metadata_transfer",
+        {
+          request: {
+            source_library_id: activeVideoLibrary.id,
+            target_library_id: target.id,
+            mode,
+            include_items: includeItems,
+            include_subscriptions: includeSubscriptions,
+          },
+        },
+      );
+      setNotice(
+        `Library metadata ${mode} complete: ${summary.items_copied} copied, ${summary.items_moved} moved, ${summary.subscriptions_moved} subscriptions moved.`,
+      );
+      await refresh();
+    } catch (e) {
+      setError(String(e));
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function ensureActiveVideoLibraryForUrlBatch(): Promise<boolean> {
+    if (urlBatchOutputDir.trim()) return true;
+    if (activeVideoLibrary?.exists) return true;
+    const missingLabel = activeVideoLibrary
+      ? `${activeVideoLibrary.name}\n${activeVideoLibrary.root_path}`
+      : "No active video library is configured.";
+    const ok = await confirm(
+      `The active video library is unavailable:\n\n${missingLabel}\n\nSelect an available folder to create or reconnect a temporary active library. The missing NAS library stays registered so you can switch back when it is online.`,
+      {
+        title: "Active library unavailable",
+        kind: "warning",
+        okLabel: "Select library",
+        cancelLabel: "Cancel queue",
+      },
+    );
+    if (!ok) return false;
+    const selected = await open({
+      multiple: false,
+      directory: true,
+      title: "Select available video library root",
+    });
+    if (!selected || typeof selected !== "string") return false;
+    const saved = await invoke<VideoLibraryRow>("video_libraries_upsert", {
+      library: {
+        id: null,
+        name: fileName(selected) || "Temporary video library",
+        root_path: selected,
+        set_active: true,
+      },
+    });
+    setNotice(`Active video library: ${saved.name}`);
+    await refresh();
+    return true;
+  }
+
   const chooseImageOutputDir = useCallback(async () => {
     setError(null);
     setNotice(null);
@@ -1364,6 +1541,16 @@ export function LibraryPage({ mode = "all", visible = true }: LibraryPageProps) 
   }, [visible, showVideoIngest, refreshActiveRefreshIds, refreshArchiveStats]);
 
   useEffect(() => {
+    if (!otherVideoLibraries.length) {
+      if (videoLibraryTransferTargetId) setVideoLibraryTransferTargetId("");
+      return;
+    }
+    if (!otherVideoLibraries.some((library) => library.id === videoLibraryTransferTargetId)) {
+      setVideoLibraryTransferTargetId(otherVideoLibraries[0].id);
+    }
+  }, [otherVideoLibraries, videoLibraryTransferTargetId]);
+
+  useEffect(() => {
     safeLocalStorageSet("voxvulgi.v1.settings.asr_lang", asrLang);
   }, [asrLang]);
 
@@ -1385,17 +1572,17 @@ export function LibraryPage({ mode = "all", visible = true }: LibraryPageProps) 
 
   useEffect(() => {
     safeLocalStorageSet(
-      "voxvulgi.v1.library.url_batch_use_browser_cookies",
-      urlBatchUseBrowserCookies ? "1" : "0",
+      "voxvulgi.v1.library.youtube_single_history_search",
+      youtubeSingleHistorySearch,
     );
-  }, [urlBatchUseBrowserCookies]);
+  }, [youtubeSingleHistorySearch]);
 
   useEffect(() => {
     safeLocalStorageSet(
-      "voxvulgi.v1.library.url_batch_browser_cookie_source",
-      urlBatchBrowserCookieSource,
+      "voxvulgi.v1.library.youtube_single_history_direction",
+      youtubeSingleHistoryDirection,
     );
-  }, [urlBatchBrowserCookieSource]);
+  }, [youtubeSingleHistoryDirection]);
 
   useEffect(() => {
     safeLocalStorageSet("voxvulgi.v1.library.instagram_batch_output_dir", instagramBatchOutputDir);
@@ -1517,20 +1704,6 @@ export function LibraryPage({ mode = "all", visible = true }: LibraryPageProps) 
 
   useEffect(() => {
     safeLocalStorageSet(
-      "voxvulgi.v1.library.youtube_subscription_use_browser_cookies",
-      subscriptionUseBrowserCookies ? "1" : "0",
-    );
-  }, [subscriptionUseBrowserCookies]);
-
-  useEffect(() => {
-    safeLocalStorageSet(
-      "voxvulgi.v1.library.youtube_subscription_browser_cookie_source",
-      subscriptionBrowserCookieSource,
-    );
-  }, [subscriptionBrowserCookieSource]);
-
-  useEffect(() => {
-    safeLocalStorageSet(
       "voxvulgi.v1.library.youtube_subscription_active",
       subscriptionActive ? "1" : "0",
     );
@@ -1579,6 +1752,13 @@ export function LibraryPage({ mode = "all", visible = true }: LibraryPageProps) 
   useEffect(() => {
     safeLocalStorageSet("voxvulgi.v1.library.media_source_filter", mediaLibrarySourceFilter);
   }, [mediaLibrarySourceFilter]);
+
+  useEffect(() => {
+    safeLocalStorageSet(
+      "voxvulgi.v1.library.media_single_video_only",
+      mediaLibrarySingleVideoOnly ? "1" : "0",
+    );
+  }, [mediaLibrarySingleVideoOnly]);
 
   useEffect(() => {
     safeLocalStorageSet("voxvulgi.v1.library.media_sort_by", mediaLibrarySortBy);
@@ -1698,24 +1878,21 @@ export function LibraryPage({ mode = "all", visible = true }: LibraryPageProps) 
       }
       await (downloadDir ? Promise.resolve(downloadDir) : refreshSharedDownloadDirStatus());
       if (!activeVideoLibrary?.exists && !urlBatchOutputDir.trim()) {
-        throw new Error(
-          "Active video library is missing. Load the NAS/local library again, choose another active library, or set a batch output override here.",
-        );
+        const ready = await ensureActiveVideoLibraryForUrlBatch();
+        if (!ready) {
+          setNotice("Queue cancelled. Select an available video library or set a batch output override.");
+          return;
+        }
       }
-      if (urlBatchUseBrowserCookies && !urlBatchBrowserCookieSource.trim()) {
-        throw new Error("Choose Chrome, Firefox, Opera, or Edge before using browser cookies.");
-      }
-
       const queued = await invoke<Array<{ id: string }>>("jobs_enqueue_download_batch", {
         urls,
-        authCookie: urlBatchAuthCookie.trim() || null,
+        authCookie: null,
         outputDir: urlBatchOutputDir.trim() || null,
-        useBrowserCookies: urlBatchUseBrowserCookies,
-        browserCookieSource: urlBatchUseBrowserCookies ? urlBatchBrowserCookieSource.trim() : null,
+        useBrowserCookies: false,
+        browserCookieSource: null,
         presetId: urlBatchPresetId.trim() || null,
       });
       setUrlBatchText("");
-      setUrlBatchAuthCookie("");
       setNotice(`Queued ${queued.length} download job${queued.length === 1 ? "" : "s"}.`);
       await refresh();
     } catch (e) {
@@ -1747,18 +1924,16 @@ export function LibraryPage({ mode = "all", visible = true }: LibraryPageProps) 
           "Instagram Archiver root is missing. Open Options to choose an existing folder or set an Instagram batch output override here.",
         );
       }
-      if (instagramBatchUseBrowserCookies && !instagramBatchBrowserCookieSource.trim()) {
-        throw new Error("Choose Chrome, Firefox, Opera, or Edge before using browser cookies.");
-      }
+      const effectiveBrowserCookieSource = instagramBatchUseBrowserCookies
+        ? instagramBatchBrowserCookieSource.trim() || DEFAULT_BROWSER_COOKIE_SOURCE
+        : null;
 
       const queued = await invoke<Array<{ id: string }>>("jobs_enqueue_instagram_batch", {
         urls,
         authCookie: instagramBatchAuthCookie.trim() || null,
         outputDir: instagramBatchOutputDir.trim() || null,
         useBrowserCookies: instagramBatchUseBrowserCookies,
-        browserCookieSource: instagramBatchUseBrowserCookies
-          ? instagramBatchBrowserCookieSource.trim()
-          : null,
+        browserCookieSource: effectiveBrowserCookieSource,
       });
 
       setInstagramBatchText("");
@@ -1885,11 +2060,6 @@ export function LibraryPage({ mode = "all", visible = true }: LibraryPageProps) 
     setSubscriptionUrl("");
     setSubscriptionFolderMap("");
     setSubscriptionOutputDirOverride("");
-    setSubscriptionUseBrowserCookies(false);
-    setSubscriptionBrowserCookieSource("");
-    setSubscriptionAuthSessionInput("");
-    setSubscriptionClearAuthSession(false);
-    setSubscriptionAuthSessionConfigured(false);
     setSubscriptionActive(true);
     setSubscriptionPresetId("");
     setSubscriptionLibraryId(activeVideoLibrary?.id ?? "");
@@ -1903,11 +2073,6 @@ export function LibraryPage({ mode = "all", visible = true }: LibraryPageProps) 
     setSubscriptionUrl(sub.source_url);
     setSubscriptionFolderMap(sub.folder_map);
     setSubscriptionOutputDirOverride(sub.output_dir_override ?? "");
-    setSubscriptionUseBrowserCookies(sub.use_browser_cookies);
-    setSubscriptionBrowserCookieSource(sub.browser_cookie_source ?? "");
-    setSubscriptionAuthSessionInput("");
-    setSubscriptionClearAuthSession(false);
-    setSubscriptionAuthSessionConfigured(sub.auth_session_configured);
     setSubscriptionActive(sub.active);
     setSubscriptionPresetId(sub.preset_id ?? "");
     setSubscriptionLibraryId(sub.library_id ?? activeVideoLibrary?.id ?? "");
@@ -1927,12 +2092,10 @@ export function LibraryPage({ mode = "all", visible = true }: LibraryPageProps) 
         folder_map: subscriptionFolderMap.trim() || null,
         output_dir_override: subscriptionOutputDirOverride.trim() || null,
         library_id: subscriptionLibraryId || activeVideoLibrary?.id || null,
-        use_browser_cookies: subscriptionUseBrowserCookies,
-        browser_cookie_source: subscriptionUseBrowserCookies
-          ? subscriptionBrowserCookieSource.trim() || null
-          : null,
-        auth_session_input: subscriptionAuthSessionInput.trim() || null,
-        clear_auth_session: subscriptionClearAuthSession,
+        use_browser_cookies: false,
+        browser_cookie_source: null,
+        auth_session_input: null,
+        clear_auth_session: false,
         active: subscriptionActive,
         preset_id: subscriptionPresetId.trim() || null,
         group_ids: subscriptionGroupIds,
@@ -1946,8 +2109,37 @@ export function LibraryPage({ mode = "all", visible = true }: LibraryPageProps) 
       };
       if (!payload.title) throw new Error("Subscription title is required.");
       if (!payload.source_url) throw new Error("Subscription URL is required.");
-      if (payload.use_browser_cookies && !payload.browser_cookie_source) {
-        throw new Error("Choose Chrome, Firefox, Opera, or Edge before using browser cookies.");
+
+      let mergePreview: YoutubeSubscriptionOutputPreview | null = null;
+      if (!subscriptionEditId && !payload.output_dir_override) {
+        const preview = await invoke<YoutubeSubscriptionOutputPreview>(
+          "youtube_subscriptions_preview_output_dir",
+          {
+            request: {
+              title: payload.title,
+              source_url: payload.source_url,
+              folder_map: payload.folder_map,
+              output_dir_override: payload.output_dir_override,
+              library_id: payload.library_id,
+            },
+          },
+        );
+        if (preview.exists && !preview.uses_output_override) {
+          const ok = await confirm(
+            `A folder already exists for this channel or playlist:\n\n${preview.path}\n\nMerge this saved subscription with that folder? VoxVulgi will keep the files in place and seed its download archive from filenames it can recognize.`,
+            {
+              title: "Merge with existing folder",
+              kind: "warning",
+              okLabel: "Merge",
+              cancelLabel: "Cancel save",
+            },
+          );
+          if (!ok) {
+            setNotice("Subscription not saved.");
+            return;
+          }
+          mergePreview = preview;
+        }
       }
 
       const saved = await invoke<YoutubeSubscriptionRow>("youtube_subscriptions_upsert", {
@@ -1960,7 +2152,25 @@ export function LibraryPage({ mode = "all", visible = true }: LibraryPageProps) 
           libraryId: subscriptionLibraryId || activeVideoLibrary?.id || null,
         });
       }
-      setNotice(`Saved subscription: ${finalSaved.title}`);
+      let mergeNotice = "";
+      if (mergePreview) {
+        try {
+          const summary = await invoke<YoutubeSubscriptionArchiveSeedSummary>(
+            "youtube_subscriptions_seed_archive_scan",
+            {
+              scanDir: mergePreview.path,
+              subscriptionId: finalSaved.id,
+            },
+          );
+          mergeNotice =
+            summary.inferred_ids > 0
+              ? ` Merged existing folder and seeded ${summary.appended_ids} archive ID(s).`
+              : " Merged existing folder; no YouTube IDs were inferable from existing filenames.";
+        } catch (seedError) {
+          mergeNotice = ` Existing folder was attached, but archive seeding failed: ${String(seedError)}`;
+        }
+      }
+      setNotice(`Saved subscription: ${finalSaved.title}.${mergeNotice}`);
       resetSubscriptionEditor();
       await refresh();
     } catch (e) {
@@ -2050,7 +2260,7 @@ export function LibraryPage({ mode = "all", visible = true }: LibraryPageProps) 
     setInstagramSubscriptionFolderMap("");
     setInstagramSubscriptionOutputDirOverride("");
     setInstagramSubscriptionUseBrowserCookies(false);
-    setInstagramSubscriptionBrowserCookieSource("");
+    setInstagramSubscriptionBrowserCookieSource(DEFAULT_BROWSER_COOKIE_SOURCE);
     setInstagramSubscriptionAuthSessionInput("");
     setInstagramSubscriptionClearAuthSession(false);
     setInstagramSubscriptionAuthSessionConfigured(false);
@@ -2065,7 +2275,9 @@ export function LibraryPage({ mode = "all", visible = true }: LibraryPageProps) 
     setInstagramSubscriptionFolderMap(sub.folder_map);
     setInstagramSubscriptionOutputDirOverride(sub.output_dir_override ?? "");
     setInstagramSubscriptionUseBrowserCookies(sub.use_browser_cookies);
-    setInstagramSubscriptionBrowserCookieSource(sub.browser_cookie_source ?? "");
+    setInstagramSubscriptionBrowserCookieSource(
+      sub.browser_cookie_source || DEFAULT_BROWSER_COOKIE_SOURCE,
+    );
     setInstagramSubscriptionAuthSessionInput("");
     setInstagramSubscriptionClearAuthSession(false);
     setInstagramSubscriptionAuthSessionConfigured(sub.auth_session_configured);
@@ -2086,7 +2298,7 @@ export function LibraryPage({ mode = "all", visible = true }: LibraryPageProps) 
         output_dir_override: instagramSubscriptionOutputDirOverride.trim() || null,
         use_browser_cookies: instagramSubscriptionUseBrowserCookies,
         browser_cookie_source: instagramSubscriptionUseBrowserCookies
-          ? instagramSubscriptionBrowserCookieSource.trim() || null
+          ? instagramSubscriptionBrowserCookieSource.trim() || DEFAULT_BROWSER_COOKIE_SOURCE
           : null,
         auth_session_input: instagramSubscriptionAuthSessionInput.trim() || null,
         clear_auth_session: instagramSubscriptionClearAuthSession,
@@ -2101,10 +2313,6 @@ export function LibraryPage({ mode = "all", visible = true }: LibraryPageProps) 
       };
       if (!payload.title) throw new Error("Instagram subscription title is required.");
       if (!payload.source_url) throw new Error("Instagram subscription URL is required.");
-      if (payload.use_browser_cookies && !payload.browser_cookie_source) {
-        throw new Error("Choose Chrome, Firefox, Opera, or Edge before using browser cookies.");
-      }
-
       const saved = await invoke<InstagramSubscriptionRow>("instagram_subscriptions_upsert", {
         subscription: payload,
       });
@@ -2384,7 +2592,7 @@ export function LibraryPage({ mode = "all", visible = true }: LibraryPageProps) 
   function resetPresetEditor() {
     setPresetEditId(null);
     setPresetTitle("");
-    setPresetPathTemplate("{provider}/{channel}");
+    setPresetPathTemplate("{channel}");
     setPresetFilenameTemplate("{title}_{id}");
     setPresetFormatPreference("bv*[ext=mp4]+ba[ext=m4a]/b[ext=mp4]/bv*+ba/b");
     setPresetQualityPreference("best");
@@ -2411,7 +2619,7 @@ export function LibraryPage({ mode = "all", visible = true }: LibraryPageProps) 
       const nextPreset: DownloadPreset = {
         id,
         title: presetTitle.trim() || "Preset",
-        path_template: presetPathTemplate.trim() || "{provider}/{channel}",
+        path_template: presetPathTemplate.trim() || "{channel}",
         filename_template: presetFilenameTemplate.trim() || "{title}_{id}",
         format_preference: presetFormatPreference.trim() || null,
         quality_preference: presetQualityPreference.trim() || null,
@@ -2795,6 +3003,56 @@ export function LibraryPage({ mode = "all", visible = true }: LibraryPageProps) 
               Remove library
             </button>
           </div>
+          <div className="row" data-testid="video-library-bundle-controls">
+            <button type="button" disabled={busy || videoLibraries.length === 0} onClick={exportVideoLibraryBundle}>
+              Export library
+            </button>
+            <button type="button" disabled={busy} onClick={importVideoLibraryBundle}>
+              Import library
+            </button>
+            <label style={{ display: "flex", alignItems: "center", gap: 8, flex: "1 1 240px" }}>
+              <span>Target</span>
+              <select
+                value={videoLibraryTransferTargetId}
+                disabled={busy || otherVideoLibraries.length === 0}
+                onChange={(e) => setVideoLibraryTransferTargetId(e.currentTarget.value)}
+              >
+                {otherVideoLibraries.length ? (
+                  otherVideoLibraries.map((library) => (
+                    <option key={library.id} value={library.id}>
+                      {library.name}{library.exists ? "" : " (missing)"}
+                    </option>
+                  ))
+                ) : (
+                  <option value="">No other library</option>
+                )}
+              </select>
+            </label>
+            <button
+              type="button"
+              disabled={busy || !activeVideoLibrary || !videoLibraryTransferTargetId}
+              onClick={() => transferVideoLibraryMetadata("copy", true, false)}
+            >
+              Copy items
+            </button>
+            <button
+              type="button"
+              disabled={busy || !activeVideoLibrary || !videoLibraryTransferTargetId}
+              onClick={() => transferVideoLibraryMetadata("move", true, false)}
+            >
+              Move items
+            </button>
+            <button
+              type="button"
+              disabled={busy || !activeVideoLibrary || !videoLibraryTransferTargetId}
+              onClick={() => transferVideoLibraryMetadata("move", false, true)}
+            >
+              Move subscriptions
+            </button>
+          </div>
+          <div style={{ color: "#4b5563", fontSize: 12 }}>
+            Export/import and copy/move operate on VoxVulgi metadata. Media files stay in place.
+          </div>
         </div>
       ) : null}
 
@@ -3173,8 +3431,8 @@ export function LibraryPage({ mode = "all", visible = true }: LibraryPageProps) 
           Paste many links at once (direct media URLs or YouTube video/playlist/channel links).
           Maximum {maxBatchUrls} videos per submission. If output folder is empty, each job is
           saved under <code>{defaultVideoDownloadsDir || "video"}</code>. VoxVulgi now treats MP4
-          as the default archive target when yt-dlp can merge/remux cleanly. For login-required
-          sources, explicit session input takes precedence over browser-cookie fallback.
+          as the default archive target when yt-dlp can merge/remux cleanly. YouTube session
+          cookies are managed in <strong>Options</strong> and applied when jobs run.
         </div>
         <textarea
           value={urlBatchText}
@@ -3205,21 +3463,6 @@ export function LibraryPage({ mode = "all", visible = true }: LibraryPageProps) 
             Choose folder
           </button>
         </div>
-        <div style={{ display: "grid", gap: 6, marginTop: 10 }}>
-          <span>Session / cookies</span>
-          <textarea
-            value={urlBatchAuthCookie}
-            onChange={(e) => setUrlBatchAuthCookie(e.currentTarget.value)}
-            disabled={busy}
-            placeholder="Cookie header, browser-export JSON, Netscape cookie text, or path to an existing cookie file"
-            rows={3}
-            style={{ width: "100%", boxSizing: "border-box", resize: "vertical" }}
-          />
-          <div style={{ color: "#4b5563" }}>
-            Use this for sign-in-required downloads when possible. Browser-cookie fallback requires
-            an explicit browser choice.
-          </div>
-        </div>
         <div className="row">
           <label style={{ display: "flex", alignItems: "center", gap: 8 }}>
             <span>Preset</span>
@@ -3240,34 +3483,6 @@ export function LibraryPage({ mode = "all", visible = true }: LibraryPageProps) 
             Applies output template + quality/subtitle preferences for this batch.
           </div>
         </div>
-        <div className="row">
-          <label style={{ display: "flex", alignItems: "center", gap: 8 }}>
-            <input
-              type="checkbox"
-              checked={urlBatchUseBrowserCookies}
-              disabled={busy}
-              onChange={(e) => setUrlBatchUseBrowserCookies(e.currentTarget.checked)}
-            />
-            <span>Use browser cookies for yt-dlp</span>
-          </label>
-          <label style={{ display: "flex", alignItems: "center", gap: 8 }}>
-            <span>Browser</span>
-            <select
-              value={urlBatchBrowserCookieSource}
-              disabled={busy || !urlBatchUseBrowserCookies}
-              onChange={(e) => setUrlBatchBrowserCookieSource(e.currentTarget.value)}
-            >
-              {browserCookieSourceOptions.map((option) => (
-                <option key={option.value} value={option.value}>
-                  {option.label}
-                </option>
-              ))}
-            </select>
-          </label>
-          <div style={{ color: "#4b5563" }}>
-            Runs yt-dlp with <code>--cookies-from-browser</code> for the selected browser.
-          </div>
-        </div>
         <div style={{ color: "#4b5563", marginTop: 8 }}>
           Parsed URLs: {parsedUrlCount}
         </div>
@@ -3275,6 +3490,89 @@ export function LibraryPage({ mode = "all", visible = true }: LibraryPageProps) 
           <button type="button" disabled={busy || parsedUrlCount === 0} onClick={enqueueUrlBatch}>
             Queue URL batch ({parsedUrlCount})
           </button>
+        </div>
+        <div style={{ borderTop: "1px solid #e5e7eb", marginTop: 16, paddingTop: 12 }}>
+          <div className="row" style={{ justifyContent: "space-between", alignItems: "center" }}>
+            <h3 style={{ margin: 0 }}>Downloaded single videos</h3>
+            <span style={{ color: "#4b5563" }}>
+              {youtubeSingleVideoItems.length} item{youtubeSingleVideoItems.length === 1 ? "" : "s"}
+            </span>
+          </div>
+          <div className="row">
+            <label style={{ display: "flex", alignItems: "center", gap: 8, flex: 1 }}>
+              <span>Search</span>
+              <input
+                value={youtubeSingleHistorySearch}
+                disabled={busy}
+                onChange={(e) => setYoutubeSingleHistorySearch(e.currentTarget.value)}
+                placeholder="Fuzzy search title, URL, or path"
+                style={{ width: "100%" }}
+              />
+            </label>
+            <label style={{ display: "flex", alignItems: "center", gap: 8 }}>
+              <span>Order</span>
+              <select
+                value={youtubeSingleHistoryDirection}
+                disabled={busy}
+                onChange={(e) =>
+                  setYoutubeSingleHistoryDirection(e.currentTarget.value === "asc" ? "asc" : "desc")
+                }
+              >
+                <option value="desc">Latest first</option>
+                <option value="asc">Oldest first</option>
+              </select>
+            </label>
+          </div>
+          <div style={{ overflowX: "auto" }}>
+            <table style={{ width: "100%", borderCollapse: "collapse", tableLayout: "fixed" }}>
+              <thead>
+                <tr>
+                  <th style={{ textAlign: "left", width: 96 }}>Preview</th>
+                  <th style={{ textAlign: "left" }}>Video</th>
+                  <th style={{ textAlign: "left", width: 180 }}>Created</th>
+                  <th style={{ textAlign: "left", width: 180 }}>Actions</th>
+                </tr>
+              </thead>
+              <tbody>
+                {youtubeSingleVideoItems.length ? (
+                  youtubeSingleVideoItems.map((item) => (
+                    <tr key={item.id}>
+                      <td style={{ padding: "8px 6px", verticalAlign: "top" }}>
+                        <ThumbnailPreview itemId={item.id} path={item.thumbnail_path} />
+                      </td>
+                      <td style={{ padding: "8px 6px", verticalAlign: "top" }}>
+                        <div style={{ fontWeight: 600, wordBreak: "break-word" }}>
+                          {item.title || fileName(item.media_path) || item.id}
+                        </div>
+                        <div style={{ color: "#4b5563", wordBreak: "break-word" }}>
+                          {item.source_uri || item.media_path}
+                        </div>
+                      </td>
+                      <td style={{ padding: "8px 6px", verticalAlign: "top" }}>
+                        {new Date(item.created_at_ms).toLocaleString()}
+                      </td>
+                      <td style={{ padding: "8px 6px", verticalAlign: "top" }}>
+                        <div className="row" style={{ gap: 6 }}>
+                          <button type="button" disabled={busy} onClick={() => openMediaFile(item)}>
+                            Open
+                          </button>
+                          <button type="button" disabled={busy} onClick={() => revealMediaFile(item)}>
+                            Reveal
+                          </button>
+                        </div>
+                      </td>
+                    </tr>
+                  ))
+                ) : (
+                  <tr>
+                    <td colSpan={4} style={{ color: "#4b5563", padding: "10px 6px" }}>
+                      No downloaded YouTube single videos match the current search.
+                    </td>
+                  </tr>
+                )}
+              </tbody>
+            </table>
+          </div>
         </div>
         </div>
       ) : null}
@@ -3305,7 +3603,7 @@ export function LibraryPage({ mode = "all", visible = true }: LibraryPageProps) 
               value={presetPathTemplate}
               disabled={busy}
               onChange={(e) => setPresetPathTemplate(e.currentTarget.value)}
-              placeholder="{provider}/{channel}"
+              placeholder="{channel}"
               style={{ width: "100%" }}
             />
           </label>
@@ -3603,6 +3901,7 @@ export function LibraryPage({ mode = "all", visible = true }: LibraryPageProps) 
         <div style={{ color: "#4b5563", marginBottom: 8 }}>
           Leave the override blank for a new managed folder under <code>{defaultSubscriptionDownloadsDir || "-"}</code>.
           Set an override when this subscription must keep writing into an existing legacy/NAS archive.
+          YouTube session cookies are managed in <strong>Options</strong> and reused by refresh jobs at runtime.
         </div>
         <div className="row">
           <label style={{ display: "flex", alignItems: "center", gap: 8, flex: 1 }}>
@@ -3625,27 +3924,6 @@ export function LibraryPage({ mode = "all", visible = true }: LibraryPageProps) 
               style={{ width: "100%" }}
             />
           </label>
-        </div>
-        <div style={{ display: "grid", gap: 6, marginTop: 10 }}>
-          <span>Saved session / cookies</span>
-          <textarea
-            value={subscriptionAuthSessionInput}
-            disabled={busy}
-            onChange={(e) => {
-              setSubscriptionAuthSessionInput(e.currentTarget.value);
-              if (e.currentTarget.value.trim()) {
-                setSubscriptionClearAuthSession(false);
-              }
-            }}
-            placeholder="Cookie header, browser-export JSON, Netscape cookie text, or path to an existing cookie file"
-            rows={3}
-            style={{ width: "100%", boxSizing: "border-box", resize: "vertical" }}
-          />
-          <div style={{ color: "#4b5563" }}>
-            {subscriptionAuthSessionConfigured
-              ? "A saved session is already configured. Leave this blank to keep it, paste a new value to replace it, or clear it below."
-              : "Optional. Save a session once and reuse it for recurring login-required refreshes."}
-          </div>
         </div>
         <div className="row">
           <label style={{ display: "flex", alignItems: "center", gap: 8, flex: 1 }}>
@@ -3687,38 +3965,6 @@ export function LibraryPage({ mode = "all", visible = true }: LibraryPageProps) 
           </button>
         </div>
         <div className="row">
-          <label style={{ display: "flex", alignItems: "center", gap: 8 }}>
-            <input
-              type="checkbox"
-              checked={subscriptionUseBrowserCookies}
-              disabled={busy}
-              onChange={(e) => setSubscriptionUseBrowserCookies(e.currentTarget.checked)}
-            />
-            <span>Use browser cookies</span>
-          </label>
-          <label style={{ display: "flex", alignItems: "center", gap: 8 }}>
-            <span>Browser</span>
-            <select
-              value={subscriptionBrowserCookieSource}
-              disabled={busy || !subscriptionUseBrowserCookies}
-              onChange={(e) => setSubscriptionBrowserCookieSource(e.currentTarget.value)}
-            >
-              {browserCookieSourceOptions.map((option) => (
-                <option key={option.value} value={option.value}>
-                  {option.label}
-                </option>
-              ))}
-            </select>
-          </label>
-          <label style={{ display: "flex", alignItems: "center", gap: 8 }}>
-            <input
-              type="checkbox"
-              checked={subscriptionClearAuthSession}
-              disabled={busy || (!subscriptionAuthSessionConfigured && !subscriptionAuthSessionInput.trim())}
-              onChange={(e) => setSubscriptionClearAuthSession(e.currentTarget.checked)}
-            />
-            <span>Clear saved session on save</span>
-          </label>
           <label style={{ display: "flex", alignItems: "center", gap: 8 }}>
             <input
               type="checkbox"
@@ -3841,7 +4087,6 @@ export function LibraryPage({ mode = "all", visible = true }: LibraryPageProps) 
                 <th>Target path</th>
                 <th>Folder map</th>
                 <th>Groups</th>
-                <th>Session</th>
                 <th>Active</th>
                 <th>Preset</th>
                 <th>Interval (min)</th>
@@ -3886,7 +4131,6 @@ export function LibraryPage({ mode = "all", visible = true }: LibraryPageProps) 
                           ? sub.group_ids.map((id) => groupNameById.get(id) ?? id).join(", ")
                           : "-"}
                       </td>
-                      <td>{sub.auth_session_configured ? "saved" : "-"}</td>
                       <td>{sub.active ? "yes" : "no"}</td>
                       <td>
                         {sub.preset_id
@@ -3939,7 +4183,7 @@ export function LibraryPage({ mode = "all", visible = true }: LibraryPageProps) 
                 })
               ) : (
                 <tr>
-                  <td colSpan={16}>No subscriptions yet.</td>
+                  <td colSpan={15}>No subscriptions yet.</td>
                 </tr>
               )}
             </tbody>
@@ -4090,9 +4334,13 @@ export function LibraryPage({ mode = "all", visible = true }: LibraryPageProps) 
               type="checkbox"
               checked={instagramSubscriptionUseBrowserCookies}
               disabled={busy}
-              onChange={(e) =>
-                setInstagramSubscriptionUseBrowserCookies(e.currentTarget.checked)
-              }
+              onChange={(e) => {
+                const checked = e.currentTarget.checked;
+                setInstagramSubscriptionUseBrowserCookies(checked);
+                if (checked && !instagramSubscriptionBrowserCookieSource.trim()) {
+                  setInstagramSubscriptionBrowserCookieSource(DEFAULT_BROWSER_COOKIE_SOURCE);
+                }
+              }}
             />
             <span>Use browser cookies</span>
           </label>
@@ -4307,7 +4555,13 @@ export function LibraryPage({ mode = "all", visible = true }: LibraryPageProps) 
               type="checkbox"
               checked={instagramBatchUseBrowserCookies}
               disabled={busy}
-              onChange={(e) => setInstagramBatchUseBrowserCookies(e.currentTarget.checked)}
+              onChange={(e) => {
+                const checked = e.currentTarget.checked;
+                setInstagramBatchUseBrowserCookies(checked);
+                if (checked && !instagramBatchBrowserCookieSource.trim()) {
+                  setInstagramBatchBrowserCookieSource(DEFAULT_BROWSER_COOKIE_SOURCE);
+                }
+              }}
             />
             <span>Use browser cookies for yt-dlp fallback</span>
           </label>
@@ -4583,6 +4837,15 @@ export function LibraryPage({ mode = "all", visible = true }: LibraryPageProps) 
                 <option value="instagram">Instagram</option>
                 <option value="local">Local import</option>
               </select>
+            </label>
+            <label style={{ display: "flex", alignItems: "center", gap: 8 }}>
+              <input
+                type="checkbox"
+                checked={mediaLibrarySingleVideoOnly}
+                disabled={busy}
+                onChange={(e) => setMediaLibrarySingleVideoOnly(e.currentTarget.checked)}
+              />
+              <span>Single videos / legacy</span>
             </label>
             <label style={{ display: "flex", alignItems: "center", gap: 8 }}>
               <span>Sort</span>

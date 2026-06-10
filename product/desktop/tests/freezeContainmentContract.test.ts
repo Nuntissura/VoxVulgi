@@ -11,8 +11,9 @@ function readRepoFile(...parts: string[]): string {
 }
 
 function functionBlock(source: string, name: string): string {
-  const marker = `function ${name}`;
-  const start = source.indexOf(marker);
+  const escapedName = name.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  const match = new RegExp(`function\\s+${escapedName}\\s*\\(`).exec(source);
+  const start = match?.index ?? -1;
   assert.notEqual(start, -1, `${name} must exist`);
   const openBrace = source.indexOf("{", start);
   assert.notEqual(openBrace, -1, `${name} must have a body`);
@@ -70,6 +71,11 @@ test("Jobs active polling refreshes only the lightweight job snapshot", () => {
     jobsSource,
     /usePollingLoop\(\s*async\s*\(\)\s*=>\s*\{\s*await\s+refreshJobsSnapshot\(\)\.catch\(\(\)\s*=>\s*undefined\);/s,
     "active polling must call refreshJobsSnapshot instead of full refresh",
+  );
+  assert.match(
+    jobsSource,
+    /setError\(\(current\)\s*=>\s*\(current\?\.includes\("database is locked"\)\s*\?\s*null\s*:\s*current\)\)/,
+    "a successful Jobs snapshot must clear stale transient database-lock banners",
   );
   assert.equal(
     jobsSource.includes("await refresh().catch(() => undefined);"),
@@ -294,6 +300,31 @@ test("Jobs page retry and progress stay operator-readable under batches", () => 
     /renderJobProgress/,
     "Jobs progress should be rendered through a dedicated helper instead of a bare percentage.",
   );
+  assert.match(
+    jobsSource,
+    /function\s+batchTargetHealthText\([\s\S]{0,220}videos:[\s\S]{0,120}downloaded[\s\S]{0,120}unresolved/,
+    "Batch rows must lead with canonical video target health, not raw attempt-row status.",
+  );
+  assert.match(
+    jobsSource,
+    /function\s+batchAttemptHealthText\([\s\S]{0,220}attempts:[\s\S]{0,120}failed/,
+    "Batch rows may show failed rows only as attempt history counts.",
+  );
+  assert.match(
+    jobsSource,
+    /Retryable unresolved videos:/,
+    "Batch retry affordance must be tied to unresolved canonical videos.",
+  );
+  assert.match(
+    jobsSource,
+    /Retry unresolved \(\$\{batchRetryableCount\}\)/,
+    "Batch retry button should not imply that historical failed attempts are current failed videos.",
+  );
+  assert.doesNotMatch(
+    jobsSource,
+    /canonical jobs \/ \$\{health\.canonical_targets\} targets/,
+    "Jobs UI must not label raw attempt rows as canonical jobs.",
+  );
 });
 
 test("Jobs page keeps list refresh usable when non-critical queue-control reads hit DB contention", () => {
@@ -315,6 +346,16 @@ test("Jobs page keeps list refresh usable when non-critical queue-control reads 
     refreshBlock,
     /refreshJobsSnapshot\(\)[\s\S]{0,260}refreshQueueControls\(\)/,
     "Jobs refresh must still prioritize the actual job list while queue controls recover independently",
+  );
+  assert.match(
+    jobsSource,
+    /function\s+isTransientDatabaseLock\(error:\s*unknown\):\s*boolean/,
+    "Jobs refresh should classify transient database locks explicitly",
+  );
+  assert.match(
+    refreshBlock,
+    /catch \(e\)[\s\S]{0,160}isTransientDatabaseLock\(e\)[\s\S]{0,180}sleep\(1_500\)[\s\S]{0,180}refreshJobsSnapshot\(\)/,
+    "Jobs refresh should retry one transient DB-lock snapshot before surfacing a terminal banner",
   );
 });
 

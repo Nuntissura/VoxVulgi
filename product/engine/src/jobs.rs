@@ -9,6 +9,7 @@ use regex::Regex;
 use rusqlite::{params, OptionalExtension};
 use scraper::{Html, Selector};
 use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::fs::OpenOptions;
 use std::io::{Read, Write};
@@ -49,9 +50,38 @@ const YT_DLP_FRAGMENT_RETRIES: u32 = 3;
 const YT_DLP_ARCHIVE_THROTTLED_RATE: &str = "100K";
 const YT_DLP_ARCHIVE_CONCURRENT_FRAGMENTS_U32: u32 = 4;
 const YT_DLP_ARCHIVE_FILE_ACCESS_RETRIES_U32: u32 = 10;
+const YT_DLP_ARCHIVE_SUB_LANGS: &str = "en.*,en,ja.*,ja,ko.*,ko";
+const DEFAULT_YOUTUBE_AUTH_PREFLIGHT_URL: &str = "https://youtu.be/wbpLhh3M6L4?si=8QuFih5T__tP1W8b";
+pub const DEFAULT_BROWSER_COOKIE_SOURCE: &str = "firefox";
+pub const SUPPORTED_BROWSER_COOKIE_SOURCES: &[&str] = &["firefox", "chrome", "edge", "opera"];
+const YT_DLP_RATE_LIMIT_RETRIES: u32 = 2;
+const YT_DLP_RATE_LIMIT_MIN_DELAY_SECS: u64 = 20;
+const YT_DLP_RATE_LIMIT_MAX_DELAY_SECS: u64 = 60;
 const EXTERNAL_CMD_POLL_INTERVAL_MS: u64 = 200;
 const YT_DLP_BOOTSTRAP_TIMEOUT_SECS: u64 = 180;
 const EXPERIMENTAL_VOICE_BACKEND_TIMEOUT_SECS: u64 = 7200;
+// Spleeter loads only up to 600s of audio (separate_to_file duration default)
+// and, with multiprocess disabled, runs single-process TF inference. 30 min is
+// a generous ceiling that still guarantees the job cannot hang indefinitely.
+const SPLEETER_SEPARATE_TIMEOUT_SECS: u64 = 1800;
+// Safety ceiling for Python model jobs (diarization, neural/voice-preserving
+// TTS, demucs). These spawn heavy Python processes that on first run may also
+// pull model weights; 1h is generous for our clip lengths while still
+// guaranteeing the job cannot hang forever and stays cancellable.
+const PYTHON_MODEL_JOB_TIMEOUT_SECS: u64 = 3600;
+// ffmpeg filter/transcode passes (e.g. vocal cleanup). Short single-pass work;
+// 30 min is purely a deadlock/stall ceiling.
+const FFMPEG_FILTER_TIMEOUT_SECS: u64 = 1800;
+// Stuck-job watchdog. A job is "stalled" when it stays Running with no change
+// to its progress value. WARN only logs (observability); FAIL auto-fails the
+// job as a last-resort backstop. FAIL must stay ABOVE the longest single
+// command timeout (PYTHON_MODEL_JOB_TIMEOUT_SECS = 3600) so a legitimately
+// long command's own timeout always fires first and the watchdog never kills
+// a healthy job — it only catches stalls that occur OUTSIDE a timed command
+// (Rust-side deadlock, DB-lock starvation, a child that escaped its timeout).
+const JOB_WATCHDOG_SCAN_INTERVAL_SECS: u64 = 30;
+const JOB_STALL_WARN_SECS: u64 = 600;
+const JOB_STALL_FAIL_SECS: u64 = 7200;
 const DIARIZATION_SPEAKER_COUNT_MAX: u32 = 16;
 #[cfg(windows)]
 const YT_DLP_WINDOWS_DOWNLOAD_URL: &str =
@@ -74,6 +104,110 @@ pub struct YoutubeAuthPreflightResult {
     pub title: Option<String>,
     pub message: String,
     pub checked_at_ms: i64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct YoutubeAuthBlockState {
+    auth_key: String,
+    source: String,
+    blocked_at_ms: i64,
+    reason: String,
+    url: Option<String>,
+    job_id: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct ClearTerminalJobsSearchSummary {
+    pub query: String,
+    pub matched_terminal_jobs: usize,
+    pub removed_jobs: usize,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct RetryBatchFailedSummary {
+    pub batch_id: String,
+    pub matched_retryable_jobs: usize,
+    pub queued_jobs: usize,
+    pub reused_active_jobs: usize,
+    pub failed_retries: usize,
+    pub blocked_jobs: usize,
+    pub skipped_succeeded_jobs: usize,
+    pub skipped_active_jobs: usize,
+    pub unresolved_jobs: usize,
+    pub dry_run: bool,
+    pub first_error: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct JobBatchHealthSummary {
+    pub batch_id: String,
+    pub total_jobs: usize,
+    pub canonical_targets: usize,
+    pub queued_jobs: usize,
+    pub running_jobs: usize,
+    pub succeeded_jobs: usize,
+    pub failed_jobs: usize,
+    pub canceled_jobs: usize,
+    pub blocked_jobs: usize,
+    pub unknown_jobs: usize,
+    pub retryable_targets: usize,
+    pub active_targets: usize,
+    pub succeeded_targets: usize,
+    pub unresolved_targets: usize,
+    pub missing_title_jobs: usize,
+    pub no_output_jobs: usize,
+    pub retried_jobs: usize,
+    pub unretried_failed_jobs: usize,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct JobAttemptInspectionRow {
+    pub job: JobRow,
+    pub canonical_key: String,
+    pub source_title: Option<String>,
+    pub source_url: Option<String>,
+    pub video_id: Option<String>,
+    pub source_path: Option<String>,
+    pub filename: Option<String>,
+    pub output_path: Option<String>,
+    pub output_dir: Option<String>,
+    pub bundle_membership: Option<String>,
+    pub is_current_attempt: bool,
+    pub current_attempt_job_id: String,
+    pub lineage_kind: String,
+    pub status_label: String,
+    pub can_delete: bool,
+    pub can_retry: bool,
+    pub blocked_by_youtube_auth: bool,
+    pub has_output: bool,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct JobBatchDetail {
+    pub health: JobBatchHealthSummary,
+    pub attempts: Vec<JobAttemptInspectionRow>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct JobDetail {
+    pub selected_job_id: String,
+    pub batch_id: Option<String>,
+    pub current_attempt_job_id: String,
+    pub attempts: Vec<JobAttemptInspectionRow>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct JobTitleBackfillSummary {
+    pub scanned_jobs: usize,
+    pub updated_jobs: usize,
+    pub missing_titles: usize,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct JobExportPayload {
+    pub format: String,
+    pub item_count: usize,
+    pub content: String,
 }
 
 pub fn job_log_retention_policy() -> JobLogRetentionPolicy {
@@ -216,6 +350,9 @@ pub struct JobRow {
     pub finished_at_ms: Option<i64>,
     pub logs_path: String,
     pub params_json: String,
+    pub target_title: Option<String>,
+    pub retry_of_job_id: Option<String>,
+    pub retry_replacement_job_id: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -1093,6 +1230,7 @@ fn import_path_match_key(path: &str) -> String {
 fn job_row_from_query_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<JobRow> {
     let status_str: String = row.get(4)?;
     let status = JobStatus::from_str(&status_str).unwrap_or(JobStatus::Failed);
+    let column_count = row.as_ref().column_count();
     Ok(JobRow {
         id: row.get(0)?,
         item_id: row.get(1)?,
@@ -1106,6 +1244,21 @@ fn job_row_from_query_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<JobRow> {
         finished_at_ms: row.get(9)?,
         logs_path: row.get(10)?,
         params_json: row.get(11)?,
+        target_title: if column_count > 12 {
+            row.get(12)?
+        } else {
+            None
+        },
+        retry_of_job_id: if column_count > 13 {
+            row.get(13)?
+        } else {
+            None
+        },
+        retry_replacement_job_id: if column_count > 14 {
+            row.get(14)?
+        } else {
+            None
+        },
     })
 }
 
@@ -1130,7 +1283,10 @@ SELECT
   started_at_ms,
   finished_at_ms,
   logs_path,
-  params_json
+  params_json,
+  target_title,
+  retry_of_job_id,
+  retry_replacement_job_id
 FROM job
 WHERE type=?1 AND status IN (?2, ?3)
 ORDER BY created_at_ms ASC
@@ -2728,6 +2884,16 @@ pub fn enqueue_youtube_subscription_refresh_v1(
     }
     let auth_cookie = normalize_auth_cookie(auth_cookie)?;
     let output_dir = normalize_output_dir(output_dir);
+    if let Some(sub) = subscriptions::get_youtube_subscription_by_id(paths, trimmed)? {
+        let subscription_use_browser_cookies = sub.use_browser_cookies && auth_cookie.is_none();
+        let auth_key = youtube_auth_material_key(
+            paths,
+            auth_cookie.as_deref(),
+            subscription_use_browser_cookies,
+            sub.browser_cookie_source.as_deref(),
+        )?;
+        ensure_youtube_auth_not_blocked(paths, auth_key.as_deref())?;
+    }
     let params_json = serde_json::to_string(&YoutubeSubscriptionRefreshV1Params {
         subscription_id: trimmed.to_string(),
         max_items: None,
@@ -2757,10 +2923,7 @@ pub fn youtube_auth_preflight(
     paths: &AppPaths,
     url: Option<String>,
 ) -> Result<YoutubeAuthPreflightResult> {
-    let url = normalize_direct_url(
-        url.as_deref()
-            .unwrap_or("https://www.youtube.com/watch?v=BaW_jenozKcj"),
-    )?;
+    let url = normalize_direct_url(url.as_deref().unwrap_or(DEFAULT_YOUTUBE_AUTH_PREFLIGHT_URL))?;
     if !is_youtube_url(&url) {
         return Err(EngineError::InstallFailed(
             "YouTube auth preflight requires a youtube.com or youtu.be URL".to_string(),
@@ -2777,6 +2940,7 @@ pub fn youtube_auth_preflight(
         });
     };
 
+    let auth_key = youtube_auth_material_key_from_cookie(&auth_cookie);
     let cookie_file = write_auth_cookie_as_netscape_temp_file(paths, &url, &auth_cookie)?;
     let mut args = build_youtube_auth_preflight_args(&url, cookie_file.to_string_lossy().as_ref());
     let js_runtime_available = append_yt_dlp_runtime_args(paths, &mut args, &url, true);
@@ -2785,6 +2949,7 @@ pub fn youtube_auth_preflight(
 
     match output_res {
         Ok(output) => {
+            clear_youtube_auth_block_for_key(paths, &auth_key)?;
             let title = String::from_utf8_lossy(&output.stdout)
                 .lines()
                 .map(str::trim)
@@ -2802,6 +2967,15 @@ pub fn youtube_auth_preflight(
         }
         Err(err) => {
             let err = augment_yt_dlp_error(&url, err, false, true, js_runtime_available);
+            if is_youtube_saved_cookie_rejection(&url, &err.to_string()) {
+                record_youtube_auth_block(
+                    paths,
+                    auth_key,
+                    "saved YouTube cookies rejected during auth preflight".to_string(),
+                    Some(url.clone()),
+                    None,
+                )?;
+            }
             Ok(YoutubeAuthPreflightResult {
                 ok: false,
                 url,
@@ -2811,6 +2985,210 @@ pub fn youtube_auth_preflight(
             })
         }
     }
+}
+
+fn youtube_auth_block_path(paths: &AppPaths) -> PathBuf {
+    paths.config_dir().join("youtube_auth_block.json")
+}
+
+fn youtube_auth_material_key_from_cookie(cookie: &str) -> String {
+    let mut hasher = Sha256::new();
+    hasher.update(cookie.as_bytes());
+    format!("cookie:{}", hex::encode(hasher.finalize()))
+}
+
+fn youtube_auth_material_key(
+    paths: &AppPaths,
+    auth_cookie: Option<&str>,
+    use_browser_cookies: bool,
+    browser_cookie_source: Option<&str>,
+) -> Result<Option<String>> {
+    if let Some(global) = resolve_global_youtube_auth_cookie(paths) {
+        return Ok(Some(youtube_auth_material_key_from_cookie(&global)));
+    }
+    if let Some(cookie) = normalize_non_empty(auth_cookie) {
+        return Ok(Some(youtube_auth_material_key_from_cookie(&cookie)));
+    }
+    if use_browser_cookies {
+        let source = browser_cookie_source_for_request(true, browser_cookie_source)?
+            .unwrap_or_else(|| "browser".to_string());
+        return Ok(Some(format!("browser:{}", source.to_ascii_lowercase())));
+    }
+    Ok(None)
+}
+
+fn load_youtube_auth_block(paths: &AppPaths) -> Result<Option<YoutubeAuthBlockState>> {
+    let path = youtube_auth_block_path(paths);
+    if !path.exists() {
+        return Ok(None);
+    }
+    let bytes = std::fs::read(path)?;
+    let state: YoutubeAuthBlockState = serde_json::from_slice(&bytes).map_err(|e| {
+        EngineError::InstallFailed(format!("failed to parse YouTube auth block state: {e}"))
+    })?;
+    Ok(Some(state))
+}
+
+fn save_youtube_auth_block(paths: &AppPaths, state: &YoutubeAuthBlockState) -> Result<()> {
+    if let Some(parent) = youtube_auth_block_path(paths).parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    persistence::atomic_write_text(
+        &youtube_auth_block_path(paths),
+        &serde_json::to_string_pretty(state)?,
+    )?;
+    Ok(())
+}
+
+pub fn clear_youtube_auth_block(paths: &AppPaths) -> Result<()> {
+    let path = youtube_auth_block_path(paths);
+    if path.exists() {
+        std::fs::remove_file(path)?;
+    }
+    Ok(())
+}
+
+fn clear_youtube_auth_block_for_key(paths: &AppPaths, auth_key: &str) -> Result<()> {
+    if load_youtube_auth_block(paths)?
+        .as_ref()
+        .map(|state| state.auth_key.as_str() == auth_key)
+        .unwrap_or(false)
+    {
+        clear_youtube_auth_block(paths)?;
+    }
+    Ok(())
+}
+
+fn active_youtube_auth_block(
+    paths: &AppPaths,
+    auth_key: Option<&str>,
+) -> Result<Option<YoutubeAuthBlockState>> {
+    let Some(auth_key) = auth_key else {
+        return Ok(None);
+    };
+    let Some(state) = load_youtube_auth_block(paths)? else {
+        return Ok(None);
+    };
+    if state.auth_key == auth_key {
+        Ok(Some(state))
+    } else {
+        Ok(None)
+    }
+}
+
+fn youtube_auth_block_message(state: &YoutubeAuthBlockState) -> String {
+    format!(
+        "YouTube auth is blocked for the current saved/browser cookie state because YouTube rejected it at {}. {} Refresh the YouTube cookies in Options, run Test saved YouTube cookies, then retry.",
+        state.blocked_at_ms, state.reason
+    )
+}
+
+fn ensure_youtube_auth_not_blocked(paths: &AppPaths, auth_key: Option<&str>) -> Result<()> {
+    if let Some(state) = active_youtube_auth_block(paths, auth_key)? {
+        return Err(EngineError::InstallFailed(youtube_auth_block_message(
+            &state,
+        )));
+    }
+    Ok(())
+}
+
+fn record_youtube_auth_block(
+    paths: &AppPaths,
+    auth_key: String,
+    reason: String,
+    url: Option<String>,
+    job_id: Option<String>,
+) -> Result<()> {
+    let state = YoutubeAuthBlockState {
+        auth_key,
+        source: "youtube".to_string(),
+        blocked_at_ms: now_ms(),
+        reason,
+        url,
+        job_id,
+    };
+    save_youtube_auth_block(paths, &state)?;
+    cancel_queued_youtube_jobs_for_auth_block(paths, &state)?;
+    Ok(())
+}
+
+fn cancel_queued_youtube_jobs_for_auth_block(
+    paths: &AppPaths,
+    state: &YoutubeAuthBlockState,
+) -> Result<usize> {
+    let conn = db::open(paths)?;
+    db::migrate(&conn)?;
+    let mut stmt = conn.prepare(
+        r#"
+SELECT id, params_json
+FROM job
+WHERE type=?1 AND status=?2
+"#,
+    )?;
+    let queued = stmt
+        .query_map(
+            params![
+                JobType::DownloadDirectUrl.as_str(),
+                JobStatus::Queued.as_str()
+            ],
+            |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)),
+        )?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+    drop(stmt);
+
+    let mut to_cancel = Vec::new();
+    for (job_id, params_json) in queued {
+        let Ok(params) = serde_json::from_str::<DownloadDirectUrlParams>(&params_json) else {
+            continue;
+        };
+        let Ok(url) = normalize_direct_url(&params.url) else {
+            continue;
+        };
+        if !is_youtube_url(&url) {
+            continue;
+        }
+        let auth_key = youtube_auth_material_key(
+            paths,
+            params.auth_cookie.as_deref(),
+            params.use_browser_cookies,
+            params.browser_cookie_source.as_deref(),
+        )?;
+        if auth_key.as_deref() == Some(state.auth_key.as_str()) {
+            to_cancel.push(job_id);
+        }
+    }
+
+    if to_cancel.is_empty() {
+        return Ok(0);
+    }
+
+    let message = youtube_auth_block_message(state);
+    let now = now_ms();
+    let tx = conn.unchecked_transaction()?;
+    for job_id in &to_cancel {
+        tx.execute(
+            "UPDATE job SET status=?1, finished_at_ms=?2, error=?3 WHERE id=?4 AND status=?5",
+            params![
+                JobStatus::Canceled.as_str(),
+                now,
+                message,
+                job_id,
+                JobStatus::Queued.as_str()
+            ],
+        )?;
+        remove_job_cookie_secret(paths, job_id);
+    }
+    tx.commit()?;
+    Ok(to_cancel.len())
+}
+
+fn is_youtube_saved_cookie_rejection(url: &str, message: &str) -> bool {
+    let lower = message.to_ascii_lowercase();
+    is_youtube_url(url)
+        && lower.contains("sign in to confirm")
+        && (lower.contains("saved youtube cookies were supplied")
+            || lower.contains("--cookies")
+            || lower.contains("cookies were supplied"))
 }
 
 fn enqueue_download_direct_url_batch_raw_with_subscription(
@@ -2856,6 +3234,15 @@ fn enqueue_download_direct_url_batch_raw_with_subscription(
             url,
         })
         .collect::<Vec<_>>();
+    if targets.iter().any(|target| is_youtube_url(&target.url)) {
+        let auth_key = youtube_auth_material_key(
+            paths,
+            auth_cookie.as_deref(),
+            use_browser_cookies,
+            browser_cookie_source.as_deref(),
+        )?;
+        ensure_youtube_auth_not_blocked(paths, auth_key.as_deref())?;
+    }
     enqueue_download_targets_batch_with_subscription(
         paths,
         targets,
@@ -3059,33 +3446,82 @@ SELECT
   started_at_ms,
   finished_at_ms,
   logs_path,
-  params_json
+  params_json,
+  target_title,
+  retry_of_job_id,
+  retry_replacement_job_id
 FROM job
 ORDER BY created_at_ms DESC
 LIMIT ?1 OFFSET ?2
 "#,
     )?;
 
-    let rows = stmt
+    let mut rows = stmt
         .query_map(params![limit as i64, offset as i64], |row| {
-            let status_str: String = row.get(4)?;
-            let status = JobStatus::from_str(&status_str).unwrap_or(JobStatus::Failed);
-            Ok(JobRow {
-                id: row.get(0)?,
-                item_id: row.get(1)?,
-                batch_id: row.get(2)?,
-                job_type: row.get(3)?,
-                status,
-                progress: row.get(5)?,
-                error: row.get(6)?,
-                created_at_ms: row.get(7)?,
-                started_at_ms: row.get(8)?,
-                finished_at_ms: row.get(9)?,
-                logs_path: row.get(10)?,
-                params_json: row.get(11)?,
-            })
+            job_row_from_query_row(row)
         })?
         .collect::<rusqlite::Result<Vec<_>>>()?;
+    hydrate_job_target_titles(&conn, &mut rows)?;
+
+    Ok(rows)
+}
+
+pub fn search_jobs(paths: &AppPaths, query: &str, limit: usize) -> Result<Vec<JobRow>> {
+    let query = query.trim();
+    if query.is_empty() {
+        return list_jobs(paths, limit, 0);
+    }
+
+    let limit = limit.clamp(1, 500);
+    let like = format!("%{query}%");
+
+    // WP-0226: read-only connection bypasses job-runner write queue.
+    let conn = db::open_readonly(paths)?;
+
+    let mut stmt = conn.prepare(
+        r#"
+SELECT
+  j.id,
+  j.item_id,
+  j.batch_id,
+  j.type,
+  j.status,
+  j.progress,
+  j.error,
+  j.created_at_ms,
+  j.started_at_ms,
+  j.finished_at_ms,
+  j.logs_path,
+  j.params_json,
+  j.target_title,
+  j.retry_of_job_id,
+  j.retry_replacement_job_id
+FROM job j
+WHERE
+  j.id LIKE ?1
+  OR COALESCE(j.batch_id, '') LIKE ?1
+  OR j.type LIKE ?1
+  OR j.status LIKE ?1
+  OR COALESCE(j.error, '') LIKE ?1
+  OR j.params_json LIKE ?1
+  OR EXISTS (
+    SELECT 1
+    FROM library_item li
+    WHERE li.title LIKE ?1
+      AND TRIM(li.source_uri) <> ''
+      AND j.params_json LIKE '%' || li.source_uri || '%'
+  )
+ORDER BY j.created_at_ms DESC
+LIMIT ?2
+"#,
+    )?;
+
+    let mut rows = stmt
+        .query_map(params![like, limit as i64], |row| {
+            job_row_from_query_row(row)
+        })?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+    hydrate_job_target_titles(&conn, &mut rows)?;
 
     Ok(rows)
 }
@@ -3099,8 +3535,9 @@ pub fn get_job(paths: &AppPaths, job_id: &str) -> Result<Option<JobRow>> {
     // WP-0226: read-only connection bypasses job-runner write queue.
     let conn = db::open_readonly(paths)?;
 
-    conn.query_row(
-        r#"
+    let mut job = conn
+        .query_row(
+            r#"
 SELECT
   id,
   item_id,
@@ -3113,15 +3550,114 @@ SELECT
   started_at_ms,
   finished_at_ms,
   logs_path,
-  params_json
+  params_json,
+  target_title,
+  retry_of_job_id,
+  retry_replacement_job_id
 FROM job
 WHERE id=?1
 "#,
-        [job_id],
-        job_row_from_query_row,
-    )
-    .optional()
-    .map_err(Into::into)
+            [job_id],
+            job_row_from_query_row,
+        )
+        .optional()?;
+    if let Some(row) = job.as_mut() {
+        hydrate_job_target_titles(&conn, std::slice::from_mut(row))?;
+    }
+    Ok(job)
+}
+
+fn direct_download_url_from_params_json(params_json: &str) -> Option<String> {
+    let parsed: serde_json::Value = serde_json::from_str(params_json).ok()?;
+    if let Some(url) = parsed
+        .get("url")
+        .and_then(|value| value.as_str())
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+    {
+        return Some(url.to_string());
+    }
+    parsed
+        .get("urls")
+        .and_then(|value| value.as_array())
+        .and_then(|values| {
+            values
+                .iter()
+                .filter_map(|value| value.as_str().map(str::trim))
+                .find(|value| !value.is_empty())
+        })
+        .map(str::to_string)
+}
+
+fn hydrate_job_target_titles(conn: &rusqlite::Connection, rows: &mut [JobRow]) -> Result<()> {
+    let mut urls = Vec::new();
+    let mut seen = HashSet::new();
+    for row in rows.iter() {
+        if row.item_id.is_some() || row.job_type != JobType::DownloadDirectUrl.as_str() {
+            continue;
+        }
+        if let Some(url) = direct_download_url_from_params_json(&row.params_json) {
+            if seen.insert(url.clone()) {
+                urls.push(url);
+            }
+        }
+    }
+    if urls.is_empty() {
+        return Ok(());
+    }
+
+    let mut by_url: HashMap<String, String> = HashMap::new();
+    let mut direct_stmt = conn.prepare(
+        r#"
+SELECT title
+FROM library_item
+WHERE source_uri=?1 AND TRIM(title) <> ''
+ORDER BY created_at_ms DESC
+LIMIT 1
+"#,
+    )?;
+    let mut provenance_stmt = conn.prepare(
+        r#"
+SELECT li.title
+FROM library_item li
+JOIN ingest_provenance ip ON ip.item_id = li.id
+WHERE ip.source_url=?1 AND TRIM(li.title) <> ''
+ORDER BY li.created_at_ms DESC
+LIMIT 1
+"#,
+    )?;
+
+    for url in urls {
+        let title = direct_stmt
+            .query_row([url.as_str()], |row| row.get::<_, String>(0))
+            .optional()?
+            .or_else(|| {
+                provenance_stmt
+                    .query_row([url.as_str()], |row| row.get::<_, String>(0))
+                    .optional()
+                    .ok()
+                    .flatten()
+            });
+        if let Some(title) = title
+            .map(|value| value.trim().to_string())
+            .filter(|value| !value.is_empty())
+        {
+            by_url.insert(url, title);
+        }
+    }
+
+    for row in rows.iter_mut() {
+        if row.target_title.is_some() {
+            continue;
+        }
+        if let Some(url) = direct_download_url_from_params_json(&row.params_json) {
+            if let Some(title) = by_url.get(&url) {
+                row.target_title = Some(title.clone());
+            }
+        }
+    }
+
+    Ok(())
 }
 
 pub fn active_youtube_subscription_refresh_ids(paths: &AppPaths) -> Result<HashSet<String>> {
@@ -3183,7 +3719,10 @@ SELECT
   started_at_ms,
   finished_at_ms,
   logs_path,
-  params_json
+  params_json,
+  target_title,
+  retry_of_job_id,
+  retry_replacement_job_id
 FROM job
 WHERE item_id=?1
 ORDER BY created_at_ms DESC
@@ -3191,26 +3730,12 @@ LIMIT ?2 OFFSET ?3
 "#,
     )?;
 
-    let rows = stmt
+    let mut rows = stmt
         .query_map(params![item_id, limit as i64, offset as i64], |row| {
-            let status_str: String = row.get(4)?;
-            let status = JobStatus::from_str(&status_str).unwrap_or(JobStatus::Failed);
-            Ok(JobRow {
-                id: row.get(0)?,
-                item_id: row.get(1)?,
-                batch_id: row.get(2)?,
-                job_type: row.get(3)?,
-                status,
-                progress: row.get(5)?,
-                error: row.get(6)?,
-                created_at_ms: row.get(7)?,
-                started_at_ms: row.get(8)?,
-                finished_at_ms: row.get(9)?,
-                logs_path: row.get(10)?,
-                params_json: row.get(11)?,
-            })
+            job_row_from_query_row(row)
         })?
         .collect::<rusqlite::Result<Vec<_>>>()?;
+    hydrate_job_target_titles(&conn, &mut rows)?;
 
     Ok(rows)
 }
@@ -3672,14 +4197,36 @@ pub fn retry_job(paths: &AppPaths, job_id: &str) -> Result<JobRow> {
     let conn = db::open(paths)?;
     db::migrate(&conn)?;
 
-    let (type_str, params_json, batch_id): (String, String, Option<String>) = conn.query_row(
-        "SELECT type, params_json, batch_id FROM job WHERE id=?1",
-        [job_id],
-        |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
-    )?;
+    let (type_str, status_str, params_json, batch_id): (String, String, String, Option<String>) =
+        conn.query_row(
+            "SELECT type, status, params_json, batch_id FROM job WHERE id=?1",
+            [job_id],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+        )?;
 
     let job_type = JobType::from_str(&type_str)
         .ok_or_else(|| EngineError::InstallFailed(format!("unknown job type in db: {type_str}")))?;
+    let status = JobStatus::from_str(&status_str).ok_or_else(|| {
+        EngineError::InstallFailed(format!("unknown job status in db: {status_str}"))
+    })?;
+
+    if matches!(status, JobStatus::Queued | JobStatus::Running) {
+        if let Some(job) = get_job(paths, job_id)? {
+            return Ok(job);
+        }
+    }
+
+    if matches!(job_type, JobType::DownloadDirectUrl) {
+        if let Some(auth_key) = youtube_auth_key_from_download_params_json(paths, &params_json)? {
+            ensure_youtube_auth_not_blocked(paths, Some(&auth_key))?;
+        }
+        if let Some(key) = direct_download_retry_key_from_params(&params_json) {
+            if let Some(active) = active_direct_download_retry_for_key(&conn, job_id, &key)? {
+                link_retry_jobs_conn(&conn, job_id, &active.id, false)?;
+                return Ok(active);
+            }
+        }
+    }
 
     let item_id = match job_type {
         JobType::AsrLocal => serde_json::from_str::<AsrLocalParams>(&params_json)
@@ -3738,7 +4285,1007 @@ pub fn retry_job(paths: &AppPaths, job_id: &str) -> Result<JobRow> {
     };
 
     // Re-enqueue with identical params.
-    enqueue_with_type_item_and_batch_id(paths, job_type, params_json, item_id, batch_id)
+    let mut retry =
+        enqueue_with_type_item_and_batch_id(paths, job_type, params_json, item_id, batch_id)?;
+    link_retry_jobs(paths, job_id, &retry.id, true)?;
+    retry.retry_of_job_id = Some(job_id.to_string());
+    Ok(retry)
+}
+
+fn link_retry_jobs(
+    paths: &AppPaths,
+    original_job_id: &str,
+    replacement_job_id: &str,
+    set_replacement_origin: bool,
+) -> Result<()> {
+    let conn = db::open(paths)?;
+    db::migrate(&conn)?;
+    link_retry_jobs_conn(
+        &conn,
+        original_job_id,
+        replacement_job_id,
+        set_replacement_origin,
+    )
+}
+
+fn link_retry_jobs_conn(
+    conn: &rusqlite::Connection,
+    original_job_id: &str,
+    replacement_job_id: &str,
+    set_replacement_origin: bool,
+) -> Result<()> {
+    conn.execute(
+        "UPDATE job SET retry_replacement_job_id=?1 WHERE id=?2",
+        params![replacement_job_id, original_job_id],
+    )?;
+    if set_replacement_origin {
+        conn.execute(
+            "UPDATE job SET retry_of_job_id=?1 WHERE id=?2",
+            params![original_job_id, replacement_job_id],
+        )?;
+    }
+    Ok(())
+}
+
+pub fn retry_failed_jobs_for_batch(
+    paths: &AppPaths,
+    batch_id_or_prefix: &str,
+) -> Result<RetryBatchFailedSummary> {
+    let query = batch_id_or_prefix.trim();
+    if query.is_empty() {
+        return Err(EngineError::InstallFailed("batch_id is empty".to_string()));
+    }
+
+    let detail = get_batch_detail(paths, query)?;
+    let batch_id = detail.health.batch_id.clone();
+    let conn = db::open(paths)?;
+    db::migrate(&conn)?;
+    let active_before = active_job_ids(&conn)?;
+    drop(conn);
+
+    let mut by_key: HashMap<&str, Vec<&JobAttemptInspectionRow>> = HashMap::new();
+    for attempt in &detail.attempts {
+        by_key
+            .entry(attempt.canonical_key.as_str())
+            .or_default()
+            .push(attempt);
+    }
+
+    let mut retryable_job_ids: Vec<String> = Vec::new();
+    let mut skipped_succeeded_jobs = 0_usize;
+    let mut skipped_active_jobs = 0_usize;
+    let mut unresolved_jobs = 0_usize;
+    for group in by_key.values() {
+        if group
+            .iter()
+            .any(|row| matches!(row.job.status, JobStatus::Succeeded))
+        {
+            skipped_succeeded_jobs += 1;
+            continue;
+        }
+        if group
+            .iter()
+            .any(|row| matches!(row.job.status, JobStatus::Queued | JobStatus::Running))
+        {
+            skipped_active_jobs += 1;
+            continue;
+        }
+        if let Some(source) = group
+            .iter()
+            .rev()
+            .find(|row| matches!(row.job.status, JobStatus::Failed | JobStatus::Canceled))
+        {
+            retryable_job_ids.push(source.job.id.clone());
+        } else {
+            unresolved_jobs += 1;
+        }
+    }
+
+    let retryable: HashSet<String> = retryable_job_ids.iter().cloned().collect();
+    let mut returned_ids: HashSet<String> = HashSet::new();
+    let mut queued_jobs = 0_usize;
+    let mut reused_active_jobs = 0_usize;
+    let mut failed_retries = 0_usize;
+    let mut first_error: Option<String> = None;
+
+    for job_id in &retryable_job_ids {
+        match retry_job(paths, job_id) {
+            Ok(row) => {
+                if active_before.contains(&row.id)
+                    || returned_ids.contains(&row.id)
+                    || retryable.contains(&row.id)
+                {
+                    reused_active_jobs += 1;
+                } else {
+                    queued_jobs += 1;
+                }
+                returned_ids.insert(row.id);
+            }
+            Err(err) => {
+                failed_retries += 1;
+                if first_error.is_none() {
+                    first_error = Some(err.to_string());
+                }
+            }
+        }
+    }
+
+    Ok(RetryBatchFailedSummary {
+        batch_id,
+        matched_retryable_jobs: retryable_job_ids.len(),
+        queued_jobs,
+        reused_active_jobs,
+        failed_retries,
+        blocked_jobs: 0,
+        skipped_succeeded_jobs,
+        skipped_active_jobs,
+        unresolved_jobs: unresolved_jobs + failed_retries,
+        dry_run: false,
+        first_error,
+    })
+}
+
+fn resolve_job_batch_id(conn: &rusqlite::Connection, batch_id_or_prefix: &str) -> Result<String> {
+    let exact = conn
+        .query_row(
+            "SELECT batch_id FROM job WHERE batch_id=?1 LIMIT 1",
+            [batch_id_or_prefix],
+            |row| row.get::<_, String>(0),
+        )
+        .optional()?;
+    if let Some(batch_id) = exact {
+        return Ok(batch_id);
+    }
+
+    let like = format!("{batch_id_or_prefix}%");
+    let mut stmt = conn.prepare(
+        r#"
+SELECT DISTINCT batch_id
+FROM job
+WHERE batch_id IS NOT NULL AND TRIM(batch_id) <> '' AND batch_id LIKE ?1
+ORDER BY batch_id ASC
+LIMIT 3
+"#,
+    )?;
+    let matches = stmt
+        .query_map([like], |row| row.get::<_, String>(0))?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+    match matches.as_slice() {
+        [batch_id] => Ok(batch_id.clone()),
+        [] => Err(EngineError::InstallFailed(format!(
+            "no batch found for {batch_id_or_prefix}"
+        ))),
+        _ => Err(EngineError::InstallFailed(format!(
+            "batch prefix {batch_id_or_prefix} matches multiple batches; enter a longer batch id"
+        ))),
+    }
+}
+
+fn active_job_ids(conn: &rusqlite::Connection) -> Result<HashSet<String>> {
+    let mut stmt = conn.prepare("SELECT id FROM job WHERE status IN (?1, ?2)")?;
+    let rows = stmt
+        .query_map(
+            params![JobStatus::Queued.as_str(), JobStatus::Running.as_str()],
+            |row| row.get::<_, String>(0),
+        )?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+    Ok(rows.into_iter().collect())
+}
+
+fn direct_download_retry_key_from_params(params_json: &str) -> Option<String> {
+    let params = serde_json::from_str::<DownloadDirectUrlParams>(params_json).ok()?;
+    let url = normalize_direct_url(&params.url).ok()?;
+    if let Some(video_id) = subscriptions::youtube_video_id_from_url(&url) {
+        return Some(format!("youtube:{video_id}"));
+    }
+    Some(format!("url:{}", url.trim().to_ascii_lowercase()))
+}
+
+fn youtube_auth_key_from_download_params_json(
+    paths: &AppPaths,
+    params_json: &str,
+) -> Result<Option<String>> {
+    let params = serde_json::from_str::<DownloadDirectUrlParams>(params_json)?;
+    let url = normalize_direct_url(&params.url)?;
+    if !is_youtube_url(&url) {
+        return Ok(None);
+    }
+    youtube_auth_material_key(
+        paths,
+        params.auth_cookie.as_deref(),
+        params.use_browser_cookies,
+        params.browser_cookie_source.as_deref(),
+    )
+}
+
+fn active_direct_download_retry_for_key(
+    conn: &rusqlite::Connection,
+    source_job_id: &str,
+    key: &str,
+) -> Result<Option<JobRow>> {
+    let mut stmt = conn.prepare(
+        r#"
+SELECT
+  id,
+  item_id,
+  batch_id,
+  type,
+  status,
+  progress,
+  error,
+  created_at_ms,
+  started_at_ms,
+  finished_at_ms,
+  logs_path,
+  params_json,
+  target_title,
+  retry_of_job_id,
+  retry_replacement_job_id
+FROM job
+WHERE type=?1 AND id<>?2 AND status IN (?3, ?4)
+ORDER BY created_at_ms ASC
+"#,
+    )?;
+    let rows = stmt
+        .query_map(
+            params![
+                JobType::DownloadDirectUrl.as_str(),
+                source_job_id,
+                JobStatus::Queued.as_str(),
+                JobStatus::Running.as_str()
+            ],
+            job_row_from_query_row,
+        )?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+
+    for mut row in rows {
+        if direct_download_retry_key_from_params(&row.params_json).as_deref() == Some(key) {
+            hydrate_job_target_titles(conn, std::slice::from_mut(&mut row))?;
+            return Ok(Some(row));
+        }
+    }
+
+    Ok(None)
+}
+
+fn job_rows_for_batch_conn(conn: &rusqlite::Connection, batch_id: &str) -> Result<Vec<JobRow>> {
+    let mut stmt = conn.prepare(
+        r#"
+SELECT
+  id,
+  item_id,
+  batch_id,
+  type,
+  status,
+  progress,
+  error,
+  created_at_ms,
+  started_at_ms,
+  finished_at_ms,
+  logs_path,
+  params_json,
+  target_title,
+  retry_of_job_id,
+  retry_replacement_job_id
+FROM job
+WHERE batch_id=?1
+ORDER BY created_at_ms ASC
+"#,
+    )?;
+    let mut rows = stmt
+        .query_map([batch_id], job_row_from_query_row)?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+    hydrate_job_target_titles(conn, &mut rows)?;
+    Ok(rows)
+}
+
+fn job_rows_by_ids_conn(conn: &rusqlite::Connection, ids: &[String]) -> Result<Vec<JobRow>> {
+    let mut rows = Vec::new();
+    for id in ids {
+        let row = conn
+            .query_row(
+                r#"
+SELECT
+  id,
+  item_id,
+  batch_id,
+  type,
+  status,
+  progress,
+  error,
+  created_at_ms,
+  started_at_ms,
+  finished_at_ms,
+  logs_path,
+  params_json,
+  target_title,
+  retry_of_job_id,
+  retry_replacement_job_id
+FROM job
+WHERE id=?1
+"#,
+                [id.as_str()],
+                job_row_from_query_row,
+            )
+            .optional()?;
+        if let Some(row) = row {
+            rows.push(row);
+        }
+    }
+    hydrate_job_target_titles(conn, &mut rows)?;
+    Ok(rows)
+}
+
+fn job_rows_for_canonical_key_conn(
+    conn: &rusqlite::Connection,
+    canonical_key: &str,
+    batch_id: Option<&str>,
+) -> Result<Vec<JobRow>> {
+    let mut stmt = if batch_id.is_some() {
+        conn.prepare(
+            r#"
+SELECT
+  id,
+  item_id,
+  batch_id,
+  type,
+  status,
+  progress,
+  error,
+  created_at_ms,
+  started_at_ms,
+  finished_at_ms,
+  logs_path,
+  params_json,
+  target_title,
+  retry_of_job_id,
+  retry_replacement_job_id
+FROM job
+WHERE batch_id=?1
+ORDER BY created_at_ms ASC
+"#,
+        )?
+    } else {
+        conn.prepare(
+            r#"
+SELECT
+  id,
+  item_id,
+  batch_id,
+  type,
+  status,
+  progress,
+  error,
+  created_at_ms,
+  started_at_ms,
+  finished_at_ms,
+  logs_path,
+  params_json,
+  target_title,
+  retry_of_job_id,
+  retry_replacement_job_id
+FROM job
+ORDER BY created_at_ms ASC
+"#,
+        )?
+    };
+    let mut rows = if let Some(batch_id) = batch_id {
+        stmt.query_map([batch_id], job_row_from_query_row)?
+            .collect::<rusqlite::Result<Vec<_>>>()?
+    } else {
+        stmt.query_map([], job_row_from_query_row)?
+            .collect::<rusqlite::Result<Vec<_>>>()?
+    };
+    rows.retain(|row| job_canonical_key(row) == canonical_key);
+    hydrate_job_target_titles(conn, &mut rows)?;
+    Ok(rows)
+}
+
+fn job_canonical_key(job: &JobRow) -> String {
+    if let Some(key) = direct_download_retry_key_from_params(&job.params_json) {
+        return key;
+    }
+    if let Some(item_id) = job
+        .item_id
+        .as_deref()
+        .map(str::trim)
+        .filter(|v| !v.is_empty())
+    {
+        return format!("item:{item_id}");
+    }
+    format!("job:{}", job.id)
+}
+
+fn job_source_url(job: &JobRow) -> Option<String> {
+    if job.job_type == JobType::DownloadDirectUrl.as_str() {
+        return direct_download_url_from_params_json(&job.params_json);
+    }
+    let parsed: serde_json::Value = serde_json::from_str(&job.params_json).ok()?;
+    parsed
+        .get("source_url")
+        .or_else(|| parsed.get("url"))
+        .and_then(|value| value.as_str())
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(str::to_string)
+}
+
+fn job_output_dir(job: &JobRow) -> Option<String> {
+    let parsed: serde_json::Value = serde_json::from_str(&job.params_json).ok()?;
+    parsed
+        .get("output_dir")
+        .or_else(|| parsed.get("output_root"))
+        .and_then(|value| value.as_str())
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(str::to_string)
+}
+
+fn filename_from_path(path: &str) -> Option<String> {
+    Path::new(path)
+        .file_name()
+        .and_then(|value| value.to_str())
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(str::to_string)
+}
+
+fn library_item_context_conn(
+    conn: &rusqlite::Connection,
+    item_id: Option<&str>,
+) -> Result<Option<(String, String, String)>> {
+    let Some(item_id) = item_id.map(str::trim).filter(|value| !value.is_empty()) else {
+        return Ok(None);
+    };
+    let row = conn
+        .query_row(
+            "SELECT title, source_uri, media_path FROM library_item WHERE id=?1",
+            [item_id],
+            |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, String>(2)?,
+                ))
+            },
+        )
+        .optional()?;
+    Ok(row)
+}
+
+fn is_youtube_auth_blocked_error(error: Option<&str>) -> bool {
+    let Some(error) = error else {
+        return false;
+    };
+    let lower = error.to_ascii_lowercase();
+    lower.contains("youtube auth is blocked")
+        || lower.contains("sign in to confirm")
+        || lower.contains("not a bot")
+        || lower.contains("youtube rejected")
+        || lower.contains("saved youtube cookies")
+}
+
+fn has_job_output(job: &JobRow, output_path: Option<&str>) -> bool {
+    matches!(job.status, JobStatus::Succeeded)
+        && output_path
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .is_some()
+}
+
+fn current_attempt_id_for_group(rows: &[JobRow]) -> String {
+    if let Some(row) = rows
+        .iter()
+        .find(|row| matches!(row.status, JobStatus::Running))
+    {
+        return row.id.clone();
+    }
+    if let Some(row) = rows
+        .iter()
+        .find(|row| matches!(row.status, JobStatus::Queued))
+    {
+        return row.id.clone();
+    }
+    if let Some(row) = rows
+        .iter()
+        .rev()
+        .find(|row| matches!(row.status, JobStatus::Succeeded))
+    {
+        return row.id.clone();
+    }
+    rows.iter()
+        .max_by_key(|row| row.created_at_ms)
+        .map(|row| row.id.clone())
+        .unwrap_or_default()
+}
+
+fn job_status_label(job: &JobRow, is_current_attempt: bool) -> String {
+    if !is_current_attempt && matches!(job.status, JobStatus::Failed | JobStatus::Canceled) {
+        return "Historical failure".to_string();
+    }
+    match (
+        &job.status,
+        job.retry_of_job_id.is_some(),
+        is_youtube_auth_blocked_error(job.error.as_deref()),
+    ) {
+        (JobStatus::Queued, true, _) => "Current retry queued".to_string(),
+        (JobStatus::Running, true, _) => "Retry running".to_string(),
+        (JobStatus::Succeeded, true, _) => "Retry succeeded".to_string(),
+        (JobStatus::Failed, true, true) | (JobStatus::Canceled, true, true) => {
+            "Retry blocked".to_string()
+        }
+        (JobStatus::Failed, true, _) | (JobStatus::Canceled, true, _) => "Retry failed".to_string(),
+        (JobStatus::Failed, false, true) | (JobStatus::Canceled, false, true) => {
+            "Retry blocked".to_string()
+        }
+        _ => job.status.as_str().to_string(),
+    }
+}
+
+fn build_attempt_rows(
+    conn: &rusqlite::Connection,
+    mut rows: Vec<JobRow>,
+) -> Result<Vec<JobAttemptInspectionRow>> {
+    if rows.is_empty() {
+        return Ok(Vec::new());
+    }
+    rows.sort_by_key(|row| row.created_at_ms);
+    let mut by_key: HashMap<String, Vec<JobRow>> = HashMap::new();
+    for row in rows.clone() {
+        by_key.entry(job_canonical_key(&row)).or_default().push(row);
+    }
+    let mut current_by_key: HashMap<String, String> = HashMap::new();
+    for (key, group_rows) in &by_key {
+        current_by_key.insert(key.clone(), current_attempt_id_for_group(group_rows));
+    }
+
+    let mut out = Vec::new();
+    for row in rows {
+        let canonical_key = job_canonical_key(&row);
+        let current_attempt_job_id = current_by_key
+            .get(&canonical_key)
+            .cloned()
+            .unwrap_or_else(|| row.id.clone());
+        let is_current_attempt = row.id == current_attempt_job_id;
+        let item_ctx = library_item_context_conn(conn, row.item_id.as_deref())?;
+        let (item_title, item_source_uri, item_media_path) = item_ctx
+            .clone()
+            .unwrap_or_else(|| ("".to_string(), "".to_string(), "".to_string()));
+        let source_url = job_source_url(&row)
+            .or_else(|| (!item_source_uri.trim().is_empty()).then_some(item_source_uri.clone()));
+        let output_path = (!item_media_path.trim().is_empty()).then_some(item_media_path.clone());
+        let source_title = row
+            .target_title
+            .clone()
+            .or_else(|| (!item_title.trim().is_empty()).then_some(item_title.clone()));
+        let video_id = source_url
+            .as_deref()
+            .and_then(subscriptions::youtube_video_id_from_url);
+        let output_dir = job_output_dir(&row);
+        let source_path = if row.job_type == JobType::ImportLocal.as_str() {
+            serde_json::from_str::<ImportLocalParams>(&row.params_json)
+                .ok()
+                .map(|params| params.path)
+        } else {
+            None
+        };
+        let filename = output_path
+            .as_deref()
+            .and_then(filename_from_path)
+            .or_else(|| source_path.as_deref().and_then(filename_from_path));
+        let has_output = has_job_output(&row, output_path.as_deref());
+        out.push(JobAttemptInspectionRow {
+            can_delete: matches!(row.status, JobStatus::Failed | JobStatus::Canceled),
+            can_retry: matches!(row.status, JobStatus::Failed | JobStatus::Canceled),
+            blocked_by_youtube_auth: is_youtube_auth_blocked_error(row.error.as_deref()),
+            has_output,
+            source_title,
+            source_url,
+            video_id,
+            source_path,
+            filename,
+            output_path,
+            output_dir,
+            bundle_membership: row.batch_id.clone(),
+            status_label: job_status_label(&row, is_current_attempt),
+            lineage_kind: if row.retry_of_job_id.is_some() || row.retry_replacement_job_id.is_some()
+            {
+                "explicit".to_string()
+            } else if by_key
+                .get(&canonical_key)
+                .map(|items| items.len())
+                .unwrap_or(0)
+                > 1
+            {
+                "inferred".to_string()
+            } else {
+                "single".to_string()
+            },
+            is_current_attempt,
+            current_attempt_job_id,
+            canonical_key,
+            job: row,
+        });
+    }
+    Ok(out)
+}
+
+fn build_batch_health(
+    batch_id: &str,
+    attempts: &[JobAttemptInspectionRow],
+) -> JobBatchHealthSummary {
+    let mut by_key: HashMap<&str, Vec<&JobAttemptInspectionRow>> = HashMap::new();
+    for attempt in attempts {
+        by_key
+            .entry(attempt.canonical_key.as_str())
+            .or_default()
+            .push(attempt);
+    }
+
+    let mut retryable_targets = 0_usize;
+    let mut active_targets = 0_usize;
+    let mut succeeded_targets = 0_usize;
+    let mut unresolved_targets = 0_usize;
+    for group in by_key.values() {
+        let has_succeeded = group
+            .iter()
+            .any(|row| matches!(row.job.status, JobStatus::Succeeded));
+        let has_active = group
+            .iter()
+            .any(|row| matches!(row.job.status, JobStatus::Queued | JobStatus::Running));
+        let has_retryable = group
+            .iter()
+            .any(|row| matches!(row.job.status, JobStatus::Failed | JobStatus::Canceled));
+        if has_succeeded {
+            succeeded_targets += 1;
+        }
+        if has_active {
+            active_targets += 1;
+        }
+        if has_retryable && !has_succeeded && !has_active {
+            retryable_targets += 1;
+        }
+        if !has_succeeded && !has_active {
+            unresolved_targets += 1;
+        }
+    }
+
+    JobBatchHealthSummary {
+        batch_id: batch_id.to_string(),
+        total_jobs: attempts.len(),
+        canonical_targets: by_key.len(),
+        queued_jobs: attempts
+            .iter()
+            .filter(|row| matches!(row.job.status, JobStatus::Queued))
+            .count(),
+        running_jobs: attempts
+            .iter()
+            .filter(|row| matches!(row.job.status, JobStatus::Running))
+            .count(),
+        succeeded_jobs: attempts
+            .iter()
+            .filter(|row| matches!(row.job.status, JobStatus::Succeeded))
+            .count(),
+        failed_jobs: attempts
+            .iter()
+            .filter(|row| matches!(row.job.status, JobStatus::Failed))
+            .count(),
+        canceled_jobs: attempts
+            .iter()
+            .filter(|row| matches!(row.job.status, JobStatus::Canceled))
+            .count(),
+        blocked_jobs: attempts
+            .iter()
+            .filter(|row| row.blocked_by_youtube_auth)
+            .count(),
+        unknown_jobs: 0,
+        retryable_targets,
+        active_targets,
+        succeeded_targets,
+        unresolved_targets,
+        missing_title_jobs: attempts
+            .iter()
+            .filter(|row| row.source_title.as_deref().unwrap_or("").trim().is_empty())
+            .count(),
+        no_output_jobs: attempts.iter().filter(|row| !row.has_output).count(),
+        retried_jobs: attempts
+            .iter()
+            .filter(|row| row.job.retry_of_job_id.is_some())
+            .count(),
+        unretried_failed_jobs: attempts
+            .iter()
+            .filter(|row| {
+                matches!(row.job.status, JobStatus::Failed | JobStatus::Canceled)
+                    && row.job.retry_replacement_job_id.is_none()
+            })
+            .count(),
+    }
+}
+
+pub fn get_batch_detail(paths: &AppPaths, batch_id_or_prefix: &str) -> Result<JobBatchDetail> {
+    let conn = db::open_readonly(paths)?;
+    let batch_id = resolve_job_batch_id(&conn, batch_id_or_prefix.trim())?;
+    let rows = job_rows_for_batch_conn(&conn, &batch_id)?;
+    let attempts = build_attempt_rows(&conn, rows)?;
+    let health = build_batch_health(&batch_id, &attempts);
+    Ok(JobBatchDetail { health, attempts })
+}
+
+pub fn get_job_detail(paths: &AppPaths, job_id: &str) -> Result<JobDetail> {
+    let selected = get_job(paths, job_id)?
+        .ok_or_else(|| EngineError::InstallFailed(format!("job not found: {}", job_id.trim())))?;
+    let canonical_key = job_canonical_key(&selected);
+    let conn = db::open_readonly(paths)?;
+    let mut ids = vec![selected.id.clone()];
+    if let Some(id) = selected.retry_of_job_id.clone() {
+        ids.push(id);
+    }
+    if let Some(id) = selected.retry_replacement_job_id.clone() {
+        ids.push(id);
+    }
+    let mut rows =
+        job_rows_for_canonical_key_conn(&conn, &canonical_key, selected.batch_id.as_deref())?;
+    if rows.is_empty() {
+        rows = job_rows_by_ids_conn(&conn, &ids)?;
+    }
+    let attempts = build_attempt_rows(&conn, rows)?;
+    let current_attempt_job_id = attempts
+        .iter()
+        .find(|row| row.is_current_attempt)
+        .map(|row| row.job.id.clone())
+        .unwrap_or_else(|| selected.id.clone());
+    Ok(JobDetail {
+        selected_job_id: selected.id,
+        batch_id: selected.batch_id,
+        current_attempt_job_id,
+        attempts,
+    })
+}
+
+pub fn retry_failed_jobs_for_batch_dry_run(
+    paths: &AppPaths,
+    batch_id_or_prefix: &str,
+) -> Result<RetryBatchFailedSummary> {
+    let detail = get_batch_detail(paths, batch_id_or_prefix)?;
+    let mut retryable = 0_usize;
+    let mut blocked = 0_usize;
+    let mut skipped_succeeded = 0_usize;
+    let mut skipped_active = 0_usize;
+    let mut unresolved = 0_usize;
+    let mut by_key: HashMap<&str, Vec<&JobAttemptInspectionRow>> = HashMap::new();
+    for attempt in &detail.attempts {
+        by_key
+            .entry(attempt.canonical_key.as_str())
+            .or_default()
+            .push(attempt);
+    }
+    for group in by_key.values() {
+        if group
+            .iter()
+            .any(|row| matches!(row.job.status, JobStatus::Succeeded))
+        {
+            skipped_succeeded += 1;
+            continue;
+        }
+        if group
+            .iter()
+            .any(|row| matches!(row.job.status, JobStatus::Queued | JobStatus::Running))
+        {
+            skipped_active += 1;
+            continue;
+        }
+        if group.iter().any(|row| row.blocked_by_youtube_auth) {
+            blocked += 1;
+        }
+        if group
+            .iter()
+            .any(|row| matches!(row.job.status, JobStatus::Failed | JobStatus::Canceled))
+        {
+            retryable += 1;
+        } else {
+            unresolved += 1;
+        }
+    }
+    Ok(RetryBatchFailedSummary {
+        batch_id: detail.health.batch_id,
+        matched_retryable_jobs: retryable,
+        queued_jobs: 0,
+        reused_active_jobs: skipped_active,
+        failed_retries: 0,
+        blocked_jobs: blocked,
+        skipped_succeeded_jobs: skipped_succeeded,
+        skipped_active_jobs: skipped_active,
+        unresolved_jobs: unresolved,
+        dry_run: true,
+        first_error: None,
+    })
+}
+
+pub fn repair_batch(paths: &AppPaths, batch_id_or_prefix: &str) -> Result<RetryBatchFailedSummary> {
+    let dry_run = retry_failed_jobs_for_batch_dry_run(paths, batch_id_or_prefix)?;
+    if dry_run.blocked_jobs > 0 {
+        return Ok(RetryBatchFailedSummary {
+            failed_retries: dry_run.blocked_jobs,
+            first_error: Some(
+                "YouTube auth is blocked for one or more unresolved targets; run Options preflight before Repair Batch."
+                    .to_string(),
+            ),
+            ..dry_run
+        });
+    }
+    retry_failed_jobs_for_batch(paths, &dry_run.batch_id)
+}
+
+pub fn backfill_job_titles_for_batch(
+    paths: &AppPaths,
+    batch_id_or_prefix: &str,
+    limit: usize,
+) -> Result<JobTitleBackfillSummary> {
+    let conn = db::open(paths)?;
+    db::migrate(&conn)?;
+    let batch_id = resolve_job_batch_id(&conn, batch_id_or_prefix.trim())?;
+    let mut rows = job_rows_for_batch_conn(&conn, &batch_id)?;
+    let scan_limit = limit.clamp(1, 500);
+    rows.truncate(scan_limit);
+    hydrate_job_target_titles(&conn, &mut rows)?;
+    let tx = conn.unchecked_transaction()?;
+    let mut updated = 0_usize;
+    let mut missing = 0_usize;
+    for row in rows.iter() {
+        if let Some(title) = row
+            .target_title
+            .as_deref()
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+        {
+            let changed = tx.execute(
+                "UPDATE job SET target_title=?1 WHERE id=?2 AND (target_title IS NULL OR TRIM(target_title)='')",
+                params![title, row.id],
+            )?;
+            if changed > 0 {
+                updated += 1;
+            }
+        } else {
+            missing += 1;
+        }
+    }
+    tx.commit()?;
+    Ok(JobTitleBackfillSummary {
+        scanned_jobs: rows.len(),
+        updated_jobs: updated,
+        missing_titles: missing,
+    })
+}
+
+pub fn export_unresolved_jobs_for_batch(
+    paths: &AppPaths,
+    batch_id_or_prefix: &str,
+    format: &str,
+) -> Result<JobExportPayload> {
+    let detail = get_batch_detail(paths, batch_id_or_prefix)?;
+    let rows: Vec<&JobAttemptInspectionRow> = detail
+        .attempts
+        .iter()
+        .filter(|row| {
+            row.is_current_attempt
+                && !row.has_output
+                && !matches!(row.job.status, JobStatus::Succeeded)
+        })
+        .collect();
+    let normalized = format.trim().to_ascii_lowercase();
+    let content = match normalized.as_str() {
+        "json" => serde_json::to_string_pretty(&rows)?,
+        "urls" | "txt" | "plain" => rows
+            .iter()
+            .filter_map(|row| row.source_url.as_deref())
+            .collect::<Vec<_>>()
+            .join("\n"),
+        "csv" | "" => {
+            let mut out = String::from("job_id,batch_id,status,title,url,video_id,error\n");
+            for row in &rows {
+                out.push_str(&format!(
+                    "{},{},{},{},{},{},{}\n",
+                    csv_escape(&row.job.id),
+                    csv_escape(row.job.batch_id.as_deref().unwrap_or("")),
+                    csv_escape(row.job.status.as_str()),
+                    csv_escape(row.source_title.as_deref().unwrap_or("")),
+                    csv_escape(row.source_url.as_deref().unwrap_or("")),
+                    csv_escape(row.video_id.as_deref().unwrap_or("")),
+                    csv_escape(row.job.error.as_deref().unwrap_or(""))
+                ));
+            }
+            out
+        }
+        _ => {
+            return Err(EngineError::InstallFailed(
+                "export format must be csv, json, or urls".to_string(),
+            ))
+        }
+    };
+    Ok(JobExportPayload {
+        format: if normalized.is_empty() {
+            "csv".to_string()
+        } else {
+            normalized
+        },
+        item_count: rows.len(),
+        content,
+    })
+}
+
+fn csv_escape(value: &str) -> String {
+    let needs_quotes =
+        value.contains(',') || value.contains('"') || value.contains('\n') || value.contains('\r');
+    if !needs_quotes {
+        return value.to_string();
+    }
+    format!("\"{}\"", value.replace('"', "\"\""))
+}
+
+pub fn delete_terminal_job(paths: &AppPaths, job_id: &str) -> Result<bool> {
+    let job_id = job_id.trim();
+    if job_id.is_empty() {
+        return Err(EngineError::InstallFailed("job_id is empty".to_string()));
+    }
+
+    let conn = db::open(paths)?;
+    db::migrate(&conn)?;
+    let status_str: Option<String> = conn
+        .query_row("SELECT status FROM job WHERE id=?1", [job_id], |row| {
+            row.get(0)
+        })
+        .optional()?;
+    let Some(status_str) = status_str else {
+        return Ok(false);
+    };
+    let status = JobStatus::from_str(&status_str).ok_or_else(|| {
+        EngineError::InstallFailed(format!("unknown job status in db: {status_str}"))
+    })?;
+    if !matches!(status, JobStatus::Failed | JobStatus::Canceled) {
+        return Err(EngineError::InstallFailed(format!(
+            "only failed or canceled jobs can be deleted individually; job {job_id} is {}",
+            status.as_str()
+        )));
+    }
+
+    let removed = conn.execute(
+        "DELETE FROM job WHERE id=?1 AND status IN (?2, ?3)",
+        params![
+            job_id,
+            JobStatus::Failed.as_str(),
+            JobStatus::Canceled.as_str()
+        ],
+    )?;
+    if removed > 0 {
+        remove_job_cookie_secret(paths, job_id);
+    }
+    Ok(removed > 0)
+}
+
+pub fn delete_terminal_jobs_matching_search(
+    paths: &AppPaths,
+    query: &str,
+    limit: usize,
+) -> Result<ClearTerminalJobsSearchSummary> {
+    let query = query.trim();
+    if query.is_empty() {
+        return Err(EngineError::InstallFailed(
+            "search query is required before deleting matching failed/canceled jobs".to_string(),
+        ));
+    }
+    let rows = search_jobs(paths, query, limit)?;
+    let removable = rows
+        .into_iter()
+        .filter(|job| matches!(job.status, JobStatus::Failed | JobStatus::Canceled))
+        .map(|job| job.id)
+        .collect::<Vec<_>>();
+    let matched_terminal_jobs = removable.len();
+    let removed_jobs = delete_terminal_jobs_by_ids(paths, &removable)?;
+    Ok(ClearTerminalJobsSearchSummary {
+        query: query.to_string(),
+        matched_terminal_jobs,
+        removed_jobs,
+    })
 }
 
 #[derive(Debug, Clone)]
@@ -3867,6 +5414,9 @@ INSERT INTO job (
         finished_at_ms: None,
         logs_path,
         params_json,
+        target_title: None,
+        retry_of_job_id: None,
+        retry_replacement_job_id: None,
     })
 }
 
@@ -4192,8 +5742,124 @@ fn mux_output_exists(paths: &AppPaths, item_id: &str) -> bool {
     dir.join("mux_dub_preview_v1.mp4").exists() || dir.join("mux_dub_preview_v1.mkv").exists()
 }
 
+/// Tracks, per Running job, the last observed progress value and the instant it
+/// last changed. Used by the stuck-job watchdog to distinguish a job that is
+/// making (coarse) progress from one that is wedged.
+struct JobProgressMark {
+    progress: f32,
+    changed_at: std::time::Instant,
+    warned: bool,
+}
+
+/// Periodic backstop that surfaces and ultimately fails jobs stuck in `Running`
+/// with no progress movement. Runs on the runner thread heartbeat. Conservative
+/// by design: it WARNs early (job log only) and only auto-fails well past the
+/// longest legitimate command timeout, so it cannot kill a healthy long job.
+fn run_job_stall_watchdog(
+    paths: &AppPaths,
+    seen: &mut std::collections::HashMap<String, JobProgressMark>,
+) {
+    let conn = match db::open(paths) {
+        Ok(c) => c,
+        Err(_) => return,
+    };
+    if db::migrate(&conn).is_err() {
+        return;
+    }
+
+    let rows: Vec<(String, f32)> = {
+        let mut stmt = match conn.prepare("SELECT id, progress FROM job WHERE status=?1") {
+            Ok(s) => s,
+            Err(_) => return,
+        };
+        let mapped = stmt.query_map(params![JobStatus::Running.as_str()], |row| {
+            Ok((row.get::<_, String>(0)?, row.get::<_, f64>(1)? as f32))
+        });
+        match mapped {
+            Ok(it) => it.filter_map(|r| r.ok()).collect(),
+            Err(_) => return,
+        }
+    };
+
+    let now = std::time::Instant::now();
+    let mut still_running: std::collections::HashSet<String> =
+        std::collections::HashSet::with_capacity(rows.len());
+
+    for (job_id, progress) in rows {
+        still_running.insert(job_id.clone());
+        let entry = seen.entry(job_id.clone()).or_insert(JobProgressMark {
+            progress,
+            changed_at: now,
+            warned: false,
+        });
+
+        // Progress moved → job is alive; reset the stall clock.
+        if (progress - entry.progress).abs() > f32::EPSILON {
+            entry.progress = progress;
+            entry.changed_at = now;
+            entry.warned = false;
+            continue;
+        }
+
+        let stalled_secs = now.duration_since(entry.changed_at).as_secs();
+
+        if stalled_secs >= JOB_STALL_FAIL_SECS {
+            let _ = log_line(
+                paths,
+                &job_id,
+                "error",
+                "job_stall_failed",
+                serde_json::json!({
+                    "stalled_secs": stalled_secs,
+                    "progress": progress,
+                    "fail_threshold_secs": JOB_STALL_FAIL_SECS,
+                }),
+            );
+            let _ = set_failed(
+                paths,
+                &job_id,
+                &format!(
+                    "job stalled: no progress for {stalled_secs}s (watchdog backstop). The \
+                     underlying step may be deadlocked; check the job log."
+                ),
+            );
+            seen.remove(&job_id);
+        } else if stalled_secs >= JOB_STALL_WARN_SECS && !entry.warned {
+            entry.warned = true;
+            let _ = log_line(
+                paths,
+                &job_id,
+                "warn",
+                "job_stalled",
+                serde_json::json!({
+                    "stalled_secs": stalled_secs,
+                    "progress": progress,
+                    "warn_threshold_secs": JOB_STALL_WARN_SECS,
+                    "fail_threshold_secs": JOB_STALL_FAIL_SECS,
+                }),
+            );
+        }
+    }
+
+    // Drop bookkeeping for jobs that are no longer Running.
+    seen.retain(|id, _| still_running.contains(id));
+}
+
 fn runner_loop(paths: AppPaths, stop: Arc<AtomicBool>, running: Arc<AtomicUsize>) {
+    let mut stall_seen: std::collections::HashMap<String, JobProgressMark> =
+        std::collections::HashMap::new();
+    let mut last_watchdog = std::time::Instant::now()
+        .checked_sub(Duration::from_secs(JOB_WATCHDOG_SCAN_INTERVAL_SECS))
+        .unwrap_or_else(std::time::Instant::now);
+
     while !stop.load(Ordering::SeqCst) {
+        // Stuck-job watchdog heartbeat — runs regardless of queue/concurrency
+        // state below so a wedged job is caught even while others are queued.
+        if last_watchdog.elapsed() >= Duration::from_secs(JOB_WATCHDOG_SCAN_INTERVAL_SECS) {
+            last_watchdog = std::time::Instant::now();
+            run_job_stall_watchdog(&paths, &mut stall_seen);
+        }
+
         let paused = match is_queue_paused(&paths) {
             Ok(v) => v,
             Err(_) => false,
@@ -4489,13 +6155,7 @@ fn execute_job(paths: &AppPaths, job_id: &str, type_str: &str, params_json: &str
             let subscription_id = p.subscription_id.clone();
             let url = normalize_direct_url(&p.url)?;
             let provider = effective_download_provider(&p.provider, &url);
-            let auth_cookie = if let Some(secret) = read_job_cookie_secret(paths, job_id) {
-                Some(secret)
-            } else if let Some(inline) = normalize_auth_cookie(p.auth_cookie)? {
-                Some(inline)
-            } else {
-                resolve_global_youtube_auth_cookie(paths)
-            };
+            let auth_cookie = resolve_youtube_auth_cookie_for_job(paths, job_id, p.auth_cookie)?;
             remove_job_cookie_secret(paths, job_id);
             let mut output_dir = normalize_output_dir(p.output_dir);
             let output_subdir = normalize_output_subdir(p.output_subdir);
@@ -4504,6 +6164,17 @@ fn execute_job(paths: &AppPaths, job_id: &str, type_str: &str, params_json: &str
                 use_browser_cookies,
                 p.browser_cookie_source.as_deref(),
             )?;
+            let youtube_auth_key = if is_youtube_url(&url) {
+                youtube_auth_material_key(
+                    paths,
+                    auth_cookie.as_deref(),
+                    use_browser_cookies && auth_cookie.is_none(),
+                    browser_cookie_source.as_deref(),
+                )?
+            } else {
+                None
+            };
+            ensure_youtube_auth_not_blocked(paths, youtube_auth_key.as_deref())?;
             if output_dir.is_none() && output_subdir.is_none() {
                 output_dir = Some(default_direct_job_output_dir(
                     paths, provider, &url, job_id,
@@ -4526,7 +6197,7 @@ fn execute_job(paths: &AppPaths, job_id: &str, type_str: &str, params_json: &str
                 }),
             )?;
 
-            let downloaded_path = download_url_to_library(
+            let downloaded_path = match download_url_to_library(
                 paths,
                 &url,
                 job_id,
@@ -4548,7 +6219,24 @@ fn execute_job(paths: &AppPaths, job_id: &str, type_str: &str, params_json: &str
                 p.yt_dlp_sleep_interval,
                 p.yt_dlp_sleep_requests,
                 p.subtitle_mode.as_deref(),
-            )?;
+            ) {
+                Ok(path) => path,
+                Err(err) => {
+                    if let Some(auth_key) = youtube_auth_key {
+                        if is_youtube_saved_cookie_rejection(&url, &err.to_string()) {
+                            let _ = record_youtube_auth_block(
+                                paths,
+                                auth_key,
+                                "saved YouTube cookies were rejected by YouTube during download"
+                                    .to_string(),
+                                Some(url.clone()),
+                                Some(job_id.to_string()),
+                            );
+                        }
+                    }
+                    return Err(err);
+                }
+            };
             set_progress(paths, job_id, 0.70)?;
 
             if is_canceled(paths, job_id)? {
@@ -4602,8 +6290,7 @@ fn execute_job(paths: &AppPaths, job_id: &str, type_str: &str, params_json: &str
         JobType::YoutubeSubscriptionRefreshV1 => {
             set_progress(paths, job_id, 0.05)?;
             let p: YoutubeSubscriptionRefreshV1Params = serde_json::from_str(params_json)?;
-            let auth_cookie = read_job_cookie_secret(paths, job_id)
-                .or_else(|| resolve_global_youtube_auth_cookie(paths));
+            let auth_cookie = resolve_youtube_auth_cookie_for_job(paths, job_id, None)?;
 
             if is_canceled(paths, job_id)? {
                 log_line(paths, job_id, "info", "job_canceled", serde_json::json!({}))?;
@@ -4623,6 +6310,15 @@ fn execute_job(paths: &AppPaths, job_id: &str, type_str: &str, params_json: &str
                 let max_items = p.max_items.unwrap_or(200).clamp(1, MAX_DOWNLOAD_BATCH_URLS);
                 let output_dir = subscriptions::youtube_subscription_output_dir(paths, &sub)?;
                 std::fs::create_dir_all(&output_dir)?;
+                let subscription_use_browser_cookies =
+                    sub.use_browser_cookies && auth_cookie.is_none();
+                let youtube_auth_key = youtube_auth_material_key(
+                    paths,
+                    auth_cookie.as_deref(),
+                    subscription_use_browser_cookies,
+                    sub.browser_cookie_source.as_deref(),
+                )?;
+                ensure_youtube_auth_not_blocked(paths, youtube_auth_key.as_deref())?;
 
                 let archive_path =
                     subscriptions::ensure_youtube_subscription_archive_state(paths, &sub)?;
@@ -4640,16 +6336,32 @@ fn execute_job(paths: &AppPaths, job_id: &str, type_str: &str, params_json: &str
                     }),
                 )?;
 
-                let expanded = expand_yt_dlp_urls(
+                let expanded = match expand_yt_dlp_urls(
                     paths,
                     &sub.source_url,
                     max_items,
                     auth_cookie.as_deref(),
-                    use_browser_cookies_for_url(
-                        &sub.source_url,
-                        sub.use_browser_cookies && auth_cookie.is_none(),
-                    ),
-                )?;
+                    use_browser_cookies_for_url(&sub.source_url, subscription_use_browser_cookies),
+                    sub.browser_cookie_source.as_deref(),
+                ) {
+                    Ok(value) => value,
+                    Err(err) => {
+                        if let Some(auth_key) = youtube_auth_key {
+                            if is_youtube_saved_cookie_rejection(&sub.source_url, &err.to_string())
+                            {
+                                let _ = record_youtube_auth_block(
+                                    paths,
+                                    auth_key,
+                                    "saved YouTube cookies were rejected by YouTube during subscription expansion"
+                                        .to_string(),
+                                    Some(sub.source_url.clone()),
+                                    Some(job_id.to_string()),
+                                );
+                            }
+                        }
+                        return Err(err);
+                    }
+                };
                 set_progress(paths, job_id, 0.40)?;
 
                 if is_canceled(paths, job_id)? {
@@ -5686,11 +7398,33 @@ if __name__ == "__main__":
                     py_cmd.env("PYANNOTE_TOKEN", token);
                 }
 
-                let output = py_cmd.output().map_err(|e| {
-                    EngineError::InstallFailed(format!(
-                        "failed to run pyannote diarization script: {e}"
-                    ))
-                })?;
+                let output = match run_command_output_with_control(
+                    paths,
+                    &mut py_cmd,
+                    Some(job_id),
+                    PYTHON_MODEL_JOB_TIMEOUT_SECS,
+                ) {
+                    Ok(output) => output,
+                    Err(CommandRunError::Spawn(error)) => {
+                        return Err(EngineError::InstallFailed(format!(
+                            "failed to run pyannote diarization script: {error}"
+                        )))
+                    }
+                    Err(CommandRunError::Wait(error)) => {
+                        return Err(EngineError::InstallFailed(format!(
+                            "pyannote diarization script failed while running: {error}"
+                        )))
+                    }
+                    Err(CommandRunError::Canceled) => {
+                        log_line(paths, job_id, "info", "job_canceled", serde_json::json!({}))?;
+                        return Ok(());
+                    }
+                    Err(CommandRunError::TimedOut(limit)) => {
+                        return Err(EngineError::InstallFailed(format!(
+                            "pyannote diarization script timed out after {limit}s"
+                        )))
+                    }
+                };
                 if !output.status.success() {
                     let stderr = String::from_utf8_lossy(&output.stderr);
                     return Err(EngineError::InstallFailed(format!(
@@ -5908,9 +7642,33 @@ if __name__ == "__main__":
                         .to_string_lossy()
                         .to_string(),
                 );
-                let output = py_cmd.output().map_err(|e| {
-                    EngineError::InstallFailed(format!("failed to run diarize script: {e}"))
-                })?;
+                let output = match run_command_output_with_control(
+                    paths,
+                    &mut py_cmd,
+                    Some(job_id),
+                    PYTHON_MODEL_JOB_TIMEOUT_SECS,
+                ) {
+                    Ok(output) => output,
+                    Err(CommandRunError::Spawn(error)) => {
+                        return Err(EngineError::InstallFailed(format!(
+                            "failed to run diarize script: {error}"
+                        )))
+                    }
+                    Err(CommandRunError::Wait(error)) => {
+                        return Err(EngineError::InstallFailed(format!(
+                            "diarize script failed while running: {error}"
+                        )))
+                    }
+                    Err(CommandRunError::Canceled) => {
+                        log_line(paths, job_id, "info", "job_canceled", serde_json::json!({}))?;
+                        return Ok(());
+                    }
+                    Err(CommandRunError::TimedOut(limit)) => {
+                        return Err(EngineError::InstallFailed(format!(
+                            "diarize script timed out after {limit}s"
+                        )))
+                    }
+                };
                 if !output.status.success() {
                     let stderr = String::from_utf8_lossy(&output.stderr);
                     return Err(EngineError::InstallFailed(format!(
@@ -6365,9 +8123,33 @@ if __name__ == "__main__":
                     .to_string_lossy()
                     .to_string(),
             );
-            let output = py_cmd.output().map_err(|e| {
-                EngineError::InstallFailed(format!("failed to run pyttsx3 script: {e}"))
-            })?;
+            let output = match run_command_output_with_control(
+                paths,
+                &mut py_cmd,
+                Some(job_id),
+                PYTHON_MODEL_JOB_TIMEOUT_SECS,
+            ) {
+                Ok(output) => output,
+                Err(CommandRunError::Spawn(error)) => {
+                    return Err(EngineError::InstallFailed(format!(
+                        "failed to run pyttsx3 script: {error}"
+                    )))
+                }
+                Err(CommandRunError::Wait(error)) => {
+                    return Err(EngineError::InstallFailed(format!(
+                        "pyttsx3 script failed while running: {error}"
+                    )))
+                }
+                Err(CommandRunError::Canceled) => {
+                    log_line(paths, job_id, "info", "job_canceled", serde_json::json!({}))?;
+                    return Ok(());
+                }
+                Err(CommandRunError::TimedOut(limit)) => {
+                    return Err(EngineError::InstallFailed(format!(
+                        "pyttsx3 script timed out after {limit}s"
+                    )))
+                }
+            };
             if !output.status.success() {
                 let stderr = String::from_utf8_lossy(&output.stderr);
                 return Err(EngineError::InstallFailed(format!(
@@ -6841,9 +8623,33 @@ if __name__ == "__main__":
             );
             py_cmd.env("HF_HUB_OFFLINE", "1");
             py_cmd.env("TRANSFORMERS_OFFLINE", "1");
-            let output = py_cmd.output().map_err(|e| {
-                EngineError::InstallFailed(format!("failed to run neural TTS script: {e}"))
-            })?;
+            let output = match run_command_output_with_control(
+                paths,
+                &mut py_cmd,
+                Some(job_id),
+                PYTHON_MODEL_JOB_TIMEOUT_SECS,
+            ) {
+                Ok(output) => output,
+                Err(CommandRunError::Spawn(error)) => {
+                    return Err(EngineError::InstallFailed(format!(
+                        "failed to run neural TTS script: {error}"
+                    )))
+                }
+                Err(CommandRunError::Wait(error)) => {
+                    return Err(EngineError::InstallFailed(format!(
+                        "neural TTS script failed while running: {error}"
+                    )))
+                }
+                Err(CommandRunError::Canceled) => {
+                    log_line(paths, job_id, "info", "job_canceled", serde_json::json!({}))?;
+                    return Ok(());
+                }
+                Err(CommandRunError::TimedOut(limit)) => {
+                    return Err(EngineError::InstallFailed(format!(
+                        "neural TTS script timed out after {limit}s"
+                    )))
+                }
+            };
             if !output.status.success() {
                 let stderr = String::from_utf8_lossy(&output.stderr);
                 return Err(EngineError::InstallFailed(format!(
@@ -7581,11 +9387,33 @@ if __name__ == "__main__":
             );
             py_cmd.env("HF_HUB_OFFLINE", "1");
             py_cmd.env("TRANSFORMERS_OFFLINE", "1");
-            let output = py_cmd.output().map_err(|e| {
-                EngineError::InstallFailed(format!(
-                    "failed to run voice-preserving TTS script: {e}"
-                ))
-            })?;
+            let output = match run_command_output_with_control(
+                paths,
+                &mut py_cmd,
+                Some(job_id),
+                PYTHON_MODEL_JOB_TIMEOUT_SECS,
+            ) {
+                Ok(output) => output,
+                Err(CommandRunError::Spawn(error)) => {
+                    return Err(EngineError::InstallFailed(format!(
+                        "failed to run voice-preserving TTS script: {error}"
+                    )))
+                }
+                Err(CommandRunError::Wait(error)) => {
+                    return Err(EngineError::InstallFailed(format!(
+                        "voice-preserving TTS script failed while running: {error}"
+                    )))
+                }
+                Err(CommandRunError::Canceled) => {
+                    log_line(paths, job_id, "info", "job_canceled", serde_json::json!({}))?;
+                    return Ok(());
+                }
+                Err(CommandRunError::TimedOut(limit)) => {
+                    return Err(EngineError::InstallFailed(format!(
+                        "voice-preserving TTS script timed out after {limit}s"
+                    )))
+                }
+            };
             if !output.status.success() {
                 let stderr = String::from_utf8_lossy(&output.stderr);
                 return Err(EngineError::InstallFailed(format!(
@@ -8751,7 +10579,15 @@ def main() -> None:
     ap.add_argument("--output", required=True)
     args = ap.parse_args()
 
-    separator = Separator("spleeter:2stems")
+    # multiprocess=False is REQUIRED on Windows. With the default (True),
+    # Spleeter builds a multiprocessing.Pool() sized to os.cpu_count(); under
+    # the Windows "spawn" start method every worker re-imports this module and
+    # therefore re-imports TensorFlow, then the pool deadlocks against the main
+    # process during separation/write. The observed symptom was ~30 idle python
+    # workers + a blocked ffmpeg decode pipe and a job stuck at progress 0.25
+    # for hours. For our short, single-file clips the write pool gives no
+    # benefit, so we run fully in-process.
+    separator = Separator("spleeter:2stems", multiprocess=False)
     separator.separate_to_file(args.input, args.output)
     print("spleeter_separate_ok")
 
@@ -8761,32 +10597,59 @@ if __name__ == "__main__":
 "#;
             std::fs::write(&sep_script_path, sep_script)?;
 
-            let output = {
-                let mut cmd = cmd::command(&venv_python);
-                cmd.arg(&sep_script_path);
-                cmd.arg("--input").arg(&audio_path);
-                cmd.arg("--output").arg(&raw_dir);
-                cmd.env("PATH", ffmpeg_path);
-                cmd.env("PYTHONNOUSERSITE", "1");
-                cmd.env(
-                    "XDG_CACHE_HOME",
-                    paths
-                        .cache_dir()
-                        .join("python")
-                        .to_string_lossy()
-                        .to_string(),
-                );
-                cmd.env(
-                    "MODEL_PATH",
-                    paths
-                        .python_models_dir()
-                        .join("spleeter")
-                        .to_string_lossy()
-                        .to_string(),
-                );
-                cmd.output()
-            }
-            .map_err(|e| EngineError::InstallFailed(format!("failed to run spleeter: {e}")))?;
+            let mut cmd = cmd::command(&venv_python);
+            cmd.arg(&sep_script_path);
+            cmd.arg("--input").arg(&audio_path);
+            cmd.arg("--output").arg(&raw_dir);
+            cmd.env("PATH", ffmpeg_path);
+            cmd.env("PYTHONNOUSERSITE", "1");
+            cmd.env(
+                "XDG_CACHE_HOME",
+                paths
+                    .cache_dir()
+                    .join("python")
+                    .to_string_lossy()
+                    .to_string(),
+            );
+            cmd.env(
+                "MODEL_PATH",
+                paths
+                    .python_models_dir()
+                    .join("spleeter")
+                    .to_string_lossy()
+                    .to_string(),
+            );
+            // Run under the cancellation/timeout-aware runner. The previous
+            // blocking `cmd.output()` ignored job cancellation and had no
+            // timeout, so a deadlocked Spleeter run left the job "Running"
+            // forever (the original Localization Studio hang).
+            let output = match run_command_output_with_control(
+                paths,
+                &mut cmd,
+                Some(job_id),
+                SPLEETER_SEPARATE_TIMEOUT_SECS,
+            ) {
+                Ok(output) => output,
+                Err(CommandRunError::Spawn(error)) => {
+                    return Err(EngineError::InstallFailed(format!(
+                        "failed to run spleeter: {error}"
+                    )))
+                }
+                Err(CommandRunError::Wait(error)) => {
+                    return Err(EngineError::InstallFailed(format!(
+                        "spleeter failed while running: {error}"
+                    )))
+                }
+                Err(CommandRunError::Canceled) => {
+                    log_line(paths, job_id, "info", "job_canceled", serde_json::json!({}))?;
+                    return Ok(());
+                }
+                Err(CommandRunError::TimedOut(limit)) => {
+                    return Err(EngineError::InstallFailed(format!(
+                        "spleeter timed out after {limit}s (separation deadlocked)"
+                    )))
+                }
+            };
 
             if !output.status.success() {
                 let stderr = String::from_utf8_lossy(&output.stderr);
@@ -9113,25 +10976,48 @@ if __name__ == "__main__":
             let torch_home = paths.python_models_dir().join("demucs");
             std::fs::create_dir_all(&torch_home)?;
 
-            let output = {
-                let mut cmd = cmd::command(&venv_python);
-                cmd.args(["-m", "demucs_infer"]);
-                cmd.args(["--two-stems", "vocals"]);
-                cmd.arg("-o").arg(&raw_dir);
-                cmd.arg(&audio_path);
-                cmd.env("PYTHONNOUSERSITE", "1");
-                cmd.env(
-                    "XDG_CACHE_HOME",
-                    paths
-                        .cache_dir()
-                        .join("python")
-                        .to_string_lossy()
-                        .to_string(),
-                );
-                cmd.env("TORCH_HOME", torch_home.to_string_lossy().to_string());
-                cmd.output()
-            }
-            .map_err(|e| EngineError::InstallFailed(format!("failed to run demucs: {e}")))?;
+            let mut cmd = cmd::command(&venv_python);
+            cmd.args(["-m", "demucs_infer"]);
+            cmd.args(["--two-stems", "vocals"]);
+            cmd.arg("-o").arg(&raw_dir);
+            cmd.arg(&audio_path);
+            cmd.env("PYTHONNOUSERSITE", "1");
+            cmd.env(
+                "XDG_CACHE_HOME",
+                paths
+                    .cache_dir()
+                    .join("python")
+                    .to_string_lossy()
+                    .to_string(),
+            );
+            cmd.env("TORCH_HOME", torch_home.to_string_lossy().to_string());
+            let output = match run_command_output_with_control(
+                paths,
+                &mut cmd,
+                Some(job_id),
+                PYTHON_MODEL_JOB_TIMEOUT_SECS,
+            ) {
+                Ok(output) => output,
+                Err(CommandRunError::Spawn(error)) => {
+                    return Err(EngineError::InstallFailed(format!(
+                        "failed to run demucs: {error}"
+                    )))
+                }
+                Err(CommandRunError::Wait(error)) => {
+                    return Err(EngineError::InstallFailed(format!(
+                        "demucs failed while running: {error}"
+                    )))
+                }
+                Err(CommandRunError::Canceled) => {
+                    log_line(paths, job_id, "info", "job_canceled", serde_json::json!({}))?;
+                    return Ok(());
+                }
+                Err(CommandRunError::TimedOut(limit)) => {
+                    return Err(EngineError::InstallFailed(format!(
+                        "demucs timed out after {limit}s (separation deadlocked)"
+                    )))
+                }
+            };
 
             if !output.status.success() {
                 let stderr = String::from_utf8_lossy(&output.stderr);
@@ -9256,20 +11142,42 @@ if __name__ == "__main__":
             }
 
             let filter = "highpass=f=80,lowpass=f=12000,afftdn=nf=-25";
-            let output = cmd::command(paths.ffmpeg_cmd())
+            let mut clean_cmd = cmd::command(paths.ffmpeg_cmd());
+            clean_cmd
                 .args(["-nostdin", "-y"])
                 .arg("-i")
                 .arg(&vocals_src)
                 .args(["-af", filter])
                 .args(["-c:a", "pcm_s16le", "-ar", "44100", "-ac", "2"])
-                .arg(&out_path)
-                .output()
-                .map_err(|e| match e.kind() {
-                    std::io::ErrorKind::NotFound => EngineError::ExternalToolMissing {
+                .arg(&out_path);
+            let output = match run_command_output_with_control(
+                paths,
+                &mut clean_cmd,
+                Some(job_id),
+                FFMPEG_FILTER_TIMEOUT_SECS,
+            ) {
+                Ok(output) => output,
+                Err(CommandRunError::Spawn(error)) => {
+                    if error.kind() == std::io::ErrorKind::NotFound {
+                        return Err(EngineError::ExternalToolMissing {
+                            tool: "ffmpeg".to_string(),
+                        });
+                    }
+                    return Err(EngineError::Io(error));
+                }
+                Err(CommandRunError::Wait(error)) => return Err(EngineError::Io(error)),
+                Err(CommandRunError::Canceled) => {
+                    log_line(paths, job_id, "info", "job_canceled", serde_json::json!({}))?;
+                    return Ok(());
+                }
+                Err(CommandRunError::TimedOut(limit)) => {
+                    return Err(EngineError::ExternalToolFailed {
                         tool: "ffmpeg".to_string(),
-                    },
-                    _ => EngineError::Io(e),
-                })?;
+                        code: None,
+                        stderr: format!("vocal cleanup timed out after {limit}s"),
+                    });
+                }
+            };
 
             if !output.status.success() {
                 return Err(EngineError::ExternalToolFailed {
@@ -10632,8 +12540,19 @@ fn delete_terminal_jobs_by_ids(paths: &AppPaths, job_ids: &[String]) -> Result<u
     let tx = conn.unchecked_transaction()?;
     let mut removed = 0_usize;
     for job_id in job_ids {
-        removed += tx.execute("DELETE FROM job WHERE id=?1", [job_id])?;
-        remove_job_cookie_secret(paths, job_id);
+        let affected = tx.execute(
+            "DELETE FROM job WHERE id=?1 AND status IN (?2, ?3, ?4)",
+            params![
+                job_id,
+                JobStatus::Succeeded.as_str(),
+                JobStatus::Failed.as_str(),
+                JobStatus::Canceled.as_str()
+            ],
+        )?;
+        removed += affected;
+        if affected > 0 {
+            remove_job_cookie_secret(paths, job_id);
+        }
     }
     tx.commit()?;
     Ok(removed)
@@ -10768,6 +12687,7 @@ fn normalize_and_expand_download_targets(
     inputs: Vec<String>,
     auth_cookie: Option<&str>,
     use_browser_cookies: bool,
+    browser_cookie_source: Option<&str>,
 ) -> Result<Vec<DownloadTarget>> {
     let urls = normalize_direct_urls(inputs)?;
     let mut targets: Vec<DownloadTarget> = Vec::new();
@@ -10792,6 +12712,7 @@ fn normalize_and_expand_download_targets(
                             remaining + 1,
                             auth_cookie,
                             use_browser_cookies_for_url(&url, use_browser_cookies),
+                            browser_cookie_source,
                         )?;
                         fallback_urls
                             .into_iter()
@@ -10872,6 +12793,7 @@ fn normalize_and_expand_download_targets(
                 remaining + 1,
                 auth_cookie,
                 use_browser_cookies_for_url(&url, use_browser_cookies),
+                browser_cookie_source,
             )?;
             if expanded.is_empty() {
                 return Err(EngineError::InstallFailed(format!(
@@ -10981,6 +12903,51 @@ pub(crate) fn normalize_auth_cookie(value: Option<String>) -> Result<Option<Stri
     }
 
     Ok(Some(trimmed.to_string()))
+}
+
+pub fn normalize_youtube_auth_cookie_for_storage(value: Option<String>) -> Result<Option<String>> {
+    let raw = value.unwrap_or_default();
+    let trimmed = raw.trim();
+    if trimmed.is_empty() {
+        return Ok(None);
+    }
+
+    let path = Path::new(trimmed);
+    if path.exists() && path.is_file() {
+        let contents = std::fs::read_to_string(path)?;
+        let normalized = normalize_youtube_auth_cookie_for_storage(Some(contents))?;
+        let normalized = normalized.ok_or_else(|| {
+            EngineError::InstallFailed(format!("cookie file was empty: {}", path.to_string_lossy()))
+        })?;
+        return Ok(Some(normalized));
+    }
+    if looks_like_cookie_file_path(trimmed) {
+        return Err(EngineError::InstallFailed(format!(
+            "cookie file path does not exist: {}",
+            trimmed
+        )));
+    }
+
+    if let Some(records) = cookie_records_from_structured_input(trimmed) {
+        let filtered = filter_youtube_cookie_records(records);
+        if filtered.is_empty() {
+            return Err(EngineError::InstallFailed(
+                "cookie export did not contain non-expired youtube.com cookies. Export a YouTube-only cookies.txt/JSON from a logged-in youtube.com browser session.".to_string(),
+            ));
+        }
+        return Ok(format_netscape_cookie_records(&filtered));
+    }
+
+    let pairs = parse_cookie_header_pairs(trimmed);
+    if pairs.is_empty() {
+        return Err(EngineError::InstallFailed(
+            "session input must be a cookie header, browser-export JSON, Netscape cookie text, or an existing cookie-file path".to_string(),
+        ));
+    }
+    Ok(Some(cookie_pairs_to_netscape_text_for_url(
+        "https://www.youtube.com/robots.txt",
+        &pairs,
+    )?))
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -11133,6 +13100,70 @@ fn format_netscape_cookie_records(records: &[NetscapeCookieRecord]) -> Option<St
     Some(contents)
 }
 
+fn cookie_records_from_structured_input(raw: &str) -> Option<Vec<NetscapeCookieRecord>> {
+    if let Ok(value) = serde_json::from_str::<serde_json::Value>(raw) {
+        let mut records = Vec::new();
+        collect_cookie_json_records(&value, &mut records);
+        return Some(records);
+    }
+    let records = netscape_cookie_text_to_records(raw);
+    if records.is_empty() {
+        None
+    } else {
+        Some(records)
+    }
+}
+
+fn collect_cookie_json_records(value: &serde_json::Value, records: &mut Vec<NetscapeCookieRecord>) {
+    match value {
+        serde_json::Value::Array(values) => {
+            for item in values {
+                collect_cookie_json_records(item, records);
+            }
+        }
+        serde_json::Value::Object(map) => {
+            if let Some(record) = cookie_json_record_from_object(map) {
+                records.push(record);
+                return;
+            }
+            if let Some(cookies) = map.get("cookies") {
+                collect_cookie_json_records(cookies, records);
+                return;
+            }
+            for nested in map.values() {
+                if matches!(
+                    nested,
+                    serde_json::Value::Array(_) | serde_json::Value::Object(_)
+                ) {
+                    collect_cookie_json_records(nested, records);
+                }
+            }
+        }
+        _ => {}
+    }
+}
+
+fn is_youtube_cookie_domain(domain: &str) -> bool {
+    let normalized = domain
+        .trim()
+        .trim_start_matches("#HttpOnly_")
+        .trim_start_matches('.')
+        .to_ascii_lowercase();
+    normalized == "youtube.com"
+        || normalized.ends_with(".youtube.com")
+        || normalized == "youtu.be"
+        || normalized.ends_with(".youtu.be")
+}
+
+fn filter_youtube_cookie_records(records: Vec<NetscapeCookieRecord>) -> Vec<NetscapeCookieRecord> {
+    let now_secs = (now_ms() / 1000).max(0);
+    records
+        .into_iter()
+        .filter(|record| is_youtube_cookie_domain(&record.domain))
+        .filter(|record| record.expires == 0 || record.expires >= now_secs)
+        .collect()
+}
+
 fn netscape_cookie_text_to_records(raw_text: &str) -> Vec<NetscapeCookieRecord> {
     let mut records: Vec<NetscapeCookieRecord> = Vec::new();
     for line in raw_text.lines() {
@@ -11201,7 +13232,7 @@ fn looks_like_cookie_file_path(value: &str) -> bool {
     }
 
     let lower = value.to_ascii_lowercase();
-    [".json", ".txt", ".cookie", ".cookies"]
+    [".json", ".txt", ".js", ".cookie", ".cookies"]
         .iter()
         .any(|suffix| lower.ends_with(suffix))
 }
@@ -11388,6 +13419,95 @@ fn yt_dlp_should_retry_without_format(url: &str, err: &EngineError) -> bool {
         || lower.contains("yt-dlp downloaded an empty file")
         || (is_youtube_url(url)
             && (lower.contains("http error 403") || lower.contains("fragment 1 not found")))
+}
+
+fn yt_dlp_is_rate_limit_error(message: &str) -> bool {
+    let lower = message.to_ascii_lowercase();
+    lower.contains("http error 429")
+        || lower.contains("429")
+        || lower.contains("too many requests")
+        || lower.contains("rate limit")
+}
+
+fn yt_dlp_rate_limit_retry_delay_secs(attempt: u32) -> u64 {
+    let delay = YT_DLP_RATE_LIMIT_MIN_DELAY_SECS << attempt;
+    delay.min(YT_DLP_RATE_LIMIT_MAX_DELAY_SECS)
+}
+
+fn run_yt_dlp_with_rate_limit_retry(
+    paths: &AppPaths,
+    args: &[String],
+    job_id: Option<&str>,
+    timeout_secs: u64,
+    using_browser_cookies: bool,
+    url: &str,
+    output_res: Result<std::process::Output>,
+) -> Result<std::process::Output> {
+    let mut output_res = output_res;
+    let mut retries = 0u32;
+    loop {
+        match output_res {
+            Ok(output) => return Ok(output),
+            Err(err) => {
+                if retries >= YT_DLP_RATE_LIMIT_RETRIES
+                    || !is_youtube_url(url)
+                    || !yt_dlp_is_rate_limit_error(&err.to_string())
+                {
+                    return Err(err);
+                }
+            }
+        };
+
+        retries += 1;
+        let delay = yt_dlp_rate_limit_retry_delay_secs(retries - 1);
+        std::thread::sleep(Duration::from_secs(delay));
+        output_res = run_yt_dlp_with_browser_cookie_retry(
+            paths,
+            args,
+            job_id,
+            timeout_secs,
+            using_browser_cookies,
+        );
+    }
+}
+
+fn yt_dlp_is_http_403_error(message: &str) -> bool {
+    message.to_ascii_lowercase().contains("http error 403")
+}
+
+fn run_yt_dlp_with_dependency_refresh_retry(
+    paths: &AppPaths,
+    args: &[String],
+    job_id: Option<&str>,
+    timeout_secs: u64,
+    url: &str,
+    output_res: Result<std::process::Output>,
+) -> Result<std::process::Output> {
+    let first_err = match output_res {
+        Ok(output) => return Ok(output),
+        Err(err) => err,
+    };
+
+    if !is_youtube_url(url) || !yt_dlp_is_http_403_error(&first_err.to_string()) {
+        return Err(first_err);
+    }
+
+    if !cfg!(windows) {
+        return Err(first_err);
+    }
+
+    let lock = YT_DLP_BOOTSTRAP_LOCK.get_or_init(|| Mutex::new(()));
+    let _guard = match lock.lock() {
+        Ok(guard) => guard,
+        Err(poisoned) => poisoned.into_inner(),
+    };
+
+    match tools::install_ytdlp_tools(paths) {
+        Ok(_) => run_yt_dlp(paths, args, job_id, timeout_secs),
+        Err(install_err) => Err(EngineError::InstallFailed(format!(
+            "{first_err}; bundled yt-dlp refresh failed: {install_err}"
+        ))),
+    }
 }
 
 fn run_yt_dlp_with_browser_cookie_retry(
@@ -11824,11 +13944,12 @@ pub fn normalize_browser_cookie_source(value: Option<&str>) -> Result<Option<Str
         return Ok(None);
     };
     let normalized = raw.to_ascii_lowercase();
-    match normalized.as_str() {
-        "chrome" | "firefox" | "edge" | "opera" => Ok(Some(normalized)),
-        _ => Err(EngineError::InstallFailed(format!(
-            "unsupported browser cookie source: {raw}. Choose chrome, firefox, edge, or opera."
-        ))),
+    if SUPPORTED_BROWSER_COOKIE_SOURCES.contains(&normalized.as_str()) {
+        Ok(Some(normalized))
+    } else {
+        Err(EngineError::InstallFailed(format!(
+            "unsupported browser cookie source: {raw}. Choose firefox, chrome, edge, or opera."
+        )))
     }
 }
 
@@ -11839,14 +13960,10 @@ fn browser_cookie_source_for_request(
     if !use_browser_cookies {
         return Ok(None);
     }
-    normalize_browser_cookie_source(source)?.map_or_else(
-        || {
-            Err(EngineError::InstallFailed(
-                "browser cookies are enabled, but no browser was selected. Choose Chrome, Firefox, Edge, or Opera.".to_string(),
-            ))
-        },
-        |value| Ok(Some(value)),
-    )
+    Ok(Some(
+        normalize_browser_cookie_source(source)?
+            .unwrap_or_else(|| DEFAULT_BROWSER_COOKIE_SOURCE.to_string()),
+    ))
 }
 
 fn yt_dlp_youtube_player_clients(
@@ -11913,7 +14030,7 @@ fn yt_dlp_failure_hint(
         }
         if using_browser_cookies {
             return Some(
-                "VoxVulgi asked yt-dlp to read browser cookies, but YouTube still rejected the request. Export a fresh YouTube-only Netscape cookies.txt instead of relying on live Chromium cookie access.".to_string(),
+                "VoxVulgi asked yt-dlp to read browser cookies, but YouTube still rejected the request. Export a fresh YouTube-only Netscape cookies.txt instead of relying on live browser cookie access.".to_string(),
             );
         }
         return Some(
@@ -11929,6 +14046,12 @@ fn yt_dlp_failure_hint(
         return Some(format!(
             "YouTube's extractor asked for a page reload instead of returning playable media.{runtime_hint}"
         ));
+    }
+    if is_youtube_url(url) && yt_dlp_is_rate_limit_error(&lower) {
+        return Some(
+            "YouTube is rate-limiting this session (HTTP 429 / too many requests). Wait before retrying, then run with slower pacing (increase sleep interval/request settings) so requests are spaced out."
+                .to_string(),
+        );
     }
     if is_youtube_url(url) && lower.contains("http error 403") {
         let auth_hint = if auth_cookie_present {
@@ -12003,11 +14126,15 @@ fn append_yt_dlp_archive_download_options(
         Some("auto") | Some("embed") | Some("auto_srt") | Some("auto-srt") => {
             args.push("--write-subs".to_string());
             args.push("--write-auto-subs".to_string());
+            args.push("--sub-langs".to_string());
+            args.push(YT_DLP_ARCHIVE_SUB_LANGS.to_string());
             args.push("--convert-subs".to_string());
             args.push("srt".to_string());
         }
         Some("manual") | Some("subs") | Some("srt") | Some("sidecar") => {
             args.push("--write-subs".to_string());
+            args.push("--sub-langs".to_string());
+            args.push(YT_DLP_ARCHIVE_SUB_LANGS.to_string());
             args.push("--convert-subs".to_string());
             args.push("srt".to_string());
         }
@@ -12327,6 +14454,9 @@ fn run_yt_dlp(
 
 fn yt_dlp_failure_should_stop(message: &str) -> bool {
     let lower = message.to_ascii_lowercase();
+    if yt_dlp_is_rate_limit_error(&lower) {
+        return false;
+    }
     lower.contains(" error:")
         || lower.contains("unable to extract")
         || lower.contains("requested format is not available")
@@ -12342,6 +14472,7 @@ fn expand_yt_dlp_urls(
     limit: usize,
     auth_cookie: Option<&str>,
     use_browser_cookies: bool,
+    browser_cookie_source: Option<&str>,
 ) -> Result<Vec<String>> {
     let limit = limit.max(1);
     let mut args = vec![
@@ -12375,7 +14506,10 @@ fn expand_yt_dlp_urls(
     let mut using_browser_cookies = false;
     if use_browser_cookies && !using_cookie_file {
         args.push("--cookies-from-browser".to_string());
-        args.push("chrome".to_string());
+        args.push(
+            browser_cookie_source_for_request(true, browser_cookie_source)?
+                .expect("browser source checked"),
+        );
         using_browser_cookies = true;
     }
     let js_runtime_available =
@@ -13801,6 +15935,23 @@ fn download_yt_dlp_url_to_library(
         }
         other => other,
     };
+    let output_res = run_yt_dlp_with_dependency_refresh_retry(
+        paths,
+        &args,
+        Some(job_id),
+        YT_DLP_DOWNLOAD_TIMEOUT_SECS,
+        url,
+        output_res,
+    );
+    let output_res = run_yt_dlp_with_rate_limit_retry(
+        paths,
+        &args,
+        Some(job_id),
+        YT_DLP_DOWNLOAD_TIMEOUT_SECS,
+        using_browser_cookies,
+        url,
+        output_res,
+    );
     if let Some(path) = cookie_file_path {
         let _ = std::fs::remove_file(path);
     }
@@ -13903,6 +16054,20 @@ fn resolve_global_youtube_auth_cookie(paths: &AppPaths) -> Option<String> {
     normalize_auth_cookie(Some(trimmed.to_string()))
         .ok()
         .flatten()
+}
+
+fn resolve_youtube_auth_cookie_for_job(
+    paths: &AppPaths,
+    job_id: &str,
+    inline_auth_cookie: Option<String>,
+) -> Result<Option<String>> {
+    if let Some(global) = resolve_global_youtube_auth_cookie(paths) {
+        return Ok(Some(global));
+    }
+    if let Some(secret) = read_job_cookie_secret(paths, job_id) {
+        return Ok(Some(secret));
+    }
+    normalize_auth_cookie(inline_auth_cookie)
 }
 
 fn delete_job_by_id(paths: &AppPaths, job_id: &str) -> Result<()> {
@@ -15717,6 +17882,58 @@ mod tests {
         .expect("insert item");
     }
 
+    fn save_test_global_youtube_cookie(paths: &AppPaths, value: &str) -> String {
+        config::save_youtube_auth_config(
+            paths,
+            &config::YoutubeAuthConfig {
+                netscape_cookie_json: Some(format!(
+                    r#"[{{"domain":".youtube.com","name":"SID","value":"{value}"}}]"#
+                )),
+            },
+        )
+        .expect("save global auth");
+        resolve_global_youtube_auth_cookie(paths).expect("resolved global auth")
+    }
+
+    fn enqueue_failed_youtube_direct_job(
+        paths: &AppPaths,
+        url: &str,
+        batch_id: &str,
+        error: &str,
+    ) -> JobRow {
+        let params_json = serde_json::json!({
+            "url": url,
+            "provider": DOWNLOAD_PROVIDER_YOUTUBE_YT_DLP,
+            "output_dir": "D:/archive"
+        })
+        .to_string();
+        let job = enqueue_with_type_item_and_batch_id(
+            paths,
+            JobType::DownloadDirectUrl,
+            params_json,
+            None,
+            Some(batch_id.to_string()),
+        )
+        .expect("enqueue direct job");
+        let conn = db::open(paths).expect("open");
+        db::migrate(&conn).expect("migrate");
+        conn.execute(
+            "UPDATE job SET status=?1, finished_at_ms=?2, error=?3 WHERE id=?4",
+            params![JobStatus::Failed.as_str(), now_ms(), error, &job.id],
+        )
+        .expect("mark failed");
+        job
+    }
+
+    fn stored_job_status(paths: &AppPaths, job_id: &str) -> String {
+        let conn = db::open(paths).expect("open");
+        db::migrate(&conn).expect("migrate");
+        conn.query_row("SELECT status FROM job WHERE id=?1", [job_id], |row| {
+            row.get(0)
+        })
+        .expect("job status")
+    }
+
     fn seed_subtitle_track_named(
         paths: &AppPaths,
         item_id: &str,
@@ -16891,7 +19108,7 @@ EOF
         for i in 0..=MAX_DOWNLOAD_BATCH_URLS {
             urls.push(format!("https://example.com/video-{i}.mp4"));
         }
-        let err = normalize_and_expand_download_targets(&paths, urls, None, false)
+        let err = normalize_and_expand_download_targets(&paths, urls, None, false, None)
             .expect_err("must fail");
         assert!(
             err.to_string().contains("batch limit exceeded"),
@@ -17032,6 +19249,31 @@ EOF
     }
 
     #[test]
+    fn yt_dlp_http_403_error_detection() {
+        assert!(yt_dlp_is_http_403_error(
+            "ERROR: unable to download video data: HTTP Error 403: Forbidden"
+        ));
+        assert!(!yt_dlp_is_http_403_error(
+            "ERROR: too many requests (HTTP Error 429: Too Many Requests)"
+        ));
+    }
+
+    #[test]
+    fn yt_dlp_failure_hint_includes_rate_limit_advice() {
+        let hint = yt_dlp_failure_hint(
+            "https://www.youtube.com/watch?v=abc123",
+            "ERROR: [youtube] abc123: HTTP Error 429: Too Many Requests",
+            false,
+            false,
+            false,
+        )
+        .expect("hint");
+
+        assert!(hint.contains("rate-limiting"));
+        assert!(hint.contains("sleep"));
+    }
+
+    #[test]
     fn youtube_player_clients_prefer_conservative_public_clients() {
         assert_eq!(
             yt_dlp_youtube_player_clients(false, false),
@@ -17104,6 +19346,13 @@ EOF
         let python3 = "python3 failed (code=Some(9009)): Python was not found; run without arguments to install from the Microsoft Store, or disable this shortcut from Settings > Apps > Advanced app settings > App execution aliases.".to_string();
         let summary = summarize_yt_dlp_failures(&[python3, python, bundled.clone()]);
         assert_eq!(summary, bundled);
+    }
+
+    #[test]
+    fn yt_dlp_failure_should_stop_allows_rate_limit_retry_path() {
+        let message =
+            "yt-dlp failed (code=Some(1)): ERROR: [youtube] abc: HTTP Error 429: Too Many Requests";
+        assert!(!yt_dlp_failure_should_stop(message));
     }
 
     #[test]
@@ -17509,6 +19758,780 @@ EOF
     }
 
     #[test]
+    fn search_jobs_finds_old_batch_and_hydrates_cached_youtube_title() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let paths = AppPaths::new(dir.path().to_path_buf());
+        db::ensure_schema(&paths).expect("schema");
+
+        let url = "https://www.youtube.com/watch?v=abc123";
+        let conn = db::open(&paths).expect("open");
+        db::migrate(&conn).expect("migrate");
+        conn.execute(
+            "INSERT INTO library_item (id, created_at_ms, source_type, source_uri, title, media_path) VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+            params![
+                "item-youtube",
+                2_i64,
+                "url_direct",
+                url,
+                "Cached YouTube title",
+                "D:/archive/Cached YouTube title.mp4",
+            ],
+        )
+        .expect("insert cached item");
+
+        let params_json = serde_json::json!({
+            "url": url,
+            "provider": DOWNLOAD_PROVIDER_YOUTUBE_YT_DLP,
+            "output_dir": "D:/archive"
+        })
+        .to_string();
+        let job = enqueue_with_type_item_and_batch_id(
+            &paths,
+            JobType::DownloadDirectUrl,
+            params_json,
+            None,
+            Some("2de9cc9c-test-batch".to_string()),
+        )
+        .expect("enqueue direct job");
+
+        let rows = search_jobs(&paths, "2de9cc9c", 500).expect("search");
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].id, job.id);
+        assert_eq!(
+            rows[0].target_title.as_deref(),
+            Some("Cached YouTube title")
+        );
+    }
+
+    #[test]
+    fn delete_terminal_job_removes_failed_row_but_refuses_queued_work() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let paths = AppPaths::new(dir.path().to_path_buf());
+        db::ensure_schema(&paths).expect("schema");
+
+        let job = enqueue_dummy_sleep(&paths, 5).expect("enqueue dummy");
+        let queued_err = delete_terminal_job(&paths, &job.id).expect_err("queued delete rejected");
+        assert!(queued_err
+            .to_string()
+            .contains("only failed or canceled jobs can be deleted individually"));
+
+        let conn = db::open(&paths).expect("open");
+        db::migrate(&conn).expect("migrate");
+        conn.execute(
+            "UPDATE job SET status=?1, finished_at_ms=?2, error=?3 WHERE id=?4",
+            params![JobStatus::Failed.as_str(), now_ms(), "forced", &job.id],
+        )
+        .expect("mark failed");
+
+        assert!(delete_terminal_job(&paths, &job.id).expect("delete failed"));
+        assert!(get_job(&paths, &job.id).expect("get deleted").is_none());
+    }
+
+    #[test]
+    fn youtube_auth_block_prevents_direct_retry_until_cleared() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let paths = AppPaths::new(dir.path().to_path_buf());
+        db::ensure_schema(&paths).expect("schema");
+
+        let cookie = save_test_global_youtube_cookie(&paths, "blocked-cookie");
+        let auth_key = youtube_auth_material_key_from_cookie(&cookie);
+        let failed = enqueue_failed_youtube_direct_job(
+            &paths,
+            "https://www.youtube.com/watch?v=JKOC9OaAIn0",
+            "42a89117-test",
+            "ERROR: [youtube] JKOC9OaAIn0: Sign in to confirm you're not a bot. VoxVulgi saved YouTube cookies were supplied, but YouTube rejected them.",
+        );
+
+        record_youtube_auth_block(
+            &paths,
+            auth_key,
+            "saved YouTube cookies were rejected by YouTube during download".to_string(),
+            Some("https://www.youtube.com/watch?v=JKOC9OaAIn0".to_string()),
+            Some(failed.id.clone()),
+        )
+        .expect("record auth block");
+
+        let retry_err = retry_job(&paths, &failed.id).expect_err("retry should be blocked");
+        assert!(retry_err.to_string().contains("YouTube auth is blocked"));
+
+        clear_youtube_auth_block(&paths).expect("clear auth block");
+        let retried = retry_job(&paths, &failed.id).expect("retry after clear");
+        assert_ne!(retried.id, failed.id);
+        assert_eq!(retried.status, JobStatus::Queued);
+    }
+
+    #[test]
+    fn youtube_auth_block_cancels_matching_queued_youtube_jobs() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let paths = AppPaths::new(dir.path().to_path_buf());
+        db::ensure_schema(&paths).expect("schema");
+
+        let cookie = save_test_global_youtube_cookie(&paths, "blocked-cookie");
+        let auth_key = youtube_auth_material_key_from_cookie(&cookie);
+        let jobs = enqueue_download_direct_url_batch_raw(
+            &paths,
+            vec![
+                "https://www.youtube.com/watch?v=one11111111".to_string(),
+                "https://www.youtube.com/watch?v=two22222222".to_string(),
+                "https://example.com/video.mp4".to_string(),
+            ],
+            Some(DOWNLOAD_PROVIDER_YOUTUBE_YT_DLP.to_string()),
+            None,
+            Some("D:/archive".to_string()),
+            None,
+            None,
+            None,
+            Some("42a89117-test".to_string()),
+        )
+        .expect("enqueue batch");
+
+        record_youtube_auth_block(
+            &paths,
+            auth_key,
+            "saved YouTube cookies were rejected by YouTube during download".to_string(),
+            Some("https://www.youtube.com/watch?v=one11111111".to_string()),
+            Some(jobs[0].id.clone()),
+        )
+        .expect("record auth block");
+
+        assert_eq!(
+            stored_job_status(&paths, &jobs[0].id),
+            JobStatus::Canceled.as_str()
+        );
+        assert_eq!(
+            stored_job_status(&paths, &jobs[1].id),
+            JobStatus::Canceled.as_str()
+        );
+        assert_eq!(
+            stored_job_status(&paths, &jobs[2].id),
+            JobStatus::Queued.as_str()
+        );
+    }
+
+    #[test]
+    fn delete_terminal_jobs_matching_search_removes_only_failed_and_canceled_matches() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let paths = AppPaths::new(dir.path().to_path_buf());
+        db::ensure_schema(&paths).expect("schema");
+
+        let failed = enqueue_failed_youtube_direct_job(
+            &paths,
+            "https://www.youtube.com/watch?v=failed11111",
+            "2de9cc9c-test",
+            "Sign in to confirm you're not a bot",
+        );
+        let canceled = enqueue_with_type_item_and_batch_id(
+            &paths,
+            JobType::DownloadDirectUrl,
+            serde_json::json!({
+                "url": "https://www.youtube.com/watch?v=canceled222",
+                "provider": DOWNLOAD_PROVIDER_YOUTUBE_YT_DLP,
+                "output_dir": "D:/archive"
+            })
+            .to_string(),
+            None,
+            Some("2de9cc9c-test".to_string()),
+        )
+        .expect("enqueue canceled");
+        let succeeded = enqueue_with_type_item_and_batch_id(
+            &paths,
+            JobType::DownloadDirectUrl,
+            serde_json::json!({
+                "url": "https://www.youtube.com/watch?v=succeeded3",
+                "provider": DOWNLOAD_PROVIDER_YOUTUBE_YT_DLP,
+                "output_dir": "D:/archive"
+            })
+            .to_string(),
+            None,
+            Some("2de9cc9c-test".to_string()),
+        )
+        .expect("enqueue succeeded");
+        let queued = enqueue_with_type_item_and_batch_id(
+            &paths,
+            JobType::DownloadDirectUrl,
+            serde_json::json!({
+                "url": "https://www.youtube.com/watch?v=queued44444",
+                "provider": DOWNLOAD_PROVIDER_YOUTUBE_YT_DLP,
+                "output_dir": "D:/archive"
+            })
+            .to_string(),
+            None,
+            Some("2de9cc9c-test".to_string()),
+        )
+        .expect("enqueue queued");
+
+        let conn = db::open(&paths).expect("open");
+        db::migrate(&conn).expect("migrate");
+        conn.execute(
+            "UPDATE job SET status=?1, finished_at_ms=?2, error=?3 WHERE id=?4",
+            params![
+                JobStatus::Canceled.as_str(),
+                now_ms(),
+                "Sign in to confirm you're not a bot",
+                &canceled.id
+            ],
+        )
+        .expect("mark canceled");
+        conn.execute(
+            "UPDATE job SET status=?1, progress=1.0, finished_at_ms=?2, error=?3 WHERE id=?4",
+            params![
+                JobStatus::Succeeded.as_str(),
+                now_ms(),
+                "Sign in to confirm you're not a bot",
+                &succeeded.id
+            ],
+        )
+        .expect("mark succeeded");
+
+        let summary = delete_terminal_jobs_matching_search(&paths, "2de9cc9c-test", 500)
+            .expect("delete matching terminal jobs");
+        assert_eq!(summary.matched_terminal_jobs, 2);
+        assert_eq!(summary.removed_jobs, 2);
+        assert!(get_job(&paths, &failed.id).expect("get failed").is_none());
+        assert!(get_job(&paths, &canceled.id)
+            .expect("get canceled")
+            .is_none());
+        assert!(get_job(&paths, &succeeded.id)
+            .expect("get succeeded")
+            .is_some());
+        assert!(get_job(&paths, &queued.id).expect("get queued").is_some());
+    }
+
+    #[test]
+    fn enqueue_youtube_batch_refuses_known_bad_auth_block() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let paths = AppPaths::new(dir.path().to_path_buf());
+        db::ensure_schema(&paths).expect("schema");
+
+        let cookie = save_test_global_youtube_cookie(&paths, "blocked-cookie");
+        let auth_key = youtube_auth_material_key_from_cookie(&cookie);
+        record_youtube_auth_block(
+            &paths,
+            auth_key,
+            "saved YouTube cookies were rejected by YouTube during download".to_string(),
+            Some("https://www.youtube.com/watch?v=blocked111".to_string()),
+            None,
+        )
+        .expect("record auth block");
+
+        let err = enqueue_download_direct_url_batch_raw(
+            &paths,
+            vec!["https://www.youtube.com/watch?v=blocked111".to_string()],
+            Some(DOWNLOAD_PROVIDER_YOUTUBE_YT_DLP.to_string()),
+            None,
+            Some("D:/archive".to_string()),
+            None,
+            None,
+            None,
+            Some("42a89117-test".to_string()),
+        )
+        .expect_err("known-bad auth should block enqueue");
+        assert!(err.to_string().contains("YouTube auth is blocked"));
+    }
+
+    #[test]
+    fn enqueue_youtube_subscription_refuses_known_bad_auth_block() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let paths = AppPaths::new(dir.path().to_path_buf());
+        db::ensure_schema(&paths).expect("schema");
+
+        let cookie = save_test_global_youtube_cookie(&paths, "blocked-cookie");
+        let auth_key = youtube_auth_material_key_from_cookie(&cookie);
+        let sub = subscriptions::upsert_youtube_subscription(
+            &paths,
+            subscriptions::YoutubeSubscriptionUpsert {
+                id: Some("sub-auth-blocked".to_string()),
+                title: "Auth blocked".to_string(),
+                source_url: "https://www.youtube.com/@sample/videos".to_string(),
+                folder_map: None,
+                output_dir_override: Some("D:/archive".to_string()),
+                library_id: None,
+                use_browser_cookies: false,
+                browser_cookie_source: None,
+                auth_session_input: None,
+                clear_auth_session: false,
+                active: true,
+                preset_id: None,
+                group_ids: vec![],
+                refresh_interval_minutes: None,
+            },
+        )
+        .expect("upsert subscription");
+        record_youtube_auth_block(
+            &paths,
+            auth_key,
+            "saved YouTube cookies were rejected by YouTube during subscription expansion"
+                .to_string(),
+            Some(sub.source_url.clone()),
+            None,
+        )
+        .expect("record auth block");
+
+        let err = enqueue_youtube_subscription_refresh_v1(
+            &paths,
+            sub.id,
+            Some("D:/archive".to_string()),
+            Some("sub-batch".to_string()),
+            None,
+            None,
+        )
+        .expect_err("known-bad auth should block subscription queue");
+        assert!(err.to_string().contains("YouTube auth is blocked"));
+    }
+
+    #[test]
+    fn retry_direct_download_reuses_active_job_for_same_youtube_url() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let paths = AppPaths::new(dir.path().to_path_buf());
+        db::ensure_schema(&paths).expect("schema");
+
+        let failed_params = serde_json::json!({
+            "url": "https://www.youtube.com/watch?v=abc123",
+            "provider": DOWNLOAD_PROVIDER_YOUTUBE_YT_DLP,
+            "output_dir": "D:/archive"
+        })
+        .to_string();
+        let failed = enqueue_with_type_item_and_batch_id(
+            &paths,
+            JobType::DownloadDirectUrl,
+            failed_params,
+            None,
+            Some("batch-old".to_string()),
+        )
+        .expect("enqueue failed source");
+
+        let active_params = serde_json::json!({
+            "url": "https://www.youtube.com/watch?v=abc123",
+            "provider": DOWNLOAD_PROVIDER_YOUTUBE_YT_DLP,
+            "output_dir": "D:/archive"
+        })
+        .to_string();
+        let active = enqueue_with_type_item_and_batch_id(
+            &paths,
+            JobType::DownloadDirectUrl,
+            active_params,
+            None,
+            Some("batch-retry".to_string()),
+        )
+        .expect("enqueue active duplicate");
+
+        let conn = db::open(&paths).expect("open");
+        db::migrate(&conn).expect("migrate");
+        conn.execute(
+            "UPDATE job SET status=?1, finished_at_ms=?2, error=?3 WHERE id=?4",
+            params![
+                JobStatus::Failed.as_str(),
+                now_ms(),
+                "old auth failure",
+                &failed.id
+            ],
+        )
+        .expect("mark failed");
+
+        let retried = retry_job(&paths, &failed.id).expect("retry failed source");
+        assert_eq!(retried.id, active.id);
+
+        let count: i64 = conn
+            .query_row("SELECT COUNT(*) FROM job", [], |row| row.get(0))
+            .expect("count jobs");
+        assert_eq!(count, 2);
+    }
+
+    #[test]
+    fn retry_failed_jobs_for_batch_uses_canonical_batch_scope() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let paths = AppPaths::new(dir.path().to_path_buf());
+        db::ensure_schema(&paths).expect("schema");
+
+        let batch_id = "42a89117-test-canonical";
+        let failed_reused = enqueue_failed_youtube_direct_job(
+            &paths,
+            "https://www.youtube.com/watch?v=batch111111",
+            batch_id,
+            "old failure",
+        );
+        let _failed_two = enqueue_failed_youtube_direct_job(
+            &paths,
+            "https://www.youtube.com/watch?v=batch222222",
+            batch_id,
+            "old failure",
+        );
+        let _failed_three = enqueue_failed_youtube_direct_job(
+            &paths,
+            "https://www.youtube.com/watch?v=batch333333",
+            batch_id,
+            "old failure",
+        );
+        let canceled = enqueue_failed_youtube_direct_job(
+            &paths,
+            "https://www.youtube.com/watch?v=batch444444",
+            batch_id,
+            "old canceled",
+        );
+        let succeeded = enqueue_with_type_item_and_batch_id(
+            &paths,
+            JobType::DownloadDirectUrl,
+            serde_json::json!({
+                "url": "https://www.youtube.com/watch?v=batch555555",
+                "provider": DOWNLOAD_PROVIDER_YOUTUBE_YT_DLP,
+                "output_dir": "D:/archive"
+            })
+            .to_string(),
+            None,
+            Some(batch_id.to_string()),
+        )
+        .expect("enqueue succeeded");
+        let active_duplicate = enqueue_with_type_item_and_batch_id(
+            &paths,
+            JobType::DownloadDirectUrl,
+            serde_json::json!({
+                "url": "https://www.youtube.com/watch?v=batch111111",
+                "provider": DOWNLOAD_PROVIDER_YOUTUBE_YT_DLP,
+                "output_dir": "D:/archive"
+            })
+            .to_string(),
+            None,
+            Some("other-active-batch".to_string()),
+        )
+        .expect("enqueue active duplicate");
+
+        let conn = db::open(&paths).expect("open");
+        db::migrate(&conn).expect("migrate");
+        conn.execute(
+            "UPDATE job SET status=?1, finished_at_ms=?2, error=?3 WHERE id=?4",
+            params![
+                JobStatus::Canceled.as_str(),
+                now_ms(),
+                "old canceled",
+                &canceled.id
+            ],
+        )
+        .expect("mark canceled");
+        conn.execute(
+            "UPDATE job SET status=?1, progress=1.0, finished_at_ms=?2, error=NULL WHERE id=?3",
+            params![JobStatus::Succeeded.as_str(), now_ms(), &succeeded.id],
+        )
+        .expect("mark succeeded");
+
+        let summary = retry_failed_jobs_for_batch(&paths, "42a89117").expect("retry batch");
+        assert_eq!(summary.batch_id, batch_id);
+        assert_eq!(summary.matched_retryable_jobs, 4);
+        assert_eq!(summary.queued_jobs, 3);
+        assert_eq!(summary.reused_active_jobs, 1);
+        assert_eq!(summary.failed_retries, 0);
+        assert_eq!(summary.first_error, None);
+
+        let queued_in_batch: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM job WHERE batch_id=?1 AND status=?2",
+                params![batch_id, JobStatus::Queued.as_str()],
+                |row| row.get(0),
+            )
+            .expect("count queued");
+        assert_eq!(queued_in_batch, 3);
+        assert_eq!(
+            stored_job_status(&paths, &active_duplicate.id),
+            JobStatus::Queued.as_str()
+        );
+        assert_eq!(
+            stored_job_status(&paths, &failed_reused.id),
+            JobStatus::Failed.as_str()
+        );
+    }
+
+    #[test]
+    fn retry_failed_jobs_for_batch_continues_after_row_error() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let paths = AppPaths::new(dir.path().to_path_buf());
+        db::ensure_schema(&paths).expect("schema");
+
+        let batch_id = "2de9cc9c-test-partial";
+        let valid_params =
+            serde_json::to_string(&DummySleepParams { seconds: 1 }).expect("dummy params");
+        let valid = enqueue_with_type_item_and_batch_id(
+            &paths,
+            JobType::DummySleep,
+            valid_params,
+            None,
+            Some(batch_id.to_string()),
+        )
+        .expect("enqueue valid");
+
+        let conn = db::open(&paths).expect("open");
+        db::migrate(&conn).expect("migrate");
+        conn.execute(
+            "UPDATE job SET status=?1, finished_at_ms=?2, error=?3 WHERE id=?4",
+            params![
+                JobStatus::Failed.as_str(),
+                now_ms(),
+                "old failure",
+                &valid.id
+            ],
+        )
+        .expect("mark valid failed");
+        conn.execute(
+            "INSERT INTO job (id, item_id, batch_id, type, status, progress, error, params_json, created_at_ms, started_at_ms, finished_at_ms, logs_path) \
+             VALUES (?1, NULL, ?2, ?3, ?4, 0.0, ?5, '{}', ?6, NULL, ?7, ?8)",
+            params![
+                "invalid-retry-row",
+                batch_id,
+                "unknown_retry_type",
+                JobStatus::Failed.as_str(),
+                "bad type",
+                1_i64,
+                1_i64,
+                paths
+                    .job_logs_dir()
+                    .join("invalid-retry-row.jsonl")
+                    .to_string_lossy()
+                    .to_string(),
+            ],
+        )
+        .expect("insert invalid failed row");
+
+        let summary = retry_failed_jobs_for_batch(&paths, batch_id).expect("retry batch");
+        assert_eq!(summary.batch_id, batch_id);
+        assert_eq!(summary.matched_retryable_jobs, 2);
+        assert_eq!(summary.queued_jobs, 1);
+        assert_eq!(summary.reused_active_jobs, 0);
+        assert_eq!(summary.failed_retries, 1);
+        assert!(summary
+            .first_error
+            .as_deref()
+            .unwrap_or_default()
+            .contains("unknown job type in db"));
+    }
+
+    #[test]
+    fn retry_job_persists_lineage_between_original_and_replacement() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let paths = AppPaths::new(dir.path().to_path_buf());
+        db::ensure_schema(&paths).expect("schema");
+
+        let failed = enqueue_failed_youtube_direct_job(
+            &paths,
+            "https://www.youtube.com/watch?v=lineage111",
+            "lineage-batch",
+            "old failure",
+        );
+
+        let retry = retry_job(&paths, &failed.id).expect("retry");
+        assert_ne!(retry.id, failed.id);
+        assert_eq!(retry.retry_of_job_id.as_deref(), Some(failed.id.as_str()));
+
+        let original = get_job(&paths, &failed.id)
+            .expect("get original")
+            .expect("original");
+        let replacement = get_job(&paths, &retry.id)
+            .expect("get replacement")
+            .expect("replacement");
+        assert_eq!(
+            original.retry_replacement_job_id.as_deref(),
+            Some(retry.id.as_str())
+        );
+        assert_eq!(
+            replacement.retry_of_job_id.as_deref(),
+            Some(failed.id.as_str())
+        );
+    }
+
+    #[test]
+    fn batch_detail_marks_original_failure_as_historical_after_retry_success() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let paths = AppPaths::new(dir.path().to_path_buf());
+        db::ensure_schema(&paths).expect("schema");
+
+        let failed = enqueue_failed_youtube_direct_job(
+            &paths,
+            "https://www.youtube.com/watch?v=history111",
+            "history-batch",
+            "old failure",
+        );
+        let retry = retry_job(&paths, &failed.id).expect("retry");
+
+        let conn = db::open(&paths).expect("open");
+        db::migrate(&conn).expect("migrate");
+        conn.execute(
+            "UPDATE job SET status=?1, progress=1.0, finished_at_ms=?2 WHERE id=?3",
+            params![JobStatus::Succeeded.as_str(), now_ms(), &retry.id],
+        )
+        .expect("mark retry succeeded");
+
+        let detail = get_batch_detail(&paths, "history-batch").expect("batch detail");
+        assert_eq!(detail.health.total_jobs, 2);
+        assert_eq!(detail.health.succeeded_targets, 1);
+        assert_eq!(detail.health.unresolved_targets, 0);
+        let original_attempt = detail
+            .attempts
+            .iter()
+            .find(|attempt| attempt.job.id == failed.id)
+            .expect("original attempt");
+        assert_eq!(original_attempt.status_label, "Historical failure");
+        assert!(!original_attempt.is_current_attempt);
+        let retry_attempt = detail
+            .attempts
+            .iter()
+            .find(|attempt| attempt.job.id == retry.id)
+            .expect("retry attempt");
+        assert_eq!(retry_attempt.status_label, "Retry succeeded");
+        assert!(retry_attempt.is_current_attempt);
+    }
+
+    #[test]
+    fn retry_batch_dry_run_skips_succeeded_and_active_targets() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let paths = AppPaths::new(dir.path().to_path_buf());
+        db::ensure_schema(&paths).expect("schema");
+
+        let batch_id = "dry-run-batch";
+        let failed = enqueue_failed_youtube_direct_job(
+            &paths,
+            "https://www.youtube.com/watch?v=dryrun111",
+            batch_id,
+            "old failure",
+        );
+        let succeeded = enqueue_failed_youtube_direct_job(
+            &paths,
+            "https://www.youtube.com/watch?v=dryrun222",
+            batch_id,
+            "old failure",
+        );
+        let active = enqueue_with_type_item_and_batch_id(
+            &paths,
+            JobType::DownloadDirectUrl,
+            serde_json::json!({
+                "url": "https://www.youtube.com/watch?v=dryrun333",
+                "provider": DOWNLOAD_PROVIDER_YOUTUBE_YT_DLP,
+                "output_dir": "D:/archive"
+            })
+            .to_string(),
+            None,
+            Some(batch_id.to_string()),
+        )
+        .expect("active");
+
+        let conn = db::open(&paths).expect("open");
+        db::migrate(&conn).expect("migrate");
+        conn.execute(
+            "UPDATE job SET status=?1, progress=1.0, finished_at_ms=?2 WHERE id=?3",
+            params![JobStatus::Succeeded.as_str(), now_ms(), &succeeded.id],
+        )
+        .expect("mark succeeded");
+        assert_eq!(
+            stored_job_status(&paths, &active.id),
+            JobStatus::Queued.as_str()
+        );
+
+        let dry = retry_failed_jobs_for_batch_dry_run(&paths, batch_id).expect("dry run");
+        assert!(dry.dry_run);
+        assert_eq!(dry.matched_retryable_jobs, 1);
+        assert_eq!(dry.skipped_succeeded_jobs, 1);
+        assert_eq!(dry.skipped_active_jobs, 1);
+        assert_eq!(dry.reused_active_jobs, 1);
+        assert_eq!(dry.batch_id, batch_id);
+        assert!(get_job(&paths, &failed.id).expect("get").is_some());
+    }
+
+    #[test]
+    fn retry_failed_batch_skips_target_that_already_has_successful_attempt() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let paths = AppPaths::new(dir.path().to_path_buf());
+        db::ensure_schema(&paths).expect("schema");
+
+        let batch_id = "downloaded-target-batch";
+        let succeeded = enqueue_failed_youtube_direct_job(
+            &paths,
+            "https://www.youtube.com/watch?v=done111",
+            batch_id,
+            "old failure",
+        );
+        let later_failed = enqueue_failed_youtube_direct_job(
+            &paths,
+            "https://www.youtube.com/watch?v=done111",
+            batch_id,
+            "later auth failure",
+        );
+
+        let conn = db::open(&paths).expect("open");
+        db::migrate(&conn).expect("migrate");
+        conn.execute(
+            "UPDATE job SET status=?1, progress=1.0, finished_at_ms=?2, error=NULL WHERE id=?3",
+            params![JobStatus::Succeeded.as_str(), now_ms(), &succeeded.id],
+        )
+        .expect("mark succeeded");
+
+        let detail = get_batch_detail(&paths, batch_id).expect("detail");
+        assert_eq!(detail.health.canonical_targets, 1);
+        assert_eq!(detail.health.succeeded_targets, 1);
+        assert_eq!(detail.health.unresolved_targets, 0);
+        let later_attempt = detail
+            .attempts
+            .iter()
+            .find(|attempt| attempt.job.id == later_failed.id)
+            .expect("later failed attempt");
+        assert_eq!(later_attempt.status_label, "Historical failure");
+        assert!(!later_attempt.is_current_attempt);
+
+        let before_count: i64 = conn
+            .query_row("SELECT COUNT(*) FROM job", [], |row| row.get(0))
+            .expect("count before");
+        let retry = retry_failed_jobs_for_batch(&paths, batch_id).expect("retry batch");
+        assert_eq!(retry.matched_retryable_jobs, 0);
+        assert_eq!(retry.queued_jobs, 0);
+        assert_eq!(retry.skipped_succeeded_jobs, 1);
+        assert_eq!(retry.unresolved_jobs, 0);
+        let after_count: i64 = conn
+            .query_row("SELECT COUNT(*) FROM job", [], |row| row.get(0))
+            .expect("count after");
+        assert_eq!(after_count, before_count);
+    }
+
+    #[test]
+    fn backfill_job_titles_updates_job_metadata_without_touching_library() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let paths = AppPaths::new(dir.path().to_path_buf());
+        db::ensure_schema(&paths).expect("schema");
+
+        let conn = db::open(&paths).expect("open");
+        db::migrate(&conn).expect("migrate");
+        conn.execute(
+            "INSERT INTO library_item (id, created_at_ms, source_type, source_uri, title, media_path) VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+            params![
+                "title-item",
+                now_ms(),
+                "youtube",
+                "https://www.youtube.com/watch?v=title111",
+                "Backfilled title",
+                "D:/archive/Backfilled title.mp4",
+            ],
+        )
+        .expect("insert library item");
+        let failed = enqueue_failed_youtube_direct_job(
+            &paths,
+            "https://www.youtube.com/watch?v=title111",
+            "title-batch",
+            "old failure",
+        );
+
+        let summary =
+            backfill_job_titles_for_batch(&paths, "title-batch", 500).expect("backfill titles");
+        assert_eq!(summary.scanned_jobs, 1);
+        assert_eq!(summary.updated_jobs, 1);
+        assert_eq!(summary.missing_titles, 0);
+
+        let job = get_job(&paths, &failed.id).expect("get").expect("job");
+        assert_eq!(job.target_title.as_deref(), Some("Backfilled title"));
+        let title: String = conn
+            .query_row(
+                "SELECT title FROM library_item WHERE id='title-item'",
+                [],
+                |row| row.get(0),
+            )
+            .expect("library title");
+        assert_eq!(title, "Backfilled title");
+    }
+
+    #[test]
     fn enqueue_download_instagram_batch_preserves_direct_provider_for_media_targets() {
         let dir = tempfile::tempdir().expect("tempdir");
         let paths = AppPaths::new(dir.path().to_path_buf());
@@ -17596,6 +20619,54 @@ EOF
     }
 
     #[test]
+    fn default_youtube_single_job_uses_channel_path_without_provider_layer() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let paths = AppPaths::new(dir.path().to_path_buf());
+        db::ensure_schema(&paths).expect("schema");
+
+        let library_root = dir.path().join("4K Video 21-08-2025");
+        std::fs::create_dir_all(&library_root).expect("library root");
+        crate::video_libraries::upsert_video_library(
+            &paths,
+            crate::video_libraries::VideoLibraryUpsert {
+                id: None,
+                name: "NAS".to_string(),
+                root_path: library_root.to_string_lossy().to_string(),
+                set_active: true,
+            },
+        )
+        .expect("library");
+
+        let jobs = enqueue_download_direct_url_batch_raw(
+            &paths,
+            vec!["https://www.youtube.com/watch?v=abc123".to_string()],
+            None,
+            None,
+            None,
+            Some(false),
+            None,
+            None,
+            None,
+        )
+        .expect("enqueue");
+        assert_eq!(jobs.len(), 1);
+
+        let conn = db::open(&paths).expect("db open");
+        db::migrate(&conn).expect("migrate");
+        let params_json: String = conn
+            .query_row(
+                "SELECT params_json FROM job WHERE id = ?1",
+                [jobs[0].id.clone()],
+                |row| row.get(0),
+            )
+            .expect("params");
+        let params: DownloadDirectUrlParams =
+            serde_json::from_str(&params_json).expect("parse params");
+
+        assert_eq!(params.output_path_template.as_deref(), Some("{channel}"));
+    }
+
+    #[test]
     fn subscription_download_jobs_use_subscription_folder_as_container() {
         let dir = tempfile::tempdir().expect("tempdir");
         let paths = AppPaths::new(dir.path().to_path_buf());
@@ -17635,6 +20706,135 @@ EOF
         assert_eq!(params.subscription_id.as_deref(), Some("subscription-1"));
         assert_eq!(params.output_path_template.as_deref(), Some("."));
         assert_eq!(params.filename_template.as_deref(), Some("{title}_{id}"));
+    }
+
+    #[test]
+    fn youtube_job_auth_prefers_current_global_cookie_over_stale_job_secret() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let paths = AppPaths::new(dir.path().to_path_buf());
+        db::ensure_schema(&paths).expect("schema");
+
+        config::save_youtube_auth_config(
+            &paths,
+            &config::YoutubeAuthConfig {
+                netscape_cookie_json: Some(
+                    r#"[{"domain":".youtube.com","name":"SID","value":"fresh-global"}]"#
+                        .to_string(),
+                ),
+            },
+        )
+        .expect("save global auth");
+        write_job_cookie_secret(&paths, "job-stale", "SID=stale-job").expect("write stale");
+
+        let resolved =
+            resolve_youtube_auth_cookie_for_job(&paths, "job-stale", None).expect("resolve auth");
+
+        let resolved = resolved.expect("resolved cookie");
+        assert!(resolved.contains("fresh-global"));
+        assert!(!resolved.contains("stale-job"));
+    }
+
+    #[test]
+    fn normalize_youtube_auth_cookie_filters_json_to_youtube_domains() {
+        let future = (now_ms() / 1000) + 60_000;
+        let past = (now_ms() / 1000) - 60_000;
+        let raw = serde_json::json!([
+            {
+                "domain": ".youtube.com",
+                "path": "/",
+                "secure": true,
+                "expirationDate": future,
+                "name": "SID",
+                "value": "youtube-valid"
+            },
+            {
+                "domain": ".example.com",
+                "path": "/",
+                "secure": true,
+                "expirationDate": future,
+                "name": "SID",
+                "value": "example-noise"
+            },
+            {
+                "domain": ".youtube.com",
+                "path": "/",
+                "secure": true,
+                "expirationDate": past,
+                "name": "EXPIRED",
+                "value": "old"
+            }
+        ])
+        .to_string();
+
+        let normalized = normalize_youtube_auth_cookie_for_storage(Some(raw))
+            .expect("normalize")
+            .expect("cookie text");
+
+        assert!(normalized.contains("# Netscape HTTP Cookie File"));
+        assert!(normalized.contains(".youtube.com"));
+        assert!(normalized.contains("youtube-valid"));
+        assert!(!normalized.contains(".example.com"));
+        assert!(!normalized.contains("example-noise"));
+        assert!(!normalized.contains("EXPIRED"));
+    }
+
+    #[test]
+    fn normalize_youtube_auth_cookie_rejects_exports_without_youtube_domains() {
+        let raw = r#"[{"domain":".example.com","name":"SID","value":"noise"}]"#.to_string();
+        let err = normalize_youtube_auth_cookie_for_storage(Some(raw))
+            .expect_err("non-youtube export should be rejected");
+
+        assert!(err
+            .to_string()
+            .contains("did not contain non-expired youtube.com cookies"));
+    }
+
+    #[test]
+    fn normalize_youtube_auth_cookie_accepts_cookie_header_as_youtube_netscape() {
+        let normalized =
+            normalize_youtube_auth_cookie_for_storage(Some("SID=abc; SAPISID=def".to_string()))
+                .expect("normalize")
+                .expect("cookie text");
+
+        assert!(normalized.contains(".youtube.com"));
+        assert!(normalized.contains("SID\tabc"));
+        assert!(normalized.contains("SAPISID\tdef"));
+    }
+
+    #[test]
+    fn normalize_youtube_auth_cookie_accepts_cookie_editor_js_file_path() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let cookie_path = dir.path().join("cookie.js");
+        let future = (now_ms() / 1000) + 60_000;
+        std::fs::write(
+            &cookie_path,
+            format!(
+                r#"[
+  {{
+    "name": "SID",
+    "value": "cookie-editor-value",
+    "domain": ".youtube.com",
+    "path": "/",
+    "secure": true,
+    "httpOnly": true,
+    "hostOnly": false,
+    "session": false,
+    "expirationDate": {future}
+  }}
+]"#
+            ),
+        )
+        .expect("write cookie export");
+
+        let normalized = normalize_youtube_auth_cookie_for_storage(Some(
+            cookie_path.to_string_lossy().to_string(),
+        ))
+        .expect("normalize")
+        .expect("cookie text");
+
+        assert!(normalized.contains("# Netscape HTTP Cookie File"));
+        assert!(normalized.contains("#HttpOnly_.youtube.com"));
+        assert!(normalized.contains("SID\tcookie-editor-value"));
     }
 
     #[test]
@@ -17685,17 +20885,29 @@ EOF
     }
 
     #[test]
-    fn browser_cookie_source_accepts_supported_browsers_and_rejects_defaultless_true() {
+    fn browser_cookie_source_accepts_supported_browsers_and_defaults_to_firefox() {
+        assert_eq!(DEFAULT_BROWSER_COOKIE_SOURCE, "firefox");
         assert_eq!(
             normalize_browser_cookie_source(Some("firefox")).expect("firefox"),
             Some("firefox".to_string())
+        );
+        assert_eq!(
+            normalize_browser_cookie_source(Some("chrome")).expect("chrome"),
+            Some("chrome".to_string())
         );
         assert_eq!(
             normalize_browser_cookie_source(Some("EDGE")).expect("edge"),
             Some("edge".to_string())
         );
         assert!(normalize_browser_cookie_source(Some("safari")).is_err());
-        assert!(browser_cookie_source_for_request(true, None).is_err());
+        assert_eq!(
+            browser_cookie_source_for_request(true, None).expect("default"),
+            Some("firefox".to_string())
+        );
+        assert_eq!(
+            browser_cookie_source_for_request(true, Some("chrome")).expect("chrome"),
+            Some("chrome".to_string())
+        );
         assert_eq!(
             browser_cookie_source_for_request(true, Some("opera")).expect("opera"),
             Some("opera".to_string())
@@ -17729,6 +20941,9 @@ EOF
             .any(|pair| pair == ["--file-access-retries", "10"]));
         assert!(args.iter().any(|value| value == "--write-subs"));
         assert!(args.iter().any(|value| value == "--write-auto-subs"));
+        assert!(args
+            .windows(2)
+            .any(|pair| pair == ["--sub-langs", YT_DLP_ARCHIVE_SUB_LANGS]));
         assert!(args
             .windows(2)
             .any(|pair| pair == ["--convert-subs", "srt"]));
@@ -17824,6 +21039,18 @@ EOF
 
         assert!(hint.contains("saved YouTube cookies were supplied"));
         assert!(hint.contains("rejected them"));
+    }
+
+    #[test]
+    fn youtube_auth_preflight_uses_operator_default_url_when_not_provided() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let paths = AppPaths::new(dir.path().to_path_buf());
+
+        let result = youtube_auth_preflight(&paths, None).expect("preflight");
+
+        assert!(!result.ok);
+        assert_eq!(result.url, DEFAULT_YOUTUBE_AUTH_PREFLIGHT_URL);
+        assert!(result.message.contains("No saved global YouTube cookies"));
     }
 
     #[test]

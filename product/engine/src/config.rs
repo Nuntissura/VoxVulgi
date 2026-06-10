@@ -10,6 +10,7 @@ const DEFAULT_YT_DLP_FILE_ACCESS_RETRIES: u32 = 10;
 const DEFAULT_YT_DLP_THROTTLED_RATE: &str = "100K";
 const DEFAULT_YT_DLP_SLEEP_INTERVAL_SECS: u32 = 0;
 const DEFAULT_YT_DLP_SLEEP_REQUESTS: u32 = 0;
+const DEFAULT_DOWNLOAD_PATH_TEMPLATE: &str = "{channel}";
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct BatchOnImportRules {
@@ -190,7 +191,7 @@ impl Default for DownloadPresetsConfig {
         let preset = DownloadPreset {
             id: "default".to_string(),
             title: "Default".to_string(),
-            path_template: "{provider}/{channel}".to_string(),
+            path_template: DEFAULT_DOWNLOAD_PATH_TEMPLATE.to_string(),
             filename_template: "{title}_{id}".to_string(),
             format_preference: Some("bv*[ext=mp4]+ba[ext=m4a]/b[ext=mp4]/bv*+ba/b".to_string()),
             quality_preference: Some("best".to_string()),
@@ -251,15 +252,18 @@ fn normalize_download_presets_config(
             continue;
         }
         let path_template = preset.path_template.trim();
+        let path_template = if path_template.is_empty()
+            || (id == "default" && title == "Default" && path_template == "{provider}/{channel}")
+        {
+            DEFAULT_DOWNLOAD_PATH_TEMPLATE.to_string()
+        } else {
+            path_template.to_string()
+        };
         let filename_template = preset.filename_template.trim();
         cleaned.push(DownloadPreset {
             id: id.to_string(),
             title: title.to_string(),
-            path_template: if path_template.is_empty() {
-                "{provider}/{channel}".to_string()
-            } else {
-                path_template.to_string()
-            },
+            path_template,
             filename_template: if filename_template.is_empty() {
                 "{title}_{id}".to_string()
             } else {
@@ -481,4 +485,31 @@ pub fn save_youtube_auth_config(paths: &AppPaths, config: &YoutubeAuthConfig) ->
     let text = format!("{json}\n");
     persistence::atomic_write_text(&path, &text)?;
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn default_download_preset_uses_channel_without_provider_layer() {
+        let config = DownloadPresetsConfig::default();
+        let preset = config.presets.first().expect("default preset");
+
+        assert_eq!(preset.id, "default");
+        assert_eq!(preset.path_template, "{channel}");
+    }
+
+    #[test]
+    fn normalize_rewrites_legacy_builtin_default_path_template() {
+        let mut config = DownloadPresetsConfig::default();
+        config.presets[0].path_template = "{provider}/{channel}".to_string();
+
+        let normalized = normalize_download_presets_config(config).expect("normalize");
+        let preset = normalized.presets.first().expect("default preset");
+
+        assert_eq!(preset.id, "default");
+        assert_eq!(preset.title, "Default");
+        assert_eq!(preset.path_template, "{channel}");
+    }
 }

@@ -3,7 +3,7 @@ use crate::Result;
 use rusqlite::{Connection, OpenFlags};
 use std::time::Duration;
 
-const CURRENT_SCHEMA_VERSION: u32 = 14;
+const CURRENT_SCHEMA_VERSION: u32 = 15;
 const READ_ONLY_BUSY_TIMEOUT_MS: u64 = 750;
 
 struct MigrationStep {
@@ -33,8 +33,12 @@ const MIGRATION_STEPS: &[MigrationStep] = &[
         apply: apply_schema_v13,
     },
     MigrationStep {
-        version: CURRENT_SCHEMA_VERSION,
+        version: 14,
         apply: apply_schema_v14,
+    },
+    MigrationStep {
+        version: CURRENT_SCHEMA_VERSION,
+        apply: apply_schema_v15,
     },
 ];
 
@@ -723,6 +727,21 @@ fn apply_schema_v14(conn: &Connection) -> Result<()> {
         "instagram_subscription",
         "browser_cookie_source",
         "TEXT",
+    )?;
+    Ok(())
+}
+
+fn apply_schema_v15(conn: &Connection) -> Result<()> {
+    ensure_column(conn, "job", "target_title", "TEXT")?;
+    ensure_column(conn, "job", "retry_of_job_id", "TEXT")?;
+    ensure_column(conn, "job", "retry_replacement_job_id", "TEXT")?;
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_job_retry_of ON job(retry_of_job_id)",
+        [],
+    )?;
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_job_retry_replacement ON job(retry_replacement_job_id)",
+        [],
     )?;
     Ok(())
 }

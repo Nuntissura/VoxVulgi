@@ -27,6 +27,16 @@ pub struct LibraryItem {
     pub thumbnail_path: Option<String>,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct LibraryItemTransferSummary {
+    pub source_library_id: String,
+    pub target_library_id: String,
+    pub mode: String,
+    pub items_matched: usize,
+    pub items_copied: usize,
+    pub items_moved: usize,
+}
+
 fn library_item_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<LibraryItem> {
     Ok(LibraryItem {
         id: row.get(0)?,
@@ -43,6 +53,44 @@ fn library_item_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<LibraryIte
         audio_codec: row.get(11)?,
         thumbnail_path: row.get(12)?,
     })
+}
+
+fn path_key(value: &str) -> String {
+    let mut normalized = value
+        .replace('\\', "/")
+        .trim_end_matches('/')
+        .to_lowercase();
+    if let Some(stripped) = normalized.strip_prefix("//?/") {
+        normalized = stripped.to_string();
+    }
+    normalized
+}
+
+fn path_is_under_root(path: &str, root: &str) -> bool {
+    let path = path_key(path);
+    let root = path_key(root);
+    path == root || path.starts_with(&format!("{root}/"))
+}
+
+fn replace_root_prefix(path: &str, source_root: &str, target_root: &str) -> String {
+    let normalized_path = path.replace('\\', "/");
+    let normalized_source = source_root
+        .replace('\\', "/")
+        .trim_end_matches('/')
+        .to_string();
+    let normalized_target = target_root
+        .replace('\\', "/")
+        .trim_end_matches('/')
+        .to_string();
+    let path_key = normalized_path.to_lowercase();
+    let source_key = normalized_source.to_lowercase();
+    if path_key == source_key {
+        return normalized_target;
+    }
+    if let Some(relative) = normalized_path.get(normalized_source.len()..) {
+        return format!("{}{}", normalized_target, relative);
+    }
+    normalized_path
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -185,6 +233,184 @@ LIMIT ?1 OFFSET ?2
         .collect::<rusqlite::Result<Vec<_>>>()?;
 
     Ok(items)
+}
+
+pub fn list_items_under_roots(paths: &AppPaths, roots: &[String]) -> Result<Vec<LibraryItem>> {
+    if roots.is_empty() {
+        return Ok(Vec::new());
+    }
+    let conn = db::open_readonly(paths)?;
+    let mut stmt = conn.prepare(
+        r#"
+SELECT
+  id,
+  created_at_ms,
+  source_type,
+  source_uri,
+  title,
+  media_path,
+  duration_ms,
+  width,
+  height,
+  container,
+  video_codec,
+  audio_codec,
+  thumbnail_path
+FROM library_item
+ORDER BY created_at_ms DESC
+"#,
+    )?;
+    let rows = stmt
+        .query_map([], library_item_from_row)?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+    Ok(rows
+        .into_iter()
+        .filter(|item| {
+            roots
+                .iter()
+                .any(|root| path_is_under_root(&item.media_path, root))
+        })
+        .collect())
+}
+
+pub fn list_youtube_video_candidates(paths: &AppPaths) -> Result<Vec<LibraryItem>> {
+    let conn = db::open_readonly(paths)?;
+
+    let mut stmt = conn.prepare(
+        r#"
+SELECT
+  id,
+  created_at_ms,
+  source_type,
+  source_uri,
+  title,
+  media_path,
+  duration_ms,
+  width,
+  height,
+  container,
+  video_codec,
+  audio_codec,
+  thumbnail_path
+FROM library_item
+WHERE
+  (
+    lower(source_uri) LIKE '%youtube.com%'
+    OR lower(source_uri) LIKE '%youtu.be%'
+    OR lower(source_type) LIKE '%youtube%'
+  )
+  AND (
+    width IS NOT NULL
+    OR height IS NOT NULL
+    OR video_codec IS NOT NULL
+    OR lower(media_path) LIKE '%.mp4'
+    OR lower(media_path) LIKE '%.mkv'
+    OR lower(media_path) LIKE '%.webm'
+    OR lower(media_path) LIKE '%.mov'
+  )
+ORDER BY created_at_ms DESC
+"#,
+    )?;
+
+    let items = stmt
+        .query_map([], library_item_from_row)?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+
+    Ok(items)
+}
+
+pub fn upsert_item_metadata(paths: &AppPaths, item: &LibraryItem) -> Result<()> {
+    let conn = db::open(paths)?;
+    db::migrate(&conn)?;
+    conn.execute(
+        r#"
+INSERT INTO library_item (
+  id,
+  created_at_ms,
+  source_type,
+  source_uri,
+  title,
+  media_path,
+  duration_ms,
+  width,
+  height,
+  container,
+  video_codec,
+  audio_codec,
+  thumbnail_path
+) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)
+ON CONFLICT(id) DO UPDATE SET
+  created_at_ms = excluded.created_at_ms,
+  source_type = excluded.source_type,
+  source_uri = excluded.source_uri,
+  title = excluded.title,
+  media_path = excluded.media_path,
+  duration_ms = excluded.duration_ms,
+  width = excluded.width,
+  height = excluded.height,
+  container = excluded.container,
+  video_codec = excluded.video_codec,
+  audio_codec = excluded.audio_codec,
+  thumbnail_path = excluded.thumbnail_path
+"#,
+        params![
+            &item.id,
+            item.created_at_ms,
+            &item.source_type,
+            &item.source_uri,
+            &item.title,
+            &item.media_path,
+            item.duration_ms,
+            item.width,
+            item.height,
+            &item.container,
+            &item.video_codec,
+            &item.audio_codec,
+            &item.thumbnail_path,
+        ],
+    )?;
+    Ok(())
+}
+
+pub fn transfer_item_metadata_between_roots(
+    paths: &AppPaths,
+    source_library_id: &str,
+    source_root: &str,
+    target_library_id: &str,
+    target_root: &str,
+    copy: bool,
+) -> Result<LibraryItemTransferSummary> {
+    let items = list_items_under_roots(paths, &[source_root.to_string()])?;
+    let conn = db::open(paths)?;
+    db::migrate(&conn)?;
+    let mut copied = 0_usize;
+    let mut moved = 0_usize;
+    for item in &items {
+        let target_path = replace_root_prefix(&item.media_path, source_root, target_root);
+        if copy {
+            let mut copied_item = item.clone();
+            copied_item.id = Uuid::new_v4().to_string();
+            copied_item.media_path = target_path;
+            copied_item.thumbnail_path = None;
+            upsert_item_metadata(paths, &copied_item)?;
+            copied = copied.saturating_add(1);
+        } else {
+            conn.execute(
+                "UPDATE library_item SET media_path = ?1, thumbnail_path = NULL WHERE id = ?2",
+                params![target_path, &item.id],
+            )?;
+            moved = moved.saturating_add(1);
+        }
+    }
+
+    Ok(LibraryItemTransferSummary {
+        source_library_id: source_library_id.to_string(),
+        target_library_id: target_library_id.to_string(),
+        mode: if copy { "copy" } else { "move" }.to_string(),
+        items_matched: items.len(),
+        items_copied: copied,
+        items_moved: moved,
+    })
 }
 
 pub fn list_localization_workspace_items(

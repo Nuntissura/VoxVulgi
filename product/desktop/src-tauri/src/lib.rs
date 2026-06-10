@@ -1380,6 +1380,23 @@ fn normalize_phase2_latest_state(
             (state, false, true, None)
         }
         Err(err) => {
+            let err_text = err.to_string();
+            let err_text_lower = err_text.to_ascii_lowercase();
+            if err_text_lower.contains("database is locked")
+                || err_text_lower.contains("database table is locked")
+                || err_text_lower.contains("sqlite_locked")
+                || err_text_lower.contains("database is busy")
+                || err_text_lower.contains("database busy")
+                || err_text_lower.contains("sqlite_busy")
+            {
+                if let Some(obj) = state.as_object_mut() {
+                    obj.insert(
+                        "normalization_note".to_string(),
+                        serde_json::json!("Installer job state could not be verified due temporary database lock; retaining active steps."),
+                    );
+                }
+                return (state, active, false, None);
+            }
             mark_phase2_active_steps_terminal(
                 &mut state,
                 "stale",
@@ -3815,6 +3832,9 @@ ORDER BY item_id ASC, created_at_ms DESC
                     finished_at_ms: row.get(9)?,
                     logs_path: row.get(10)?,
                     params_json: row.get(11)?,
+                    target_title: None,
+                    retry_of_job_id: None,
+                    retry_replacement_job_id: None,
                 })
             },
         )
@@ -5586,7 +5606,14 @@ fn config_youtube_auth_set(
     state: State<'_, AppState>,
     config_value: config::YoutubeAuthConfig,
 ) -> Result<config::YoutubeAuthConfig, String> {
+    let config_value = config::YoutubeAuthConfig {
+        netscape_cookie_json: jobs::normalize_youtube_auth_cookie_for_storage(
+            config_value.netscape_cookie_json,
+        )
+        .map_err(|e| e.to_string())?,
+    };
     config::save_youtube_auth_config(&state.paths, &config_value).map_err(|e| e.to_string())?;
+    jobs::clear_youtube_auth_block(&state.paths).map_err(|e| e.to_string())?;
     Ok(config_value)
 }
 
@@ -7027,6 +7054,23 @@ fn library_list(
 }
 
 #[tauri::command]
+async fn library_list_youtube_video_candidates(
+    state: State<'_, AppState>,
+) -> Result<Vec<library::LibraryItem>, String> {
+    let _timer = InvokeTimer::start(state.paths.clone(), "library_list_youtube_video_candidates");
+    let paths = state.paths.clone();
+    let trace_paths = paths.clone();
+    let result = tauri::async_runtime::spawn_blocking(move || {
+        library::list_youtube_video_candidates(&paths).map_err(|e| e.to_string())
+    })
+    .await
+    .map_err(|e| e.to_string())?;
+    result.map_err(|e| {
+        trace_database_command_error(&trace_paths, "library_list_youtube_video_candidates", e)
+    })
+}
+
+#[tauri::command]
 fn localization_workspace_list(
     state: State<'_, AppState>,
     limit: usize,
@@ -7071,6 +7115,15 @@ fn youtube_subscriptions_output_dir(
         .ok_or_else(|| format!("subscription not found: {id}"))?;
     subscriptions::youtube_subscription_output_dir(&state.paths, &sub)
         .map(|path| path.to_string_lossy().to_string())
+        .map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+fn youtube_subscriptions_preview_output_dir(
+    state: State<'_, AppState>,
+    request: subscriptions::YoutubeSubscriptionOutputPreviewRequest,
+) -> Result<subscriptions::YoutubeSubscriptionOutputPreview, String> {
+    subscriptions::preview_youtube_subscription_output_dir(&state.paths, request)
         .map_err(|e| e.to_string())
 }
 
@@ -7137,6 +7190,50 @@ fn video_libraries_remove(
     id: String,
 ) -> Result<Vec<video_libraries::VideoLibraryRow>, String> {
     video_libraries::remove_video_library(&state.paths, &id).map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+async fn video_library_bundle_export(
+    state: State<'_, AppState>,
+    out_path: String,
+) -> Result<video_libraries::VideoLibraryBundleSummary, String> {
+    let _timer = InvokeTimer::start(state.paths.clone(), "video_library_bundle_export");
+    let paths = state.paths.clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        video_libraries::export_video_library_bundle(&paths, &std::path::PathBuf::from(out_path))
+            .map_err(|e| e.to_string())
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
+#[tauri::command]
+async fn video_library_bundle_import(
+    state: State<'_, AppState>,
+    in_path: String,
+) -> Result<video_libraries::VideoLibraryBundleSummary, String> {
+    let _timer = InvokeTimer::start(state.paths.clone(), "video_library_bundle_import");
+    let paths = state.paths.clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        video_libraries::import_video_library_bundle(&paths, &std::path::PathBuf::from(in_path))
+            .map_err(|e| e.to_string())
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
+#[tauri::command]
+async fn video_library_metadata_transfer(
+    state: State<'_, AppState>,
+    request: video_libraries::VideoLibraryMetadataTransferRequest,
+) -> Result<video_libraries::VideoLibraryMetadataTransferSummary, String> {
+    let _timer = InvokeTimer::start(state.paths.clone(), "video_library_metadata_transfer");
+    let paths = state.paths.clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        video_libraries::transfer_video_library_metadata(&paths, request).map_err(|e| e.to_string())
+    })
+    .await
+    .map_err(|e| e.to_string())?
 }
 
 #[tauri::command]
@@ -7534,6 +7631,23 @@ async fn jobs_list(
     .await
     .map_err(|e| e.to_string())?;
     result.map_err(|e| trace_database_command_error(&trace_paths, "jobs_list", e))
+}
+
+#[tauri::command]
+async fn jobs_search(
+    state: State<'_, AppState>,
+    query: String,
+    limit: usize,
+) -> Result<Vec<jobs::JobRow>, String> {
+    let _timer = InvokeTimer::start(state.paths.clone(), "jobs_search");
+    let paths = state.paths.clone();
+    let trace_paths = paths.clone();
+    let result = tauri::async_runtime::spawn_blocking(move || {
+        jobs::search_jobs(&paths, &query, limit).map_err(|e| e.to_string())
+    })
+    .await
+    .map_err(|e| e.to_string())?;
+    result.map_err(|e| trace_database_command_error(&trace_paths, "jobs_search", e))
 }
 
 #[tauri::command]
@@ -7960,6 +8074,31 @@ fn jobs_cancel_all(state: State<'_, AppState>) -> Result<usize, String> {
 }
 
 #[tauri::command]
+#[allow(non_snake_case)]
+fn jobs_delete_terminal(
+    state: State<'_, AppState>,
+    job_id: Option<String>,
+    jobId: Option<String>,
+) -> Result<bool, String> {
+    let job_id = job_id
+        .or(jobId)
+        .map(|v| v.trim().to_string())
+        .filter(|v| !v.is_empty())
+        .ok_or_else(|| "missing required key jobId".to_string())?;
+    jobs::delete_terminal_job(&state.paths, &job_id).map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+fn jobs_delete_terminal_matching_search(
+    state: State<'_, AppState>,
+    query: String,
+    limit: usize,
+) -> Result<jobs::ClearTerminalJobsSearchSummary, String> {
+    jobs::delete_terminal_jobs_matching_search(&state.paths, &query, limit)
+        .map_err(|e| e.to_string())
+}
+
+#[tauri::command]
 fn jobs_queue_control_get(
     state: State<'_, AppState>,
 ) -> Result<jobs::JobQueueControlState, String> {
@@ -8044,6 +8183,177 @@ fn jobs_retry(
         .filter(|v| !v.is_empty())
         .ok_or_else(|| "missing required key jobId".to_string())?;
     jobs::retry_job(&state.paths, &job_id).map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+#[allow(non_snake_case)]
+async fn jobs_retry_batch_failed(
+    state: State<'_, AppState>,
+    batch_id: Option<String>,
+    batchId: Option<String>,
+) -> Result<jobs::RetryBatchFailedSummary, String> {
+    let _timer = InvokeTimer::start(state.paths.clone(), "jobs_retry_batch_failed");
+    let batch_id = batch_id
+        .or(batchId)
+        .map(|v| v.trim().to_string())
+        .filter(|v| !v.is_empty())
+        .ok_or_else(|| "missing required key batchId".to_string())?;
+    let paths = state.paths.clone();
+    let trace_paths = paths.clone();
+    let result = tauri::async_runtime::spawn_blocking(move || {
+        jobs::retry_failed_jobs_for_batch(&paths, &batch_id).map_err(|e| e.to_string())
+    })
+    .await
+    .map_err(|e| e.to_string())?;
+    result.map_err(|e| trace_database_command_error(&trace_paths, "jobs_retry_batch_failed", e))
+}
+
+#[tauri::command]
+#[allow(non_snake_case)]
+async fn jobs_retry_batch_failed_dry_run(
+    state: State<'_, AppState>,
+    batch_id: Option<String>,
+    batchId: Option<String>,
+) -> Result<jobs::RetryBatchFailedSummary, String> {
+    let _timer = InvokeTimer::start(state.paths.clone(), "jobs_retry_batch_failed_dry_run");
+    let batch_id = batch_id
+        .or(batchId)
+        .map(|v| v.trim().to_string())
+        .filter(|v| !v.is_empty())
+        .ok_or_else(|| "missing required key batchId".to_string())?;
+    let paths = state.paths.clone();
+    let trace_paths = paths.clone();
+    let result = tauri::async_runtime::spawn_blocking(move || {
+        jobs::retry_failed_jobs_for_batch_dry_run(&paths, &batch_id).map_err(|e| e.to_string())
+    })
+    .await
+    .map_err(|e| e.to_string())?;
+    result.map_err(|e| {
+        trace_database_command_error(&trace_paths, "jobs_retry_batch_failed_dry_run", e)
+    })
+}
+
+#[tauri::command]
+#[allow(non_snake_case)]
+async fn jobs_repair_batch(
+    state: State<'_, AppState>,
+    batch_id: Option<String>,
+    batchId: Option<String>,
+) -> Result<jobs::RetryBatchFailedSummary, String> {
+    let _timer = InvokeTimer::start(state.paths.clone(), "jobs_repair_batch");
+    let batch_id = batch_id
+        .or(batchId)
+        .map(|v| v.trim().to_string())
+        .filter(|v| !v.is_empty())
+        .ok_or_else(|| "missing required key batchId".to_string())?;
+    let paths = state.paths.clone();
+    let trace_paths = paths.clone();
+    let result = tauri::async_runtime::spawn_blocking(move || {
+        jobs::repair_batch(&paths, &batch_id).map_err(|e| e.to_string())
+    })
+    .await
+    .map_err(|e| e.to_string())?;
+    result.map_err(|e| trace_database_command_error(&trace_paths, "jobs_repair_batch", e))
+}
+
+#[tauri::command]
+#[allow(non_snake_case)]
+async fn jobs_batch_detail(
+    state: State<'_, AppState>,
+    batch_id: Option<String>,
+    batchId: Option<String>,
+) -> Result<jobs::JobBatchDetail, String> {
+    let _timer = InvokeTimer::start(state.paths.clone(), "jobs_batch_detail");
+    let batch_id = batch_id
+        .or(batchId)
+        .map(|v| v.trim().to_string())
+        .filter(|v| !v.is_empty())
+        .ok_or_else(|| "missing required key batchId".to_string())?;
+    let paths = state.paths.clone();
+    let trace_paths = paths.clone();
+    let result = tauri::async_runtime::spawn_blocking(move || {
+        jobs::get_batch_detail(&paths, &batch_id).map_err(|e| e.to_string())
+    })
+    .await
+    .map_err(|e| e.to_string())?;
+    result.map_err(|e| trace_database_command_error(&trace_paths, "jobs_batch_detail", e))
+}
+
+#[tauri::command]
+#[allow(non_snake_case)]
+async fn jobs_detail(
+    state: State<'_, AppState>,
+    job_id: Option<String>,
+    jobId: Option<String>,
+) -> Result<jobs::JobDetail, String> {
+    let _timer = InvokeTimer::start(state.paths.clone(), "jobs_detail");
+    let job_id = job_id
+        .or(jobId)
+        .map(|v| v.trim().to_string())
+        .filter(|v| !v.is_empty())
+        .ok_or_else(|| "missing required key jobId".to_string())?;
+    let paths = state.paths.clone();
+    let trace_paths = paths.clone();
+    let result = tauri::async_runtime::spawn_blocking(move || {
+        jobs::get_job_detail(&paths, &job_id).map_err(|e| e.to_string())
+    })
+    .await
+    .map_err(|e| e.to_string())?;
+    result.map_err(|e| trace_database_command_error(&trace_paths, "jobs_detail", e))
+}
+
+#[tauri::command]
+#[allow(non_snake_case)]
+async fn jobs_backfill_titles_for_batch(
+    state: State<'_, AppState>,
+    batch_id: Option<String>,
+    batchId: Option<String>,
+    limit: Option<usize>,
+) -> Result<jobs::JobTitleBackfillSummary, String> {
+    let _timer = InvokeTimer::start(state.paths.clone(), "jobs_backfill_titles_for_batch");
+    let batch_id = batch_id
+        .or(batchId)
+        .map(|v| v.trim().to_string())
+        .filter(|v| !v.is_empty())
+        .ok_or_else(|| "missing required key batchId".to_string())?;
+    let paths = state.paths.clone();
+    let trace_paths = paths.clone();
+    let result = tauri::async_runtime::spawn_blocking(move || {
+        jobs::backfill_job_titles_for_batch(&paths, &batch_id, limit.unwrap_or(500))
+            .map_err(|e| e.to_string())
+    })
+    .await
+    .map_err(|e| e.to_string())?;
+    result.map_err(|e| {
+        trace_database_command_error(&trace_paths, "jobs_backfill_titles_for_batch", e)
+    })
+}
+
+#[tauri::command]
+#[allow(non_snake_case)]
+async fn jobs_export_unresolved_batch(
+    state: State<'_, AppState>,
+    batch_id: Option<String>,
+    batchId: Option<String>,
+    format: Option<String>,
+) -> Result<jobs::JobExportPayload, String> {
+    let _timer = InvokeTimer::start(state.paths.clone(), "jobs_export_unresolved_batch");
+    let batch_id = batch_id
+        .or(batchId)
+        .map(|v| v.trim().to_string())
+        .filter(|v| !v.is_empty())
+        .ok_or_else(|| "missing required key batchId".to_string())?;
+    let format = format.unwrap_or_else(|| "csv".to_string());
+    let paths = state.paths.clone();
+    let trace_paths = paths.clone();
+    let result = tauri::async_runtime::spawn_blocking(move || {
+        jobs::export_unresolved_jobs_for_batch(&paths, &batch_id, &format)
+            .map_err(|e| e.to_string())
+    })
+    .await
+    .map_err(|e| e.to_string())?;
+    result
+        .map_err(|e| trace_database_command_error(&trace_paths, "jobs_export_unresolved_batch", e))
 }
 
 #[tauri::command]
@@ -8393,6 +8703,7 @@ pub fn run() {
             download_presets_set,
             library_get,
             library_list,
+            library_list_youtube_video_candidates,
             localization_workspace_list,
             youtube_subscription_groups_delete,
             youtube_subscription_groups_list,
@@ -8400,6 +8711,7 @@ pub fn run() {
             youtube_subscription_groups_upsert,
             youtube_subscriptions_list,
             youtube_subscriptions_output_dir,
+            youtube_subscriptions_preview_output_dir,
             youtube_subscriptions_upsert,
             youtube_subscriptions_set_library,
             youtube_subscriptions_delete,
@@ -8407,6 +8719,9 @@ pub fn run() {
             video_libraries_upsert,
             video_libraries_set_active,
             video_libraries_remove,
+            video_library_bundle_export,
+            video_library_bundle_import,
+            video_library_metadata_transfer,
             youtube_subscriptions_import_existing_downloads,
             legacy_archive_analyze,
             youtube_subscriptions_queue_one,
@@ -8427,6 +8742,11 @@ pub fn run() {
             instagram_subscriptions_output_dir,
             jobs_cancel,
             jobs_cancel_all,
+            jobs_backfill_titles_for_batch,
+            jobs_batch_detail,
+            jobs_delete_terminal,
+            jobs_delete_terminal_matching_search,
+            jobs_detail,
             jobs_enqueue_dummy,
             jobs_enqueue_asr_local,
             jobs_enqueue_download_batch,
@@ -8456,6 +8776,7 @@ pub fn run() {
             jobs_clear_failed_for_item,
             jobs_list,
             jobs_list_for_item,
+            jobs_search,
             jobs_queue_control_get,
             jobs_queue_control_set,
             jobs_item_artifact_retention_policy,
@@ -8463,7 +8784,11 @@ pub fn run() {
             jobs_prune_logs,
             jobs_runtime_settings_get,
             jobs_runtime_settings_set,
+            jobs_export_unresolved_batch,
+            jobs_repair_batch,
             jobs_retry,
+            jobs_retry_batch_failed,
+            jobs_retry_batch_failed_dry_run,
             models_inventory,
             models_install,
             models_install_demo,

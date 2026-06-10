@@ -45,6 +45,8 @@ type DownloadPresetsConfig = {
 
 type DownloaderProfileId = "aggressive" | "balanced" | "gentle" | "conservative";
 
+const DEFAULT_YOUTUBE_AUTH_PREFLIGHT_URL = "https://youtu.be/wbpLhh3M6L4?si=8QuFih5T__tP1W8b";
+
 const DOWNLOADER_PROFILES: Array<{
   id: DownloaderProfileId;
   label: string;
@@ -140,7 +142,7 @@ export function OptionsPage() {
   const [authJson, setAuthJson] = useState("");
   const [authBusy, setAuthBusy] = useState(false);
   const [authPreflightBusy, setAuthPreflightBusy] = useState(false);
-  const [authPreflightUrl, setAuthPreflightUrl] = useState("https://www.youtube.com/watch?v=BaW_jenozKcj");
+  const [authPreflightUrl, setAuthPreflightUrl] = useState(DEFAULT_YOUTUBE_AUTH_PREFLIGHT_URL);
   const [authMessage, setAuthMessage] = useState("");
   const [downloadPresets, setDownloadPresets] = useState<DownloadPresetsConfig | null>(null);
   const [downloaderBusy, setDownloaderBusy] = useState(false);
@@ -363,13 +365,11 @@ export function OptionsPage() {
     setAuthBusy(true);
     setAuthMessage("");
     try {
-      if (authJson.trim()) {
-        JSON.parse(authJson); // simple loose validation
-      }
-      await invoke("config_youtube_auth_set", {
+      const saved = await invoke<{ netscape_cookie_json?: string | null }>("config_youtube_auth_set", {
         configValue: { netscape_cookie_json: authJson },
       });
-      setAuthMessage("Saved global YouTube cookies successfully.");
+      setAuthJson(saved.netscape_cookie_json || "");
+      setAuthMessage("Saved YouTube-only cookies. Unrelated domains and expired persistent cookies were removed.");
     } catch (e) {
       setAuthMessage(`Error saving cookies: ${String(e)}`);
     } finally {
@@ -571,15 +571,16 @@ export function OptionsPage() {
         <div style={{ color: "#4b5563", marginTop: 6, marginBottom: 12 }}>
           Store browser session cookies used by YouTube archiver jobs and subscriptions.
           When no per-job or per-subscription cookie is set, the global cookies are used as fallback.
+          Saving filters the export to YouTube domains and stores normalized Netscape cookie text.
         </div>
         <div style={{ marginBottom: 8 }}>
-          <strong>How to export cookies:</strong> Install a browser extension like
-          "EditThisCookie" or "Get cookies.txt", visit youtube.com while logged in,
-          export cookies as JSON or Netscape cookies.txt, then paste below.
+          <strong>How to export cookies:</strong> Use the Cookie Editor export as-is:
+          paste its JSON, paste a path to its <code>cookie.js</code> file, or paste Netscape cookies.txt.
+          Run the preflight after saving.
         </div>
         <textarea
           style={{ width: "100%", height: 120, fontFamily: "monospace", fontSize: 13, marginBottom: 8 }}
-          placeholder='Paste exported cookie JSON here, e.g.:&#10;[{"domain": ".youtube.com", "name": "__Secure-YEC", "value": "...", ...}]'
+          placeholder='Paste Cookie Editor JSON, a cookie.js file path, or Netscape cookies.txt.'
           value={authJson}
           onChange={(e) => setAuthJson(e.target.value)}
           disabled={authBusy}

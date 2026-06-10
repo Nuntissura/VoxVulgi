@@ -1335,13 +1335,16 @@ export function DiagnosticsPage({ visible = true }: { visible?: boolean }) {
     () => phase2CompletedCount(phase2Steps),
     [phase2Steps],
   );
+  const voicePackagesRuntimeReady = Boolean(
+    ttsNeuralLocalV1?.installed && ttsVoicePreservingLocalV1?.installed,
+  );
 
   const phase2SummaryLabel =
     sectionStatus.phase2.state === "loading" && !phase2Latest
       ? "Checking..."
       : phase2HasActive
         ? "Installing..."
-        : phase2Steps.length > 0 && phase2Steps.every(phase2StepIsComplete)
+        : voicePackagesRuntimeReady
           ? "Installed"
           : phase2HasProblem
             ? "Interrupted"

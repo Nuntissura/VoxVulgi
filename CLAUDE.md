@@ -41,6 +41,17 @@
 - New proof bundles should include `summary.md` under `product/desktop/build_target/tool_artifacts/wp_runs/<WP-ID>/...`.
 - Build-only verification is not sufficient for UI/operator-heavy packets when the proof standard requires app-boundary or manual evidence.
 
+## Workflow Failure Source-of-Truth Policy
+
+- [VV-SOT-001] When fixing a repeated VoxVulgi workflow failure, first identify the canonical source-of-truth entities before proposing, patching, or claiming a fix.
+- [VV-SOT-002] For queue, batch, retry, recovery, import, archive, or library bugs, explicitly distinguish source videos, batch members, job attempts, outputs, cached projections, visible UI rows, filtered lists, paginated slices, grouped displays, and derived counts.
+- [VV-SOT-003] Do not treat visible queue counts, loaded rows, search results, collapsed panels, or grouped display counts as the full backend state until verified against the canonical job or library store.
+- [VV-SOT-004] For retry and recovery bugs, prove whether the action targets the whole canonical failed set or only the currently visible, loaded, filtered, or paginated subset.
+- [VV-SOT-005] Do not claim video title, source URL, original filename, path, or context visibility is fixed unless failed, never-started, partial-success, retried, and successful paths all have a reliable metadata source.
+- [VV-SOT-006] When the operator repeats the same VoxVulgi complaint across turns, restate the stable core workflow requirement before acting and validate every proposed fix against that requirement.
+- [VV-SOT-007] Before claiming a fix for an operator-reported VoxVulgi workflow, test the exact reported batch, job, URL, or library case, or state why exact runtime proof is unavailable.
+- [VV-SOT-008] If the operator asks for explanation, root cause, accountability, or why a VoxVulgi fix failed, stop implementation and answer from evidence only until the operator explicitly resumes implementation.
+
 ## Research-First Implementation Policy
 
 - Do not vibecode medium- or high-difficulty technical implementations.

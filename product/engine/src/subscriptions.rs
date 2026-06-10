@@ -80,6 +80,23 @@ pub struct YoutubeSubscriptionUpsert {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct YoutubeSubscriptionOutputPreviewRequest {
+    pub title: String,
+    pub source_url: String,
+    pub folder_map: Option<String>,
+    pub output_dir_override: Option<String>,
+    #[serde(default)]
+    pub library_id: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct YoutubeSubscriptionOutputPreview {
+    pub path: String,
+    pub exists: bool,
+    pub uses_output_override: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct YoutubeSubscriptionGroupRow {
     pub id: String,
     pub name: String,
@@ -2244,6 +2261,64 @@ pub fn youtube_subscription_output_dir(
     Ok(library_root.join(sanitize_folder_map(&sub.folder_map)))
 }
 
+pub fn preview_youtube_subscription_output_dir(
+    paths: &AppPaths,
+    req: YoutubeSubscriptionOutputPreviewRequest,
+) -> Result<YoutubeSubscriptionOutputPreview> {
+    let normalized = normalize_upsert(YoutubeSubscriptionUpsert {
+        id: None,
+        title: req.title,
+        source_url: req.source_url,
+        folder_map: req.folder_map,
+        output_dir_override: req.output_dir_override,
+        library_id: req.library_id,
+        use_browser_cookies: false,
+        browser_cookie_source: None,
+        auth_session_input: None,
+        clear_auth_session: false,
+        active: true,
+        preset_id: None,
+        group_ids: Vec::new(),
+        refresh_interval_minutes: Some(DEFAULT_REFRESH_INTERVAL_MINUTES),
+    })?;
+
+    let (target, uses_output_override) = if let Some(override_dir) = normalized.output_dir_override
+    {
+        let mut p = PathBuf::from(override_dir);
+        if !p.is_absolute() {
+            p = std::env::current_dir()?.join(p);
+        }
+        (p, true)
+    } else {
+        let library_root = if let Some(library_id) = normalized.library_id.as_deref() {
+            let library =
+                video_libraries::get_video_library_by_id(paths, library_id)?.ok_or_else(|| {
+                    EngineError::InstallFailed(format!(
+                        "video library not found or disabled: {library_id}"
+                    ))
+                })?;
+            if !library.active {
+                return Err(EngineError::InstallFailed(format!(
+                    "video library not found or disabled: {library_id}"
+                )));
+            }
+            PathBuf::from(library.root_path)
+        } else {
+            video_libraries::default_video_library_root(paths)?
+        };
+        (
+            library_root.join(sanitize_folder_map(&normalized.folder_map)),
+            false,
+        )
+    };
+
+    Ok(YoutubeSubscriptionOutputPreview {
+        path: target.to_string_lossy().to_string(),
+        exists: target.is_dir(),
+        uses_output_override,
+    })
+}
+
 fn legacy_output_youtube_subscription_archive_path(
     paths: &AppPaths,
     sub: &YoutubeSubscriptionRow,
@@ -3287,6 +3362,46 @@ mod tests {
             youtube_subscription_output_dir(&paths, &sub).expect("output dir"),
             override_dir
         );
+    }
+
+    #[test]
+    fn preview_subscription_output_reports_existing_library_target() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let paths = AppPaths::new(dir.path().join("app_state"));
+        crate::db::ensure_schema(&paths).expect("schema");
+
+        let library_root = dir.path().join("4K Video 21-08-2025");
+        let existing = library_root.join("Existing Channel");
+        std::fs::create_dir_all(&existing).expect("existing channel dir");
+        let library = crate::video_libraries::upsert_video_library(
+            &paths,
+            crate::video_libraries::VideoLibraryUpsert {
+                id: None,
+                name: "NAS".to_string(),
+                root_path: library_root.to_string_lossy().to_string(),
+                set_active: true,
+            },
+        )
+        .expect("save library");
+
+        let preview = preview_youtube_subscription_output_dir(
+            &paths,
+            YoutubeSubscriptionOutputPreviewRequest {
+                title: "Existing Channel".to_string(),
+                source_url: "https://www.youtube.com/@existing/videos".to_string(),
+                folder_map: Some("Existing Channel".to_string()),
+                output_dir_override: None,
+                library_id: Some(library.id),
+            },
+        )
+        .expect("preview");
+
+        assert_eq!(
+            PathBuf::from(&preview.path),
+            existing.canonicalize().expect("canonical existing")
+        );
+        assert!(preview.exists);
+        assert!(!preview.uses_output_override);
     }
 
     #[test]

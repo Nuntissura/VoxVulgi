@@ -464,3 +464,138 @@ This changelog tracks desktop installer builds produced by `governance/scripts/b
   - `product/desktop/build_target/Current/release/bundle/nsis/VoxVulgi_0.1.51_x64-setup.exe`
   - `product/desktop/build_target/Current/release/bundle/msi/VoxVulgi_0.1.51_x64_en-US.msi`
 - Notes: WP-0245: Jobs page no longer fans out per-item `library_get`/`item_outputs` (replaced by batched `library_get_many` + `item_outputs_many` Tauri commands) — v0.1.50 freeze trace had 672+227 slow rows from this pattern. All six pack-install Tauri commands now async + `InvokeTimer`-traced so reinstalls leave forensic evidence and don't block the IPC dispatcher. Localization Studio surfaces a "Job queue is paused" banner with one-click Resume so a silently-paused queue can never again hide running work. Build script's `Get-FileSha256Hex` switched to .NET SHA256 because the 60+ min WP-0233 warmup gate subprocess corrupts `$env:PSModulePath`. Warmup gate was skipped on this build (auditable reason recorded in log); the same v0.1.51 manifest passed the gate at 2026-05-22 23:59 (all 6 packs OK).
+
+## 0.1.52 - 2026-05-28T02:42:01Z
+- Work Packets: `WP-9999`
+- Commit: `76f243a`
+- Offline Bundle ID: `offline_full_win64_20260521_181537`
+- Artifacts:
+  - `product/desktop/build_target/Current/release/bundle/nsis/VoxVulgi_0.1.52_x64-setup.exe`
+  - `product/desktop/build_target/Current/release/bundle/msi/VoxVulgi_0.1.52_x64_en-US.msi`
+- Notes: Ad-hoc operator request: rebuild installer/exe for youtube downloader troubleshooting (no prior WP requested).
+
+## 0.1.53 - 2026-05-28T23:48:02Z
+- Work Packets: `WP-9999`
+- Commit: `76f243a`
+- Offline Bundle ID: `offline_full_win64_20260521_181537`
+- Artifacts:
+  - `product/desktop/build_target/Current/release/bundle/nsis/VoxVulgi_0.1.53_x64-setup.exe`
+  - `product/desktop/build_target/Current/release/bundle/msi/VoxVulgi_0.1.53_x64_en-US.msi`
+- Notes: Desktop target build via build_desktop_target.ps1.
+
+## 0.1.54 - 2026-05-29T19:51:53Z
+- Work Packets: `WP-0246`
+- Commit: `76f243a`
+- Offline Bundle ID: `offline_full_win64_20260521_181537`
+- Artifacts:
+  - `product/desktop/build_target/Current/release/bundle/nsis/VoxVulgi_0.1.54_x64-setup.exe`
+  - `product/desktop/build_target/Current/release/bundle/msi/VoxVulgi_0.1.54_x64_en-US.msi`
+- Notes: Localization Studio hang fix + job-pipeline hardening. Root cause: Spleeter source-separation deadlocked on Windows — the default Separator() builds a multiprocessing Pool() sized to os.cpu_count(); each spawned worker re-imports TensorFlow and the pool then deadlocks (observed: job stuck at progress 0.25 for 5h+, ~33 idle python workers + a blocked ffmpeg decode pipe). Fix: Separator("spleeter:2stems", multiprocess=False). Hardening: spleeter, demucs, pyannote/diarize (x2), pyttsx3, neural TTS, and voice-preserving TTS spawns, plus the vocal-cleanup ffmpeg pass, now run under run_command_output_with_control with timeouts (3600s model jobs, 1800s spleeter/ffmpeg) so they are cancellable and cannot hang forever. New runner-thread stuck-job watchdog: WARNs in the job log after 600s with no progress change and auto-fails as a backstop after 7200s (kept above the longest command timeout so healthy long jobs are never killed).
+
+## 0.1.55 - 2026-06-01T03:39:34Z
+- Work Packets: `WP-0247`
+- Commit: `76f243a`
+- Offline Bundle ID: `offline_full_win64_20260521_181537`
+- Artifacts:
+  - `product/desktop/build_target/Current/release/bundle/nsis/VoxVulgi_0.1.55_x64-setup.exe`
+  - `product/desktop/build_target/Current/release/bundle/msi/VoxVulgi_0.1.55_x64_en-US.msi`
+- Notes: WP-0247: Options-global YouTube auth is now canonical at job execution time; YouTube archiver panes no longer expose duplicate session inputs; Jobs collapsed/direct rows show source context; YouTube single history lists all single-video candidates with fuzzy search/order; Media Library adds a single-video/legacy filter.
+
+## 0.1.56 - 2026-06-02T03:07:44Z
+- Work Packets: `WP-0248`
+- Commit: `76f243a`
+- Offline Bundle ID: `offline_full_win64_20260521_181537`
+- Artifacts:
+  - `product/desktop/build_target/Current/release/bundle/nsis/VoxVulgi_0.1.56_x64-setup.exe`
+  - `product/desktop/build_target/Current/release/bundle/msi/VoxVulgi_0.1.56_x64_en-US.msi`
+- Notes: WP-0248: Jobs search can load old batch/job rows by ID/title/URL, failed/canceled rows can be deleted individually, queued retry rows show paused-queue state, and YouTube direct jobs show cached titles.
+
+## 0.1.57 - 2026-06-02T03:33:15Z
+- Work Packets: `WP-0248`
+- Commit: `76f243a`
+- Offline Bundle ID: `offline_full_win64_20260521_181537`
+- Artifacts:
+  - `product/desktop/build_target/Current/release/bundle/nsis/VoxVulgi_0.1.57_x64-setup.exe`
+  - `product/desktop/build_target/Current/release/bundle/msi/VoxVulgi_0.1.57_x64_en-US.msi`
+- Notes: WP-0248: Jobs search can load old batch/job rows by ID/title/URL, failed/canceled rows can be deleted individually, queued retry rows show paused-queue state, and YouTube direct jobs show cached titles with wrapped target text.
+
+## 0.1.58 - 2026-06-02T08:00:37Z
+- Work Packets: `WP-0248`
+- Commit: `76f243a`
+- Offline Bundle ID: `offline_full_win64_20260521_181537`
+- Artifacts:
+  - `product/desktop/build_target/Current/release/bundle/nsis/VoxVulgi_0.1.58_x64-setup.exe`
+  - `product/desktop/build_target/Current/release/bundle/msi/VoxVulgi_0.1.58_x64_en-US.msi`
+- Notes: WP-0248 follow-up: prevent duplicate direct-url retries and cap yt-dlp subtitle languages.
+
+## 0.1.59 - 2026-06-02T16:30:51Z
+- Work Packets: `WP-0248`
+- Commit: `76f243a`
+- Offline Bundle ID: `offline_full_win64_20260521_181537`
+- Artifacts:
+  - `product/desktop/build_target/Current/release/bundle/nsis/VoxVulgi_0.1.59_x64-setup.exe`
+  - `product/desktop/build_target/Current/release/bundle/msi/VoxVulgi_0.1.59_x64_en-US.msi`
+- Notes: WP-0248 follow-up: contain rejected YouTube auth retries and add search cleanup.
+
+## 0.1.60 - 2026-06-02T23:00:02Z
+- Work Packets: `WP-0248`
+- Commit: `76f243a`
+- Offline Bundle ID: `offline_full_win64_20260521_181537`
+- Artifacts:
+  - `product/desktop/build_target/Current/release/bundle/nsis/VoxVulgi_0.1.60_x64-setup.exe`
+  - `product/desktop/build_target/Current/release/bundle/msi/VoxVulgi_0.1.60_x64_en-US.msi`
+- Notes: WP-0248 follow-up: normalize global YouTube cookie exports to YouTube-only Netscape cookies.
+
+## 0.1.61 - 2026-06-03T03:23:51Z
+- Work Packets: `WP-0248`
+- Commit: `76f243a`
+- Offline Bundle ID: `offline_full_win64_20260521_181537`
+- Artifacts:
+  - `product/desktop/build_target/Current/release/bundle/nsis/VoxVulgi_0.1.61_x64-setup.exe`
+  - `product/desktop/build_target/Current/release/bundle/msi/VoxVulgi_0.1.61_x64_en-US.msi`
+- Notes: WP-0248 follow-up: batch Retry failed now uses canonical backend batch scope instead of visible Jobs rows; retries every failed/canceled row, reuses active duplicate targets, and reports partial row errors.
+
+## 0.1.62 - 2026-06-03T06:58:56Z
+- Work Packets: `WP-0248`
+- Commit: `76f243a`
+- Offline Bundle ID: `offline_full_win64_20260521_181537`
+- Artifacts:
+  - `product/desktop/build_target/Current/release/bundle/nsis/VoxVulgi_0.1.62_x64-setup.exe`
+  - `product/desktop/build_target/Current/release/bundle/msi/VoxVulgi_0.1.62_x64_en-US.msi`
+- Notes: WP-0248 follow-up: trustworthy Jobs recovery surface with retry lineage, canonical batch health/detail, attempt history, filters/export/backfill/repair, Cookie Editor cookie.js auth input, and updated YouTube auth preflight URL. Warmup gate skipped on rerun because the immediately preceding WP-0248 attempt passed the gate (20260603_065926) and failed only while archiving a locked running desktop.exe.
+
+## 0.1.63 - 2026-06-03T07:28:18Z
+- Work Packets: `WP-0248`
+- Commit: `76f243a`
+- Offline Bundle ID: `offline_full_win64_20260521_181537`
+- Artifacts:
+  - `product/desktop/build_target/Current/release/bundle/nsis/VoxVulgi_0.1.63_x64-setup.exe`
+  - `product/desktop/build_target/Current/release/bundle/msi/VoxVulgi_0.1.63_x64_en-US.msi`
+- Notes: WP-0248 follow-up: trustworthy Jobs recovery surface with retry lineage, canonical batch health/detail, attempt history, filters/export/backfill/repair, Cookie Editor cookie.js auth input, updated YouTube auth preflight URL, and stale Jobs DB-lock banner recovery. Warmup gate skipped because the same-run gate passed at 20260603_065926 and this final rerun only changed frontend lock-banner recovery with unchanged pack inputs.
+
+## 0.1.64 - 2026-06-03T07:55:14Z
+- Work Packets: `WP-0248`
+- Commit: `76f243a`
+- Offline Bundle ID: `offline_full_win64_20260521_181537`
+- Artifacts:
+  - `product/desktop/build_target/Current/release/bundle/nsis/VoxVulgi_0.1.64_x64-setup.exe`
+  - `product/desktop/build_target/Current/release/bundle/msi/VoxVulgi_0.1.64_x64_en-US.msi`
+- Notes: WP-0248 follow-up: trustworthy Jobs recovery surface with retry lineage, canonical batch health/detail, attempt history, filters/export/backfill/repair, Cookie Editor cookie.js auth input, updated YouTube auth preflight URL, stale Jobs DB-lock banner recovery, and one bounded transient-lock refresh retry. Warmup gate skipped because the same-run gate passed at 20260603_065926 and this final rerun only changed frontend lock recovery with unchanged pack inputs.
+
+## 0.1.65 - 2026-06-03T09:21:43Z
+- Work Packets: `WP-0248`
+- Commit: `76f243a`
+- Offline Bundle ID: `offline_full_win64_20260521_181537`
+- Artifacts:
+  - `product/desktop/build_target/Current/release/bundle/nsis/VoxVulgi_0.1.65_x64-setup.exe`
+  - `product/desktop/build_target/Current/release/bundle/msi/VoxVulgi_0.1.65_x64_en-US.msi`
+- Notes: WP-0248 browser-cookie source alignment: Firefox default with Chrome and Edge supported.
+
+## 0.1.66 - 2026-06-04T00:47:17Z
+- Work Packets: `WP-0248`
+- Commit: `76f243a`
+- Offline Bundle ID: `offline_full_win64_20260521_181537`
+- Artifacts:
+  - `product/desktop/build_target/Current/release/bundle/nsis/VoxVulgi_0.1.66_x64-setup.exe`
+  - `product/desktop/build_target/Current/release/bundle/msi/VoxVulgi_0.1.66_x64_en-US.msi`
+- Notes: WP-0248 canonical batch target-health display: show videos downloaded/unresolved separately from historical attempts and skip already-downloaded targets on batch retry.
