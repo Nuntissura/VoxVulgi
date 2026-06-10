@@ -478,6 +478,39 @@ test("read-only SQLite UI connections fail fast on DB contention", () => {
   );
 });
 
+test("main window disables WebView2 native occlusion/background renderer freeze (WP-0250)", () => {
+  const config = JSON.parse(readRepoFile("src-tauri", "tauri.conf.json")) as {
+    app?: { windows?: Array<{ additionalBrowserArgs?: string }> };
+  };
+  const windows = config.app?.windows ?? [];
+  assert.ok(windows.length > 0, "tauri config must declare at least one window");
+  const args = windows[0]?.additionalBrowserArgs ?? "";
+
+  // Overriding additionalBrowserArgs replaces wry's defaults, so they must be re-included.
+  for (const preserved of ["msWebOOUI", "msPdfOOUI", "msSmartScreenProtection"]) {
+    assert.ok(
+      args.includes(preserved),
+      `additionalBrowserArgs must re-include wry default feature "${preserved}" because setting the field overrides wry's defaults`,
+    );
+  }
+  // Occlusion/background renderer-freeze mitigations (the WP-0250 idle-in-background freeze).
+  assert.match(
+    args,
+    /--disable-features=[^\s]*CalculateNativeWinOcclusion/,
+    "must disable Chromium native window occlusion so a backgrounded/occluded window does not freeze the WebView2 renderer",
+  );
+  for (const flag of [
+    "--disable-backgrounding-occluded-windows",
+    "--disable-renderer-backgrounding",
+    "--disable-background-timer-throttling",
+  ]) {
+    assert.ok(
+      args.includes(flag),
+      `additionalBrowserArgs must include ${flag} so an idle background window keeps its main thread + Worker alive`,
+    );
+  }
+});
+
 test("affected Tauri commands emit DB lock and busy trace events", () => {
   const tauriSource = readRepoFile("src-tauri", "src", "lib.rs");
 
