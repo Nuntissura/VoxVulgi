@@ -2,6 +2,38 @@ import { fileName, parentPath } from "./pathUtils";
 
 export type ArchiverMediaKind = "video" | "image" | "audio" | "other";
 
+// WP-0270: this is the durable scheduler vocabulary. UI code may display an
+// `unclassified` legacy row, but it must never infer a canonical track from a
+// URL, output path, or the current preview.
+export type CanonicalJobTrack =
+  | "youtube_single"
+  | "youtube_recurring"
+  | "instagram"
+  | "other_video"
+  | "image_archive"
+  | "localization";
+
+export type DisplayJobTrack = CanonicalJobTrack | "unclassified";
+
+export function jobTrackLabel(track: string | null | undefined): string {
+  switch (track) {
+    case "youtube_single":
+      return "YouTube single";
+    case "youtube_recurring":
+      return "YouTube background";
+    case "instagram":
+      return "Instagram";
+    case "other_video":
+      return "Other video";
+    case "image_archive":
+      return "Image Archive";
+    case "localization":
+      return "Localization";
+    default:
+      return "Unclassified";
+  }
+}
+
 export type ArchiverLibraryItem = {
   id: string;
   created_at_ms: number;
@@ -16,6 +48,11 @@ export type ArchiverLibraryItem = {
   video_codec: string | null;
   audio_codec: string | null;
   thumbnail_path: string | null;
+  // WP-0268: durable engine-authored origin. Null means unknown and must never be
+  // upgraded to "single" from a URL or output-path heuristic in the frontend.
+  lineage_service?: string | null;
+  lineage_origin_kind?: string | null;
+  lineage_work_track?: string | null;
 };
 
 export type ArchiverJobRow = {
@@ -26,6 +63,9 @@ export type ArchiverJobRow = {
   target_title?: string | null;
   retry_of_job_id?: string | null;
   retry_replacement_job_id?: string | null;
+  // The engine persists this. Optional only while old installed databases are
+  // backfilled; consumers must render that state as Unclassified.
+  track?: string | null;
 };
 
 export type ArchiverItemOutputs = {
@@ -43,6 +83,13 @@ export type JobContextSummary = {
   detail: string | null;
   target_path: string | null;
   target_action_label: string | null;
+  // WP-0256: where this job came from — "Playlist · aespa", "Channel · universe.",
+  // "Direct download", "Image batch", "Instagram · …", "Local import" — so Jobs always
+  // answers "does this belong to a subscription/playlist or a one-off?". null when unknown.
+  origin?: string | null;
+  // Product track is distinct from origin/lineage and comes only from the
+  // persisted job row.
+  track_label: string;
 };
 
 export type LibraryContainerMeta = {
@@ -203,6 +250,18 @@ export function isSingleVideoLibraryItem(item: ArchiverLibraryItem, downloadRoot
   return meta.containerKind === "single_file" || isYoutubeSingleVideoItem(item, downloadRoot);
 }
 
+export function isCanonicalSingleVideoItem(item: ArchiverLibraryItem): boolean {
+  return inferArchiverMediaKind(item) === "video" && item.lineage_origin_kind === "single";
+}
+
+export function isCanonicalYoutubeSingleVideoItem(item: ArchiverLibraryItem): boolean {
+  return (
+    isCanonicalSingleVideoItem(item) &&
+    item.lineage_service === "youtube" &&
+    item.lineage_work_track === "youtube_single"
+  );
+}
+
 function normalizeSearchText(value: string): string {
   return value.toLowerCase().replace(/[^a-z0-9]+/g, " ").trim();
 }
@@ -267,6 +326,63 @@ function fileNameFromPath(path: string | null): string | null {
   return path ? fileName(path) || null : null;
 }
 
+// WP-0256: a short, human "where did this come from" label from a subscription row.
+function subscriptionOriginLabel(sub: ArchiverSubscriptionRow): string {
+  const url = (sub.source_url || "").toLowerCase();
+  let kind = "Subscription";
+  if (/[?&]list=/.test(url)) kind = "Playlist";
+  else if (/\/shorts\b/.test(url) || /\/@[^/]+\/shorts/.test(url)) kind = "Shorts";
+  else if (/\/@/.test(url) || /\/(channel|c|user)\//.test(url)) kind = "Channel";
+  return `${kind} · ${sub.title}`;
+}
+
+// WP-0256: derive the job's source/origin. A download_direct_url job carries
+// `subscription_id` in its params ONLY when it was fanned out by a subscription refresh;
+// a one-off paste has none. Origin is provenance, not a scheduler classification;
+// product-track display always uses persisted `job.track` instead.
+function deriveJobOrigin(
+  job: ArchiverJobRow,
+  params: Record<string, unknown> | null,
+  lookups: {
+    youtubeSubscriptionsById?: Record<string, ArchiverSubscriptionRow>;
+    instagramSubscriptionsById?: Record<string, ArchiverSubscriptionRow>;
+  },
+): string | null {
+  const subscriptionId = stringOrNull(params?.subscription_id);
+  if (subscriptionId) {
+    const sub = lookups.youtubeSubscriptionsById?.[subscriptionId];
+    if (sub) return subscriptionOriginLabel(sub);
+    const sourceDisplayName = stringOrNull(params?.source_display_name);
+    const sourcePageUrl = stringOrNull(params?.source_page_url);
+    if (sourceDisplayName || sourcePageUrl) {
+      return subscriptionOriginLabel({
+        id: subscriptionId,
+        title: sourceDisplayName || "Untitled source",
+        source_url: sourcePageUrl || "",
+      });
+    }
+    return `Subscription ${subscriptionId.slice(0, 8)}`;
+  }
+  switch (job.job_type) {
+    case "youtube_subscription_refresh_v1":
+      return "Subscription check";
+    case "download_direct_url":
+      return "Direct download";
+    case "download_image_batch":
+      return "Image batch";
+    case "import_local":
+      return "Local import";
+    default:
+      break;
+  }
+  const instagramSubscriptionId = stringOrNull(params?.instagram_subscription_id);
+  if (instagramSubscriptionId) {
+    const ig = lookups.instagramSubscriptionsById?.[instagramSubscriptionId];
+    return ig ? `Instagram · ${ig.title}` : "Instagram";
+  }
+  return null;
+}
+
 export function buildJobContextSummary(
   job: ArchiverJobRow,
   lookups: {
@@ -276,6 +392,10 @@ export function buildJobContextSummary(
     instagramSubscriptionsById?: Record<string, ArchiverSubscriptionRow>;
   },
 ): JobContextSummary {
+  const params = safeParseJobParams(job);
+  const origin = deriveJobOrigin(job, params, lookups);
+  const track_label = jobTrackLabel(job.track);
+
   const item = lookups.item;
   if (item) {
     const outcome = lookups.itemOutputs?.terminal_summary?.trim();
@@ -287,10 +407,11 @@ export function buildJobContextSummary(
       detail: detail || null,
       target_path: item.media_path || null,
       target_action_label: "Open media folder",
+      origin,
+      track_label,
     };
   }
 
-  const params = safeParseJobParams(job);
   if (job.job_type === "download_direct_url") {
     const urls = directDownloadUrls(params);
     const outputDir = stringOrNull(params?.output_dir);
@@ -307,17 +428,23 @@ export function buildJobContextSummary(
       detail: detail || null,
       target_path: outputDir,
       target_action_label: outputDir ? "Open target root" : null,
+      origin,
+      track_label,
     };
   }
 
   if (job.job_type === "youtube_subscription_refresh_v1") {
     const subscriptionId = stringOrNull(params?.subscription_id);
     const subscription = subscriptionId ? lookups.youtubeSubscriptionsById?.[subscriptionId] : undefined;
+    const sourceDisplayName = stringOrNull(params?.source_display_name);
+    const sourcePageUrl = stringOrNull(params?.source_page_url);
     return {
-      label: subscription?.title || "YouTube subscription refresh",
-      detail: subscription?.source_url ?? null,
+      label: subscription?.title || sourceDisplayName || "YouTube subscription refresh",
+      detail: subscription?.source_url ?? sourcePageUrl,
       target_path: subscriptionId ?? null,
       target_action_label: subscriptionId ? "Open subscription target" : null,
+      origin,
+      track_label,
     };
   }
 
@@ -329,6 +456,8 @@ export function buildJobContextSummary(
       detail: outputDir ? `Target root: ${outputDir}` : null,
       target_path: outputDir,
       target_action_label: outputDir ? "Open target root" : null,
+      origin,
+      track_label,
     };
   }
 
@@ -340,6 +469,8 @@ export function buildJobContextSummary(
       detail: reusedItemId ? `Reused existing Localization item ${reusedItemId}: ${path}` : path,
       target_path: path,
       target_action_label: path ? "Open source" : null,
+      origin,
+      track_label,
     };
   }
 
@@ -352,6 +483,8 @@ export function buildJobContextSummary(
     detail: instagramSubscription?.source_url ?? null,
     target_path: null,
     target_action_label: null,
+    origin,
+    track_label,
   };
 }
 

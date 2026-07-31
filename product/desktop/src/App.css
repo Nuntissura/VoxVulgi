@@ -860,7 +860,7 @@ code {
 }
 
 .safe-mode-pill {
-  margin-left: 8px;
+  margin-left: 0;
   padding: 4px 10px;
   font-size: 0.78rem;
   line-height: 1.1;
@@ -984,6 +984,13 @@ code {
   );
 }
 
+/* html2canvas can render descendants of a closed disclosure in its cloned DOM even though the
+   live WebView hides them. Keep the semantic closed state explicit so visual-debug snapshots are
+   faithful on Options and every other page, not only the Jobs-specific disclosures below. */
+details:not([open]) > :not(summary) {
+  display: none !important;
+}
+
 button,
 select {
   border-radius: var(--panel-radius-tight);
@@ -1065,22 +1072,18 @@ textarea {
       rgba(251, 253, 255, 0.93) 45%,
       rgba(240, 246, 252, 0.9) 100%
     );
-  backdrop-filter: blur(18px) saturate(158%);
+  /* WP-0260 perf: dropped `backdrop-filter: blur(18px) saturate(158%)` — it was the most
+     expensive always-on paint on Options/Video Archiver (many inputs) and bought nothing over
+     the opaque gloss gradient. Helps the intentionally-slow-refresh app. */
   box-shadow: var(--float-shadow);
-  transition:
-    transform 130ms ease,
-    box-shadow 130ms ease,
-    border-color 130ms ease;
+  transition: border-color 130ms ease;
 }
 
 input:not([type="checkbox"]):hover:not(:disabled),
 textarea:hover:not(:disabled) {
-  transform: translateY(-2px);
-  box-shadow:
-    0 0 0 1px rgba(255, 255, 255, 0.72) inset,
-    0 24px 40px rgba(18, 31, 45, 0.27),
-    0 7px 14px rgba(27, 41, 58, 0.18),
-    inset 0 1px 0 rgba(255, 255, 255, 0.96);
+  /* WP-0260 perf: replaced a transform lift + 4-layer drop shadow (expensive paint + layout
+     shift on every input hover) with a cheap border tint. */
+  border-color: rgba(57, 122, 189, 0.7);
 }
 
 input:focus-visible,
@@ -1129,6 +1132,129 @@ input[type="checkbox"] {
   gap: 8px;
   align-items: center;
   margin-top: 10px;
+}
+
+.youtube-auth-intro {
+  margin: 6px 0 12px;
+  color: var(--ink-soft);
+}
+
+.youtube-auth-status {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: 8px 12px;
+  margin: 10px 0 6px;
+  padding: 10px 12px;
+  border: 1px solid var(--panel-border);
+  border-radius: var(--panel-radius-tight);
+  background: linear-gradient(154deg, #eef2f6 0%, #dde3ea 60%, #cfd6df 100%);
+}
+
+.youtube-auth-status > strong {
+  font-size: 0.98rem;
+}
+
+.youtube-auth-status[data-state="ready"] > strong {
+  color: #166534;
+}
+
+.youtube-auth-status[data-state="reconnect"] {
+  border-color: rgba(162, 72, 93, 0.62);
+  background: linear-gradient(170deg, rgba(255, 245, 247, 0.9), rgba(246, 214, 223, 0.72));
+}
+
+.youtube-auth-status[data-state="reconnect"] > strong {
+  color: #991b1b;
+}
+
+.youtube-auth-steps {
+  list-style: none;
+  counter-reset: youtube-auth-step;
+  margin: 8px 0 0;
+  padding: 0;
+}
+
+.youtube-auth-steps > li {
+  counter-increment: youtube-auth-step;
+  display: grid;
+  grid-template-columns: minmax(250px, 1fr) auto;
+  align-items: center;
+  gap: 12px;
+  padding: 12px 0 12px 42px;
+  border-top: 1px solid rgba(103, 118, 136, 0.24);
+  position: relative;
+}
+
+.youtube-auth-steps > li::before {
+  content: counter(youtube-auth-step);
+  position: absolute;
+  left: 4px;
+  top: 13px;
+  display: grid;
+  place-items: center;
+  width: 26px;
+  height: 26px;
+  border-radius: 50%;
+  color: #f4f8ff;
+  background: #52647a;
+  font-weight: 800;
+}
+
+.youtube-auth-steps > li > div {
+  display: grid;
+  gap: 3px;
+}
+
+.youtube-auth-steps > li > div > span {
+  color: var(--ink-soft);
+  font-size: 0.84rem;
+}
+
+.youtube-auth-recovery {
+  color: #6c1f30;
+  border-left: 4px solid rgba(162, 72, 93, 0.76);
+  padding: 10px 12px;
+  margin: 10px 0;
+  background: linear-gradient(90deg, rgba(255, 240, 244, 0.88), rgba(255, 240, 244, 0.18));
+}
+
+.youtube-auth-recovery ol {
+  margin: 8px 0;
+  padding-left: 22px;
+}
+
+.youtube-auth-recovery li + li {
+  margin-top: 4px;
+}
+
+.youtube-auth-detail {
+  margin-top: 8px;
+  overflow-wrap: anywhere;
+}
+
+.youtube-auth-detail summary {
+  cursor: pointer;
+  color: var(--ink-soft);
+  font-size: 0.84rem;
+}
+
+.youtube-auth-detail > div {
+  margin-top: 6px;
+  font-family: "JetBrains Mono", "Cascadia Mono", "Consolas", monospace;
+  font-size: 0.78rem;
+}
+
+@media (max-width: 760px) {
+  .youtube-auth-steps > li {
+    grid-template-columns: 1fr;
+    align-items: start;
+  }
+
+  .youtube-auth-steps > li > button,
+  .youtube-auth-steps > li > select {
+    width: 100%;
+  }
 }
 
 .kv {
@@ -1194,6 +1320,403 @@ input[type="checkbox"] {
 
 .table-wrap-sticky-actions td:last-child .row {
   flex-wrap: nowrap;
+}
+
+/* WP-0255: subscription manager — status strip + master-detail. Fits the window (no
+   horizontal scroll), left list scrolls vertically and chains wheel to the page. No cards. */
+.archiver-workflow-tabs {
+  display: flex;
+  align-items: stretch;
+  gap: 4px;
+  margin: 10px 0 14px;
+  border-bottom: 1px solid rgba(70, 82, 96, 0.35);
+}
+
+.archiver-workflow-tabs button {
+  min-width: 140px;
+  padding: 9px 14px 8px;
+  border: 0;
+  border-bottom: 3px solid transparent;
+  border-radius: 0;
+  background: transparent;
+  box-shadow: none;
+}
+
+.archiver-workflow-tabs button.seg-on {
+  border-bottom-color: #3b6fa5;
+  background: rgba(199, 224, 247, 0.35);
+}
+
+.archiver-presets > summary {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  list-style: none;
+  cursor: pointer;
+  color: #173652;
+  font-weight: 650;
+}
+
+.archiver-presets {
+  margin: 14px 0;
+  padding: 8px 0;
+  border-top: 1px solid rgba(70, 82, 96, 0.28);
+  border-bottom: 1px solid rgba(70, 82, 96, 0.28);
+}
+
+.archiver-presets > summary::-webkit-details-marker {
+  display: none;
+}
+
+.archiver-presets > summary::before {
+  content: "+";
+  width: 16px;
+  color: #3b6fa5;
+  font-weight: 750;
+  text-align: center;
+}
+
+.archiver-presets[open] > summary::before {
+  content: "−";
+}
+
+.archiver-presets:not([open]) > :not(summary) {
+  display: none;
+}
+
+.archiver-presets-body {
+  margin-top: 12px;
+}
+
+.sub-status-strip {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+  margin: 10px 0 6px;
+  padding: 8px 12px;
+  border: 1px solid var(--panel-border);
+  border-radius: var(--panel-radius);
+  background: linear-gradient(154deg, #eef2f6 0%, #dde3ea 60%, #cfd6df 100%);
+  font-size: 0.9rem;
+  color: #2b3a4a;
+}
+.sub-status-metric strong { font-size: 1.02rem; color: #16324a; }
+.sub-status-sep { color: #93a2b3; }
+.sub-status-error strong { color: #b91c1c; }
+
+.sub-manager {
+  display: flex;
+  gap: 12px;
+  margin-top: 8px;
+  align-items: stretch;
+}
+.sub-list {
+  flex: 0 0 42%;
+  max-width: 480px;
+  min-width: 280px;
+  max-height: 60vh;
+  overflow-y: auto;
+  overflow-x: hidden;
+  border: 1px solid var(--panel-border);
+  border-radius: var(--panel-radius);
+  background: rgba(255, 255, 255, 0.35);
+}
+.sub-list-pane {
+  flex: 0 0 42%;
+  max-width: 480px;
+  min-width: 280px;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+.sub-list-pane .sub-list {
+  flex: 1 1 auto;
+  max-width: none;
+  min-width: 0;
+}
+.sub-list-window-controls {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  color: #4b5563;
+  font-size: 0.8rem;
+  font-variant-numeric: tabular-nums;
+}
+.sub-list-window-controls button {
+  flex: 0 0 auto;
+}
+.sub-list-row {
+  display: block;
+  width: 100%;
+  text-align: left;
+  border: none;
+  border-bottom: 1px solid rgba(126, 145, 167, 0.22);
+  background: transparent;
+  padding: 8px 12px;
+  margin: 0;
+  border-radius: 0;
+  cursor: pointer;
+}
+.sub-list-row:hover { background: rgba(206, 214, 223, 0.4); }
+.sub-list-row-selected,
+.sub-list-row-selected:hover {
+  background: linear-gradient(154deg, #dde9f4 0%, #cbd9ea 100%);
+  box-shadow: inset 3px 0 0 #3b6fa5;
+}
+.sub-list-main {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+.sub-list-title {
+  font-weight: 600;
+  color: #16324a;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.sub-list-sub {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-top: 2px;
+  font-size: 0.8rem;
+  color: #4b5563;
+}
+.sub-list-type {
+  text-transform: uppercase;
+  letter-spacing: 0.03em;
+  font-size: 0.72rem;
+  color: #6b7a8a;
+}
+.sub-list-inactive { color: #b45309; }
+.sub-list-count { margin-left: auto; font-variant-numeric: tabular-nums; }
+.sub-bar {
+  margin-top: 6px;
+  height: 5px;
+  border-radius: 3px;
+  background: rgba(126, 145, 167, 0.25);
+  overflow: hidden;
+}
+.sub-bar-fill { height: 100%; border-radius: 3px; transition: width 200ms ease; }
+.sub-bar-fill-idle { background: #4b7bb0; }
+.sub-bar-fill-downloading { background: #2f9e57; }
+.sub-bar-fill-error { background: #c2603a; }
+
+.sub-pill {
+  flex: 0 0 auto;
+  font-size: 0.7rem;
+  font-weight: 600;
+  padding: 1px 8px;
+  border-radius: 999px;
+  white-space: nowrap;
+}
+.sub-pill-idle { background: rgba(75, 123, 176, 0.16); color: #2b557d; }
+.sub-pill-downloading { background: rgba(47, 158, 87, 0.18); color: #1f7a43; }
+.sub-pill-error { background: rgba(194, 96, 58, 0.18); color: #9a3b16; }
+
+.sub-detail {
+  flex: 1 1 auto;
+  min-width: 0;
+  border: 1px solid var(--panel-border);
+  border-radius: var(--panel-radius);
+  padding: 12px 16px;
+  background: rgba(255, 255, 255, 0.35);
+}
+.sub-detail-empty,
+.sub-list-empty { color: #6b7a8a; padding: 16px; }
+.sub-detail-head {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin-bottom: 6px;
+}
+.sub-detail-title { font-size: 1.05rem; font-weight: 700; color: #16324a; }
+.sub-detail-progress { color: #2b3a4a; margin-bottom: 10px; }
+.sub-detail-grid {
+  display: grid;
+  grid-template-columns: max-content 1fr;
+  gap: 4px 14px;
+  margin: 0 0 12px;
+}
+.sub-detail-grid dt { color: #6b7a8a; font-size: 0.85rem; }
+.sub-detail-grid dd { margin: 0; color: #1f2b38; overflow-wrap: anywhere; }
+.sub-detail-wrap { overflow-wrap: anywhere; word-break: break-word; }
+.sub-lib-ok { color: #166534; }
+.sub-lib-missing { color: #92400e; }
+.sub-detail-actions { margin-top: 4px; flex-wrap: wrap; }
+.sub-detail-videos {
+  margin-top: 12px;
+  display: grid;
+  gap: 12px;
+  max-height: min(62vh, 620px);
+  overflow-y: auto;
+  padding-right: 6px;
+  overscroll-behavior: auto;
+}
+.sub-video-section {
+  margin-top: 12px;
+}
+.sub-video-selection-toolbar,
+.library-selection-toolbar {
+  position: sticky;
+  top: 0;
+  z-index: 2;
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 8px;
+  padding: 8px 10px;
+  border: 1px solid rgba(126, 145, 167, 0.35);
+  border-radius: 8px;
+  background: rgba(242, 246, 250, 0.96);
+  box-shadow: 0 2px 8px rgba(31, 43, 56, 0.08);
+}
+.library-selection-toolbar {
+  margin: 10px 0;
+}
+.sub-video-selection-toolbar label,
+.library-selection-toolbar label {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+.sub-video-section-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  color: #2b3a4a;
+  margin-bottom: 6px;
+}
+.sub-video-section-head span {
+  color: #6b7a8a;
+  font-variant-numeric: tabular-nums;
+}
+.sub-video-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  border-top: 1px solid rgba(126, 145, 167, 0.28);
+}
+.sub-video-load-more {
+  width: 100%;
+  margin-top: 8px;
+}
+.sub-video-row {
+  display: grid;
+  grid-template-columns: max-content minmax(0, 1fr);
+  gap: 8px;
+  align-items: center;
+  min-height: 34px;
+  padding: 6px 0;
+  border-bottom: 1px solid rgba(126, 145, 167, 0.22);
+}
+.sub-video-row-with-thumb {
+  grid-template-columns: max-content max-content minmax(0, 1fr) max-content max-content;
+}
+.sub-video-row-deleted {
+  opacity: 0.78;
+}
+.sub-video-row-deleted .sub-video-status {
+  color: #7c2d12;
+}
+.sub-video-status {
+  color: #6b7a8a;
+  font-size: 0.75rem;
+  text-transform: uppercase;
+  letter-spacing: 0.03em;
+}
+.sub-video-title {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: #1f2b38;
+}
+.sub-video-meta {
+  color: #6b7a8a;
+  font-size: 0.8rem;
+  white-space: nowrap;
+}
+.sub-video-actions {
+  display: flex;
+  gap: 4px;
+}
+.sub-video-actions button {
+  padding: 2px 7px;
+  font-size: 0.75rem;
+}
+.sub-video-empty {
+  color: #6b7280;
+  padding: 4px 0 8px;
+}
+
+@media (max-width: 900px) {
+  .sub-manager { flex-direction: column; }
+  .sub-list-pane { flex-basis: auto; max-width: none; min-width: 0; }
+  .sub-list { flex-basis: auto; max-width: none; max-height: 40vh; }
+  .sub-video-row-with-thumb {
+    grid-template-columns: max-content minmax(0, 1fr);
+  }
+  .sub-video-row-with-thumb > input[type="checkbox"] {
+    grid-row: 1 / span 2;
+  }
+  .sub-video-row-with-thumb .sub-video-meta,
+  .sub-video-row-with-thumb .sub-video-actions {
+    grid-column: 2;
+  }
+}
+
+/* WP-0256: Jobs/Queue progress bars (per-job + per-batch), colored by status. */
+.job-bar {
+  width: 100%;
+  max-width: 160px;
+  height: 6px;
+  border-radius: 3px;
+  background: rgba(126, 145, 167, 0.25);
+  overflow: hidden;
+  margin-bottom: 3px;
+}
+.job-bar-fill {
+  height: 100%;
+  border-radius: 3px;
+  background: #4b7bb0;
+  transition: width 320ms linear;
+}
+.job-bar-fill.is-indeterminate {
+  width: 38%;
+  animation: job-bar-indeterminate 1.15s ease-in-out infinite;
+}
+@keyframes job-bar-indeterminate {
+  from { transform: translateX(-115%); }
+  to { transform: translateX(280%); }
+}
+@media (prefers-reduced-motion: reduce) {
+  .job-bar-fill { transition: none; }
+  .job-bar-fill.is-indeterminate { animation: none; transform: none; }
+}
+.job-bar-running { background: #2f9e57; }
+.job-bar-succeeded { background: #2f9e57; }
+.job-bar-queued { background: #8a98a8; }
+.job-bar-failed { background: #c2603a; }
+.job-bar-canceled { background: #9aa3ad; }
+
+.download-preflight-panel {
+  margin-top: 14px;
+  padding: 12px 0;
+  border-top: 1px solid rgba(194, 96, 58, 0.35);
+  border-bottom: 1px solid rgba(194, 96, 58, 0.2);
+}
+.error-inline {
+  margin-top: 4px;
+  color: #9b3d25;
+  font-size: 0.78rem;
+  overflow-wrap: anywhere;
 }
 
 table {
@@ -1406,7 +1929,7 @@ img {
   }
 
   .topbar {
-    padding: 10px;
+    padding: 8px 10px;
   }
 
   .topbar-main {
@@ -1424,12 +1947,33 @@ img {
   .topbar-center {
     width: 100%;
     justify-content: flex-start;
-    flex-wrap: wrap;
+    flex-wrap: nowrap;
   }
 
   .topbar-chrome {
     width: auto;
     justify-content: flex-end;
+  }
+
+  .topbar-center .nav {
+    width: 100%;
+  }
+
+  .topbar-center .nav button {
+    flex: 1 1 0;
+    min-width: 0;
+    padding: 6px 5px;
+    font-size: 0.74rem;
+    line-height: 1.05;
+  }
+
+  .topbar-chrome .safe-mode-pill {
+    padding: 4px 8px;
+    font-size: 0.72rem;
+  }
+
+  .content {
+    margin-top: 8px;
   }
 
   .loc-home-layout {
@@ -1743,4 +2287,653 @@ img {
 
 .loc-speaker-count-input {
   width: 78px;
+}
+
+/* =====================================================================
+   WP-0260 — iTunes-7-10 Aqua / brushed-metal theme (2000-2010 aesthetic)
+   Cheap-render ONLY: gradients + borders + inset shadows + vars.
+   No backdrop-filter, no images, no @keyframes, no transforms, no outer
+   multi-layer shadows. Appended last so it overrides earlier same-specificity
+   rules without !important (except .seg-on, which must beat an inline style).
+   ===================================================================== */
+:root {
+  --mtl-chrome-0: #6b7480;
+  --mtl-chrome-1: #565f6b;
+  --mtl-chrome-2: #3f4753;
+  --mtl-chrome-edge: rgba(28, 33, 40, 0.9);
+  --mtl-silver-0: #f2f4f7;
+  --mtl-silver-1: #dde2e9;
+  --mtl-silver-2: #c3ccd6;
+  --mtl-silver-3: #aab4c0;
+  --aqua-0: #7fb2ea;
+  --aqua-1: #3d84d8;
+  --aqua-2: #235fb0;
+  --aqua-edge: rgba(20, 58, 110, 0.92);
+  --ruby-0: #e88b8b;
+  --ruby-1: #cf4b4b;
+  --ruby-2: #a52d2d;
+  --ruby-edge: rgba(96, 20, 20, 0.9);
+  --lcd-0: #2b3441;
+  --lcd-1: #1e2732;
+  --lcd-2: #141b24;
+  --lcd-ink: #cfe3ff;
+  --lcd-ink-dim: #7f93ac;
+  --gloss-hi: rgba(255, 255, 255, 0.85);
+  --gloss-lo: rgba(30, 40, 52, 0.42);
+  --accent: #2f74c9;
+  --brushed:
+    repeating-linear-gradient(
+      90deg,
+      rgba(255, 255, 255, 0.05) 0 1px,
+      rgba(120, 130, 142, 0.05) 1px 2px,
+      rgba(255, 255, 255, 0) 2px 3px
+    );
+}
+
+.card {
+  background:
+    linear-gradient(180deg, var(--gloss-hi) 0, rgba(255, 255, 255, 0) 3px),
+    var(--brushed),
+    linear-gradient(178deg, var(--mtl-silver-0) 0%, var(--mtl-silver-1) 46%, var(--mtl-silver-2) 100%);
+  border-color: var(--panel-border);
+  box-shadow:
+    inset 0 1px 0 var(--gloss-hi),
+    inset 0 -1px 0 var(--gloss-lo);
+}
+
+.topbar {
+  background:
+    linear-gradient(180deg, rgba(255, 255, 255, 0.18) 0, rgba(255, 255, 255, 0) 2px),
+    var(--brushed),
+    linear-gradient(180deg, var(--mtl-chrome-0) 0%, var(--mtl-chrome-1) 50%, var(--mtl-chrome-2) 100%);
+  border-color: var(--mtl-chrome-edge);
+  box-shadow:
+    inset 0 1px 0 rgba(255, 255, 255, 0.28),
+    inset 0 -1px 0 rgba(0, 0, 0, 0.4);
+}
+.topbar .brand,
+.topbar h1 { color: #eef3fb; }
+.topbar .brand-version {
+  background: rgba(0, 0, 0, 0.28);
+  border-color: rgba(0, 0, 0, 0.4);
+  color: #dbe6f4;
+}
+
+button,
+.btn,
+select {
+  background:
+    linear-gradient(180deg, rgba(255, 255, 255, 0.9) 0, rgba(255, 255, 255, 0) 48%),
+    var(--brushed),
+    linear-gradient(180deg, var(--mtl-silver-0) 0%, var(--mtl-silver-1) 50%, var(--mtl-silver-2) 100%);
+  border-color: var(--panel-border);
+  box-shadow:
+    inset 0 1px 0 var(--gloss-hi),
+    inset 0 -1px 1px var(--gloss-lo);
+  transition: filter 120ms ease;
+}
+button:hover:not(:disabled),
+.btn:hover:not(:disabled),
+select:hover:not(:disabled) {
+  filter: brightness(1.04);
+  border-color: rgba(56, 72, 93, 0.7);
+}
+button:active:not(:disabled),
+.btn:active:not(:disabled),
+select:active:not(:disabled) {
+  background:
+    linear-gradient(180deg, rgba(255, 255, 255, 0) 0, rgba(255, 255, 255, 0.5) 100%),
+    linear-gradient(180deg, var(--mtl-silver-2) 0%, var(--mtl-silver-1) 100%);
+  box-shadow:
+    inset 0 2px 3px var(--gloss-lo),
+    inset 0 -1px 0 var(--gloss-hi);
+}
+
+.btn-primary {
+  color: #f5faff;
+  border-color: var(--aqua-edge);
+  background:
+    linear-gradient(180deg, rgba(255, 255, 255, 0.72) 0, rgba(255, 255, 255, 0) 46%),
+    linear-gradient(180deg, var(--aqua-0) 0%, var(--aqua-1) 50%, var(--aqua-2) 100%);
+  box-shadow:
+    inset 0 1px 0 rgba(255, 255, 255, 0.55),
+    inset 0 -1px 1px rgba(12, 36, 72, 0.5);
+  text-shadow: 0 -1px 0 rgba(10, 34, 70, 0.4);
+}
+.btn-primary:hover:not(:disabled) { filter: brightness(1.05); }
+.btn-primary:active:not(:disabled) {
+  background:
+    linear-gradient(180deg, rgba(255, 255, 255, 0) 0, rgba(255, 255, 255, 0.32) 100%),
+    linear-gradient(180deg, var(--aqua-2) 0%, var(--aqua-1) 100%);
+  box-shadow: inset 0 2px 4px rgba(8, 26, 54, 0.6), inset 0 -1px 0 rgba(255, 255, 255, 0.4);
+}
+
+.btn-danger {
+  color: #fff3f3;
+  border-color: var(--ruby-edge);
+  background:
+    linear-gradient(180deg, rgba(255, 255, 255, 0.7) 0, rgba(255, 255, 255, 0) 46%),
+    linear-gradient(180deg, var(--ruby-0) 0%, var(--ruby-1) 50%, var(--ruby-2) 100%);
+  box-shadow:
+    inset 0 1px 0 rgba(255, 255, 255, 0.5),
+    inset 0 -1px 1px rgba(70, 14, 14, 0.5);
+  text-shadow: 0 -1px 0 rgba(70, 14, 14, 0.4);
+}
+.btn-danger:hover:not(:disabled) { filter: brightness(1.05); }
+.btn-danger:active:not(:disabled) {
+  background:
+    linear-gradient(180deg, rgba(255, 255, 255, 0) 0, rgba(255, 255, 255, 0.3) 100%),
+    linear-gradient(180deg, var(--ruby-2) 0%, var(--ruby-1) 100%);
+  box-shadow: inset 0 2px 4px rgba(50, 10, 10, 0.6), inset 0 -1px 0 rgba(255, 255, 255, 0.4);
+}
+
+.sub-status-strip {
+  color: var(--lcd-ink);
+  border-color: rgba(10, 16, 24, 0.85);
+  background:
+    linear-gradient(180deg, rgba(255, 255, 255, 0.06) 0, rgba(255, 255, 255, 0) 2px),
+    linear-gradient(180deg, var(--lcd-0) 0%, var(--lcd-1) 55%, var(--lcd-2) 100%);
+  box-shadow:
+    inset 0 2px 4px rgba(0, 0, 0, 0.55),
+    inset 0 -1px 0 rgba(255, 255, 255, 0.08),
+    0 1px 0 rgba(255, 255, 255, 0.5);
+  text-shadow: 0 1px 0 rgba(0, 0, 0, 0.6);
+}
+.sub-status-strip .sub-status-metric strong { color: #eaf4ff; }
+.sub-status-strip .sub-status-sep { color: var(--lcd-ink-dim); }
+.sub-status-strip .sub-status-error strong { color: #ff9b9b; }
+
+.card.lcd-banner {
+  /* Dark LCD panel (var(--lcd-0..2) is #2b3441 -> #141b24). Bright base text for the
+     primary copy; the muted/inline helper text is fixed up in the rule block below. */
+  color: #e9f2fd;
+  border-color: rgba(10, 16, 24, 0.85);
+  background:
+    linear-gradient(180deg, rgba(255, 255, 255, 0.06) 0, rgba(255, 255, 255, 0) 2px),
+    linear-gradient(180deg, var(--lcd-0) 0%, var(--lcd-1) 55%, var(--lcd-2) 100%);
+  box-shadow:
+    inset 0 2px 5px rgba(0, 0, 0, 0.55),
+    inset 0 -1px 0 rgba(255, 255, 255, 0.08);
+}
+.card.lcd-banner h2 { color: #f1f7ff; }
+
+/* JobsPage "Queue controls" hard-codes its helper/muted copy as inline color:#4b5563
+   (dark slate) on <div>s and the <summary> — unreadable on this dark panel. Force a
+   readable dim-light tone for text-level descendants. !important is required to beat the
+   inline styles. Form controls are deliberately excluded (see the button/select rule
+   below) so the metallic chrome keeps its dark ink on a light face. */
+.card.lcd-banner div,
+.card.lcd-banner p,
+.card.lcd-banner span,
+.card.lcd-banner small,
+.card.lcd-banner label,
+.card.lcd-banner summary,
+.card.lcd-banner details,
+.card.lcd-banner li,
+.card.lcd-banner code {
+  color: #c8daee !important;
+}
+
+/* Metallic buttons/selects on the dark panel keep dark ink on their light silver face
+   (default chrome), which stays clearly readable. State it explicitly so the !important
+   text rule above can never bleed a light color onto the light button face. */
+.card.lcd-banner button,
+.card.lcd-banner .btn,
+.card.lcd-banner select {
+  color: var(--ink);
+}
+
+.nav {
+  gap: 0;
+  padding: 2px;
+  border-radius: 999px;
+  background: linear-gradient(180deg, var(--mtl-chrome-2), var(--mtl-chrome-1));
+  box-shadow:
+    inset 0 1px 3px rgba(0, 0, 0, 0.5),
+    inset 0 -1px 0 rgba(255, 255, 255, 0.12);
+  flex-wrap: nowrap;
+}
+.nav button {
+  border-radius: 999px;
+  border-color: transparent;
+  background: transparent;
+  box-shadow: none;
+  color: #e7edf6;
+  transition: filter 120ms ease;
+}
+.nav button:hover:not(.active) {
+  background: linear-gradient(180deg, rgba(255, 255, 255, 0.14), rgba(255, 255, 255, 0));
+  filter: none;
+}
+.nav button.active {
+  color: #1b2530;
+  border-color: rgba(255, 255, 255, 0.25);
+  background:
+    linear-gradient(180deg, rgba(255, 255, 255, 0.92) 0, rgba(255, 255, 255, 0) 48%),
+    linear-gradient(180deg, var(--mtl-silver-0) 0%, var(--mtl-silver-1) 55%, var(--mtl-silver-2) 100%);
+  box-shadow:
+    inset 0 1px 0 var(--gloss-hi),
+    inset 0 -1px 1px var(--gloss-lo),
+    0 1px 2px rgba(0, 0, 0, 0.35);
+}
+
+.card.segmented { padding: 6px 10px; }
+.card.segmented button { border-radius: 999px; margin: 0; }
+.seg-on {
+  color: #f5faff !important;
+  border-color: var(--aqua-edge) !important;
+  background:
+    linear-gradient(180deg, rgba(255, 255, 255, 0.7) 0, rgba(255, 255, 255, 0) 46%),
+    linear-gradient(180deg, var(--aqua-0), var(--aqua-1) 50%, var(--aqua-2)) !important;
+  box-shadow:
+    inset 0 1px 0 rgba(255, 255, 255, 0.5),
+    inset 0 -1px 1px rgba(12, 36, 72, 0.5) !important;
+}
+
+.content::-webkit-scrollbar-thumb,
+.table-wrap::-webkit-scrollbar-thumb {
+  border-color: rgba(40, 48, 58, 0.9);
+  background:
+    linear-gradient(180deg, rgba(210, 218, 228, 0.98), rgba(150, 160, 173, 0.98)),
+    var(--brushed);
+  box-shadow:
+    inset 0 1px 0 rgba(255, 255, 255, 0.6),
+    inset 0 -1px 0 rgba(40, 48, 58, 0.5);
+}
+.content::-webkit-scrollbar-thumb:hover,
+.table-wrap::-webkit-scrollbar-thumb:hover {
+  background:
+    linear-gradient(180deg, var(--aqua-0), var(--aqua-1)),
+    var(--brushed);
+}
+.sub-list { scrollbar-width: thin; scrollbar-color: rgba(90, 100, 112, 0.9) rgba(190, 198, 208, 0.9); }
+.sub-list::-webkit-scrollbar { width: 11px; }
+.sub-list::-webkit-scrollbar-thumb {
+  border-radius: 8px;
+  border: 1px solid rgba(70, 80, 92, 0.8);
+  background: linear-gradient(180deg, rgba(200, 208, 219, 0.98), rgba(140, 150, 163, 0.98)), var(--brushed);
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.55), inset 0 -1px 0 rgba(50, 60, 72, 0.4);
+}
+
+.sub-list-row-selected,
+.sub-list-row-selected:hover {
+  color: #10263c;
+  background:
+    linear-gradient(180deg, rgba(255, 255, 255, 0.55) 0, rgba(255, 255, 255, 0) 42%),
+    linear-gradient(180deg, #d3e6fb 0%, #b7d3f2 55%, #9cc0ea 100%);
+  box-shadow:
+    inset 3px 0 0 var(--aqua-1),
+    inset 0 1px 0 rgba(255, 255, 255, 0.7),
+    inset 0 -1px 0 rgba(70, 110, 160, 0.35);
+}
+.sub-list-row-selected .sub-list-title { color: #0f2c48; }
+
+.loc-workspace-rail-stage.is-selected {
+  background:
+    linear-gradient(180deg, rgba(255, 255, 255, 0.5), rgba(255, 255, 255, 0) 45%),
+    linear-gradient(180deg, #d3e6fb, #b7d3f2);
+  border-color: rgba(60, 100, 150, 0.5);
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.75);
+}
+tbody tr[aria-selected="true"],
+tbody tr.is-selected {
+  background:
+    linear-gradient(180deg, rgba(255, 255, 255, 0.4) 0, rgba(255, 255, 255, 0) 50%),
+    linear-gradient(180deg, #d8e9fb, #bcd6f3);
+}
+
+/* WP-0261: "Processing now" consumer signal (live subscription activity). No card. */
+.sub-processing {
+  margin: 6px 0 2px;
+  padding: 8px 12px;
+  border: 1px solid rgba(47, 158, 87, 0.4);
+  border-radius: var(--panel-radius);
+  background: linear-gradient(180deg, rgba(47, 158, 87, 0.14), rgba(47, 158, 87, 0.04));
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  /* WP-0255 fix: when many subscriptions refresh at once (258 subs, "all updating
+     now") this live-activity list grew one full-width row per active sub with no cap,
+     pushing the master-detail .sub-manager thousands of px off-screen so the operator
+     could never reach or click the subscription list ("can't click subscriptions / no
+     dual-pane view"). Bound the height and scroll internally so the manager below stays
+     reachable regardless of how many subs are checking.
+     WP-0261: keep it reading as a compact strip (a few rows, then scroll) rather than a
+     tall 30vh block, and contain the wheel so scrolling it does not chain to the page. */
+  max-height: 160px;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+}
+.sub-processing-row { display: flex; flex-direction: column; gap: 4px; }
+.sub-processing-label { font-size: 0.9rem; font-weight: 600; color: #1f7a43; overflow-wrap: anywhere; }
+.sub-processing-bar { height: 7px; max-width: 420px; }
+
+/* WP-0256/WP-0258 v2: Jobs is a current-work workspace, not a stack of cards. */
+.jobs-page-intro {
+  margin: -4px 0 14px;
+  color: #4b5563;
+}
+
+.jobs-notice {
+  margin: 10px 0;
+  padding: 9px 12px;
+  border-left: 3px solid var(--aqua-1);
+  background: rgba(199, 224, 247, 0.42);
+  color: #18334d;
+}
+
+.jobs-batch-operations {
+  display: grid;
+  gap: 4px;
+  margin: 8px 0;
+  color: #334155;
+  font-size: 0.8rem;
+}
+
+.jobs-batch-operations > div {
+  display: grid;
+  grid-template-columns: auto minmax(180px, 1fr) auto;
+  align-items: baseline;
+  gap: 6px 10px;
+  padding: 5px 8px;
+  border-left: 3px solid #64748b;
+  background: rgba(241, 245, 249, 0.72);
+}
+
+.jobs-batch-operations > .is-running { border-left-color: #1d6fa5; }
+.jobs-batch-operations > .is-succeeded { border-left-color: #1f7a43; }
+.jobs-batch-operations > .is-failed { border-left-color: #991b1b; }
+.jobs-batch-operations code { color: #64748b; font-size: 0.72rem; overflow-wrap: anywhere; }
+
+.jobs-toolbar {
+  margin: 10px 0 0;
+  padding: 10px 0;
+  border-top: 1px solid rgba(70, 82, 96, 0.3);
+  border-bottom: 1px solid rgba(70, 82, 96, 0.3);
+}
+
+.jobs-toolbar-main {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  flex-wrap: wrap;
+}
+
+.jobs-queue-state {
+  display: flex;
+  align-items: baseline;
+  gap: 10px;
+  min-width: 250px;
+}
+
+.jobs-queue-state strong { color: #17633a; }
+.jobs-queue-state.is-paused strong { color: #8a3f16; }
+.jobs-queue-state span { color: #4b5563; font-size: 0.86rem; }
+
+/* WP-0270: compact canonical scheduler truth in the existing toolbar, not a
+   card-per-track dashboard. These rows remain above any bounded preview. */
+.jobs-track-strip {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(185px, 1fr));
+  gap: 6px 12px;
+  margin-top: 10px;
+  padding-top: 8px;
+  border-top: 1px solid rgba(70, 82, 96, 0.2);
+}
+
+.jobs-scheduler-health {
+  margin-top: 8px;
+  border-top: 1px solid rgba(70, 82, 96, 0.2);
+}
+
+.jobs-scheduler-health > summary {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 8px 0 2px;
+  cursor: pointer;
+  color: #173652;
+  font-weight: 650;
+}
+
+.jobs-scheduler-health > summary span {
+  color: #4b5563;
+  font-size: 0.8rem;
+  font-weight: 400;
+}
+
+.jobs-scheduler-health:not([open]) > :not(summary) {
+  display: none;
+}
+
+.jobs-track-summary {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  column-gap: 8px;
+  align-items: baseline;
+  min-width: 0;
+  color: #334155;
+  font-size: 0.8rem;
+}
+
+.jobs-track-summary strong { color: #173652; overflow-wrap: anywhere; }
+.jobs-track-summary span { color: #4b5563; white-space: nowrap; }
+.jobs-track-summary small { grid-column: 1 / -1; color: #7c2d12; line-height: 1.25; }
+.jobs-track-summary.is-unclassified strong { color: #7c2d12; }
+
+.jobs-track-runtime-state {
+  grid-column: 1 / -1;
+  color: #4b5563;
+  font-size: 0.8rem;
+  line-height: 1.35;
+}
+
+.jobs-track-runtime-state.is-stale { color: #8a3f16; }
+.jobs-track-runtime-state.is-error { color: #991b1b; }
+
+.jobs-youtube-gate {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px 9px;
+  margin-top: 8px;
+  color: #4b5563;
+  font-size: 0.8rem;
+  line-height: 1.35;
+}
+
+.jobs-youtube-gate strong { color: #173652; }
+.jobs-youtube-gate small { color: #7c2d12; }
+
+.jobs-toolbar-more,
+.jobs-advanced-filters {
+  margin-top: 8px;
+  color: #4b5563;
+  font-size: 0.88rem;
+}
+
+.jobs-toolbar-more > summary,
+.jobs-advanced-filters > summary {
+  cursor: pointer;
+  width: fit-content;
+}
+
+/* Keep closed disclosure content out of both the live layout and html2canvas
+   proof clones. WebView renders closed <details> correctly, but the snapshot
+   clone can otherwise paint its descendants over the following workspace. */
+.jobs-toolbar-more:not([open]) > :not(summary),
+.jobs-advanced-filters:not([open]) > :not(summary) {
+  display: none;
+}
+
+.jobs-track-controls {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+  gap: 8px 12px;
+  margin-top: 8px;
+}
+
+.jobs-track-control {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 68px;
+  gap: 4px 8px;
+  align-items: center;
+  color: #334155;
+}
+
+.jobs-track-control input { width: 68px; }
+.jobs-track-control small { grid-column: 1 / -1; color: #4b5563; line-height: 1.25; }
+
+.jobs-help-text,
+.jobs-preview-note {
+  color: #4b5563;
+  font-size: 0.82rem;
+  line-height: 1.4;
+}
+
+.jobs-detail-panel {
+  margin: 14px 0 0;
+  padding: 14px 0;
+  border-bottom: 1px solid rgba(70, 82, 96, 0.3);
+}
+
+.jobs-workspace { margin-top: 18px; }
+.jobs-workspace-title { margin: 0 0 6px; }
+
+.jobs-view-tabs {
+  display: flex;
+  align-items: stretch;
+  gap: 4px;
+  overflow-x: auto;
+  border-bottom: 1px solid rgba(70, 82, 96, 0.35);
+}
+
+.jobs-view-tabs button {
+  min-width: 150px;
+  padding: 9px 12px 8px;
+  border: 0;
+  border-bottom: 3px solid transparent;
+  border-radius: 0;
+  background: transparent;
+  box-shadow: none;
+  text-align: left;
+}
+
+.jobs-view-tabs button:hover {
+  background: rgba(199, 224, 247, 0.35);
+  filter: none;
+}
+
+.jobs-track-filter {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  flex-wrap: wrap;
+  padding: 10px 0 2px;
+}
+
+.jobs-track-filter label {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  color: #334155;
+  font-weight: 600;
+}
+
+.jobs-track-filter select {
+  min-width: 230px;
+}
+
+.jobs-track-filter > span {
+  color: #6b7a8a;
+  font-size: 0.8rem;
+}
+
+.jobs-table-wrap {
+  max-height: min(68vh, 720px);
+  overflow: auto;
+  overscroll-behavior: auto;
+}
+
+.jobs-table-wrap thead th {
+  position: sticky;
+  top: 0;
+  z-index: 3;
+}
+
+.jobs-group-load-more td {
+  text-align: center;
+  color: #4b5563;
+  background: rgba(231, 237, 243, 0.82);
+}
+
+.jobs-group-load-more button {
+  margin-left: 10px;
+}
+
+.jobs-preview-load-more {
+  position: sticky;
+  bottom: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 10px;
+  padding: 10px;
+  border-top: 1px solid rgba(70, 82, 96, 0.3);
+  background: rgba(231, 237, 243, 0.96);
+  color: #4b5563;
+}
+
+.jobs-view-tabs button.is-active {
+  border-bottom-color: var(--aqua-1);
+  background: rgba(199, 224, 247, 0.5);
+  color: #173652;
+}
+
+.jobs-view-tabs button span {
+  display: block;
+  margin-top: 2px;
+  color: #5b6875;
+  font-size: 0.74rem;
+  font-weight: 500;
+}
+
+.jobs-track-tabs {
+  margin-top: 7px;
+  border-bottom-color: rgba(70, 82, 96, 0.22);
+}
+
+.jobs-track-tabs button {
+  min-width: 118px;
+  padding-block: 7px 6px;
+  font-size: 0.82rem;
+}
+
+.jobs-findbar {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+  margin: 12px 0 8px;
+}
+
+.jobs-source-filter {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-left: auto;
+  min-width: min(420px, 100%);
+}
+
+.jobs-source-filter select { min-width: 260px; max-width: 420px; }
+.jobs-preview-note { margin: 9px 0; }
+.jobs-row-id { margin-top: 3px; color: #667482; font-size: 0.74rem; }
+.jobs-timing { min-width: 150px; color: #4b5563; font-size: 0.78rem; line-height: 1.45; }
+.jobs-empty-row td { padding: 30px 16px; text-align: center; color: #4b5563; }
+
+@media (max-width: 980px) {
+  .jobs-source-filter { margin-left: 0; }
+  .jobs-findbar label:first-child { min-width: min(360px, 100%) !important; }
+  .jobs-findbar input[type="search"] { min-width: 220px !important; width: 100%; }
 }

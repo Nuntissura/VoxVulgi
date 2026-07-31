@@ -194,22 +194,55 @@ pub fn queue_instagram_subscription(paths: &AppPaths, id: &str) -> Result<Vec<jo
     queue_subscription_internal(paths, &sub)
 }
 
+/// WP-0263 passive cron: enqueue DUE active Instagram subscriptions, but conservatively.
+/// Meta's anti-bot is stricter than YouTube's, so this NEVER bursts the fleet: at most ONE
+/// due profile is enqueued per call, and only when the Instagram enumeration cooldown has
+/// elapsed. Each call is one profile at a time with long gaps; the startup auto-check + the
+/// recurring lane keep pulling the next due profile on subsequent passes.
 pub fn queue_all_active_instagram_subscriptions(paths: &AppPaths) -> Result<Vec<jobs::JobRow>> {
+    queue_due_instagram_subscriptions_paced(paths, false)
+}
+
+/// WP-0263: "Update all Instagram subscriptions" — refreshes due profiles ignoring nothing
+/// beyond the conservative anti-bot cooldown. Still one profile at a time (Meta-strict), so an
+/// operator-triggered update trickles rather than bursts. Clears the recurring pause first is
+/// the caller's responsibility (mirrors the YouTube `_now` command in lib.rs).
+pub fn queue_all_active_instagram_subscriptions_now(paths: &AppPaths) -> Result<Vec<jobs::JobRow>> {
+    queue_due_instagram_subscriptions_paced(paths, true)
+}
+
+// Shared conservative enqueue. `ignore_due_gate` == true refreshes any active subscription
+// regardless of its per-sub interval (operator "update all"); false honors the per-sub due gate
+// (passive startup cron). Both honor the queue-pause and the Instagram enumeration cooldown, and
+// both enqueue at most one profile per call so Meta never sees a burst.
+fn queue_due_instagram_subscriptions_paced(
+    paths: &AppPaths,
+    ignore_due_gate: bool,
+) -> Result<Vec<jobs::JobRow>> {
     if jobs::get_queue_control(paths)?.paused {
+        return Ok(Vec::new());
+    }
+    // Anti-bot pacing: do not enqueue another Instagram profile until the conservative
+    // Instagram interval has elapsed since the last enumeration dispatch.
+    if !jobs::instagram_enumeration_dispatch_allowed(paths) {
         return Ok(Vec::new());
     }
 
     let rows = list_instagram_subscriptions(paths)?;
     let now = now_ms();
-    let mut queued_jobs: Vec<jobs::JobRow> = Vec::new();
-    for sub in rows {
-        if !sub.active || !is_subscription_due(&sub, now) {
-            continue;
-        }
-        let mut queued = queue_subscription_internal(paths, &sub)?;
-        queued_jobs.append(&mut queued);
+    // Oldest-queued-first so the fleet rotates fairly instead of always re-hitting the same
+    // profile. `None` (never queued) sorts first.
+    let mut candidates: Vec<InstagramSubscriptionRow> = rows
+        .into_iter()
+        .filter(|sub| sub.active && (ignore_due_gate || is_subscription_due(sub, now)))
+        .collect();
+    candidates.sort_by_key(|sub| sub.last_queued_at_ms.unwrap_or(i64::MIN));
+
+    // One profile at a time (Meta-strict). The next due profile is picked up on the next pass.
+    if let Some(sub) = candidates.into_iter().next() {
+        return queue_subscription_internal(paths, &sub);
     }
-    Ok(queued_jobs)
+    Ok(Vec::new())
 }
 
 pub fn instagram_subscription_output_dir(
@@ -238,16 +271,23 @@ fn queue_subscription_internal(
     let output_dir = instagram_subscription_output_dir(paths, sub)?
         .to_string_lossy()
         .to_string();
+    // WP-0263 auth precedence: explicit per-subscription cookie -> global Instagram cookie
+    // (Options) -> browser-cookie fallback. The per-sub secret (if set) wins; otherwise the
+    // run-time `DownloadDirectUrl` handler resolves the global Instagram cookie. Passing the
+    // per-sub cookie through here keeps the per-sub override optional but authoritative.
     let auth_cookie = jobs::read_auth_cookie_secret_path(
         &paths.instagram_subscription_cookie_secret_path(&sub.id),
     );
-    let queued = jobs::enqueue_download_instagram_batch(
+    // WP-0263 pillar 2b: route subscription downloads into the conservative recurring lane by
+    // stamping the subscription_id (mirrors the YouTube subscription-child routing).
+    let queued = jobs::enqueue_download_instagram_batch_with_subscription(
         paths,
         vec![sub.source_url.clone()],
         auth_cookie,
         Some(output_dir),
         Some(sub.use_browser_cookies),
         sub.browser_cookie_source.clone(),
+        Some(sub.id.clone()),
     )?;
 
     let conn = db::open(paths)?;
@@ -256,6 +296,10 @@ fn queue_subscription_internal(
         "UPDATE instagram_subscription SET last_queued_at_ms = ?1, updated_at_ms = ?1 WHERE id = ?2",
         params![now_ms(), sub.id],
     )?;
+    drop(conn);
+    // WP-0263: stamp the Instagram enumeration dispatch so the passive cron paces the next
+    // profile refresh by the conservative Instagram interval. Best-effort.
+    let _ = jobs::record_instagram_enumeration_dispatch(paths);
 
     Ok(queued)
 }

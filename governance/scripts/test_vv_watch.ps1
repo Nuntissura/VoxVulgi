@@ -53,13 +53,24 @@ try {
     Assert-True ($null -ne $firstSample.process) "Sample missing process"
     Assert-True ($null -ne $firstSample.bridge) "Sample missing bridge"
     Assert-True ($null -ne $firstSample.python_environment) "Sample missing python_environment"
+    Assert-True ($null -ne $firstSample.sample_index) "Sample missing sample_index"
+    Assert-True ($null -ne $firstSample.scheduled_at_ms) "Sample missing scheduled_at_ms"
+    Assert-True ($null -ne $firstSample.schedule_lag_ms) "Sample missing schedule_lag_ms"
+    Assert-True ($null -ne $firstSample.sample_elapsed_ms) "Sample missing sample_elapsed_ms"
+    Assert-True ($null -ne $firstSample.heavy_probe) "Sample missing heavy/light probe classification"
+    Assert-True ($null -ne $firstSample.probe_durations) "Sample missing probe_durations"
+    Assert-True ($null -ne $firstSample.host_pressure) "Sample missing host_pressure"
 
     $summary = Get-Content -LiteralPath $summaryPath -Raw | ConvertFrom-Json
     Assert-True ($summary.sample_count -ge 1) "Summary sample_count is invalid"
     Assert-True ($summary.output_dir -eq $runDir) "Summary output_dir does not match run directory"
     Assert-True ($null -ne $summary.voice_pack_install_state) "Summary missing voice_pack_install_state"
-    Assert-True ($null -ne $summary.voice_pack_install_state.tts_neural_local_v1) "Summary missing neural TTS install state"
-    Assert-True ($null -ne $summary.voice_pack_install_state.tts_voice_preserving_local_v1) "Summary missing voice-preserving install state"
+    Assert-True ([bool]$summary.python_environment.skipped) "Default freeze watch must skip unrelated Python package bootstrap"
+    Assert-True ([bool]$summary.voice_pack_install_state.skipped) "Default freeze watch must skip unrelated voice-pack bootstrap"
+    Assert-True ($null -ne $summary.requested_duration_ms) "Summary missing requested duration"
+    Assert-True ($null -ne $summary.actual_monitor_elapsed_ms) "Summary missing actual monitor elapsed time"
+    Assert-True ($null -ne $summary.skipped_intervals) "Summary missing skipped interval count"
+    Assert-True ($null -ne $summary.sample_elapsed_max_ms) "Summary missing sample elapsed maximum"
 
     Write-Host "vvwatch self-test passed: $runDir"
 }

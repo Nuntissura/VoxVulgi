@@ -3,9 +3,9 @@ import assert from "node:assert/strict";
 
 import {
   buildJobContextSummary,
-  filterYoutubeSingleVideoItems,
-  isSingleVideoLibraryItem,
-  isYoutubeSingleVideoItem,
+  isCanonicalSingleVideoItem,
+  isCanonicalYoutubeSingleVideoItem,
+  jobTrackLabel,
   summarizeJobGroupTargets,
 } from "../src/lib/archiverRuntime.ts";
 
@@ -68,6 +68,34 @@ test("download direct job context prefers cached target title and keeps source u
   );
 });
 
+test("job track labels use only the durable scheduler vocabulary", () => {
+  assert.equal(jobTrackLabel("youtube_single"), "YouTube single");
+  assert.equal(jobTrackLabel("youtube_recurring"), "YouTube background");
+  assert.equal(jobTrackLabel("instagram"), "Instagram");
+  assert.equal(jobTrackLabel("other_video"), "Other video");
+  assert.equal(jobTrackLabel("image_archive"), "Image Archive");
+  assert.equal(jobTrackLabel("localization"), "Localization");
+  assert.equal(jobTrackLabel(null), "Unclassified");
+  assert.equal(jobTrackLabel("youtube"), "Unclassified");
+});
+
+test("direct job context keeps origin separate from persisted track", () => {
+  const context = buildJobContextSummary(
+    {
+      id: "job-instagram",
+      item_id: null,
+      job_type: "download_direct_url",
+      track: "instagram",
+      params_json: JSON.stringify({ url: "https://www.instagram.com/reel/example" }),
+    },
+    {},
+  );
+
+  assert.equal(context.track_label, "Instagram");
+  assert.equal(context.origin, "Direct download");
+  assert.notEqual(context.origin, "Single video");
+});
+
 
 test("collapsed job group summary keeps distinct video sources visible", () => {
   const jobs = [
@@ -77,10 +105,10 @@ test("collapsed job group summary keeps distinct video sources visible", () => {
     { id: "job-4", item_id: null, job_type: "download_direct_url", params_json: "{}" },
   ];
   const summary = summarizeJobGroupTargets(jobs, {
-    "job-1": { label: "https://youtu.be/one", detail: null, target_path: null, target_action_label: null },
-    "job-2": { label: "https://youtu.be/two", detail: null, target_path: null, target_action_label: null },
-    "job-3": { label: "https://youtu.be/three", detail: null, target_path: null, target_action_label: null },
-    "job-4": { label: "https://youtu.be/four", detail: null, target_path: null, target_action_label: null },
+    "job-1": { label: "https://youtu.be/one", detail: null, target_path: null, target_action_label: null, track_label: "YouTube single" },
+    "job-2": { label: "https://youtu.be/two", detail: null, target_path: null, target_action_label: null, track_label: "YouTube single" },
+    "job-3": { label: "https://youtu.be/three", detail: null, target_path: null, target_action_label: null, track_label: "YouTube single" },
+    "job-4": { label: "https://youtu.be/four", detail: null, target_path: null, target_action_label: null, track_label: "YouTube single" },
   });
 
   assert.equal(
@@ -89,45 +117,44 @@ test("collapsed job group summary keeps distinct video sources visible", () => {
   );
 });
 
-test("single-video library classifier separates loose files from subscription containers", () => {
-  const single = libraryItem();
+test("single-video library classifier uses canonical lineage and never mapped paths", () => {
+  const single = libraryItem({
+    lineage_service: "youtube",
+    lineage_origin_kind: "single",
+    lineage_work_track: "youtube_single",
+  });
   const subscription = libraryItem({
     id: "item-2",
-    media_path: "D:\\Archive\\video\\subscriptions\\Girls Generation\\clip.mp4",
+    media_path: "\\\\MIR\\Archive\\MEOVV\\clip.mp4",
+    lineage_service: "youtube",
+    lineage_origin_kind: "subscription",
+    lineage_work_track: "youtube_recurring",
   });
-  const localAudio = libraryItem({
+  const unknownMappedYoutube = libraryItem({
     id: "item-3",
-    source_type: "local_file",
-    source_uri: "D:\\Music\\track.wav",
-    media_path: "D:\\Music\\track.wav",
-    video_codec: null,
-    audio_codec: "pcm",
+    media_path: "\\\\MIR\\Archive\\Unknown\\clip.mp4",
   });
 
-  assert.equal(isSingleVideoLibraryItem(single, "D:\\Archive\\video"), true);
-  assert.equal(isSingleVideoLibraryItem(subscription, "D:\\Archive\\video"), false);
-  assert.equal(isSingleVideoLibraryItem(localAudio, "D:\\Archive\\video"), false);
+  assert.equal(isCanonicalSingleVideoItem(single), true);
+  assert.equal(isCanonicalYoutubeSingleVideoItem(single), true);
+  assert.equal(isCanonicalSingleVideoItem(subscription), false);
+  assert.equal(isCanonicalYoutubeSingleVideoItem(subscription), false);
+  assert.equal(isCanonicalSingleVideoItem(unknownMappedYoutube), false);
+  assert.equal(isCanonicalYoutubeSingleVideoItem(unknownMappedYoutube), false);
 });
 
-test("youtube single-video list filters newest first and fuzzy matches title typos", () => {
-  const rows = [
-    libraryItem({ id: "old", created_at_ms: 1_000, title: "SNSD Tokyo fancam" }),
-    libraryItem({ id: "new", created_at_ms: 3_000, title: "Haerin airport vlog" }),
-    libraryItem({
-      id: "sub",
-      created_at_ms: 4_000,
-      title: "Subscription video",
-      media_path: "D:\\Archive\\video\\subscriptions\\Channel\\clip.mp4",
-    }),
-  ];
+test("youtube single classification keeps origin and scheduling track separate", () => {
+  const manualPlaylistMember = libraryItem({
+    lineage_service: "youtube",
+    lineage_origin_kind: "playlist",
+    lineage_work_track: "youtube_single",
+  });
+  const subscriptionChild = libraryItem({
+    lineage_service: "youtube",
+    lineage_origin_kind: "subscription",
+    lineage_work_track: "youtube_recurring",
+  });
 
-  assert.deepEqual(
-    filterYoutubeSingleVideoItems(rows, "hrn vlog", "D:\\Archive\\video", "desc").map((item) => item.id),
-    ["new"],
-  );
-  assert.deepEqual(
-    filterYoutubeSingleVideoItems(rows, "", "D:\\Archive\\video", "desc").map((item) => item.id),
-    ["new", "old"],
-  );
-  assert.equal(isYoutubeSingleVideoItem(rows[2], "D:\\Archive\\video"), false);
+  assert.equal(isCanonicalYoutubeSingleVideoItem(manualPlaylistMember), false);
+  assert.equal(isCanonicalYoutubeSingleVideoItem(subscriptionChild), false);
 });

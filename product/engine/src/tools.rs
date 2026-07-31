@@ -1486,6 +1486,18 @@ pub fn python_venv_python_path(paths: &AppPaths) -> Result<std::path::PathBuf> {
     Ok(venv_python)
 }
 
+/// Interpreter for the isolated CosyVoice venv (torch 2.3.1 stack), kept separate
+/// from the main venv because their dependency pins conflict.
+pub fn cosyvoice_venv_python_path(paths: &AppPaths) -> Result<std::path::PathBuf> {
+    let venv_python = venv_python_path(&paths.python_cosyvoice_venv_dir());
+    if !venv_python.exists() {
+        return Err(EngineError::ExternalToolMissing {
+            tool: "python (cosyvoice venv)".to_string(),
+        });
+    }
+    Ok(venv_python)
+}
+
 #[derive(Debug, Clone)]
 struct ResolvedPython {
     program: std::path::PathBuf,
@@ -2807,6 +2819,333 @@ fn kokoro_warmup_probe_path(paths: &AppPaths) -> std::path::PathBuf {
     paths.python_models_dir().join("kokoro").join(".warmup_ok")
 }
 
+fn dir_has_file_with_extension(dir: &std::path::Path, ext: &str) -> bool {
+    std::fs::read_dir(dir)
+        .ok()
+        .into_iter()
+        .flatten()
+        .flatten()
+        .any(|entry| {
+            entry
+                .path()
+                .extension()
+                .and_then(|value| value.to_str())
+                .map(|value| value.eq_ignore_ascii_case(ext))
+                .unwrap_or(false)
+        })
+}
+
+/// The voice-preserving dub job loads Kokoro through `KPipeline`, which resolves
+/// `hexgrad/Kokoro-82M` from the Hugging Face cache (`HF_HOME = <cache>/huggingface`)
+/// with `HF_HUB_OFFLINE=1` at job time. A `.warmup_ok` marker file is NOT sufficient
+/// proof that the model is reachable there: an older build warmed Kokoro into the
+/// default *user* cache and left a marker, which made later builds skip
+/// re-provisioning, so the offline job could never find the weights in the
+/// *app-local* cache and failed on the very first synth call. This verifies the
+/// snapshot the offline job actually needs (config + model weights + the default
+/// `af_heart` voice) is present in the app-local cache the job reads, so the gate
+/// cannot be satisfied by a stale marker alone.
+fn kokoro_app_cache_ready(paths: &AppPaths) -> bool {
+    let repo = paths
+        .cache_dir()
+        .join("huggingface")
+        .join("hub")
+        .join("models--hexgrad--Kokoro-82M");
+    // huggingface_hub resolves the `main` revision through `refs/main` -> commit sha,
+    // then loads `snapshots/<sha>/<file>`. Mirror that resolution exactly so this gate
+    // matches what the OFFLINE job can actually load: a partial payload hydration that
+    // drops `refs/main` or the snapshot files (the real-world failure shape) must read
+    // as not-ready even if some stray files exist. `is_file()` follows the symlinks the
+    // HF cache uses into `blobs/`, so a dangling snapshot entry (missing blob) also
+    // correctly reads as not ready.
+    let sha = match std::fs::read_to_string(repo.join("refs").join("main")) {
+        Ok(value) => value.trim().to_string(),
+        Err(_) => return false,
+    };
+    if sha.is_empty() {
+        return false;
+    }
+    let snapshot = repo.join("snapshots").join(&sha);
+    let has_config = snapshot.join("config.json").is_file();
+    let has_weights =
+        snapshot.join("kokoro-v1_0.pth").is_file() || dir_has_file_with_extension(&snapshot, "pth");
+    let has_default_voice = snapshot.join("voices").join("af_heart.pt").is_file();
+    has_config && has_weights && has_default_voice
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct CosyVoicePackStatus {
+    pub installed: bool,
+    pub status_detail: String,
+    pub venv_python_present: bool,
+    pub model_present: bool,
+    pub matcha_present: bool,
+    pub render_script_present: bool,
+}
+
+/// Readiness for the CosyVoice 2 cross-lingual clone backend. Applies the same
+/// honest-gate lesson as the Kokoro fix: verify the isolated venv python and the
+/// concrete local model files the offline render actually loads are present, rather
+/// than trusting a marker. CosyVoice is offline-by-design (loads from a local
+/// `model_dir`), so a complete on-disk model + the isolated venv == runnable.
+pub fn cosyvoice_pack_status(paths: &AppPaths) -> CosyVoicePackStatus {
+    let venv_python_present = venv_python_path(&paths.python_cosyvoice_venv_dir()).exists();
+
+    let model_dir = paths.cosyvoice_model_parent_dir().join("CosyVoice2-0.5B");
+    let model_present = model_dir.join("cosyvoice2.yaml").is_file()
+        && model_dir.join("llm.pt").is_file()
+        && model_dir.join("flow.pt").is_file()
+        && model_dir.join("hift.pt").is_file()
+        && model_dir
+            .join("CosyVoice-BlankEN")
+            .join("model.safetensors")
+            .is_file();
+
+    let backend_dir = paths.cosyvoice_backend_dir();
+    let matcha_present = backend_dir
+        .join("third_party")
+        .join("Matcha-TTS")
+        .join("matcha")
+        .is_dir();
+    let render_script_present = backend_dir.join("voxvulgi_cosyvoice_render.py").is_file();
+
+    let installed = venv_python_present && model_present && matcha_present && render_script_present;
+    let status_detail = if installed {
+        "CosyVoice 2 voice cloning is ready (isolated venv + local model present).".to_string()
+    } else if !venv_python_present {
+        "CosyVoice isolated Python environment is not installed.".to_string()
+    } else if !model_present {
+        "CosyVoice2-0.5B model files are missing from the local model directory.".to_string()
+    } else if !matcha_present {
+        "CosyVoice dependency Matcha-TTS is missing (third_party/Matcha-TTS).".to_string()
+    } else {
+        "CosyVoice render wrapper script is missing.".to_string()
+    };
+
+    CosyVoicePackStatus {
+        installed,
+        status_detail,
+        venv_python_present,
+        model_present,
+        matcha_present,
+        render_script_present,
+    }
+}
+
+// Bundled into the binary so a fresh install always has the exact pinned deps + the
+// render wrapper that matches this engine build (no reliance on the on-disk checkout).
+const COSYVOICE_REQUIREMENTS: &str =
+    include_str!("../resources/tooling/requirements.cosyvoice.txt");
+const COSYVOICE_RENDER_WRAPPER: &str =
+    include_str!("../resources/tooling/voxvulgi_cosyvoice_render.py");
+// torch 2.3.1 stack + a 4.86 GB model on a throttled connection can exceed the default
+// 30-minute command timeout, so the CosyVoice install steps get a 90-minute budget.
+const COSYVOICE_INSTALL_TIMEOUT_SECS: u64 = 90 * 60;
+
+fn cosyvoice_model_complete(model_dir: &std::path::Path) -> bool {
+    model_dir.join("cosyvoice2.yaml").is_file()
+        && model_dir.join("llm.pt").is_file()
+        && model_dir.join("flow.pt").is_file()
+        && model_dir.join("hift.pt").is_file()
+        && model_dir
+            .join("CosyVoice-BlankEN")
+            .join("model.safetensors")
+            .is_file()
+}
+
+fn py_path(path: &std::path::Path) -> String {
+    // Forward slashes are valid on Windows and avoid backslash-escaping in embedded code.
+    path.to_string_lossy().replace('\\', "/")
+}
+
+fn cosyvoice_model_download_code(model_dir: &std::path::Path) -> String {
+    format!(
+        "from huggingface_hub import snapshot_download\n\
+         snapshot_download('FunAudioLLM/CosyVoice2-0.5B', local_dir=r'{}')\n\
+         print('cosyvoice_model_downloaded')\n",
+        py_path(model_dir)
+    )
+}
+
+/// WP-0262: install-time warmup ceiling. The CosyVoice class import
+/// (`from cosyvoice.cli.cosyvoice import ...`) has been observed to take >150 s on a
+/// cold venv; the render wrapper's `--warmup` mode enforces a bounded, instrumented
+/// import (default 300 s hard limit via `IMPORT_HARD_LIMIT_SECS`) that fails LOUDLY
+/// with the stall location instead of silently consuming the outer command timeout.
+/// This outer budget is a generous belt-and-suspenders ceiling around that.
+const COSYVOICE_WARMUP_TIMEOUT_SECS: u64 = 12 * 60;
+
+/// WP-0262: run the bounded, instrumented warmup through the render wrapper's
+/// `--warmup` mode (a single canonical import+model-load+synth path shared with the
+/// job-time renderer). A slow/hung `from cosyvoice.cli.cosyvoice import ...` now
+/// surfaces as an explicit, loud error identifying WHERE it stalled rather than a
+/// mystery job-timeout with no audio. This also warms the wetext text-frontend cache
+/// (its only first-run network use) so later dub jobs need no model download.
+fn cosyvoice_warmup_args(
+    repo_dir: &std::path::Path,
+    model_parent: &std::path::Path,
+) -> Vec<String> {
+    let wrapper = repo_dir.join("voxvulgi_cosyvoice_render.py");
+    vec![
+        py_path(&wrapper),
+        "--warmup".to_string(),
+        "--model-dir".to_string(),
+        py_path(model_parent),
+    ]
+}
+
+/// Provision the isolated CosyVoice 2 voice-clone pack: write the engine-pinned render
+/// wrapper, create the second venv, install the pinned deps (validated recipe), download
+/// the model if absent, warm the model + wetext cache, and verify with the honest gate.
+/// The CosyVoice repo code + Matcha-TTS ship via the offline payload (too large to embed,
+/// too fragile to git-clone at runtime); the venv + 4.86 GB model are downloaded here.
+pub fn install_voice_clone_cosyvoice_v1_pack(paths: &AppPaths) -> Result<CosyVoicePackStatus> {
+    paths.ensure_dirs()?;
+    let backend_dir = paths.cosyvoice_backend_dir();
+
+    // The CosyVoice python package must be present (shipped via the offline payload). We
+    // do not git-clone at runtime; fail with guidance instead.
+    if !backend_dir
+        .join("cosyvoice")
+        .join("cli")
+        .join("cosyvoice.py")
+        .is_file()
+    {
+        return Err(EngineError::InstallFailed(format!(
+            "CosyVoice backend code is missing under {}. It ships with the installer offline payload; reinstall VoxVulgi to restore it.",
+            backend_dir.display()
+        )));
+    }
+    if !backend_dir
+        .join("third_party")
+        .join("Matcha-TTS")
+        .join("matcha")
+        .is_dir()
+    {
+        return Err(EngineError::InstallFailed(format!(
+            "CosyVoice dependency Matcha-TTS is missing under {}. It ships with the offline payload; reinstall VoxVulgi.",
+            backend_dir.display()
+        )));
+    }
+
+    // Always (re)write the render wrapper from the engine-pinned copy so it matches this build.
+    std::fs::write(
+        backend_dir.join("voxvulgi_cosyvoice_render.py"),
+        COSYVOICE_RENDER_WRAPPER,
+    )?;
+
+    // 1) Isolated venv (torch 2.3.1 conflicts with the main venv's torch 2.10).
+    let venv_dir = paths.python_cosyvoice_venv_dir();
+    if !venv_python_path(&venv_dir).exists() {
+        let resolved = resolve_base_python(paths).ok_or_else(|| {
+            EngineError::InstallFailed(
+                "Python was not found to create the CosyVoice venv. Install the portable Python in Diagnostics first."
+                    .to_string(),
+            )
+        })?;
+        if let Some(parent) = venv_dir.parent() {
+            std::fs::create_dir_all(parent)?;
+        }
+        let mut cmd = crate::cmd::command(&resolved.program);
+        for arg in &resolved.args {
+            cmd.arg(arg);
+        }
+        let output = cmd
+            .args(["-m", "venv"])
+            .arg(&venv_dir)
+            .output()
+            .map_err(|e| {
+                EngineError::InstallFailed(format!("failed to create CosyVoice venv: {e}"))
+            })?;
+        if !output.status.success() {
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            return Err(EngineError::InstallFailed(format!(
+                "CosyVoice venv creation failed (code={:?}): {}",
+                output.status.code(),
+                stderr.trim()
+            )));
+        }
+    }
+    let venv_python = venv_python_path(&venv_dir);
+
+    // 2) Pinned dependency install (validated recipe). setuptools<80 still ships
+    //    pkg_resources, which openai-whisper's legacy build needs; --no-build-isolation
+    //    then builds it against the venv's setuptools.
+    let _ = run_python_checked(
+        paths,
+        &venv_python,
+        &["-m", "pip", "install", "--upgrade", "pip"],
+        "CosyVoice pip bootstrap",
+    );
+    run_python_checked(
+        paths,
+        &venv_python,
+        &["-m", "pip", "install", "setuptools<80", "wheel"],
+        "CosyVoice setuptools/wheel install failed",
+    )?;
+    let req_path = paths
+        .python_models_dir()
+        .join(".cosyvoice_requirements.txt");
+    if let Some(parent) = req_path.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    std::fs::write(&req_path, COSYVOICE_REQUIREMENTS)?;
+    let req_arg = req_path.to_string_lossy().to_string();
+    run_python_checked_with_timeout(
+        paths,
+        &venv_python,
+        &[
+            "-m",
+            "pip",
+            "install",
+            "--no-build-isolation",
+            "-r",
+            &req_arg,
+        ],
+        "CosyVoice dependency install failed",
+        COSYVOICE_INSTALL_TIMEOUT_SECS,
+    )?;
+
+    // 3) Download the model into the local model dir if not already complete.
+    let model_dir = paths.cosyvoice_model_parent_dir().join("CosyVoice2-0.5B");
+    if !cosyvoice_model_complete(&model_dir) {
+        std::fs::create_dir_all(&model_dir)?;
+        let code = cosyvoice_model_download_code(&model_dir);
+        run_python_checked_with_timeout(
+            paths,
+            &venv_python,
+            &["-c", &code],
+            "CosyVoice2-0.5B model download failed",
+            COSYVOICE_INSTALL_TIMEOUT_SECS,
+        )?;
+    }
+
+    // 4) Warm the model + wetext cache (verifies inference works offline-from-local-dir).
+    //    WP-0262: routed through the render wrapper's bounded/instrumented `--warmup`
+    //    mode so a slow/hung CosyVoice class import fails LOUDLY with the stall location
+    //    instead of silently exceeding the timeout.
+    let warmup_args = cosyvoice_warmup_args(&backend_dir, &paths.cosyvoice_model_parent_dir());
+    let warmup_args_ref: Vec<&str> = warmup_args.iter().map(String::as_str).collect();
+    run_python_checked_with_timeout(
+        paths,
+        &venv_python,
+        &warmup_args_ref,
+        "CosyVoice warmup failed",
+        COSYVOICE_WARMUP_TIMEOUT_SECS,
+    )?;
+
+    // 5) Honest gate.
+    let status = cosyvoice_pack_status(paths);
+    if !status.installed {
+        return Err(EngineError::InstallFailed(format!(
+            "CosyVoice install completed but the readiness check failed: {}",
+            status.status_detail
+        )));
+    }
+    let _ = generate_pack_integrity_manifest(paths);
+    Ok(status)
+}
+
 pub fn tts_neural_local_v1_pack_status(paths: &AppPaths) -> TtsNeuralLocalV1PackStatus {
     let venv_dir = paths.python_venv_dir();
     let venv_python = venv_python_path(&venv_dir);
@@ -2830,7 +3169,7 @@ pub fn tts_neural_local_v1_pack_status(paths: &AppPaths) -> TtsNeuralLocalV1Pack
     let transformers_version = python_distribution_version(&venv_python, "transformers");
     let huggingface_hub_version = python_distribution_version(&venv_python, "huggingface-hub")
         .or_else(|| python_distribution_version(&venv_python, "huggingface_hub"));
-    let warmup_ready = kokoro_warmup_probe_path(paths).exists();
+    let warmup_ready = kokoro_warmup_probe_path(paths).exists() && kokoro_app_cache_ready(paths);
     let lockfile_ready = pack_install_satisfied(paths, "tts_neural_local_v1");
     let version_mismatches = lockfile_source_pin_mismatches(&venv_python, "tts_neural_local_v1");
     let versions_ready = version_mismatches.is_empty();
@@ -2849,7 +3188,7 @@ pub fn tts_neural_local_v1_pack_status(paths: &AppPaths) -> TtsNeuralLocalV1Pack
     } else if package_version.is_none() {
         "Kokoro is not installed in the managed Python environment.".to_string()
     } else if !warmup_ready {
-        "Kokoro is installed, but its local model warmup has not completed.".to_string()
+        "Kokoro is installed, but its model is missing from the app-local cache the dub job reads. Run Install/Repair to provision it.".to_string()
     } else if !lockfile_runtime_ready {
         "Installed packages do not match the current Neural TTS lockfile. Run Install/Repair to refresh the pack.".to_string()
     } else if !versions_ready {
@@ -3003,6 +3342,19 @@ pub fn install_tts_neural_local_v1_pack(paths: &AppPaths) -> Result<TtsNeuralLoc
         }
     }
 
+    // Only write the readiness marker once the model is actually present in the
+    // app-local HF cache the OFFLINE dub job reads. This prevents the stale-marker
+    // class of bug where the warmup populated a different cache (e.g. the default
+    // user cache) yet the marker still claimed the offline job was ready.
+    if !kokoro_app_cache_ready(paths) {
+        return Err(EngineError::InstallFailed(
+            "Kokoro warmup completed but the Kokoro-82M snapshot is missing from the \
+             app-local Hugging Face cache the offline dub job reads (HF_HOME). The dub \
+             job would fail at the first synth call; aborting instead of marking the \
+             pack ready."
+                .to_string(),
+        ));
+    }
     let warmup_probe = kokoro_warmup_probe_path(paths);
     if let Some(parent) = warmup_probe.parent() {
         std::fs::create_dir_all(parent)?;
@@ -3078,7 +3430,8 @@ pub fn tts_voice_preserving_local_v1_pack_status(
         .or_else(|| cosyvoice_runtime_available.then(|| "installed (module only)".to_string()));
     let openvoice_patch_applied =
         vendor_patches::openvoice_api_patch_applied(&venv_python).unwrap_or(false);
-    let kokoro_warmup_ready = kokoro_warmup_probe_path(paths).exists();
+    let kokoro_warmup_ready =
+        kokoro_warmup_probe_path(paths).exists() && kokoro_app_cache_ready(paths);
     let kokoro_lockfile_ready = pack_install_satisfied(paths, "tts_neural_local_v1");
     let neural_base_status = tts_neural_local_v1_pack_status(paths);
     let lockfile_ready = pack_install_satisfied(paths, "tts_voice_preserving_local_v1");
@@ -3114,7 +3467,7 @@ pub fn tts_voice_preserving_local_v1_pack_status(
     } else if kokoro_version.is_none() {
         "Kokoro base TTS is not installed; install Neural TTS first or run the full voice pack install.".to_string()
     } else if !kokoro_warmup_ready {
-        "Kokoro base TTS is installed, but its local model warmup has not completed.".to_string()
+        "Kokoro base TTS is installed, but its model is missing from the app-local cache the dub job reads. Run Install/Repair to provision it.".to_string()
     } else if !kokoro_lockfile_ready {
         "Kokoro base TTS does not match the current Neural TTS lockfile. Run Install/Repair to refresh the pack.".to_string()
     } else if !neural_base_status.installed {
@@ -3521,6 +3874,25 @@ fn run_python_checked(
     args: &[&str],
     error_prefix: &str,
 ) -> Result<()> {
+    run_python_checked_with_timeout(
+        paths,
+        python,
+        args,
+        error_prefix,
+        PYTHON_COMMAND_TIMEOUT_SECS,
+    )
+}
+
+/// Like `run_python_checked` but with a caller-chosen timeout. The CosyVoice install
+/// (torch 2.3.1 stack + a multi-GB model on a throttled connection) can exceed the
+/// default 30-minute command timeout, so it passes a longer budget.
+fn run_python_checked_with_timeout(
+    paths: &AppPaths,
+    python: &std::path::Path,
+    args: &[&str],
+    error_prefix: &str,
+    timeout_secs: u64,
+) -> Result<()> {
     let mut cmd = crate::cmd::command(python);
     cmd.args(args);
 
@@ -3592,7 +3964,7 @@ fn run_python_checked(
             return Ok(());
         }
 
-        if started.elapsed() > std::time::Duration::from_secs(PYTHON_COMMAND_TIMEOUT_SECS) {
+        if started.elapsed() > std::time::Duration::from_secs(timeout_secs) {
             let _ = child.kill();
             let output = child
                 .wait_with_output()
@@ -3600,7 +3972,7 @@ fn run_python_checked(
             let stderr = String::from_utf8_lossy(&output.stderr);
             let stderr = stderr.trim();
             return Err(EngineError::InstallFailed(format!(
-                "{error_prefix} timed out after {PYTHON_COMMAND_TIMEOUT_SECS}s{}{}",
+                "{error_prefix} timed out after {timeout_secs}s{}{}",
                 if stderr.is_empty() { "" } else { ": " },
                 stderr
             )));
@@ -3665,5 +4037,55 @@ mod tests {
         assert!(pack_lockfile_runtime_ready(true, true));
         assert!(pack_lockfile_runtime_ready(false, true));
         assert!(!pack_lockfile_runtime_ready(false, false));
+    }
+
+    #[test]
+    fn kokoro_app_cache_ready_requires_snapshot_files_not_just_marker() {
+        use std::fs;
+        let base =
+            std::env::temp_dir().join(format!("voxvulgi_kokoro_gate_test_{}", std::process::id()));
+        let _ = fs::remove_dir_all(&base);
+        let paths = AppPaths::new(base.clone());
+
+        // The stale-marker bug scenario: nothing in the app-local HF cache yet.
+        assert!(
+            !kokoro_app_cache_ready(&paths),
+            "empty app cache must not read as ready"
+        );
+
+        let repo = paths
+            .cache_dir()
+            .join("huggingface")
+            .join("hub")
+            .join("models--hexgrad--Kokoro-82M");
+        let sha = "f3ff3571791e39611d31c381e3a41a3af07b4987";
+        let snapshot = repo.join("snapshots").join(sha);
+        fs::create_dir_all(snapshot.join("voices")).unwrap();
+        fs::write(snapshot.join("config.json"), b"{}").unwrap();
+        fs::write(snapshot.join("kokoro-v1_0.pth"), b"weights").unwrap();
+        fs::write(snapshot.join("voices").join("af_heart.pt"), b"voice").unwrap();
+
+        // Snapshot files present but no `refs/main` -> the offline resolver cannot map
+        // `main` -> sha, so the job would still fail. Must read as not ready.
+        assert!(
+            !kokoro_app_cache_ready(&paths),
+            "snapshot files without refs/main must not read as ready"
+        );
+
+        fs::create_dir_all(repo.join("refs")).unwrap();
+        fs::write(repo.join("refs").join("main"), sha).unwrap();
+        assert!(
+            kokoro_app_cache_ready(&paths),
+            "refs/main + config + weights + default voice present must read as ready"
+        );
+
+        // Missing the default voice -> the offline job would fail loading it.
+        fs::remove_file(snapshot.join("voices").join("af_heart.pt")).unwrap();
+        assert!(
+            !kokoro_app_cache_ready(&paths),
+            "missing default voice must not read as ready"
+        );
+
+        let _ = fs::remove_dir_all(&base);
     }
 }

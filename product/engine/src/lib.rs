@@ -9,6 +9,7 @@ pub mod image_batch;
 pub mod instagram_subscriptions;
 pub mod jobs;
 pub mod library;
+pub mod media_cleanup;
 pub mod models;
 pub mod pack_install_state;
 pub mod paths;

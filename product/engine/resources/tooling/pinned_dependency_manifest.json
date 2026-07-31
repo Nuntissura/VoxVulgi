@@ -89,8 +89,8 @@
       "numpy==1.26.4",
       "soundfile==0.13.1",
       "torch==2.10.0",
-      "transformers==5.8.1",
-      "huggingface_hub==1.5.0"
+      "transformers==4.49.0",
+      "huggingface_hub==0.34.4"
     ],
     "unpinned_fallback": [
       "kokoro",
@@ -101,15 +101,15 @@
       "huggingface_hub"
     ],
     "warmup_recovery_force_reinstall": [
-      "transformers==5.8.1",
-      "huggingface_hub==1.5.0",
+      "transformers==4.49.0",
+      "huggingface_hub==0.34.4",
       "kokoro==0.9.4"
     ]
   },
   "tts_voice_preserving_local_v1": {
     "openvoice_git_spec": "git+https://github.com/myshell-ai/OpenVoice.git@74a1d147b17a8c3092dd5430504bd83ef6c7eb23",
     "pinned_dependencies": [
-      "huggingface_hub==1.5.0",
+      "huggingface_hub==0.34.4",
       "numpy==1.26.4",
       "librosa==0.11.0",
       "soundfile==0.13.1",

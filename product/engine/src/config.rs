@@ -459,6 +459,12 @@ fn write_secret_token(path: &Path, token: &str) -> Result<()> {
 pub struct YoutubeAuthConfig {
     #[serde(default)]
     pub netscape_cookie_json: Option<String>,
+    #[serde(default)]
+    pub browser_cookie_source: Option<String>,
+    #[serde(default)]
+    pub last_verified_at_ms: Option<i64>,
+    #[serde(default)]
+    pub reconnect_required_at_ms: Option<i64>,
 }
 
 pub fn load_youtube_auth_config(paths: &AppPaths) -> Result<YoutubeAuthConfig> {
@@ -487,6 +493,34 @@ pub fn save_youtube_auth_config(paths: &AppPaths, config: &YoutubeAuthConfig) ->
     Ok(())
 }
 
+pub fn mark_youtube_auth_verified(
+    paths: &AppPaths,
+    checked_at_ms: i64,
+) -> Result<YoutubeAuthConfig> {
+    let mut config = load_youtube_auth_config(paths)?;
+    if config.netscape_cookie_json.is_none() && config.browser_cookie_source.is_none() {
+        return Ok(config);
+    }
+    config.last_verified_at_ms = Some(checked_at_ms);
+    config.reconnect_required_at_ms = None;
+    save_youtube_auth_config(paths, &config)?;
+    Ok(config)
+}
+
+pub fn mark_youtube_auth_reconnect_required(
+    paths: &AppPaths,
+    rejected_at_ms: i64,
+) -> Result<YoutubeAuthConfig> {
+    let mut config = load_youtube_auth_config(paths)?;
+    if config.netscape_cookie_json.is_none() && config.browser_cookie_source.is_none() {
+        return Ok(config);
+    }
+    config.last_verified_at_ms = None;
+    config.reconnect_required_at_ms = Some(rejected_at_ms);
+    save_youtube_auth_config(paths, &config)?;
+    Ok(config)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -498,6 +532,44 @@ mod tests {
 
         assert_eq!(preset.id, "default");
         assert_eq!(preset.path_template, "{channel}");
+    }
+
+    #[test]
+    fn youtube_auth_verification_state_persists_ready_and_reconnect_required() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let paths = AppPaths::new(dir.path().to_path_buf());
+        save_youtube_auth_config(
+            &paths,
+            &YoutubeAuthConfig {
+                browser_cookie_source: Some("firefox".to_string()),
+                ..Default::default()
+            },
+        )
+        .expect("save auth source");
+
+        let verified = mark_youtube_auth_verified(&paths, 1234).expect("mark verified");
+        assert_eq!(verified.last_verified_at_ms, Some(1234));
+        assert_eq!(verified.reconnect_required_at_ms, None);
+
+        let rejected = mark_youtube_auth_reconnect_required(&paths, 5678).expect("mark reconnect");
+        assert_eq!(rejected.last_verified_at_ms, None);
+        assert_eq!(rejected.reconnect_required_at_ms, Some(5678));
+
+        let loaded = load_youtube_auth_config(&paths).expect("reload auth");
+        assert_eq!(loaded.browser_cookie_source.as_deref(), Some("firefox"));
+        assert_eq!(loaded.last_verified_at_ms, None);
+        assert_eq!(loaded.reconnect_required_at_ms, Some(5678));
+    }
+
+    #[test]
+    fn youtube_auth_verification_state_does_not_create_a_session() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let paths = AppPaths::new(dir.path().to_path_buf());
+
+        let config = mark_youtube_auth_verified(&paths, 1234).expect("no-op without auth");
+        assert_eq!(config.last_verified_at_ms, None);
+        assert_eq!(config.reconnect_required_at_ms, None);
+        assert!(!paths.youtube_auth_config_path().exists());
     }
 
     #[test]

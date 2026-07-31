@@ -1,7 +1,10 @@
 param(
   [switch]$Force,
+  [switch]$BuildOnly,
   [switch]$IncludeBuildTarget,
-  [switch]$PruneOldBuilds
+  [switch]$PruneOldBuilds,
+  [ValidateRange(1, 32)]
+  [int]$BuildThrottleLimit = 1
 )
 
 $ErrorActionPreference = "Stop"
@@ -22,17 +25,22 @@ $offlineRoot = Join-Path $desktopRoot 'src-tauri\offline'
 
 $targets.Add((Join-Path $engineRoot 'target'))
 $targets.Add((Join-Path $desktopRoot 'src-tauri\target'))
-$targets.Add((Join-Path $offlineRoot 'tools'))
-$targets.Add((Join-Path $offlineRoot 'models'))
-$targets.Add((Join-Path $offlineRoot 'cache'))
-$targets.Add((Join-Path $offlineRoot 'payload.zip'))
-$targets.Add((Join-Path $offlineRoot 'manifest.json'))
+
+if (-not $BuildOnly) {
+  $targets.Add((Join-Path $offlineRoot 'tools'))
+  $targets.Add((Join-Path $offlineRoot 'models'))
+  $targets.Add((Join-Path $offlineRoot 'cache'))
+  $targets.Add((Join-Path $offlineRoot 'payload.zip'))
+  $targets.Add((Join-Path $offlineRoot 'manifest.json'))
+}
 
 Get-ChildItem -Path $engineRoot -Directory -Filter 'target_*' -ErrorAction SilentlyContinue |
   ForEach-Object { $targets.Add($_.FullName) }
 
-Get-ChildItem -Path $repoRoot -Directory -Filter 'tmp_*' -ErrorAction SilentlyContinue |
-  ForEach-Object { $targets.Add($_.FullName) }
+if (-not $BuildOnly) {
+  Get-ChildItem -Path $repoRoot -Directory -Filter 'tmp_*' -ErrorAction SilentlyContinue |
+    ForEach-Object { $targets.Add($_.FullName) }
+}
 
 if ($IncludeBuildTarget) {
   $targets.Add($buildPaths.CurrentDir)
@@ -60,18 +68,58 @@ if (-not $Force) {
 }
 
 Step "Deleting artifacts"
-foreach ($target in $normalizedTargets) {
-  if (-not (Test-Path -LiteralPath $target)) {
-    continue
+if ($BuildOnly -and $BuildThrottleLimit -gt 1) {
+  if ($PSVersionTable.PSVersion.Major -lt 7) {
+    throw "Parallel build cleanup requires PowerShell 7 or newer."
   }
 
-  $item = Get-Item -LiteralPath $target
-  if ($item.PSIsContainer) {
-    Remove-Item -LiteralPath $target -Recurse -Force
-  } else {
-    Remove-Item -LiteralPath $target -Force
+  $parallelTargets = New-Object System.Collections.Generic.List[string]
+  foreach ($target in $normalizedTargets) {
+    if ($PruneOldBuilds -and $target -eq $buildPaths.OldVersionsDir) {
+      continue
+    }
+    $parallelTargets.Add($target)
   }
-  Write-Host "Removed: $target"
+  if ($PruneOldBuilds -and (Test-Path -LiteralPath $buildPaths.OldVersionsDir)) {
+    Get-ChildItem -LiteralPath $buildPaths.OldVersionsDir -Force |
+      ForEach-Object { $parallelTargets.Add($_.FullName) }
+  }
+
+  $parallelTargets |
+    ForEach-Object -Parallel {
+      $ErrorActionPreference = "Stop"
+      $target = $_
+      if (-not (Test-Path -LiteralPath $target)) {
+        return
+      }
+
+      $item = Get-Item -LiteralPath $target
+      if ($item.PSIsContainer) {
+        Remove-Item -LiteralPath $target -Recurse -Force
+      } else {
+        Remove-Item -LiteralPath $target -Force
+      }
+      Write-Output "Removed: $target"
+    } -ThrottleLimit $BuildThrottleLimit
+
+  if ($PruneOldBuilds -and (Test-Path -LiteralPath $buildPaths.OldVersionsDir)) {
+    Remove-Item -LiteralPath $buildPaths.OldVersionsDir -Force
+    Write-Host "Removed: $($buildPaths.OldVersionsDir)"
+  }
+} else {
+  foreach ($target in $normalizedTargets) {
+    if (-not (Test-Path -LiteralPath $target)) {
+      continue
+    }
+
+    $item = Get-Item -LiteralPath $target
+    if ($item.PSIsContainer) {
+      Remove-Item -LiteralPath $target -Recurse -Force
+    } else {
+      Remove-Item -LiteralPath $target -Force
+    }
+    Write-Host "Removed: $target"
+  }
 }
 
 Step "Done"

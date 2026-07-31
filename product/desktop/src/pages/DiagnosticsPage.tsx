@@ -309,6 +309,7 @@ type JobRow = {
   started_at_ms: number | null;
   finished_at_ms: number | null;
   logs_path: string;
+  track?: string | null;
 };
 
 type JobCleanupOutputTarget = {
@@ -489,6 +490,38 @@ type DiagnosticsJobQueueSnapshot = {
   recent_failures: DiagnosticsRecentJobFailure[];
 };
 
+// WP-0270: exact engine-owned scheduler snapshot also exposed through Jobs
+// controls and GET /agent/jobs_tracks. Diagnostics consumes it as captured;
+// it never derives track totals from its bounded recent-job preview.
+type DiagnosticsJobTrackStatusTotals = {
+  queued: number;
+  running: number;
+  succeeded: number;
+  failed: number;
+  canceled: number;
+  total: number;
+};
+
+type DiagnosticsJobTrackRuntimeRow = DiagnosticsJobTrackStatusTotals & {
+  track: "youtube_single" | "youtube_recurring" | "instagram" | "other_video" | "image_archive" | "localization";
+  configured_budget: number;
+  effective_budget: number;
+  paused: boolean;
+  hold_reason: string | null;
+};
+
+type DiagnosticsYoutubeSharedGateSnapshot = {
+  state: string;
+  next_eligible_at_ms: number | null;
+  hold_reason: string | null;
+};
+
+type DiagnosticsJobsTracksSnapshot = {
+  tracks: DiagnosticsJobTrackRuntimeRow[];
+  unclassified: DiagnosticsJobTrackStatusTotals;
+  youtube_gate: DiagnosticsYoutubeSharedGateSnapshot;
+};
+
 type DiagnosticsLibrarySnapshot = {
   total_items: number;
   by_source_type: DiagnosticsKeyCount[];
@@ -554,6 +587,7 @@ type DiagnosticsAppStateSnapshot = {
   storage: StorageBreakdown;
   thumbnail_cache: ThumbnailCacheStatus;
   jobs: DiagnosticsJobQueueSnapshot;
+  jobs_tracks: DiagnosticsJobsTracksSnapshot;
   library: DiagnosticsLibrarySnapshot;
   recent_trace: DiagnosticsTraceEntry[];
   feature_health: DiagnosticsFeatureHealthRow[];
@@ -1504,8 +1538,8 @@ export function DiagnosticsPage({ visible = true }: { visible?: boolean }) {
     setError(null);
     setNotice(
       diarization?.repair_required
-        ? "Repairing diarization pack (forced reinstall of validated Python deps; may take a few minutes)."
-        : "Installing diarization pack (Python deps download; may take a few minutes).",
+        ? "Repairing the speaker-labelling pack (reinstalling its tools; may take a few minutes)."
+        : "Installing the speaker-labelling pack (downloading its tools; may take a few minutes).",
     );
     try {
       await invoke<DiarizationPackStatus>("tools_diarization_install");
@@ -2968,7 +3002,12 @@ export function DiagnosticsPage({ visible = true }: { visible?: boolean }) {
           </div>
         ) : null}
         <div className="kv">
-          <div className="k">Voice backend recommendation</div>
+          <div
+            className="k"
+            title="The voice engine VoxVulgi suggests using for the best result. You do not have to change anything."
+          >
+            Recommended voice
+          </div>
           <div className="v">
             {voiceBackendRecommendation
               ? `${voiceBackendRecommendation.preferred_backend_id} (${voiceBackendRecommendation.goal})`
@@ -2977,16 +3016,24 @@ export function DiagnosticsPage({ visible = true }: { visible?: boolean }) {
         </div>
         {voiceBackendRecommendation?.fallback_backend_id ? (
           <div className="kv">
-            <div className="k">Safe fallback</div>
+            <div
+              className="k"
+              title="The backup voice used automatically if the recommended one is unavailable."
+            >
+              Backup voice
+            </div>
             <div className="v">{voiceBackendRecommendation.fallback_backend_id}</div>
           </div>
         ) : null}
         {voiceBackendCatalog?.backends?.length ? (
           <div style={{ marginTop: 12, display: "flex", flexDirection: "column", gap: 10 }}>
-            <div style={{ fontSize: 12, opacity: 0.75 }}>
-              Backend catalog maps the shipped OpenVoice path against stronger experimental OSS
-              candidates. Managed default remains OpenVoice until benchmark evidence supports a
-              change.
+            <div
+              style={{ fontSize: 12, opacity: 0.75 }}
+              title="A list of the voice engines VoxVulgi can use. The one marked as the default is chosen for you unless you pick another."
+            >
+              This is the list of voice engines VoxVulgi can use for cloning a speaker's voice. The
+              built-in default is chosen for you and works out of the box; the others are optional
+              extras you can explore if you want to try newer voices.
             </div>
             {voiceBackendCatalog.backends.map((backend) => (
               <div
@@ -3001,53 +3048,89 @@ export function DiagnosticsPage({ visible = true }: { visible?: boolean }) {
                 }}
               >
                 <div className="row" style={{ justifyContent: "space-between", alignItems: "center" }}>
-                  <div style={{ fontWeight: 600 }}>
+                  <div
+                    style={{ fontWeight: 600 }}
+                    title={
+                      backend.managed_default
+                        ? "This is the voice engine VoxVulgi uses unless you choose another."
+                        : "An optional voice engine you can try instead of the default."
+                    }
+                  >
                     {backend.display_name}
-                    {backend.managed_default ? " (managed default)" : ""}
+                    {backend.managed_default ? " (used by default)" : ""}
                   </div>
-                  <code>{backend.status}</code>
+                  <code title="Whether this voice engine is ready to use.">{backend.status}</code>
                 </div>
                 <div style={{ fontSize: 12, opacity: 0.75 }}>{backend.status_detail}</div>
                 <div className="kv">
-                  <div className="k">Family</div>
-                  <div className="v">
-                    {backend.family} / {backend.mode}
+                  <div className="k" title="Which languages this voice engine handles.">
+                    Languages
                   </div>
-                </div>
-                <div className="kv">
-                  <div className="k">Install mode</div>
-                  <div className="v">
-                    {backend.install_mode}; GPU recommended: {backend.gpu_recommended ? "yes" : "no"}
-                  </div>
-                </div>
-                <div className="kv">
-                  <div className="k">Language scope</div>
                   <div className="v">{backend.language_scope}</div>
                 </div>
-                <div className="kv">
-                  <div className="k">References</div>
-                  <div className="v">{backend.reference_expectation}</div>
+                <div
+                  style={{ fontSize: 12, opacity: 0.75 }}
+                  title="What this voice engine is good at."
+                >
+                  Good for: {backend.strengths.join(" | ")}
                 </div>
-                <div className="kv">
-                  <div className="k">Licenses</div>
-                  <div className="v">
-                    code {backend.code_license}; weights {backend.weights_license}
+                <div
+                  style={{ fontSize: 12, opacity: 0.75 }}
+                  title="Things to be aware of with this voice engine."
+                >
+                  Watch out for: {backend.risks.join(" | ")}
+                </div>
+                <details>
+                  <summary
+                    style={{ cursor: "pointer", color: "#4b5563", fontSize: 12 }}
+                    title="Technical details for advanced users. Safe to leave closed."
+                  >
+                    Show technical details
+                  </summary>
+                  <div className="kv" style={{ marginTop: 6 }}>
+                    <div className="k">Family</div>
+                    <div className="v">
+                      {backend.family} / {backend.mode}
+                    </div>
                   </div>
-                </div>
-                <div style={{ fontSize: 12, opacity: 0.75 }}>
-                  Strengths: {backend.strengths.join(" | ")}
-                </div>
-                <div style={{ fontSize: 12, opacity: 0.75 }}>Risks: {backend.risks.join(" | ")}</div>
+                  <div className="kv">
+                    <div className="k">Install mode</div>
+                    <div className="v">
+                      {backend.install_mode}; GPU recommended: {backend.gpu_recommended ? "yes" : "no"}
+                    </div>
+                  </div>
+                  <div className="kv">
+                    <div className="k">References</div>
+                    <div className="v">{backend.reference_expectation}</div>
+                  </div>
+                  <div className="kv">
+                    <div className="k">Licenses</div>
+                    <div className="v">
+                      code {backend.code_license}; weights {backend.weights_license}
+                    </div>
+                  </div>
+                </details>
               </div>
             ))}
           </div>
         ) : null}
         {voiceBackendAdapters.length ? (
           <div style={{ marginTop: 16, display: "flex", flexDirection: "column", gap: 10 }}>
-            <div style={{ fontSize: 12, opacity: 0.75 }}>
-              BYO adapter registry is local-only. VoxVulgi never auto-installs these backends; you
-              point the app at a prepared local checkout or environment and run explicit probes.
+            <div
+              style={{ fontSize: 12, opacity: 0.75 }}
+              title="Advanced. Lets tech-savvy users connect their own voice engine. Everything stays on your computer and nothing is installed automatically."
+            >
+              Advanced: connect your own voice engine. Most people never need this. Everything you
+              enter stays on your computer, and VoxVulgi never installs or runs anything on its own —
+              you point it at a copy you have already set up and press a button to check it.
             </div>
+            <details>
+              <summary
+                style={{ cursor: "pointer", color: "#4b5563", fontSize: 12 }}
+                title="Open only if you want to connect your own advanced voice engine. Safe to leave closed."
+              >
+                Show advanced: connect your own voice engine
+              </summary>
             {voiceBackendAdapters.map((detail) => {
               const backendId = detail.template.backend_id;
               const draft = voiceBackendAdapterDrafts[backendId] ?? defaultAdapterConfig(detail.template);
@@ -3073,9 +3156,16 @@ export function DiagnosticsPage({ visible = true }: { visible?: boolean }) {
                 >
                   <div className="row" style={{ justifyContent: "space-between", alignItems: "center" }}>
                     <div style={{ fontWeight: 600 }}>{detail.template.display_name}</div>
-                    <code>{detail.last_probe?.status ?? (detail.config ? "configured" : "not configured")}</code>
+                    <code title="Whether you have set this engine up yet, and whether the last check passed.">
+                      {detail.last_probe?.status ?? (detail.config ? "set up" : "not set up yet")}
+                    </code>
                   </div>
-                  <div style={{ fontSize: 12, opacity: 0.75 }}>{detail.template.probe_hint}</div>
+                  <div
+                    style={{ fontSize: 12, opacity: 0.75 }}
+                    title="A short tip on how to check this engine."
+                  >
+                    {detail.template.probe_hint}
+                  </div>
                   {detail.template.starter_recipes.length ? (
                     <div
                       style={{
@@ -3088,17 +3178,23 @@ export function DiagnosticsPage({ visible = true }: { visible?: boolean }) {
                       }}
                     >
                       <div className="row" style={{ justifyContent: "space-between", gap: 10 }}>
-                        <div style={{ fontWeight: 600, fontSize: 13 }}>Starter recipes</div>
+                        <div
+                          style={{ fontWeight: 600, fontSize: 13 }}
+                          title="Ready-made setups that fill in the fields below for you, so you do not have to type them by hand."
+                        >
+                          Ready-made setups
+                        </div>
                         <button
                           type="button"
                           disabled={busy || adapterBusy || !selectedRecipeId}
                           onClick={() => applyVoiceBackendStarterRecipe(backendId).catch(() => undefined)}
+                          title="Fill the fields below using the selected ready-made setup. Nothing is saved until you press Save."
                         >
-                          Apply recipe to draft
+                          Use this setup
                         </button>
                       </div>
                       <label style={{ display: "flex", flexDirection: "column", gap: 4 }}>
-                        <span style={{ fontSize: 12, opacity: 0.75 }}>Recipe</span>
+                        <span style={{ fontSize: 12, opacity: 0.75 }}>Setup</span>
                         <select
                           value={selectedRecipeId}
                           onChange={(e) =>
@@ -3118,14 +3214,23 @@ export function DiagnosticsPage({ visible = true }: { visible?: boolean }) {
                       {selectedRecipe ? (
                         <>
                           <div style={{ fontSize: 12, opacity: 0.78 }}>{selectedRecipe.description}</div>
-                          <div style={{ fontSize: 12, opacity: 0.72 }}>
-                            Suggested model dir: {selectedRecipe.suggested_model_dir ?? "-"}
+                          <div
+                            style={{ fontSize: 12, opacity: 0.72 }}
+                            title="Where this setup expects the voice model files to live."
+                          >
+                            Suggested model folder: {selectedRecipe.suggested_model_dir ?? "-"}
                           </div>
-                          <div style={{ fontSize: 12, opacity: 0.72 }}>
-                            Probe tokens: {selectedRecipe.default_probe_command.join(" ") || "-"}
+                          <div
+                            style={{ fontSize: 12, opacity: 0.72 }}
+                            title="The command this setup runs to check the engine works."
+                          >
+                            Check command: {selectedRecipe.default_probe_command.join(" ") || "-"}
                           </div>
-                          <div style={{ fontSize: 12, opacity: 0.72 }}>
-                            Render tokens: {selectedRecipe.default_render_command.join(" ") || "-"}
+                          <div
+                            style={{ fontSize: 12, opacity: 0.72 }}
+                            title="The command this setup runs to produce the dubbed voice."
+                          >
+                            Voice command: {selectedRecipe.default_render_command.join(" ") || "-"}
                           </div>
                           {selectedRecipe.notes.length ? (
                             <div style={{ fontSize: 12, opacity: 0.72 }}>
@@ -3136,7 +3241,10 @@ export function DiagnosticsPage({ visible = true }: { visible?: boolean }) {
                       ) : null}
                     </div>
                   ) : null}
-                  <label style={{ display: "flex", alignItems: "center", gap: 8 }}>
+                  <label
+                    style={{ display: "flex", alignItems: "center", gap: 8 }}
+                    title="Turn this engine on so VoxVulgi can use it."
+                  >
                     <input
                       type="checkbox"
                       checked={draft.enabled}
@@ -3147,10 +3255,13 @@ export function DiagnosticsPage({ visible = true }: { visible?: boolean }) {
                         }))
                       }
                     />
-                    <span>Enabled</span>
+                    <span>Turn on</span>
                   </label>
-                  <label style={{ display: "flex", flexDirection: "column", gap: 4 }}>
-                    <span style={{ fontSize: 12, opacity: 0.75 }}>Root directory</span>
+                  <label
+                    style={{ display: "flex", flexDirection: "column", gap: 4 }}
+                    title="The main folder where you installed this engine on your computer."
+                  >
+                    <span style={{ fontSize: 12, opacity: 0.75 }}>Main folder</span>
                     <div className="row" style={{ gap: 8, flexWrap: "wrap" }}>
                       <input
                         value={draft.root_dir ?? ""}
@@ -3160,7 +3271,7 @@ export function DiagnosticsPage({ visible = true }: { visible?: boolean }) {
                             root_dir: e.currentTarget.value.trim() || null,
                           }))
                         }
-                        placeholder="Path to local checkout or packaged env"
+                        placeholder="Folder where you installed this engine"
                         style={{ minWidth: 360 }}
                       />
                       <button
@@ -3186,13 +3297,17 @@ export function DiagnosticsPage({ visible = true }: { visible?: boolean }) {
                         type="button"
                         disabled={adapterBusy || !(draft.root_dir ?? "").trim()}
                         onClick={() => openPathBestEffort(draft.root_dir ?? "").catch(() => undefined)}
+                        title="Open this folder in your file browser."
                       >
-                        Open root
+                        Open folder
                       </button>
                     </div>
                   </label>
-                  <label style={{ display: "flex", flexDirection: "column", gap: 4 }}>
-                    <span style={{ fontSize: 12, opacity: 0.75 }}>Python executable</span>
+                  <label
+                    style={{ display: "flex", flexDirection: "column", gap: 4 }}
+                    title="Optional. The Python program this engine should run with. Leave blank to let VoxVulgi pick one."
+                  >
+                    <span style={{ fontSize: 12, opacity: 0.75 }}>Python program (optional)</span>
                     <input
                       value={draft.python_exe ?? ""}
                       onChange={(e) =>
@@ -3201,11 +3316,14 @@ export function DiagnosticsPage({ visible = true }: { visible?: boolean }) {
                           python_exe: e.currentTarget.value.trim() || null,
                         }))
                       }
-                      placeholder="Optional explicit python path"
+                      placeholder="Leave blank unless you need a specific Python"
                     />
                   </label>
-                  <label style={{ display: "flex", flexDirection: "column", gap: 4 }}>
-                    <span style={{ fontSize: 12, opacity: 0.75 }}>Model directory</span>
+                  <label
+                    style={{ display: "flex", flexDirection: "column", gap: 4 }}
+                    title="Optional. The folder that holds this engine's voice model files."
+                  >
+                    <span style={{ fontSize: 12, opacity: 0.75 }}>Voice model folder (optional)</span>
                     <input
                       value={draft.model_dir ?? ""}
                       onChange={(e) =>
@@ -3214,12 +3332,15 @@ export function DiagnosticsPage({ visible = true }: { visible?: boolean }) {
                           model_dir: e.currentTarget.value.trim() || null,
                         }))
                       }
-                      placeholder="Optional model directory"
+                      placeholder="Leave blank unless you have a separate model folder"
                     />
                   </label>
-                  <label style={{ display: "flex", flexDirection: "column", gap: 4 }}>
+                  <label
+                    style={{ display: "flex", flexDirection: "column", gap: 4 }}
+                    title="Advanced. The command VoxVulgi runs to start this engine. The example below shows the expected format."
+                  >
                     <span style={{ fontSize: 12, opacity: 0.75 }}>
-                      Entry command tokens
+                      Start command (advanced)
                     </span>
                     <input
                       value={draft.entry_command.join(" ")}
@@ -3235,9 +3356,12 @@ export function DiagnosticsPage({ visible = true }: { visible?: boolean }) {
                       placeholder={detail.template.default_entry_command.join(" ")}
                     />
                   </label>
-                  <label style={{ display: "flex", flexDirection: "column", gap: 4 }}>
+                  <label
+                    style={{ display: "flex", flexDirection: "column", gap: 4 }}
+                    title="Advanced. A safe command VoxVulgi runs to check the engine works. Optional."
+                  >
                     <span style={{ fontSize: 12, opacity: 0.75 }}>
-                      Probe command tokens
+                      Check command (advanced, optional)
                     </span>
                     <input
                       value={draft.probe_command.join(" ")}
@@ -3250,12 +3374,15 @@ export function DiagnosticsPage({ visible = true }: { visible?: boolean }) {
                             .filter(Boolean),
                         }))
                       }
-                      placeholder="Optional explicit non-destructive probe command"
+                      placeholder="Leave blank to use the engine's own check"
                     />
                   </label>
-                  <label style={{ display: "flex", flexDirection: "column", gap: 4 }}>
+                  <label
+                    style={{ display: "flex", flexDirection: "column", gap: 4 }}
+                    title="Advanced. The command VoxVulgi runs to produce the dubbed voice. The example below shows the expected format."
+                  >
                     <span style={{ fontSize: 12, opacity: 0.75 }}>
-                      Render command tokens
+                      Voice command (advanced)
                     </span>
                     <input
                       value={draft.render_command.join(" ")}
@@ -3284,15 +3411,24 @@ export function DiagnosticsPage({ visible = true }: { visible?: boolean }) {
                       rows={2}
                     />
                   </label>
-                  <div style={{ fontSize: 12, opacity: 0.7 }}>
-                    Expected markers: {detail.template.expected_markers.join(" | ") || "-"}
+                  <div
+                    style={{ fontSize: 12, opacity: 0.7 }}
+                    title="Advanced. Words VoxVulgi looks for in the engine's output to confirm it ran correctly."
+                  >
+                    Success signals (advanced): {detail.template.expected_markers.join(" | ") || "-"}
                   </div>
-                  <div style={{ fontSize: 12, opacity: 0.7 }}>
-                    Placeholders: {"{python_exe} {root_dir} {model_dir} {request_json} {manifest_json} {report_json} {output_dir} {backend_id} {item_id} {track_id} {variant_label}"}
+                  <div
+                    style={{ fontSize: 12, opacity: 0.7 }}
+                    title="Advanced. Fill-in codes you can use in the commands above; VoxVulgi swaps in the real values when it runs."
+                  >
+                    Fill-in codes for the commands above: {"{python_exe} {root_dir} {model_dir} {request_json} {manifest_json} {report_json} {output_dir} {backend_id} {item_id} {track_id} {variant_label}"}
                   </div>
                   {detail.last_probe ? (
-                    <div style={{ fontSize: 12, opacity: 0.75 }}>
-                      Probe: {detail.last_probe.summary}
+                    <div
+                      style={{ fontSize: 12, opacity: 0.75 }}
+                      title="The result of the last time you checked this engine."
+                    >
+                      Last check: {detail.last_probe.summary}
                       {detail.last_probe.messages.length
                         ? ` Messages: ${detail.last_probe.messages.join(" | ")}`
                         : ""}
@@ -3303,27 +3439,31 @@ export function DiagnosticsPage({ visible = true }: { visible?: boolean }) {
                       type="button"
                       disabled={busy || adapterBusy}
                       onClick={() => saveVoiceBackendAdapter(backendId).catch(() => undefined)}
+                      title="Save this engine's settings on your computer."
                     >
-                      Save adapter
+                      Save
                     </button>
                     <button
                       type="button"
                       disabled={busy || adapterBusy || !detail.config}
                       onClick={() => probeVoiceBackendAdapter(backendId).catch(() => undefined)}
+                      title="Check that this engine is set up correctly and works."
                     >
-                      Probe adapter
+                      Check now
                     </button>
                     <button
                       type="button"
                       disabled={busy || adapterBusy || !detail.config}
                       onClick={() => deleteVoiceBackendAdapter(backendId).catch(() => undefined)}
+                      title="Remove this engine's saved settings. Does not delete anything you installed."
                     >
-                      Remove adapter
+                      Remove
                     </button>
                   </div>
                 </div>
               );
             })}
+            </details>
           </div>
         ) : null}
 
@@ -3381,8 +3521,11 @@ export function DiagnosticsPage({ visible = true }: { visible?: boolean }) {
             type="button"
             disabled={busy || (!!diarization?.installed && !diarization?.repair_required)}
             onClick={installDiarizationPack}
+            title="Adds the tools that tell speakers apart, so each person's lines can be labelled separately."
           >
-            {diarization?.repair_required ? "Repair diarization pack" : "Install diarization pack"}
+            {diarization?.repair_required
+              ? "Repair speaker-labelling pack"
+              : "Install speaker-labelling pack"}
           </button>
           <button
             type="button"
@@ -3553,12 +3696,16 @@ export function DiagnosticsPage({ visible = true }: { visible?: boolean }) {
       </div>
 
       <div className="card">
-        <h2>Batch on import (local-only)</h2>
+        <h2>Do these steps automatically on import</h2>
         <div style={{ color: "#4b5563" }}>
-          Off by default. When enabled, importing media will automatically queue the selected jobs.
+          Off by default. When turned on, each video you import will automatically start the steps
+          you tick below. Everything runs on your own computer.
         </div>
         <div className="row" style={{ flexWrap: "wrap" }}>
-          <label style={{ display: "flex", alignItems: "center", gap: 8 }}>
+          <label
+            style={{ display: "flex", alignItems: "center", gap: 8 }}
+            title="Automatically turn spoken words into on-screen subtitles when you import a video."
+          >
             <input
               type="checkbox"
               checked={batchRules?.auto_asr ?? false}
@@ -3573,9 +3720,12 @@ export function DiagnosticsPage({ visible = true }: { visible?: boolean }) {
                 }))
               }
             />
-            <span>Auto ASR</span>
+            <span>Auto subtitles</span>
           </label>
-          <label style={{ display: "flex", alignItems: "center", gap: 8 }}>
+          <label
+            style={{ display: "flex", alignItems: "center", gap: 8 }}
+            title="Automatically translate the subtitles into English when you import a video."
+          >
             <input
               type="checkbox"
               checked={batchRules?.auto_translate ?? false}
@@ -3590,9 +3740,12 @@ export function DiagnosticsPage({ visible = true }: { visible?: boolean }) {
                 }))
               }
             />
-            <span>Auto translate</span>
+            <span>Auto translate to English</span>
           </label>
-          <label style={{ display: "flex", alignItems: "center", gap: 8 }}>
+          <label
+            style={{ display: "flex", alignItems: "center", gap: 8 }}
+            title="Automatically split the background music from the spoken voice when you import a video."
+          >
             <input
               type="checkbox"
               checked={batchRules?.auto_separate ?? false}
@@ -3607,9 +3760,12 @@ export function DiagnosticsPage({ visible = true }: { visible?: boolean }) {
                 }))
               }
             />
-            <span>Auto separate</span>
+            <span>Auto split music &amp; voice</span>
           </label>
-          <label style={{ display: "flex", alignItems: "center", gap: 8 }}>
+          <label
+            style={{ display: "flex", alignItems: "center", gap: 8 }}
+            title="Automatically figure out who is speaking so each person's lines can be labelled."
+          >
             <input
               type="checkbox"
               checked={batchRules?.auto_diarize ?? false}
@@ -3624,9 +3780,12 @@ export function DiagnosticsPage({ visible = true }: { visible?: boolean }) {
                 }))
               }
             />
-            <span>Auto diarize</span>
+            <span>Auto label speakers</span>
           </label>
-          <label style={{ display: "flex", alignItems: "center", gap: 8 }}>
+          <label
+            style={{ display: "flex", alignItems: "center", gap: 8 }}
+            title="Automatically make a quick sample of the English voice-over so you can hear how it sounds."
+          >
             <input
               type="checkbox"
               checked={batchRules?.auto_dub_preview ?? false}
@@ -3645,41 +3804,65 @@ export function DiagnosticsPage({ visible = true }: { visible?: boolean }) {
           </label>
         </div>
         <div className="row">
-          <button type="button" disabled={busy || !batchRules} onClick={saveBatchOnImportRules}>
+          <button
+            type="button"
+            disabled={busy || !batchRules}
+            onClick={saveBatchOnImportRules}
+            title="Remember these automatic steps for every video you import from now on."
+          >
             Save rules
           </button>
-          <button type="button" disabled={busy} onClick={() => refresh()}>
+          <button
+            type="button"
+            disabled={busy}
+            onClick={() => refresh()}
+            title="Reload the current settings from your computer."
+          >
             Refresh
           </button>
         </div>
       </div>
 
       <div className="card">
-        <h2>Optional diarization backend (power-user)</h2>
+        <h2>Advanced: speaker-labelling engine</h2>
         <div style={{ color: "#4b5563" }}>
-          Off by default. This supports BYO gated models/tokens. Tokens are stored locally and are
-          not shown in logs.
+          Most people never need this. Open it only if you want to plug in your own advanced
+          speaker-labelling engine.
+        </div>
+        <details>
+          <summary
+            style={{ cursor: "pointer", color: "#4b5563", fontSize: 12 }}
+            title="Advanced settings for plugging in your own speaker-labelling engine. Safe to leave closed."
+          >
+            Show advanced settings
+          </summary>
+        <div style={{ color: "#4b5563", marginTop: 8 }}>
+          Off by default. Lets you bring your own advanced engine and sign-in key. Your key is kept
+          only on your computer and is never shown in logs.
         </div>
 
         <div className="kv">
-          <div className="k">Enabled</div>
+          <div className="k">Turned on</div>
           <div className="v">{diarizationOptional?.config.enabled ? "yes" : "no"}</div>
         </div>
         <div className="kv">
-          <div className="k">Token present</div>
+          <div className="k">Sign-in key saved</div>
           <div className="v">{diarizationOptional?.token_present ? "yes" : "no"}</div>
         </div>
         <div className="kv">
-          <div className="k">Config path</div>
+          <div className="k">Settings folder</div>
           <div className="v">{diarizationOptional?.config_path ?? "-"}</div>
         </div>
         <div className="kv">
-          <div className="k">Token path</div>
+          <div className="k">Sign-in key folder</div>
           <div className="v">{diarizationOptional?.token_path ?? "-"}</div>
         </div>
 
         <div className="row" style={{ flexWrap: "wrap" }}>
-          <label style={{ display: "flex", alignItems: "center", gap: 8 }}>
+          <label
+            style={{ display: "flex", alignItems: "center", gap: 8 }}
+            title="Turn on your own advanced speaker-labelling engine instead of the built-in one."
+          >
             <input
               type="checkbox"
               checked={diarizationOptionalDraft?.enabled ?? false}
@@ -3694,11 +3877,14 @@ export function DiagnosticsPage({ visible = true }: { visible?: boolean }) {
                 }))
               }
             />
-            <span>Enable optional backend</span>
+            <span>Use my own engine</span>
           </label>
 
-          <label style={{ display: "flex", alignItems: "center", gap: 8 }}>
-            <span>Backend</span>
+          <label
+            style={{ display: "flex", alignItems: "center", gap: 8 }}
+            title="Choose which speaker-labelling engine to use. Leave on 'baseline' if unsure."
+          >
+            <span>Engine</span>
             <select
               value={diarizationOptionalDraft?.backend ?? "baseline"}
               disabled={busy || !diarizationOptionalDraft}
@@ -3719,8 +3905,11 @@ export function DiagnosticsPage({ visible = true }: { visible?: boolean }) {
         </div>
 
         <div className="row" style={{ flexWrap: "wrap" }}>
-          <label style={{ display: "flex", alignItems: "center", gap: 8, flex: 1 }}>
-            <span>Python exe</span>
+          <label
+            style={{ display: "flex", alignItems: "center", gap: 8, flex: 1 }}
+            title="Advanced: point to a specific Python program on your computer. Leave blank to use the built-in one."
+          >
+            <span>Python program</span>
             <input
               value={diarizationOptionalDraft?.python_exe ?? ""}
               disabled={busy || !diarizationOptionalDraft}
@@ -3733,15 +3922,18 @@ export function DiagnosticsPage({ visible = true }: { visible?: boolean }) {
                   local_model_path: prev?.local_model_path ?? null,
                 }))
               }
-              placeholder="Optional override (absolute path)"
+              placeholder="Leave blank to use the built-in one"
               style={{ width: "100%" }}
             />
           </label>
         </div>
 
         <div className="row" style={{ flexWrap: "wrap" }}>
-          <label style={{ display: "flex", alignItems: "center", gap: 8, flex: 1 }}>
-            <span>Model id</span>
+          <label
+            style={{ display: "flex", alignItems: "center", gap: 8, flex: 1 }}
+            title="Advanced: the name of the model your engine should use. Leave blank unless your engine needs it."
+          >
+            <span>Model name</span>
             <input
               value={diarizationOptionalDraft?.model_id ?? ""}
               disabled={busy || !diarizationOptionalDraft}
@@ -3754,15 +3946,18 @@ export function DiagnosticsPage({ visible = true }: { visible?: boolean }) {
                   local_model_path: prev?.local_model_path ?? null,
                 }))
               }
-              placeholder="Optional (backend specific)"
+              placeholder="Leave blank unless your engine needs it"
               style={{ width: "100%" }}
             />
           </label>
         </div>
 
         <div className="row" style={{ flexWrap: "wrap" }}>
-          <label style={{ display: "flex", alignItems: "center", gap: 8, flex: 1 }}>
-            <span>Local model path</span>
+          <label
+            style={{ display: "flex", alignItems: "center", gap: 8, flex: 1 }}
+            title="Advanced: the folder on your computer where the model files are stored. Leave blank unless your engine needs it."
+          >
+            <span>Model folder</span>
             <input
               value={diarizationOptionalDraft?.local_model_path ?? ""}
               disabled={busy || !diarizationOptionalDraft}
@@ -3775,21 +3970,24 @@ export function DiagnosticsPage({ visible = true }: { visible?: boolean }) {
                   local_model_path: e.currentTarget.value.trim() ? e.currentTarget.value : null,
                 }))
               }
-              placeholder="Optional (backend specific)"
+              placeholder="Leave blank unless your engine needs it"
               style={{ width: "100%" }}
             />
           </label>
         </div>
 
         <div className="row" style={{ flexWrap: "wrap" }}>
-          <label style={{ display: "flex", alignItems: "center", gap: 8, flex: 1 }}>
-            <span>Token</span>
+          <label
+            style={{ display: "flex", alignItems: "center", gap: 8, flex: 1 }}
+            title="Advanced: your private sign-in key for the engine. It is kept on your computer and hidden once saved."
+          >
+            <span>Sign-in key</span>
             <input
               type="password"
               value={diarizationOptionalTokenDraft}
               disabled={busy}
               onChange={(e) => setDiarizationOptionalTokenDraft(e.currentTarget.value)}
-              placeholder="Paste token to set/replace (not shown after saving)"
+              placeholder="Paste your key to set or replace it (hidden after saving)"
               style={{ width: "100%" }}
             />
           </label>
@@ -3800,27 +3998,36 @@ export function DiagnosticsPage({ visible = true }: { visible?: boolean }) {
             type="button"
             disabled={busy || !diarizationOptionalDraft}
             onClick={saveOptionalDiarizationBackend}
+            title="Save these advanced engine settings."
           >
-            Save diarization backend
+            Save settings
           </button>
-          <button type="button" disabled={busy} onClick={clearOptionalDiarizationToken}>
-            Clear token
+          <button
+            type="button"
+            disabled={busy}
+            onClick={clearOptionalDiarizationToken}
+            title="Remove your saved sign-in key from this computer."
+          >
+            Clear sign-in key
           </button>
           <button
             type="button"
             disabled={busy || !diarizationOptional?.config_path}
             onClick={() => revealPath(diarizationOptional?.config_path ?? "")}
+            title="Open the folder that holds these saved settings."
           >
-            Reveal config
+            Show settings folder
           </button>
           <button
             type="button"
             disabled={busy || !diarizationOptional?.token_path}
             onClick={() => revealPath(diarizationOptional?.token_path ?? "")}
+            title="Open the folder that holds your saved sign-in key."
           >
-            Reveal token file
+            Show sign-in key folder
           </button>
         </div>
+        </details>
       </div>
 
       <div className="card">

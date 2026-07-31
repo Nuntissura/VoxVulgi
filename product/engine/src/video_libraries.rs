@@ -473,7 +473,12 @@ fn row_to_video_library(
     let root_path: String = row.get(2)?;
     Ok(VideoLibraryRow {
         selected: selected_id == Some(id.as_str()),
-        exists: Path::new(&root_path).is_dir(),
+        // WP-0255: bounded so a dropped NAS share can't hang the library list (and thus the
+        // whole archiver loader) on the SMB timeout. Reports "missing" fast instead of freezing.
+        exists: crate::paths::path_is_dir_bounded(
+            Path::new(&root_path),
+            std::time::Duration::from_millis(700),
+        ),
         id,
         name: row.get(1)?,
         root_path,
@@ -621,6 +626,15 @@ mod tests {
                 video_codec: Some("h264".to_string()),
                 audio_codec: Some("aac".to_string()),
                 thumbnail_path: None,
+                file_status: "available".to_string(),
+                file_status_changed_at_ms: None,
+                file_status_change_source: None,
+                file_delete_method: None,
+                file_redownload_authorized_job_id: None,
+                lineage_service: None,
+                lineage_origin_kind: None,
+                lineage_work_track: None,
+                canonical_service: None,
             },
         )
         .expect("item metadata");
@@ -721,6 +735,15 @@ mod tests {
                 video_codec: None,
                 audio_codec: None,
                 thumbnail_path: None,
+                file_status: "available".to_string(),
+                file_status_changed_at_ms: None,
+                file_status_change_source: None,
+                file_delete_method: None,
+                file_redownload_authorized_job_id: None,
+                lineage_service: None,
+                lineage_origin_kind: None,
+                lineage_work_track: None,
+                canonical_service: None,
             },
         )
         .expect("item");

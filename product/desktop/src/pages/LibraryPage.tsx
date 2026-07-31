@@ -1,12 +1,22 @@
-import { type UIEvent, useCallback, useEffect, useMemo, useState } from "react";
+import {
+  type CSSProperties,
+  type Dispatch,
+  type SetStateAction,
+  type UIEvent,
+  useCallback,
+  useEffect,
+  useMemo,
+  useRef,
+  useState,
+} from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { confirm, open, save } from "@tauri-apps/plugin-dialog";
 import { copyPathToClipboard, openPathBestEffort, revealPath } from "../lib/pathOpener";
 import { safeLocalStorageGet, safeLocalStorageSet } from "../lib/persist";
 import {
-  filterYoutubeSingleVideoItems,
   inferArchiverMediaKind,
-  isSingleVideoLibraryItem,
+  isCanonicalYoutubeSingleVideoItem,
+  jobTrackLabel,
 } from "../lib/archiverRuntime";
 import {
   featureRootStatus,
@@ -14,6 +24,9 @@ import {
   useSharedDownloadDirStatus,
 } from "../lib/sharedDownloadDir";
 import { fileName, joinPath, parentPath } from "../lib/pathUtils";
+// WP-0264: shared failure-state classifier (subscription panel + Jobs use the same rules).
+import { classifyFailure, toneStyle, type FailureState } from "../lib/failureStates";
+import { usePollingLoop } from "../lib/activity";
 
 type LibraryItem = {
   id: string;
@@ -29,8 +42,127 @@ type LibraryItem = {
   video_codec: string | null;
   audio_codec: string | null;
   thumbnail_path: string | null;
+  file_status: "available" | "delete_pending" | "operator_deleted";
+  file_status_changed_at_ms: number | null;
+  file_status_change_source: string | null;
+  file_delete_method: string | null;
+  file_redownload_authorized_job_id: string | null;
+  lineage_service?: string | null;
+  lineage_origin_kind?: string | null;
+  lineage_work_track?: string | null;
+  canonical_service?: string | null;
 };
 
+type DownloadLineageBackfillState = {
+  complete: boolean;
+  has_more: boolean;
+  cursor_job_rowid: number;
+  remaining_candidates: number;
+};
+
+// WP-0270: preserve engine routing in the immediate enqueue receipt instead
+// of reconstructing a track from the submitted URL.
+type EnqueuedJobReceipt = {
+  id: string;
+  track?: string | null;
+};
+
+function summarizeEnqueuedTracks(jobs: EnqueuedJobReceipt[]): string {
+  const counts = new Map<string, number>();
+  for (const job of jobs) {
+    const label = jobTrackLabel(job.track);
+    counts.set(label, (counts.get(label) ?? 0) + 1);
+  }
+  return Array.from(counts.entries())
+    .map(([label, count]) => `${label} ×${count}`)
+    .join(" · ");
+}
+
+type YoutubeSingleHistoryPage = {
+  canonical_total: number;
+  filtered_total: number;
+  unclassified_total: number | null;
+  items: LibraryItem[];
+  backfill: DownloadLineageBackfillState;
+};
+
+type LibraryItemsPage = {
+  filtered_total: number;
+  items: LibraryItem[];
+};
+
+type LiveSingleJob = {
+  id: string;
+  batch_id: string | null;
+  status: "queued" | "running";
+  progress: number;
+  params_json: string;
+  target_title: string | null;
+  created_at_ms: number;
+  started_at_ms: number | null;
+  track: string;
+};
+
+type JobsTrackActivityPage = {
+  jobs: LiveSingleJob[];
+  queued: number;
+  running: number;
+  active_total: number;
+  limit: number;
+  offset: number;
+  has_more: boolean;
+  generated_at_ms: number;
+};
+
+type DownloadPreflightRow = {
+  input_index: number;
+  url: string;
+  status: "ready" | "active" | "present" | "missing" | "operator_deleted" | "storage_unreachable" | "invalid" | "duplicate_input";
+  service: string | null;
+  media_id: string | null;
+  library_item_id: string | null;
+  library_title: string | null;
+  media_path: string | null;
+  active_job_id: string | null;
+  failed_url: string | null;
+  last_error: string | null;
+};
+
+function liveSingleSourceUrl(job: LiveSingleJob): string {
+  try {
+    const value = JSON.parse(job.params_json) as { url?: unknown };
+    return typeof value.url === "string" ? value.url : "";
+  } catch {
+    return "";
+  }
+}
+
+// WP: per-subscription video list for the Video Archiver subscription detail pane.
+// Shape returned by the read-only `youtube_subscription_videos` engine command.
+type SubscriptionPendingVideo = { title: string; url: string };
+type SubscriptionVideosResult = {
+  downloaded: LibraryItem[];
+  deleted: LibraryItem[];
+  pending: SubscriptionPendingVideo[];
+};
+
+type LibraryFileDeleteReceipt = {
+  mode: "trash" | "permanent";
+  requested: number;
+  deleted: number;
+  already_deleted: number;
+  failed: number;
+};
+
+type ManualDeletedRedownloadReceipt = {
+  requested: number;
+  queued: number;
+  failed: number;
+  batch_id: string;
+};
+
+const SUBSCRIPTION_VIDEO_RENDER_STEP = 24;
+const SUBSCRIPTION_LIST_RENDER_STEP = 50;
 const thumbnailDataUrlCache = new Map<string, string>();
 const DEFAULT_BROWSER_COOKIE_SOURCE = "firefox";
 const browserCookieSourceOptions = [
@@ -40,6 +172,10 @@ const browserCookieSourceOptions = [
   { value: "edge", label: "Edge" },
   { value: "opera", label: "Opera" },
 ];
+
+function isOperatorDeletedItem(item: LibraryItem): boolean {
+  return item.file_status === "operator_deleted" || item.file_status === "delete_pending";
+}
 
 function ThumbnailPreview({
   itemId,
@@ -149,6 +285,9 @@ type LibraryContainerMeta = {
 };
 
 function inferProviderLabel(item: LibraryItem): string {
+  if (item.canonical_service === "youtube") return "YouTube";
+  if (item.canonical_service === "instagram") return "Instagram";
+  if (item.canonical_service === "pinterest") return "Pinterest";
   const sourceUri = (item.source_uri ?? "").toLowerCase();
   const sourceType = (item.source_type ?? "").toLowerCase();
   const mediaPath = (item.media_path ?? "").toLowerCase();
@@ -183,16 +322,267 @@ function describeRecurringTarget(
   const pinned = (outputDirOverride ?? "").trim();
   if (pinned) {
     const normalizedDefault = (defaultRoot ?? "").trim().toLowerCase();
-    const looksLegacyPinned =
+    const looksExternalPinned =
       !normalizedDefault || !pinned.toLowerCase().startsWith(normalizedDefault);
     return {
-      mode: looksLegacyPinned ? "Pinned legacy/NAS target" : "Pinned custom target",
+      mode: looksExternalPinned ? "Pinned NAS target" : "Pinned custom target",
       path: pinned,
     };
   }
   return {
     mode: "Managed under current root",
     path: joinPath(defaultRoot, folderMap || ""),
+  };
+}
+
+// WP-0255: small presentation helpers for the subscription manager (master-detail).
+function formatTimeAgo(ms: number | null | undefined): string {
+  if (!ms) return "never";
+  const diff = Date.now() - ms;
+  if (diff < 60_000) return "just now";
+  const min = Math.floor(diff / 60_000);
+  if (min < 60) return `${min}m ago`;
+  const hr = Math.floor(min / 60);
+  if (hr < 24) return `${hr}h ago`;
+  const days = Math.floor(hr / 24);
+  return `${days}d ago`;
+}
+
+// Storage stays in minutes; the UI reads/edits in hours (operator: uploads aren't that frequent).
+function formatRefreshIntervalHours(minutes: number): string {
+  const hours = minutes / 60;
+  if (hours >= 24 && hours % 24 === 0) {
+    const days = hours / 24;
+    return `${days} day${days > 1 ? "s" : ""}`;
+  }
+  if (Number.isInteger(hours)) return `every ${hours}h`;
+  return `every ${hours.toFixed(1)}h`;
+}
+
+// WP: honest per-subscription run state. The pill must NOT conflate refresh/enumeration with
+// actual downloading. Previously any active refresh was labelled "Downloading", so a subscription
+// that was only being checked (or had videos merely queued) lied about downloading while the right
+// pane and Jobs showed nothing. Truthful states:
+//   - "checking"    -> being refreshed/enumerated (activeRefreshSubIds or the activity "checking"
+//                      phase). Refresh only, NOT downloading.
+//   - "downloading" -> a download job is actually RUNNING for this subscription (running > 0).
+//   - "waiting"     -> videos are queued for this subscription but none are running yet.
+//   - "error"       -> failing refreshes / in backoff.
+//   - "idle"        -> nothing in flight.
+type SubscriptionRunState =
+  | "deleted"
+  | "unavailable"
+  | "checking"
+  | "downloading"
+  | "waiting"
+  | "error"
+  | "idle";
+
+// Resolved, truthful per-subscription activity used to drive the pill and the live counts.
+type ResolvedSubscriptionActivity = {
+  isRefreshing: boolean;
+  running: number;
+  queued: number;
+  checking: boolean;
+};
+
+function subscriptionRunState(
+  sub: {
+    source_status: YoutubeSubscriptionSourceStatus;
+    consecutive_failures: number;
+    next_allowed_refresh_at_ms: number | null;
+  },
+  activity: ResolvedSubscriptionActivity,
+): SubscriptionRunState {
+  if (sub.source_status === "deleted") return "deleted";
+  // Downloading ONLY when a download job is actually running for this subscription.
+  if (activity.running > 0) return "downloading";
+  // Checking ONLY while enumerating/refreshing — never for queued-but-not-running downloads.
+  if (activity.isRefreshing || activity.checking) return "checking";
+  // Queued with nothing running yet reads as "Waiting", not "Downloading".
+  if (activity.queued > 0) return "waiting";
+  if (sub.source_status === "unavailable") return "unavailable";
+  if (
+    sub.consecutive_failures > 0 ||
+    (sub.next_allowed_refresh_at_ms != null && sub.next_allowed_refresh_at_ms > Date.now())
+  ) {
+    return "error";
+  }
+  return "idle";
+}
+
+// Presentation for the run-state pill + progress bar. App.css only ships idle/downloading/error
+// palettes; the two new truthful states (checking, waiting) reuse an existing class and layer a
+// distinct inline color so no CSS edit is required (this file is the only edit surface this run).
+function subscriptionRunPresentation(state: SubscriptionRunState): {
+  label: string;
+  pillClassName: string;
+  pillStyle?: CSSProperties;
+  barClassName: string;
+  barStyle?: CSSProperties;
+} {
+  switch (state) {
+    case "deleted":
+      return {
+        label: "Deleted",
+        pillClassName: "sub-pill-error",
+        pillStyle: { background: "rgba(71, 85, 105, 0.18)", color: "#334155" },
+        barClassName: "sub-bar-fill-error",
+        barStyle: { background: "#64748b" },
+      };
+    case "unavailable":
+      return {
+        label: "Unavailable",
+        pillClassName: "sub-pill-error",
+        pillStyle: { background: "rgba(214, 158, 46, 0.18)", color: "#8a6d1a" },
+        barClassName: "sub-bar-fill-error",
+        barStyle: { background: "#d69e2e" },
+      };
+    case "downloading":
+      return {
+        label: "Downloading",
+        pillClassName: "sub-pill-downloading",
+        barClassName: "sub-bar-fill-downloading",
+      };
+    case "checking":
+      return {
+        label: "Checking",
+        pillClassName: "sub-pill-idle",
+        pillStyle: { background: "rgba(47, 158, 87, 0.16)", color: "#1f7a43" },
+        barClassName: "sub-bar-fill-idle",
+        barStyle: { background: "#2f9e57" },
+      };
+    case "waiting":
+      return {
+        label: "Waiting",
+        pillClassName: "sub-pill-idle",
+        pillStyle: { background: "rgba(214, 158, 46, 0.18)", color: "#8a6d1a" },
+        barClassName: "sub-bar-fill-idle",
+        barStyle: { background: "#d69e2e" },
+      };
+    case "error":
+      return {
+        label: "Needs attention",
+        pillClassName: "sub-pill-error",
+        barClassName: "sub-bar-fill-error",
+      };
+    default:
+      return {
+        label: "Idle",
+        pillClassName: "sub-pill-idle",
+        barClassName: "sub-bar-fill-idle",
+      };
+  }
+}
+
+// Resolve the truthful activity for one subscription from all available signals.
+// `subscription_download_activity` (a dedicated read-only command that may not be registered this
+// run) is authoritative for running/queued download counts; the older youtube_subscriptions_activity
+// feed is the fallback when the dedicated command returned nothing for this subscription.
+function resolveSubscriptionActivity(
+  subId: string,
+  isRefreshing: boolean,
+  downloadActivity: Record<string, SubscriptionDownloadActivityRow>,
+  activity: Record<string, SubscriptionActivityRow>,
+): ResolvedSubscriptionActivity {
+  const dl = downloadActivity[subId];
+  const act = activity[subId];
+  const running = dl ? dl.running : act ? act.running : 0;
+  const queued = dl ? dl.queued : act ? act.queued : 0;
+  const checking = act ? act.phase === "checking" : false;
+  return { isRefreshing, running, queued, checking };
+}
+
+// WP-0264: compact form of a classifyFailure label for the tight status strip
+// (e.g. "Channel/handle not found" -> "handle not found"). Keeps the aggregate
+// line short; the full label + requirement still shows on each sub's chip.
+function compactFailureLabel(label: string): string {
+  switch (label) {
+    case "Sign-in needed":
+      return "sign-in";
+    case "Channel/handle not found":
+      return "handle not found";
+    case "Unavailable":
+      return "unavailable";
+    case "YouTube is rate-limiting":
+      return "rate-limited";
+    case "Members-only / private":
+      return "members-only";
+    case "Busy (temporary)":
+      return "busy";
+    case "Network problem":
+      return "network";
+    case "Error":
+      return "error";
+    case "Unclassified":
+      return "unclassified";
+    default:
+      return label.toLowerCase();
+  }
+}
+
+// WP: single source of truth for "which attention bucket a failing subscription falls in".
+// A subscription needs attention when it has consecutive failures. The bucket label matches
+// the aggregate status-strip breakdown so clicking a category filters to exactly those subs.
+// Returns null when the subscription is healthy (no attention needed).
+function subscriptionAttentionBucket(sub: {
+  source_status: YoutubeSubscriptionSourceStatus;
+  consecutive_failures: number;
+  last_error_message?: string | null;
+}): string | null {
+  if (sub.source_status === "deleted") return null;
+  if (sub.source_status === "unavailable") return "Unavailable";
+  if (sub.consecutive_failures <= 0) return null;
+  const state = classifyFailure(sub.last_error_message);
+  return state.kind === "ok" ? "Unclassified" : state.label;
+}
+
+// WP: the chip to show for a failing subscription. Classifies the stored error into a plain
+// state + required fix. A failing sub with NO stored error (older data / never persisted) still
+// gets an actionable "Unclassified" chip instead of rendering nothing, so the operator can always
+// see WHICH subs need attention and HOW to fix them. Returns null for healthy subscriptions.
+function subscriptionAttentionChip(sub: {
+  source_status: YoutubeSubscriptionSourceStatus;
+  consecutive_failures: number;
+  last_error_message?: string | null;
+}): FailureState | null {
+  if (sub.source_status === "deleted") return null;
+  if (sub.source_status === "unavailable") {
+    return {
+      kind: "channel_not_found",
+      label: "Unavailable",
+      requirement:
+        "This subscription URL returned HTTP 404. This does not prove its hosting channel was deleted; the URL may be renamed, private, restricted, temporarily unavailable, or undisclosed.",
+      tone: "warn",
+    };
+  }
+  if (sub.consecutive_failures <= 0) return null;
+  const state = classifyFailure(sub.last_error_message);
+  if (state.kind === "ok") {
+    return {
+      kind: "unknown",
+      label: "Unclassified",
+      requirement: "No error detail stored yet — click Queue now to re-check this subscription.",
+      tone: "error",
+    };
+  }
+  return state;
+}
+
+// WP: inline styling for the clickable "need attention" filter controls in the status strip.
+// App.css is owned by another agent this run, so the active/inactive chip styling lives inline.
+function attentionFilterButtonStyle(active: boolean, primary: boolean): CSSProperties {
+  return {
+    cursor: "pointer",
+    borderRadius: 999,
+    border: `1px solid ${active ? "#b91c1c" : "#fca5a5"}`,
+    background: active ? "#b91c1c" : primary ? "#fef2f2" : "#ffffff",
+    color: active ? "#ffffff" : "#b91c1c",
+    fontSize: primary ? 13 : 11,
+    fontWeight: 600,
+    lineHeight: 1.4,
+    padding: primary ? "1px 10px" : "1px 8px",
+    whiteSpace: "nowrap",
   };
 }
 
@@ -295,6 +685,8 @@ type BatchOnImportRules = {
   auto_dub_preview: boolean;
 };
 
+type YoutubeSubscriptionSourceStatus = "normal" | "unavailable" | "deleted";
+
 type YoutubeSubscriptionRow = {
   id: string;
   title: string;
@@ -306,6 +698,9 @@ type YoutubeSubscriptionRow = {
   browser_cookie_source: string | null;
   auth_session_configured: boolean;
   active: boolean;
+  source_status: YoutubeSubscriptionSourceStatus;
+  source_status_changed_at_ms: number | null;
+  source_status_change_source: string | null;
   preset_id: string | null;
   group_ids: string[];
   refresh_interval_minutes: number;
@@ -315,6 +710,43 @@ type YoutubeSubscriptionRow = {
   next_allowed_refresh_at_ms: number | null;
   created_at_ms: number;
   updated_at_ms: number;
+  // WP-0255: honest per-subscription progress (schema v18; written on refresh completion).
+  last_checked_at_ms?: number | null;
+  upstream_total?: number | null;
+  last_new_found?: number | null;
+  last_refresh_queued?: number | null;
+  // WP-0264: latest raw refresh error, stored on the sub so the panel can classify the
+  // failure state without a per-poll job join. Cleared (NULL) on a successful refresh.
+  // Declared optional so tsc is happy before the engine (schema v21) ships the field.
+  last_error_message?: string | null;
+};
+
+type YoutubeSubscriptionStatusChangeReceipt = {
+  subscription: YoutubeSubscriptionRow;
+  canceled_refresh_jobs: number;
+};
+
+// WP-0261: live per-subscription activity (from the youtube_subscriptions_activity command).
+type SubscriptionActivityRow = {
+  subscription_id: string;
+  phase: "checking" | "downloading" | "idle";
+  queued: number;
+  running: number;
+  succeeded: number;
+  failed: number;
+  current_title: string | null;
+  current_progress: number | null;
+};
+
+// WP: dedicated read-only per-subscription download activity — authoritative counts of how many
+// download jobs are actually RUNNING vs merely QUEUED for a subscription. Used to keep the run-state
+// pill honest ("Downloading" only when running > 0, "Waiting" when queued but not running). Sourced
+// from the `subscription_download_activity` command; guarded, since the command may not be
+// registered this run (then the activity feed above is the fallback).
+type SubscriptionDownloadActivityRow = {
+  subscription_id: string;
+  running: number;
+  queued: number;
 };
 
 type YoutubeSubscriptionUpsert = {
@@ -396,14 +828,6 @@ type YoutubeSubscriptionArchiveSeedSummary = {
   skipped_existing_ids: number;
 };
 
-type ExistingDownloadsImportSummary = {
-  scanned_dir: string;
-  discovered_media_files: number;
-  imported_items: number;
-  skipped_existing_items: number;
-  failures: number;
-};
-
 type InstagramSubscriptionRow = {
   id: string;
   title: string;
@@ -432,50 +856,6 @@ type InstagramSubscriptionUpsert = {
   clear_auth_session?: boolean;
   active: boolean;
   refresh_interval_minutes: number | null;
-};
-
-type LegacyArchiveContainerHint = {
-  relative_path: string;
-  media_file_count: number;
-};
-
-type LegacyArchiveManagedContainerHint = {
-  container_kind: string;
-  relative_path: string;
-  title: string;
-  source_url: string;
-  matched_root_path: string | null;
-};
-
-type LegacyArchiveAnalysisSummary = {
-  root_path: string;
-  install_path: string | null;
-  install_path_exists: boolean;
-  legacy_state_db_path: string | null;
-  legacy_state_db_exists: boolean;
-  media_file_count: number;
-  detected_4kvdp_install: boolean;
-  detected_4kvdp_subscriptions_json: boolean;
-  detected_4kvdp_subscription_entries_csv: boolean;
-  detected_channel_dirs: number;
-  detected_playlist_dirs: number;
-  top_level_dir_count: number;
-  top_level_file_count: number;
-  managed_container_count: number;
-  managed_subscription_count: number;
-  managed_playlist_count: number;
-  matched_managed_dirs: number;
-  unmatched_top_level_dirs: number;
-  scan_max_depth: number;
-  scan_max_files: number;
-  local_report_path: string;
-  warnings: string[];
-  container_hints: LegacyArchiveContainerHint[];
-  managed_container_hints: LegacyArchiveManagedContainerHint[];
-  sample_unmatched_dirs: string[];
-  sample_top_level_files: string[];
-  sample_media_paths: string[];
-  recommendations: string[];
 };
 
 type DownloadPreset = {
@@ -511,37 +891,6 @@ type YoutubeSubscriptionsImportSummary = {
   updated: number;
 };
 
-type YoutubeSubscriptionsImport4kvdpSummary = {
-  total_in_subscriptions_json: number;
-  imported_subscriptions: number;
-  inserted: number;
-  updated: number;
-  skipped_non_youtube: number;
-  archive_seeded_subscriptions: number;
-  archive_seeded_entries: number;
-  archive_skipped_entries: number;
-  archive_seed_failures: number;
-};
-
-type YoutubeSubscriptionsImport4kvdpStateSummary = {
-  sqlite_path: string;
-  total_in_legacy_state: number;
-  imported_sources: number;
-  imported_subscription_sources: number;
-  imported_playlist_sources: number;
-  inserted: number;
-  updated: number;
-  skipped_non_youtube: number;
-  mapped_to_selected_root: number;
-  retained_existing_legacy_dir: number;
-  missing_target_dirs: number;
-  archive_seeded_subscriptions: number;
-  archive_seeded_entries: number;
-  archive_skipped_entries: number;
-  archive_seed_failures: number;
-  group_names: string[];
-};
-
 const DEFAULT_PRESET_YT_DLP_CONCURRENT_FRAGMENTS = 4;
 const DEFAULT_PRESET_YT_DLP_THROTTLED_RATE = "100K";
 const DEFAULT_PRESET_YT_DLP_FILE_ACCESS_RETRIES = 10;
@@ -568,6 +917,7 @@ export function LibraryPage({ mode = "all", visible = true }: LibraryPageProps) 
   const maxInstagramBatchUrls = 1500;
   const maxImageBatchUrls = 1500;
   const libraryPageSize = 200;
+  const singleActivityPageSize = 100;
   const libraryViewportHeight = "min(72vh, 960px)";
   const libraryLoadMoreThresholdPx = 240;
   const ACTIVE_REFRESH_IDS_DEFER_MS = 5_000;
@@ -579,6 +929,7 @@ export function LibraryPage({ mode = "all", visible = true }: LibraryPageProps) 
   const showImageArchive = mode === "all" || mode === "image_archive";
   const showMediaLibrary = mode === "all" || mode === "media_library";
   const showImportControls = showMediaLibrary;
+  const refreshEpochRef = useRef(0);
   const title =
     mode === "video_ingest"
       ? "Video Archiver"
@@ -593,6 +944,19 @@ export function LibraryPage({ mode = "all", visible = true }: LibraryPageProps) 
   const [itemsOffset, setItemsOffset] = useState(0);
   const [itemsHasMore, setItemsHasMore] = useState(true);
   const [itemsLoadingMore, setItemsLoadingMore] = useState(false);
+  const [mediaLibraryFilteredTotal, setMediaLibraryFilteredTotal] = useState(0);
+  const [youtubeSingleHistoryPage, setYoutubeSingleHistoryPage] =
+    useState<YoutubeSingleHistoryPage | null>(null);
+  const [youtubeSingleUnclassifiedTotal, setYoutubeSingleUnclassifiedTotal] =
+    useState<number | null>(null);
+  const [youtubeSingleUnclassifiedError, setYoutubeSingleUnclassifiedError] =
+    useState<string | null>(null);
+  const [youtubeSingleActivityPage, setYoutubeSingleActivityPage] =
+    useState<JobsTrackActivityPage | null>(null);
+  const [youtubeSingleActivityOffset, setYoutubeSingleActivityOffset] = useState(0);
+  const previousYoutubeSingleActiveTotal = useRef<number | null>(null);
+  const [, setYoutubeLineageBackfillBusy] = useState(false);
+  const [youtubeLineageBackfillError, setYoutubeLineageBackfillError] = useState<string | null>(null);
   const [videoLibraries, setVideoLibraries] = useState<VideoLibraryRow[]>([]);
   const [videoLibraryName, setVideoLibraryName] = useState("");
   const [videoLibraryRoot, setVideoLibraryRoot] = useState("");
@@ -603,6 +967,12 @@ export function LibraryPage({ mode = "all", visible = true }: LibraryPageProps) 
   );
   const [subscriptionGroups, setSubscriptionGroups] = useState<YoutubeSubscriptionGroupRow[]>([]);
   const [archiveStats, setArchiveStats] = useState<Record<string, number>>({});
+  // WP-0261: live "what's being processed" per subscription (keyed by subscription_id).
+  const [subActivity, setSubActivity] = useState<Record<string, SubscriptionActivityRow>>({});
+  // WP: authoritative per-subscription download activity (running vs queued), keyed by subscription_id.
+  const [subDownloadActivity, setSubDownloadActivity] = useState<
+    Record<string, SubscriptionDownloadActivityRow>
+  >({});
   const [activeRefreshSubIds, setActiveRefreshSubIds] = useState<Set<string>>(new Set());
   const [advancedMode, setAdvancedMode] = useState(() => {
     return safeLocalStorageGet("voxvulgi.v1.library.advanced_mode") === "1";
@@ -625,12 +995,17 @@ export function LibraryPage({ mode = "all", visible = true }: LibraryPageProps) 
     return "auto";
   });
   const [urlBatchText, setUrlBatchText] = useState("");
+  const [downloadPreflightRows, setDownloadPreflightRows] = useState<DownloadPreflightRow[]>([]);
+  const [replacementUrlByIdentity, setReplacementUrlByIdentity] = useState<Record<string, string>>({});
   const [urlBatchOutputDir, setUrlBatchOutputDir] = useState(() => {
     return safeLocalStorageGet("voxvulgi.v1.library.url_batch_output_dir") ?? "";
   });
   const [youtubeSingleHistorySearch, setYoutubeSingleHistorySearch] = useState(() => {
     return safeLocalStorageGet("voxvulgi.v1.library.youtube_single_history_search") ?? "";
   });
+  const [youtubeSingleHistoryAppliedSearch, setYoutubeSingleHistoryAppliedSearch] = useState(
+    () => safeLocalStorageGet("voxvulgi.v1.library.youtube_single_history_search") ?? "",
+  );
   const [youtubeSingleHistoryDirection, setYoutubeSingleHistoryDirection] = useState<
     "desc" | "asc"
   >(() => {
@@ -755,16 +1130,22 @@ export function LibraryPage({ mode = "all", visible = true }: LibraryPageProps) 
   const [subscriptionLibraryId, setSubscriptionLibraryId] = useState<string>("");
   const [subscriptionGroupIds, setSubscriptionGroupIds] = useState<string[]>([]);
   const [subscriptionGroupFilterId, setSubscriptionGroupFilterId] = useState<string>("");
+  // WP-0254/WP-0255: reflects the recurring-lane Stop state for the Update-all/Stop buttons.
+  const [recurringStopped, setRecurringStopped] = useState(false);
   const [subscriptionRefreshIntervalMinutes, setSubscriptionRefreshIntervalMinutes] = useState(() => {
     const raw = safeLocalStorageGet("voxvulgi.v1.library.youtube_subscription_refresh_interval_minutes");
     const parsed = raw ? Number(raw) : NaN;
     if (Number.isFinite(parsed)) {
+      // WP-0255: the editor default is now 12h (720 min) because uploads aren't that frequent.
+      // The old hardcoded default was 60 min; treat a persisted legacy 60 as "never chosen"
+      // and upgrade it to the new 12h default. Per-subscription stored intervals are unaffected.
+      const value = parsed === 60 ? 720 : Math.round(parsed);
       return Math.max(
         minSubscriptionRefreshIntervalMinutes,
-        Math.min(maxSubscriptionRefreshIntervalMinutes, Math.round(parsed)),
+        Math.min(maxSubscriptionRefreshIntervalMinutes, value),
       );
     }
-    return 60;
+    return 720;
   });
   const [urlBatchPresetId, setUrlBatchPresetId] = useState(() => {
     return safeLocalStorageGet("voxvulgi.v1.library.url_batch_preset_id") ?? "";
@@ -800,29 +1181,6 @@ export function LibraryPage({ mode = "all", visible = true }: LibraryPageProps) 
   const [presetYtDlpSleepRequests, setPresetYtDlpSleepRequests] = useState(
     `${DEFAULT_PRESET_YT_DLP_SLEEP_REQUESTS}`,
   );
-  const [legacyArchiveRoot, setLegacyArchiveRoot] = useState(() => {
-    return safeLocalStorageGet("voxvulgi.v1.library.legacy_archive_root") ?? "";
-  });
-  const [legacyArchiveInstallPath, setLegacyArchiveInstallPath] = useState(() => {
-    return (
-      safeLocalStorageGet("voxvulgi.v1.library.legacy_archive_install_path") ??
-      "C:\\Program Files\\4KDownload\\4kvideodownloaderplus"
-    );
-  });
-  const [legacyArchiveMaxDepth, setLegacyArchiveMaxDepth] = useState(() => {
-    const raw = safeLocalStorageGet("voxvulgi.v1.library.legacy_archive_max_depth");
-    const parsed = raw ? Number(raw) : NaN;
-    if (Number.isFinite(parsed) && parsed >= 1) return Math.round(parsed);
-    return 4;
-  });
-  const [legacyArchiveMaxFiles, setLegacyArchiveMaxFiles] = useState(() => {
-    const raw = safeLocalStorageGet("voxvulgi.v1.library.legacy_archive_max_files");
-    const parsed = raw ? Number(raw) : NaN;
-    if (Number.isFinite(parsed) && parsed >= 1) return Math.round(parsed);
-    return 2500;
-  });
-  const [legacyArchiveAnalysis, setLegacyArchiveAnalysis] =
-    useState<LegacyArchiveAnalysisSummary | null>(null);
   const [mediaLibrarySearch, setMediaLibrarySearch] = useState(() => {
     return safeLocalStorageGet("voxvulgi.v1.library.media_search") ?? "";
   });
@@ -854,6 +1212,22 @@ export function LibraryPage({ mode = "all", visible = true }: LibraryPageProps) 
     if (raw === "youtube" || raw === "instagram" || raw === "local") return raw;
     return "all";
   });
+  const [mediaLibraryFileStatus, setMediaLibraryFileStatus] = useState<
+    "available" | "operator_deleted" | "all"
+  >(() => {
+    const raw = safeLocalStorageGet("voxvulgi.v1.library.media_file_status");
+    if (raw === "operator_deleted" || raw === "all") return raw;
+    return "available";
+  });
+  const [mediaLibrarySelectedIds, setMediaLibrarySelectedIds] = useState<Set<string>>(
+    () => new Set(),
+  );
+  const [subscriptionVideoSelectedIds, setSubscriptionVideoSelectedIds] = useState<Set<string>>(
+    () => new Set(),
+  );
+  const [libraryFileDeleteMode, setLibraryFileDeleteMode] = useState<"trash" | "permanent">(
+    "trash",
+  );
   const [mediaLibrarySingleVideoOnly, setMediaLibrarySingleVideoOnly] = useState(() => {
     return safeLocalStorageGet("voxvulgi.v1.library.media_single_video_only") === "1";
   });
@@ -926,13 +1300,155 @@ export function LibraryPage({ mode = "all", visible = true }: LibraryPageProps) 
   }, [subscriptionGroupFilterId, subscriptions]);
 
   const activeSubscriptionCount = useMemo(
-    () => visibleSubscriptions.filter((sub) => sub.active).length,
+    () =>
+      visibleSubscriptions.filter(
+        (sub) => sub.active && sub.source_status !== "deleted",
+      ).length,
     [visibleSubscriptions],
+  );
+  // WP-0255: "Update all now" force-updates ALL active subs (the engine command has no group
+  // scope), so its count must reflect the global active set, not the group-filtered view.
+  const allActiveSubscriptionCount = useMemo(
+    () =>
+      subscriptions.filter(
+        (sub) => sub.active && sub.source_status !== "deleted",
+      ).length,
+    [subscriptions],
+  );
+  // WP-0255: master-detail selection + all-subscriptions status overview strip.
+  const [selectedSubscriptionId, setSelectedSubscriptionId] = useState<string | null>(null);
+  const selectedSubscription = useMemo(
+    () => visibleSubscriptions.find((sub) => sub.id === selectedSubscriptionId) ?? null,
+    [visibleSubscriptions, selectedSubscriptionId],
+  );
+  // WP: "need attention" is now an ACTIONABLE filter, not a dead readout. null = show all,
+  // "__all__" = show every failing sub, or a specific classifyFailure bucket label to narrow to
+  // one failure kind. Clicking the status strip (or a category) sets this; the list re-renders to
+  // only the matching subs, each with its failure chip + required fix.
+  const [attentionFilter, setAttentionFilter] = useState<string | null>(null);
+  // WP: hide the green "Checking for new videos…" activity list. Hidden by DEFAULT (operator found
+  // it noisy) and persisted so the choice survives reloads.
+  const [hideProcessingList, setHideProcessingList] = useState(() => {
+    const raw = safeLocalStorageGet("voxvulgi.v1.library.hide_processing_list");
+    return raw === null ? true : raw === "1";
+  });
+  // Per-subscription video list for the detail pane: pending (still to download) + downloaded.
+  const [subscriptionVideos, setSubscriptionVideos] = useState<SubscriptionVideosResult>({
+    downloaded: [],
+    deleted: [],
+    pending: [],
+  });
+  const [pendingVideoRenderLimit, setPendingVideoRenderLimit] = useState(
+    SUBSCRIPTION_VIDEO_RENDER_STEP,
+  );
+  const [downloadedVideoRenderLimit, setDownloadedVideoRenderLimit] = useState(
+    SUBSCRIPTION_VIDEO_RENDER_STEP,
+  );
+  const [deletedVideoRenderLimit, setDeletedVideoRenderLimit] = useState(
+    SUBSCRIPTION_VIDEO_RENDER_STEP,
+  );
+  const [subscriptionVideosLoading, setSubscriptionVideosLoading] = useState(false);
+  const loadSelectedSubscriptionVideos = useCallback(async () => {
+    const subId = selectedSubscription?.id ?? null;
+    setPendingVideoRenderLimit(SUBSCRIPTION_VIDEO_RENDER_STEP);
+    setDownloadedVideoRenderLimit(SUBSCRIPTION_VIDEO_RENDER_STEP);
+    setDeletedVideoRenderLimit(SUBSCRIPTION_VIDEO_RENDER_STEP);
+    setSubscriptionVideoSelectedIds(new Set());
+    if (!subId) {
+      setSubscriptionVideos({ downloaded: [], deleted: [], pending: [] });
+      setSubscriptionVideosLoading(false);
+      return;
+    }
+    setSubscriptionVideosLoading(true);
+    const result = await invoke<SubscriptionVideosResult>("youtube_subscription_videos", {
+      subscriptionId: subId,
+      limit: 500,
+    }).catch(
+      () => ({ downloaded: [], deleted: [], pending: [] }) as SubscriptionVideosResult,
+    );
+    setSubscriptionVideos({
+      downloaded: Array.isArray(result?.downloaded) ? result.downloaded : [],
+      deleted: Array.isArray(result?.deleted) ? result.deleted : [],
+      pending: Array.isArray(result?.pending) ? result.pending : [],
+    });
+    setSubscriptionVideosLoading(false);
+  }, [selectedSubscription?.id]);
+  useEffect(() => {
+    void loadSelectedSubscriptionVideos();
+  }, [loadSelectedSubscriptionVideos]);
+  const subscriptionOverview = useMemo(() => {
+    let updating = 0;
+    let errored = 0;
+    let lastSync: number | null = null;
+    // WP-0264: per-kind breakdown of the failing subs, so the status strip reads
+    // "3 sign-in · 16 handle not found · 24 busy" instead of a bare "45 need attention".
+    // Classify each failing sub's last_error_message and count by the plain label.
+    const kindCounts = new Map<string, number>();
+    for (const sub of visibleSubscriptions) {
+      if (activeRefreshSubIds.has(sub.id)) updating += 1;
+      // WP: bucket via the shared helper so the strip counts, the clickable categories, and the
+      // per-row chip all agree on which subs need attention and how they are classified.
+      const bucket = subscriptionAttentionBucket(sub);
+      if (bucket) {
+        errored += 1;
+        kindCounts.set(bucket, (kindCounts.get(bucket) ?? 0) + 1);
+      }
+      const checked = sub.last_checked_at_ms ?? null;
+      if (checked != null && (lastSync == null || checked > lastSync)) lastSync = checked;
+    }
+    const breakdown = Array.from(kindCounts.entries())
+      .sort((a, b) => b[1] - a[1])
+      .map(([label, count]) => ({ label, count }));
+    return { total: visibleSubscriptions.length, updating, errored, lastSync, breakdown };
+  }, [visibleSubscriptions, activeRefreshSubIds]);
+  // WP: the subscription list actually rendered. When an attention filter is active it narrows to
+  // just the failing subs (optionally one failure bucket); otherwise it is the full group-filtered
+  // set. Derived AFTER the overview so the strip counts always reflect the full set, not the filter.
+  const displayedSubscriptions = useMemo(() => {
+    if (!attentionFilter) return visibleSubscriptions;
+    return visibleSubscriptions.filter((sub) => {
+      const bucket = subscriptionAttentionBucket(sub);
+      if (!bucket) return false;
+      return attentionFilter === "__all__" || bucket === attentionFilter;
+    });
+  }, [attentionFilter, visibleSubscriptions]);
+  const [subscriptionListRenderLimit, setSubscriptionListRenderLimit] = useState(
+    SUBSCRIPTION_LIST_RENDER_STEP,
+  );
+  useEffect(() => {
+    setSubscriptionListRenderLimit(SUBSCRIPTION_LIST_RENDER_STEP);
+  }, [attentionFilter, subscriptionGroupFilterId]);
+  const renderedSubscriptions = useMemo(
+    () => displayedSubscriptions.slice(0, subscriptionListRenderLimit),
+    [displayedSubscriptions, subscriptionListRenderLimit],
   );
   const activeInstagramSubscriptionCount = useMemo(
     () => instagramSubscriptions.filter((sub) => sub.active).length,
     [instagramSubscriptions],
   );
+  // WP-0263: master-detail selection + all-subscriptions status overview strip for Instagram,
+  // mirroring the YouTube subscription manager. Instagram rows carry fewer fields (no
+  // consecutive_failures / upstream_total / last_checked_at_ms), so the overview degrades to the
+  // fields the Instagram store actually provides.
+  const [selectedInstagramSubscriptionId, setSelectedInstagramSubscriptionId] = useState<
+    string | null
+  >(null);
+  const selectedInstagramSubscription = useMemo(
+    () => instagramSubscriptions.find((sub) => sub.id === selectedInstagramSubscriptionId) ?? null,
+    [instagramSubscriptions, selectedInstagramSubscriptionId],
+  );
+  const instagramSubscriptionOverview = useMemo(() => {
+    let lastSync: number | null = null;
+    for (const sub of instagramSubscriptions) {
+      const queued = sub.last_queued_at_ms ?? null;
+      if (queued != null && (lastSync == null || queued > lastSync)) lastSync = queued;
+    }
+    return {
+      total: instagramSubscriptions.length,
+      active: activeInstagramSubscriptionCount,
+      lastSync,
+    };
+  }, [instagramSubscriptions, activeInstagramSubscriptionCount]);
   const videoRootStatus = useMemo(() => featureRootStatus(downloadDir, "video"), [downloadDir]);
   const instagramRootStatus = useMemo(
     () => featureRootStatus(downloadDir, "instagram"),
@@ -973,62 +1489,12 @@ export function LibraryPage({ mode = "all", visible = true }: LibraryPageProps) 
     () => imageRootStatus?.current_dir?.trim() || imageRootStatus?.default_dir?.trim() || "",
     [imageRootStatus],
   );
-  const filteredMediaItems = useMemo(() => {
-    const needle = mediaLibrarySearch.trim().toLowerCase();
-    const filtered = items.filter((item) => {
-      const mediaKind = inferMediaKind(item);
-      if (mediaLibraryTypeFilter !== "all" && mediaKind !== mediaLibraryTypeFilter) {
-        return false;
-      }
-      if (mediaLibrarySingleVideoOnly && !isSingleVideoLibraryItem(item, effectiveDownloadRoot)) {
-        return false;
-      }
-      if (mediaLibrarySourceFilter !== "all") {
-        const provider = inferProviderLabel(item).toLowerCase();
-        if (mediaLibrarySourceFilter === "youtube" && !provider.includes("youtube")) return false;
-        if (mediaLibrarySourceFilter === "instagram" && !provider.includes("instagram")) return false;
-        if (mediaLibrarySourceFilter === "local" && !provider.includes("local")) return false;
-      }
-      if (!needle) return true;
-      const haystack = [
-        item.title,
-        item.media_path,
-        item.source_uri,
-        item.video_codec,
-        item.audio_codec,
-      ]
-        .filter(Boolean)
-        .join(" ")
-        .toLowerCase();
-      return haystack.includes(needle);
-    });
-    filtered.sort((a, b) => {
-      const base =
-        mediaLibrarySortBy === "title"
-          ? (a.title ?? "").localeCompare(b.title ?? "")
-          : (a.created_at_ms ?? 0) - (b.created_at_ms ?? 0);
-      return mediaLibrarySortDirection === "asc" ? base : -base;
-    });
-    return filtered;
-  }, [
-    items,
-    mediaLibrarySearch,
-    mediaLibraryTypeFilter,
-    mediaLibrarySingleVideoOnly,
-    mediaLibrarySourceFilter,
-    mediaLibrarySortBy,
-    mediaLibrarySortDirection,
-    effectiveDownloadRoot,
-  ]);
+  // WP-0286: the engine has already applied every canonical predicate before pagination. This
+  // loaded page must not be filtered or sorted again in React, or rows outside the page disappear.
+  const filteredMediaItems = items;
   const youtubeSingleVideoItems = useMemo(
-    () =>
-      filterYoutubeSingleVideoItems(
-        items,
-        youtubeSingleHistorySearch,
-        effectiveDownloadRoot,
-        youtubeSingleHistoryDirection,
-      ),
-    [effectiveDownloadRoot, items, youtubeSingleHistoryDirection, youtubeSingleHistorySearch],
+    () => items.filter(isCanonicalYoutubeSingleVideoItem),
+    [items],
   );
   const mediaLibraryRows = useMemo(
     () =>
@@ -1038,6 +1504,44 @@ export function LibraryPage({ mode = "all", visible = true }: LibraryPageProps) 
         containerMeta: deriveLibraryContainerMeta(item, effectiveDownloadRoot),
       })),
     [effectiveDownloadRoot, filteredMediaItems],
+  );
+  const mediaLibrarySelectedItems = useMemo(
+    () => items.filter((item) => mediaLibrarySelectedIds.has(item.id)),
+    [items, mediaLibrarySelectedIds],
+  );
+  const mediaLibrarySelectedAvailableIds = useMemo(
+    () =>
+      mediaLibrarySelectedItems
+        .filter(
+          (item) =>
+            !isOperatorDeletedItem(item) &&
+            inferMediaKind(item) === "video" &&
+            inferProviderLabel(item).toLowerCase().includes("youtube"),
+        )
+        .map((item) => item.id),
+    [mediaLibrarySelectedItems],
+  );
+  const mediaLibrarySelectedDeletedIds = useMemo(
+    () => mediaLibrarySelectedItems.filter(isOperatorDeletedItem).map((item) => item.id),
+    [mediaLibrarySelectedItems],
+  );
+  const subscriptionSelectedItems = useMemo(
+    () =>
+      [...subscriptionVideos.downloaded, ...subscriptionVideos.deleted].filter((item) =>
+        subscriptionVideoSelectedIds.has(item.id),
+      ),
+    [subscriptionVideoSelectedIds, subscriptionVideos.deleted, subscriptionVideos.downloaded],
+  );
+  const subscriptionSelectedAvailableIds = useMemo(
+    () =>
+      subscriptionSelectedItems
+        .filter((item) => !isOperatorDeletedItem(item))
+        .map((item) => item.id),
+    [subscriptionSelectedItems],
+  );
+  const subscriptionSelectedDeletedIds = useMemo(
+    () => subscriptionSelectedItems.filter(isOperatorDeletedItem).map((item) => item.id),
+    [subscriptionSelectedItems],
   );
   const groupedMediaItems = useMemo(() => {
     if (mediaLibraryGroupMode === "flat") {
@@ -1089,30 +1593,119 @@ export function LibraryPage({ mode = "all", visible = true }: LibraryPageProps) 
   );
 
   const refreshArchiveStats = useCallback(async () => {
-    if (!showVideoIngest) return;
+    if (!showVideoIngest || videoArchiverTab !== "youtube_recurring") return;
     const nextArchiveStats = await invoke<Record<string, number>>(
       "youtube_subscriptions_archive_stats",
     ).catch(() => ({}));
     setArchiveStats(nextArchiveStats);
-  }, [showVideoIngest]);
+  }, [showVideoIngest, videoArchiverTab]);
+
+  const refreshSubscriptionActivity = useCallback(async () => {
+    if (!showVideoIngest || videoArchiverTab !== "youtube_recurring") return;
+    const rows = await invoke<SubscriptionActivityRow[]>(
+      "youtube_subscriptions_activity",
+    ).catch(() => [] as SubscriptionActivityRow[]);
+    const map: Record<string, SubscriptionActivityRow> = {};
+    for (const row of rows) map[row.subscription_id] = row;
+    setSubActivity(map);
+  }, [showVideoIngest, videoArchiverTab]);
+
+  // WP: poll the dedicated read-only download-activity command. Guarded with .catch(() => []) so an
+  // unregistered command degrades to "no live download rows" instead of throwing; the run-state
+  // resolver then falls back to the youtube_subscriptions_activity feed.
+  const refreshSubscriptionDownloadActivity = useCallback(async () => {
+    if (!showVideoIngest || videoArchiverTab !== "youtube_recurring") return;
+    const rows = await invoke<SubscriptionDownloadActivityRow[]>(
+      "subscription_download_activity",
+    ).catch(() => [] as SubscriptionDownloadActivityRow[]);
+    const map: Record<string, SubscriptionDownloadActivityRow> = {};
+    for (const row of rows) {
+      if (!row || typeof row.subscription_id !== "string") continue;
+      map[row.subscription_id] = {
+        subscription_id: row.subscription_id,
+        running: Number(row.running) || 0,
+        queued: Number(row.queued) || 0,
+      };
+    }
+    setSubDownloadActivity(map);
+  }, [showVideoIngest, videoArchiverTab]);
 
   const refreshActiveRefreshIds = useCallback(async () => {
-    if (!showVideoIngest) return;
+    if (!showVideoIngest || videoArchiverTab !== "youtube_recurring") return;
     const nextActiveRefreshIds = await invoke<string[]>(
       "youtube_subscriptions_active_refresh_ids",
     ).catch(() => []);
     setActiveRefreshSubIds(new Set(nextActiveRefreshIds));
-  }, [showVideoIngest]);
+  }, [showVideoIngest, videoArchiverTab]);
+
+  const refreshYoutubeSingleActivity = useCallback(async () => {
+    if (!visible || !showVideoIngest || videoArchiverTab !== "youtube_single") return;
+    const page = await invoke<JobsTrackActivityPage>("jobs_track_activity", {
+      track: "youtube_single",
+      limit: singleActivityPageSize,
+      offset: youtubeSingleActivityOffset,
+    });
+    if (page.active_total > 0 && page.offset >= page.active_total && youtubeSingleActivityOffset > 0) {
+      setYoutubeSingleActivityOffset(
+        Math.max(0, Math.floor((page.active_total - 1) / singleActivityPageSize) * singleActivityPageSize),
+      );
+      return;
+    }
+    setYoutubeSingleActivityPage((current) => {
+      if (
+        current &&
+        current.queued === page.queued &&
+        current.running === page.running &&
+        current.offset === page.offset &&
+        current.jobs.length === page.jobs.length &&
+        current.jobs.every((job, index) => {
+          const next = page.jobs[index];
+          return next && job.id === next.id && job.status === next.status && job.progress === next.progress;
+        })
+      ) {
+        return current;
+      }
+      return page;
+    });
+
+    const previousTotal = previousYoutubeSingleActiveTotal.current;
+    previousYoutubeSingleActiveTotal.current = page.active_total;
+    if (previousTotal != null && page.active_total < previousTotal) {
+      // A member crossed a terminal boundary. Refresh completed history once for that transition,
+      // not on every progress tick.
+      const history = await invoke<YoutubeSingleHistoryPage>("library_youtube_single_history", {
+        limit: libraryPageSize,
+        offset: 0,
+        query: youtubeSingleHistoryAppliedSearch || null,
+        direction: youtubeSingleHistoryDirection,
+      });
+      setYoutubeSingleHistoryPage(history);
+      setItems(history.items);
+      setItemsOffset(history.items.length);
+      setItemsHasMore(history.items.length < history.filtered_total);
+    }
+  }, [
+    libraryPageSize,
+    showVideoIngest,
+    singleActivityPageSize,
+    videoArchiverTab,
+    visible,
+    youtubeSingleActivityOffset,
+    youtubeSingleHistoryAppliedSearch,
+    youtubeSingleHistoryDirection,
+  ]);
 
   const refresh = useCallback(async () => {
+    const refreshEpoch = ++refreshEpochRef.current;
     setError(null);
     const wantsYoutubeSingleHistory = showVideoIngest && videoArchiverTab === "youtube_single";
     const wantsItems = showMediaLibrary || showInstagramArchive || wantsYoutubeSingleHistory;
     const wantsVideo = showVideoIngest;
+    const wantsSubscriptions = wantsVideo && videoArchiverTab === "youtube_recurring";
     const wantsInstagram = showInstagramArchive;
     const wantsBatchRules = showImportControls;
     const [
-      nextItems,
+      nextItemsResult,
       nextRules,
       nextSubscriptions,
       nextGroups,
@@ -1121,20 +1714,38 @@ export function LibraryPage({ mode = "all", visible = true }: LibraryPageProps) 
       nextInstagramSubscriptions,
     ] = await Promise.all([
       wantsYoutubeSingleHistory && !showMediaLibrary && !showInstagramArchive
-        ? invoke<LibraryItem[]>("library_list_youtube_video_candidates")
+        ? invoke<YoutubeSingleHistoryPage>("library_youtube_single_history", {
+            limit: libraryPageSize,
+            offset: 0,
+            query: youtubeSingleHistoryAppliedSearch || null,
+            direction: youtubeSingleHistoryDirection,
+          })
+        : showMediaLibrary
+        ? invoke<LibraryItemsPage>("library_query", {
+            limit: libraryPageSize,
+            offset: 0,
+            fileStatus: mediaLibraryFileStatus,
+            query: mediaLibrarySearch || null,
+            mediaType: mediaLibraryTypeFilter,
+            source: mediaLibrarySourceFilter,
+            singleVideoOnly: mediaLibrarySingleVideoOnly,
+            sortBy: mediaLibrarySortBy,
+            direction: mediaLibrarySortDirection,
+          })
         : wantsItems
         ? invoke<LibraryItem[]>("library_list", {
-            limit: wantsInstagram && !showMediaLibrary ? 160 : libraryPageSize,
+            limit: wantsInstagram ? 160 : libraryPageSize,
             offset: 0,
+            fileStatus: "available",
           })
         : Promise.resolve([] as LibraryItem[]),
       wantsBatchRules
         ? invoke<BatchOnImportRules>("config_batch_on_import_get").catch(() => null)
         : Promise.resolve(null),
-      wantsVideo
+      wantsSubscriptions
         ? invoke<YoutubeSubscriptionRow[]>("youtube_subscriptions_list").catch(() => [])
         : Promise.resolve([] as YoutubeSubscriptionRow[]),
-      wantsVideo
+      wantsSubscriptions
         ? invoke<YoutubeSubscriptionGroupRow[]>("youtube_subscription_groups_list").catch(() => [])
         : Promise.resolve([] as YoutubeSubscriptionGroupRow[]),
       wantsVideo
@@ -1147,9 +1758,32 @@ export function LibraryPage({ mode = "all", visible = true }: LibraryPageProps) 
         ? invoke<InstagramSubscriptionRow[]>("instagram_subscriptions_list").catch(() => [])
         : Promise.resolve([] as InstagramSubscriptionRow[]),
     ]);
+    if (refreshEpoch !== refreshEpochRef.current) return;
+    const wantsYoutubeHistoryView =
+      wantsYoutubeSingleHistory && !showMediaLibrary && !showInstagramArchive;
+    const nextYoutubeHistoryPage = wantsYoutubeHistoryView
+      ? (nextItemsResult as YoutubeSingleHistoryPage)
+      : null;
+    const nextMediaLibraryPage = showMediaLibrary
+      ? (nextItemsResult as LibraryItemsPage)
+      : null;
+    const nextItems = nextYoutubeHistoryPage
+      ? nextYoutubeHistoryPage.items
+      : nextMediaLibraryPage
+        ? nextMediaLibraryPage.items
+        : (nextItemsResult as LibraryItem[]);
     setItems(nextItems);
     setItemsOffset(nextItems.length);
-    setItemsHasMore(showMediaLibrary && !wantsInstagram && nextItems.length >= libraryPageSize);
+    setYoutubeSingleHistoryPage(nextYoutubeHistoryPage);
+    setMediaLibraryFilteredTotal(nextMediaLibraryPage?.filtered_total ?? 0);
+    // WP-0253 Item 2b: the YouTube-history view is now paged like Media Library.
+    setItemsHasMore(
+      wantsYoutubeHistoryView
+        ? nextItems.length < (nextYoutubeHistoryPage?.filtered_total ?? 0)
+        : nextMediaLibraryPage
+          ? nextItems.length < nextMediaLibraryPage.filtered_total
+          : false,
+    );
     setItemsLoadingMore(false);
     if (nextRules) setBatchRules(nextRules);
     setSubscriptions(nextSubscriptions);
@@ -1161,13 +1795,27 @@ export function LibraryPage({ mode = "all", visible = true }: LibraryPageProps) 
       setUrlBatchPresetId((current) => current || nextPresets.default_preset_id || "");
     }
     setSubscriptionLibraryId((current) => current || nextVideoLibraries.find((library) => library.selected)?.id || "");
+    if (wantsSubscriptions) {
+      invoke<boolean>("youtube_subscriptions_recurring_paused")
+        .then((paused) => setRecurringStopped(paused))
+        .catch(() => {});
+    }
   }, [
     libraryPageSize,
+    mediaLibraryFileStatus,
+    mediaLibrarySearch,
+    mediaLibrarySingleVideoOnly,
+    mediaLibrarySortBy,
+    mediaLibrarySortDirection,
+    mediaLibrarySourceFilter,
+    mediaLibraryTypeFilter,
     showImportControls,
     showInstagramArchive,
     showMediaLibrary,
     showVideoIngest,
     videoArchiverTab,
+    youtubeSingleHistoryAppliedSearch,
+    youtubeSingleHistoryDirection,
   ]);
 
   const loadMoreItems = useCallback(async () => {
@@ -1175,19 +1823,78 @@ export function LibraryPage({ mode = "all", visible = true }: LibraryPageProps) 
     setItemsLoadingMore(true);
     setError(null);
     try {
-      const nextItems = await invoke<LibraryItem[]>("library_list", {
-        limit: libraryPageSize,
-        offset: itemsOffset,
-      });
+      // WP-0268: single history pages come from the canonical lineage query; Media Library
+      // retains its regular bounded list. Neither materializes the whole library.
+      const isYoutubeHistoryView =
+        showVideoIngest &&
+        videoArchiverTab === "youtube_single" &&
+        !showMediaLibrary &&
+        !showInstagramArchive;
+      let nextItems: LibraryItem[];
+      let canonicalTotal: number | null = null;
+      if (isYoutubeHistoryView) {
+        const page = await invoke<YoutubeSingleHistoryPage>("library_youtube_single_history", {
+          limit: libraryPageSize,
+          offset: itemsOffset,
+          query: youtubeSingleHistoryAppliedSearch || null,
+          direction: youtubeSingleHistoryDirection,
+        });
+        nextItems = page.items;
+        canonicalTotal = page.filtered_total;
+        setYoutubeSingleHistoryPage(page);
+      } else if (showMediaLibrary) {
+        const page = await invoke<LibraryItemsPage>("library_query", {
+          limit: libraryPageSize,
+          offset: itemsOffset,
+          fileStatus: mediaLibraryFileStatus,
+          query: mediaLibrarySearch || null,
+          mediaType: mediaLibraryTypeFilter,
+          source: mediaLibrarySourceFilter,
+          singleVideoOnly: mediaLibrarySingleVideoOnly,
+          sortBy: mediaLibrarySortBy,
+          direction: mediaLibrarySortDirection,
+        });
+        nextItems = page.items;
+        canonicalTotal = page.filtered_total;
+        setMediaLibraryFilteredTotal(page.filtered_total);
+      } else {
+        nextItems = await invoke<LibraryItem[]>("library_list", {
+          limit: libraryPageSize,
+          offset: itemsOffset,
+          fileStatus: showMediaLibrary ? mediaLibraryFileStatus : "available",
+        });
+      }
       setItems((prev) => [...prev, ...nextItems]);
       setItemsOffset((prev) => prev + nextItems.length);
-      setItemsHasMore(nextItems.length >= libraryPageSize);
+      setItemsHasMore(
+        canonicalTotal == null
+          ? nextItems.length >= libraryPageSize
+          : itemsOffset + nextItems.length < canonicalTotal,
+      );
     } catch (e) {
       setError(String(e));
     } finally {
       setItemsLoadingMore(false);
     }
-  }, [itemsHasMore, itemsLoadingMore, itemsOffset, libraryPageSize]);
+  }, [
+    itemsHasMore,
+    itemsLoadingMore,
+    itemsOffset,
+    libraryPageSize,
+    mediaLibraryFileStatus,
+    mediaLibrarySearch,
+    mediaLibrarySingleVideoOnly,
+    mediaLibrarySortBy,
+    mediaLibrarySortDirection,
+    mediaLibrarySourceFilter,
+    mediaLibraryTypeFilter,
+    showVideoIngest,
+    videoArchiverTab,
+    showMediaLibrary,
+    showInstagramArchive,
+    youtubeSingleHistoryAppliedSearch,
+    youtubeSingleHistoryDirection,
+  ]);
 
   const handleItemsScroll = useCallback(
     (event: UIEvent<HTMLDivElement>) => {
@@ -1503,42 +2210,266 @@ export function LibraryPage({ mode = "all", visible = true }: LibraryPageProps) 
     }
   }, []);
 
-  const chooseLegacyArchiveRoot = useCallback(async () => {
+  useEffect(() => {
+    if (!visible) return;
+    const timer = window.setTimeout(() => {
+      refresh().catch((e) => setError(String(e)));
+      void refreshSharedDownloadDirStatus();
+    }, showMediaLibrary ? 350 : 150);
+    return () => {
+      window.clearTimeout(timer);
+      refreshEpochRef.current += 1;
+    };
+  }, [refresh, showMediaLibrary, visible]);
+
+  usePollingLoop(
+    async () => {
+      await refreshYoutubeSingleActivity();
+    },
+    {
+      enabled: visible && showVideoIngest && videoArchiverTab === "youtube_single",
+      intervalMs: (youtubeSingleActivityPage?.active_total ?? 0) > 0 ? 750 : 2_500,
+    },
+  );
+
+  usePollingLoop(
+    async () => {
+      if (!downloadPreflightRows.length) return;
+      const rows = await invoke<DownloadPreflightRow[]>("library_download_preflight", {
+        urls: downloadPreflightRows.map((row) => row.url),
+      });
+      setDownloadPreflightRows(rows.filter((row) => row.status !== "ready"));
+    },
+    {
+      enabled:
+        visible &&
+        showVideoIngest &&
+        videoArchiverTab === "youtube_single" &&
+        downloadPreflightRows.length > 0,
+      intervalMs: 10_000,
+    },
+  );
+
+  useEffect(() => {
+    const historyVisible =
+      visible &&
+      showVideoIngest &&
+      videoArchiverTab === "youtube_single" &&
+      !showMediaLibrary &&
+      !showInstagramArchive;
+    if (!historyVisible || youtubeSingleUnclassifiedTotal != null) return;
+    let canceled = false;
+    setYoutubeSingleUnclassifiedError(null);
+    invoke<number>("library_youtube_single_unclassified_total")
+      .then((total) => {
+        if (!canceled) setYoutubeSingleUnclassifiedTotal(total);
+      })
+      .catch((readError) => {
+        if (!canceled) setYoutubeSingleUnclassifiedError(String(readError));
+      });
+    return () => {
+      canceled = true;
+    };
+  }, [
+    showInstagramArchive,
+    showMediaLibrary,
+    showVideoIngest,
+    videoArchiverTab,
+    visible,
+    youtubeSingleUnclassifiedTotal,
+  ]);
+
+  function toggleSelectedId(
+    setter: Dispatch<SetStateAction<Set<string>>>,
+    itemId: string,
+  ) {
+    setter((current) => {
+      const next = new Set(current);
+      if (next.has(itemId)) next.delete(itemId);
+      else next.add(itemId);
+      return next;
+    });
+  }
+
+  async function deleteSelectedVideoFiles(
+    itemIds: string[],
+    surface: "subscription" | "media_library",
+  ) {
+    if (!itemIds.length) return;
+    const permanent = libraryFileDeleteMode === "permanent";
+    const accepted = await confirm(
+      permanent
+        ? `Permanently delete ${itemIds.length} selected video file${itemIds.length === 1 ? "" : "s"}? The files cannot be restored from the Recycle Bin. Library metadata and source memberships will be kept so automatic jobs never redownload them.`
+        : `Move ${itemIds.length} selected video file${itemIds.length === 1 ? "" : "s"} to the OS Recycle Bin? Library metadata and source memberships will be kept so automatic jobs never redownload them.`,
+      {
+        title: permanent ? "Permanently delete selected videos" : "Delete selected videos",
+        kind: "warning",
+        okLabel: permanent ? "Delete permanently" : "Move to Recycle Bin",
+        cancelLabel: "Cancel",
+      },
+    );
+    if (!accepted) return;
+    setBusy(true);
     setError(null);
     setNotice(null);
     try {
-      const selected = await open({
-        multiple: false,
-        directory: true,
-        title: "Select legacy archive root",
+      const receipt = await invoke<LibraryFileDeleteReceipt>("library_file_delete", {
+        itemIds,
+        mode: libraryFileDeleteMode,
       });
-      if (!selected || typeof selected !== "string") return;
-      setLegacyArchiveRoot(selected);
-      setLegacyArchiveAnalysis(null);
+      setNotice(
+        `Video file action complete: ${receipt.deleted} deleted, ${receipt.already_deleted} already deleted, ${receipt.failed} failed. Metadata and source memberships were preserved.`,
+      );
+      if (surface === "subscription") {
+        await loadSelectedSubscriptionVideos();
+      } else {
+        setMediaLibrarySelectedIds(new Set());
+        await refresh();
+      }
     } catch (e) {
       setError(String(e));
+    } finally {
+      setBusy(false);
     }
-  }, []);
+  }
+
+  async function redownloadSelectedDeletedVideos(
+    itemIds: string[],
+    surface: "subscription" | "media_library",
+  ) {
+    if (!itemIds.length) return;
+    const accepted = await confirm(
+      `Queue a replacement download for ${itemIds.length} selected deleted video${itemIds.length === 1 ? "" : "s"}? This is the only action that can override their deleted state. Retry-all, update-all, and redownload-all remain blocked.`,
+      {
+        title: "Redownload selected deleted videos",
+        kind: "warning",
+        okLabel: "Queue selected",
+        cancelLabel: "Cancel",
+      },
+    );
+    if (!accepted) return;
+    setBusy(true);
+    setError(null);
+    setNotice(null);
+    try {
+      const receipt = await invoke<ManualDeletedRedownloadReceipt>(
+        "library_operator_deleted_redownload",
+        {
+          itemIds,
+          subscriptionId: surface === "subscription" ? selectedSubscription?.id ?? null : null,
+        },
+      );
+      setNotice(
+        `Explicit replacement request: ${receipt.queued} queued, ${receipt.failed} failed. Deleted status remains until each replacement imports successfully.`,
+      );
+      if (surface === "subscription") {
+        await loadSelectedSubscriptionVideos();
+      } else {
+        setMediaLibrarySelectedIds(new Set());
+        await refresh();
+      }
+    } catch (e) {
+      setError(String(e));
+    } finally {
+      setBusy(false);
+    }
+  }
 
   useEffect(() => {
-    if (!visible) return;
-    refresh().catch((e) => setError(String(e)));
-    void refreshSharedDownloadDirStatus();
-  }, [refresh, visible]);
+    const backfill = youtubeSingleHistoryPage?.backfill;
+    const historyVisible =
+      visible &&
+      showVideoIngest &&
+      videoArchiverTab === "youtube_single" &&
+      !showMediaLibrary &&
+      !showInstagramArchive;
+    if (
+      !historyVisible ||
+      !backfill?.has_more ||
+      youtubeLineageBackfillError
+    ) {
+      return;
+    }
+
+    let canceled = false;
+    const timer = window.setTimeout(async () => {
+      setYoutubeLineageBackfillBusy(true);
+      try {
+        // The engine runner owns bounded lineage recovery so classification continues when this
+        // tab is closed. This effect only refreshes the canonical projection; keeping a second
+        // frontend writer here caused avoidable SQLite contention and made migration progress
+        // depend on the WebView lifecycle.
+        const page = await invoke<YoutubeSingleHistoryPage>("library_youtube_single_history", {
+          limit: libraryPageSize,
+          offset: 0,
+          query: youtubeSingleHistoryAppliedSearch || null,
+          direction: youtubeSingleHistoryDirection,
+        });
+        if (canceled) return;
+        setYoutubeLineageBackfillError(null);
+        setYoutubeSingleHistoryPage(page);
+        setItems(page.items);
+        setItemsOffset(page.items.length);
+        setItemsHasMore(page.items.length < page.filtered_total);
+      } catch (e) {
+        if (!canceled) {
+          const message = `Single-video history classification paused: ${String(e)}`;
+          setYoutubeLineageBackfillError(message);
+          setError(message);
+        }
+      } finally {
+        if (!canceled) setYoutubeLineageBackfillBusy(false);
+      }
+    }, 1500);
+
+    return () => {
+      canceled = true;
+      window.clearTimeout(timer);
+    };
+  }, [
+    libraryPageSize,
+    showInstagramArchive,
+    showMediaLibrary,
+    showVideoIngest,
+    videoArchiverTab,
+    visible,
+    youtubeLineageBackfillError,
+    youtubeSingleHistoryAppliedSearch,
+    youtubeSingleHistoryDirection,
+    youtubeSingleHistoryPage?.backfill,
+  ]);
 
   useEffect(() => {
-    if (!visible || !showVideoIngest) return;
+    if (!visible || !showVideoIngest || videoArchiverTab !== "youtube_recurring") return;
     const activeRefreshTimer = window.setTimeout(() => {
       void refreshActiveRefreshIds();
     }, ACTIVE_REFRESH_IDS_DEFER_MS);
     const archiveStatsTimer = window.setTimeout(() => {
       void refreshArchiveStats();
     }, ARCHIVE_STATS_DEFER_MS);
+    // WP-0261: poll live activity on the same conservative cadence as active-refresh ids.
+    const activityTimer = window.setTimeout(() => {
+      void refreshSubscriptionActivity();
+    }, ACTIVE_REFRESH_IDS_DEFER_MS);
+    // WP: authoritative running/queued download counts, same cadence.
+    const downloadActivityTimer = window.setTimeout(() => {
+      void refreshSubscriptionDownloadActivity();
+    }, ACTIVE_REFRESH_IDS_DEFER_MS);
     return () => {
       window.clearTimeout(activeRefreshTimer);
       window.clearTimeout(archiveStatsTimer);
+      window.clearTimeout(activityTimer);
+      window.clearTimeout(downloadActivityTimer);
     };
-  }, [visible, showVideoIngest, refreshActiveRefreshIds, refreshArchiveStats]);
+  }, [
+    visible,
+    showVideoIngest,
+    videoArchiverTab,
+    refreshActiveRefreshIds,
+    refreshArchiveStats,
+    refreshSubscriptionActivity,
+    refreshSubscriptionDownloadActivity,
+  ]);
 
   useEffect(() => {
     if (!otherVideoLibraries.length) {
@@ -1575,6 +2506,14 @@ export function LibraryPage({ mode = "all", visible = true }: LibraryPageProps) 
       "voxvulgi.v1.library.youtube_single_history_search",
       youtubeSingleHistorySearch,
     );
+  }, [youtubeSingleHistorySearch]);
+
+  useEffect(() => {
+    const timer = window.setTimeout(
+      () => setYoutubeSingleHistoryAppliedSearch(youtubeSingleHistorySearch.trim()),
+      300,
+    );
+    return () => window.clearTimeout(timer);
   }, [youtubeSingleHistorySearch]);
 
   useEffect(() => {
@@ -1721,37 +2660,27 @@ export function LibraryPage({ mode = "all", visible = true }: LibraryPageProps) 
   }, [mediaLibrarySearch]);
 
   useEffect(() => {
-    safeLocalStorageSet("voxvulgi.v1.library.legacy_archive_root", legacyArchiveRoot);
-  }, [legacyArchiveRoot]);
-
-  useEffect(() => {
-    safeLocalStorageSet(
-      "voxvulgi.v1.library.legacy_archive_install_path",
-      legacyArchiveInstallPath,
-    );
-  }, [legacyArchiveInstallPath]);
-
-  useEffect(() => {
-    safeLocalStorageSet(
-      "voxvulgi.v1.library.legacy_archive_max_depth",
-      String(legacyArchiveMaxDepth),
-    );
-  }, [legacyArchiveMaxDepth]);
-
-  useEffect(() => {
-    safeLocalStorageSet(
-      "voxvulgi.v1.library.legacy_archive_max_files",
-      String(legacyArchiveMaxFiles),
-    );
-  }, [legacyArchiveMaxFiles]);
-
-  useEffect(() => {
     safeLocalStorageSet("voxvulgi.v1.library.media_type_filter", mediaLibraryTypeFilter);
   }, [mediaLibraryTypeFilter]);
 
   useEffect(() => {
     safeLocalStorageSet("voxvulgi.v1.library.media_source_filter", mediaLibrarySourceFilter);
   }, [mediaLibrarySourceFilter]);
+
+  useEffect(() => {
+    safeLocalStorageSet("voxvulgi.v1.library.media_file_status", mediaLibraryFileStatus);
+  }, [mediaLibraryFileStatus]);
+
+  useEffect(() => {
+    setMediaLibrarySelectedIds(new Set());
+  }, [
+    mediaLibraryFileStatus,
+    mediaLibrarySearch,
+    mediaLibraryFileStatus,
+    mediaLibrarySingleVideoOnly,
+    mediaLibrarySourceFilter,
+    mediaLibraryTypeFilter,
+  ]);
 
   useEffect(() => {
     safeLocalStorageSet(
@@ -1782,6 +2711,14 @@ export function LibraryPage({ mode = "all", visible = true }: LibraryPageProps) 
   useEffect(() => {
     safeLocalStorageSet("voxvulgi.v1.library.media_view_mode", mediaLibraryViewMode);
   }, [mediaLibraryViewMode]);
+
+  // WP: persist the "hide activity list" toggle (hidden by default).
+  useEffect(() => {
+    safeLocalStorageSet(
+      "voxvulgi.v1.library.hide_processing_list",
+      hideProcessingList ? "1" : "0",
+    );
+  }, [hideProcessingList]);
 
   async function importFile() {
     setBusy(true);
@@ -1815,7 +2752,8 @@ export function LibraryPage({ mode = "all", visible = true }: LibraryPageProps) 
       });
       if (!selected || typeof selected !== "string") return;
 
-      await invoke("jobs_enqueue_import_local", { path: selected });
+      const queued = await invoke<EnqueuedJobReceipt>("jobs_enqueue_import_local", { path: selected });
+      setNotice(`Queued ${jobTrackLabel(queued.track)} import job ${queued.id.slice(0, 8)}.`);
       await refresh();
     } catch (e) {
       setError(String(e));
@@ -1860,6 +2798,125 @@ export function LibraryPage({ mode = "all", visible = true }: LibraryPageProps) 
     }
   }
 
+  function preflightIdentityKey(row: DownloadPreflightRow): string {
+    return `${row.service ?? "invalid"}:${row.media_id ?? row.input_index}`;
+  }
+
+  async function rerunDownloadPreflight(urls: string[]) {
+    if (!urls.length) {
+      setDownloadPreflightRows([]);
+      return;
+    }
+    const rows = await invoke<DownloadPreflightRow[]>("library_download_preflight", { urls });
+    setDownloadPreflightRows(rows.filter((row) => row.status !== "ready"));
+  }
+
+  async function queueApprovedMissing(rows: DownloadPreflightRow[]) {
+    const approved = rows.filter(
+      (row): row is DownloadPreflightRow & { library_item_id: string } =>
+        row.status === "missing" && Boolean(row.library_item_id),
+    );
+    if (!approved.length) return;
+    setBusy(true);
+    setError(null);
+    try {
+      const queued = await invoke<EnqueuedJobReceipt[]>("jobs_enqueue_download_batch", {
+        urls: approved.map((row) => row.url),
+        authCookie: null,
+        outputDir: urlBatchOutputDir.trim() || null,
+        useBrowserCookies: false,
+        browserCookieSource: null,
+        presetId: urlBatchPresetId.trim() || null,
+        approvedMissingItemIds: approved.map((row) => row.library_item_id),
+      });
+      setNotice(
+        `Approved redownload for ${queued.length} missing canonical video${queued.length === 1 ? "" : "s"}. The existing library identity is retained.`,
+      );
+      await rerunDownloadPreflight(downloadPreflightRows.map((row) => row.url));
+      await refreshYoutubeSingleActivity();
+    } catch (e) {
+      setError(String(e));
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function relocateMissingVideo(row: DownloadPreflightRow) {
+    if (!row.library_item_id) return;
+    const selected = await open({
+      multiple: false,
+      directory: false,
+      title: `Relocate ${row.library_title || "missing video"}`,
+    });
+    if (!selected || typeof selected !== "string") return;
+    setBusy(true);
+    setError(null);
+    try {
+      await invoke("library_canonical_media_relocate", {
+        itemId: row.library_item_id,
+        newPath: selected,
+      });
+      setNotice("The canonical library record now points to the selected existing file. No download was queued.");
+      await rerunDownloadPreflight(downloadPreflightRows.map((entry) => entry.url));
+      await refresh();
+    } catch (e) {
+      setError(String(e));
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function replaceFailedSourceUrl(row: DownloadPreflightRow) {
+    if (!row.service || !row.media_id) return;
+    const key = preflightIdentityKey(row);
+    const newUrl = (replacementUrlByIdentity[key] ?? "").trim();
+    if (!newUrl) {
+      setError("Enter the replacement link first.");
+      return;
+    }
+    setBusy(true);
+    setError(null);
+    try {
+      await invoke("library_canonical_source_replace", {
+        service: row.service,
+        mediaId: row.media_id,
+        newUrl,
+      });
+      const nextRows = downloadPreflightRows.map((entry) =>
+        preflightIdentityKey(entry) === key ? { ...entry, url: newUrl } : entry,
+      );
+      setReplacementUrlByIdentity((current) => ({ ...current, [key]: "" }));
+      await rerunDownloadPreflight(nextRows.map((entry) => entry.url));
+      setUrlBatchText(nextRows.map((entry) => entry.url).join("\n"));
+      setNotice("Replacement link verified as the same canonical video. You can now approve its redownload.");
+    } catch (e) {
+      setError(String(e));
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function removeMissingLibraryRecord(row: DownloadPreflightRow) {
+    if (!row.library_item_id) return;
+    const ok = await confirm(
+      `Remove the library record for "${row.library_title || row.url}"? This removes metadata only. VoxVulgi will not delete any media file.`,
+      { title: "Remove missing-video record", kind: "warning" },
+    );
+    if (!ok) return;
+    setBusy(true);
+    setError(null);
+    try {
+      await invoke("library_canonical_record_remove", { itemId: row.library_item_id });
+      setNotice("Removed the library metadata record. No media file was deleted.");
+      await rerunDownloadPreflight(downloadPreflightRows.map((entry) => entry.url));
+      await refresh();
+    } catch (e) {
+      setError(String(e));
+    } finally {
+      setBusy(false);
+    }
+  }
+
 
   async function enqueueUrlBatch() {
     setBusy(true);
@@ -1880,21 +2937,40 @@ export function LibraryPage({ mode = "all", visible = true }: LibraryPageProps) 
       if (!activeVideoLibrary?.exists && !urlBatchOutputDir.trim()) {
         const ready = await ensureActiveVideoLibraryForUrlBatch();
         if (!ready) {
-          setNotice("Queue cancelled. Select an available video library or set a batch output override.");
+          setNotice("Nothing was queued. Pick an available video library, or choose a folder to save to.");
           return;
         }
       }
-      const queued = await invoke<Array<{ id: string }>>("jobs_enqueue_download_batch", {
-        urls,
+      const preflight = await invoke<DownloadPreflightRow[]>("library_download_preflight", { urls });
+      const blocked = preflight.filter((row) => row.status !== "ready");
+      const readyUrls = preflight.filter((row) => row.status === "ready").map((row) => row.url);
+      setDownloadPreflightRows(blocked);
+      if (!readyUrls.length) {
+        setNotice(
+          `Nothing new was queued. ${blocked.length} input${blocked.length === 1 ? " needs" : "s need"} review below because it is already present, active, missing, unreachable, duplicated, or invalid.`,
+        );
+        return;
+      }
+      const queued = await invoke<EnqueuedJobReceipt[]>("jobs_enqueue_download_batch", {
+        urls: readyUrls,
         authCookie: null,
         outputDir: urlBatchOutputDir.trim() || null,
         useBrowserCookies: false,
         browserCookieSource: null,
         presetId: urlBatchPresetId.trim() || null,
+        approvedMissingItemIds: [],
       });
-      setUrlBatchText("");
-      setNotice(`Queued ${queued.length} download job${queued.length === 1 ? "" : "s"}.`);
-      await refresh();
+      setUrlBatchText(blocked.map((row) => row.url).join("\n"));
+      const visibleJobIds = queued.slice(0, 3).map((job) => job.id.slice(0, 8));
+      const extraCount = Math.max(0, queued.length - visibleJobIds.length);
+      const receipt = visibleJobIds.length
+        ? ` Job ${visibleJobIds.join(", ")}${extraCount ? ` + ${extraCount} more` : ""}.`
+        : "";
+      const tracks = summarizeEnqueuedTracks(queued);
+      setNotice(
+        `Queued ${queued.length} new download job${queued.length === 1 ? "" : "s"}${tracks ? `: ${tracks}.` : "."}${receipt}${blocked.length ? ` ${blocked.length} input${blocked.length === 1 ? " needs" : "s need"} review below.` : ""}`,
+      );
+      await Promise.all([refresh(), refreshYoutubeSingleActivity()]);
     } catch (e) {
       setError(String(e));
     } finally {
@@ -1921,14 +2997,14 @@ export function LibraryPage({ mode = "all", visible = true }: LibraryPageProps) 
       const featureStatus = featureRootStatus(effectiveStatus, "instagram");
       if (!featureStatus?.exists && !instagramBatchOutputDir.trim()) {
         throw new Error(
-          "Instagram Archiver root is missing. Open Options to choose an existing folder or set an Instagram batch output override here.",
+          "The Instagram folder is not set up yet. Open Options to choose a folder, or type a folder to save to here.",
         );
       }
       const effectiveBrowserCookieSource = instagramBatchUseBrowserCookies
         ? instagramBatchBrowserCookieSource.trim() || DEFAULT_BROWSER_COOKIE_SOURCE
         : null;
 
-      const queued = await invoke<Array<{ id: string }>>("jobs_enqueue_instagram_batch", {
+      const queued = await invoke<EnqueuedJobReceipt[]>("jobs_enqueue_instagram_batch", {
         urls,
         authCookie: instagramBatchAuthCookie.trim() || null,
         outputDir: instagramBatchOutputDir.trim() || null,
@@ -1937,7 +3013,9 @@ export function LibraryPage({ mode = "all", visible = true }: LibraryPageProps) 
       });
 
       setInstagramBatchText("");
-      setNotice(`Queued ${queued.length} Instagram job${queued.length === 1 ? "" : "s"}.`);
+      setNotice(
+        `Queued ${queued.length} Instagram job${queued.length === 1 ? "" : "s"}${queued.length ? `: ${summarizeEnqueuedTracks(queued)}.` : "."}`,
+      );
       await refresh();
     } catch (e) {
       setError(String(e));
@@ -1955,7 +3033,7 @@ export function LibraryPage({ mode = "all", visible = true }: LibraryPageProps) 
       const featureStatus = featureRootStatus(effectiveStatus, "images");
       if (!featureStatus?.exists && !imageBatchOutputDir.trim()) {
         throw new Error(
-          "Image Archive root is missing. Open Options to choose an existing folder, use the default path, or set an image batch output override here.",
+          "The image folder is not set up yet. Open Options to choose a folder, use the default, or type a folder to save to here.",
         );
       }
 
@@ -1981,7 +3059,7 @@ export function LibraryPage({ mode = "all", visible = true }: LibraryPageProps) 
         ? Math.max(0, Math.round(imageBatchDelaySeconds * 1000))
         : 350;
 
-      const queued = await invoke<{ id: string }>("jobs_enqueue_image_batch", {
+      const queued = await invoke<EnqueuedJobReceipt>("jobs_enqueue_image_batch", {
         startUrls,
         maxPages,
         delayMs,
@@ -1995,7 +3073,7 @@ export function LibraryPage({ mode = "all", visible = true }: LibraryPageProps) 
 
       setImageBatchUrlsText("");
       setNotice(
-        `Queued image batch job ${queued.id.slice(0, 8)}. Open Jobs to monitor progress and logs.`,
+        `Queued ${jobTrackLabel(queued.track)} job ${queued.id.slice(0, 8)}. Open Jobs to monitor progress and logs.`,
       );
     } catch (e) {
       setError(String(e));
@@ -2013,7 +3091,7 @@ export function LibraryPage({ mode = "all", visible = true }: LibraryPageProps) 
       const featureStatus = featureRootStatus(effectiveStatus, "images");
       if (!featureStatus?.exists && !pinterestBatchOutputDir.trim()) {
         throw new Error(
-          "Image Archive root is missing. Open Options to choose an existing folder, use the default path, or set a Pinterest output override here.",
+          "The image folder is not set up yet. Open Options to choose a folder, use the default, or type a folder to save to here.",
         );
       }
 
@@ -2028,7 +3106,7 @@ export function LibraryPage({ mode = "all", visible = true }: LibraryPageProps) 
         throw new Error(`Too many Pinterest URLs. Maximum ${maxImageBatchUrls}.`);
       }
 
-      const queued = await invoke<{ id: string }>("jobs_enqueue_image_batch", {
+      const queued = await invoke<EnqueuedJobReceipt>("jobs_enqueue_image_batch", {
         startUrls,
         maxPages: imageBatchMaxPages,
         delayMs: Math.max(0, Math.round(imageBatchDelaySeconds * 1000)),
@@ -2045,7 +3123,7 @@ export function LibraryPage({ mode = "all", visible = true }: LibraryPageProps) 
 
       setPinterestBatchText("");
       setNotice(
-        `Queued Pinterest crawl job ${queued.id.slice(0, 8)}. Open Jobs to monitor progress and logs.`,
+        `Queued ${jobTrackLabel(queued.track)} Pinterest crawl job ${queued.id.slice(0, 8)}. Open Jobs to monitor progress and logs.`,
       );
     } catch (e) {
       setError(String(e));
@@ -2180,16 +3258,41 @@ export function LibraryPage({ mode = "all", visible = true }: LibraryPageProps) 
     }
   }
 
-  async function deleteSubscription(id: string) {
+  async function setSubscriptionManualStatus(
+    sub: YoutubeSubscriptionRow,
+    status: "normal" | "deleted",
+  ) {
+    if (status === "deleted") {
+      const ok = await confirm(
+        `Mark "${sub.title}" as deleted?\n\nVoxVulgi will stop checking and queueing this subscription. Its saved videos, subtitles, source memberships, metadata, and job history will be kept. You can restore it later.`,
+        {
+          title: "Mark subscription deleted",
+          kind: "warning",
+          okLabel: "Mark subscription deleted",
+          cancelLabel: "Keep subscription",
+        },
+      );
+      if (!ok) return;
+    }
     setBusy(true);
     setError(null);
     setNotice(null);
     try {
-      await invoke("youtube_subscriptions_delete", { id });
-      if (subscriptionEditId === id) {
-        resetSubscriptionEditor();
-      }
-      setNotice("Subscription deleted.");
+      const receipt = await invoke<YoutubeSubscriptionStatusChangeReceipt>(
+        "youtube_subscriptions_set_manual_status",
+        { id: sub.id, status },
+      );
+      setNotice(
+        status === "deleted"
+          ? `Marked ${receipt.subscription.title} deleted. Preserved its videos and metadata${
+              receipt.canceled_refresh_jobs
+                ? `; canceled ${receipt.canceled_refresh_jobs} pending refresh check${
+                    receipt.canceled_refresh_jobs === 1 ? "" : "s"
+                  }`
+                : ""
+            }.`
+          : `Restored ${receipt.subscription.title}. It can be queued again.`,
+      );
       await refresh();
     } catch (e) {
       setError(String(e));
@@ -2203,8 +3306,10 @@ export function LibraryPage({ mode = "all", visible = true }: LibraryPageProps) 
     setError(null);
     setNotice(null);
     try {
-      const queued = await invoke<Array<{ id: string }>>("youtube_subscriptions_queue_one", { id });
-      setNotice(`Queued ${queued.length} job${queued.length === 1 ? "" : "s"} from subscription.`);
+      const queued = await invoke<EnqueuedJobReceipt[]>("youtube_subscriptions_queue_one", { id });
+      setNotice(
+        `Queued ${queued.length} job${queued.length === 1 ? "" : "s"} from subscription${queued.length ? `: ${summarizeEnqueuedTracks(queued)}.` : "."}`,
+      );
       await refresh();
     } catch (e) {
       setError(String(e));
@@ -2218,15 +3323,58 @@ export function LibraryPage({ mode = "all", visible = true }: LibraryPageProps) 
     setError(null);
     setNotice(null);
     try {
-      const queued = subscriptionGroupFilterId
-        ? await invoke<Array<{ id: string }>>("youtube_subscriptions_queue_group", {
-            groupId: subscriptionGroupFilterId,
-          })
-        : await invoke<Array<{ id: string }>>("youtube_subscriptions_queue_all_active");
+      if (subscriptionGroupFilterId) {
+        const queued = await invoke<EnqueuedJobReceipt[]>("youtube_subscriptions_queue_group", {
+          groupId: subscriptionGroupFilterId,
+        });
+        setNotice(
+          `Queued ${queued.length} due job${queued.length === 1 ? "" : "s"} from the group${queued.length ? `: ${summarizeEnqueuedTracks(queued)}.` : "."}`,
+        );
+      } else {
+        // Background enqueue (returns immediately) so the UI never freezes.
+        await invoke("youtube_subscriptions_queue_all_active");
+        setNotice("Queuing due subscriptions in the background (one channel at a time).");
+      }
+    } catch (e) {
+      setError(String(e));
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  // WP-0254/WP-0255: "Update all now" refreshes every active subscription immediately
+  // (ignoring the per-subscription interval) into the conservative recurring lane, and
+  // clears any prior Stop. "Stop" pauses only subscription/playlist syncing — single
+  // one-off downloads and localization keep running; queued recurring work is remembered.
+  async function updateAllSubscriptions() {
+    setBusy(true);
+    setError(null);
+    setNotice(null);
+    try {
+      // Returns immediately; the enqueue of all subscriptions runs in the background
+      // (one channel at a time in the recurring lane) so the UI never freezes.
+      await invoke("youtube_subscriptions_update_all");
+      setRecurringStopped(false);
       setNotice(
-        `Queued ${queued.length} due job${queued.length === 1 ? "" : "s"} from active subscriptions.`,
+        `Updating ${activeSubscriptionCount} subscription${activeSubscriptionCount === 1 ? "" : "s"} in the background (one channel at a time so single downloads stay fast). New videos appear in Jobs as they're found.`,
       );
-      await refresh();
+    } catch (e) {
+      setError(String(e));
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function stopRecurringSubscriptions() {
+    setBusy(true);
+    setError(null);
+    setNotice(null);
+    try {
+      await invoke<boolean>("youtube_subscriptions_stop_recurring");
+      setRecurringStopped(true);
+      setNotice(
+        "Stopped subscription/playlist updating. In-progress single downloads keep running; queued items resume on the next 'Update all' or app restart.",
+      );
     } catch (e) {
       setError(String(e));
     } finally {
@@ -2349,11 +3497,11 @@ export function LibraryPage({ mode = "all", visible = true }: LibraryPageProps) 
     setError(null);
     setNotice(null);
     try {
-      const queued = await invoke<Array<{ id: string }>>("instagram_subscriptions_queue_one", {
+      const queued = await invoke<EnqueuedJobReceipt[]>("instagram_subscriptions_queue_one", {
         id,
       });
       setNotice(
-        `Queued ${queued.length} Instagram job${queued.length === 1 ? "" : "s"} from subscription.`,
+        `Queued ${queued.length} Instagram job${queued.length === 1 ? "" : "s"} from subscription${queued.length ? `: ${summarizeEnqueuedTracks(queued)}.` : "."}`,
       );
       await refresh();
     } catch (e) {
@@ -2368,11 +3516,11 @@ export function LibraryPage({ mode = "all", visible = true }: LibraryPageProps) 
     setError(null);
     setNotice(null);
     try {
-      const queued = await invoke<Array<{ id: string }>>(
+      const queued = await invoke<EnqueuedJobReceipt[]>(
         "instagram_subscriptions_queue_all_active",
       );
       setNotice(
-        `Queued ${queued.length} due Instagram job${queued.length === 1 ? "" : "s"} from saved archive targets.`,
+        `Queued ${queued.length} due Instagram job${queued.length === 1 ? "" : "s"} from saved archive targets${queued.length ? `: ${summarizeEnqueuedTracks(queued)}.` : "."}`,
       );
       await refresh();
     } catch (e) {
@@ -2456,61 +3604,6 @@ export function LibraryPage({ mode = "all", visible = true }: LibraryPageProps) 
     }
   }
 
-  async function import4kvdpSubscriptionsDir() {
-    setBusy(true);
-    setError(null);
-    setNotice(null);
-    try {
-      const selected = await open({
-        multiple: false,
-        directory: true,
-        title: "Select 4K Video Downloader+ exports folder",
-      });
-      if (!selected || typeof selected !== "string") return;
-
-      const summary = await invoke<YoutubeSubscriptionsImport4kvdpSummary>(
-        "youtube_subscriptions_import_4kvdp_dir",
-        { dirPath: selected },
-      );
-      setNotice(
-        `Imported ${summary.imported_subscriptions} subscription(s) (inserted ${summary.inserted}, updated ${summary.updated}). Seeded ${summary.archive_seeded_subscriptions} archive file(s).`,
-      );
-      await refresh();
-    } catch (e) {
-      setError(String(e));
-    } finally {
-      setBusy(false);
-    }
-  }
-
-  async function import4kvdpAppState() {
-    setBusy(true);
-    setError(null);
-    setNotice(null);
-    try {
-      const root = legacyArchiveRoot.trim();
-      if (!root) {
-        throw new Error("Choose or enter a legacy archive root first.");
-      }
-
-      const summary = await invoke<YoutubeSubscriptionsImport4kvdpStateSummary>(
-        "youtube_subscriptions_import_4kvdp_state",
-        {
-          rootPath: root,
-          sqlitePath: legacyArchiveAnalysis?.legacy_state_db_path ?? null,
-        },
-      );
-      setNotice(
-        `Imported ${summary.imported_sources} legacy 4KVDP source(s) (${summary.imported_subscription_sources} subscription/channel, ${summary.imported_playlist_sources} playlist). Inserted ${summary.inserted}, updated ${summary.updated}, seeded ${summary.archive_seeded_subscriptions} archive file(s).`,
-      );
-      await refresh();
-    } catch (e) {
-      setError(String(e));
-    } finally {
-      setBusy(false);
-    }
-  }
-
   function toggleSubscriptionGroup(groupId: string) {
     setSubscriptionGroupIds((prev) => {
       if (prev.includes(groupId)) {
@@ -2564,6 +3657,33 @@ export function LibraryPage({ mode = "all", visible = true }: LibraryPageProps) 
         setSubscriptionGroupFilterId("");
       }
       setSubscriptionGroupIds((prev) => prev.filter((id) => id !== groupId));
+      await refresh();
+    } catch (e) {
+      setError(String(e));
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function clearSubscriptionGroupMemberships() {
+    const ok = await confirm(
+      "Unlink every subscription from every group? This keeps all subscriptions, videos, downloaded-file records, archives, and the group labels themselves. It only removes the group links.",
+      {
+        title: "Unlink subscription groups",
+        kind: "warning",
+        okLabel: "Unlink groups",
+        cancelLabel: "Cancel",
+      },
+    );
+    if (!ok) return;
+    setBusy(true);
+    setError(null);
+    setNotice(null);
+    try {
+      const removed = await invoke<number>("youtube_subscription_groups_clear_memberships");
+      setSubscriptionGroupIds([]);
+      setSubscriptionGroupFilterId("");
+      setNotice(`Unlinked ${removed} subscription group membership(s). Subscriptions and videos were kept.`);
       await refresh();
     } catch (e) {
       setError(String(e));
@@ -2820,116 +3940,27 @@ export function LibraryPage({ mode = "all", visible = true }: LibraryPageProps) 
     }
   }
 
-  async function importExistingDownloads() {
-    setBusy(true);
-    setError(null);
-    setNotice(null);
-    try {
-      const selected = await open({
-        multiple: false,
-        directory: true,
-        title: "Import existing downloads (index-only)",
-      });
-      if (!selected || typeof selected !== "string") return;
-      const summary = await invoke<ExistingDownloadsImportSummary>(
-        "youtube_subscriptions_import_existing_downloads",
-        {
-          scanDir: selected,
-        },
-      );
-      setNotice(
-        `Scanned ${summary.discovered_media_files} file(s); imported ${summary.imported_items}, skipped ${summary.skipped_existing_items}, failures ${summary.failures}.`,
-      );
-      await refresh();
-    } catch (e) {
-      setError(String(e));
-    } finally {
-      setBusy(false);
-    }
-  }
-
-  async function analyzeLegacyArchiveRoot() {
-    setBusy(true);
-    setError(null);
-    setNotice(null);
-    try {
-      const root = legacyArchiveRoot.trim();
-      if (!root) {
-        throw new Error("Choose or enter a legacy archive root first.");
-      }
-      const summary = await invoke<LegacyArchiveAnalysisSummary>("legacy_archive_analyze", {
-        rootPath: root,
-        installPath: legacyArchiveInstallPath.trim() || null,
-        maxDepth: Math.max(1, Math.min(16, Math.round(legacyArchiveMaxDepth))),
-        maxFiles: Math.max(1, Math.min(100000, Math.round(legacyArchiveMaxFiles))),
-      });
-      setLegacyArchiveAnalysis(summary);
-      setNotice(
-        `Analyzed legacy root: ${summary.media_file_count} sampled media file(s), ${summary.managed_container_count} managed 4KVDP container(s), ${summary.unmatched_top_level_dirs} unmatched top-level folder(s), and ${summary.top_level_file_count} loose root file(s). Local report: ${summary.local_report_path || "not written"}.`,
-      );
-    } catch (e) {
-      setError(String(e));
-    } finally {
-      setBusy(false);
-    }
-  }
-
-  async function importExistingDownloadsFromLegacyRoot() {
-    if (legacyArchiveRoot.trim()) {
-      setBusy(true);
-      setError(null);
-      setNotice(null);
-      try {
-        const summary = await invoke<ExistingDownloadsImportSummary>(
-          "youtube_subscriptions_import_existing_downloads",
-          {
-            scanDir: legacyArchiveRoot.trim(),
-            maxDepth: Math.max(1, Math.min(16, Math.round(legacyArchiveMaxDepth))),
-            maxFiles: Math.max(1, Math.min(100000, Math.round(legacyArchiveMaxFiles))),
-          },
-        );
-        setNotice(
-          `Scanned ${summary.discovered_media_files} file(s); imported ${summary.imported_items}, skipped ${summary.skipped_existing_items}, failures ${summary.failures}.`,
-        );
-        await refresh();
-      } catch (e) {
-        setError(String(e));
-      } finally {
-        setBusy(false);
-      }
-      return;
-    }
-    await importExistingDownloads();
-  }
-
-  async function openLegacyAnalysisReport() {
-    setError(null);
-    if (!legacyArchiveAnalysis?.local_report_path) return;
-    try {
-      await openPathBestEffort(legacyArchiveAnalysis!.local_report_path);
-    } catch (e) {
-      setError(String(e));
-    }
-  }
-
   const showVideoTabControls = mode === "video_ingest";
   const showVideoBatchPanel =
     showVideoIngest &&
     (mode !== "video_ingest" ||
       videoArchiverTab === "youtube_single" ||
       videoArchiverTab === "website");
+  // WP-0255: selecting the "YouTube playlist/subscription" tab is itself the opt-in —
+  // show subscriptions in any view mode (Quick or Advanced). The old `advancedMode &&`
+  // gate made this tab render blank in Quick mode even though subscriptions exist.
   const showYoutubeRecurringPanel =
     showVideoIngest &&
-    advancedMode &&
     (mode !== "video_ingest" || videoArchiverTab === "youtube_recurring");
   const showYoutubePresetPanel =
     showVideoIngest &&
-    advancedMode &&
-    (mode !== "video_ingest" || videoArchiverTab !== "website");
+    (mode === "video_ingest"
+      ? videoArchiverTab !== "website"
+      : advancedMode);
   const videoBatchTitle =
     mode === "video_ingest" && videoArchiverTab === "website"
-      ? "Website video archiver (batch)"
-      : "YouTube single videos";
+      ? "Other website videos"
+      : "Single videos";
 
   return (
     <section>
@@ -2968,6 +3999,12 @@ export function LibraryPage({ mode = "all", visible = true }: LibraryPageProps) 
                 : "No video library configured"}
             </div>
           </div>
+          {/* WP-0255: collapse the create/rename/export/move controls so the archiver
+              isn't this busy. The Active-library selector above stays visible. */}
+          <details>
+            <summary style={{ cursor: "pointer", color: "#4b5563", fontSize: 12 }}>
+              Manage libraries (create / rename / export / move metadata)
+            </summary>
           <div className="row">
             <label style={{ display: "flex", alignItems: "center", gap: 8, flex: "1 1 220px" }}>
               <span>Name</span>
@@ -3053,6 +4090,7 @@ export function LibraryPage({ mode = "all", visible = true }: LibraryPageProps) 
           <div style={{ color: "#4b5563", fontSize: 12 }}>
             Export/import and copy/move operate on VoxVulgi metadata. Media files stay in place.
           </div>
+          </details>
         </div>
       ) : null}
 
@@ -3079,33 +4117,35 @@ export function LibraryPage({ mode = "all", visible = true }: LibraryPageProps) 
         </div>
         <div style={{ marginTop: 10, color: "#4b5563" }}>
           {(() => {
-            if (!batchRules) return "Batch-on-import: -";
+            if (!batchRules) return "When videos arrive: -";
             const tasks: string[] = [];
-            if (batchRules.auto_asr) tasks.push("ASR");
-            if (batchRules.auto_translate) tasks.push("Translate->EN");
-            if (batchRules.auto_separate) tasks.push("Separate stems");
-            if (batchRules.auto_diarize) tasks.push("Diarize speakers");
-            if (batchRules.auto_dub_preview) tasks.push("Dub preview (TTS->Mix->Mux)");
-            if (!tasks.length) return "Batch-on-import: off (no background jobs queued).";
-            return `Batch-on-import: will queue ${tasks.join(", ")}. Configure in Diagnostics.`;
+            if (batchRules.auto_asr) tasks.push("write captions");
+            if (batchRules.auto_translate) tasks.push("translate to English");
+            if (batchRules.auto_separate) tasks.push("split voice from music");
+            if (batchRules.auto_diarize) tasks.push("label who is speaking");
+            if (batchRules.auto_dub_preview) tasks.push("make a dubbed preview");
+            if (!tasks.length) return "When videos arrive: nothing runs automatically.";
+            return `When videos arrive, VoxVulgi will automatically: ${tasks.join(", ")}. Change this in Diagnostics.`;
           })()}
         </div>
         </div>
       ) : null}
 
-      {showVideoIngest || showInstagramArchive || showImageArchive ? (
-        <div className="card" style={{ display: "flex", alignItems: "center", gap: 12 }}>
+      {showInstagramArchive || showImageArchive ? (
+        <div className="card segmented" style={{ display: "flex", alignItems: "center", gap: 12 }}>
           <strong>View mode:</strong>
           <button
             type="button"
-            style={{ fontWeight: advancedMode ? undefined : 700 }}
+            className={advancedMode ? undefined : "seg-on"}
+            aria-pressed={!advancedMode}
             onClick={() => setAdvancedMode(false)}
           >
             Quick
           </button>
           <button
             type="button"
-            style={{ fontWeight: advancedMode ? 700 : undefined }}
+            className={advancedMode ? "seg-on" : undefined}
+            aria-pressed={advancedMode}
             onClick={() => setAdvancedMode(true)}
           >
             Advanced
@@ -3119,344 +4159,90 @@ export function LibraryPage({ mode = "all", visible = true }: LibraryPageProps) 
       ) : null}
 
       {showVideoTabControls ? (
-        <div className="card" style={{ display: "flex", alignItems: "center", gap: 12, flexWrap: "wrap" }}>
-          <strong>Video Archiver:</strong>
+        <div
+          className="segmented archiver-workflow-tabs"
+          role="tablist"
+          aria-label="Video Archiver workflow"
+        >
           <button
             type="button"
-            style={{ fontWeight: videoArchiverTab === "youtube_single" ? 700 : undefined }}
+            role="tab"
+            className={videoArchiverTab === "youtube_single" ? "seg-on" : undefined}
+            aria-pressed={videoArchiverTab === "youtube_single"}
+            aria-selected={videoArchiverTab === "youtube_single"}
+            aria-controls="video-archiver-single-panel"
             onClick={() => setVideoArchiverTab("youtube_single")}
           >
-            YouTube single
+            Single videos
           </button>
           <button
             type="button"
-            style={{ fontWeight: videoArchiverTab === "youtube_recurring" ? 700 : undefined }}
+            role="tab"
+            className={videoArchiverTab === "youtube_recurring" ? "seg-on" : undefined}
+            aria-pressed={videoArchiverTab === "youtube_recurring"}
+            aria-selected={videoArchiverTab === "youtube_recurring"}
+            aria-controls="video-archiver-subscriptions-panel"
             onClick={() => setVideoArchiverTab("youtube_recurring")}
           >
-            YouTube playlist/subscription
+            Subscriptions
           </button>
           <button
             type="button"
-            style={{ fontWeight: videoArchiverTab === "website" ? 700 : undefined }}
+            role="tab"
+            className={videoArchiverTab === "website" ? "seg-on" : undefined}
+            aria-pressed={videoArchiverTab === "website"}
+            aria-selected={videoArchiverTab === "website"}
+            aria-controls="video-archiver-website-panel"
             onClick={() => setVideoArchiverTab("website")}
           >
-            Website/non-YouTube
+            Other websites
           </button>
-        </div>
-      ) : null}
-
-      {false && showVideoIngest && advancedMode ? (
-        <div className="card">
-        <h2>Legacy archive import (read-only)</h2>
-        <div style={{ color: "#4b5563", marginBottom: 8 }}>
-          Use this when you already have a large downloader-managed archive on local disk or NAS.
-          VoxVulgi only analyzes and indexes it here. It does not move, delete, or rewrite legacy
-          media. Start with a shallow analysis first, import any managed 4KVDP state, then index
-          the unmatched/manual containers incrementally.
-        </div>
-        <div className="row">
-          <label style={{ display: "flex", alignItems: "center", gap: 8, flex: 1 }}>
-            <span>Archive root</span>
-            <input
-              value={legacyArchiveRoot}
-              disabled={busy}
-              onChange={(e) => {
-                setLegacyArchiveRoot(e.currentTarget.value);
-                setLegacyArchiveAnalysis(null);
-              }}
-              placeholder="Absolute local or NAS folder path"
-              style={{ width: "100%" }}
-            />
-          </label>
-          <button type="button" disabled={busy} onClick={chooseLegacyArchiveRoot}>
-            Choose folder
-          </button>
-        </div>
-        <div className="row">
-          <label style={{ display: "flex", alignItems: "center", gap: 8, flex: 1 }}>
-            <span>Old 4KVDP install</span>
-            <input
-              value={legacyArchiveInstallPath}
-              disabled={busy}
-              onChange={(e) => setLegacyArchiveInstallPath(e.currentTarget.value)}
-              placeholder="Optional old app install path"
-              style={{ width: "100%" }}
-            />
-          </label>
-        </div>
-        <div style={{ color: "#4b5563", marginBottom: 8 }}>
-          The install path is only a hint. VoxVulgi will also auto-detect the old 4KVDP app-state
-          SQLite in Local AppData and use that to preserve managed subscription and playlist
-          mapping when available.
-        </div>
-        <div className="row">
-          <label style={{ display: "flex", alignItems: "center", gap: 8 }}>
-            <span>Max depth</span>
-            <input
-              type="number"
-              min={1}
-              max={16}
-              value={legacyArchiveMaxDepth}
-              disabled={busy}
-              onChange={(e) =>
-                setLegacyArchiveMaxDepth(
-                  Math.max(1, Math.min(16, Number(e.currentTarget.value) || 1)),
-                )
-              }
-              style={{ width: 110 }}
-            />
-          </label>
-          <label style={{ display: "flex", alignItems: "center", gap: 8 }}>
-            <span>Max files</span>
-            <input
-              type="number"
-              min={1}
-              max={100000}
-              value={legacyArchiveMaxFiles}
-              disabled={busy}
-              onChange={(e) =>
-                setLegacyArchiveMaxFiles(
-                  Math.max(1, Math.min(100000, Number(e.currentTarget.value) || 1)),
-                )
-              }
-              style={{ width: 130 }}
-            />
-          </label>
-          <div style={{ color: "#4b5563" }}>
-            These bounds keep NAS reads deliberate and write a local analysis report only.
-          </div>
-        </div>
-        <div className="row">
-          <button
-            type="button"
-            disabled={busy || !legacyArchiveRoot.trim()}
-            onClick={analyzeLegacyArchiveRoot}
-          >
-            Analyze root
-          </button>
-          <button
-            type="button"
-            disabled={busy || !legacyArchiveRoot.trim()}
-            onClick={importExistingDownloadsFromLegacyRoot}
-          >
-            Index downloads
-          </button>
-          <button
-            type="button"
-            disabled={busy || !legacyArchiveRoot.trim()}
-            onClick={import4kvdpAppState}
-          >
-            Import 4KVDP app state
-          </button>
-          <button type="button" disabled={busy} onClick={import4kvdpSubscriptionsDir}>
-            Import 4KVDP exports
-          </button>
-        </div>
-        {legacyArchiveAnalysis ? (
-          <>
-            <div className="kv">
-              <div className="k">Media files</div>
-              <div className="v">{legacyArchiveAnalysis!.media_file_count}</div>
-            </div>
-            <div className="kv">
-              <div className="k">Install path</div>
-              <div className="v">{legacyArchiveAnalysis!.install_path ?? "-"}</div>
-            </div>
-            <div className="kv">
-              <div className="k">Install path exists</div>
-              <div className="v">{legacyArchiveAnalysis!.install_path_exists ? "yes" : "no"}</div>
-            </div>
-            <div className="kv">
-              <div className="k">4KVDP state DB</div>
-              <div className="v">{legacyArchiveAnalysis!.legacy_state_db_path ?? "-"}</div>
-            </div>
-            <div className="kv">
-              <div className="k">4KVDP state DB exists</div>
-              <div className="v">
-                {legacyArchiveAnalysis!.legacy_state_db_exists ? "yes" : "no"}
-              </div>
-            </div>
-            <div className="kv">
-              <div className="k">4KVDP install hints</div>
-              <div className="v">
-                {legacyArchiveAnalysis!.detected_4kvdp_install ? "detected" : "not detected"}
-              </div>
-            </div>
-            <div className="kv">
-              <div className="k">4KVDP subscriptions.json</div>
-              <div className="v">
-                {legacyArchiveAnalysis!.detected_4kvdp_subscriptions_json ? "detected" : "not detected"}
-              </div>
-            </div>
-            <div className="kv">
-              <div className="k">4KVDP subscription_entries.csv</div>
-              <div className="v">
-                {legacyArchiveAnalysis!.detected_4kvdp_subscription_entries_csv ? "detected" : "not detected"}
-              </div>
-            </div>
-            <div className="kv">
-              <div className="k">Channel-like folders</div>
-              <div className="v">{legacyArchiveAnalysis!.detected_channel_dirs}</div>
-            </div>
-            <div className="kv">
-              <div className="k">Playlist-like folders</div>
-              <div className="v">{legacyArchiveAnalysis!.detected_playlist_dirs}</div>
-            </div>
-            <div className="kv">
-              <div className="k">Top-level folders</div>
-              <div className="v">{legacyArchiveAnalysis!.top_level_dir_count}</div>
-            </div>
-            <div className="kv">
-              <div className="k">Loose root files</div>
-              <div className="v">{legacyArchiveAnalysis!.top_level_file_count}</div>
-            </div>
-            <div className="kv">
-              <div className="k">Managed 4KVDP containers</div>
-              <div className="v">
-                {legacyArchiveAnalysis!.managed_container_count} total (
-                {legacyArchiveAnalysis!.managed_subscription_count} subscription/channel,{" "}
-                {legacyArchiveAnalysis!.managed_playlist_count} playlist)
-              </div>
-            </div>
-            <div className="kv">
-              <div className="k">Managed folders matched on disk</div>
-              <div className="v">{legacyArchiveAnalysis!.matched_managed_dirs}</div>
-            </div>
-            <div className="kv">
-              <div className="k">Unmatched top-level folders</div>
-              <div className="v">{legacyArchiveAnalysis!.unmatched_top_level_dirs}</div>
-            </div>
-            <div className="kv">
-              <div className="k">Analysis bounds</div>
-              <div className="v">
-                depth {legacyArchiveAnalysis!.scan_max_depth}, max files{" "}
-                {legacyArchiveAnalysis!.scan_max_files}
-              </div>
-            </div>
-            <div className="kv">
-              <div className="k">Local report</div>
-              <div className="v">{legacyArchiveAnalysis!.local_report_path || "-"}</div>
-            </div>
-            <div className="row">
-              <button
-                type="button"
-                disabled={busy || !legacyArchiveAnalysis!.local_report_path}
-                onClick={openLegacyAnalysisReport}
-              >
-                Open report
-              </button>
-            </div>
-            {legacyArchiveAnalysis!.warnings.length ? (
-              <div style={{ color: "#6b4f1d", marginTop: 8 }}>
-                {legacyArchiveAnalysis!.warnings.join(" ")}
-              </div>
-            ) : null}
-            {legacyArchiveAnalysis!.recommendations.length ? (
-              <div style={{ marginTop: 12 }}>
-                <div style={{ fontWeight: 600, marginBottom: 6 }}>Recommended import order</div>
-                <ul style={{ margin: 0, paddingLeft: 18 }}>
-                  {legacyArchiveAnalysis!.recommendations.map((line) => (
-                    <li key={line}>{line}</li>
-                  ))}
-                </ul>
-              </div>
-            ) : null}
-            {legacyArchiveAnalysis!.managed_container_hints.length ? (
-              <div className="table-wrap" style={{ marginTop: 12 }}>
-                <table>
-                  <thead>
-                    <tr>
-                      <th>Managed kind</th>
-                      <th>Folder</th>
-                      <th>Matched root path</th>
-                    </tr>
-                  </thead>
-                  <tbody>
-                    {legacyArchiveAnalysis!.managed_container_hints.map((hint) => (
-                      <tr key={`${hint.container_kind}:${hint.relative_path}:${hint.source_url}`}>
-                        <td>{hint.container_kind}</td>
-                        <td>{hint.relative_path}</td>
-                        <td>{hint.matched_root_path ?? "-"}</td>
-                      </tr>
-                    ))}
-                  </tbody>
-                </table>
-              </div>
-            ) : null}
-            {legacyArchiveAnalysis!.sample_unmatched_dirs.length ? (
-              <div style={{ marginTop: 12 }}>
-                <div style={{ fontWeight: 600, marginBottom: 6 }}>Sample unmatched folders</div>
-                <div style={{ color: "#4b5563" }}>
-                  {legacyArchiveAnalysis!.sample_unmatched_dirs.join(" | ")}
-                </div>
-              </div>
-            ) : null}
-            {legacyArchiveAnalysis!.sample_top_level_files.length ? (
-              <div style={{ marginTop: 12 }}>
-                <div style={{ fontWeight: 600, marginBottom: 6 }}>Sample loose root files</div>
-                <div style={{ color: "#4b5563" }}>
-                  {legacyArchiveAnalysis!.sample_top_level_files.join(" | ")}
-                </div>
-              </div>
-            ) : null}
-            {legacyArchiveAnalysis!.container_hints.length ? (
-              <div className="table-wrap" style={{ marginTop: 12 }}>
-                <table>
-                  <thead>
-                    <tr>
-                      <th>Sampled container</th>
-                      <th>Media files (sampled)</th>
-                    </tr>
-                  </thead>
-                  <tbody>
-                    {legacyArchiveAnalysis!.container_hints.map((hint) => (
-                      <tr key={hint.relative_path}>
-                        <td>{hint.relative_path}</td>
-                        <td>{hint.media_file_count}</td>
-                      </tr>
-                    ))}
-                  </tbody>
-                </table>
-              </div>
-            ) : null}
-          </>
-        ) : null}
         </div>
       ) : null}
 
       {showVideoBatchPanel ? (
-        <div className="card">
+        <div
+          className="card"
+          id={
+            mode === "video_ingest" && videoArchiverTab === "website"
+              ? "video-archiver-website-panel"
+              : "video-archiver-single-panel"
+          }
+          role={mode === "video_ingest" ? "tabpanel" : undefined}
+        >
         <h2>{videoBatchTitle}</h2>
         <div style={{ color: "#4b5563", marginBottom: 8 }}>
-          Paste many links at once (direct media URLs or YouTube video/playlist/channel links).
-          Maximum {maxBatchUrls} videos per submission. If output folder is empty, each job is
-          saved under <code>{defaultVideoDownloadsDir || "video"}</code>. VoxVulgi now treats MP4
-          as the default archive target when yt-dlp can merge/remux cleanly. YouTube session
-          cookies are managed in <strong>Options</strong> and applied when jobs run.
+          {mode === "video_ingest" && videoArchiverTab === "website"
+            ? `Paste one or more supported website video links, up to ${maxBatchUrls} at a time.`
+            : `Paste one or more direct YouTube video or Shorts links, up to ${maxBatchUrls} at a time.`}{" "}
+          Videos are saved as MP4 to <code>{defaultVideoDownloadsDir || "video"}</code> unless you pick another folder below.
         </div>
         <textarea
           value={urlBatchText}
           onChange={(e) => setUrlBatchText(e.currentTarget.value)}
           disabled={busy}
           placeholder={
-            "https://www.youtube.com/@channel/videos\nhttps://www.youtube.com/watch?v=abc123"
+            mode === "video_ingest" && videoArchiverTab === "website"
+              ? "https://example.com/video-page"
+              : "https://www.youtube.com/watch?v=abc123\nhttps://www.youtube.com/shorts/abc123"
           }
           rows={4}
           style={{ width: "100%", boxSizing: "border-box", resize: "vertical" }}
         />
         <div style={{ color: "#4b5563", marginTop: 8 }}>
-          Effective Video Archiver root: <code>{defaultVideoDownloadsDir || "-"}</code>. Change it
-          in <strong>Options</strong>; the folder field below is only a per-batch override.
+          Videos are saved to <code>{defaultVideoDownloadsDir || "-"}</code>. You can change the
+          default in <strong>Options</strong>, or pick a folder just for this batch below.
         </div>
         <div className="row">
           <label style={{ display: "flex", alignItems: "center", gap: 8, flex: 1 }}>
-            <span>Batch output override</span>
+            <span>Save to folder (optional)</span>
             <input
               value={urlBatchOutputDir}
               disabled={busy}
               onChange={(e) => setUrlBatchOutputDir(e.currentTarget.value)}
               placeholder="Optional absolute folder path (overrides the video root)"
               style={{ width: "100%" }}
+              title="Pick a folder for just this batch. Leave blank to use the default video folder."
             />
           </label>
           <button type="button" disabled={busy} onClick={chooseVideoOutputDir}>
@@ -3470,6 +4256,7 @@ export function LibraryPage({ mode = "all", visible = true }: LibraryPageProps) 
               value={urlBatchPresetId}
               disabled={busy || !downloadPresets}
               onChange={(e) => setUrlBatchPresetId(e.currentTarget.value)}
+              title="A saved set of quality, subtitle, and folder choices applied to this batch."
             >
               <option value="">(Default preset)</option>
               {(downloadPresets?.presets ?? []).map((preset) => (
@@ -3480,7 +4267,7 @@ export function LibraryPage({ mode = "all", visible = true }: LibraryPageProps) 
             </select>
           </label>
           <div style={{ color: "#4b5563" }}>
-            Applies output template + quality/subtitle preferences for this batch.
+            Sets the quality, subtitles, and folder for this batch.
           </div>
         </div>
         <div style={{ color: "#4b5563", marginTop: 8 }}>
@@ -3491,13 +4278,246 @@ export function LibraryPage({ mode = "all", visible = true }: LibraryPageProps) 
             Queue URL batch ({parsedUrlCount})
           </button>
         </div>
+        {downloadPreflightRows.length ? (
+          <div
+            id="youtube-single-download-preflight"
+            data-testid="youtube-single-download-preflight"
+            className="download-preflight-panel"
+          >
+            <div className="row" style={{ justifyContent: "space-between", alignItems: "center" }}>
+              <div>
+                <strong>Already known or needs repair</strong>
+                <div style={{ color: "#4b5563", fontSize: 12 }}>
+                  Existing and active videos were not queued. Missing records need an explicit relocate or redownload decision.
+                </div>
+              </div>
+              <button
+                type="button"
+                disabled={busy || !downloadPreflightRows.some((row) => row.status === "missing")}
+                onClick={() => queueApprovedMissing(downloadPreflightRows)}
+              >
+                Redownload all missing
+              </button>
+            </div>
+            <div className="table-wrap" style={{ marginTop: 8 }}>
+              <table>
+                <thead>
+                  <tr>
+                    <th>State</th>
+                    <th>Video / link</th>
+                    <th>Canonical file</th>
+                    <th>Actions</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {downloadPreflightRows.map((row) => {
+                    const key = preflightIdentityKey(row);
+                    const stateLabel =
+                      row.status === "present" ? "Already downloaded" :
+                      row.status === "active" ? "Already queued/running" :
+                      row.status === "missing" ? "File missing" :
+                      row.status === "operator_deleted" ? "Deleted by operator" :
+                      row.status === "storage_unreachable" ? "Storage unreachable" :
+                      row.status === "duplicate_input" ? "Duplicate in this batch" : "Invalid link";
+                    return (
+                      <tr key={`${key}:${row.input_index}`}>
+                        <td><strong>{stateLabel}</strong></td>
+                        <td style={{ minWidth: 280, overflowWrap: "anywhere" }}>
+                          <div style={{ fontWeight: 600 }}>{row.library_title || row.url}</div>
+                          {row.library_title ? <div style={{ color: "#4b5563", fontSize: 12 }}>{row.url}</div> : null}
+                          {row.active_job_id ? <div>Job <code>{row.active_job_id.slice(0, 8)}</code></div> : null}
+                          {row.failed_url ? <div className="error-inline">Failed link: {row.failed_url}</div> : null}
+                          {row.last_error ? <div className="error-inline">{row.last_error}</div> : null}
+                        </td>
+                        <td style={{ minWidth: 220, overflowWrap: "anywhere" }}>
+                          {row.media_path ? <code>{row.media_path}</code> : "—"}
+                        </td>
+                        <td style={{ minWidth: 260 }}>
+                          {row.status === "missing" ? (
+                            <>
+                              <div className="row" style={{ marginTop: 0 }}>
+                                <button type="button" disabled={busy} onClick={() => relocateMissingVideo(row)}>
+                                  Relocate file
+                                </button>
+                                <button type="button" disabled={busy} onClick={() => queueApprovedMissing([row])}>
+                                  Approve redownload
+                                </button>
+                              </div>
+                              {row.failed_url || row.last_error ? (
+                                <div style={{ marginTop: 8 }}>
+                                  <input
+                                    value={replacementUrlByIdentity[key] ?? ""}
+                                    disabled={busy}
+                                    onChange={(event) => setReplacementUrlByIdentity((current) => ({
+                                      ...current,
+                                      [key]: event.currentTarget.value,
+                                    }))}
+                                    placeholder="Replacement link for the same video"
+                                    style={{ width: "100%" }}
+                                  />
+                                  <div className="row" style={{ marginTop: 6 }}>
+                                    <button type="button" disabled={busy} onClick={() => replaceFailedSourceUrl(row)}>
+                                      Use replacement link
+                                    </button>
+                                    <button type="button" disabled={busy} onClick={() => removeMissingLibraryRecord(row)}>
+                                      Remove library record
+                                    </button>
+                                  </div>
+                                </div>
+                              ) : null}
+                            </>
+                          ) : row.status === "operator_deleted" ? (
+                            <span>
+                              Protected from Redownload all. Open Media Library → Deleted and
+                              explicitly select this video to redownload it.
+                            </span>
+                          ) : row.status === "storage_unreachable" ? (
+                            <span>Check the NAS/storage connection. No record was changed.</span>
+                          ) : (
+                            <span>No action needed.</span>
+                          )}
+                        </td>
+                      </tr>
+                    );
+                  })}
+                </tbody>
+              </table>
+            </div>
+          </div>
+        ) : null}
+        <div
+          id="youtube-single-live-queue"
+          data-testid="youtube-single-live-queue"
+          style={{ borderTop: "1px solid #e5e7eb", marginTop: 16, paddingTop: 12 }}
+        >
+          <div className="row" style={{ justifyContent: "space-between", alignItems: "center" }}>
+            <h3 style={{ margin: 0 }}>Queued and downloading</h3>
+            <span style={{ color: "#4b5563" }}>
+              {youtubeSingleActivityPage
+                ? `${youtubeSingleActivityPage.running} downloading · ${youtubeSingleActivityPage.queued} queued`
+                : "Loading active single videos…"}
+            </span>
+          </div>
+          {youtubeSingleActivityPage?.jobs.length ? (
+            <>
+              <div className="table-wrap youtube-single-live-table" style={{ marginTop: 8 }}>
+                <table>
+                  <thead>
+                    <tr>
+                      <th>Status</th>
+                      <th>Video</th>
+                      <th>Batch</th>
+                      <th>Progress</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {youtubeSingleActivityPage.jobs.map((job) => {
+                      const pct = Math.max(0, Math.min(100, Math.round((job.progress || 0) * 100)));
+                      const sourceUrl = liveSingleSourceUrl(job);
+                      return (
+                        <tr key={job.id} data-testid={`youtube-single-live-job-${job.id}`}>
+                          <td>
+                            <strong>{job.status === "running" ? "Downloading" : "Queued"}</strong>
+                            <div style={{ color: "#4b5563", fontSize: 12 }}>
+                              Job <code>{job.id.slice(0, 8)}</code>
+                            </div>
+                          </td>
+                          <td style={{ minWidth: 260, overflowWrap: "anywhere" }}>
+                            <div style={{ fontWeight: 600 }}>
+                              {job.target_title || sourceUrl || "Single video"}
+                            </div>
+                            {job.target_title && sourceUrl ? (
+                              <div style={{ color: "#4b5563", fontSize: 12 }}>{sourceUrl}</div>
+                            ) : null}
+                          </td>
+                          <td>{job.batch_id ? <code>{job.batch_id.slice(0, 8)}</code> : "—"}</td>
+                          <td style={{ minWidth: 180 }}>
+                            <div
+                              className="job-bar"
+                              role="progressbar"
+                              aria-label={`${job.target_title || "Video"} ${job.status}`}
+                              aria-valuemin={0}
+                              aria-valuemax={100}
+                              aria-valuenow={job.status === "running" ? pct : undefined}
+                            >
+                              <div
+                                className={`job-bar-fill job-bar-${job.status}${job.status === "queued" ? " is-indeterminate" : ""}`}
+                                style={job.status === "running" ? { width: `${pct}%` } : undefined}
+                              />
+                            </div>
+                            <strong>{job.status === "running" ? `${pct}%` : "Waiting for its track slot"}</strong>
+                          </td>
+                        </tr>
+                      );
+                    })}
+                  </tbody>
+                </table>
+              </div>
+              <div className="row" style={{ justifyContent: "space-between", marginTop: 8 }}>
+                <span style={{ color: "#4b5563" }}>
+                  Showing {youtubeSingleActivityPage.offset + 1}–
+                  {youtubeSingleActivityPage.offset + youtubeSingleActivityPage.jobs.length} of {youtubeSingleActivityPage.active_total}
+                </span>
+                <div className="row" style={{ marginTop: 0 }}>
+                  <button
+                    type="button"
+                    disabled={youtubeSingleActivityOffset === 0}
+                    onClick={() => setYoutubeSingleActivityOffset((value) => Math.max(0, value - singleActivityPageSize))}
+                  >
+                    Previous
+                  </button>
+                  <button
+                    type="button"
+                    disabled={!youtubeSingleActivityPage.has_more}
+                    onClick={() => setYoutubeSingleActivityOffset((value) => value + singleActivityPageSize)}
+                  >
+                    Next
+                  </button>
+                </div>
+              </div>
+            </>
+          ) : (
+            <div style={{ color: "#4b5563", marginTop: 8 }}>
+              {youtubeSingleActivityPage ? "No single-video downloads are queued or running." : "Reading the single-video queue…"}
+            </div>
+          )}
+        </div>
         <div style={{ borderTop: "1px solid #e5e7eb", marginTop: 16, paddingTop: 12 }}>
           <div className="row" style={{ justifyContent: "space-between", alignItems: "center" }}>
             <h3 style={{ margin: 0 }}>Downloaded single videos</h3>
             <span style={{ color: "#4b5563" }}>
-              {youtubeSingleVideoItems.length} item{youtubeSingleVideoItems.length === 1 ? "" : "s"}
+              {youtubeSingleHistoryAppliedSearch && youtubeSingleHistoryPage
+                ? `${youtubeSingleHistoryPage.filtered_total} matching of ${youtubeSingleHistoryPage.canonical_total}`
+                : youtubeSingleHistoryPage?.canonical_total ?? youtubeSingleVideoItems.length} canonical item
+              {(youtubeSingleHistoryPage?.canonical_total ?? youtubeSingleVideoItems.length) === 1 ? "" : "s"}
             </span>
           </div>
+          {youtubeSingleHistoryPage ? (
+            <div
+              data-testid="youtube-single-history-lineage-status"
+              style={{ color: "#4b5563", fontSize: 12, marginTop: 6 }}
+            >
+              {youtubeSingleHistoryPage.backfill.has_more
+                ? `Classifying older downloads in the background · ${youtubeSingleHistoryPage.backfill.remaining_candidates} proven job link${youtubeSingleHistoryPage.backfill.remaining_candidates === 1 ? "" : "s"} left to inspect.`
+                : "Canonical history classification is up to date."}
+              {youtubeSingleUnclassifiedTotal == null
+                ? youtubeSingleUnclassifiedError
+                  ? " Older unclassified-item count is temporarily unavailable."
+                  : " Checking older unclassified items in the background."
+                : youtubeSingleUnclassifiedTotal > 0
+                  ? ` ${youtubeSingleUnclassifiedTotal} older YouTube item${youtubeSingleUnclassifiedTotal === 1 ? " is" : "s are"} preserved as unclassified and excluded from this single-video list.`
+                  : ""}
+              {youtubeLineageBackfillError ? (
+                <button
+                  type="button"
+                  style={{ marginLeft: 8 }}
+                  onClick={() => setYoutubeLineageBackfillError(null)}
+                >
+                  Retry classification
+                </button>
+              ) : null}
+            </div>
+          ) : null}
           <div className="row">
             <label style={{ display: "flex", alignItems: "center", gap: 8, flex: 1 }}>
               <span>Search</span>
@@ -3505,7 +4525,7 @@ export function LibraryPage({ mode = "all", visible = true }: LibraryPageProps) 
                 value={youtubeSingleHistorySearch}
                 disabled={busy}
                 onChange={(e) => setYoutubeSingleHistorySearch(e.currentTarget.value)}
-                placeholder="Fuzzy search title, URL, or path"
+                placeholder="Search title, URL, or path"
                 style={{ width: "100%" }}
               />
             </label>
@@ -3566,7 +4586,9 @@ export function LibraryPage({ mode = "all", visible = true }: LibraryPageProps) 
                 ) : (
                   <tr>
                     <td colSpan={4} style={{ color: "#4b5563", padding: "10px 6px" }}>
-                      No downloaded YouTube single videos match the current search.
+                      {youtubeSingleHistoryPage?.backfill.has_more
+                        ? "Older downloads are still being classified. Canonical singles will appear here as they are confirmed."
+                        : "No canonical downloaded YouTube single videos match the current search."}
                     </td>
                   </tr>
                 )}
@@ -3578,7 +4600,9 @@ export function LibraryPage({ mode = "all", visible = true }: LibraryPageProps) 
       ) : null}
 
       {showYoutubePresetPanel ? (
-        <div className="card">
+        <details className="archiver-presets">
+        <summary>Download presets</summary>
+        <div className="archiver-presets-body">
         <h2>Download presets + templates</h2>
         <div style={{ color: "#4b5563", marginBottom: 8 }}>
           Define reusable output folder/file templates and quality/subtitle preferences.
@@ -3793,14 +4817,23 @@ export function LibraryPage({ mode = "all", visible = true }: LibraryPageProps) 
           </table>
         </div>
         </div>
+        </details>
       ) : null}
 
-      {showYoutubeRecurringPanel ? (
+      {showYoutubeRecurringPanel && (mode === "video_ingest" || advancedMode) ? (
         <div className="card">
-        <h2>Subscription groups</h2>
+        <h2>Subscription groups (optional)</h2>
         <div style={{ color: "#4b5563", marginBottom: 8 }}>
-          Organize subscriptions into groups for filtering and queueing. Deleting a group does not
-          delete subscriptions.
+          Groups are optional <strong>labels</strong> for organizing your subscriptions — like
+          folders you can drop channels/playlists into. A subscription can be in several groups at
+          once, and grouping never moves or copies anything: every subscription still lives in the
+          one list below. Use a group to <strong>bulk-update or filter just that set</strong> (e.g.
+          update only the channels in one group instead of all 255).
+          <br />
+          <strong>How to use:</strong> type a name and <em>Save group</em> &rarr; open a
+          subscription's editor and tick the group(s) it belongs to &rarr; pick a group in
+          <em> Filter subscriptions</em> to view/queue only that set. Deleting a group removes the
+          label only &mdash; never the subscriptions.
         </div>
         <div className="row">
           <label style={{ display: "flex", alignItems: "center", gap: 8, flex: 1 }}>
@@ -3820,6 +4853,9 @@ export function LibraryPage({ mode = "all", visible = true }: LibraryPageProps) 
           </button>
           <button type="button" disabled={busy} onClick={resetGroupEditor}>
             Clear editor
+          </button>
+          <button type="button" disabled={busy} onClick={clearSubscriptionGroupMemberships}>
+            Unlink all subscriptions from groups
           </button>
           <label style={{ display: "flex", alignItems: "center", gap: 8 }}>
             <span>Filter subscriptions</span>
@@ -3881,27 +4917,15 @@ export function LibraryPage({ mode = "all", visible = true }: LibraryPageProps) 
       ) : null}
 
       {showYoutubeRecurringPanel ? (
-        <div className="card">
+        <div
+          className="card"
+          id="video-archiver-subscriptions-panel"
+          role={mode === "video_ingest" ? "tabpanel" : undefined}
+        >
         <h2>YouTube subscriptions</h2>
         <div style={{ color: "#4b5563", marginBottom: 8 }}>
-          Save channels/playlists as reusable subscriptions. Each subscription maps downloads into
-          its own folder and can set its own refresh interval. Loaded subscriptions come from the
-          local DB and stay available when you switch panes/windows.
-        </div>
-        <div style={{ color: "#4b5563", marginBottom: 8 }}>
-          Effective YouTube subscription root for new managed targets:{" "}
-          <code>{defaultSubscriptionDownloadsDir || "-"}</code>.
-          The selected library is saved with the subscription so later active-library changes do not move it.
-        </div>
-        <div style={{ color: "#4b5563", marginBottom: 8 }}>
-          Output override chooses where subscription media lands. "Already downloaded" continuity is
-          tracked in VoxVulgi-managed state, so migrated legacy/NAS folders can stay the target even
-          when the global root changes.
-        </div>
-        <div style={{ color: "#4b5563", marginBottom: 8 }}>
-          Leave the override blank for a new managed folder under <code>{defaultSubscriptionDownloadsDir || "-"}</code>.
-          Set an override when this subscription must keep writing into an existing legacy/NAS archive.
-          YouTube session cookies are managed in <strong>Options</strong> and reused by refresh jobs at runtime.
+          Save a channel or playlist so VoxVulgi checks it for new videos on its own. New videos are
+          saved to <code>{defaultSubscriptionDownloadsDir || "-"}</code> unless you pick another folder below.
         </div>
         <div className="row">
           <label style={{ display: "flex", alignItems: "center", gap: 8, flex: 1 }}>
@@ -3940,40 +4964,59 @@ export function LibraryPage({ mode = "all", visible = true }: LibraryPageProps) 
               ))}
             </select>
           </label>
-          <label style={{ display: "flex", alignItems: "center", gap: 8, flex: 1 }}>
-            <span>Folder map</span>
-            <input
-              value={subscriptionFolderMap}
-              disabled={busy}
-              onChange={(e) => setSubscriptionFolderMap(e.currentTarget.value)}
-              placeholder="channel_map_name"
-              style={{ width: "100%" }}
-            />
-          </label>
-          <label style={{ display: "flex", alignItems: "center", gap: 8, flex: 1 }}>
-            <span>Subscription output override</span>
-            <input
-              value={subscriptionOutputDirOverride}
-              disabled={busy}
-              onChange={(e) => setSubscriptionOutputDirOverride(e.currentTarget.value)}
-              placeholder="Optional absolute folder path"
-              style={{ width: "100%" }}
-            />
-          </label>
-          <button type="button" disabled={busy} onClick={chooseSubscriptionOutputDir}>
-            Choose folder
-          </button>
         </div>
+        <details>
+          <summary style={{ cursor: "pointer", color: "#4b5563", fontSize: 12 }}>
+            Folder options (optional)
+          </summary>
+          <div className="row" style={{ marginTop: 6 }}>
+            <label style={{ display: "flex", alignItems: "center", gap: 8, flex: 1 }}>
+              <span>Folder name</span>
+              <input
+                value={subscriptionFolderMap}
+                disabled={busy}
+                onChange={(e) => setSubscriptionFolderMap(e.currentTarget.value)}
+                placeholder="channel_map_name"
+                style={{ width: "100%" }}
+                title="Name of the subfolder these videos are saved into. Leave blank to use a folder named after the channel."
+              />
+            </label>
+            <label style={{ display: "flex", alignItems: "center", gap: 8, flex: 1 }}>
+              <span>Save to folder (optional)</span>
+              <input
+                value={subscriptionOutputDirOverride}
+                disabled={busy}
+                onChange={(e) => setSubscriptionOutputDirOverride(e.currentTarget.value)}
+                placeholder="Optional absolute folder path"
+                style={{ width: "100%" }}
+                title="Pick a specific folder for this subscription. Leave blank to use the default video folder."
+              />
+            </label>
+            <button type="button" disabled={busy} onClick={chooseSubscriptionOutputDir}>
+              Choose folder
+            </button>
+          </div>
+        </details>
         <div className="row">
           <label style={{ display: "flex", alignItems: "center", gap: 8 }}>
             <input
               type="checkbox"
               checked={subscriptionActive}
-              disabled={busy}
+              disabled={
+                busy ||
+                subscriptions.find((candidate) => candidate.id === subscriptionEditId)
+                  ?.source_status === "deleted"
+              }
               onChange={(e) => setSubscriptionActive(e.currentTarget.checked)}
             />
             <span>Active</span>
           </label>
+          {subscriptions.find((candidate) => candidate.id === subscriptionEditId)?.source_status ===
+          "deleted" ? (
+            <span style={{ color: "#475569", fontSize: 12 }}>
+              Deleted status is retained while editing. Restore it from the detail pane to queue it again.
+            </span>
+          ) : null}
           <label style={{ display: "flex", alignItems: "center", gap: 8 }}>
             <span>Preset</span>
             <select
@@ -3990,114 +5033,404 @@ export function LibraryPage({ mode = "all", visible = true }: LibraryPageProps) 
             </select>
           </label>
           <label style={{ display: "flex", alignItems: "center", gap: 8 }}>
-            <span>Refresh every (min)</span>
+            <span>Refresh every (hours)</span>
             <input
               type="number"
-              min={minSubscriptionRefreshIntervalMinutes}
-              max={maxSubscriptionRefreshIntervalMinutes}
-              value={subscriptionRefreshIntervalMinutes}
+              min={1}
+              max={Math.floor(maxSubscriptionRefreshIntervalMinutes / 60)}
+              step={1}
+              value={Math.round((subscriptionRefreshIntervalMinutes / 60) * 10) / 10}
               disabled={busy}
-              onChange={(e) =>
+              onChange={(e) => {
+                // WP-0255: edited in hours; stored in minutes. Clamp to engine bounds.
+                const hours = Number(e.currentTarget.value);
+                const minutes = Number.isFinite(hours)
+                  ? Math.round(hours * 60)
+                  : minSubscriptionRefreshIntervalMinutes;
                 setSubscriptionRefreshIntervalMinutes(
                   Math.max(
                     minSubscriptionRefreshIntervalMinutes,
-                    Math.min(
-                      maxSubscriptionRefreshIntervalMinutes,
-                      Number(e.currentTarget.value) || minSubscriptionRefreshIntervalMinutes,
-                    ),
+                    Math.min(maxSubscriptionRefreshIntervalMinutes, minutes),
                   ),
-                )
-              }
-              style={{ width: 110 }}
+                );
+              }}
+              style={{ width: 90 }}
+              title="How often this subscription is auto-checked for new videos. Stored in minutes; edited in hours."
             />
           </label>
         </div>
-        <div className="row">
-          <span style={{ color: "#4b5563" }}>Groups</span>
-          {subscriptionGroups.length ? (
-            subscriptionGroups.map((group) => (
-              <label key={group.id} style={{ display: "flex", alignItems: "center", gap: 6 }}>
-                <input
-                  type="checkbox"
-                  checked={subscriptionGroupIds.includes(group.id)}
-                  disabled={busy}
-                  onChange={() => toggleSubscriptionGroup(group.id)}
-                />
-                <span>{group.name}</span>
-              </label>
-            ))
-          ) : (
-            <span style={{ color: "#4b5563" }}>No groups yet.</span>
-          )}
-        </div>
+        {advancedMode ? (
+          <div className="row">
+            <span style={{ color: "#4b5563" }} title="Optional labels — tick the groups this subscription belongs to">
+              In groups
+            </span>
+            {subscriptionGroups.length ? (
+              subscriptionGroups.map((group) => (
+                <label key={group.id} style={{ display: "flex", alignItems: "center", gap: 6 }}>
+                  <input
+                    type="checkbox"
+                    checked={subscriptionGroupIds.includes(group.id)}
+                    disabled={busy}
+                    onChange={() => toggleSubscriptionGroup(group.id)}
+                  />
+                  <span>{group.name}</span>
+                </label>
+              ))
+            ) : (
+              <span style={{ color: "#4b5563" }}>No groups yet.</span>
+            )}
+          </div>
+        ) : null}
         <div style={{ color: "#4b5563", marginTop: 6 }}>
-          Queue due active uses each subscription interval against its last queued time.
+          <strong>Update all now</strong> checks every active subscription immediately.{" "}
+          <strong>Check due now</strong> only checks the ones past their refresh interval.{" "}
+          <strong>Reload list</strong> just refreshes this view — it never downloads.
         </div>
         <div className="row">
-          <button type="button" disabled={busy} onClick={saveSubscription}>
+          <button
+            type="button"
+            disabled={busy}
+            onClick={saveSubscription}
+            title={subscriptionEditId ? "Save changes to this subscription." : "Add this subscription to your list."}
+          >
             {subscriptionEditId ? "Update subscription" : "Save subscription"}
           </button>
-          <button type="button" disabled={busy} onClick={resetSubscriptionEditor}>
-            Clear editor
+          <button
+            type="button"
+            disabled={busy}
+            onClick={resetSubscriptionEditor}
+            title="Clears the add/edit form above (does not delete anything)."
+          >
+            Clear form
+          </button>
+          <button
+            type="button"
+            disabled={busy || allActiveSubscriptionCount === 0}
+            onClick={updateAllSubscriptions}
+            style={{ fontWeight: 700 }}
+            title="Check EVERY active subscription for new videos right now — ignores each subscription's interval and any group filter, and clears Stop. New videos appear in Jobs."
+          >
+            {subscriptionGroupFilterId
+              ? `Update ALL now (${allActiveSubscriptionCount}, ignores filter)`
+              : `Update all now (${allActiveSubscriptionCount})`}
+          </button>
+          <button
+            type="button"
+            disabled={busy}
+            onClick={stopRecurringSubscriptions}
+            title="Pause recurring subscription syncing. One-off downloads keep running; paused work resumes on the next Update all or restart."
+          >
+            {recurringStopped ? "Stopped — Stop again" : "Stop"}
           </button>
           <button
             type="button"
             disabled={busy || activeSubscriptionCount === 0}
             onClick={queueAllActiveSubscriptions}
+            title="Check only the subscriptions whose interval has elapsed since their last check (respects the group filter)."
           >
-            {subscriptionGroupFilterId ? "Queue due in group" : "Queue due active"} ({activeSubscriptionCount})
+            {subscriptionGroupFilterId ? "Check due in group" : "Check due now"} ({activeSubscriptionCount})
           </button>
-          <button type="button" disabled={busy} onClick={exportSubscriptionsJson}>
-            Export JSON
-          </button>
-          <button type="button" disabled={busy} onClick={importSubscriptionsJson}>
-            Import JSON
-          </button>
-          <button type="button" disabled={busy} onClick={import4kvdpSubscriptionsDir}>
-            Import 4KVDP exports
-          </button>
-          <button type="button" disabled={busy} onClick={() => scanFolderSeedArchive()}>
-            Scan folder + seed continuity
-          </button>
-          <button type="button" disabled={busy} onClick={importExistingDownloadsFromLegacyRoot}>
-            Import existing downloads
-          </button>
-          <button type="button" disabled={busy} onClick={() => refresh()}>
-            Refresh subscriptions
+          {/* WP-0255: group the rarely-used import/export/migration buttons so the
+              subscription bar isn't a wall of buttons. */}
+          <details style={{ display: "inline-block" }}>
+            <summary style={{ cursor: "pointer", color: "#4b5563", fontSize: 12 }}>
+              Import / export &amp; migration
+            </summary>
+            <div className="row" style={{ marginTop: 6 }}>
+              <button type="button" disabled={busy} onClick={exportSubscriptionsJson}>
+                Export JSON
+              </button>
+              <button type="button" disabled={busy} onClick={importSubscriptionsJson}>
+                Import JSON
+              </button>
+              <button
+                type="button"
+                disabled={busy}
+                onClick={() => scanFolderSeedArchive()}
+                title="Scan a folder of videos you already downloaded so VoxVulgi knows not to download them again."
+              >
+                Mark existing videos as done
+              </button>
+            </div>
+          </details>
+          <button
+            type="button"
+            disabled={busy}
+            onClick={() => refresh()}
+            title="Reload this list from the local database (updated counts, last-checked times). Does not contact YouTube or download anything."
+          >
+            Reload list
           </button>
         </div>
         <div style={{ color: "#4b5563", marginTop: 8 }}>
           Saved subscriptions: {subscriptions.length}
           {subscriptionGroupFilterId ? ` (filtered: ${groupNameById.get(subscriptionGroupFilterId) ?? "group"})` : ""}
         </div>
-        <div className="panel-scroll-hint">
-          This table scrolls inside the panel when the archive metadata is wider than the window.
-          Actions stay pinned on the right.
+        {/* WP-0255: all-subscriptions status strip (no card) so the operator always sees
+            overall state at a glance, then a master-detail manager that fits the window
+            (replaces the 15-column horizontally-scrolling table). */}
+        <div className="sub-status-strip">
+          <span className="sub-status-metric"><strong>{subscriptionOverview.total}</strong> subscriptions</span>
+          <span className="sub-status-sep">·</span>
+          <span
+            className="sub-status-metric"
+            title="These are queued for a refresh check. VoxVulgi checks them in small paced batches (not all at once) to avoid YouTube anti-bot limits."
+          >
+            <strong>{subscriptionOverview.updating}</strong> queued to check · paced
+          </span>
+          <span className="sub-status-sep">·</span>
+          {/* WP-0264: per-kind breakdown replaces the bare "N need attention" — classify each
+              failing sub's stored error and show a compact count-by-state so the operator sees
+              sign-in vs handle-not-found vs rate-limit vs busy at a glance. */}
+          {subscriptionOverview.errored ? (
+            <span
+              className="sub-status-metric sub-status-error"
+              style={{ display: "inline-flex", alignItems: "center", gap: 6, flexWrap: "wrap" }}
+            >
+              {/* WP: clickable — filters the list to the failing subs so the operator can see and
+                  fix exactly which ones need attention, instead of a dead count. */}
+              <button
+                type="button"
+                style={attentionFilterButtonStyle(attentionFilter === "__all__", true)}
+                onClick={() => setAttentionFilter(attentionFilter === "__all__" ? null : "__all__")}
+                title="Show only the subscriptions that need attention"
+              >
+                {subscriptionOverview.errored} need attention
+              </button>
+              {subscriptionOverview.breakdown.map((b) => (
+                <button
+                  key={b.label}
+                  type="button"
+                  style={attentionFilterButtonStyle(attentionFilter === b.label, false)}
+                  onClick={() => setAttentionFilter(attentionFilter === b.label ? null : b.label)}
+                  title={`Show only: ${compactFailureLabel(b.label)}`}
+                >
+                  {b.count} {compactFailureLabel(b.label)}
+                </button>
+              ))}
+              {attentionFilter ? (
+                <button
+                  type="button"
+                  style={{
+                    cursor: "pointer",
+                    borderRadius: 999,
+                    border: "1px solid #9ca3af",
+                    background: "#ffffff",
+                    color: "#374151",
+                    fontSize: 11,
+                    fontWeight: 600,
+                    padding: "1px 8px",
+                    whiteSpace: "nowrap",
+                  }}
+                  onClick={() => setAttentionFilter(null)}
+                  title="Clear the filter and show all subscriptions"
+                >
+                  ✕ clear filter
+                </button>
+              ) : null}
+            </span>
+          ) : (
+            <span className="sub-status-metric">
+              <strong>0</strong> need attention
+            </span>
+          )}
+          <span className="sub-status-sep">·</span>
+          <span className="sub-status-metric">last sync {formatTimeAgo(subscriptionOverview.lastSync)}</span>
         </div>
-        <div className="table-wrap table-wrap-wide table-wrap-sticky-actions">
-          <table>
-            <thead>
-              <tr>
-                <th>Title</th>
-                <th>Type</th>
-                <th>URL</th>
-                <th>Downloaded</th>
-                <th>Status</th>
-                <th>Target mode</th>
-                <th>Target path</th>
-                <th>Folder map</th>
-                <th>Groups</th>
-                <th>Active</th>
-                <th>Preset</th>
-                <th>Interval (min)</th>
-                <th>Last queued</th>
-                <th>Backoff</th>
-                <th>Actions</th>
-              </tr>
-            </thead>
-            <tbody>
-              {visibleSubscriptions.length ? (
-                visibleSubscriptions.map((sub) => {
+        {/* WP: toggle to show/hide the green "Checking for new videos" activity list. Hidden by
+            DEFAULT (operator found it noisy and it buried the subscription list); persisted. */}
+        <div style={{ display: "flex", justifyContent: "flex-end", margin: "2px 0 0" }}>
+          <button
+            type="button"
+            onClick={() =>
+              setHideProcessingList((v) => {
+                const next = !v;
+                safeLocalStorageSet(
+                  "voxvulgi.v1.library.hide_processing_list",
+                  next ? "1" : "0",
+                );
+                return next;
+              })
+            }
+            style={{
+              cursor: "pointer",
+              fontSize: 11,
+              border: "1px solid #cbd5e1",
+              borderRadius: 6,
+              background: "#f8fafc",
+              color: "#475569",
+              padding: "2px 8px",
+            }}
+            title="Show or hide the green 'Checking for new videos' activity list"
+          >
+            {hideProcessingList ? "Show activity list" : "Hide activity list"}
+          </button>
+        </div>
+        {/* WP-0261/WP: the green "Checking for new videos" list is REFRESH ONLY. A subscription
+            appears here while it is being enumerated/refreshed (active-refresh ids or the activity
+            feed's "checking" phase). Actual downloading now lives in the per-row/detail pill so this
+            list can never contradict the "Downloading" badge. */}
+        {!hideProcessingList && (() => {
+          const checkingIds = new Set<string>(activeRefreshSubIds);
+          for (const a of Object.values(subActivity)) {
+            if (a.phase === "checking") checkingIds.add(a.subscription_id);
+          }
+          if (!checkingIds.size) return null;
+          return (
+            <div className="sub-processing">
+              {Array.from(checkingIds).map((subId) => {
+                const sub = subscriptions.find((s) => s.id === subId);
+                const title = sub?.title ?? subId;
+                return (
+                  <div key={subId} className="sub-processing-row">
+                    <span className="sub-processing-label">
+                      Checking {title} for new videos…
+                    </span>
+                    <div className="sub-bar sub-processing-bar">
+                      <div className="sub-bar-fill sub-bar-fill-downloading" style={{ width: "100%" }} />
+                    </div>
+                  </div>
+                );
+              })}
+            </div>
+          );
+        })()}
+        <div className="sub-manager">
+          <div className="sub-list-pane">
+            <div className="sub-list" role="listbox" aria-label="Subscriptions">
+              {displayedSubscriptions.length ? (
+                renderedSubscriptions.map((sub) => {
+                const downloaded = archiveStats[sub.id] ?? 0;
+                const total = sub.upstream_total ?? null;
+                const isRefreshing = activeRefreshSubIds.has(sub.id);
+                const activity = resolveSubscriptionActivity(
+                  sub.id,
+                  isRefreshing,
+                  subDownloadActivity,
+                  subActivity,
+                );
+                const runState = subscriptionRunState(sub, activity);
+                const pres = subscriptionRunPresentation(runState);
+                const pct =
+                  total && total > 0 ? Math.min(100, Math.round((downloaded / total) * 100)) : null;
+                const selected = sub.id === selectedSubscriptionId;
+                const stateLabel = pres.label;
+                // WP-0261/WP: live counts derived from the resolved activity so the row text can
+                // never disagree with the pill (queued/running from the authoritative source;
+                // succeeded/current title from the activity feed when present).
+                const act = subActivity[sub.id];
+                const liveActive =
+                  activity.checking || activity.running > 0 || activity.queued > 0;
+                // WP-0264: classify the stored failure into a plain state chip + requirement,
+                // shown when the sub has failed and has an error to classify.
+                // WP: use the shared attention chip so a failing sub with NO stored error still
+                // gets an actionable "Unclassified" chip instead of rendering nothing.
+                const failure = subscriptionAttentionChip(sub);
+                const showFailureChip = failure != null;
+                return (
+                  <button
+                    type="button"
+                    role="option"
+                    key={sub.id}
+                    className={`sub-list-row${selected ? " sub-list-row-selected" : ""}`}
+                    onClick={() => setSelectedSubscriptionId(sub.id)}
+                    aria-selected={selected}
+                  >
+                    <div className="sub-list-main">
+                      <span className="sub-list-title" title={sub.title}>{sub.title}</span>
+                      <span className={`sub-pill ${pres.pillClassName}`} style={pres.pillStyle}>{stateLabel}</span>
+                    </div>
+                    <div className="sub-list-sub">
+                      <span className="sub-list-type">{inferSubscriptionType(sub.source_url)}</span>
+                      {sub.source_status === "deleted" ? (
+                        <span className="sub-list-inactive">deleted · not queued</span>
+                      ) : sub.source_status === "unavailable" ? (
+                        <span className="sub-list-inactive">URL unavailable</span>
+                      ) : !sub.active ? (
+                        <span className="sub-list-inactive">paused</span>
+                      ) : null}
+                      <span className="sub-list-count">
+                        {total != null ? `${downloaded} / ${total}` : `${downloaded} downloaded`}
+                        {sub.last_new_found ? ` · ${sub.last_new_found} new` : ""}
+                      </span>
+                    </div>
+                    {liveActive ? (
+                      <div className="sub-list-sub">
+                        <span className="sub-list-count">
+                          {runState === "checking"
+                            ? "Checking for new videos…"
+                            : runState === "waiting"
+                              ? `${activity.queued} queued · waiting to download`
+                              : `Queued ${activity.queued} · Running ${activity.running} · Done ${act?.succeeded ?? 0}`}
+                        </span>
+                        {runState === "downloading" && act?.current_title ? (
+                          <span className="sub-list-count" title={act.current_title}>
+                            Downloading: {act.current_title}
+                          </span>
+                        ) : null}
+                      </div>
+                    ) : null}
+                    {showFailureChip && failure ? (
+                      <div
+                        className="sub-list-sub"
+                        style={{ alignItems: "center", gap: 6 }}
+                        title={sub.last_error_message ?? ""}
+                      >
+                        <span style={toneStyle(failure.tone)}>{failure.label}</span>
+                        <span className="sub-list-count">{failure.requirement}</span>
+                      </div>
+                    ) : null}
+                    <div className="sub-bar">
+                      <div
+                        className={`sub-bar-fill ${pres.barClassName}`}
+                        style={{ ...pres.barStyle, width: `${pct ?? (downloaded > 0 ? 100 : 0)}%` }}
+                      />
+                    </div>
+                  </button>
+                );
+                })
+              ) : (
+                <div className="sub-list-empty">
+                  {attentionFilter
+                    ? "No subscriptions match this filter. Clear the filter to see all."
+                    : "No subscriptions yet. Add one with the form above."}
+                </div>
+              )}
+            </div>
+            {displayedSubscriptions.length ? (
+              <div className="sub-list-window-controls">
+                <span>
+                  Showing {Math.min(subscriptionListRenderLimit, displayedSubscriptions.length)} of{" "}
+                  {displayedSubscriptions.length} subscriptions
+                </span>
+                {subscriptionListRenderLimit < displayedSubscriptions.length ? (
+                  <button
+                    type="button"
+                    data-agent-safe-action="true"
+                    onClick={() =>
+                      setSubscriptionListRenderLimit((current) =>
+                        Math.min(
+                          current + SUBSCRIPTION_LIST_RENDER_STEP,
+                          displayedSubscriptions.length,
+                        ),
+                      )
+                    }
+                  >
+                    Load{" "}
+                    {Math.min(
+                      SUBSCRIPTION_LIST_RENDER_STEP,
+                      displayedSubscriptions.length - subscriptionListRenderLimit,
+                    )}{" "}
+                    more
+                  </button>
+                ) : null}
+              </div>
+            ) : null}
+          </div>
+          <div className="sub-detail">
+            {selectedSubscription
+              ? (() => {
+                  const sub = selectedSubscription;
                   const boundLibrary = sub.library_id ? videoLibraryById.get(sub.library_id) : null;
                   const subscriptionRoot = boundLibrary
                     ? boundLibrary.root_path
@@ -4107,87 +5440,496 @@ export function LibraryPage({ mode = "all", visible = true }: LibraryPageProps) 
                     subscriptionRoot,
                     sub.folder_map,
                   );
-                  return (
-                    <tr key={sub.id}>
-                      <td>{sub.title}</td>
-                      <td>{inferSubscriptionType(sub.source_url)}</td>
-                      <td style={{ minWidth: 260, maxWidth: 360, wordBreak: "break-word" }}>
-                        {sub.source_url}
-                      </td>
-                      <td>{archiveStats[sub.id] ?? 0}</td>
-                      <td>{activeRefreshSubIds.has(sub.id) ? "Downloading..." : "Idle"}</td>
-                      <td>{target.mode}</td>
-                      <td style={{ minWidth: 260, maxWidth: 380, wordBreak: "break-word" }}>
-                        {target.path || "-"}
-                        {boundLibrary ? (
-                          <div style={{ fontSize: 11, color: boundLibrary.exists ? "#166534" : "#92400e" }}>
-                            {boundLibrary.name}{boundLibrary.exists ? "" : " (missing)"}
-                          </div>
-                        ) : null}
-                      </td>
-                      <td>{sub.folder_map}</td>
-                      <td>
-                        {sub.group_ids.length
-                          ? sub.group_ids.map((id) => groupNameById.get(id) ?? id).join(", ")
-                          : "-"}
-                      </td>
-                      <td>{sub.active ? "yes" : "no"}</td>
-                      <td>
-                        {sub.preset_id
-                          ? downloadPresets?.presets.find((preset) => preset.id === sub.preset_id)?.title ??
-                            sub.preset_id
-                          : "(default)"}
-                      </td>
-                      <td>{sub.refresh_interval_minutes}</td>
-                      <td>
-                        {sub.last_queued_at_ms
-                          ? new Date(sub.last_queued_at_ms).toLocaleString()
-                          : "-"}
-                      </td>
-                      <td>
-                        {sub.next_allowed_refresh_at_ms &&
-                        sub.next_allowed_refresh_at_ms > Date.now()
-                          ? `retry after ${new Date(sub.next_allowed_refresh_at_ms).toLocaleString()}`
-                          : "ready"}
-                        {sub.consecutive_failures > 0 ? ` (${sub.consecutive_failures} fail)` : ""}
-                      </td>
-                      <td>
-                        <div className="row" style={{ marginTop: 0, flexWrap: "nowrap" }}>
-                          <button type="button" disabled={busy} onClick={() => editSubscription(sub)}>
-                            Edit
-                          </button>
-                          <button type="button" disabled={busy} onClick={() => queueSubscription(sub.id)}>
-                            Queue
-                          </button>
-                          <button
-                            type="button"
-                            disabled={busy}
-                            onClick={() => openYoutubeSubscriptionFolder(sub.id)}
-                          >
-                            Open folder
-                          </button>
-                          <button type="button" disabled={busy} onClick={() => deleteSubscription(sub.id)}>
-                            Delete
-                          </button>
-                          <button
-                            type="button"
-                            disabled={busy}
-                            onClick={() => scanFolderSeedArchive(sub.id)}
-                          >
-                            Seed continuity
-                          </button>
-                        </div>
-                      </td>
-                    </tr>
+                  const downloaded = archiveStats[sub.id] ?? 0;
+                  const total = sub.upstream_total ?? null;
+                  const isRefreshing = activeRefreshSubIds.has(sub.id);
+                  const activity = resolveSubscriptionActivity(
+                    sub.id,
+                    isRefreshing,
+                    subDownloadActivity,
+                    subActivity,
                   );
-                })
-              ) : (
-                <tr>
-                  <td colSpan={15}>No subscriptions yet.</td>
-                </tr>
+                  const runState = subscriptionRunState(sub, activity);
+                  const pres = subscriptionRunPresentation(runState);
+                  const stateLabel = pres.label;
+                  // WP-0261/WP: live counts derived from the resolved activity so the detail text
+                  // never disagrees with the pill or with Jobs.
+                  const act = subActivity[sub.id];
+                  const liveActive =
+                    activity.checking || activity.running > 0 || activity.queued > 0;
+                  // WP-0264: classified failure state for the selected sub (chip + requirement).
+                  const detailFailure = subscriptionAttentionChip(sub);
+                  const showDetailFailure = detailFailure != null;
+                  return (
+                    <>
+                      <div className="sub-detail-head">
+                        <span className="sub-detail-title">{sub.title}</span>
+                        <span className={`sub-pill ${pres.pillClassName}`} style={pres.pillStyle}>{stateLabel}</span>
+                      </div>
+                      {showDetailFailure && detailFailure ? (
+                        <div
+                          className="sub-detail-progress"
+                          style={{ display: "flex", flexDirection: "column", gap: 4 }}
+                        >
+                          <span>
+                            <span style={toneStyle(detailFailure.tone)}>{detailFailure.label}</span>
+                          </span>
+                          <span>{detailFailure.requirement}</span>
+                          {detailFailure.tone === "action" ? (
+                            <span style={{ color: "#4b5563", fontSize: 12 }}>
+                              {detailFailure.kind === "auth_required"
+                                ? "Open Options to refresh your YouTube sign-in."
+                                : "Open the Edit form above to update this subscription’s URL."}
+                            </span>
+                          ) : null}
+                        </div>
+                      ) : null}
+                      <div className="sub-detail-progress">
+                        {total != null ? (
+                          <>
+                            <strong>{downloaded}</strong> of <strong>{total}</strong> videos downloaded
+                            {sub.last_new_found ? ` · ${sub.last_new_found} new at last check` : ""}
+                          </>
+                        ) : (
+                          <>
+                            <strong>{downloaded}</strong> downloaded · total unknown until the first check
+                          </>
+                        )}
+                      </div>
+                      {liveActive ? (
+                        <div className="sub-detail-progress">
+                          {runState === "checking" ? (
+                            "Checking for new videos…"
+                          ) : runState === "waiting" ? (
+                            <>
+                              <strong>{activity.queued}</strong> queued · waiting to download
+                            </>
+                          ) : (
+                            <>
+                              Queued <strong>{activity.queued}</strong> · Running <strong>{activity.running}</strong> · Done <strong>{act?.succeeded ?? 0}</strong>
+                              {act && act.failed > 0 ? <> · Failed <strong>{act.failed}</strong></> : null}
+                            </>
+                          )}
+                          {runState === "downloading" && act?.current_title ? (
+                            <div className="sub-detail-wrap">Downloading: {act.current_title}</div>
+                          ) : null}
+                        </div>
+                      ) : null}
+                      <dl className="sub-detail-grid">
+                        <dt>Type</dt>
+                        <dd>
+                          {inferSubscriptionType(sub.source_url)}
+                          {sub.source_status === "normal" && !sub.active ? " (paused)" : ""}
+                        </dd>
+                        <dt>Status</dt>
+                        <dd>
+                          {sub.source_status === "normal"
+                            ? "Normal"
+                            : sub.source_status === "unavailable"
+                              ? "Unavailable — the subscription URL returned HTTP 404. This does not prove its hosting channel was deleted."
+                              : "Deleted — manually marked; refresh queueing is blocked."}
+                          {sub.source_status_changed_at_ms
+                            ? ` · ${new Date(sub.source_status_changed_at_ms).toLocaleString()}`
+                            : ""}
+                          {sub.source_status_change_source
+                            ? ` · ${sub.source_status_change_source.replace(/_/g, " ")}`
+                            : ""}
+                        </dd>
+                        <dt>URL</dt>
+                        <dd className="sub-detail-wrap">{sub.source_url}</dd>
+                        <dt>Target</dt>
+                        <dd className="sub-detail-wrap">
+                          {target.mode}{target.path ? ` — ${target.path}` : ""}
+                          {boundLibrary ? (
+                            <span className={boundLibrary.exists ? "sub-lib-ok" : "sub-lib-missing"}>
+                              {" "}({boundLibrary.name}{boundLibrary.exists ? "" : " missing"})
+                            </span>
+                          ) : null}
+                        </dd>
+                        <dt>Folder name</dt>
+                        <dd>{sub.folder_map || "-"}</dd>
+                        <dt>Preset</dt>
+                        <dd>
+                          {sub.preset_id
+                            ? downloadPresets?.presets.find((p) => p.id === sub.preset_id)?.title ??
+                              sub.preset_id
+                            : "(default)"}
+                        </dd>
+                        <dt>Groups</dt>
+                        <dd>
+                          {sub.group_ids.length
+                            ? sub.group_ids.map((id) => groupNameById.get(id) ?? id).join(", ")
+                            : "-"}
+                        </dd>
+                        <dt>Refresh</dt>
+                        <dd>{formatRefreshIntervalHours(sub.refresh_interval_minutes)}</dd>
+                        <dt>Last checked</dt>
+                        <dd>
+                          {sub.last_checked_at_ms
+                            ? `${new Date(sub.last_checked_at_ms).toLocaleString()} (${formatTimeAgo(sub.last_checked_at_ms)})`
+                            : "never"}
+                        </dd>
+                        <dt>Last queued</dt>
+                        <dd>{sub.last_queued_at_ms ? new Date(sub.last_queued_at_ms).toLocaleString() : "-"}</dd>
+                        <dt>Backoff</dt>
+                        <dd>
+                          {sub.next_allowed_refresh_at_ms && sub.next_allowed_refresh_at_ms > Date.now()
+                            ? `retry after ${new Date(sub.next_allowed_refresh_at_ms).toLocaleString()}`
+                            : "ready"}
+                          {sub.consecutive_failures > 0 ? ` (${sub.consecutive_failures} fail)` : ""}
+                        </dd>
+                      </dl>
+                      <div className="row sub-detail-actions">
+                        <button
+                          type="button"
+                          disabled={busy || sub.source_status === "deleted"}
+                          onClick={() => queueSubscription(sub.id)}
+                          title={
+                            sub.source_status === "deleted"
+                              ? "Restore this subscription before queueing it."
+                              : sub.source_status === "unavailable"
+                                ? "Check the URL again. A success restores Normal; another HTTP 404 keeps it Unavailable."
+                                : "Check this subscription now."
+                          }
+                        >
+                          Queue now
+                        </button>
+                        <button type="button" disabled={busy} onClick={() => editSubscription(sub)}>
+                          Edit
+                        </button>
+                        <button
+                          type="button"
+                          disabled={busy}
+                          onClick={() => {
+                            editSubscription(sub);
+                            setNotice("Paste the corrected channel or playlist URL in the YouTube URL field, then save.");
+                          }}
+                          title="Load this subscription into the form so you can paste a corrected @handle or stable /channel/UC... URL."
+                        >
+                          Refresh URL
+                        </button>
+                        <button
+                          type="button"
+                          disabled={busy}
+                          onClick={() => openYoutubeSubscriptionFolder(sub.id)}
+                        >
+                          Open folder
+                        </button>
+                        <button
+                          type="button"
+                          disabled={busy}
+                          onClick={() => scanFolderSeedArchive(sub.id)}
+                          title="Scan this folder for videos you already have so they are not downloaded again."
+                        >
+                          Mark existing as done
+                        </button>
+                        <button
+                          type="button"
+                          disabled={busy}
+                          onClick={() =>
+                            setSubscriptionManualStatus(
+                              sub,
+                              sub.source_status === "deleted" ? "normal" : "deleted",
+                            )
+                          }
+                          title={
+                            sub.source_status === "deleted"
+                              ? "Restore this preserved subscription and allow refresh queueing again."
+                              : "Stop all future refresh queueing while keeping videos, subtitles, metadata, memberships, and history."
+                          }
+                        >
+                          {sub.source_status === "deleted"
+                            ? "Restore subscription"
+                            : "Mark subscription deleted"}
+                        </button>
+                      </div>
+                      <div className="sub-detail-videos">
+                        {subscriptionVideosLoading ? (
+                          <div className="sub-detail-progress">loading videos…</div>
+                        ) : (
+                          <>
+                            <div className="sub-video-selection-toolbar" aria-label="Subscription video selection actions">
+                              <strong>
+                                {subscriptionVideoSelectedIds.size} selected
+                              </strong>
+                              <button
+                                type="button"
+                                data-agent-safe-action="true"
+                                disabled={
+                                  busy ||
+                                  subscriptionVideos.downloaded.length +
+                                    subscriptionVideos.deleted.length ===
+                                    0
+                                }
+                                onClick={() =>
+                                  setSubscriptionVideoSelectedIds(
+                                    new Set(
+                                      [
+                                        ...subscriptionVideos.downloaded,
+                                        ...subscriptionVideos.deleted,
+                                      ].map((item) => item.id),
+                                    ),
+                                  )
+                                }
+                              >
+                                Select loaded
+                              </button>
+                              <button
+                                type="button"
+                                data-agent-safe-action="true"
+                                disabled={busy || subscriptionVideoSelectedIds.size === 0}
+                                onClick={() => setSubscriptionVideoSelectedIds(new Set())}
+                              >
+                                Clear
+                              </button>
+                              <label>
+                                <span>Delete method</span>
+                                <select
+                                  value={libraryFileDeleteMode}
+                                  disabled={busy}
+                                  onChange={(event) =>
+                                    setLibraryFileDeleteMode(
+                                      event.currentTarget.value as "trash" | "permanent",
+                                    )
+                                  }
+                                >
+                                  <option value="trash">Recycle Bin</option>
+                                  <option value="permanent">Permanent</option>
+                                </select>
+                              </label>
+                              <button
+                                type="button"
+                                disabled={busy || subscriptionSelectedAvailableIds.length === 0}
+                                onClick={() =>
+                                  deleteSelectedVideoFiles(
+                                    subscriptionSelectedAvailableIds,
+                                    "subscription",
+                                  )
+                                }
+                              >
+                                Delete selected ({subscriptionSelectedAvailableIds.length})
+                              </button>
+                              <button
+                                type="button"
+                                disabled={busy || subscriptionSelectedDeletedIds.length === 0}
+                                onClick={() =>
+                                  redownloadSelectedDeletedVideos(
+                                    subscriptionSelectedDeletedIds,
+                                    "subscription",
+                                  )
+                                }
+                              >
+                                Redownload selected ({subscriptionSelectedDeletedIds.length})
+                              </button>
+                            </div>
+                            <section className="sub-video-section" aria-label="Still to download">
+                              <div className="sub-video-section-head">
+                                <strong>Still to download</strong>
+                                <span>
+                                  Showing {Math.min(pendingVideoRenderLimit, subscriptionVideos.pending.length)}
+                                  {" "}of {subscriptionVideos.pending.length} loaded rows ·{" "}
+                                  {activity.queued} queued total
+                                </span>
+                              </div>
+                              {subscriptionVideos.pending.length ? (
+                                <ul className="sub-video-list">
+                                  {subscriptionVideos.pending
+                                    .slice(0, pendingVideoRenderLimit)
+                                    .map((video, index) => (
+                                    <li
+                                      key={`pending-${index}-${video?.url ?? ""}`}
+                                      className="sub-video-row"
+                                    >
+                                      <span className="sub-video-status">Queued</span>
+                                      <span className="sub-video-title">
+                                        {video?.title || video?.url || "(untitled)"}
+                                      </span>
+                                    </li>
+                                  ))}
+                                </ul>
+                              ) : (
+                                <div className="sub-video-empty">Nothing pending.</div>
+                              )}
+                              {pendingVideoRenderLimit < subscriptionVideos.pending.length ? (
+                                <button
+                                  type="button"
+                                  data-agent-safe-action="true"
+                                  className="sub-video-load-more"
+                                  onClick={() =>
+                                    setPendingVideoRenderLimit((current) =>
+                                      Math.min(
+                                        current + SUBSCRIPTION_VIDEO_RENDER_STEP,
+                                        subscriptionVideos.pending.length,
+                                      ),
+                                    )
+                                  }
+                                >
+                                  Load {Math.min(
+                                    SUBSCRIPTION_VIDEO_RENDER_STEP,
+                                    subscriptionVideos.pending.length - pendingVideoRenderLimit,
+                                  )} more pending videos
+                                </button>
+                              ) : null}
+                            </section>
+                            <section className="sub-video-section" aria-label="Downloaded videos">
+                              <div className="sub-video-section-head">
+                                <strong>Downloaded</strong>
+                                <span>
+                                  Showing {Math.min(
+                                    downloadedVideoRenderLimit,
+                                    subscriptionVideos.downloaded.length,
+                                  )} of {subscriptionVideos.downloaded.length} loaded rows ·{" "}
+                                  {downloaded} archived total
+                                </span>
+                              </div>
+                              {subscriptionVideos.downloaded.length ? (
+                                <ul className="sub-video-list">
+                                  {subscriptionVideos.downloaded
+                                    .slice(0, downloadedVideoRenderLimit)
+                                    .map((item, index) => (
+                                    <li
+                                      key={item?.id ?? `downloaded-${index}`}
+                                      className="sub-video-row sub-video-row-with-thumb"
+                                      title={item?.title ?? ""}
+                                    >
+                                      <input
+                                        type="checkbox"
+                                        checked={subscriptionVideoSelectedIds.has(item.id)}
+                                        disabled={busy}
+                                        aria-label={`Select ${item.title || "downloaded video"}`}
+                                        onChange={() =>
+                                          toggleSelectedId(setSubscriptionVideoSelectedIds, item.id)
+                                        }
+                                      />
+                                      <ThumbnailPreview itemId={item.id} path={item.thumbnail_path} />
+                                      <span className="sub-video-title">
+                                        {item?.title || "(untitled)"}
+                                      </span>
+                                      <span className="sub-video-meta">{formatDuration(item.duration_ms)}</span>
+                                      <span className="sub-video-actions">
+                                        <button type="button" onClick={() => openMediaFile(item)}>
+                                          Open
+                                        </button>
+                                        <button type="button" onClick={() => revealMediaFile(item)}>
+                                          Folder
+                                        </button>
+                                      </span>
+                                    </li>
+                                  ))}
+                                </ul>
+                              ) : (
+                                <div className="sub-video-empty">Nothing downloaded yet.</div>
+                              )}
+                              {downloadedVideoRenderLimit < subscriptionVideos.downloaded.length ? (
+                                <button
+                                  type="button"
+                                  data-agent-safe-action="true"
+                                  className="sub-video-load-more"
+                                  onClick={() =>
+                                    setDownloadedVideoRenderLimit((current) =>
+                                      Math.min(
+                                        current + SUBSCRIPTION_VIDEO_RENDER_STEP,
+                                        subscriptionVideos.downloaded.length,
+                                      ),
+                                    )
+                                  }
+                                >
+                                  Load {Math.min(
+                                    SUBSCRIPTION_VIDEO_RENDER_STEP,
+                                    subscriptionVideos.downloaded.length -
+                                      downloadedVideoRenderLimit,
+                                  )} more downloaded videos
+                                </button>
+                              ) : null}
+                            </section>
+                            <section className="sub-video-section" aria-label="Deleted videos">
+                              <div className="sub-video-section-head">
+                                <strong>Deleted</strong>
+                                <span>
+                                  Showing {Math.min(
+                                    deletedVideoRenderLimit,
+                                    subscriptionVideos.deleted.length,
+                                  )} of {subscriptionVideos.deleted.length} loaded rows
+                                </span>
+                              </div>
+                              {subscriptionVideos.deleted.length ? (
+                                <ul className="sub-video-list">
+                                  {subscriptionVideos.deleted
+                                    .slice(0, deletedVideoRenderLimit)
+                                    .map((item, index) => (
+                                      <li
+                                        key={item?.id ?? `deleted-${index}`}
+                                        className="sub-video-row sub-video-row-with-thumb sub-video-row-deleted"
+                                        title={item?.title ?? ""}
+                                      >
+                                        <input
+                                          type="checkbox"
+                                          checked={subscriptionVideoSelectedIds.has(item.id)}
+                                          disabled={busy}
+                                          aria-label={`Select deleted video ${item.title || ""}`}
+                                          onChange={() =>
+                                            toggleSelectedId(
+                                              setSubscriptionVideoSelectedIds,
+                                              item.id,
+                                            )
+                                          }
+                                        />
+                                        <ThumbnailPreview
+                                          itemId={item.id}
+                                          path={item.thumbnail_path}
+                                        />
+                                        <span className="sub-video-title">
+                                          {item?.title || "(untitled)"} · Deleted
+                                        </span>
+                                        <span className="sub-video-meta">
+                                          {item.file_status === "delete_pending"
+                                            ? "Deletion needs review"
+                                            : item.file_delete_method === "trash"
+                                              ? "Recycle Bin"
+                                              : "Removed"}
+                                        </span>
+                                      </li>
+                                    ))}
+                                </ul>
+                              ) : (
+                                <div className="sub-video-empty">
+                                  No deleted videos. Deleted files stay here so you can explicitly
+                                  redownload selected items.
+                                </div>
+                              )}
+                              {deletedVideoRenderLimit < subscriptionVideos.deleted.length ? (
+                                <button
+                                  type="button"
+                                  data-agent-safe-action="true"
+                                  className="sub-video-load-more"
+                                  onClick={() =>
+                                    setDeletedVideoRenderLimit((current) =>
+                                      Math.min(
+                                        current + SUBSCRIPTION_VIDEO_RENDER_STEP,
+                                        subscriptionVideos.deleted.length,
+                                      ),
+                                    )
+                                  }
+                                >
+                                  Load {Math.min(
+                                    SUBSCRIPTION_VIDEO_RENDER_STEP,
+                                    subscriptionVideos.deleted.length - deletedVideoRenderLimit,
+                                  )} more deleted videos
+                                </button>
+                              ) : null}
+                            </section>
+                          </>
+                        )}
+                      </div>
+                    </>
+                  );
+                })()
+              : (
+                <div className="sub-detail-empty">
+                  Select a subscription on the left to see its details and actions.
+                </div>
               )}
-            </tbody>
-          </table>
+          </div>
         </div>
         </div>
       ) : null}
@@ -4252,13 +5994,27 @@ export function LibraryPage({ mode = "all", visible = true }: LibraryPageProps) 
       {showInstagramArchive && advancedMode ? (
         <div className="card">
         <h2>Instagram subscriptions</h2>
+        {/* WP-0263: Instagram subscription manager brought to parity with the Video Archiver
+            (master-detail + status strip + plain copy). The global Instagram sign-in in Options
+            is used by default, so a per-subscription sign-in is now an optional override. */}
         <div style={{ color: "#4b5563", marginBottom: 8 }}>
-          Save recurring Instagram archive targets with their own folder map and refresh interval.
-          Queue due active runs uses the saved interval against the last queued time. Explicit
-          session input takes precedence over browser-cookie fallback.
+          Save an Instagram profile so VoxVulgi checks it for new posts on its own. To save a profile
+          just once instead, use the one-time batch below. Checking runs slowly and one profile at a
+          time &mdash; Meta is strict about automation, so this is kept deliberately passive.
         </div>
-        <div style={{ color: "#4b5563", marginBottom: 8 }}>
-          This section is for recurring saved targets. The Instagram Archiver batch below is a one-time paste-and-queue flow.
+        <div
+          style={{
+            marginBottom: 10,
+            padding: "8px 10px",
+            borderRadius: 8,
+            background: "rgba(75, 123, 176, 0.10)",
+            color: "#2b557d",
+            fontSize: 13,
+          }}
+        >
+          Your Instagram sign-in is now saved once in <strong>Options &rarr; Instagram sign-in</strong>{" "}
+          and reused for every profile here. You only need the per-subscription sign-in below if a
+          particular profile needs a different login.
         </div>
         <div className="row">
           <label style={{ display: "flex", alignItems: "center", gap: 8, flex: 1 }}>
@@ -4282,95 +6038,115 @@ export function LibraryPage({ mode = "all", visible = true }: LibraryPageProps) 
             />
           </label>
         </div>
-        <div style={{ display: "grid", gap: 6, marginTop: 10 }}>
-          <span>Saved session / cookies</span>
-          <textarea
-            value={instagramSubscriptionAuthSessionInput}
-            disabled={busy}
-            onChange={(e) => {
-              setInstagramSubscriptionAuthSessionInput(e.currentTarget.value);
-              if (e.currentTarget.value.trim()) {
-                setInstagramSubscriptionClearAuthSession(false);
-              }
-            }}
-            placeholder="Cookie header, browser-export JSON, Netscape cookie text, or path to an existing cookie file"
-            rows={3}
-            style={{ width: "100%", boxSizing: "border-box", resize: "vertical" }}
-          />
-          <div style={{ color: "#4b5563" }}>
-            {instagramSubscriptionAuthSessionConfigured
-              ? "A saved session is already configured. Leave this blank to keep it, paste a new value to replace it, or clear it below."
-              : "Optional. Save a session once and reuse it for recurring login-required Instagram downloads."}
+        <details>
+          <summary style={{ cursor: "pointer", color: "#4b5563", fontSize: 12 }}>
+            Folder options (optional)
+          </summary>
+          <div className="row" style={{ marginTop: 6 }}>
+            <label style={{ display: "flex", alignItems: "center", gap: 8, flex: 1 }}>
+              <span>Folder name</span>
+              <input
+                value={instagramSubscriptionFolderMap}
+                disabled={busy}
+                onChange={(e) => setInstagramSubscriptionFolderMap(e.currentTarget.value)}
+                placeholder="example_profile"
+                style={{ width: "100%" }}
+                title="Name of the subfolder these posts are saved into. Leave blank to use a folder named after the profile."
+              />
+            </label>
+            <label style={{ display: "flex", alignItems: "center", gap: 8, flex: 1 }}>
+              <span>Save to folder (optional)</span>
+              <input
+                value={instagramSubscriptionOutputDirOverride}
+                disabled={busy}
+                onChange={(e) => setInstagramSubscriptionOutputDirOverride(e.currentTarget.value)}
+                placeholder="Optional absolute folder path"
+                style={{ width: "100%" }}
+                title="Pick a specific folder for this profile. Leave blank to use the default Instagram folder."
+              />
+            </label>
+            <button type="button" disabled={busy} onClick={chooseInstagramSubscriptionOutputDir}>
+              Choose folder
+            </button>
           </div>
-        </div>
-        <div className="row">
-          <label style={{ display: "flex", alignItems: "center", gap: 8, flex: 1 }}>
-            <span>Folder map</span>
-            <input
-              value={instagramSubscriptionFolderMap}
-              disabled={busy}
-              onChange={(e) => setInstagramSubscriptionFolderMap(e.currentTarget.value)}
-              placeholder="example_profile"
-              style={{ width: "100%" }}
-            />
-          </label>
-          <label style={{ display: "flex", alignItems: "center", gap: 8, flex: 1 }}>
-            <span>Output override</span>
-            <input
-              value={instagramSubscriptionOutputDirOverride}
-              disabled={busy}
-              onChange={(e) => setInstagramSubscriptionOutputDirOverride(e.currentTarget.value)}
-              placeholder="Optional absolute folder path"
-              style={{ width: "100%" }}
-            />
-          </label>
-          <button type="button" disabled={busy} onClick={chooseInstagramSubscriptionOutputDir}>
-            Choose folder
-          </button>
-        </div>
-        <div className="row">
-          <label style={{ display: "flex", alignItems: "center", gap: 8 }}>
-            <input
-              type="checkbox"
-              checked={instagramSubscriptionUseBrowserCookies}
+        </details>
+        {/* WP-0263: per-subscription sign-in is now an OPTIONAL override (the global Options
+            cookie is the primary path), so it lives behind a details toggle. */}
+        <details>
+          <summary style={{ cursor: "pointer", color: "#4b5563", fontSize: 12 }}>
+            Use a different sign-in for this profile (optional)
+          </summary>
+          <div style={{ display: "grid", gap: 6, marginTop: 10 }}>
+            <span title="Only needed if this profile needs a different login than the one saved in Options.">
+              Saved sign-in for this profile (optional)
+            </span>
+            <textarea
+              value={instagramSubscriptionAuthSessionInput}
               disabled={busy}
               onChange={(e) => {
-                const checked = e.currentTarget.checked;
-                setInstagramSubscriptionUseBrowserCookies(checked);
-                if (checked && !instagramSubscriptionBrowserCookieSource.trim()) {
-                  setInstagramSubscriptionBrowserCookieSource(DEFAULT_BROWSER_COOKIE_SOURCE);
+                setInstagramSubscriptionAuthSessionInput(e.currentTarget.value);
+                if (e.currentTarget.value.trim()) {
+                  setInstagramSubscriptionClearAuthSession(false);
                 }
               }}
+              placeholder="Paste your saved Instagram sign-in, or the path to a sign-in file"
+              rows={3}
+              style={{ width: "100%", boxSizing: "border-box", resize: "vertical" }}
             />
-            <span>Use browser cookies</span>
-          </label>
-          <label style={{ display: "flex", alignItems: "center", gap: 8 }}>
-            <span>Browser</span>
-            <select
-              value={instagramSubscriptionBrowserCookieSource}
-              disabled={busy || !instagramSubscriptionUseBrowserCookies}
-              onChange={(e) => setInstagramSubscriptionBrowserCookieSource(e.currentTarget.value)}
-            >
-              {browserCookieSourceOptions.map((option) => (
-                <option key={option.value} value={option.value}>
-                  {option.label}
-                </option>
-              ))}
-            </select>
-          </label>
-          <label style={{ display: "flex", alignItems: "center", gap: 8 }}>
-            <input
-              type="checkbox"
-              checked={instagramSubscriptionClearAuthSession}
-              disabled={
-                busy ||
-                (!instagramSubscriptionAuthSessionConfigured &&
-                  !instagramSubscriptionAuthSessionInput.trim())
-              }
-              onChange={(e) => setInstagramSubscriptionClearAuthSession(e.currentTarget.checked)}
-            />
-            <span>Clear saved session on save</span>
-          </label>
+            <div style={{ color: "#4b5563" }}>
+              {instagramSubscriptionAuthSessionConfigured
+                ? "This profile has its own saved sign-in. Leave this blank to keep it, paste a new value to replace it, or clear it below."
+                : "Leave blank to use the global Instagram sign-in from Options. Fill this in only if this profile needs a different login."}
+            </div>
+          </div>
+          <div className="row" style={{ marginTop: 8 }}>
+            <label style={{ display: "flex", alignItems: "center", gap: 8 }}>
+              <input
+                type="checkbox"
+                checked={instagramSubscriptionUseBrowserCookies}
+                disabled={busy}
+                onChange={(e) => {
+                  const checked = e.currentTarget.checked;
+                  setInstagramSubscriptionUseBrowserCookies(checked);
+                  if (checked && !instagramSubscriptionBrowserCookieSource.trim()) {
+                    setInstagramSubscriptionBrowserCookieSource(DEFAULT_BROWSER_COOKIE_SOURCE);
+                  }
+                }}
+                title="Use your existing browser sign-in so VoxVulgi can open profiles that require a login."
+              />
+              <span>Use my browser sign-in</span>
+            </label>
+            <label style={{ display: "flex", alignItems: "center", gap: 8 }}>
+              <span>Browser</span>
+              <select
+                value={instagramSubscriptionBrowserCookieSource}
+                disabled={busy || !instagramSubscriptionUseBrowserCookies}
+                onChange={(e) => setInstagramSubscriptionBrowserCookieSource(e.currentTarget.value)}
+                title="Which browser to read your Instagram sign-in from."
+              >
+                {browserCookieSourceOptions.map((option) => (
+                  <option key={option.value} value={option.value}>
+                    {option.label}
+                  </option>
+                ))}
+              </select>
+            </label>
+            <label style={{ display: "flex", alignItems: "center", gap: 8 }}>
+              <input
+                type="checkbox"
+                checked={instagramSubscriptionClearAuthSession}
+                disabled={
+                  busy ||
+                  (!instagramSubscriptionAuthSessionConfigured &&
+                    !instagramSubscriptionAuthSessionInput.trim())
+                }
+                onChange={(e) => setInstagramSubscriptionClearAuthSession(e.currentTarget.checked)}
+              />
+              <span>Clear this profile&rsquo;s sign-in on save</span>
+            </label>
+          </div>
+        </details>
+        <div className="row">
           <label style={{ display: "flex", alignItems: "center", gap: 8 }}>
             <input
               type="checkbox"
@@ -4381,41 +6157,70 @@ export function LibraryPage({ mode = "all", visible = true }: LibraryPageProps) 
             <span>Active</span>
           </label>
           <label style={{ display: "flex", alignItems: "center", gap: 8 }}>
-            <span>Refresh every (min)</span>
+            <span>Refresh every (hours)</span>
             <input
               type="number"
-              min={minSubscriptionRefreshIntervalMinutes}
-              max={maxSubscriptionRefreshIntervalMinutes}
-              value={instagramSubscriptionRefreshIntervalMinutes}
+              min={1}
+              max={Math.floor(maxSubscriptionRefreshIntervalMinutes / 60)}
+              step={1}
+              value={Math.round((instagramSubscriptionRefreshIntervalMinutes / 60) * 10) / 10}
               disabled={busy}
-              onChange={(e) =>
+              onChange={(e) => {
+                // WP-0263: edited in hours; stored in minutes (parity with YouTube). Clamp to
+                // engine bounds.
+                const hours = Number(e.currentTarget.value);
+                const minutes = Number.isFinite(hours)
+                  ? Math.round(hours * 60)
+                  : minSubscriptionRefreshIntervalMinutes;
                 setInstagramSubscriptionRefreshIntervalMinutes(
                   Math.max(
                     minSubscriptionRefreshIntervalMinutes,
-                    Math.min(
-                      maxSubscriptionRefreshIntervalMinutes,
-                      Number(e.currentTarget.value) || minSubscriptionRefreshIntervalMinutes,
-                    ),
+                    Math.min(maxSubscriptionRefreshIntervalMinutes, minutes),
                   ),
-                )
-              }
-              style={{ width: 110 }}
+                );
+              }}
+              style={{ width: 90 }}
+              title="How often this profile is auto-checked for new posts. Kept conservative for Meta's anti-bot rules. Stored in minutes; edited in hours."
             />
           </label>
         </div>
+        <div style={{ color: "#4b5563", marginTop: 6 }}>
+          <strong>Save subscription</strong> adds or updates this profile.{" "}
+          <strong>Check due now</strong> only checks the ones past their refresh interval.{" "}
+          New posts appear in Jobs.
+        </div>
         <div className="row">
-          <button type="button" disabled={busy} onClick={saveInstagramSubscription}>
+          <button
+            type="button"
+            disabled={busy}
+            onClick={saveInstagramSubscription}
+            title={instagramSubscriptionEditId ? "Save changes to this profile." : "Add this profile to your list."}
+          >
             {instagramSubscriptionEditId ? "Update subscription" : "Save subscription"}
           </button>
-          <button type="button" disabled={busy} onClick={resetInstagramSubscriptionEditor}>
-            Clear editor
+          <button
+            type="button"
+            disabled={busy}
+            onClick={resetInstagramSubscriptionEditor}
+            title="Clears the add/edit form above (does not delete anything)."
+          >
+            Clear form
           </button>
           <button
             type="button"
             disabled={busy || activeInstagramSubscriptionCount === 0}
             onClick={queueAllActiveInstagramSubscriptions}
+            title="Check only the profiles whose interval has elapsed since their last check."
           >
-            Queue due active ({activeInstagramSubscriptionCount})
+            Check due now ({activeInstagramSubscriptionCount})
+          </button>
+          <button
+            type="button"
+            disabled={busy}
+            onClick={() => refresh()}
+            title="Reload this list from the local database. Does not contact Instagram or download anything."
+          >
+            Reload list
           </button>
         </div>
         <div style={{ color: "#4b5563", marginTop: 8 }}>
@@ -4423,91 +6228,118 @@ export function LibraryPage({ mode = "all", visible = true }: LibraryPageProps) 
           {" "}
           <code>{defaultInstagramSubscriptionDownloadsDir || "instagram/subscriptions"}</code>
         </div>
-        <div className="panel-scroll-hint">
-          This table scrolls inside the panel when the saved columns outgrow the visible width.
-          Actions stay pinned on the right.
+        {/* WP-0263: all-subscriptions status strip (reuses the YouTube manager's classes) so the
+            operator always sees overall Instagram state at a glance. */}
+        <div className="sub-status-strip">
+          <span className="sub-status-metric"><strong>{instagramSubscriptionOverview.total}</strong> profiles</span>
+          <span className="sub-status-sep">·</span>
+          <span className="sub-status-metric"><strong>{instagramSubscriptionOverview.active}</strong> active</span>
+          <span className="sub-status-sep">·</span>
+          <span className="sub-status-metric">last check {formatTimeAgo(instagramSubscriptionOverview.lastSync)}</span>
         </div>
-        <div className="table-wrap table-wrap-wide table-wrap-sticky-actions">
-          <table>
-            <thead>
-              <tr>
-                <th>Title</th>
-                <th>URL</th>
-                <th>Target mode</th>
-                <th>Target path</th>
-                <th>Folder map</th>
-                <th>Session</th>
-                <th>Active</th>
-                <th>Interval (min)</th>
-                <th>Last queued</th>
-                <th>Actions</th>
-              </tr>
-            </thead>
-            <tbody>
-              {instagramSubscriptions.length ? (
-                instagramSubscriptions.map((sub) => {
+        {/* WP-0263: master-detail manager mirroring the YouTube subscription surface. Instagram
+            rows carry fewer fields, so progress/backoff/preset/groups rows are omitted. */}
+        <div className="sub-manager">
+          <div className="sub-list" role="listbox" aria-label="Instagram subscriptions">
+            {instagramSubscriptions.length ? (
+              instagramSubscriptions.map((sub) => {
+                const selected = sub.id === selectedInstagramSubscriptionId;
+                const runState: "idle" = "idle";
+                const stateLabel = sub.active ? "Idle" : "Paused";
+                return (
+                  <button
+                    type="button"
+                    role="option"
+                    key={sub.id}
+                    className={`sub-list-row${selected ? " sub-list-row-selected" : ""}`}
+                    onClick={() => setSelectedInstagramSubscriptionId(sub.id)}
+                    aria-selected={selected}
+                  >
+                    <div className="sub-list-main">
+                      <span className="sub-list-title" title={sub.title}>{sub.title}</span>
+                      <span className={`sub-pill sub-pill-${runState}`}>{stateLabel}</span>
+                    </div>
+                    <div className="sub-list-sub">
+                      <span className="sub-list-type">Instagram</span>
+                      {!sub.active ? <span className="sub-list-inactive">paused</span> : null}
+                      <span className="sub-list-count">
+                        {sub.last_queued_at_ms ? `checked ${formatTimeAgo(sub.last_queued_at_ms)}` : "never checked"}
+                      </span>
+                    </div>
+                  </button>
+                );
+              })
+            ) : (
+              <div className="sub-list-empty">No Instagram subscriptions yet. Add one with the form above.</div>
+            )}
+          </div>
+          <div className="sub-detail">
+            {selectedInstagramSubscription
+              ? (() => {
+                  const sub = selectedInstagramSubscription;
                   const target = describeRecurringTarget(
                     sub.output_dir_override,
                     defaultInstagramSubscriptionDownloadsDir,
                     sub.folder_map,
                   );
+                  const runState: "idle" = "idle";
+                  const stateLabel = sub.active ? "Idle" : "Paused";
                   return (
-                    <tr key={sub.id}>
-                      <td>{sub.title}</td>
-                      <td style={{ minWidth: 260, maxWidth: 360, wordBreak: "break-word" }}>
-                        {sub.source_url}
-                      </td>
-                      <td>{target.mode}</td>
-                      <td style={{ minWidth: 240, maxWidth: 360, wordBreak: "break-word" }}>
-                        {target.path || "-"}
-                      </td>
-                      <td>{sub.folder_map}</td>
-                      <td>{sub.auth_session_configured ? "saved" : "-"}</td>
-                      <td>{sub.active ? "yes" : "no"}</td>
-                      <td>{sub.refresh_interval_minutes}</td>
-                      <td>{sub.last_queued_at_ms ? new Date(sub.last_queued_at_ms).toLocaleString() : "-"}</td>
-                      <td>
-                        <div className="row" style={{ marginTop: 0, flexWrap: "nowrap" }}>
-                          <button
-                            type="button"
-                            disabled={busy}
-                            onClick={() => editInstagramSubscription(sub)}
-                          >
-                            Edit
-                          </button>
-                          <button
-                            type="button"
-                            disabled={busy}
-                            onClick={() => queueInstagramSubscription(sub.id)}
-                          >
-                            Queue
-                          </button>
-                          <button
-                            type="button"
-                            disabled={busy}
-                            onClick={() => openInstagramSubscriptionFolder(sub.id)}
-                          >
-                            Open folder
-                          </button>
-                          <button
-                            type="button"
-                            disabled={busy}
-                            onClick={() => deleteInstagramSubscription(sub.id)}
-                          >
-                            Delete
-                          </button>
-                        </div>
-                      </td>
-                    </tr>
+                    <>
+                      <div className="sub-detail-head">
+                        <span className="sub-detail-title">{sub.title}</span>
+                        <span className={`sub-pill sub-pill-${runState}`}>{stateLabel}</span>
+                      </div>
+                      <div className="sub-detail-progress">
+                        {sub.last_queued_at_ms
+                          ? <>Last checked <strong>{formatTimeAgo(sub.last_queued_at_ms)}</strong>. New posts appear in Jobs.</>
+                          : <>Not checked yet. Use <strong>Queue now</strong> or wait for the next passive check.</>}
+                      </div>
+                      <dl className="sub-detail-grid">
+                        <dt>Type</dt>
+                        <dd>Instagram profile{sub.active ? "" : " (paused)"}</dd>
+                        <dt>URL</dt>
+                        <dd className="sub-detail-wrap">{sub.source_url}</dd>
+                        <dt>Target</dt>
+                        <dd className="sub-detail-wrap">
+                          {target.mode}{target.path ? ` — ${target.path}` : ""}
+                        </dd>
+                        <dt>Folder name</dt>
+                        <dd>{sub.folder_map || "-"}</dd>
+                        <dt>Sign-in</dt>
+                        <dd>{sub.auth_session_configured ? "own sign-in saved for this profile" : "uses global Options sign-in"}</dd>
+                        <dt>Refresh</dt>
+                        <dd>{formatRefreshIntervalHours(sub.refresh_interval_minutes)}</dd>
+                        <dt>Last queued</dt>
+                        <dd>{sub.last_queued_at_ms ? new Date(sub.last_queued_at_ms).toLocaleString() : "-"}</dd>
+                      </dl>
+                      <div className="row sub-detail-actions">
+                        <button type="button" disabled={busy} onClick={() => queueInstagramSubscription(sub.id)}>
+                          Queue now
+                        </button>
+                        <button type="button" disabled={busy} onClick={() => editInstagramSubscription(sub)}>
+                          Edit
+                        </button>
+                        <button
+                          type="button"
+                          disabled={busy}
+                          onClick={() => openInstagramSubscriptionFolder(sub.id)}
+                        >
+                          Open folder
+                        </button>
+                        <button type="button" disabled={busy} onClick={() => deleteInstagramSubscription(sub.id)}>
+                          Delete
+                        </button>
+                      </div>
+                    </>
                   );
-                })
-              ) : (
-                <tr>
-                  <td colSpan={10}>No Instagram subscriptions yet.</td>
-                </tr>
+                })()
+              : (
+                <div className="sub-detail-empty">
+                  Select a profile on the left to see its details and actions.
+                </div>
               )}
-            </tbody>
-          </table>
+          </div>
         </div>
         </div>
       ) : null}
@@ -4516,13 +6348,8 @@ export function LibraryPage({ mode = "all", visible = true }: LibraryPageProps) 
         <div className="card">
         <h2>Instagram Archiver batch</h2>
         <div style={{ color: "#4b5563", marginBottom: 8 }}>
-          Paste Instagram post/reel/profile links. Use your session cookie for private content.
-          Output folder is optional; if left empty, each job is saved to a new folder under
-          `instagram` in the main download folder. Explicit session input accepts a cookie
-          header, browser-export JSON, Netscape cookie text, or a cookie-file path.
-        </div>
-        <div style={{ color: "#4b5563", marginBottom: 8 }}>
-          This batch section runs once for the pasted URLs. Use the saved Instagram subscriptions above when the same profile should refresh again later.
+          Paste Instagram post, reel, or profile links to save them once. For private accounts, add
+          your sign-in below. To keep a profile updated over time, add it as a subscription above instead.
         </div>
         <textarea
           value={instagramBatchText}
@@ -4533,65 +6360,73 @@ export function LibraryPage({ mode = "all", visible = true }: LibraryPageProps) 
           style={{ width: "100%", boxSizing: "border-box", resize: "vertical" }}
         />
         <div style={{ color: "#4b5563", marginTop: 8 }}>
-          Effective Instagram Archiver root: <code>{defaultInstagramDownloadsDir || "-"}</code>.
-          Change it in <strong>Options</strong>; the folder field below is only a per-batch override.
+          Posts are saved to <code>{defaultInstagramDownloadsDir || "-"}</code>. You can change the
+          default in <strong>Options</strong>, or pick a folder just for this batch below.
         </div>
         <div className="row">
           <label style={{ display: "grid", gap: 6, flex: 1 }}>
-            <span>Session / cookies</span>
+            <span title="Your Instagram sign-in, needed only for private posts or profiles.">Sign-in (optional)</span>
             <textarea
               value={instagramBatchAuthCookie}
               disabled={busy}
               onChange={(e) => setInstagramBatchAuthCookie(e.currentTarget.value)}
-              placeholder="Cookie header, browser-export JSON, Netscape cookie text, or path to an existing cookie file"
+              placeholder="Paste your saved Instagram sign-in, or the path to a sign-in file"
               rows={3}
               style={{ width: "100%", boxSizing: "border-box", resize: "vertical" }}
             />
           </label>
         </div>
-        <div className="row">
-          <label style={{ display: "flex", alignItems: "center", gap: 8 }}>
-            <input
-              type="checkbox"
-              checked={instagramBatchUseBrowserCookies}
-              disabled={busy}
-              onChange={(e) => {
-                const checked = e.currentTarget.checked;
-                setInstagramBatchUseBrowserCookies(checked);
-                if (checked && !instagramBatchBrowserCookieSource.trim()) {
-                  setInstagramBatchBrowserCookieSource(DEFAULT_BROWSER_COOKIE_SOURCE);
-                }
-              }}
-            />
-            <span>Use browser cookies for yt-dlp fallback</span>
-          </label>
-          <label style={{ display: "flex", alignItems: "center", gap: 8 }}>
-            <span>Browser</span>
-            <select
-              value={instagramBatchBrowserCookieSource}
-              disabled={busy || !instagramBatchUseBrowserCookies}
-              onChange={(e) => setInstagramBatchBrowserCookieSource(e.currentTarget.value)}
-            >
-              {browserCookieSourceOptions.map((option) => (
-                <option key={option.value} value={option.value}>
-                  {option.label}
-                </option>
-              ))}
-            </select>
-          </label>
-          <div style={{ color: "#4b5563" }}>
-            Only used when enabled and only for yt-dlp-based extraction.
+        <details>
+          <summary style={{ cursor: "pointer", color: "#4b5563", fontSize: 12 }}>
+            Sign-in from your browser (optional)
+          </summary>
+          <div className="row" style={{ marginTop: 6 }}>
+            <label style={{ display: "flex", alignItems: "center", gap: 8 }}>
+              <input
+                type="checkbox"
+                checked={instagramBatchUseBrowserCookies}
+                disabled={busy}
+                onChange={(e) => {
+                  const checked = e.currentTarget.checked;
+                  setInstagramBatchUseBrowserCookies(checked);
+                  if (checked && !instagramBatchBrowserCookieSource.trim()) {
+                    setInstagramBatchBrowserCookieSource(DEFAULT_BROWSER_COOKIE_SOURCE);
+                  }
+                }}
+                title="Use your existing browser sign-in as a backup way to open posts that require a login."
+              />
+              <span>Use my browser sign-in</span>
+            </label>
+            <label style={{ display: "flex", alignItems: "center", gap: 8 }}>
+              <span>Browser</span>
+              <select
+                value={instagramBatchBrowserCookieSource}
+                disabled={busy || !instagramBatchUseBrowserCookies}
+                onChange={(e) => setInstagramBatchBrowserCookieSource(e.currentTarget.value)}
+                title="Which browser to read your Instagram sign-in from."
+              >
+                {browserCookieSourceOptions.map((option) => (
+                  <option key={option.value} value={option.value}>
+                    {option.label}
+                  </option>
+                ))}
+              </select>
+            </label>
+            <div style={{ color: "#4b5563" }}>
+              Only used as a backup when the pasted sign-in above is not enough.
+            </div>
           </div>
-        </div>
+        </details>
         <div className="row">
           <label style={{ display: "flex", alignItems: "center", gap: 8, flex: 1 }}>
-            <span>Batch output override</span>
+            <span>Save to folder (optional)</span>
             <input
               value={instagramBatchOutputDir}
               disabled={busy}
               onChange={(e) => setInstagramBatchOutputDir(e.currentTarget.value)}
               placeholder="Optional absolute folder path"
               style={{ width: "100%" }}
+              title="Pick a folder for just this batch. Leave blank to use the default Instagram folder."
             />
           </label>
           <button type="button" disabled={busy} onClick={chooseInstagramOutputDir}>
@@ -4617,9 +6452,8 @@ export function LibraryPage({ mode = "all", visible = true }: LibraryPageProps) 
         <div className="card">
         <h2>Pinterest archive crawler</h2>
         <div style={{ color: "#4b5563", marginBottom: 8 }}>
-          Paste Pinterest board/folder URLs in bulk. VoxVulgi routes them through the crawler with
-          content-link traversal enabled so large collections can be archived without one-by-one
-          submission.
+          Paste Pinterest board links to save whole boards at once. VoxVulgi follows each board so
+          you do not have to add pins one at a time.
         </div>
         <textarea
           value={pinterestBatchText}
@@ -4630,18 +6464,19 @@ export function LibraryPage({ mode = "all", visible = true }: LibraryPageProps) 
           style={{ width: "100%", boxSizing: "border-box", resize: "vertical" }}
         />
         <div style={{ color: "#4b5563", marginTop: 8 }}>
-          Effective Image Archive root: <code>{defaultImageDownloadsDir || "-"}</code>. Change it
-          in <strong>Options</strong>; the folder field below is only a per-batch override.
+          Images are saved to <code>{defaultImageDownloadsDir || "-"}</code>. You can change the
+          default in <strong>Options</strong>, or pick a folder just for this batch below.
         </div>
         <div className="row">
           <label style={{ display: "flex", alignItems: "center", gap: 8, flex: 1 }}>
-            <span>Batch output override</span>
+            <span>Save to folder (optional)</span>
             <input
               value={pinterestBatchOutputDir}
               disabled={busy}
               onChange={(e) => setPinterestBatchOutputDir(e.currentTarget.value)}
               placeholder="Optional absolute folder path"
               style={{ width: "100%" }}
+              title="Pick a folder for just this batch. Leave blank to use the default image folder."
             />
           </label>
           <button type="button" disabled={busy} onClick={choosePinterestOutputDir}>
@@ -4667,16 +6502,12 @@ export function LibraryPage({ mode = "all", visible = true }: LibraryPageProps) 
         <div className="card">
         <h2>Image archive (batch)</h2>
         <div style={{ color: "#4b5563", marginBottom: 8 }}>
-          Crawl blog/forum pages, follow next pages, skip likely profile photos, and download
-          full-size image candidates into your download folder. Post/thread link traversal is
-          optional (off by default) to avoid drifting outside the selected topic. Use Jobs to
-          monitor progress. If the site requires login, paste your browser session cookie below.
-          If output folder is empty, each job is saved to a new folder under `images`. JPEG is
-          preferred where alternate encodings are available without forcing destructive transcoding.
+          Paste a web page link (a blog or forum) and VoxVulgi collects the full-size images from it.
+          Watch progress in <strong>Jobs</strong>. If the site needs a login, paste your sign-in below.
         </div>
         <div style={{ color: "#4b5563", marginBottom: 8 }}>
-          Effective Image Archive root: <code>{defaultImageDownloadsDir || "-"}</code>. Change it
-          in <strong>Options</strong>; the folder field below is only a per-batch override.
+          Images are saved to <code>{defaultImageDownloadsDir || "-"}</code>. You can change the
+          default in <strong>Options</strong>, or pick a folder just for this batch below.
         </div>
         <textarea
           value={imageBatchUrlsText}
@@ -4686,89 +6517,106 @@ export function LibraryPage({ mode = "all", visible = true }: LibraryPageProps) 
           rows={4}
           style={{ width: "100%", boxSizing: "border-box", resize: "vertical" }}
         />
-        <div className="row">
-          <label style={{ display: "flex", alignItems: "center", gap: 8 }}>
-            <span>Max pages</span>
-            <input
-              type="number"
-              min={1}
-              max={5000}
-              value={imageBatchMaxPages}
-              disabled={busy}
-              onChange={(e) => setImageBatchMaxPages(Number(e.currentTarget.value))}
-              style={{ width: 120 }}
-            />
-          </label>
-          <label style={{ display: "flex", alignItems: "center", gap: 8 }}>
-            <span>Delay (s)</span>
-            <input
-              type="number"
-              min={0}
-              step={0.05}
-              value={imageBatchDelaySeconds}
-              disabled={busy}
-              onChange={(e) => setImageBatchDelaySeconds(Number(e.currentTarget.value))}
-              style={{ width: 110 }}
-            />
-          </label>
-          <label style={{ display: "flex", alignItems: "center", gap: 8 }}>
-            <input
-              type="checkbox"
-              checked={imageBatchFollowContentLinks}
-              disabled={busy}
-              onChange={(e) => setImageBatchFollowContentLinks(e.currentTarget.checked)}
-            />
-            <span>Follow post/thread links</span>
-          </label>
-          <label style={{ display: "flex", alignItems: "center", gap: 8 }}>
-            <input
-              type="checkbox"
-              checked={imageBatchAllowCrossDomain}
-              disabled={busy}
-              onChange={(e) => setImageBatchAllowCrossDomain(e.currentTarget.checked)}
-            />
-            <span>Allow cross-domain crawl</span>
-          </label>
-        </div>
+        <details>
+          <summary style={{ cursor: "pointer", color: "#4b5563", fontSize: 12 }}>
+            Advanced options
+          </summary>
+          <div className="row" style={{ marginTop: 6 }}>
+            <label style={{ display: "flex", alignItems: "center", gap: 8 }}>
+              <span>Max pages</span>
+              <input
+                type="number"
+                min={1}
+                max={5000}
+                value={imageBatchMaxPages}
+                disabled={busy}
+                onChange={(e) => setImageBatchMaxPages(Number(e.currentTarget.value))}
+                style={{ width: 120 }}
+                title="Most pages VoxVulgi will visit before stopping. Higher finds more but takes longer."
+              />
+            </label>
+            <label style={{ display: "flex", alignItems: "center", gap: 8 }}>
+              <span>Wait between pages (s)</span>
+              <input
+                type="number"
+                min={0}
+                step={0.05}
+                value={imageBatchDelaySeconds}
+                disabled={busy}
+                onChange={(e) => setImageBatchDelaySeconds(Number(e.currentTarget.value))}
+                style={{ width: 110 }}
+                title="Pause between pages, in seconds. A small wait is gentler on the website."
+              />
+            </label>
+            <label style={{ display: "flex", alignItems: "center", gap: 8 }}>
+              <input
+                type="checkbox"
+                checked={imageBatchFollowContentLinks}
+                disabled={busy}
+                onChange={(e) => setImageBatchFollowContentLinks(e.currentTarget.checked)}
+                title="Also open the individual posts or threads linked from each page to find more images."
+              />
+              <span>Also open linked posts</span>
+            </label>
+            <label style={{ display: "flex", alignItems: "center", gap: 8 }}>
+              <input
+                type="checkbox"
+                checked={imageBatchAllowCrossDomain}
+                disabled={busy}
+                onChange={(e) => setImageBatchAllowCrossDomain(e.currentTarget.checked)}
+                title="Allow following links to other websites. Off keeps VoxVulgi on the site you pasted."
+              />
+              <span>Allow other websites</span>
+            </label>
+          </div>
+          <div className="row">
+            <label style={{ display: "flex", alignItems: "center", gap: 8, flex: 1 }}>
+              <span>Skip words</span>
+              <input
+                value={imageBatchSkipKeywords}
+                disabled={busy}
+                onChange={(e) => setImageBatchSkipKeywords(e.currentTarget.value)}
+                placeholder="avatar profile userpic"
+                style={{ width: "100%" }}
+                title="Skip images whose link contains any of these words (space-separated), such as avatar or profile."
+              />
+            </label>
+          </div>
+        </details>
         <div className="row">
           <label style={{ display: "flex", alignItems: "center", gap: 8, flex: 1 }}>
-            <span>Skip keywords</span>
-            <input
-              value={imageBatchSkipKeywords}
-              disabled={busy}
-              onChange={(e) => setImageBatchSkipKeywords(e.currentTarget.value)}
-              placeholder="avatar profile userpic"
-              style={{ width: "100%" }}
-            />
-          </label>
-        </div>
-        <div className="row">
-          <label style={{ display: "flex", alignItems: "center", gap: 8, flex: 1 }}>
-            <span>Batch output override</span>
+            <span>Save to folder (optional)</span>
             <input
               value={imageBatchOutputDir}
               disabled={busy}
               onChange={(e) => setImageBatchOutputDir(e.currentTarget.value)}
               placeholder="Optional absolute folder path"
               style={{ width: "100%" }}
+              title="Pick a folder for just this batch. Leave blank to use the default image folder."
             />
           </label>
           <button type="button" disabled={busy} onClick={chooseImageOutputDir}>
             Choose folder
           </button>
         </div>
-        <div className="row">
-          <label style={{ display: "flex", alignItems: "center", gap: 8, flex: 1 }}>
-            <span>Session cookie</span>
-            <input
-              value={imageBatchAuthCookie}
-              disabled={busy}
-              onChange={(e) => setImageBatchAuthCookie(e.currentTarget.value)}
-              placeholder="session=...; auth=..."
-              style={{ width: "100%" }}
-            />
-          </label>
-        </div>
+        <details>
+          <summary style={{ cursor: "pointer", color: "#4b5563", fontSize: 12 }}>
+            Sign-in for login-only sites (optional)
+          </summary>
+          <div className="row" style={{ marginTop: 6 }}>
+            <label style={{ display: "flex", alignItems: "center", gap: 8, flex: 1 }}>
+              <span>Sign-in</span>
+              <input
+                value={imageBatchAuthCookie}
+                disabled={busy}
+                onChange={(e) => setImageBatchAuthCookie(e.currentTarget.value)}
+                placeholder="session=...; auth=..."
+                style={{ width: "100%" }}
+                title="Paste your saved sign-in for sites that require a login. Leave blank for public pages."
+              />
+            </label>
+          </div>
+        </details>
         <div style={{ color: "#4b5563", marginTop: 8 }}>
           Parsed start URLs: {parsedImageUrlCount}
         </div>
@@ -4788,9 +6636,8 @@ export function LibraryPage({ mode = "all", visible = true }: LibraryPageProps) 
         <div className="card">
           <h2>Media library items</h2>
           <div style={{ color: "#4b5563", marginTop: 6 }}>
-            Browse imported/downloaded media and launch localization actions. The default view is a
-            full-width archive list with explicit container semantics so large subscription,
-            playlist, folder, and loose-file libraries are easier to understand.
+            Browse the videos and images you have saved, and start translating or dubbing them.
+            Everything is grouped by channel, playlist, and folder so large libraries stay easy to scan.
           </div>
           <div className="row">
             <label style={{ display: "flex", alignItems: "center", gap: 8, flex: 1, minWidth: 260 }}>
@@ -4839,13 +6686,29 @@ export function LibraryPage({ mode = "all", visible = true }: LibraryPageProps) 
               </select>
             </label>
             <label style={{ display: "flex", alignItems: "center", gap: 8 }}>
+              <span>File status</span>
+              <select
+                value={mediaLibraryFileStatus}
+                disabled={busy}
+                onChange={(event) =>
+                  setMediaLibraryFileStatus(
+                    event.currentTarget.value as typeof mediaLibraryFileStatus,
+                  )
+                }
+              >
+                <option value="available">Available</option>
+                <option value="operator_deleted">Deleted</option>
+                <option value="all">All (deleted last)</option>
+              </select>
+            </label>
+            <label style={{ display: "flex", alignItems: "center", gap: 8 }}>
               <input
                 type="checkbox"
                 checked={mediaLibrarySingleVideoOnly}
                 disabled={busy}
                 onChange={(e) => setMediaLibrarySingleVideoOnly(e.currentTarget.checked)}
               />
-              <span>Single videos / legacy</span>
+              <span>Single videos</span>
             </label>
             <label style={{ display: "flex", alignItems: "center", gap: 8 }}>
               <span>Sort</span>
@@ -4918,6 +6781,63 @@ export function LibraryPage({ mode = "all", visible = true }: LibraryPageProps) 
               </select>
             </label>
           </div>
+          <div className="library-selection-toolbar" aria-label="Media library selection actions">
+            <strong>{mediaLibrarySelectedIds.size} selected</strong>
+            <button
+              type="button"
+              data-agent-safe-action="true"
+              disabled={busy || filteredMediaItems.length === 0}
+              onClick={() =>
+                setMediaLibrarySelectedIds(new Set(filteredMediaItems.map((item) => item.id)))
+              }
+            >
+              Select loaded
+            </button>
+            <button
+              type="button"
+              data-agent-safe-action="true"
+              disabled={busy || mediaLibrarySelectedIds.size === 0}
+              onClick={() => setMediaLibrarySelectedIds(new Set())}
+            >
+              Clear
+            </button>
+            <label>
+              <span>Delete method</span>
+              <select
+                value={libraryFileDeleteMode}
+                disabled={busy}
+                onChange={(event) =>
+                  setLibraryFileDeleteMode(
+                    event.currentTarget.value as "trash" | "permanent",
+                  )
+                }
+              >
+                <option value="trash">Recycle Bin</option>
+                <option value="permanent">Permanent</option>
+              </select>
+            </label>
+            <button
+              type="button"
+              disabled={busy || mediaLibrarySelectedAvailableIds.length === 0}
+              onClick={() =>
+                deleteSelectedVideoFiles(mediaLibrarySelectedAvailableIds, "media_library")
+              }
+            >
+              Delete selected ({mediaLibrarySelectedAvailableIds.length})
+            </button>
+            <button
+              type="button"
+              disabled={busy || mediaLibrarySelectedDeletedIds.length === 0}
+              onClick={() =>
+                redownloadSelectedDeletedVideos(
+                  mediaLibrarySelectedDeletedIds,
+                  "media_library",
+                )
+              }
+            >
+              Redownload selected ({mediaLibrarySelectedDeletedIds.length})
+            </button>
+          </div>
           <div
             className="table-wrap"
             style={{ maxHeight: libraryViewportHeight, overflowY: "auto", padding: 14 }}
@@ -4956,7 +6876,10 @@ export function LibraryPage({ mode = "all", visible = true }: LibraryPageProps) 
                                 borderRadius: 8,
                                 border: "1px solid rgba(126, 145, 167, 0.3)",
                                 background:
-                                  "linear-gradient(154deg, #edf2f7 0%, #dce3eb 54%, #c9d2dc 100%)",
+                                  isOperatorDeletedItem(item)
+                                    ? "linear-gradient(154deg, #e5e7eb 0%, #d1d5db 100%)"
+                                    : "linear-gradient(154deg, #edf2f7 0%, #dce3eb 54%, #c9d2dc 100%)",
+                                opacity: isOperatorDeletedItem(item) ? 0.82 : 1,
                               }}
                             >
                               <div
@@ -4967,6 +6890,15 @@ export function LibraryPage({ mode = "all", visible = true }: LibraryPageProps) 
                                   flexWrap: "wrap",
                                 }}
                               >
+                                <input
+                                  type="checkbox"
+                                  checked={mediaLibrarySelectedIds.has(item.id)}
+                                  disabled={busy}
+                                  aria-label={`Select ${isOperatorDeletedItem(item) ? "deleted " : ""}${item.title}`}
+                                  onChange={() =>
+                                    toggleSelectedId(setMediaLibrarySelectedIds, item.id)
+                                  }
+                                />
                                 <ThumbnailPreview
                                   itemId={item.id}
                                   path={item.thumbnail_path}
@@ -4981,7 +6913,10 @@ export function LibraryPage({ mode = "all", visible = true }: LibraryPageProps) 
                                     gap: 4,
                                   }}
                                 >
-                                  <strong style={{ lineHeight: 1.2 }}>{item.title}</strong>
+                                  <strong style={{ lineHeight: 1.2 }}>
+                                    {item.title}
+                                    {isOperatorDeletedItem(item) ? " · Deleted" : ""}
+                                  </strong>
                                   <div style={{ color: "#4b5563", fontSize: 12 }}>
                                     {row.mediaKind.toUpperCase()} · {formatDuration(item.duration_ms)} ·{' '}
                                     {row.containerMeta.providerLabel}
@@ -5035,10 +6970,18 @@ export function LibraryPage({ mode = "all", visible = true }: LibraryPageProps) 
                                 {item.media_path}
                               </div>
                               <div className="row" style={{ marginTop: 0 }}>
-                                <button type="button" disabled={busy} onClick={() => openMediaFile(item)}>
+                                <button
+                                  type="button"
+                                  disabled={busy || isOperatorDeletedItem(item)}
+                                  onClick={() => openMediaFile(item)}
+                                >
                                   Open file
                                 </button>
-                                <button type="button" disabled={busy} onClick={() => revealMediaFile(item)}>
+                                <button
+                                  type="button"
+                                  disabled={busy || isOperatorDeletedItem(item)}
+                                  onClick={() => revealMediaFile(item)}
+                                >
                                   Open folder
                                 </button>
                               </div>
@@ -5066,13 +7009,28 @@ export function LibraryPage({ mode = "all", visible = true }: LibraryPageProps) 
                                 borderRadius: 8,
                                 border: "1px solid rgba(126, 145, 167, 0.3)",
                                 background:
-                                  "linear-gradient(154deg, #edf2f7 0%, #dce3eb 54%, #c9d2dc 100%)",
+                                  isOperatorDeletedItem(item)
+                                    ? "linear-gradient(154deg, #e5e7eb 0%, #d1d5db 100%)"
+                                    : "linear-gradient(154deg, #edf2f7 0%, #dce3eb 54%, #c9d2dc 100%)",
+                                opacity: isOperatorDeletedItem(item) ? 0.82 : 1,
                               }}
                             >
                               <div style={{ display: "flex", gap: 12, alignItems: "flex-start" }}>
+                                <input
+                                  type="checkbox"
+                                  checked={mediaLibrarySelectedIds.has(item.id)}
+                                  disabled={busy}
+                                  aria-label={`Select ${isOperatorDeletedItem(item) ? "deleted " : ""}${item.title}`}
+                                  onChange={() =>
+                                    toggleSelectedId(setMediaLibrarySelectedIds, item.id)
+                                  }
+                                />
                                 <ThumbnailPreview itemId={item.id} path={item.thumbnail_path} />
                                 <div style={{ minWidth: 0, display: "grid", gap: 4 }}>
-                                  <strong style={{ lineHeight: 1.2 }}>{item.title}</strong>
+                                  <strong style={{ lineHeight: 1.2 }}>
+                                    {item.title}
+                                    {isOperatorDeletedItem(item) ? " · Deleted" : ""}
+                                  </strong>
                                   <div style={{ color: "#4b5563", fontSize: 12 }}>
                                     {row.mediaKind.toUpperCase()} · {formatDuration(item.duration_ms)}
                                   </div>
@@ -5097,10 +7055,18 @@ export function LibraryPage({ mode = "all", visible = true }: LibraryPageProps) 
                                 {item.media_path}
                               </div>
                               <div className="row" style={{ marginTop: 0 }}>
-                                <button type="button" disabled={busy} onClick={() => openMediaFile(item)}>
+                                <button
+                                  type="button"
+                                  disabled={busy || isOperatorDeletedItem(item)}
+                                  onClick={() => openMediaFile(item)}
+                                >
                                   Open file
                                 </button>
-                                <button type="button" disabled={busy} onClick={() => revealMediaFile(item)}>
+                                <button
+                                  type="button"
+                                  disabled={busy || isOperatorDeletedItem(item)}
+                                  onClick={() => revealMediaFile(item)}
+                                >
                                   Open folder
                                 </button>
                               </div>
@@ -5118,9 +7084,9 @@ export function LibraryPage({ mode = "all", visible = true }: LibraryPageProps) 
           </div>
           <div className="row">
             <div style={{ color: "#4b5563" }}>
-              Loaded {items.length} item{items.length === 1 ? "" : "s"}.
-              Showing {filteredMediaItems.length} after filters.
-              {itemsHasMore ? " (more available)" : ""}.
+              Loaded {items.length} of {mediaLibraryFilteredTotal} matching item
+              {mediaLibraryFilteredTotal === 1 ? "" : "s"}.
+              {itemsHasMore ? " More matching items are available." : ""}
             </div>
             <button
               type="button"

@@ -181,12 +181,18 @@ test("lockfile installs retry post-install metadata checks under filesystem lag"
 
 test("python installer commands have a hard timeout and kill hung child processes", () => {
   const toolsSource = readRepoFile("..", "engine", "src", "tools.rs");
-  const block = functionBlock(toolsSource, "run_python_checked");
+  const wrapper = functionBlock(toolsSource, "run_python_checked");
+  const block = functionBlock(toolsSource, "run_python_checked_with_timeout");
 
   assert.match(
     toolsSource,
     /PYTHON_COMMAND_TIMEOUT_SECS/,
     "Python install and warmup commands need a bounded timeout under heavy load",
+  );
+  assert.match(
+    wrapper,
+    /run_python_checked_with_timeout[\s\S]*PYTHON_COMMAND_TIMEOUT_SECS/,
+    "the default installer path must delegate to the bounded runner",
   );
   assert.match(
     block,

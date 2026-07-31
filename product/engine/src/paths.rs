@@ -151,6 +151,16 @@ impl AppPaths {
             .join(format!("{subscription_id}.cookie.txt"))
     }
 
+    /// WP-0263: the app-global Instagram login pasted once in Options and used for every
+    /// Instagram operation (single download, subscription refresh, batch). Mirrors the
+    /// YouTube global auth (`youtube_auth_config_path`), but is stored as a plain cookie
+    /// secret file under the Instagram secrets dir so it reuses the existing
+    /// `read_auth_cookie_secret_path` / `write_auth_cookie_secret_path` handling.
+    pub fn instagram_global_auth_cookie_secret_path(&self) -> PathBuf {
+        self.instagram_subscription_secrets_dir()
+            .join("_global.cookie.txt")
+    }
+
     pub fn download_dir_override_path(&self) -> PathBuf {
         self.config_dir().join("download_dir.txt")
     }
@@ -249,6 +259,88 @@ impl AppPaths {
         Ok(())
     }
 
+    /// Default ASR model id used when no `config/asr_model_id.txt` override is set.
+    /// Korean/Japanese-first: large-v3 q5_0 is the quality default (tiny is unusable
+    /// for Korean). Swappable at runtime by writing a model id into the override file
+    /// (e.g. `whispercpp-large-v3` for max quality, `whispercpp-tiny` to revert fast).
+    pub const DEFAULT_ASR_MODEL_ID: &'static str = "whispercpp-large-v3-q5_0";
+
+    pub fn asr_model_id_override_path(&self) -> PathBuf {
+        self.config_dir().join("asr_model_id.txt")
+    }
+
+    pub fn asr_model_id_override(&self) -> std::io::Result<Option<String>> {
+        let path = self.asr_model_id_override_path();
+        if !path.exists() {
+            return Ok(None);
+        }
+        let raw = std::fs::read_to_string(path)?;
+        let trimmed = raw.trim();
+        if trimmed.is_empty() {
+            return Ok(None);
+        }
+        Ok(Some(trimmed.to_string()))
+    }
+
+    /// The ASR model id every transcription/translation enqueue site should use, so the
+    /// model is selected in exactly one place and is operator-swappable without a rebuild.
+    pub fn effective_asr_model_id(&self) -> String {
+        match self.asr_model_id_override() {
+            Ok(Some(id)) => id,
+            _ => Self::DEFAULT_ASR_MODEL_ID.to_string(),
+        }
+    }
+
+    pub fn set_asr_model_id_override(&self, model_id: &str) -> std::io::Result<()> {
+        let path = self.asr_model_id_override_path();
+        let text = format!("{}\n", model_id.trim());
+        persistence::atomic_write_text(&path, &text)?;
+        Ok(())
+    }
+
+    pub fn clear_asr_model_id_override(&self) -> std::io::Result<()> {
+        let path = self.asr_model_id_override_path();
+        if path.exists() {
+            std::fs::remove_file(path)?;
+        }
+        Ok(())
+    }
+
+    /// Operator override for the default voice-clone dub backend (e.g. `cosyvoice` or
+    /// `openvoice_v2`). When unset, the engine prefers CosyVoice when its pack is
+    /// installed and falls back to Kokoro+OpenVoice. Swappable without a rebuild.
+    pub fn dub_backend_id_override_path(&self) -> PathBuf {
+        self.config_dir().join("dub_backend_id.txt")
+    }
+
+    pub fn dub_backend_id_override(&self) -> std::io::Result<Option<String>> {
+        let path = self.dub_backend_id_override_path();
+        if !path.exists() {
+            return Ok(None);
+        }
+        let raw = std::fs::read_to_string(path)?;
+        let trimmed = raw.trim();
+        if trimmed.is_empty() {
+            return Ok(None);
+        }
+        Ok(Some(trimmed.to_string()))
+    }
+
+    pub fn set_dub_backend_id_override(&self, backend_id: &str) -> std::io::Result<()> {
+        let path = self.dub_backend_id_override_path();
+        let text = format!("{}\n", backend_id.trim());
+        persistence::atomic_write_text(&path, &text)?;
+        Ok(())
+    }
+
+    pub fn clear_dub_backend_id_override(&self) -> std::io::Result<()> {
+        let path = self.dub_backend_id_override_path();
+        if path.exists() {
+            std::fs::remove_file(path)?;
+        }
+        Ok(())
+    }
+
     pub fn default_download_dir(&self) -> PathBuf {
         if let Ok(exe_path) = std::env::current_exe() {
             if let Some(parent) = exe_path.parent() {
@@ -293,6 +385,28 @@ impl AppPaths {
             std::fs::remove_file(path)?;
         }
         Ok(())
+    }
+
+    /// WP-0252 Item 2d: a stable, ALWAYS-local download folder used when the configured
+    /// destination (e.g. a NAS share) is unreachable. Lives under app-data so it exists
+    /// regardless of where the app is installed, and the user's NAS library is never lost
+    /// — fallback items simply live here until the operator moves them back.
+    pub fn local_fallback_download_dir(&self) -> PathBuf {
+        self.base_dir.join("local_fallback_downloads")
+    }
+
+    /// The download destination to use right now: the configured dir if its root is
+    /// reachable within a short bounded probe, otherwise the local fallback. The bool is
+    /// `true` when the fallback was used (so callers can record it for later resync).
+    /// Additive and non-destructive: never moves or deletes existing files.
+    pub fn effective_download_dir_with_fallback(&self) -> std::io::Result<(PathBuf, bool)> {
+        let configured = self.effective_download_dir()?;
+        if download_root_reachable(&configured, std::time::Duration::from_secs(3)) {
+            return Ok((configured, false));
+        }
+        let fallback = self.local_fallback_download_dir();
+        std::fs::create_dir_all(&fallback)?;
+        Ok((fallback, true))
     }
 
     pub fn models_dir(&self) -> PathBuf {
@@ -341,6 +455,26 @@ impl AppPaths {
 
     pub fn python_models_dir(&self) -> PathBuf {
         self.python_toolchain_dir().join("models")
+    }
+
+    /// Isolated Python venv dedicated to CosyVoice (its torch==2.3.1 / numpy<2 stack
+    /// conflicts with the main venv's torch 2.10, so it must live separately).
+    pub fn python_cosyvoice_venv_dir(&self) -> PathBuf {
+        self.python_toolchain_dir().join("venv_cosyvoice")
+    }
+
+    pub fn voice_backends_dir(&self) -> PathBuf {
+        self.base_dir.join("voice_backends")
+    }
+
+    /// The vendored CosyVoice repo (provides `cosyvoice.*` on sys.path + the render wrapper).
+    pub fn cosyvoice_backend_dir(&self) -> PathBuf {
+        self.voice_backends_dir().join("cosyvoice")
+    }
+
+    /// Parent dir holding `CosyVoice2-0.5B/` (the offline-by-design model the render loads).
+    pub fn cosyvoice_model_parent_dir(&self) -> PathBuf {
+        self.cosyvoice_backend_dir().join("pretrained_models")
     }
 
     /// WP-0234: per-pack install-state journal directory.
@@ -449,4 +583,43 @@ impl AppPaths {
         // Keep it simple for now; callers should provide an app-specific directory.
         base_dir.to_path_buf()
     }
+}
+
+/// Bounded reachability probe for a download/library root. Returns false if neither the
+/// path nor its nearest existing ancestor can be stat-ed within `timeout`. A dropped NAS
+/// share (UNC path) can block `metadata()` for the full OS SMB timeout, so the probe runs
+/// on a worker thread and the caller gives up after `timeout` — converting a multi-second
+/// hang into a quick "use local fallback" decision. (WP-0252 Item 2d.)
+pub fn download_root_reachable(dir: &Path, timeout: std::time::Duration) -> bool {
+    let probe = dir.to_path_buf();
+    let (tx, rx) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        let mut current = probe.as_path();
+        let reachable = loop {
+            if std::fs::metadata(current).is_ok() {
+                break true;
+            }
+            match current.parent() {
+                Some(parent) if parent != current => current = parent,
+                _ => break false,
+            }
+        };
+        let _ = tx.send(reachable);
+    });
+    matches!(rx.recv_timeout(timeout), Ok(true))
+}
+
+// WP-0255: bounded `is_dir`. A dropped NAS/UNC share makes a plain `Path::is_dir()` hang on
+// the Windows SMB timeout (tens of seconds); doing that inside a list query (e.g. the video
+// library list, which runs in the page's shared loader) froze the UI during a NAS blip.
+// This runs the stat on a throwaway thread and gives up after `timeout`, returning false
+// rather than blocking the caller. The orphaned probe thread is reaped by the OS once the
+// underlying SMB call finally times out.
+pub fn path_is_dir_bounded(dir: &Path, timeout: std::time::Duration) -> bool {
+    let probe = dir.to_path_buf();
+    let (tx, rx) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        let _ = tx.send(probe.is_dir());
+    });
+    matches!(rx.recv_timeout(timeout), Ok(true))
 }

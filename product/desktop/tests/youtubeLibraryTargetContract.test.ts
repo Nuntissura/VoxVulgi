@@ -13,9 +13,9 @@ function readRepoFile(...parts: string[]): string {
 test("YouTube subscription save previews and confirms existing library folders before merge", () => {
   const librarySource = readRepoFile("src", "pages", "LibraryPage.tsx");
   const saveStart = librarySource.indexOf("async function saveSubscription()");
-  const saveEnd = librarySource.indexOf("async function deleteSubscription", saveStart);
+  const saveEnd = librarySource.indexOf("async function setSubscriptionManualStatus", saveStart);
   assert.notEqual(saveStart, -1, "saveSubscription must exist");
-  assert.notEqual(saveEnd, -1, "deleteSubscription must follow saveSubscription");
+  assert.notEqual(saveEnd, -1, "manual status control must follow saveSubscription");
   const saveBlock = librarySource.slice(saveStart, saveEnd);
 
   assert.match(

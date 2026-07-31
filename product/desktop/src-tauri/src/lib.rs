@@ -3,7 +3,7 @@ use base64::Engine as _;
 use raw_window_handle::{HasWindowHandle, RawWindowHandle};
 use sha2::{Digest, Sha256};
 use std::sync::{
-    atomic::{AtomicBool, Ordering},
+    atomic::{AtomicBool, AtomicU64, Ordering},
     Arc, Mutex, OnceLock,
 };
 use std::time::{Duration, Instant};
@@ -18,7 +18,7 @@ use windows_sys::Win32::{
         GetWindowDC, ReleaseDC, SelectObject, BITMAPINFO, BITMAPINFOHEADER, BI_RGB, DIB_RGB_COLORS,
         HGDIOBJ, RGBQUAD, SRCCOPY,
     },
-    UI::WindowsAndMessaging::GetWindowRect,
+    UI::WindowsAndMessaging::{GetWindowRect, ShowWindowAsync, SW_HIDE},
 };
 
 #[cfg(target_os = "windows")]
@@ -33,6 +33,12 @@ extern "system" {
 static AGENT_APP_HANDLE: OnceLock<tauri::AppHandle> = OnceLock::new();
 static AGENT_BRIDGE_STATE: OnceLock<Arc<Mutex<AgentBridgeInner>>> = OnceLock::new();
 static AGENT_BRIDGE_FILES_DIR: OnceLock<std::path::PathBuf> = OnceLock::new();
+static DIAGNOSTICS_TRACE_WRITE_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+static AGENT_UI_REQUEST_SEQUENCE: AtomicU64 = AtomicU64::new(1);
+static JOBS_BATCH_OPERATION_SEQUENCE: AtomicU64 = AtomicU64::new(1);
+static JOBS_BATCH_OPERATIONS: OnceLock<
+    Mutex<std::collections::HashMap<String, JobsBatchOperationSnapshot>>,
+> = OnceLock::new();
 // WP-0221: exposed so the freeze-detector Worker can POST to /agent/freeze_event
 // without relying on Tauri IPC (which routes through the WebView main thread we
 // are trying to observe).
@@ -43,12 +49,33 @@ struct AgentBridgeInner {
     current_page: String,
     editor_item_id: Option<String>,
     safe_mode: bool,
+    agent_headless: bool,
     snapshot_tx: Option<std::sync::mpsc::Sender<String>>,
     dump_tx: Option<std::sync::mpsc::Sender<String>>,
+    ui_request_tx: Option<std::sync::mpsc::Sender<String>>,
 }
 
 fn agent_bridge_state() -> &'static Arc<Mutex<AgentBridgeInner>> {
     AGENT_BRIDGE_STATE.get_or_init(|| Arc::new(Mutex::new(AgentBridgeInner::default())))
+}
+
+#[cfg(target_os = "windows")]
+fn hide_agent_headless_window(window: &tauri::WebviewWindow) -> Result<(), String> {
+    let handle = window.window_handle().map_err(|error| error.to_string())?;
+    let hwnd = match handle.as_raw() {
+        RawWindowHandle::Win32(handle) => handle.hwnd.get() as HWND,
+        _ => return Err("headless window hide requires a Win32 window".to_string()),
+    };
+    let accepted = unsafe { ShowWindowAsync(hwnd, SW_HIDE) };
+    if accepted == 0 {
+        return Err("ShowWindowAsync(SW_HIDE) failed for headless window".to_string());
+    }
+    Ok(())
+}
+
+#[cfg(not(target_os = "windows"))]
+fn hide_agent_headless_window(window: &tauri::WebviewWindow) -> Result<(), String> {
+    window.hide().map_err(|error| error.to_string())
 }
 
 fn spawn_agent_bridge(app_data_dir: &std::path::Path) {
@@ -96,11 +123,137 @@ fn spawn_agent_bridge(app_data_dir: &std::path::Path) {
     });
 }
 
+fn agent_bridge_marker_owned_by_process(raw: &str, process_id: u32) -> bool {
+    serde_json::from_str::<serde_json::Value>(raw)
+        .ok()
+        .and_then(|value| value.get("pid").and_then(|pid| pid.as_u64()))
+        .map(|pid| pid == u64::from(process_id))
+        .unwrap_or(false)
+}
+
 fn cleanup_agent_bridge_files() {
     if let Some(dir) = AGENT_BRIDGE_FILES_DIR.get() {
-        let _ = std::fs::remove_file(dir.join("agent_bridge_port.txt"));
-        let _ = std::fs::remove_file(dir.join("agent_bridge.json"));
+        let json_path = dir.join("agent_bridge.json");
+        let owned = std::fs::read_to_string(&json_path)
+            .ok()
+            .map(|raw| agent_bridge_marker_owned_by_process(&raw, std::process::id()))
+            .unwrap_or(false);
+        if owned {
+            let _ = std::fs::remove_file(dir.join("agent_bridge_port.txt"));
+            let _ = std::fs::remove_file(json_path);
+        }
     }
+}
+
+/// WP-0252 Item 2a: write the stop sentinel the watcher supervisor polls, so it exits
+/// promptly on graceful app shutdown (the PID-liveness gate is the freeze-proof backstop).
+fn signal_watcher_stop() {
+    if let Some(dir) = AGENT_BRIDGE_FILES_DIR.get() {
+        let watch_root = dir.join("diagnostics").join("external_watch");
+        let _ = std::fs::create_dir_all(&watch_root);
+        let _ = std::fs::write(watch_root.join("stop.flag"), "stop\n");
+    }
+}
+
+/// WP-0252 Item 2a: launch the bundled external-watcher supervisor detached (no window,
+/// not in the app's console/job group) so it survives a WebView freeze, relaunches the
+/// watcher if it crashes while the app PID is alive, and exits when the app exits. Lives
+/// next to `desktop.exe` under `resource_dir/watcher/`.
+#[cfg(windows)]
+fn spawn_watcher_supervisor(resource_dir: &std::path::Path, app_data_dir: &std::path::Path) {
+    use std::os::windows::process::CommandExt;
+    const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+    const DETACHED_PROCESS: u32 = 0x0000_0008;
+    let watcher_dir = resource_dir.join("watcher");
+    let supervisor = watcher_dir.join("vv_watch_supervisor.ps1");
+    if !supervisor.is_file() {
+        return;
+    }
+    let _ = std::process::Command::new("powershell.exe")
+        .args([
+            "-NoLogo",
+            "-NoProfile",
+            "-NonInteractive",
+            "-WindowStyle",
+            "Hidden",
+            "-ExecutionPolicy",
+            "Bypass",
+            "-File",
+            &supervisor.to_string_lossy(),
+            "-AppPid",
+            &std::process::id().to_string(),
+            "-AppDataDir",
+            &app_data_dir.to_string_lossy(),
+            "-WatcherDir",
+            &watcher_dir.to_string_lossy(),
+        ])
+        .creation_flags(CREATE_NO_WINDOW | DETACHED_PROCESS)
+        .spawn();
+}
+
+#[cfg(not(windows))]
+fn spawn_watcher_supervisor(_resource_dir: &std::path::Path, _app_data_dir: &std::path::Path) {}
+
+/// Default ON; operator can disable without a rebuild via `config/watcher_enabled.txt`
+/// containing `0`/`false`/`off`/`no`.
+fn watcher_enabled(paths: &AppPaths) -> bool {
+    match std::fs::read_to_string(paths.config_dir().join("watcher_enabled.txt")) {
+        Ok(value) => {
+            let t = value.trim().to_ascii_lowercase();
+            !(t == "0" || t == "false" || t == "off" || t == "no")
+        }
+        Err(_) => true,
+    }
+}
+
+/// WP-0254: 4KVDP-style startup auto-check + auto-download of due subscriptions. Default
+/// ON (operator choice); disablable without a rebuild via `config/subscription_auto_sync.txt`
+/// containing `0`/`false`/`off`/`no`. Unlike the WP-0227/WP-0228 pack-install regression,
+/// this only enqueues *due* subscription refreshes into the conservative recurring lane
+/// (limit 1), so it cannot swamp the app at startup.
+fn subscription_auto_sync_enabled(paths: &AppPaths) -> bool {
+    match std::fs::read_to_string(paths.config_dir().join("subscription_auto_sync.txt")) {
+        Ok(value) => {
+            let t = value.trim().to_ascii_lowercase();
+            !(t == "0" || t == "false" || t == "off" || t == "no")
+        }
+        Err(_) => true,
+    }
+}
+
+fn copy_dir_recursive(src: &std::path::Path, dst: &std::path::Path) -> std::io::Result<()> {
+    std::fs::create_dir_all(dst)?;
+    for entry in std::fs::read_dir(src)? {
+        let entry = entry?;
+        let from = entry.path();
+        let to = dst.join(entry.file_name());
+        if from.is_dir() {
+            copy_dir_recursive(&from, &to)?;
+        } else {
+            std::fs::copy(&from, &to)?;
+        }
+    }
+    Ok(())
+}
+
+/// WP-0252 Item 1 (self-contained CosyVoice): seed the ~3 MB CosyVoice runtime code
+/// (the `cosyvoice` package + Matcha-TTS + prompt assets, pinned commit) from the bundled
+/// resource into app-data on first run, so the engine install fn (which downloads the venv
+/// + model on demand) has the code it needs. Never clobbers an existing checkout/install.
+fn seed_cosyvoice_backend_if_missing(
+    resource_dir: &std::path::Path,
+    app_data_dir: &std::path::Path,
+) {
+    let src = resource_dir.join("voice_backends_seed").join("cosyvoice");
+    let dst = app_data_dir.join("voice_backends").join("cosyvoice");
+    let marker = |root: &std::path::Path| root.join("cosyvoice").join("cli").join("cosyvoice.py");
+    if marker(&dst).is_file() {
+        return; // already present (full checkout or prior seed) — do not overwrite
+    }
+    if !marker(&src).is_file() {
+        return; // seed resource absent (e.g. a dev build without the resource)
+    }
+    let _ = copy_dir_recursive(&src, &dst);
 }
 
 fn handle_agent_request(stream: &mut std::net::TcpStream) {
@@ -153,9 +306,19 @@ fn handle_agent_request(stream: &mut std::net::TcpStream) {
         match (method, path) {
             ("GET", "/agent/health") => ("200 OK", r#"{"status":"ok"}"#.to_string()),
             ("GET", "/agent/state") => ("200 OK", agent_handle_state()),
+            // WP-0261: read-only per-subscription activity so an external monitor can see
+            // subscription refresh + fan-out progress without stealing focus.
+            ("GET", "/agent/subscriptions_activity") => agent_handle_subscriptions_activity(),
+            // WP-0270: canonical scheduler-track state. This deliberately shares the engine
+            // producer used by the Jobs controls and diagnostics instead of grouping rendered
+            // rows or duplicating gate calculations on the bridge thread.
+            ("GET", "/agent/jobs_tracks") => agent_handle_jobs_tracks(),
             ("POST", "/agent/navigate") => agent_handle_navigate(&body_str),
             ("POST", "/agent/snapshot") => agent_handle_snapshot(&body_str),
             ("POST", "/agent/dump") => agent_handle_dump(&body_str),
+            ("POST", "/agent/ui_audit") => agent_handle_ui_request("audit", &body_str),
+            ("POST", "/agent/ui_action") => agent_handle_ui_request("action", &body_str),
+            ("POST", "/agent/subscription_status") => agent_handle_subscription_status(&body_str),
             ("POST", "/agent/freeze_event") => agent_handle_freeze_event(&body_str),
             ("POST", "/agent/freeze_dump") => agent_handle_freeze_dump(&body_str),
             _ => ("404 Not Found", r#"{"error":"not found"}"#.to_string()),
@@ -186,12 +349,94 @@ fn agent_handle_state() -> String {
         "current_page": state.current_page,
         "editor_item_id": state.editor_item_id,
         "safe_mode": state.safe_mode,
+        "agent_headless": state.agent_headless,
+        "app_version": env!("CARGO_PKG_VERSION"),
     })
     .to_string()
 }
 
+// WP-0261: bridge handler for GET /agent/subscriptions_activity. Returns the same read-only
+// per-subscription activity rows the UI polls (subscriptions::youtube_subscriptions_activity), so
+// an external monitor can watch subscription refresh + child-download fan-out. Runs on the bridge
+// thread and reads the DB read-only, so it stays off the writer path and works even under load.
+fn agent_handle_subscriptions_activity() -> (&'static str, String) {
+    let app = match AGENT_APP_HANDLE.get() {
+        Some(a) => a,
+        None => {
+            return (
+                "503 Service Unavailable",
+                r#"{"error":"app handle unavailable"}"#.to_string(),
+            )
+        }
+    };
+    let state = match app.try_state::<AppState>() {
+        Some(s) => s,
+        None => {
+            return (
+                "503 Service Unavailable",
+                r#"{"error":"app state unavailable"}"#.to_string(),
+            )
+        }
+    };
+    match subscriptions::youtube_subscriptions_activity(&state.paths) {
+        Ok(rows) => match serde_json::to_string(&rows) {
+            Ok(body) => ("200 OK", body),
+            Err(e) => (
+                "500 Internal Server Error",
+                format!(r#"{{"error":"serialize: {}"}}"#, e),
+            ),
+        },
+        Err(e) => (
+            "500 Internal Server Error",
+            format!(r#"{{"error":"{}"}}"#, e.to_string().replace('"', "'")),
+        ),
+    }
+}
+
+// WP-0270: bridge handler for GET /agent/jobs_tracks. The producer opens the job DB read-only
+// and executes one bounded grouped aggregate plus a tiny in-process runner gate-state read, so
+// the endpoint remains useful to agents while the WebView is unavailable and never changes queue
+// truth, settings, or scheduler state.
+fn agent_handle_jobs_tracks() -> (&'static str, String) {
+    let app = match AGENT_APP_HANDLE.get() {
+        Some(app) => app,
+        None => {
+            return (
+                "503 Service Unavailable",
+                r#"{"error":"app handle unavailable"}"#.to_string(),
+            )
+        }
+    };
+    let state = match app.try_state::<AppState>() {
+        Some(state) => state,
+        None => {
+            return (
+                "503 Service Unavailable",
+                r#"{"error":"app state unavailable"}"#.to_string(),
+            )
+        }
+    };
+    jobs_tracks_bridge_response(&state.paths)
+}
+
+fn jobs_tracks_bridge_response(paths: &AppPaths) -> (&'static str, String) {
+    match jobs::get_job_tracks_runtime_snapshot(paths) {
+        Ok(snapshot) => match serde_json::to_string(&snapshot) {
+            Ok(body) => ("200 OK", body),
+            Err(error) => (
+                "500 Internal Server Error",
+                format!(r#"{{"error":"serialize: {}"}}"#, error),
+            ),
+        },
+        Err(error) => (
+            "503 Service Unavailable",
+            format!(r#"{{"error":"{}"}}"#, error.to_string().replace('"', "'")),
+        ),
+    }
+}
+
 fn agent_handle_navigate(body: &str) -> (&'static str, String) {
-    let parsed: serde_json::Value = match serde_json::from_str(body) {
+    let parsed: serde_json::Value = match serde_json::from_str::<serde_json::Value>(body) {
         Ok(v) => v,
         Err(_) => return ("400 Bad Request", r#"{"error":"invalid json"}"#.to_string()),
     };
@@ -583,6 +828,191 @@ fn agent_handle_dump(body: &str) -> (&'static str, String) {
     }
 }
 
+fn validate_agent_ui_request(
+    agent_headless: bool,
+    body: &str,
+) -> Result<serde_json::Value, (&'static str, String)> {
+    if !agent_headless {
+        return Err((
+            "403 Forbidden",
+            r#"{"error":"UI audit routes require --agent-headless"}"#.to_string(),
+        ));
+    }
+    if body.len() > 16 * 1024 {
+        return Err((
+            "413 Payload Too Large",
+            r#"{"error":"UI audit request exceeds 16 KiB"}"#.to_string(),
+        ));
+    }
+    let parsed: serde_json::Value = serde_json::from_str(body)
+        .map_err(|_| ("400 Bad Request", r#"{"error":"invalid json"}"#.to_string()))?;
+    if !parsed.is_object() {
+        return Err((
+            "400 Bad Request",
+            r#"{"error":"UI audit request must be a JSON object"}"#.to_string(),
+        ));
+    }
+    Ok(parsed)
+}
+
+fn agent_handle_ui_request(operation: &'static str, body: &str) -> (&'static str, String) {
+    let agent_headless = agent_bridge_state().lock().unwrap().agent_headless;
+    let request = match validate_agent_ui_request(agent_headless, body) {
+        Ok(value) => value,
+        Err(response) => return response,
+    };
+    let request_id = format!(
+        "ui-{}-{}",
+        now_epoch_ms_i64(),
+        AGENT_UI_REQUEST_SEQUENCE.fetch_add(1, Ordering::Relaxed)
+    );
+    let (tx, rx) = std::sync::mpsc::channel::<String>();
+    {
+        let mut state = agent_bridge_state().lock().unwrap();
+        if state.ui_request_tx.is_some() {
+            return (
+                "409 Conflict",
+                r#"{"error":"another UI audit request is already active"}"#.to_string(),
+            );
+        }
+        state.ui_request_tx = Some(tx);
+    }
+
+    let app = match AGENT_APP_HANDLE.get() {
+        Some(app) => app,
+        None => {
+            agent_bridge_state().lock().unwrap().ui_request_tx = None;
+            return (
+                "503 Service Unavailable",
+                r#"{"error":"agent app handle unavailable"}"#.to_string(),
+            );
+        }
+    };
+    if app
+        .emit(
+            "agent-ui-request",
+            serde_json::json!({
+                "request_id": request_id,
+                "operation": operation,
+                "request": request,
+            }),
+        )
+        .is_err()
+    {
+        agent_bridge_state().lock().unwrap().ui_request_tx = None;
+        return (
+            "503 Service Unavailable",
+            r#"{"error":"failed to emit UI audit request"}"#.to_string(),
+        );
+    }
+
+    match rx.recv_timeout(Duration::from_secs(15)) {
+        Ok(payload) => {
+            if serde_json::from_str::<serde_json::Value>(&payload).is_err() {
+                return (
+                    "502 Bad Gateway",
+                    r#"{"error":"frontend returned invalid UI audit JSON"}"#.to_string(),
+                );
+            }
+            ("200 OK", payload)
+        }
+        Err(_) => {
+            agent_bridge_state().lock().unwrap().ui_request_tx = None;
+            (
+                "504 Gateway Timeout",
+                r#"{"error":"UI audit request timed out (15s)"}"#.to_string(),
+            )
+        }
+    }
+}
+
+fn agent_handle_subscription_status(body: &str) -> (&'static str, String) {
+    if !agent_bridge_state().lock().unwrap().agent_headless {
+        return (
+            "403 Forbidden",
+            r#"{"error":"subscription status changes require --agent-headless"}"#.to_string(),
+        );
+    }
+    if body.len() > 16 * 1024 {
+        return (
+            "413 Payload Too Large",
+            r#"{"error":"request exceeds 16 KiB"}"#.to_string(),
+        );
+    }
+    let parsed: serde_json::Value = match serde_json::from_str::<serde_json::Value>(body) {
+        Ok(value) if value.is_object() => value,
+        _ => return ("400 Bad Request", r#"{"error":"invalid json"}"#.to_string()),
+    };
+    let id = parsed
+        .get("id")
+        .and_then(|value| value.as_str())
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .unwrap_or_default();
+    let status = parsed
+        .get("status")
+        .and_then(|value| value.as_str())
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .unwrap_or_default();
+    if id.is_empty() || status.is_empty() {
+        return (
+            "400 Bad Request",
+            r#"{"error":"id and status are required"}"#.to_string(),
+        );
+    }
+
+    let app = match AGENT_APP_HANDLE.get() {
+        Some(app) => app,
+        None => {
+            return (
+                "503 Service Unavailable",
+                r#"{"error":"app handle unavailable"}"#.to_string(),
+            )
+        }
+    };
+    let state = match app.try_state::<AppState>() {
+        Some(state) => state,
+        None => {
+            return (
+                "503 Service Unavailable",
+                r#"{"error":"app state unavailable"}"#.to_string(),
+            )
+        }
+    };
+    match subscriptions::set_youtube_subscription_manual_status(
+        &state.paths,
+        id,
+        status,
+        subscriptions::YOUTUBE_SUBSCRIPTION_STATUS_ACTOR_ASSISTANT,
+    ) {
+        Ok(receipt) => {
+            append_diagnostics_trace_row_best_effort(
+                &state.paths,
+                "subscription_manual_status_changed",
+                serde_json::json!({
+                    "actor": subscriptions::YOUTUBE_SUBSCRIPTION_STATUS_ACTOR_ASSISTANT,
+                    "subscription_id": receipt.subscription.id,
+                    "source_status": receipt.subscription.source_status,
+                    "canceled_refresh_jobs": receipt.canceled_refresh_jobs,
+                }),
+                "info",
+            );
+            match serde_json::to_string(&receipt) {
+                Ok(body) => ("200 OK", body),
+                Err(error) => (
+                    "500 Internal Server Error",
+                    serde_json::json!({ "error": error.to_string() }).to_string(),
+                ),
+            }
+        }
+        Err(error) => (
+            "400 Bad Request",
+            serde_json::json!({ "error": error.to_string() }).to_string(),
+        ),
+    }
+}
+
 // WP-0221: Freeze-event ingress for the Worker-driven freeze detector.
 // The freeze-detector Worker runs on its own browser thread and POSTs here
 // when the WebView main thread stops answering pings, so the report path
@@ -765,10 +1195,11 @@ fn agent_handle_freeze_dump(body: &str) -> (&'static str, String) {
 use voxvulgi_engine::models::ModelStore;
 use voxvulgi_engine::paths::AppPaths;
 use voxvulgi_engine::{
-    config, db, diagnostics, instagram_subscriptions, jobs, library, speakers, subscriptions,
-    subtitle_tracks, subtitles, tools, translate, video_libraries, voice_backend_adapters,
-    voice_backends, voice_benchmarks, voice_cast_packs, voice_cleanup, voice_library, voice_plans,
-    voice_reference_candidates, voice_reference_curation, voice_templates,
+    config, db, diagnostics, instagram_subscriptions, jobs, library, media_cleanup, speakers,
+    subscriptions, subtitle_tracks, subtitles, tools, translate, video_libraries,
+    voice_backend_adapters, voice_backends, voice_benchmarks, voice_cast_packs, voice_cleanup,
+    voice_library, voice_plans, voice_reference_candidates, voice_reference_curation,
+    voice_templates,
 };
 
 #[derive(Debug, Clone, serde::Deserialize)]
@@ -866,7 +1297,7 @@ struct ArtifactVoiceCloneMeta {
 #[derive(Debug, Clone)]
 struct AppState {
     paths: AppPaths,
-    runner: jobs::JobRunnerHandle,
+    runner: Option<jobs::JobRunnerHandle>,
     safe_mode_enabled: Arc<AtomicBool>,
     safe_mode_cli: bool,
     startup: Arc<Mutex<StartupTracker>>,
@@ -874,8 +1305,14 @@ struct AppState {
 
 impl Drop for AppState {
     fn drop(&mut self) {
-        self.runner.stop();
+        if let Some(runner) = &self.runner {
+            runner.stop();
+        }
     }
+}
+
+fn runtime_background_work_enabled(safe_mode_enabled: bool, agent_headless: bool) -> bool {
+    !safe_mode_enabled && !agent_headless
 }
 
 #[derive(Debug, Clone, serde::Serialize)]
@@ -1135,6 +1572,9 @@ struct DiagnosticsAppStateSnapshot {
     storage: diagnostics::StorageBreakdown,
     thumbnail_cache: library::ThumbnailCacheStatus,
     jobs: DiagnosticsJobQueueSnapshot,
+    // WP-0270: exact same canonical producer exposed through Jobs controls and
+    // GET /agent/jobs_tracks; do not derive this from the diagnostics recent-job preview.
+    jobs_tracks: jobs::JobTracksRuntimeSnapshot,
     library: DiagnosticsLibrarySnapshot,
     recent_trace: Vec<DiagnosticsTraceEntry>,
     feature_health: Vec<DiagnosticsFeatureHealthRow>,
@@ -1172,6 +1612,60 @@ struct DiagnosticsTraceEntry {
     level: String,
     details: serde_json::Value,
     process: Option<DiagnosticsProcessSnapshot>,
+}
+
+#[derive(Debug, Clone, serde::Serialize)]
+struct JobsBatchOperationSnapshot {
+    request_id: String,
+    mode: String,
+    batch_query: String,
+    state: String,
+    started_at_ms: i64,
+    finished_at_ms: Option<i64>,
+    summary: Option<jobs::RetryBatchFailedSummary>,
+    error: Option<String>,
+}
+
+fn jobs_batch_operations(
+) -> &'static Mutex<std::collections::HashMap<String, JobsBatchOperationSnapshot>> {
+    JOBS_BATCH_OPERATIONS.get_or_init(|| Mutex::new(std::collections::HashMap::new()))
+}
+
+fn prune_jobs_batch_operations(
+    operations: &mut std::collections::HashMap<String, JobsBatchOperationSnapshot>,
+    now_ms: i64,
+) {
+    const COMPLETED_RETENTION_MS: i64 = 60 * 60 * 1000;
+    const MAX_RECEIPTS: usize = 128;
+    operations.retain(|_, operation| {
+        operation.state == "running"
+            || operation
+                .finished_at_ms
+                .map(|finished_at_ms| {
+                    now_ms.saturating_sub(finished_at_ms) <= COMPLETED_RETENTION_MS
+                })
+                .unwrap_or(true)
+    });
+    if operations.len() < MAX_RECEIPTS {
+        return;
+    }
+    let mut completed = operations
+        .values()
+        .filter(|operation| operation.state != "running")
+        .map(|operation| {
+            (
+                operation.finished_at_ms.unwrap_or(operation.started_at_ms),
+                operation.request_id.clone(),
+            )
+        })
+        .collect::<Vec<_>>();
+    completed.sort_by_key(|(finished_at_ms, _)| *finished_at_ms);
+    for (_, request_id) in completed {
+        if operations.len() < MAX_RECEIPTS {
+            break;
+        }
+        operations.remove(&request_id);
+    }
 }
 
 #[derive(Debug, Clone, serde::Serialize)]
@@ -1448,6 +1942,10 @@ fn append_diagnostics_trace_row(
     details: serde_json::Value,
     level: String,
 ) -> Result<String, String> {
+    let _write_guard = DIAGNOSTICS_TRACE_WRITE_LOCK
+        .get_or_init(|| Mutex::new(()))
+        .lock()
+        .map_err(|_| "diagnostics trace write lock is poisoned".to_string())?;
     let path = diagnostics_trace_file_path(paths)?;
     let mut file = std::fs::OpenOptions::new()
         .create(true)
@@ -1455,12 +1953,24 @@ fn append_diagnostics_trace_row(
         .open(&path)
         .map_err(|e| e.to_string())?;
 
+    let include_process_snapshot = matches!(
+        event.as_str(),
+        "runtime_sample"
+            | "freeze_detected"
+            | "freeze_recovered"
+            | "event_loop_skew"
+            | "command_slow"
+            | "database_locked"
+            | "database_busy"
+    );
     let row = DiagnosticsTraceEntry {
         ts_ms: now_epoch_ms_i64(),
         event,
         level,
         details,
-        process: capture_process_snapshot(),
+        process: include_process_snapshot
+            .then(capture_process_snapshot)
+            .flatten(),
     };
 
     use std::io::Write as _;
@@ -1525,17 +2035,33 @@ fn trace_database_command_error(
 struct InvokeTimer {
     paths: AppPaths,
     name: &'static str,
+    invocation_id: u64,
     started: std::time::Instant,
     started_at_ms: i64,
 }
 
+static INVOKE_SEQUENCE: AtomicU64 = AtomicU64::new(1);
+
 impl InvokeTimer {
     fn start(paths: AppPaths, name: &'static str) -> Self {
+        let invocation_id = INVOKE_SEQUENCE.fetch_add(1, Ordering::Relaxed);
+        let started_at_ms = now_epoch_ms_i64();
+        append_diagnostics_trace_row_best_effort(
+            &paths,
+            "command_started",
+            serde_json::json!({
+                "cmd": name,
+                "invocation_id": invocation_id,
+                "started_at_ms": started_at_ms,
+            }),
+            "info",
+        );
         Self {
             paths,
             name,
+            invocation_id,
             started: std::time::Instant::now(),
-            started_at_ms: now_epoch_ms_i64(),
+            started_at_ms,
         }
     }
 }
@@ -1548,6 +2074,7 @@ impl Drop for InvokeTimer {
             "command_completed",
             serde_json::json!({
                 "cmd": self.name,
+                "invocation_id": self.invocation_id,
                 "started_at_ms": self.started_at_ms,
                 "elapsed_ms": elapsed_ms,
             }),
@@ -1559,6 +2086,8 @@ impl Drop for InvokeTimer {
                 "command_slow",
                 serde_json::json!({
                     "cmd": self.name,
+                    "invocation_id": self.invocation_id,
+                    "started_at_ms": self.started_at_ms,
                     "elapsed_ms": elapsed_ms,
                 }),
                 "warn",
@@ -2237,6 +2766,60 @@ mod tests {
     use voxvulgi_engine::{config, db, paths::AppPaths};
 
     #[test]
+    fn jobs_batch_operation_receipts_are_age_and_count_bounded() {
+        let now_ms = 10_000_000_i64;
+        let mut operations = std::collections::HashMap::new();
+        operations.insert(
+            "running".to_string(),
+            JobsBatchOperationSnapshot {
+                request_id: "running".to_string(),
+                mode: "retry".to_string(),
+                batch_query: "batch-running".to_string(),
+                state: "running".to_string(),
+                started_at_ms: 1,
+                finished_at_ms: None,
+                summary: None,
+                error: None,
+            },
+        );
+        operations.insert(
+            "expired".to_string(),
+            JobsBatchOperationSnapshot {
+                request_id: "expired".to_string(),
+                mode: "dry_run".to_string(),
+                batch_query: "batch-expired".to_string(),
+                state: "succeeded".to_string(),
+                started_at_ms: 1,
+                finished_at_ms: Some(now_ms - (60 * 60 * 1000) - 1),
+                summary: None,
+                error: None,
+            },
+        );
+        for index in 0..140 {
+            let request_id = format!("completed-{index:03}");
+            operations.insert(
+                request_id.clone(),
+                JobsBatchOperationSnapshot {
+                    request_id,
+                    mode: "repair".to_string(),
+                    batch_query: format!("batch-{index:03}"),
+                    state: "succeeded".to_string(),
+                    started_at_ms: now_ms - 1_000 + index,
+                    finished_at_ms: Some(now_ms - 1_000 + index),
+                    summary: None,
+                    error: None,
+                },
+            );
+        }
+
+        prune_jobs_batch_operations(&mut operations, now_ms);
+
+        assert!(operations.contains_key("running"));
+        assert!(!operations.contains_key("expired"));
+        assert!(operations.len() < 128);
+    }
+
+    #[test]
     fn verify_offline_payload_integrity_accepts_matching_bytes_and_hash() {
         let dir = tempfile::tempdir().expect("tempdir");
         let payload = dir.path().join("payload.zip");
@@ -2273,6 +2856,21 @@ mod tests {
 
         let err = verify_offline_payload_integrity(&manifest, &payload).expect_err("mismatch");
         assert!(err.contains("sha256 mismatch"));
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn youtube_sign_in_browser_candidates_are_source_specific() {
+        let firefox = youtube_browser_windows_candidates("firefox");
+        let chrome = youtube_browser_windows_candidates("chrome");
+        let edge = youtube_browser_windows_candidates("edge");
+        let opera = youtube_browser_windows_candidates("opera");
+
+        assert!(firefox.iter().any(|path| path.ends_with("firefox.exe")));
+        assert!(chrome.iter().any(|path| path.ends_with("chrome.exe")));
+        assert!(edge.iter().any(|path| path.ends_with("msedge.exe")));
+        assert!(opera.iter().any(|path| path.ends_with("opera.exe")));
+        assert!(youtube_browser_windows_candidates("unsupported").is_empty());
     }
 
     #[test]
@@ -2384,6 +2982,46 @@ mod tests {
     }
 
     #[test]
+    fn agent_ui_request_validation_is_headless_bounded_and_object_only() {
+        let foreground = validate_agent_ui_request(false, "{}").expect_err("foreground rejected");
+        assert_eq!(foreground.0, "403 Forbidden");
+
+        let invalid = validate_agent_ui_request(true, "[]").expect_err("array rejected");
+        assert_eq!(invalid.0, "400 Bad Request");
+
+        let oversized = format!(r#"{{"value":"{}"}}"#, "x".repeat(17 * 1024));
+        let too_large =
+            validate_agent_ui_request(true, &oversized).expect_err("oversized rejected");
+        assert_eq!(too_large.0, "413 Payload Too Large");
+
+        let accepted = validate_agent_ui_request(true, r#"{"limit":700,"include_offscreen":true}"#)
+            .expect("headless object accepted");
+        assert_eq!(accepted["limit"], 700);
+        assert_eq!(accepted["include_offscreen"], true);
+    }
+
+    #[test]
+    fn agent_bridge_cleanup_only_owns_its_exact_pid_marker() {
+        assert!(agent_bridge_marker_owned_by_process(
+            r#"{"pid":42,"port":51000}"#,
+            42
+        ));
+        assert!(!agent_bridge_marker_owned_by_process(
+            r#"{"pid":43,"port":51000}"#,
+            42
+        ));
+        assert!(!agent_bridge_marker_owned_by_process("not json", 42));
+    }
+
+    #[test]
+    fn headless_audit_disables_runtime_background_work() {
+        assert!(runtime_background_work_enabled(false, false));
+        assert!(!runtime_background_work_enabled(true, false));
+        assert!(!runtime_background_work_enabled(false, true));
+        assert!(!runtime_background_work_enabled(true, true));
+    }
+
+    #[test]
     fn build_download_dir_status_includes_feature_defaults_from_base_root() {
         let dir = tempfile::tempdir().expect("tempdir");
         let paths = AppPaths::new(dir.path().to_path_buf());
@@ -2471,6 +3109,32 @@ mod tests {
     }
 
     #[test]
+    fn jobs_tracks_bridge_response_serializes_the_canonical_engine_snapshot_shape() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let paths = AppPaths::new(dir.path().to_path_buf());
+        db::ensure_schema(&paths).expect("ensure schema");
+        jobs::enqueue_dummy_sleep(&paths, 1).expect("enqueue other-video job");
+
+        let expected = serde_json::to_value(
+            jobs::get_job_tracks_runtime_snapshot(&paths).expect("engine snapshot"),
+        )
+        .expect("serialize engine snapshot");
+        let (status, body) = jobs_tracks_bridge_response(&paths);
+        assert_eq!(status, "200 OK");
+        let bridge: serde_json::Value = serde_json::from_str(&body).expect("bridge json");
+        assert_eq!(
+            bridge, expected,
+            "bridge must not project a different truth"
+        );
+        assert_eq!(bridge["tracks"].as_array().map(Vec::len), Some(6));
+        assert_eq!(bridge["tracks"][0]["track"], "youtube_single");
+        assert!(bridge["tracks"][0].get("configured_budget").is_some());
+        assert!(bridge["tracks"][0].get("total").is_some());
+        assert!(bridge["unclassified"].is_object());
+        assert!(bridge["youtube_gate"].is_object());
+    }
+
+    #[test]
     fn diagnostics_app_state_snapshot_export_writes_json_and_markdown() {
         let dir = tempfile::tempdir().expect("tempdir");
         let paths = AppPaths::new(dir.path().to_path_buf());
@@ -2520,8 +3184,25 @@ mod tests {
         let json_text = std::fs::read_to_string(&export.json_path).expect("json");
         let markdown_text = std::fs::read_to_string(&export.markdown_path).expect("markdown");
         assert!(json_text.contains("\"feature_health\""));
+        assert!(json_text.contains("\"jobs_tracks\""));
+        assert_eq!(snapshot.jobs_tracks.tracks.len(), 6);
         assert!(markdown_text.contains("# VoxVulgi app-state snapshot"));
         assert!(markdown_text.contains("## Feature health"));
+        assert!(markdown_text.contains("## Scheduler tracks"));
+        for track in [
+            "youtube_single",
+            "youtube_recurring",
+            "instagram",
+            "other_video",
+            "image_archive",
+            "localization",
+        ] {
+            assert!(markdown_text.contains(&format!("| `{track}` |")));
+        }
+        assert!(markdown_text.contains("| `unclassified` |"));
+        assert!(markdown_text.contains("### Shared YouTube start gate"));
+        assert!(markdown_text.contains("Next eligible start:"));
+        assert!(markdown_text.contains("Hold reason:"));
 
         if let Ok(proof_dir) = std::env::var("VOXVULGI_WP0135_PROOF_DIR") {
             let proof_dir = std::path::PathBuf::from(proof_dir);
@@ -3030,6 +3711,7 @@ fn build_library_snapshot(paths: &AppPaths) -> Result<DiagnosticsLibrarySnapshot
 }
 
 fn build_feature_health_rows(
+    paths: &AppPaths,
     startup: &StartupStatus,
     ffmpeg: &tools::FfmpegToolsStatus,
     ytdlp: &tools::YtDlpToolsStatus,
@@ -3041,10 +3723,13 @@ fn build_feature_health_rows(
     trace_dir: &DiagnosticsTraceDirStatus,
     jobs: &DiagnosticsJobQueueSnapshot,
 ) -> Vec<DiagnosticsFeatureHealthRow> {
+    // Track the configured/active ASR model so the health row stays truthful after an
+    // operator swaps the ASR model (default large-v3 q5_0; tiny is only a fallback).
+    let active_asr = paths.effective_asr_model_id();
     let whisper_ready = models
         .models
         .iter()
-        .any(|model| model.id == "whispercpp-tiny" && model.installed);
+        .any(|model| model.id == active_asr && model.installed);
     let startup_blocked = startup
         .phases
         .iter()
@@ -3214,6 +3899,68 @@ fn render_diagnostics_app_state_snapshot_markdown(
         snapshot.jobs.failed
     ));
 
+    // WP-0270: export the same engine-owned canonical track snapshot that Jobs and the
+    // read-only agent bridge consume. Do not derive these totals from recent_jobs.
+    md.push_str("## Scheduler tracks\n\n");
+    md.push_str("| Track | Configured budget | Effective budget | Paused | Queued | Running | Succeeded | Failed | Canceled | Total | Hold reason |\n");
+    md.push_str("| --- | ---: | ---: | --- | ---: | ---: | ---: | ---: | ---: | ---: | --- |\n");
+    for track in &snapshot.jobs_tracks.tracks {
+        let track_name = match track.track {
+            jobs::JobTrack::YoutubeSingle => "youtube_single",
+            jobs::JobTrack::YoutubeRecurring => "youtube_recurring",
+            jobs::JobTrack::Instagram => "instagram",
+            jobs::JobTrack::OtherVideo => "other_video",
+            jobs::JobTrack::ImageArchive => "image_archive",
+            jobs::JobTrack::Localization => "localization",
+        };
+        let hold_reason = track
+            .hold_reason
+            .as_deref()
+            .unwrap_or("-")
+            .replace('|', "\\|")
+            .replace(['\r', '\n'], " ");
+        md.push_str(&format!(
+            "| `{}` | `{}` | `{}` | `{}` | `{}` | `{}` | `{}` | `{}` | `{}` | `{}` | {} |\n",
+            track_name,
+            track.configured_budget,
+            track.effective_budget,
+            track.paused,
+            track.queued,
+            track.running,
+            track.succeeded,
+            track.failed,
+            track.canceled,
+            track.total,
+            hold_reason,
+        ));
+    }
+    let unclassified = &snapshot.jobs_tracks.unclassified;
+    md.push_str(&format!(
+        "| `unclassified` | `-` | `-` | `-` | `{}` | `{}` | `{}` | `{}` | `{}` | `{}` | legacy rows awaiting track repair |\n\n",
+        unclassified.queued,
+        unclassified.running,
+        unclassified.succeeded,
+        unclassified.failed,
+        unclassified.canceled,
+        unclassified.total,
+    ));
+    let gate = &snapshot.jobs_tracks.youtube_gate;
+    let gate_hold_reason = gate
+        .hold_reason
+        .as_deref()
+        .unwrap_or("-")
+        .replace('|', "\\|")
+        .replace(['\r', '\n'], " ");
+    md.push_str("### Shared YouTube start gate\n\n");
+    md.push_str(&format!(
+        "- State: `{}`\n- Next eligible start: `{}`\n- Hold reason: `{}`\n\n",
+        gate.state,
+        gate.next_eligible_at_ms
+            .map(|value| value.to_string())
+            .unwrap_or_else(|| "-".to_string()),
+        gate_hold_reason,
+    ));
+
     if !snapshot.jobs.recent_failures.is_empty() {
         md.push_str("## Recent failures\n\n");
         for failure in &snapshot.jobs.recent_failures {
@@ -3327,9 +4074,11 @@ fn build_diagnostics_app_state_snapshot(
     let storage = diagnostics::storage_breakdown(paths).map_err(|e| e.to_string())?;
     let thumbnail_cache = library::thumbnail_cache_status(paths).map_err(|e| e.to_string())?;
     let jobs = build_job_queue_snapshot(paths)?;
+    let jobs_tracks = jobs::get_job_tracks_runtime_snapshot(paths).map_err(|e| e.to_string())?;
     let library = build_library_snapshot(paths)?;
     let recent_trace = read_recent_diagnostics_trace_entries(paths, 40)?;
     let feature_health = build_feature_health_rows(
+        paths,
         &startup,
         &ffmpeg,
         &ytdlp,
@@ -3369,6 +4118,7 @@ fn build_diagnostics_app_state_snapshot(
         storage,
         thumbnail_cache,
         jobs,
+        jobs_tracks,
         library,
         recent_trace,
         feature_health,
@@ -3807,7 +4557,8 @@ SELECT
   started_at_ms,
   finished_at_ms,
   logs_path,
-  params_json
+  params_json,
+  track
 FROM job
 WHERE item_id IN ({placeholders})
 ORDER BY item_id ASC, created_at_ms DESC
@@ -3819,6 +4570,7 @@ ORDER BY item_id ASC, created_at_ms DESC
             rusqlite::params_from_iter(item_ids.iter().map(String::as_str)),
             |row| {
                 let status_str: String = row.get(4)?;
+                let persisted_track: Option<String> = row.get(12)?;
                 Ok(jobs::JobRow {
                     id: row.get(0)?,
                     item_id: row.get(1)?,
@@ -3835,6 +4587,7 @@ ORDER BY item_id ASC, created_at_ms DESC
                     target_title: None,
                     retry_of_job_id: None,
                     retry_replacement_job_id: None,
+                    track: jobs::durable_job_track_label(persisted_track.as_deref()),
                 })
             },
         )
@@ -5611,10 +6364,121 @@ fn config_youtube_auth_set(
             config_value.netscape_cookie_json,
         )
         .map_err(|e| e.to_string())?,
+        browser_cookie_source: jobs::normalize_browser_cookie_source(
+            config_value.browser_cookie_source.as_deref(),
+        )
+        .map_err(|e| e.to_string())?,
+        last_verified_at_ms: None,
+        reconnect_required_at_ms: None,
     };
     config::save_youtube_auth_config(&state.paths, &config_value).map_err(|e| e.to_string())?;
     jobs::clear_youtube_auth_block(&state.paths).map_err(|e| e.to_string())?;
     Ok(config_value)
+}
+
+const YOUTUBE_SIGN_IN_URL: &str = "https://www.youtube.com/";
+
+#[derive(Debug, serde::Serialize)]
+struct YoutubeSignInLaunchResult {
+    browser_source: String,
+    url: String,
+}
+
+#[cfg(windows)]
+fn youtube_browser_windows_candidates(browser_source: &str) -> Vec<std::path::PathBuf> {
+    let program_files = std::env::var_os("ProgramFiles").map(std::path::PathBuf::from);
+    let program_files_x86 = std::env::var_os("ProgramFiles(x86)").map(std::path::PathBuf::from);
+    let local_app_data = std::env::var_os("LOCALAPPDATA").map(std::path::PathBuf::from);
+    let mut candidates = Vec::new();
+    let mut push_under = |root: &Option<std::path::PathBuf>, relative: &str| {
+        if let Some(root) = root {
+            candidates.push(root.join(relative));
+        }
+    };
+    match browser_source {
+        "firefox" => {
+            push_under(&program_files, "Mozilla Firefox/firefox.exe");
+            push_under(&program_files_x86, "Mozilla Firefox/firefox.exe");
+        }
+        "chrome" => {
+            push_under(&program_files, "Google/Chrome/Application/chrome.exe");
+            push_under(&program_files_x86, "Google/Chrome/Application/chrome.exe");
+            push_under(&local_app_data, "Google/Chrome/Application/chrome.exe");
+        }
+        "edge" => {
+            push_under(&program_files, "Microsoft/Edge/Application/msedge.exe");
+            push_under(&program_files_x86, "Microsoft/Edge/Application/msedge.exe");
+            push_under(&local_app_data, "Microsoft/Edge/Application/msedge.exe");
+        }
+        "opera" => {
+            push_under(&local_app_data, "Programs/Opera/opera.exe");
+            push_under(&program_files, "Opera/opera.exe");
+            push_under(&program_files_x86, "Opera/opera.exe");
+        }
+        _ => {}
+    }
+    candidates
+}
+
+#[cfg(windows)]
+fn launch_youtube_sign_in_in_browser(browser_source: &str) -> Result<(), String> {
+    let executable = youtube_browser_windows_candidates(browser_source)
+        .into_iter()
+        .find(|path| path.is_file())
+        .ok_or_else(|| {
+            format!(
+                "Could not find {browser_source} on this computer. Open youtube.com in that browser yourself, sign in, then return here."
+            )
+        })?;
+    std::process::Command::new(&executable)
+        .arg(YOUTUBE_SIGN_IN_URL)
+        .spawn()
+        .map_err(|err| format!("Could not open {}: {err}", executable.display()))?;
+    Ok(())
+}
+
+#[cfg(target_os = "macos")]
+fn launch_youtube_sign_in_in_browser(browser_source: &str) -> Result<(), String> {
+    let app = match browser_source {
+        "firefox" => "Firefox",
+        "chrome" => "Google Chrome",
+        "edge" => "Microsoft Edge",
+        "opera" => "Opera",
+        _ => return Err(format!("Unsupported browser: {browser_source}")),
+    };
+    std::process::Command::new("open")
+        .args(["-a", app, YOUTUBE_SIGN_IN_URL])
+        .spawn()
+        .map_err(|err| format!("Could not open {app}: {err}"))?;
+    Ok(())
+}
+
+#[cfg(all(unix, not(target_os = "macos")))]
+fn launch_youtube_sign_in_in_browser(browser_source: &str) -> Result<(), String> {
+    let executable = match browser_source {
+        "firefox" => "firefox",
+        "chrome" => "google-chrome",
+        "edge" => "microsoft-edge",
+        "opera" => "opera",
+        _ => return Err(format!("Unsupported browser: {browser_source}")),
+    };
+    std::process::Command::new(executable)
+        .arg(YOUTUBE_SIGN_IN_URL)
+        .spawn()
+        .map_err(|err| format!("Could not open {executable}: {err}"))?;
+    Ok(())
+}
+
+#[tauri::command]
+fn youtube_auth_open_sign_in(browser_source: String) -> Result<YoutubeSignInLaunchResult, String> {
+    let browser_source = jobs::normalize_browser_cookie_source(Some(&browser_source))
+        .map_err(|err| err.to_string())?
+        .ok_or_else(|| "Choose a supported browser first.".to_string())?;
+    launch_youtube_sign_in_in_browser(&browser_source)?;
+    Ok(YoutubeSignInLaunchResult {
+        browser_source,
+        url: YOUTUBE_SIGN_IN_URL.to_string(),
+    })
 }
 
 #[tauri::command]
@@ -5623,6 +6487,59 @@ fn config_youtube_auth_preflight(
     url: Option<String>,
 ) -> Result<jobs::YoutubeAuthPreflightResult, String> {
     jobs::youtube_auth_preflight(&state.paths, url).map_err(|e| e.to_string())
+}
+
+// ---- WP-0263: global Instagram auth in Options (mirrors config_youtube_auth_*) ----
+
+/// Frontend->backend payload for `config_instagram_auth_set`. `cookie` is the pasted Instagram
+/// session cookie (a `Cookie:` header string, or a browser-extension cookie JSON array — the
+/// engine normalizes both). Empty/omitted clears the saved global Instagram cookie.
+#[derive(Debug, Clone, serde::Deserialize)]
+struct InstagramAuthConfigInput {
+    #[serde(default)]
+    cookie: Option<String>,
+}
+
+/// Backend->frontend status for `config_instagram_auth_get` / `config_instagram_auth_set`.
+/// The secret itself is never returned; only whether a global Instagram cookie is configured.
+#[derive(Debug, Clone, serde::Serialize)]
+struct InstagramAuthConfigStatus {
+    configured: bool,
+}
+
+/// Whether a global Instagram cookie is configured. Mirrors `config_youtube_auth_get`, but
+/// never returns the secret to the frontend — only the `configured` flag.
+#[tauri::command]
+fn config_instagram_auth_get(
+    state: State<'_, AppState>,
+) -> Result<InstagramAuthConfigStatus, String> {
+    Ok(InstagramAuthConfigStatus {
+        configured: jobs::get_global_instagram_auth_configured(&state.paths),
+    })
+}
+
+/// Save (or clear, when `config_value.cookie` is empty/omitted) the global Instagram cookie.
+/// Mirrors `config_youtube_auth_set`: normalizes + stores the secret, then clears any armed
+/// Instagram auth block so a fresh login lets the fleet retry immediately.
+#[tauri::command]
+fn config_instagram_auth_set(
+    state: State<'_, AppState>,
+    config_value: InstagramAuthConfigInput,
+) -> Result<InstagramAuthConfigStatus, String> {
+    jobs::set_global_instagram_auth_cookie(&state.paths, config_value.cookie)
+        .map_err(|e| e.to_string())?;
+    Ok(InstagramAuthConfigStatus {
+        configured: jobs::get_global_instagram_auth_configured(&state.paths),
+    })
+}
+
+/// "Test saved Instagram cookies" — mirrors `config_youtube_auth_preflight`.
+#[tauri::command]
+fn config_instagram_auth_preflight(
+    state: State<'_, AppState>,
+    url: Option<String>,
+) -> Result<jobs::InstagramAuthPreflightResult, String> {
+    jobs::instagram_auth_preflight(&state.paths, url).map_err(|e| e.to_string())
 }
 
 #[tauri::command]
@@ -7043,31 +7960,205 @@ async fn voice_cleanup_list_for_speaker(
 }
 
 #[tauri::command]
-fn library_list(
+async fn library_list(
     state: State<'_, AppState>,
     limit: usize,
     offset: usize,
+    file_status: Option<String>,
 ) -> Result<Vec<library::LibraryItem>, String> {
     let _timer = InvokeTimer::start(state.paths.clone(), "library_list");
-    library::list_items(&state.paths, limit, offset)
-        .map_err(|e| trace_database_command_error(&state.paths, "library_list", e.to_string()))
+    let paths = state.paths.clone();
+    let trace_paths = paths.clone();
+    let result = tauri::async_runtime::spawn_blocking(move || {
+        library::list_items_by_file_status(&paths, limit, offset, file_status.as_deref())
+            .map_err(|e| e.to_string())
+    })
+    .await
+    .map_err(|e| e.to_string())?;
+    result.map_err(|e| trace_database_command_error(&trace_paths, "library_list", e))
+}
+
+#[tauri::command]
+async fn library_query(
+    state: State<'_, AppState>,
+    limit: usize,
+    offset: usize,
+    file_status: Option<String>,
+    query: Option<String>,
+    media_type: Option<String>,
+    source: Option<String>,
+    single_video_only: Option<bool>,
+    sort_by: Option<String>,
+    direction: Option<String>,
+) -> Result<library::LibraryPage, String> {
+    let _timer = InvokeTimer::start(state.paths.clone(), "library_query");
+    let paths = state.paths.clone();
+    let trace_paths = paths.clone();
+    let result = tauri::async_runtime::spawn_blocking(move || {
+        library::query_items_page(
+            &paths,
+            limit,
+            offset,
+            file_status.as_deref(),
+            query.as_deref(),
+            media_type.as_deref(),
+            source.as_deref(),
+            single_video_only.unwrap_or(false),
+            sort_by.as_deref(),
+            direction.as_deref(),
+        )
+        .map_err(|e| e.to_string())
+    })
+    .await
+    .map_err(|e| e.to_string())?;
+    result.map_err(|e| trace_database_command_error(&trace_paths, "library_query", e))
+}
+
+#[tauri::command]
+async fn library_file_delete(
+    state: State<'_, AppState>,
+    item_ids: Vec<String>,
+    mode: String,
+) -> Result<library::LibraryFileDeleteReceipt, String> {
+    let _timer = InvokeTimer::start(state.paths.clone(), "library_file_delete");
+    let paths = state.paths.clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        library::delete_library_item_files(&paths, &item_ids, &mode, "operator")
+            .map_err(|e| e.to_string())
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
+#[tauri::command]
+async fn library_operator_deleted_redownload(
+    state: State<'_, AppState>,
+    item_ids: Vec<String>,
+    subscription_id: Option<String>,
+) -> Result<jobs::ManualDeletedRedownloadReceipt, String> {
+    let _timer = InvokeTimer::start(state.paths.clone(), "library_operator_deleted_redownload");
+    let paths = state.paths.clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        jobs::enqueue_manual_deleted_redownload(&paths, item_ids, subscription_id)
+            .map_err(|e| e.to_string())
+    })
+    .await
+    .map_err(|e| e.to_string())?
 }
 
 #[tauri::command]
 async fn library_list_youtube_video_candidates(
     state: State<'_, AppState>,
+    limit: usize,
+    offset: usize,
 ) -> Result<Vec<library::LibraryItem>, String> {
     let _timer = InvokeTimer::start(state.paths.clone(), "library_list_youtube_video_candidates");
     let paths = state.paths.clone();
     let trace_paths = paths.clone();
     let result = tauri::async_runtime::spawn_blocking(move || {
-        library::list_youtube_video_candidates(&paths).map_err(|e| e.to_string())
+        library::list_youtube_video_candidates(&paths, limit, offset).map_err(|e| e.to_string())
     })
     .await
     .map_err(|e| e.to_string())?;
     result.map_err(|e| {
         trace_database_command_error(&trace_paths, "library_list_youtube_video_candidates", e)
     })
+}
+
+/// WP-0268 canonical single-video history. This intentionally has a new command name rather
+/// than reusing the legacy broad-candidate command so consumers cannot mistake a heuristic list
+/// for durable provenance.
+#[tauri::command]
+async fn library_youtube_single_history(
+    state: State<'_, AppState>,
+    limit: usize,
+    offset: usize,
+    query: Option<String>,
+    direction: Option<String>,
+) -> Result<library::YoutubeSingleHistoryPage, String> {
+    let _timer = InvokeTimer::start(state.paths.clone(), "library_youtube_single_history");
+    let paths = state.paths.clone();
+    let trace_paths = paths.clone();
+    let result = tauri::async_runtime::spawn_blocking(move || {
+        library::list_youtube_single_history(
+            &paths,
+            limit,
+            offset,
+            query.as_deref(),
+            direction.as_deref(),
+        )
+        .map_err(|e| e.to_string())
+    })
+    .await
+    .map_err(|e| e.to_string())?;
+    result.map_err(|e| {
+        trace_database_command_error(&trace_paths, "library_youtube_single_history", e)
+    })
+}
+
+/// Secondary diagnostic count for the Single videos workspace. Kept separate from the canonical
+/// page so a cold full-library legacy scan cannot delay navigation or history rendering.
+#[tauri::command]
+async fn library_youtube_single_unclassified_total(
+    state: State<'_, AppState>,
+) -> Result<usize, String> {
+    let _timer = InvokeTimer::start(
+        state.paths.clone(),
+        "library_youtube_single_unclassified_total",
+    );
+    let paths = state.paths.clone();
+    let trace_paths = paths.clone();
+    let result = tauri::async_runtime::spawn_blocking(move || {
+        library::count_youtube_single_unclassified(&paths).map_err(|error| error.to_string())
+    })
+    .await
+    .map_err(|error| error.to_string())?;
+    result.map_err(|error| {
+        trace_database_command_error(
+            &trace_paths,
+            "library_youtube_single_unclassified_total",
+            error,
+        )
+    })
+}
+
+/// Run one bounded legacy-provenance backfill step. Callers can repeat while `has_more` is true;
+/// no schema migration or output-path inference occurs on the UI thread.
+#[tauri::command]
+async fn library_download_lineage_backfill_step(
+    state: State<'_, AppState>,
+    limit: Option<usize>,
+) -> Result<library::DownloadLineageBackfillState, String> {
+    let _timer = InvokeTimer::start(
+        state.paths.clone(),
+        "library_download_lineage_backfill_step",
+    );
+    let paths = state.paths.clone();
+    let trace_paths = paths.clone();
+    let result = tauri::async_runtime::spawn_blocking(move || {
+        library::backfill_download_lineage_batch(&paths, limit.unwrap_or(200))
+            .map_err(|e| e.to_string())
+    })
+    .await
+    .map_err(|e| e.to_string())?;
+    result.map_err(|e| {
+        trace_database_command_error(&trace_paths, "library_download_lineage_backfill_step", e)
+    })
+}
+
+#[tauri::command]
+async fn library_resync_local_fallback(
+    state: State<'_, AppState>,
+) -> Result<library::FallbackResyncReport, String> {
+    // WP-0253 Item 2d: move items saved to the local fallback during a NAS outage back
+    // onto the configured root (copy -> verify -> relink -> delete-after-verify). No-op
+    // when the root is unreachable or nothing fell back.
+    let paths = state.paths.clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        library::resync_local_fallback_downloads(&paths).map_err(|e| e.to_string())
+    })
+    .await
+    .map_err(|e| e.to_string())?
 }
 
 #[tauri::command]
@@ -7144,6 +8235,33 @@ fn youtube_subscriptions_set_library(
 ) -> Result<subscriptions::YoutubeSubscriptionRow, String> {
     subscriptions::set_youtube_subscription_library(&state.paths, &id, library_id.as_deref())
         .map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+fn youtube_subscriptions_set_manual_status(
+    state: State<'_, AppState>,
+    id: String,
+    status: String,
+) -> Result<subscriptions::YoutubeSubscriptionStatusChangeReceipt, String> {
+    let receipt = subscriptions::set_youtube_subscription_manual_status(
+        &state.paths,
+        &id,
+        &status,
+        subscriptions::YOUTUBE_SUBSCRIPTION_STATUS_ACTOR_OPERATOR,
+    )
+    .map_err(|error| error.to_string())?;
+    append_diagnostics_trace_row_best_effort(
+        &state.paths,
+        "subscription_manual_status_changed",
+        serde_json::json!({
+            "actor": subscriptions::YOUTUBE_SUBSCRIPTION_STATUS_ACTOR_OPERATOR,
+            "subscription_id": receipt.subscription.id,
+            "source_status": receipt.subscription.source_status,
+            "canceled_refresh_jobs": receipt.canceled_refresh_jobs,
+        }),
+        "info",
+    );
+    Ok(receipt)
 }
 
 #[tauri::command]
@@ -7244,11 +8362,61 @@ fn youtube_subscriptions_queue_one(
     subscriptions::queue_youtube_subscription(&state.paths, &id).map_err(|e| e.to_string())
 }
 
+// FREEZE FIX (2026-06-16): same as update_all — enqueuing the due subscriptions resolves
+// each one's output dir (can stat a NAS path), so do it on a background thread instead of
+// the UI thread. Returns immediately; jobs appear in the recurring lane as they are created.
 #[tauri::command]
-fn youtube_subscriptions_queue_all_active(
-    state: State<'_, AppState>,
-) -> Result<Vec<jobs::JobRow>, String> {
-    subscriptions::queue_all_active_youtube_subscriptions(&state.paths).map_err(|e| e.to_string())
+fn youtube_subscriptions_queue_all_active(state: State<'_, AppState>) -> Result<(), String> {
+    let paths = state.paths.clone();
+    std::thread::spawn(move || {
+        if let Err(e) = subscriptions::queue_all_active_youtube_subscriptions(&paths) {
+            append_diagnostics_trace_row_best_effort(
+                &paths,
+                "subscription_queue_due_error",
+                serde_json::json!({ "error": e.to_string() }),
+                "warn",
+            );
+        }
+    });
+    Ok(())
+}
+
+// WP-0254/WP-0255: "Update all subscriptions" button — clears any recurring "Stop" and
+// refreshes every active subscription now (ignores the due gate). Feeds the conservative
+// recurring lane so it cannot starve single one-off downloads.
+//
+// FREEZE FIX (2026-06-16): enqueuing 255 subscriptions resolves each one's output dir,
+// which can stat a NAS path; doing that on the UI thread froze the app (badly during a NAS
+// hiccup, where every stat hits the SMB timeout). Return immediately and do the enqueue on
+// a background thread — jobs appear in the recurring lane (limit 1) as they are created.
+#[tauri::command]
+fn youtube_subscriptions_update_all(state: State<'_, AppState>) -> Result<(), String> {
+    jobs::set_recurring_paused(&state.paths, false).map_err(|e| e.to_string())?;
+    let paths = state.paths.clone();
+    std::thread::spawn(move || {
+        if let Err(e) = subscriptions::queue_all_active_youtube_subscriptions_now(&paths) {
+            append_diagnostics_trace_row_best_effort(
+                &paths,
+                "subscription_update_all_error",
+                serde_json::json!({ "error": e.to_string() }),
+                "warn",
+            );
+        }
+    });
+    Ok(())
+}
+
+// WP-0254: "Stop" button — pauses only the recurring lane (playlist/channel/subscription
+// syncing). Single one-off downloads and localization keep running. Queued recurring work
+// is remembered and resumes on next startup or "Update all".
+#[tauri::command]
+fn youtube_subscriptions_stop_recurring(state: State<'_, AppState>) -> Result<bool, String> {
+    jobs::set_recurring_paused(&state.paths, true).map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+fn youtube_subscriptions_recurring_paused(state: State<'_, AppState>) -> Result<bool, String> {
+    jobs::is_recurring_paused(&state.paths).map_err(|e| e.to_string())
 }
 
 #[tauri::command]
@@ -7315,6 +8483,35 @@ async fn youtube_subscriptions_import_4kvdp_state(
 }
 
 #[tauri::command]
+async fn youtube_imported_identity_enrich_4kvdp(
+    state: State<'_, AppState>,
+    sqlite_path: Option<String>,
+    dry_run: Option<bool>,
+    max_items: Option<usize>,
+) -> Result<subscriptions::YoutubeImportedIdentityEnrichmentSummary, String> {
+    let paths = state.paths.clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        let sqlite_path = sqlite_path
+            .as_deref()
+            .map(std::path::PathBuf::from)
+            .unwrap_or_default();
+        subscriptions::enrich_imported_youtube_identity_4kvdp(
+            &paths,
+            if sqlite_path.as_os_str().is_empty() {
+                None
+            } else {
+                Some(sqlite_path.as_path())
+            },
+            dry_run.unwrap_or(true),
+            max_items,
+        )
+        .map_err(|e| e.to_string())
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
+#[tauri::command]
 async fn youtube_subscription_groups_list(
     state: State<'_, AppState>,
 ) -> Result<Vec<subscriptions::YoutubeSubscriptionGroupRow>, String> {
@@ -7358,6 +8555,14 @@ fn youtube_subscription_groups_set_for_subscription(
 }
 
 #[tauri::command]
+fn youtube_subscription_groups_clear_memberships(
+    state: State<'_, AppState>,
+) -> Result<usize, String> {
+    subscriptions::clear_youtube_subscription_group_memberships(&state.paths)
+        .map_err(|e| e.to_string())
+}
+
+#[tauri::command]
 fn youtube_subscriptions_queue_group(
     state: State<'_, AppState>,
     group_id: String,
@@ -7381,36 +8586,102 @@ fn youtube_subscriptions_seed_archive_scan(
 }
 
 #[tauri::command]
-fn youtube_subscriptions_archive_stats(
+async fn youtube_subscriptions_archive_stats(
     state: State<'_, AppState>,
 ) -> Result<std::collections::HashMap<String, usize>, String> {
     let _timer = InvokeTimer::start(state.paths.clone(), "youtube_subscriptions_archive_stats");
-    subscriptions::youtube_subscriptions_archive_stats(&state.paths).map_err(|e| {
-        trace_database_command_error(
-            &state.paths,
-            "youtube_subscriptions_archive_stats",
-            e.to_string(),
-        )
+    let paths = state.paths.clone();
+    let trace_paths = paths.clone();
+    let result = tauri::async_runtime::spawn_blocking(move || {
+        subscriptions::youtube_subscriptions_archive_stats(&paths).map_err(|e| e.to_string())
+    })
+    .await
+    .map_err(|e| e.to_string())?;
+    result.map_err(|e| {
+        trace_database_command_error(&trace_paths, "youtube_subscriptions_archive_stats", e)
     })
 }
 
 #[tauri::command]
-fn youtube_subscriptions_active_refresh_ids(
+async fn youtube_subscriptions_active_refresh_ids(
     state: State<'_, AppState>,
 ) -> Result<Vec<String>, String> {
     let _timer = InvokeTimer::start(
         state.paths.clone(),
         "youtube_subscriptions_active_refresh_ids",
     );
-    jobs::active_youtube_subscription_refresh_ids(&state.paths)
-        .map(|s| s.into_iter().collect())
-        .map_err(|e| {
-            trace_database_command_error(
-                &state.paths,
-                "youtube_subscriptions_active_refresh_ids",
-                e.to_string(),
-            )
-        })
+    let paths = state.paths.clone();
+    let trace_paths = paths.clone();
+    let result = tauri::async_runtime::spawn_blocking(move || {
+        jobs::active_youtube_subscription_refresh_ids(&paths).map_err(|e| e.to_string())
+    })
+    .await
+    .map_err(|e| e.to_string())?;
+    result.map(|s| s.into_iter().collect()).map_err(|e| {
+        trace_database_command_error(&trace_paths, "youtube_subscriptions_active_refresh_ids", e)
+    })
+}
+
+// WP-0261: live per-subscription activity for the consumer "Processing now" signal.
+#[tauri::command]
+async fn youtube_subscriptions_activity(
+    state: State<'_, AppState>,
+) -> Result<Vec<subscriptions::SubscriptionActivityRow>, String> {
+    let _timer = InvokeTimer::start(state.paths.clone(), "youtube_subscriptions_activity");
+    let paths = state.paths.clone();
+    let trace_paths = paths.clone();
+    let result = tauri::async_runtime::spawn_blocking(move || {
+        subscriptions::youtube_subscriptions_activity(&paths).map_err(|e| e.to_string())
+    })
+    .await
+    .map_err(|e| e.to_string())?;
+    result.map_err(|e| {
+        trace_database_command_error(&trace_paths, "youtube_subscriptions_activity", e)
+    })
+}
+
+// WP-0257 pacing follow-up: live per-subscription DOWNLOAD activity (queued + running child
+// downloads and the current running title). Unlike youtube_subscriptions_activity, this keeps
+// reporting a subscription's downloads after its refresh finished enumerating, so the UI can show
+// downloads still draining. Read-only + bounded (aggregated in SQL, title query LIMIT-capped), so
+// it never contends with the runner's writer path and cannot lock the DB.
+#[tauri::command]
+async fn subscription_download_activity(
+    state: State<'_, AppState>,
+) -> Result<Vec<subscriptions::SubscriptionDownloadActivityRow>, String> {
+    let _timer = InvokeTimer::start(state.paths.clone(), "subscription_download_activity");
+    let paths = state.paths.clone();
+    let trace_paths = paths.clone();
+    let result = tauri::async_runtime::spawn_blocking(move || {
+        subscriptions::subscription_download_activity(&paths).map_err(|e| e.to_string())
+    })
+    .await
+    .map_err(|e| e.to_string())?;
+    result.map_err(|e| {
+        trace_database_command_error(&trace_paths, "subscription_download_activity", e)
+    })
+}
+
+// WP-0257/WP-0284: READ-ONLY per-subscription detail projections. Available and
+// operator-deleted items come from canonical source membership; pending items come from queued
+// download jobs. Runs on the blocking pool over bounded read-only queries, so it never locks the
+// DB.
+#[tauri::command]
+async fn youtube_subscription_videos(
+    state: State<'_, AppState>,
+    subscription_id: String,
+    limit: usize,
+) -> Result<subscriptions::YoutubeSubscriptionVideos, String> {
+    let _timer = InvokeTimer::start(state.paths.clone(), "youtube_subscription_videos");
+    let paths = state.paths.clone();
+    let trace_paths = paths.clone();
+    let result = tauri::async_runtime::spawn_blocking(move || {
+        subscriptions::youtube_subscription_videos(&paths, &subscription_id, limit)
+            .map_err(|e| e.to_string())
+    })
+    .await
+    .map_err(|e| e.to_string())?;
+    result.map_err(|e| trace_database_command_error(&trace_paths, "youtube_subscription_videos", e))
 }
 
 #[tauri::command]
@@ -7634,16 +8905,83 @@ async fn jobs_list(
 }
 
 #[tauri::command]
+async fn jobs_list_live(state: State<'_, AppState>) -> Result<Vec<jobs::JobRow>, String> {
+    let _timer = InvokeTimer::start(state.paths.clone(), "jobs_list_live");
+    let paths = state.paths.clone();
+    let trace_paths = paths.clone();
+    let result = tauri::async_runtime::spawn_blocking(move || {
+        jobs::list_jobs_live_snapshot(&paths, 2_000, 2_000, 1_000).map_err(|e| e.to_string())
+    })
+    .await
+    .map_err(|e| e.to_string())?;
+    result.map_err(|e| trace_database_command_error(&trace_paths, "jobs_list_live", e))
+}
+
+#[tauri::command]
+async fn jobs_overview(
+    state: State<'_, AppState>,
+    view: Option<String>,
+    track: Option<String>,
+) -> Result<jobs::JobsOverviewSnapshot, String> {
+    let _timer = InvokeTimer::start(state.paths.clone(), "jobs_overview");
+    let paths = state.paths.clone();
+    let trace_paths = paths.clone();
+    let result = tauri::async_runtime::spawn_blocking(move || {
+        jobs::jobs_overview_snapshot(&paths, view.as_deref(), track.as_deref())
+            .map_err(|e| e.to_string())
+    })
+    .await
+    .map_err(|e| e.to_string())?;
+    result.map_err(|e| trace_database_command_error(&trace_paths, "jobs_overview", e))
+}
+
+#[tauri::command]
+async fn jobs_track_activity(
+    state: State<'_, AppState>,
+    track: String,
+    limit: usize,
+    offset: usize,
+) -> Result<jobs::JobsTrackActivityPage, String> {
+    let _timer = InvokeTimer::start(state.paths.clone(), "jobs_track_activity");
+    let paths = state.paths.clone();
+    let trace_paths = paths.clone();
+    let result = tauri::async_runtime::spawn_blocking(move || {
+        jobs::jobs_track_activity_page(&paths, &track, limit, offset).map_err(|e| e.to_string())
+    })
+    .await
+    .map_err(|e| e.to_string())?;
+    result.map_err(|e| trace_database_command_error(&trace_paths, "jobs_track_activity", e))
+}
+
+#[tauri::command]
+async fn jobs_progress_many(
+    state: State<'_, AppState>,
+    job_ids: Vec<String>,
+) -> Result<Vec<jobs::JobRow>, String> {
+    let _timer = InvokeTimer::start(state.paths.clone(), "jobs_progress_many");
+    let paths = state.paths.clone();
+    let trace_paths = paths.clone();
+    let result = tauri::async_runtime::spawn_blocking(move || {
+        jobs::jobs_progress_many(&paths, &job_ids).map_err(|e| e.to_string())
+    })
+    .await
+    .map_err(|e| e.to_string())?;
+    result.map_err(|e| trace_database_command_error(&trace_paths, "jobs_progress_many", e))
+}
+
+#[tauri::command]
 async fn jobs_search(
     state: State<'_, AppState>,
     query: String,
     limit: usize,
+    track: Option<String>,
 ) -> Result<Vec<jobs::JobRow>, String> {
     let _timer = InvokeTimer::start(state.paths.clone(), "jobs_search");
     let paths = state.paths.clone();
     let trace_paths = paths.clone();
     let result = tauri::async_runtime::spawn_blocking(move || {
-        jobs::search_jobs(&paths, &query, limit).map_err(|e| e.to_string())
+        jobs::search_jobs_for_track(&paths, &query, limit, track.as_deref())
+            .map_err(|e| e.to_string())
     })
     .await
     .map_err(|e| e.to_string())?;
@@ -7706,8 +9044,9 @@ fn jobs_enqueue_download_batch(
     use_browser_cookies: Option<bool>,
     browser_cookie_source: Option<String>,
     preset_id: Option<String>,
+    approved_missing_item_ids: Option<Vec<String>>,
 ) -> Result<Vec<jobs::JobRow>, String> {
-    jobs::enqueue_download_direct_url_batch(
+    jobs::enqueue_download_direct_url_batch_with_repairs(
         &state.paths,
         urls,
         auth_cookie,
@@ -7715,8 +9054,67 @@ fn jobs_enqueue_download_batch(
         use_browser_cookies,
         browser_cookie_source,
         preset_id,
+        approved_missing_item_ids.unwrap_or_default(),
     )
     .map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+async fn library_download_preflight(
+    state: State<'_, AppState>,
+    urls: Vec<String>,
+) -> Result<Vec<library::DownloadPreflightRow>, String> {
+    let _timer = InvokeTimer::start(state.paths.clone(), "library_download_preflight");
+    let paths = state.paths.clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        library::preflight_download_urls(&paths, &urls).map_err(|e| e.to_string())
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
+#[tauri::command]
+async fn library_canonical_media_relocate(
+    state: State<'_, AppState>,
+    item_id: String,
+    new_path: String,
+) -> Result<library::LibraryItem, String> {
+    let paths = state.paths.clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        library::relocate_canonical_media(&paths, &item_id, std::path::Path::new(&new_path))
+            .map_err(|e| e.to_string())
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
+#[tauri::command]
+async fn library_canonical_source_replace(
+    state: State<'_, AppState>,
+    service: String,
+    media_id: String,
+    new_url: String,
+) -> Result<(), String> {
+    let paths = state.paths.clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        library::replace_canonical_source_url(&paths, &service, &media_id, &new_url)
+            .map_err(|e| e.to_string())
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
+#[tauri::command]
+async fn library_canonical_record_remove(
+    state: State<'_, AppState>,
+    item_id: String,
+) -> Result<bool, String> {
+    let paths = state.paths.clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        library::remove_canonical_library_record(&paths, &item_id).map_err(|e| e.to_string())
+    })
+    .await
+    .map_err(|e| e.to_string())?
 }
 
 #[tauri::command]
@@ -8099,21 +9497,159 @@ fn jobs_delete_terminal_matching_search(
 }
 
 #[tauri::command]
-fn jobs_queue_control_get(
+async fn jobs_queue_control_get(
     state: State<'_, AppState>,
 ) -> Result<jobs::JobQueueControlState, String> {
     let _timer = InvokeTimer::start(state.paths.clone(), "jobs_queue_control_get");
-    jobs::get_queue_control(&state.paths).map_err(|e| {
-        trace_database_command_error(&state.paths, "jobs_queue_control_get", e.to_string())
+    let paths = state.paths.clone();
+    let trace_paths = paths.clone();
+    let result = tauri::async_runtime::spawn_blocking(move || {
+        jobs::get_queue_control(&paths).map_err(|e| e.to_string())
     })
+    .await
+    .map_err(|e| e.to_string())?;
+    result.map_err(|e| trace_database_command_error(&trace_paths, "jobs_queue_control_get", e))
 }
 
 #[tauri::command]
-fn jobs_queue_control_set(
+async fn jobs_queue_control_set(
     state: State<'_, AppState>,
     paused: bool,
 ) -> Result<jobs::JobQueueControlState, String> {
-    jobs::set_queue_paused(&state.paths, paused).map_err(|e| e.to_string())
+    let _timer = InvokeTimer::start(state.paths.clone(), "jobs_queue_control_set");
+    let paths = state.paths.clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        jobs::set_queue_paused(&paths, paused).map_err(|e| e.to_string())
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
+#[tauri::command]
+async fn youtube_queue_identity_reconcile(
+    state: State<'_, AppState>,
+    dry_run: Option<bool>,
+    after_job_id: Option<String>,
+    limit: Option<usize>,
+) -> Result<jobs::YoutubeQueueIdentityReconcileSummary, String> {
+    let paths = state.paths.clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        jobs::youtube_queue_identity_reconcile(
+            &paths,
+            dry_run.unwrap_or(true),
+            after_job_id.as_deref(),
+            limit,
+        )
+        .map_err(|e| e.to_string())
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
+#[tauri::command]
+fn media_cleanup_get(
+    state: State<'_, AppState>,
+    run_id: String,
+) -> Result<Option<media_cleanup::MediaCleanupRun>, String> {
+    let _timer = InvokeTimer::start(state.paths.clone(), "media_cleanup_get");
+    media_cleanup::get_run(&state.paths, &run_id).map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+fn media_cleanup_create(
+    state: State<'_, AppState>,
+    roots: Vec<String>,
+    quarantine_root: Option<String>,
+) -> Result<media_cleanup::MediaCleanupRun, String> {
+    let _timer = InvokeTimer::start(state.paths.clone(), "media_cleanup_create");
+    media_cleanup::create_inventory_run(&state.paths, roots, quarantine_root)
+        .map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+async fn media_cleanup_inventory_advance(
+    state: State<'_, AppState>,
+    run_id: String,
+    max_files: Option<usize>,
+) -> Result<media_cleanup::MediaCleanupAdvanceSummary, String> {
+    let _timer = InvokeTimer::start(state.paths.clone(), "media_cleanup_inventory_advance");
+    let paths = state.paths.clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        media_cleanup::advance_inventory(&paths, &run_id, max_files).map_err(|e| e.to_string())
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
+#[tauri::command]
+async fn media_cleanup_hash_advance(
+    state: State<'_, AppState>,
+    run_id: String,
+    max_files: Option<usize>,
+) -> Result<media_cleanup::MediaCleanupAdvanceSummary, String> {
+    let _timer = InvokeTimer::start(state.paths.clone(), "media_cleanup_hash_advance");
+    let paths = state.paths.clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        media_cleanup::advance_hashing(&paths, &run_id, max_files).map_err(|e| e.to_string())
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
+#[tauri::command]
+fn media_cleanup_groups(
+    state: State<'_, AppState>,
+    run_id: String,
+) -> Result<Vec<media_cleanup::MediaCleanupGroup>, String> {
+    let _timer = InvokeTimer::start(state.paths.clone(), "media_cleanup_groups");
+    media_cleanup::list_groups(&state.paths, &run_id).map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+fn media_cleanup_group_decide(
+    state: State<'_, AppState>,
+    run_id: String,
+    group_id: String,
+    decision: String,
+    keeper_path: Option<String>,
+) -> Result<media_cleanup::MediaCleanupGroup, String> {
+    let _timer = InvokeTimer::start(state.paths.clone(), "media_cleanup_group_decide");
+    media_cleanup::set_group_decision(
+        &state.paths,
+        &run_id,
+        &group_id,
+        &decision,
+        keeper_path.as_deref(),
+    )
+    .map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+async fn media_cleanup_apply(
+    state: State<'_, AppState>,
+    run_id: String,
+) -> Result<media_cleanup::MediaCleanupApplySummary, String> {
+    let _timer = InvokeTimer::start(state.paths.clone(), "media_cleanup_apply");
+    let paths = state.paths.clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        media_cleanup::apply_approved_groups(&paths, &run_id).map_err(|e| e.to_string())
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
+#[tauri::command]
+async fn media_cleanup_rollback(
+    state: State<'_, AppState>,
+    run_id: String,
+) -> Result<media_cleanup::MediaCleanupApplySummary, String> {
+    let _timer = InvokeTimer::start(state.paths.clone(), "media_cleanup_rollback");
+    let paths = state.paths.clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        media_cleanup::rollback_run(&paths, &run_id).map_err(|e| e.to_string())
+    })
+    .await
+    .map_err(|e| e.to_string())?
 }
 
 #[tauri::command]
@@ -8131,7 +9667,52 @@ fn jobs_runtime_settings_set(
     state: State<'_, AppState>,
     max_concurrency: usize,
 ) -> Result<jobs::JobRuntimeSettings, String> {
+    // Compatibility-only: WP-0269's scheduler does not read this global setting. New product
+    // controls must use `jobs_track_runtime_get/set` below.
     jobs::set_runtime_max_concurrency(&state.paths, max_concurrency).map_err(|e| e.to_string())
+}
+
+/// WP-0270 canonical controls/snapshot getter. The response is intentionally identical to
+/// GET /agent/jobs_tracks and the `jobs_tracks` diagnostics-app-state field.
+#[tauri::command]
+async fn jobs_track_runtime_get(
+    state: State<'_, AppState>,
+) -> Result<jobs::JobTracksRuntimeSnapshot, String> {
+    let _timer = InvokeTimer::start(state.paths.clone(), "jobs_track_runtime_get");
+    let paths = state.paths.clone();
+    let trace_paths = paths.clone();
+    let result = tauri::async_runtime::spawn_blocking(move || {
+        jobs::get_job_tracks_runtime_snapshot(&paths).map_err(|e| e.to_string())
+    })
+    .await
+    .map_err(|e| e.to_string())?;
+    result.map_err(|e| trace_database_command_error(&trace_paths, "jobs_track_runtime_get", e))
+}
+
+/// WP-0270 atomic six-track setting update. Engine validation happens before the transaction;
+/// after commit this returns the same canonical snapshot a fresh runner/bridge read observes.
+#[tauri::command]
+fn jobs_track_runtime_set(
+    state: State<'_, AppState>,
+    settings: jobs::JobTrackRuntimeSettings,
+) -> Result<jobs::JobTracksRuntimeSnapshot, String> {
+    jobs::set_job_track_runtime_settings(&state.paths, settings)
+        .map_err(|error| error.to_string())?;
+    jobs::get_job_tracks_runtime_snapshot(&state.paths).map_err(|error| error.to_string())
+}
+
+// WP-0257 (#3/#4): operator-tunable anti-bot pacing (Options -> Anti-bot pacing).
+#[tauri::command]
+fn antibot_pacing_get(state: State<'_, AppState>) -> Result<jobs::AntiBotPacingSettings, String> {
+    jobs::get_antibot_pacing(&state.paths).map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+fn antibot_pacing_set(
+    state: State<'_, AppState>,
+    settings: jobs::AntiBotPacingSettings,
+) -> Result<jobs::AntiBotPacingSettings, String> {
+    jobs::set_antibot_pacing(&state.paths, settings).map_err(|e| e.to_string())
 }
 
 #[tauri::command]
@@ -8254,6 +9835,155 @@ async fn jobs_repair_batch(
     .await
     .map_err(|e| e.to_string())?;
     result.map_err(|e| trace_database_command_error(&trace_paths, "jobs_repair_batch", e))
+}
+
+#[tauri::command]
+#[allow(non_snake_case)]
+fn jobs_batch_operation_start(
+    state: State<'_, AppState>,
+    mode: String,
+    batch_id: Option<String>,
+    batchId: Option<String>,
+) -> Result<JobsBatchOperationSnapshot, String> {
+    let _timer = InvokeTimer::start(state.paths.clone(), "jobs_batch_operation_start");
+    let mode = mode.trim().to_ascii_lowercase();
+    if !matches!(mode.as_str(), "dry_run" | "retry" | "repair") {
+        return Err("mode must be dry_run, retry, or repair".to_string());
+    }
+    let batch_query = batch_id
+        .or(batchId)
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty())
+        .ok_or_else(|| "missing required key batchId".to_string())?;
+    let started_at_ms = now_epoch_ms_i64();
+    let request_id = {
+        let mut operations = jobs_batch_operations()
+            .lock()
+            .map_err(|_| "batch operation registry is unavailable".to_string())?;
+        prune_jobs_batch_operations(&mut operations, started_at_ms);
+        if let Some(existing) = operations.values().find(|operation| {
+            operation.state == "running"
+                && operation.mode == mode
+                && operation.batch_query == batch_query
+        }) {
+            return Ok(existing.clone());
+        }
+        if operations.len() >= 128 {
+            return Err(
+                "too many batch operations are still running; wait for one to finish".to_string(),
+            );
+        }
+        let sequence = JOBS_BATCH_OPERATION_SEQUENCE.fetch_add(1, Ordering::Relaxed);
+        let request_id = format!("jobs-batch-{started_at_ms}-{sequence}");
+        operations.insert(
+            request_id.clone(),
+            JobsBatchOperationSnapshot {
+                request_id: request_id.clone(),
+                mode: mode.clone(),
+                batch_query: batch_query.clone(),
+                state: "running".to_string(),
+                started_at_ms,
+                finished_at_ms: None,
+                summary: None,
+                error: None,
+            },
+        );
+        request_id
+    };
+
+    let paths = state.paths.clone();
+    let operation_request_id = request_id.clone();
+    let operation_mode = mode.clone();
+    let operation_batch_query = batch_query.clone();
+    append_diagnostics_trace_row_best_effort(
+        &paths,
+        "jobs_batch_operation_started",
+        serde_json::json!({
+            "request_id": request_id.clone(),
+            "mode": mode.clone(),
+            "batch_query": batch_query.clone(),
+        }),
+        "info",
+    );
+    tauri::async_runtime::spawn(async move {
+        let worker_paths = paths.clone();
+        let worker_mode = operation_mode.clone();
+        let worker_batch_query = operation_batch_query.clone();
+        let result = tauri::async_runtime::spawn_blocking(move || match worker_mode.as_str() {
+            "dry_run" => {
+                jobs::retry_failed_jobs_for_batch_dry_run(&worker_paths, &worker_batch_query)
+            }
+            "retry" => jobs::retry_failed_jobs_for_batch(&worker_paths, &worker_batch_query),
+            "repair" => jobs::repair_batch(&worker_paths, &worker_batch_query),
+            _ => unreachable!("validated batch operation mode"),
+        })
+        .await
+        .map_err(|error| format!("batch operation worker failed: {error}"))
+        .and_then(|result| result.map_err(|error| error.to_string()));
+        let finished_at_ms = now_epoch_ms_i64();
+        let elapsed_ms = finished_at_ms.saturating_sub(started_at_ms);
+        let (event, level, trace_error) = match &result {
+            Ok(_) => ("jobs_batch_operation_completed", "info", None),
+            Err(error) => ("jobs_batch_operation_failed", "error", Some(error.clone())),
+        };
+        if let Ok(mut operations) = jobs_batch_operations().lock() {
+            if let Some(operation) = operations.get_mut(&operation_request_id) {
+                operation.state = if result.is_ok() {
+                    "succeeded".to_string()
+                } else {
+                    "failed".to_string()
+                };
+                operation.finished_at_ms = Some(finished_at_ms);
+                match result {
+                    Ok(summary) => operation.summary = Some(summary),
+                    Err(error) => operation.error = Some(error),
+                }
+            }
+        }
+        append_diagnostics_trace_row_best_effort(
+            &paths,
+            event,
+            serde_json::json!({
+                "request_id": operation_request_id,
+                "mode": operation_mode,
+                "batch_query": operation_batch_query,
+                "started_at_ms": started_at_ms,
+                "finished_at_ms": finished_at_ms,
+                "elapsed_ms": elapsed_ms,
+                "error": trace_error,
+            }),
+            level,
+        );
+    });
+
+    jobs_batch_operations()
+        .lock()
+        .map_err(|_| "batch operation registry is unavailable".to_string())?
+        .get(&request_id)
+        .cloned()
+        .ok_or_else(|| "batch operation receipt disappeared".to_string())
+}
+
+#[tauri::command]
+#[allow(non_snake_case)]
+fn jobs_batch_operation_get(
+    request_id: Option<String>,
+    requestId: Option<String>,
+) -> Result<JobsBatchOperationSnapshot, String> {
+    let request_id = request_id
+        .or(requestId)
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty())
+        .ok_or_else(|| "missing required key requestId".to_string())?;
+    let now_ms = now_epoch_ms_i64();
+    let mut operations = jobs_batch_operations()
+        .lock()
+        .map_err(|_| "batch operation registry is unavailable".to_string())?;
+    prune_jobs_batch_operations(&mut operations, now_ms);
+    operations
+        .get(&request_id)
+        .cloned()
+        .ok_or_else(|| format!("batch operation receipt not found: {request_id}"))
 }
 
 #[tauri::command]
@@ -8547,10 +10277,27 @@ fn agent_dump_complete(path: String) {
     }
 }
 
+#[tauri::command]
+fn agent_ui_request_complete(payload: String) {
+    let mut state = agent_bridge_state().lock().unwrap();
+    if let Some(tx) = state.ui_request_tx.take() {
+        let _ = tx.send(payload);
+    }
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
         .setup(|app| {
+            let cli_args = std::env::args().collect::<Vec<_>>();
+            let cli_agent_headless = cli_args
+                .iter()
+                .any(|value| value.trim() == "--agent-headless");
+            if cli_agent_headless {
+                if let Some(window) = app.get_webview_window("main") {
+                    hide_agent_headless_window(&window).map_err(std::io::Error::other)?;
+                }
+            }
             let base_dir = app.path().app_data_dir()?;
             let paths = AppPaths::new(AppPaths::normalize_base_dir(&base_dir));
             let startup = Arc::new(Mutex::new(StartupTracker::new()));
@@ -8559,12 +10306,19 @@ pub fn run() {
             set_startup_phase(&startup, &paths, "app_dirs", "running", None);
             paths.ensure_dirs()?;
             set_startup_phase(&startup, &paths, "app_dirs", "ready", None);
-            let cli_safe_mode = std::env::args().any(|value| value.trim() == "--safe-mode");
+            let cli_safe_mode = cli_args.iter().any(|value| value.trim() == "--safe-mode");
             let persisted_safe_mode = config::load_safe_mode_config(&paths)
                 .map(|value| value.enabled)
                 .unwrap_or(false);
             let safe_mode_enabled = cli_safe_mode || persisted_safe_mode;
-            if safe_mode_enabled {
+            {
+                let mut bridge_state = agent_bridge_state().lock().unwrap();
+                bridge_state.agent_headless = cli_agent_headless;
+                bridge_state.safe_mode = safe_mode_enabled;
+            }
+            let runtime_background_work =
+                runtime_background_work_enabled(safe_mode_enabled, cli_agent_headless);
+            if !runtime_background_work {
                 set_startup_phase(&startup, &paths, "offline_bundle", "skipped", None);
             } else if let Ok(resource_dir) = app.path().resource_dir() {
                 set_startup_phase(&startup, &paths, "offline_bundle", "pending", None);
@@ -8609,16 +10363,100 @@ pub fn run() {
                     Some("resource directory unavailable".to_string()),
                 );
             }
+            // WP-0252: seed the bundled CosyVoice runtime code on first run, and start the
+            // detached external-watcher supervisor (skipped in safe mode / when disabled).
+            if runtime_background_work {
+                if let Ok(resource_dir) = app.path().resource_dir() {
+                    seed_cosyvoice_backend_if_missing(&resource_dir, &base_dir);
+                    if watcher_enabled(&paths) {
+                        spawn_watcher_supervisor(&resource_dir, &base_dir);
+                    }
+                }
+            }
             set_startup_phase(&startup, &paths, "db_schema", "running", None);
             db::ensure_schema(&paths)?;
             video_libraries::ensure_default_video_library(&paths)?;
             set_startup_phase(&startup, &paths, "db_schema", "ready", None);
-            if safe_mode_enabled {
+            // WP-0253 Item 2d: if the configured download root (e.g. a NAS share) is
+            // reachable again, move any local-fallback downloads back onto it (copy ->
+            // verify -> relink -> delete-after-verify). Background thread; no-op when the
+            // root is unreachable or nothing fell back, so it never blocks startup.
+            if runtime_background_work {
+                let resync_paths = paths.clone();
+                std::thread::spawn(move || {
+                    // Run once at startup, then poll every 5 min so a mid-session NAS
+                    // reconnect also triggers the move-back. Cheap no-op when the root is
+                    // unreachable or nothing fell back; serialized (single loop thread) so
+                    // resyncs never overlap.
+                    loop {
+                        let _ = library::resync_local_fallback_downloads(&resync_paths);
+                        std::thread::sleep(std::time::Duration::from_secs(300));
+                    }
+                });
+            }
+            if safe_mode_enabled && !cli_agent_headless {
                 let _ = jobs::set_queue_paused(&paths, true);
             }
-            set_startup_phase(&startup, &paths, "job_runner", "running", None);
-            let runner = jobs::start_runner(paths.clone())?;
-            set_startup_phase(&startup, &paths, "job_runner", "ready", None);
+            let runner = if runtime_background_work {
+                set_startup_phase(&startup, &paths, "job_runner", "running", None);
+                let runner = jobs::start_runner(paths.clone())?;
+                set_startup_phase(&startup, &paths, "job_runner", "ready", None);
+                Some(runner)
+            } else {
+                set_startup_phase(&startup, &paths, "job_runner", "skipped", None);
+                None
+            };
+            // WP-0254: 4KVDP-style startup auto-check + auto-download. After a short delay
+            // (so it never competes with first-paint startup work), enqueue DUE active
+            // subscriptions into the conservative recurring lane (limit 1, one channel at a
+            // time). Background + best-effort; gated by safe-mode + config flag. Unlike the
+            // WP-0227/WP-0228 pack-install regression, this is light (due-only refreshes,
+            // paced by the recurring lane) so it cannot swamp the app.
+            if runtime_background_work && subscription_auto_sync_enabled(&paths) {
+                let auto_sync_paths = paths.clone();
+                std::thread::spawn(move || {
+                    std::thread::sleep(std::time::Duration::from_secs(20));
+                    match subscriptions::queue_all_active_youtube_subscriptions(&auto_sync_paths) {
+                        Ok(jobs) => append_diagnostics_trace_row_best_effort(
+                            &auto_sync_paths,
+                            "subscription_auto_sync",
+                            serde_json::json!({ "queued_refresh_jobs": jobs.len() }),
+                            "info",
+                        ),
+                        Err(e) => append_diagnostics_trace_row_best_effort(
+                            &auto_sync_paths,
+                            "subscription_auto_sync_error",
+                            serde_json::json!({ "error": e.to_string() }),
+                            "warn",
+                        ),
+                    }
+                });
+                // WP-0263: Instagram passive startup auto-check. Gated by the same
+                // safe-mode + auto-sync config as YouTube. Enqueues only DUE Instagram
+                // subscriptions, one profile at a time, honoring the conservative Instagram
+                // enumeration cooldown (Meta anti-bot is stricter). Runs on its own delayed
+                // thread so it never competes with first-paint or the YouTube auto-sync.
+                let ig_auto_sync_paths = paths.clone();
+                std::thread::spawn(move || {
+                    std::thread::sleep(std::time::Duration::from_secs(45));
+                    match instagram_subscriptions::queue_all_active_instagram_subscriptions(
+                        &ig_auto_sync_paths,
+                    ) {
+                        Ok(jobs) => append_diagnostics_trace_row_best_effort(
+                            &ig_auto_sync_paths,
+                            "instagram_subscription_auto_sync",
+                            serde_json::json!({ "queued_download_jobs": jobs.len() }),
+                            "info",
+                        ),
+                        Err(e) => append_diagnostics_trace_row_best_effort(
+                            &ig_auto_sync_paths,
+                            "instagram_subscription_auto_sync_error",
+                            serde_json::json!({ "error": e.to_string() }),
+                            "warn",
+                        ),
+                    }
+                });
+            }
             let trace_paths = paths.clone();
             std::thread::spawn(move || loop {
                 std::thread::sleep(Duration::from_secs(30));
@@ -8692,8 +10530,12 @@ pub fn run() {
             config_batch_on_import_get,
             config_batch_on_import_set,
             config_youtube_auth_get,
+            youtube_auth_open_sign_in,
             config_youtube_auth_preflight,
             config_youtube_auth_set,
+            config_instagram_auth_get,
+            config_instagram_auth_preflight,
+            config_instagram_auth_set,
             config_diarization_optional_clear_token,
             config_diarization_optional_set,
             config_diarization_optional_status,
@@ -8703,9 +10545,17 @@ pub fn run() {
             download_presets_set,
             library_get,
             library_list,
+            library_query,
+            library_file_delete,
+            library_operator_deleted_redownload,
             library_list_youtube_video_candidates,
+            library_youtube_single_history,
+            library_youtube_single_unclassified_total,
+            library_download_lineage_backfill_step,
+            library_resync_local_fallback,
             localization_workspace_list,
             youtube_subscription_groups_delete,
+            youtube_subscription_groups_clear_memberships,
             youtube_subscription_groups_list,
             youtube_subscription_groups_set_for_subscription,
             youtube_subscription_groups_upsert,
@@ -8714,6 +10564,7 @@ pub fn run() {
             youtube_subscriptions_preview_output_dir,
             youtube_subscriptions_upsert,
             youtube_subscriptions_set_library,
+            youtube_subscriptions_set_manual_status,
             youtube_subscriptions_delete,
             video_libraries_list,
             video_libraries_upsert,
@@ -8726,14 +10577,21 @@ pub fn run() {
             legacy_archive_analyze,
             youtube_subscriptions_queue_one,
             youtube_subscriptions_queue_all_active,
+            youtube_subscriptions_update_all,
+            youtube_subscriptions_stop_recurring,
+            youtube_subscriptions_recurring_paused,
             youtube_subscriptions_queue_group,
             youtube_subscriptions_export_json,
             youtube_subscriptions_import_json,
             youtube_subscriptions_import_4kvdp_dir,
             youtube_subscriptions_import_4kvdp_state,
+            youtube_imported_identity_enrich_4kvdp,
             youtube_subscriptions_seed_archive_scan,
             youtube_subscriptions_archive_stats,
             youtube_subscriptions_active_refresh_ids,
+            youtube_subscriptions_activity,
+            subscription_download_activity,
+            youtube_subscription_videos,
             instagram_subscriptions_list,
             instagram_subscriptions_upsert,
             instagram_subscriptions_delete,
@@ -8750,6 +10608,10 @@ pub fn run() {
             jobs_enqueue_dummy,
             jobs_enqueue_asr_local,
             jobs_enqueue_download_batch,
+            library_download_preflight,
+            library_canonical_media_relocate,
+            library_canonical_source_replace,
+            library_canonical_record_remove,
             jobs_enqueue_instagram_batch,
             jobs_enqueue_image_batch,
             jobs_enqueue_import_local,
@@ -8777,18 +10639,37 @@ pub fn run() {
             jobs_list,
             jobs_list_for_item,
             jobs_search,
+            jobs_list_live,
+            jobs_overview,
+            jobs_track_activity,
+            jobs_progress_many,
             jobs_queue_control_get,
             jobs_queue_control_set,
+            youtube_queue_identity_reconcile,
+            media_cleanup_get,
+            media_cleanup_create,
+            media_cleanup_inventory_advance,
+            media_cleanup_hash_advance,
+            media_cleanup_groups,
+            media_cleanup_group_decide,
+            media_cleanup_apply,
+            media_cleanup_rollback,
             jobs_item_artifact_retention_policy,
             jobs_log_retention_policy,
             jobs_prune_logs,
             jobs_runtime_settings_get,
             jobs_runtime_settings_set,
+            jobs_track_runtime_get,
+            jobs_track_runtime_set,
+            antibot_pacing_get,
+            antibot_pacing_set,
             jobs_export_unresolved_batch,
             jobs_repair_batch,
             jobs_retry,
             jobs_retry_batch_failed,
             jobs_retry_batch_failed_dry_run,
+            jobs_batch_operation_start,
+            jobs_batch_operation_get,
             models_inventory,
             models_install,
             models_install_demo,
@@ -8899,12 +10780,14 @@ pub fn run() {
             glossary_import_csv,
             agent_report_state,
             agent_snapshot_complete,
-            agent_dump_complete
+            agent_dump_complete,
+            agent_ui_request_complete
         ])
         .build(tauri::generate_context!())
         .expect("error while building tauri application")
         .run(|_app_handle, event| {
             if let tauri::RunEvent::Exit = event {
+                signal_watcher_stop();
                 cleanup_agent_bridge_files();
             }
         });

@@ -127,6 +127,13 @@ test("Video Archiver visible list reads run off the Tauri command lane", () => {
 test("archive stats are non-invasive during routine refresh", () => {
   const subscriptionsSource = readRepoFile("..", "engine", "src", "subscriptions.rs");
   const archiveStats = functionBlock(subscriptionsSource, "youtube_subscriptions_archive_stats");
+  const computeStart = subscriptionsSource.indexOf("fn compute_youtube_subscriptions_archive_stats");
+  const computeEnd = subscriptionsSource.indexOf("\npub fn ", computeStart + 1);
+  assert.ok(computeStart > 0, "archive-stat disk reader must exist");
+  const computeArchiveStats = subscriptionsSource.slice(
+    computeStart,
+    computeEnd > computeStart ? computeEnd : undefined,
+  );
 
   assert.doesNotMatch(
     archiveStats,
@@ -144,9 +151,14 @@ test("archive stats are non-invasive during routine refresh", () => {
     "routine archive stats must not create app-managed archive files",
   );
   assert.match(
-    archiveStats,
+    computeArchiveStats,
     /youtube_subscription_state_dir|YT_DLP_ARCHIVE_FILENAME/,
     "routine archive stats should count only existing app-managed archive files",
+  );
+  assert.match(
+    archiveStats,
+    /ARCHIVE_STATS_CACHE|ARCHIVE_STATS_CACHE_TTL_SECS/,
+    "repeated visible reads should reuse the bounded archive-stat cache",
   );
 });
 

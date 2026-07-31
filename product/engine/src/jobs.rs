@@ -6,15 +6,15 @@ use crate::{
     Result,
 };
 use regex::Regex;
-use rusqlite::{params, OptionalExtension};
+use rusqlite::{params, OptionalExtension, TransactionBehavior};
 use scraper::{Html, Selector};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::fs::OpenOptions;
-use std::io::{Read, Write};
+use std::io::{BufRead, Read, Write};
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
 use std::thread;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
@@ -42,7 +42,75 @@ const DIRECT_DOWNLOAD_SNIFF_BYTES: usize = 8192;
 const INSTAGRAM_API_APP_ID: &str = "936619743392459";
 const DEFAULT_HTTP_USER_AGENT: &str = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/130.0.0.0 Safari/537.36";
 const META_KEY_JOBS_QUEUE_PAUSED: &str = "jobs_queue_paused";
+// WP-0254: recurring-lane "Stop" flag. Independent of the global pause so the operator
+// can stop playlist/channel/subscription syncing without halting single one-off
+// downloads or localization. Transient — cleared at startup so a restart resumes the
+// re-queued recurring work (see `requeue_orphaned_running_jobs` + `start_runner`).
+const META_KEY_JOBS_RECURRING_PAUSED: &str = "jobs_recurring_paused";
 const META_KEY_JOBS_MAX_CONCURRENCY: &str = "jobs_max_concurrency";
+
+// WP-0258 (2d): batch retry is a write-path op that was observed blocking the UI ~197 s while
+// it re-enqueued thousands of failed children (each `retry_job` opens its own short write conn).
+// To stop it starving the read-only `jobs_list` / `jobs_batch_detail` queries, we process the
+// canonical retryable set in bounded chunks and yield the DB briefly between chunks so a WAL
+// writer never hogs the lock for minutes. This does NOT change WHICH jobs are retried, the
+// canonical batch scope, retry lineage, or the returned summary counts (WP-0248 / VV-SOT) — it
+// only paces the identical work. A chunk of 25 keeps each burst small; the yield lets a pending
+// read grab the lock between bursts.
+const BATCH_RETRY_CHUNK_SIZE: usize = 25;
+const BATCH_RETRY_CHUNK_YIELD_MS: u64 = 15;
+// WP-0269: canonical product tracks. Keep the legacy lane values above readable for existing
+// installations, but scheduling now uses these provider/workflow-specific budgets.
+const META_KEY_TRACK_LIMIT_YOUTUBE_SINGLE: &str = "jobs_track_limit_youtube_single";
+const META_KEY_TRACK_LIMIT_YOUTUBE_RECURRING: &str = "jobs_track_limit_youtube_recurring";
+const META_KEY_TRACK_LIMIT_INSTAGRAM: &str = "jobs_track_limit_instagram";
+const META_KEY_TRACK_LIMIT_OTHER_VIDEO: &str = "jobs_track_limit_other_video";
+const META_KEY_TRACK_LIMIT_IMAGE_ARCHIVE: &str = "jobs_track_limit_image_archive";
+const META_KEY_TRACK_LIMIT_LOCALIZATION: &str = "jobs_track_limit_localization";
+const DEFAULT_TRACK_LIMIT_YOUTUBE_SINGLE: usize = 1;
+const DEFAULT_TRACK_LIMIT_YOUTUBE_RECURRING: usize = 1;
+const DEFAULT_TRACK_LIMIT_INSTAGRAM: usize = 1;
+const DEFAULT_TRACK_LIMIT_OTHER_VIDEO: usize = 2;
+const DEFAULT_TRACK_LIMIT_IMAGE_ARCHIVE: usize = 1;
+const DEFAULT_TRACK_LIMIT_LOCALIZATION: usize = 1;
+// Keep legacy normalization bounded, but make it finish in minutes rather than hours on the
+// operator's 60k-plus active recurring backlog. Each batch is committed in one transaction.
+const LEGACY_TRACK_BACKFILL_BATCH: usize = 500;
+const LEGACY_TRACK_BACKFILL_INTERVAL_SECS: u64 = 2;
+const DOWNLOAD_LINEAGE_BACKFILL_BATCH: usize = 200;
+const DOWNLOAD_LINEAGE_BACKFILL_INTERVAL_SECS: u64 = 2;
+const LEGACY_TRACK_FETCH_SCAN_MULTIPLIER: usize = 16;
+const LEGACY_TRACK_CURSOR_SCAN_BATCH: usize = 4_096;
+const UNCLASSIFIED_JOB_TRACK: &str = "unclassified";
+
+// WP-0257 (#3/#4): operator-tunable anti-bot pacing. Bursting channel/subscription
+// enumerations is what trips YouTube anti-bot in the first place; these knobs space the
+// recurring lane out and trickle "Update all" instead of firing every subscription at once.
+const META_KEY_RECURRING_MIN_INTERVAL_SECS: &str = "antibot_recurring_min_interval_secs";
+const META_KEY_RECURRING_JITTER_SECS: &str = "antibot_recurring_jitter_secs";
+const META_KEY_ENUM_SLEEP_REQUESTS: &str = "antibot_enumeration_sleep_requests";
+const META_KEY_UPDATE_ALL_BATCH: &str = "antibot_update_all_batch_size";
+const META_KEY_RECURRING_DOWNLOAD_MIN_SLEEP: &str = "antibot_recurring_download_min_sleep_secs";
+const META_KEY_RECURRING_DOWNLOAD_MAX_SLEEP: &str = "antibot_recurring_download_max_sleep_secs";
+const DEFAULT_RECURRING_MIN_INTERVAL_SECS: u64 = 60;
+const MAX_RECURRING_MIN_INTERVAL_SECS: u64 = 3600;
+const DEFAULT_RECURRING_JITTER_SECS: u64 = 60;
+const MAX_RECURRING_JITTER_SECS: u64 = 3600;
+// WP-0263: Instagram/Meta anti-bot is materially stricter than YouTube. Instagram
+// subscription ENUMERATION (profile feed expansion) gets its own, far more conservative
+// recurring inter-dispatch cooldown so a profile refresh never bursts. Default 900s (15 min)
+// vs. YouTube's 45s; operator-tunable via the meta key. 0 = no extra cooldown (not advised).
+const META_KEY_INSTAGRAM_RECURRING_MIN_INTERVAL_SECS: &str =
+    "antibot_instagram_recurring_min_interval_secs";
+const DEFAULT_INSTAGRAM_RECURRING_MIN_INTERVAL_SECS: u64 = 900;
+const MAX_INSTAGRAM_RECURRING_MIN_INTERVAL_SECS: u64 = 86_400;
+const DEFAULT_ENUM_SLEEP_REQUESTS: u32 = 2;
+const MAX_ENUM_SLEEP_REQUESTS: u32 = 60;
+const DEFAULT_UPDATE_ALL_BATCH: usize = 25;
+const MAX_UPDATE_ALL_BATCH: usize = 5000;
+const DEFAULT_RECURRING_DOWNLOAD_MIN_SLEEP_SECS: u32 = 5;
+const DEFAULT_RECURRING_DOWNLOAD_MAX_SLEEP_SECS: u32 = 10;
+const MAX_RECURRING_DOWNLOAD_SLEEP_SECS: u32 = 300;
 const YT_DLP_EXPAND_TIMEOUT_SECS: u64 = 900;
 const YT_DLP_DOWNLOAD_TIMEOUT_SECS: u64 = 7200;
 const YT_DLP_RETRIES: u32 = 3;
@@ -88,6 +156,14 @@ const YT_DLP_WINDOWS_DOWNLOAD_URL: &str =
     "https://github.com/yt-dlp/yt-dlp/releases/latest/download/yt-dlp.exe";
 
 static YT_DLP_BOOTSTRAP_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+// WP-0270: the runner owns the live shared-YouTube-gate state, while UI/bridge/diagnostics
+// readers need the same state without touching the scheduler thread. Key this small in-process
+// registry by the app data root so tests and multiple app roots cannot leak gate state between
+// one another. Canonical queue totals remain in SQLite; only inherently process-local gate truth
+// belongs here.
+static JOB_TRACK_RUNTIME_STATES: OnceLock<
+    Mutex<HashMap<PathBuf, Arc<Mutex<JobTrackRunnerRuntimeState>>>>,
+> = OnceLock::new();
 
 #[derive(Debug, Clone, Serialize)]
 pub struct JobLogRetentionPolicy {
@@ -106,6 +182,17 @@ pub struct YoutubeAuthPreflightResult {
     pub checked_at_ms: i64,
 }
 
+// WP-0263: mirror of `YoutubeAuthPreflightResult` for the "Test saved Instagram cookies"
+// Options control. Same shape so the frontend can reuse the YouTube preflight UI pattern.
+#[derive(Debug, Clone, Serialize)]
+pub struct InstagramAuthPreflightResult {
+    pub ok: bool,
+    pub url: String,
+    pub title: Option<String>,
+    pub message: String,
+    pub checked_at_ms: i64,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct YoutubeAuthBlockState {
     auth_key: String,
@@ -114,7 +201,33 @@ struct YoutubeAuthBlockState {
     reason: String,
     url: Option<String>,
     job_id: Option<String>,
+    // WP-0257: a transient YouTube anti-bot rejection must self-heal instead of becoming a
+    // permanent outage. `expires_at_ms` is when the block auto-clears; `backoff_count`
+    // escalates the TTL on repeated rejections. serde(default) keeps pre-WP-0257 block files
+    // loadable — those have expires_at_ms==0, which is treated as already-expired (so an old
+    // sticky block clears on the first check after upgrade).
+    #[serde(default)]
+    expires_at_ms: i64,
+    #[serde(default)]
+    backoff_count: u32,
 }
+
+// WP-0257: corroboration tracker so ONE channel's cookie rejection can't block the whole
+// fleet. A rejection only arms the global block once several DISTINCT subscriptions reject
+// under the same cookie key within a window (proving the cookie is broadly dead, not one bad
+// channel). A single rejection just backs off that one subscription.
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+struct YoutubeAuthSuspectState {
+    auth_key: String,
+    targets: Vec<String>,
+    first_ms: i64,
+}
+
+const YOUTUBE_AUTH_SUSPECT_THRESHOLD: usize = 3;
+const YOUTUBE_AUTH_SUSPECT_WINDOW_MS: i64 = 15 * 60_000;
+// Escalating auto-clear TTLs for a recorded block: 5m, 15m, 1h, 6h (capped).
+const YOUTUBE_AUTH_BLOCK_BACKOFF_MS: [i64; 4] =
+    [5 * 60_000, 15 * 60_000, 60 * 60_000, 6 * 60 * 60_000];
 
 #[derive(Debug, Clone, Serialize)]
 pub struct ClearTerminalJobsSearchSummary {
@@ -136,6 +249,45 @@ pub struct RetryBatchFailedSummary {
     pub unresolved_jobs: usize,
     pub dry_run: bool,
     pub first_error: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct YoutubeQueueIdentityReconcileCandidate {
+    pub job_id: String,
+    pub source_url: String,
+    pub media_id: String,
+    pub library_item_id: String,
+    pub media_path: String,
+    pub storage_state: String,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct YoutubeQueueIdentityReconcileSummary {
+    pub operation_id: String,
+    pub dry_run: bool,
+    pub scanned_queued_jobs: usize,
+    pub canonical_youtube_jobs: usize,
+    pub canonical_identities: usize,
+    pub duplicate_identities: usize,
+    pub kept_jobs: usize,
+    pub would_cancel_jobs: usize,
+    pub legacy_track_jobs: usize,
+    pub invalid_jobs: usize,
+    pub non_youtube_jobs: usize,
+    pub source_memberships_preserved: usize,
+    pub running_direct_jobs: usize,
+    pub queue_paused: bool,
+    pub remaining_duplicate_identities: usize,
+    pub remaining_present_jobs: usize,
+    pub claim_mismatches: usize,
+    pub linked_candidate_jobs: usize,
+    pub present_jobs: usize,
+    pub missing_jobs: usize,
+    pub unreachable_jobs: usize,
+    pub canceled_jobs: usize,
+    pub has_more: bool,
+    pub next_cursor: Option<String>,
+    pub candidates: Vec<YoutubeQueueIdentityReconcileCandidate>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -281,6 +433,181 @@ pub enum JobType {
     DummySleep,
 }
 
+/// WP-0254: scheduling lanes, each with an independent concurrency budget so one-off
+/// downloads, conservative recurring (playlist/channel/subscription) syncing, and heavy
+/// localization never starve each other in one global FIFO pool. Keep the string values
+/// in sync with `db.rs` `apply_schema_v17` backfill.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum JobLane {
+    Single,
+    Recurring,
+    Localization,
+}
+
+impl JobLane {
+    fn as_str(self) -> &'static str {
+        match self {
+            JobLane::Single => "single",
+            JobLane::Recurring => "recurring",
+            JobLane::Localization => "localization",
+        }
+    }
+}
+
+/// Canonical WP-0269 scheduling vocabulary. Tracks express the product workflow and provider
+/// boundary; the older `lane` column remains a compatibility projection only. The serialized
+/// values intentionally match durable library-download lineage work tracks.
+#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum JobTrack {
+    YoutubeSingle,
+    YoutubeRecurring,
+    Instagram,
+    OtherVideo,
+    ImageArchive,
+    Localization,
+}
+
+impl JobTrack {
+    const ALL: [JobTrack; 6] = [
+        JobTrack::YoutubeSingle,
+        JobTrack::YoutubeRecurring,
+        JobTrack::Instagram,
+        JobTrack::OtherVideo,
+        JobTrack::ImageArchive,
+        JobTrack::Localization,
+    ];
+
+    fn as_str(self) -> &'static str {
+        match self {
+            JobTrack::YoutubeSingle => "youtube_single",
+            JobTrack::YoutubeRecurring => "youtube_recurring",
+            JobTrack::Instagram => "instagram",
+            JobTrack::OtherVideo => "other_video",
+            JobTrack::ImageArchive => "image_archive",
+            JobTrack::Localization => "localization",
+        }
+    }
+
+    fn from_str(value: &str) -> Option<Self> {
+        match value.trim() {
+            "youtube_single" => Some(JobTrack::YoutubeSingle),
+            "youtube_recurring" => Some(JobTrack::YoutubeRecurring),
+            "instagram" => Some(JobTrack::Instagram),
+            "other_video" => Some(JobTrack::OtherVideo),
+            "image_archive" => Some(JobTrack::ImageArchive),
+            "localization" => Some(JobTrack::Localization),
+            _ => None,
+        }
+    }
+
+    fn default_limit(self) -> usize {
+        match self {
+            JobTrack::YoutubeSingle => DEFAULT_TRACK_LIMIT_YOUTUBE_SINGLE,
+            JobTrack::YoutubeRecurring => DEFAULT_TRACK_LIMIT_YOUTUBE_RECURRING,
+            JobTrack::Instagram => DEFAULT_TRACK_LIMIT_INSTAGRAM,
+            JobTrack::OtherVideo => DEFAULT_TRACK_LIMIT_OTHER_VIDEO,
+            JobTrack::ImageArchive => DEFAULT_TRACK_LIMIT_IMAGE_ARCHIVE,
+            JobTrack::Localization => DEFAULT_TRACK_LIMIT_LOCALIZATION,
+        }
+    }
+
+    fn meta_key(self) -> &'static str {
+        match self {
+            JobTrack::YoutubeSingle => META_KEY_TRACK_LIMIT_YOUTUBE_SINGLE,
+            JobTrack::YoutubeRecurring => META_KEY_TRACK_LIMIT_YOUTUBE_RECURRING,
+            JobTrack::Instagram => META_KEY_TRACK_LIMIT_INSTAGRAM,
+            JobTrack::OtherVideo => META_KEY_TRACK_LIMIT_OTHER_VIDEO,
+            JobTrack::ImageArchive => META_KEY_TRACK_LIMIT_IMAGE_ARCHIVE,
+            JobTrack::Localization => META_KEY_TRACK_LIMIT_LOCALIZATION,
+        }
+    }
+
+    fn legacy_lane(self) -> JobLane {
+        match self {
+            JobTrack::YoutubeRecurring => JobLane::Recurring,
+            JobTrack::Localization => JobLane::Localization,
+            JobTrack::YoutubeSingle
+            | JobTrack::Instagram
+            | JobTrack::OtherVideo
+            | JobTrack::ImageArchive => JobLane::Single,
+        }
+    }
+
+    fn for_type(job_type: &JobType) -> Self {
+        match job_type {
+            JobType::YoutubeSubscriptionRefreshV1 => JobTrack::YoutubeRecurring,
+            JobType::DownloadImageBatch => JobTrack::ImageArchive,
+            JobType::AsrLocal
+            | JobType::TranslateLocal
+            | JobType::DiarizeLocalV1
+            | JobType::DubVoicePreservingV1
+            | JobType::ExperimentalVoiceBackendRenderV1
+            | JobType::TtsPreviewPyttsx3V1
+            | JobType::TtsNeuralLocalV1
+            | JobType::MixDubPreviewV1
+            | JobType::MuxDubPreviewV1
+            | JobType::SeparateAudioSpleeter
+            | JobType::SeparateAudioDemucsV1
+            | JobType::CleanVocalsV1
+            | JobType::QcReportV1
+            | JobType::ExportPackV1
+            | JobType::InstallPhase2PacksV1 => JobTrack::Localization,
+            JobType::ImportLocal | JobType::DummySleep | JobType::DownloadDirectUrl => {
+                JobTrack::OtherVideo
+            }
+        }
+    }
+
+    fn for_direct_download(url: &str, subscription_id: Option<&str>) -> Self {
+        library::classify_direct_download_execution(url, subscription_id)
+            .and_then(|classification| JobTrack::from_str(&classification.work_track))
+            .unwrap_or(JobTrack::OtherVideo)
+    }
+}
+
+/// Durable public track truth for every JobRow projection. Scheduler-only legacy classification
+/// must never leak into UI, bridge, diagnostics, or localization-specific manual queries.
+pub fn durable_job_track_label(persisted_track: Option<&str>) -> String {
+    persisted_track
+        .and_then(JobTrack::from_str)
+        .map(JobTrack::as_str)
+        .unwrap_or(UNCLASSIFIED_JOB_TRACK)
+        .to_string()
+}
+
+/// Compatibility classifier for rows written before WP-0269 added `job.track`. It never uses an
+/// output path, UI grouping, or media-library projection. Well-formed direct-download params are
+/// classified by the same canonical execution classifier used at enqueue; malformed historical
+/// params keep a conservative type/legacy-lane fallback instead of disappearing from scheduling.
+fn legacy_job_track(job_type: &str, params_json: &str, legacy_lane: Option<&str>) -> JobTrack {
+    let Some(job_type) = JobType::from_str(job_type) else {
+        return JobTrack::OtherVideo;
+    };
+    match job_type {
+        JobType::ImportLocal => serde_json::from_str::<ImportLocalParams>(params_json)
+            .ok()
+            .map(|params| {
+                if params.add_to_localization_workspace {
+                    JobTrack::Localization
+                } else {
+                    JobTrack::OtherVideo
+                }
+            })
+            .unwrap_or(JobTrack::OtherVideo),
+        JobType::DownloadDirectUrl => serde_json::from_str::<DownloadDirectUrlParams>(params_json)
+            .ok()
+            .map(|params| {
+                JobTrack::for_direct_download(&params.url, params.subscription_id.as_deref())
+            })
+            .unwrap_or_else(|| match legacy_lane {
+                Some("recurring") => JobTrack::YoutubeRecurring,
+                _ => JobTrack::OtherVideo,
+            }),
+        _ => JobTrack::for_type(&job_type),
+    }
+}
+
 impl JobType {
     fn as_str(&self) -> &'static str {
         match self {
@@ -353,6 +680,45 @@ pub struct JobRow {
     pub target_title: Option<String>,
     pub retry_of_job_id: Option<String>,
     pub retry_replacement_job_id: Option<String>,
+    /// Persisted canonical product scheduling track, or `unclassified` until bounded legacy
+    /// backfill has stamped a pre-v24 row. This public field never reports an inferred value.
+    pub track: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct JobsOverviewCounts {
+    pub queued: usize,
+    pub running: usize,
+    pub succeeded: usize,
+    pub failed: usize,
+    pub canceled: usize,
+    pub total: usize,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct JobsOverviewSnapshot {
+    pub jobs: Vec<JobRow>,
+    pub counts: JobsOverviewCounts,
+    pub selected_counts: JobsOverviewCounts,
+    pub generated_at_ms: i64,
+    pub preview_view: String,
+    pub selected_track: Option<String>,
+    pub running_preview_limit: usize,
+    pub queued_preview_limit: usize,
+    pub attention_preview_limit: usize,
+    pub history_preview_limit: usize,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct JobsTrackActivityPage {
+    pub jobs: Vec<JobRow>,
+    pub queued: usize,
+    pub running: usize,
+    pub active_total: usize,
+    pub limit: usize,
+    pub offset: usize,
+    pub has_more: bool,
+    pub generated_at_ms: i64,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -742,13 +1108,17 @@ pub struct LocalizationRunQueueSummary {
     pub notes: Vec<String>,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Default)]
 struct LocalizationContinuationOutcome {
     stage: String,
     source_track_id: Option<String>,
     translated_track_id: Option<String>,
     queued_jobs: Vec<JobRow>,
     notes: Vec<String>,
+    // WP-0262: set true only for the terminal case where the localization pipeline could not
+    // build a per-speaker voice reference for multi-speaker audio and therefore queued nothing.
+    // Consumers turn this into a VISIBLE terminal job/item state instead of a silent stall.
+    voice_reference_blocked: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -1142,6 +1512,11 @@ struct DownloadDirectUrlParams {
     browser_cookie_source: Option<String>,
     #[serde(default)]
     subscription_id: Option<String>,
+    /// Enqueue-time source snapshot retained when the subscription lookup is unavailable later.
+    #[serde(default)]
+    source_display_name: Option<String>,
+    #[serde(default)]
+    source_page_url: Option<String>,
     #[serde(default)]
     preset_id: Option<String>,
     #[serde(default)]
@@ -1173,6 +1548,10 @@ struct DownloadDirectUrlParams {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct YoutubeSubscriptionRefreshV1Params {
     subscription_id: String,
+    #[serde(default)]
+    source_display_name: Option<String>,
+    #[serde(default)]
+    source_page_url: Option<String>,
     #[serde(default)]
     max_items: Option<usize>,
     #[serde(default)]
@@ -1207,6 +1586,102 @@ pub struct JobRuntimeSettings {
     pub max_concurrency: usize,
 }
 
+/// Independently bounded scheduler budgets exposed to the desktop Options surface. These are
+/// deliberately provider/workflow tracks rather than a global worker count: a busy YouTube
+/// backlog must never consume the Instagram, general-video, image, or localization capacity.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct JobTrackRuntimeSettings {
+    pub youtube_single: usize,
+    pub youtube_recurring: usize,
+    pub instagram: usize,
+    pub other_video: usize,
+    pub image_archive: usize,
+    pub localization: usize,
+}
+
+impl JobTrackRuntimeSettings {
+    fn for_track(&self, track: JobTrack) -> usize {
+        match track {
+            JobTrack::YoutubeSingle => self.youtube_single,
+            JobTrack::YoutubeRecurring => self.youtube_recurring,
+            JobTrack::Instagram => self.instagram,
+            JobTrack::OtherVideo => self.other_video,
+            JobTrack::ImageArchive => self.image_archive,
+            JobTrack::Localization => self.localization,
+        }
+    }
+
+    fn validate(&self) -> Result<()> {
+        for (name, value) in [
+            ("youtube_single", self.youtube_single),
+            ("youtube_recurring", self.youtube_recurring),
+            ("instagram", self.instagram),
+            ("other_video", self.other_video),
+            ("image_archive", self.image_archive),
+            ("localization", self.localization),
+        ] {
+            if !(1..=MAX_MAX_CONCURRENT_JOBS).contains(&value) {
+                return Err(EngineError::InstallFailed(format!(
+                    "job track limit {name} must be between 1 and {MAX_MAX_CONCURRENT_JOBS}"
+                )));
+            }
+        }
+        Ok(())
+    }
+}
+
+/// Canonical status totals for one persisted job-track value. These numbers are derived from one
+/// read-only `GROUP BY track, status` query over the durable job table; they are never inferred
+/// from a preview, filter, page, URL, or legacy scheduler fallback.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize)]
+pub struct JobTrackStatusTotals {
+    pub queued: u64,
+    pub running: u64,
+    pub succeeded: u64,
+    pub failed: u64,
+    pub canceled: u64,
+    pub total: u64,
+}
+
+/// One of the six independently scheduled product tracks in the canonical runtime snapshot.
+/// `configured_budget` is the persisted setting the runner reads; `effective_budget` is zero
+/// only when this track is paused/held by a scheduler control, never because a bounded UI
+/// preview happens not to contain rows.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct JobTrackRuntimeRow {
+    pub track: JobTrack,
+    pub configured_budget: usize,
+    pub effective_budget: usize,
+    pub paused: bool,
+    pub hold_reason: Option<String>,
+    pub queued: u64,
+    pub running: u64,
+    pub succeeded: u64,
+    pub failed: u64,
+    pub canceled: u64,
+    pub total: u64,
+}
+
+/// Live state for the single safe start/pacing gate shared by both YouTube tracks. This is a
+/// runner-owned observation rather than a second pacing calculation in UI, bridge, or tests.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct YoutubeSharedGateSnapshot {
+    /// `ready`, `waiting`, or `held`.
+    pub state: String,
+    pub next_eligible_at_ms: Option<i64>,
+    pub hold_reason: Option<String>,
+}
+
+/// The sole public producer contract for Jobs controls, the agent bridge, and diagnostics.
+/// `tracks` is always emitted in `JobTrack::ALL` order; invalid, empty, and NULL persisted track
+/// values are reported only in `unclassified`, never guessed into a product track.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct JobTracksRuntimeSnapshot {
+    pub tracks: Vec<JobTrackRuntimeRow>,
+    pub unclassified: JobTrackStatusTotals,
+    pub youtube_gate: YoutubeSharedGateSnapshot,
+}
+
 fn canonical_import_path(path: &str) -> Result<String> {
     let trimmed = path.trim();
     if trimmed.is_empty() {
@@ -1231,11 +1706,21 @@ fn job_row_from_query_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<JobRow> {
     let status_str: String = row.get(4)?;
     let status = JobStatus::from_str(&status_str).unwrap_or(JobStatus::Failed);
     let column_count = row.as_ref().column_count();
+    let job_type: String = row.get(3)?;
+    let params_json: String = row.get(11)?;
+    // Public JobRow truth is strictly durable: an old NULL/stale value is not presented as a
+    // guessed canonical track. The scheduler has a separate internal fallback classifier so
+    // legacy work remains executable while bounded backfill stamps it.
+    let track = if column_count > 15 {
+        durable_job_track_label(row.get::<_, Option<String>>(15)?.as_deref())
+    } else {
+        UNCLASSIFIED_JOB_TRACK.to_string()
+    };
     Ok(JobRow {
         id: row.get(0)?,
         item_id: row.get(1)?,
         batch_id: row.get(2)?,
-        job_type: row.get(3)?,
+        job_type,
         status,
         progress: row.get(5)?,
         error: row.get(6)?,
@@ -1243,7 +1728,7 @@ fn job_row_from_query_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<JobRow> {
         started_at_ms: row.get(8)?,
         finished_at_ms: row.get(9)?,
         logs_path: row.get(10)?,
-        params_json: row.get(11)?,
+        params_json,
         target_title: if column_count > 12 {
             row.get(12)?
         } else {
@@ -1259,6 +1744,7 @@ fn job_row_from_query_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<JobRow> {
         } else {
             None
         },
+        track,
     })
 }
 
@@ -1286,7 +1772,8 @@ SELECT
   params_json,
   target_title,
   retry_of_job_id,
-  retry_replacement_job_id
+  retry_replacement_job_id,
+  track
 FROM job
 WHERE type=?1 AND status IN (?2, ?3)
 ORDER BY created_at_ms ASC
@@ -1334,12 +1821,18 @@ fn enqueue_completed_import_reuse_job(
         reuse_existing_item: true,
         duplicate_of_item_id: Some(item.id.clone()),
     })?;
-    let mut job = enqueue_with_type_item_and_batch_id(
+    let track = if add_to_localization_workspace {
+        JobTrack::Localization
+    } else {
+        JobTrack::OtherVideo
+    };
+    let mut job = enqueue_with_type_item_batch_and_track(
         paths,
         JobType::ImportLocal,
         params_json,
         Some(item.id.clone()),
         None,
+        track,
     )?;
     let now = now_ms();
     let conn = db::open(paths)?;
@@ -1419,7 +1912,19 @@ pub fn enqueue_import_local(
     } else {
         None
     };
-    enqueue_with_type_item_and_batch_id(paths, JobType::ImportLocal, params_json, None, batch_id)
+    let track = if add_to_localization_workspace {
+        JobTrack::Localization
+    } else {
+        JobTrack::OtherVideo
+    };
+    enqueue_with_type_item_batch_and_track(
+        paths,
+        JobType::ImportLocal,
+        params_json,
+        None,
+        batch_id,
+        track,
+    )
 }
 
 pub fn enqueue_install_phase2_packs_v1(paths: &AppPaths) -> Result<JobRow> {
@@ -1506,7 +2011,7 @@ pub fn enqueue_asr_local(
         None => None,
     };
 
-    let model_id = "whispercpp-tiny".to_string();
+    let model_id = paths.effective_asr_model_id();
     let params_json = serde_json::to_string(&AsrLocalParams {
         item_id: item_id.clone(),
         lang,
@@ -1523,7 +2028,7 @@ pub fn enqueue_translate_local(
     item_id: String,
     source_track_id: String,
 ) -> Result<JobRow> {
-    let model_id = "whispercpp-tiny".to_string();
+    let model_id = paths.effective_asr_model_id();
     let params_json = serde_json::to_string(&TranslateLocalParams {
         item_id: item_id.clone(),
         source_track_id,
@@ -1929,7 +2434,7 @@ pub fn enqueue_localization_batch_v1(
             queue_export_pack: request.queue_export_pack,
             queue_qc: request.queue_qc,
             variant_label: None,
-            tts_backend_id: Some("openvoice_v2".to_string()),
+            tts_backend_id: Some(default_dub_backend_id(paths)),
             speaker_overrides: Vec::new(),
             speaker_count: DiarizationSpeakerCountRequest::default(),
         };
@@ -1942,6 +2447,11 @@ pub fn enqueue_localization_batch_v1(
             Some(batch_id.clone()),
         )?;
         let queued_jobs = outcome.queued_jobs;
+        // WP-0262: make a voice-reference-blocked outcome visible up front in the batch summary
+        // instead of leaving the operator with only a soft note that nothing was queued.
+        if outcome.voice_reference_blocked {
+            warnings.push(VOICE_REFERENCE_BLOCKED_MESSAGE.to_string());
+        }
         if queued_jobs.is_empty() && !outcome.notes.is_empty() {
             warnings.extend(outcome.notes);
         }
@@ -2015,6 +2525,30 @@ fn empty_transcript_error_message(
     )
 }
 
+// WP-0262: plain operator-facing message used when the multi-speaker localization pipeline could
+// not build a per-speaker voice reference and therefore queued nothing. Surfaced as a VISIBLE
+// terminal job failure so the operator is not left staring at a silently stalled item.
+const VOICE_REFERENCE_BLOCKED_MESSAGE: &str =
+    "Couldn't build a voice reference for one or more speakers - try single-speaker or add a reference";
+
+// WP-0262: build the operator-facing message for a voice-reference-blocked continuation outcome,
+// appending the pipeline notes (which name the affected speakers) when available.
+fn voice_reference_blocked_message(notes: &[String]) -> String {
+    let mut message = VOICE_REFERENCE_BLOCKED_MESSAGE.to_string();
+    let detail = notes
+        .iter()
+        .map(|note| note.trim())
+        .filter(|note| !note.is_empty())
+        .collect::<Vec<_>>()
+        .join(" ");
+    if !detail.is_empty() {
+        message.push_str(" (");
+        message.push_str(&detail);
+        message.push(')');
+    }
+    message
+}
+
 fn empty_track_stage(track: &subtitle_tracks::SubtitleTrackRow) -> String {
     match track.kind.as_str() {
         "source" => "empty_source_track".to_string(),
@@ -2048,6 +2582,7 @@ fn empty_track_continuation_outcome(
             stats.raw_segment_count,
             stats.usable_segment_count
         )],
+        ..Default::default()
     }
 }
 
@@ -2330,6 +2865,7 @@ fn queue_voice_setup_for_localization(
         translated_track_id: translated_track_id.or_else(|| Some(track.id.clone())),
         queued_jobs: vec![queued_job],
         notes,
+        ..Default::default()
     })
 }
 
@@ -2380,6 +2916,7 @@ fn queue_dub_or_voice_setup_for_localization(
         translated_track_id: translated_track_id.or_else(|| Some(track.id.clone())),
         queued_jobs: vec![queued_job],
         notes,
+        ..Default::default()
     })
 }
 
@@ -2420,6 +2957,7 @@ fn queue_localization_continuation_from_track(
             notes: vec![
                 "English subtitles are ready; no dubbing stages were requested.".to_string(),
             ],
+            ..Default::default()
         });
     }
 
@@ -2428,7 +2966,7 @@ fn queue_localization_continuation_from_track(
             let params_json = serde_json::to_string(&TranslateLocalParams {
                 item_id: item.id.clone(),
                 source_track_id: track.id.clone(),
-                model_id: "whispercpp-tiny".to_string(),
+                model_id: paths.effective_asr_model_id(),
                 batch_on_import: false,
                 pipeline: Some(LocalizationPipelineOptions {
                     source_track_id: Some(track.id.clone()),
@@ -2451,6 +2989,7 @@ fn queue_localization_continuation_from_track(
                     "No translated English track was available, so VoxVulgi queued translation first."
                         .to_string(),
                 ],
+                ..Default::default()
             })
         }
         LocalizationNextStageDecision::Diarize => {
@@ -2481,10 +3020,16 @@ fn queue_localization_continuation_from_track(
                     "The translated English track has no speaker labels yet, so VoxVulgi queued diarization before voice planning."
                         .to_string(),
                 ],
+                ..Default::default()
             })
         }
         LocalizationNextStageDecision::VoicePlanBlocked { missing_speakers } => {
             let mut notes = Vec::new();
+            // WP-0262: when the auto dubbing pipeline exhausts its automatic attempt to build a
+            // per-speaker voice reference and still cannot proceed, this is a terminal blocked
+            // state (nothing was queued). Flag it so the job consumers surface a VISIBLE terminal
+            // job/item state instead of silently doing nothing.
+            let mut voice_reference_blocked = false;
             if pipeline.auto_pipeline && output_mode == "dub" {
                 let auto_refs = auto_apply_source_voice_references_for_missing_speakers(
                     paths,
@@ -2517,6 +3062,8 @@ fn queue_localization_continuation_from_track(
                         notes,
                     );
                 }
+                // Auto attempt could not build usable per-speaker references -> terminal blocked.
+                voice_reference_blocked = true;
                 notes.push(format!(
                     "Voice-preserving dubbing still needs usable source voice samples for: {}.",
                     still_missing.join(", ")
@@ -2539,6 +3086,7 @@ fn queue_localization_continuation_from_track(
                 translated_track_id: Some(track.id.clone()),
                 queued_jobs: Vec::new(),
                 notes,
+                voice_reference_blocked,
             })
         }
         LocalizationNextStageDecision::Dub => {
@@ -2592,7 +3140,7 @@ pub fn enqueue_localization_run_v1(
         queue_export_pack: request.queue_export_pack,
         queue_qc: request.queue_qc,
         variant_label: None,
-        tts_backend_id: Some("openvoice_v2".to_string()),
+        tts_backend_id: Some(default_dub_backend_id(paths)),
         speaker_overrides: Vec::new(),
         speaker_count: request.speaker_count.clone(),
     };
@@ -2640,7 +3188,7 @@ pub fn enqueue_localization_run_v1(
     let params_json = serde_json::to_string(&AsrLocalParams {
         item_id: item_id.clone(),
         lang,
-        model_id: "whispercpp-tiny".to_string(),
+        model_id: paths.effective_asr_model_id(),
         batch_on_import: false,
         pipeline: Some(pipeline),
     })?;
@@ -2799,7 +3347,7 @@ pub fn enqueue_voice_ab_preview_v1(
                 queue_export_pack: request.queue_export_pack,
                 queue_qc: request.queue_qc,
                 variant_label: Some(variant_label),
-                tts_backend_id: Some("openvoice_v2".to_string()),
+                tts_backend_id: Some(default_dub_backend_id(paths)),
                 speaker_overrides: vec![override_value],
                 speaker_count: DiarizationSpeakerCountRequest::default(),
             }),
@@ -2830,6 +3378,28 @@ pub fn enqueue_download_direct_url_batch(
     browser_cookie_source: Option<String>,
     preset_id: Option<String>,
 ) -> Result<Vec<JobRow>> {
+    enqueue_download_direct_url_batch_with_repairs(
+        paths,
+        urls,
+        auth_cookie,
+        output_dir,
+        use_browser_cookies,
+        browser_cookie_source,
+        preset_id,
+        Vec::new(),
+    )
+}
+
+pub fn enqueue_download_direct_url_batch_with_repairs(
+    paths: &AppPaths,
+    urls: Vec<String>,
+    auth_cookie: Option<String>,
+    output_dir: Option<String>,
+    use_browser_cookies: Option<bool>,
+    browser_cookie_source: Option<String>,
+    preset_id: Option<String>,
+    approved_missing_item_ids: Vec<String>,
+) -> Result<Vec<JobRow>> {
     enqueue_download_direct_url_batch_raw(
         paths,
         urls,
@@ -2840,7 +3410,130 @@ pub fn enqueue_download_direct_url_batch(
         browser_cookie_source,
         preset_id,
         None,
+        approved_missing_item_ids,
     )
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ManualDeletedRedownloadResult {
+    pub item_id: String,
+    pub title: Option<String>,
+    pub job_id: Option<String>,
+    pub outcome: String,
+    pub message: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ManualDeletedRedownloadReceipt {
+    pub requested: usize,
+    pub queued: usize,
+    pub failed: usize,
+    pub batch_id: String,
+    pub results: Vec<ManualDeletedRedownloadResult>,
+}
+
+/// WP-0284 is the only public path that grants a deleted canonical item a replacement attempt.
+/// Each selected item receives its own exact job-id capability in `library_item`; aggregate and
+/// generic retry paths never pass `approved_operator_deleted_item_ids`.
+pub fn enqueue_manual_deleted_redownload(
+    paths: &AppPaths,
+    item_ids: Vec<String>,
+    subscription_id: Option<String>,
+) -> Result<ManualDeletedRedownloadReceipt> {
+    let mut seen = HashSet::new();
+    let item_ids = item_ids
+        .into_iter()
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty())
+        .filter(|value| seen.insert(value.clone()))
+        .take(501)
+        .collect::<Vec<_>>();
+    if item_ids.is_empty() {
+        return Err(EngineError::InstallFailed(
+            "select at least one deleted video".to_string(),
+        ));
+    }
+    if item_ids.len() > 500 {
+        return Err(EngineError::InstallFailed(
+            "too many selected deleted videos (max 500)".to_string(),
+        ));
+    }
+    let subscription_id = subscription_id
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty());
+    let batch_id = Uuid::new_v4().to_string();
+    let mut receipt = ManualDeletedRedownloadReceipt {
+        requested: item_ids.len(),
+        queued: 0,
+        failed: 0,
+        batch_id: batch_id.clone(),
+        results: Vec::with_capacity(item_ids.len()),
+    };
+    for item_id in item_ids {
+        let target = match library::operator_deleted_redownload_target(paths, &item_id) {
+            Ok(target) => target,
+            Err(err) => {
+                receipt.failed += 1;
+                receipt.results.push(ManualDeletedRedownloadResult {
+                    item_id,
+                    title: None,
+                    job_id: None,
+                    outcome: "failed".to_string(),
+                    message: err.to_string(),
+                });
+                continue;
+            }
+        };
+        let queued = enqueue_download_direct_url_batch_raw_with_subscription(
+            paths,
+            vec![target.source_url.clone()],
+            Some(DOWNLOAD_PROVIDER_YOUTUBE_YT_DLP.to_string()),
+            None,
+            Some(target.output_dir.clone()),
+            None,
+            None,
+            None,
+            Some(batch_id.clone()),
+            subscription_id.clone(),
+            Vec::new(),
+            vec![target.item_id.clone()],
+        );
+        match queued {
+            Ok(jobs) if jobs.len() == 1 => {
+                receipt.queued += 1;
+                receipt.results.push(ManualDeletedRedownloadResult {
+                    item_id: target.item_id,
+                    title: Some(target.title),
+                    job_id: Some(jobs[0].id.clone()),
+                    outcome: "queued".to_string(),
+                    message:
+                        "explicit replacement queued; deleted state remains until import succeeds"
+                            .to_string(),
+                });
+            }
+            Ok(_) => {
+                receipt.failed += 1;
+                receipt.results.push(ManualDeletedRedownloadResult {
+                    item_id: target.item_id,
+                    title: Some(target.title),
+                    job_id: None,
+                    outcome: "failed".to_string(),
+                    message: "canonical replacement was not queued".to_string(),
+                });
+            }
+            Err(err) => {
+                receipt.failed += 1;
+                receipt.results.push(ManualDeletedRedownloadResult {
+                    item_id: target.item_id,
+                    title: Some(target.title),
+                    job_id: None,
+                    outcome: "failed".to_string(),
+                    message: err.to_string(),
+                });
+            }
+        }
+    }
+    Ok(receipt)
 }
 
 pub fn enqueue_download_direct_url_batch_raw(
@@ -2853,6 +3546,7 @@ pub fn enqueue_download_direct_url_batch_raw(
     browser_cookie_source: Option<String>,
     preset_id: Option<String>,
     batch_id: Option<String>,
+    approved_missing_item_ids: Vec<String>,
 ) -> Result<Vec<JobRow>> {
     enqueue_download_direct_url_batch_raw_with_subscription(
         paths,
@@ -2865,6 +3559,8 @@ pub fn enqueue_download_direct_url_batch_raw(
         preset_id,
         batch_id,
         None,
+        approved_missing_item_ids,
+        Vec::new(),
     )
 }
 
@@ -2884,7 +3580,14 @@ pub fn enqueue_youtube_subscription_refresh_v1(
     }
     let auth_cookie = normalize_auth_cookie(auth_cookie)?;
     let output_dir = normalize_output_dir(output_dir);
-    if let Some(sub) = subscriptions::get_youtube_subscription_by_id(paths, trimmed)? {
+    let subscription = subscriptions::get_youtube_subscription_by_id(paths, trimmed)?;
+    if let Some(sub) = subscription.as_ref() {
+        if sub.source_status == subscriptions::YOUTUBE_SUBSCRIPTION_STATUS_DELETED {
+            return Err(EngineError::InstallFailed(format!(
+                "subscription is marked deleted and cannot be queued: {}",
+                sub.id
+            )));
+        }
         let subscription_use_browser_cookies = sub.use_browser_cookies && auth_cookie.is_none();
         let auth_key = youtube_auth_material_key(
             paths,
@@ -2896,6 +3599,8 @@ pub fn enqueue_youtube_subscription_refresh_v1(
     }
     let params_json = serde_json::to_string(&YoutubeSubscriptionRefreshV1Params {
         subscription_id: trimmed.to_string(),
+        source_display_name: subscription.as_ref().map(|sub| sub.title.clone()),
+        source_page_url: subscription.as_ref().map(|sub| sub.source_url.clone()),
         max_items: None,
         output_dir,
         preset_id,
@@ -2930,22 +3635,51 @@ pub fn youtube_auth_preflight(
         ));
     }
 
-    let Some(auth_cookie) = resolve_global_youtube_auth_cookie(paths) else {
+    let auth_cookie = resolve_global_youtube_auth_cookie(paths);
+    let browser_source = if auth_cookie.is_none() {
+        resolve_global_youtube_browser_source(paths)
+    } else {
+        None
+    };
+    if auth_cookie.is_none() && browser_source.is_none() {
         return Ok(YoutubeAuthPreflightResult {
             ok: false,
             url,
             title: None,
-            message: "No saved global YouTube cookies were found.".to_string(),
+            message: "No YouTube session is configured. Choose a browser and connect, or import a YouTube-only cookie file.".to_string(),
             checked_at_ms: now_ms(),
         });
-    };
+    }
 
-    let auth_key = youtube_auth_material_key_from_cookie(&auth_cookie);
-    let cookie_file = write_auth_cookie_as_netscape_temp_file(paths, &url, &auth_cookie)?;
-    let mut args = build_youtube_auth_preflight_args(&url, cookie_file.to_string_lossy().as_ref());
-    let js_runtime_available = append_yt_dlp_runtime_args(paths, &mut args, &url, true);
+    let mut cookie_file: Option<PathBuf> = None;
+    let (auth_key, mut args, using_browser_cookies, auth_cookie_present) =
+        if let Some(auth_cookie) = auth_cookie.as_deref() {
+            let path = write_auth_cookie_as_netscape_temp_file(paths, &url, auth_cookie)?;
+            let args = build_youtube_auth_preflight_args(&url, path.to_string_lossy().as_ref());
+            cookie_file = Some(path);
+            (
+                youtube_auth_material_key_from_cookie(auth_cookie),
+                args,
+                false,
+                true,
+            )
+        } else {
+            let source = browser_source.expect("browser source checked");
+            (
+                format!("browser:{}", source.to_ascii_lowercase()),
+                build_youtube_browser_auth_preflight_args(&url, &source),
+                true,
+                false,
+            )
+        };
+    let js_runtime_available =
+        append_yt_dlp_runtime_args(paths, &mut args, &url, auth_cookie_present);
+    // Deliberately do not use run_yt_dlp_with_browser_cookie_retry here. A public URL could
+    // succeed on its guest retry and falsely declare the selected browser session connected.
     let output_res = run_yt_dlp(paths, &args, None, 90);
-    let _ = std::fs::remove_file(cookie_file);
+    if let Some(cookie_file) = cookie_file {
+        let _ = std::fs::remove_file(cookie_file);
+    }
 
     match output_res {
         Ok(output) => {
@@ -2955,23 +3689,33 @@ pub fn youtube_auth_preflight(
                 .map(str::trim)
                 .find(|line| !line.is_empty())
                 .map(str::to_string);
+            let checked_at_ms = now_ms();
+            config::mark_youtube_auth_verified(paths, checked_at_ms)?;
             Ok(YoutubeAuthPreflightResult {
                 ok: true,
                 url,
                 title: title.clone(),
                 message: title
-                    .map(|value| format!("YouTube accepted the saved cookies for: {value}"))
-                    .unwrap_or_else(|| "YouTube accepted the saved cookies.".to_string()),
-                checked_at_ms: now_ms(),
+                    .map(|value| format!("YouTube accepted the connected session for: {value}"))
+                    .unwrap_or_else(|| "YouTube accepted the connected session.".to_string()),
+                checked_at_ms,
             })
         }
         Err(err) => {
-            let err = augment_yt_dlp_error(&url, err, false, true, js_runtime_available);
+            let err = augment_yt_dlp_error(
+                &url,
+                err,
+                using_browser_cookies,
+                auth_cookie_present,
+                js_runtime_available,
+            );
+            let checked_at_ms = now_ms();
+            config::mark_youtube_auth_reconnect_required(paths, checked_at_ms)?;
             if is_youtube_saved_cookie_rejection(&url, &err.to_string()) {
                 record_youtube_auth_block(
                     paths,
                     auth_key,
-                    "saved YouTube cookies rejected during auth preflight".to_string(),
+                    "the configured YouTube session was rejected during auth preflight".to_string(),
                     Some(url.clone()),
                     None,
                 )?;
@@ -2981,14 +3725,138 @@ pub fn youtube_auth_preflight(
                 url,
                 title: None,
                 message: err.to_string(),
-                checked_at_ms: now_ms(),
+                checked_at_ms,
             })
         }
     }
 }
 
+// WP-0263: "Test saved Instagram cookies" preflight. Mirrors `youtube_auth_preflight` but
+// probes Instagram's web_profile_info API with the resolved global cookie. A default stable
+// public profile is used when the operator does not pass a URL. This is a single metadata-only
+// request (no media download), so it is cheap and Meta-safe.
+const DEFAULT_INSTAGRAM_AUTH_PREFLIGHT_URL: &str = "https://www.instagram.com/instagram/";
+
+pub fn instagram_auth_preflight(
+    paths: &AppPaths,
+    url: Option<String>,
+) -> Result<InstagramAuthPreflightResult> {
+    let url = normalize_direct_url(
+        url.as_deref()
+            .unwrap_or(DEFAULT_INSTAGRAM_AUTH_PREFLIGHT_URL),
+    )?;
+    if !is_instagram_url(&url) {
+        return Err(EngineError::InstallFailed(
+            "Instagram auth preflight requires an instagram.com URL".to_string(),
+        ));
+    }
+
+    // WP-0263 precedence: explicit not applicable here (Options test uses the global cookie);
+    // resolve the global Instagram cookie. No cookie -> honest "no saved cookies" result.
+    let Some(auth_cookie) = resolve_global_instagram_auth_cookie(paths) else {
+        return Ok(InstagramAuthPreflightResult {
+            ok: false,
+            url,
+            title: None,
+            message: "No saved global Instagram cookies were found. Paste your Instagram cookie in Options first.".to_string(),
+            checked_at_ms: now_ms(),
+        });
+    };
+
+    let username = match instagram_username_from_url(&url) {
+        Some(name) => name,
+        None => {
+            return Ok(InstagramAuthPreflightResult {
+                ok: false,
+                url,
+                title: None,
+                message:
+                    "Instagram auth preflight expects a profile URL (instagram.com/<username>/)."
+                        .to_string(),
+                checked_at_ms: now_ms(),
+            });
+        }
+    };
+    let profile_page_url = format!("https://www.instagram.com/{username}/");
+    let profile_info_url =
+        format!("https://i.instagram.com/api/v1/users/web_profile_info/?username={username}");
+
+    match download_instagram_json(&profile_info_url, Some(&auth_cookie), Some(&profile_page_url)) {
+        Ok(payload) => {
+            let full_name = payload
+                .get("data")
+                .and_then(|v| v.get("user"))
+                .and_then(|v| v.get("full_name").or_else(|| v.get("username")))
+                .and_then(|v| v.as_str())
+                .filter(|v| !v.trim().is_empty())
+                .map(str::to_string);
+            Ok(InstagramAuthPreflightResult {
+                ok: true,
+                url,
+                title: full_name.clone(),
+                message: full_name
+                    .map(|value| format!("Instagram accepted the saved cookies for: {value}"))
+                    .unwrap_or_else(|| "Instagram accepted the saved cookies.".to_string()),
+                checked_at_ms: now_ms(),
+            })
+        }
+        Err(err) => Ok(InstagramAuthPreflightResult {
+            ok: false,
+            url,
+            title: None,
+            message: format!(
+                "Instagram rejected the saved cookies (or the session expired). Re-authenticate Instagram in Options. Detail: {err}"
+            ),
+            checked_at_ms: now_ms(),
+        }),
+    }
+}
+
 fn youtube_auth_block_path(paths: &AppPaths) -> PathBuf {
     paths.config_dir().join("youtube_auth_block.json")
+}
+
+fn youtube_auth_suspect_path(paths: &AppPaths) -> PathBuf {
+    paths.config_dir().join("youtube_auth_suspect.json")
+}
+
+fn clear_youtube_auth_suspect(paths: &AppPaths) {
+    let path = youtube_auth_suspect_path(paths);
+    if path.exists() {
+        let _ = std::fs::remove_file(path);
+    }
+}
+
+// WP-0257: record one cookie-rejection "suspicion" for a distinct target and report whether
+// enough DISTINCT targets have now rejected under this cookie key within the window to justify
+// arming a global block. Best-effort: any read/write error returns false, so a single rejection
+// only backs off its own subscription instead of poisoning the whole fleet.
+fn register_youtube_auth_suspicion(paths: &AppPaths, auth_key: &str, target: &str) -> bool {
+    let now = now_ms();
+    let mut state = std::fs::read(youtube_auth_suspect_path(paths))
+        .ok()
+        .and_then(|bytes| serde_json::from_slice::<YoutubeAuthSuspectState>(&bytes).ok())
+        .unwrap_or_default();
+    if state.auth_key != auth_key
+        || now.saturating_sub(state.first_ms) > YOUTUBE_AUTH_SUSPECT_WINDOW_MS
+    {
+        state = YoutubeAuthSuspectState {
+            auth_key: auth_key.to_string(),
+            targets: Vec::new(),
+            first_ms: now,
+        };
+    }
+    if !state.targets.iter().any(|t| t == target) {
+        state.targets.push(target.to_string());
+    }
+    let armed = state.targets.len() >= YOUTUBE_AUTH_SUSPECT_THRESHOLD;
+    if let Some(parent) = youtube_auth_suspect_path(paths).parent() {
+        let _ = std::fs::create_dir_all(parent);
+    }
+    if let Ok(text) = serde_json::to_string_pretty(&state) {
+        let _ = persistence::atomic_write_text(&youtube_auth_suspect_path(paths), &text);
+    }
+    armed
 }
 
 fn youtube_auth_material_key_from_cookie(cookie: &str) -> String {
@@ -3005,6 +3873,9 @@ fn youtube_auth_material_key(
 ) -> Result<Option<String>> {
     if let Some(global) = resolve_global_youtube_auth_cookie(paths) {
         return Ok(Some(youtube_auth_material_key_from_cookie(&global)));
+    }
+    if let Some(source) = resolve_global_youtube_browser_source(paths) {
+        return Ok(Some(format!("browser:{}", source.to_ascii_lowercase())));
     }
     if let Some(cookie) = normalize_non_empty(auth_cookie) {
         return Ok(Some(youtube_auth_material_key_from_cookie(&cookie)));
@@ -3069,16 +3940,33 @@ fn active_youtube_auth_block(
     let Some(state) = load_youtube_auth_block(paths)? else {
         return Ok(None);
     };
-    if state.auth_key == auth_key {
-        Ok(Some(state))
-    } else {
-        Ok(None)
+    if state.auth_key != auth_key {
+        return Ok(None);
     }
+    // WP-0257: TTL auto-clear. A transient anti-bot rejection self-heals once the backoff
+    // window elapses. Pre-WP-0257 blocks have expires_at_ms == 0 and are treated as already
+    // expired, so an old sticky block clears on the first check after upgrade.
+    if now_ms() >= state.expires_at_ms {
+        let _ = clear_youtube_auth_block(paths);
+        return Ok(None);
+    }
+    Ok(Some(state))
+}
+
+fn youtube_auth_circuit_open(paths: &AppPaths) -> bool {
+    let Ok(Some(state)) = load_youtube_auth_block(paths) else {
+        return false;
+    };
+    if now_ms() >= state.expires_at_ms {
+        let _ = clear_youtube_auth_block(paths);
+        return false;
+    }
+    true
 }
 
 fn youtube_auth_block_message(state: &YoutubeAuthBlockState) -> String {
     format!(
-        "YouTube auth is blocked for the current saved/browser cookie state because YouTube rejected it at {}. {} Refresh the YouTube cookies in Options, run Test saved YouTube cookies, then retry.",
+        "YouTube auth is blocked for the current saved/browser session because YouTube rejected it at {}. {} Open Options > YouTube sign-in, run Connect and test (or import fresh YouTube-only cookies), then retry.",
         state.blocked_at_ms, state.reason
     )
 }
@@ -3099,87 +3987,27 @@ fn record_youtube_auth_block(
     url: Option<String>,
     job_id: Option<String>,
 ) -> Result<()> {
+    // WP-0257: escalate the auto-clear TTL when the same cookie key keeps getting rejected.
+    let prev_backoff = load_youtube_auth_block(paths)?
+        .filter(|s| s.auth_key == auth_key)
+        .map(|s| s.backoff_count)
+        .unwrap_or(0);
+    let backoff_count = prev_backoff.saturating_add(1);
+    let ttl_idx = (backoff_count as usize - 1).min(YOUTUBE_AUTH_BLOCK_BACKOFF_MS.len() - 1);
+    let now = now_ms();
     let state = YoutubeAuthBlockState {
         auth_key,
         source: "youtube".to_string(),
-        blocked_at_ms: now_ms(),
+        blocked_at_ms: now,
         reason,
         url,
         job_id,
+        expires_at_ms: now + YOUTUBE_AUTH_BLOCK_BACKOFF_MS[ttl_idx],
+        backoff_count,
     };
     save_youtube_auth_block(paths, &state)?;
-    cancel_queued_youtube_jobs_for_auth_block(paths, &state)?;
+    config::mark_youtube_auth_reconnect_required(paths, now)?;
     Ok(())
-}
-
-fn cancel_queued_youtube_jobs_for_auth_block(
-    paths: &AppPaths,
-    state: &YoutubeAuthBlockState,
-) -> Result<usize> {
-    let conn = db::open(paths)?;
-    db::migrate(&conn)?;
-    let mut stmt = conn.prepare(
-        r#"
-SELECT id, params_json
-FROM job
-WHERE type=?1 AND status=?2
-"#,
-    )?;
-    let queued = stmt
-        .query_map(
-            params![
-                JobType::DownloadDirectUrl.as_str(),
-                JobStatus::Queued.as_str()
-            ],
-            |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)),
-        )?
-        .collect::<rusqlite::Result<Vec<_>>>()?;
-    drop(stmt);
-
-    let mut to_cancel = Vec::new();
-    for (job_id, params_json) in queued {
-        let Ok(params) = serde_json::from_str::<DownloadDirectUrlParams>(&params_json) else {
-            continue;
-        };
-        let Ok(url) = normalize_direct_url(&params.url) else {
-            continue;
-        };
-        if !is_youtube_url(&url) {
-            continue;
-        }
-        let auth_key = youtube_auth_material_key(
-            paths,
-            params.auth_cookie.as_deref(),
-            params.use_browser_cookies,
-            params.browser_cookie_source.as_deref(),
-        )?;
-        if auth_key.as_deref() == Some(state.auth_key.as_str()) {
-            to_cancel.push(job_id);
-        }
-    }
-
-    if to_cancel.is_empty() {
-        return Ok(0);
-    }
-
-    let message = youtube_auth_block_message(state);
-    let now = now_ms();
-    let tx = conn.unchecked_transaction()?;
-    for job_id in &to_cancel {
-        tx.execute(
-            "UPDATE job SET status=?1, finished_at_ms=?2, error=?3 WHERE id=?4 AND status=?5",
-            params![
-                JobStatus::Canceled.as_str(),
-                now,
-                message,
-                job_id,
-                JobStatus::Queued.as_str()
-            ],
-        )?;
-        remove_job_cookie_secret(paths, job_id);
-    }
-    tx.commit()?;
-    Ok(to_cancel.len())
 }
 
 fn is_youtube_saved_cookie_rejection(url: &str, message: &str) -> bool {
@@ -3188,7 +4016,9 @@ fn is_youtube_saved_cookie_rejection(url: &str, message: &str) -> bool {
         && lower.contains("sign in to confirm")
         && (lower.contains("saved youtube cookies were supplied")
             || lower.contains("--cookies")
-            || lower.contains("cookies were supplied"))
+            || lower.contains("cookies were supplied")
+            || lower.contains("browser cookies")
+            || lower.contains("cookies-from-browser"))
 }
 
 fn enqueue_download_direct_url_batch_raw_with_subscription(
@@ -3202,6 +4032,8 @@ fn enqueue_download_direct_url_batch_raw_with_subscription(
     preset_id: Option<String>,
     batch_id: Option<String>,
     subscription_id: Option<String>,
+    approved_missing_item_ids: Vec<String>,
+    approved_operator_deleted_item_ids: Vec<String>,
 ) -> Result<Vec<JobRow>> {
     let auth_cookie = normalize_auth_cookie(auth_cookie)?;
     let output_dir = normalize_output_dir(output_dir);
@@ -3253,6 +4085,8 @@ fn enqueue_download_direct_url_batch_raw_with_subscription(
         &preset,
         batch_id,
         subscription_id,
+        approved_missing_item_ids.into_iter().collect(),
+        approved_operator_deleted_item_ids.into_iter().collect(),
     )
 }
 
@@ -3266,15 +4100,70 @@ fn enqueue_download_targets_batch_with_subscription(
     preset: &config::DownloadPreset,
     batch_id: Option<String>,
     subscription_id: Option<String>,
+    approved_missing_item_ids: HashSet<String>,
+    approved_operator_deleted_item_ids: HashSet<String>,
 ) -> Result<Vec<JobRow>> {
     let batch_id = batch_id.or_else(|| Some(Uuid::new_v4().to_string()));
+    let subscription_snapshot = match subscription_id.as_deref() {
+        Some(id) => subscriptions::get_youtube_subscription_by_id(paths, id)?,
+        None => None,
+    };
+    let direct_url_title_by_url = if subscription_id.is_none() {
+        collect_direct_url_labels_for_single_jobs(&targets)
+    } else {
+        HashMap::new()
+    };
+    // Resolve canonical identity and physical-file state once for the whole submitted batch.
+    // Running one DB migration/open and one path probe per member made large single-video batches
+    // needlessly serialize, especially when some canonical files lived on a busy NAS.
+    let preflight_rows = library::preflight_download_urls(
+        paths,
+        &targets
+            .iter()
+            .map(|target| target.url.clone())
+            .collect::<Vec<_>>(),
+    )?;
     let mut jobs: Vec<JobRow> = Vec::with_capacity(targets.len());
-    for target in targets {
+    for (target, preflight) in targets.into_iter().zip(preflight_rows) {
+        // Classify before the URL is moved into serialized job params.
+        let track = JobTrack::for_direct_download(&target.url, subscription_id.as_deref());
         let output_path_template = if subscription_id.is_some() {
             ".".to_string()
         } else {
             preset.path_template.clone()
         };
+        if preflight.status == "duplicate_input" || preflight.status == "invalid" {
+            continue;
+        }
+        let allow_missing = subscription_id.is_some()
+            || preflight
+                .library_item_id
+                .as_ref()
+                .is_some_and(|item_id| approved_missing_item_ids.contains(item_id));
+        let allow_operator_deleted = preflight
+            .library_item_id
+            .as_ref()
+            .is_some_and(|item_id| approved_operator_deleted_item_ids.contains(item_id));
+        let job_id = Uuid::new_v4().to_string();
+        match library::claim_download_source(
+            paths,
+            &target.url,
+            &job_id,
+            allow_missing,
+            allow_operator_deleted,
+            if subscription_id.is_some() {
+                "subscription"
+            } else {
+                "single"
+            },
+            subscription_id.as_deref(),
+        )? {
+            library::DownloadSourceClaim::Claimed => {}
+            library::DownloadSourceClaim::Active(_)
+            | library::DownloadSourceClaim::Present(_)
+            | library::DownloadSourceClaim::Missing(_)
+            | library::DownloadSourceClaim::OperatorDeleted(_) => continue,
+        }
         let params_json = serde_json::to_string(&DownloadDirectUrlParams {
             url: target.url,
             provider: target.provider.to_string(),
@@ -3284,6 +4173,10 @@ fn enqueue_download_targets_batch_with_subscription(
             use_browser_cookies,
             browser_cookie_source: browser_cookie_source.clone(),
             subscription_id: subscription_id.clone(),
+            source_display_name: subscription_snapshot.as_ref().map(|sub| sub.title.clone()),
+            source_page_url: subscription_snapshot
+                .as_ref()
+                .map(|sub| sub.source_url.clone()),
             preset_id: Some(preset.id.clone()),
             output_path_template: Some(output_path_template),
             filename_template: Some(preset.filename_template.clone()),
@@ -3298,20 +4191,34 @@ fn enqueue_download_targets_batch_with_subscription(
             yt_dlp_sleep_requests: preset.yt_dlp_sleep_requests,
             subtitle_mode: preset.subtitle_mode.clone(),
         })?;
-        let job = enqueue_with_type_item_and_batch_id(
+        // WP-0269: classify from canonical source URL + subscription context. A manual YouTube
+        // playlist/channel is foreground `youtube_single`; only subscription-originated work is
+        // background `youtube_recurring`. This avoids a URL-shape heuristic moving an operator's
+        // explicit batch behind the subscription fleet.
+        let job = match enqueue_with_type_item_batch_track_and_id(
             paths,
             JobType::DownloadDirectUrl,
             params_json,
             None,
             batch_id.clone(),
-        )?;
+            track,
+            job_id.clone(),
+        ) {
+            Ok(job) => job,
+            Err(err) => {
+                let _ = library::release_download_source_claim(paths, &job_id, None, None);
+                return Err(err);
+            }
+        };
 
         if let Some(cookie) = auth_cookie.as_deref() {
             if let Err(err) = write_job_cookie_secret(paths, &job.id, cookie) {
                 let _ = delete_job_by_id(paths, &job.id);
+                let _ = library::release_download_source_claim(paths, &job.id, None, None);
                 for queued in &jobs {
                     let _ = delete_job_by_id(paths, &queued.id);
                     let _ = remove_job_cookie_secret(paths, &queued.id);
+                    let _ = library::release_download_source_claim(paths, &queued.id, None, None);
                 }
                 return Err(err);
             }
@@ -3319,9 +4226,45 @@ fn enqueue_download_targets_batch_with_subscription(
         jobs.push(job);
     }
 
+    if !direct_url_title_by_url.is_empty() {
+        stamp_job_target_titles_by_url(paths, &jobs, &direct_url_title_by_url);
+        for job in &mut jobs {
+            if let Some(url) = direct_download_url_from_params_json(&job.params_json) {
+                if let Some(title) = direct_url_title_by_url.get(&url) {
+                    job.target_title = Some(title.clone());
+                }
+            }
+        }
+    }
+
     Ok(jobs)
 }
 
+fn collect_direct_url_labels_for_single_jobs(
+    targets: &[DownloadTarget],
+) -> HashMap<String, String> {
+    let mut title_by_url = HashMap::new();
+    let mut seen_urls = HashSet::new();
+
+    for target in targets {
+        if !seen_urls.insert(target.url.clone()) {
+            continue;
+        }
+        // Queueing must remain immediate. A prior implementation ran yt-dlp metadata extraction
+        // synchronously here to obtain the title, so a slow YouTube response made the button look
+        // dead before the durable job row existed. Persist a deterministic tracking label from the
+        // URL instead; the real title replaces it after the worker imports the downloaded item.
+        if let Some(video_id) = subscriptions::youtube_video_id_from_url(&target.url) {
+            title_by_url.insert(target.url.clone(), format!("YouTube video {video_id}"));
+        }
+    }
+
+    title_by_url
+}
+
+/// One-off single Instagram profile/post download (WP-0263 pillar 2a). Runs in the `single`
+/// lane. Auth is resolved with Instagram precedence at run time (see the `DownloadDirectUrl`
+/// handler): explicit cookie here -> global Instagram cookie from Options -> browser fallback.
 pub fn enqueue_download_instagram_batch(
     paths: &AppPaths,
     urls: Vec<String>,
@@ -3329,6 +4272,30 @@ pub fn enqueue_download_instagram_batch(
     output_dir: Option<String>,
     use_browser_cookies: Option<bool>,
     browser_cookie_source: Option<String>,
+) -> Result<Vec<JobRow>> {
+    enqueue_download_instagram_batch_with_subscription(
+        paths,
+        urls,
+        auth_cookie,
+        output_dir,
+        use_browser_cookies,
+        browser_cookie_source,
+        None,
+    )
+}
+
+/// WP-0263 pillar 2b: subscription-driven Instagram download. When `subscription_id` is set,
+/// the resulting `DownloadDirectUrl` jobs are stamped into the conservative `recurring` lane
+/// (mirroring the YouTube subscription-child routing) so a passive Instagram cron never
+/// starves one-off single downloads and runs one profile at a time.
+pub fn enqueue_download_instagram_batch_with_subscription(
+    paths: &AppPaths,
+    urls: Vec<String>,
+    auth_cookie: Option<String>,
+    output_dir: Option<String>,
+    use_browser_cookies: Option<bool>,
+    browser_cookie_source: Option<String>,
+    subscription_id: Option<String>,
 ) -> Result<Vec<JobRow>> {
     let auth_cookie = normalize_auth_cookie(auth_cookie)?;
     let output_dir = normalize_output_dir(output_dir);
@@ -3352,7 +4319,7 @@ pub fn enqueue_download_instagram_batch(
         )));
     }
 
-    enqueue_download_direct_url_batch_raw(
+    enqueue_download_direct_url_batch_raw_with_subscription(
         paths,
         normalized_urls,
         Some(DOWNLOAD_PROVIDER_YOUTUBE_YT_DLP.to_string()),
@@ -3362,6 +4329,9 @@ pub fn enqueue_download_instagram_batch(
         browser_cookie_source,
         None,
         None,
+        subscription_id,
+        Vec::new(),
+        Vec::new(),
     )
 }
 
@@ -3449,7 +4419,8 @@ SELECT
   params_json,
   target_title,
   retry_of_job_id,
-  retry_replacement_job_id
+  retry_replacement_job_id,
+  track
 FROM job
 ORDER BY created_at_ms DESC
 LIMIT ?1 OFFSET ?2
@@ -3466,10 +4437,476 @@ LIMIT ?1 OFFSET ?2
     Ok(rows)
 }
 
+// WP-0265: queue view needs to show in-flight work even when not in the latest page.
+// Return a stable live snapshot for the Jobs page: all currently active jobs, plus a bounded
+// recent history, plus recent failed/canceled attempts. The result is deduped by row ID and
+// returned newest-first by `created_at_ms`.
+pub fn list_jobs_live_snapshot(
+    paths: &AppPaths,
+    recent_limit: usize,
+    active_limit: usize,
+    terminal_limit: usize,
+) -> Result<Vec<JobRow>> {
+    let conn = db::open_readonly(paths)?;
+
+    const LIVE_RECENT_MAX: usize = 2_000;
+    const LIVE_ACTIVE_MAX: usize = 2_000;
+    const LIVE_TERMINAL_MAX: usize = 1_000;
+
+    let recent_limit = recent_limit.max(1).min(LIVE_RECENT_MAX);
+    let active_limit = active_limit.max(1).min(LIVE_ACTIVE_MAX);
+    let terminal_limit = terminal_limit.max(0).min(LIVE_TERMINAL_MAX);
+
+    let mut rows = Vec::new();
+    let mut seen = HashSet::new();
+
+    let mut append_rows = |rows_to_append: Vec<JobRow>| {
+        for row in rows_to_append {
+            if seen.insert(row.id.clone()) {
+                rows.push(row);
+            }
+        }
+    };
+
+    let mut active_stmt = conn.prepare(
+        r#"
+SELECT
+  id,
+  item_id,
+  batch_id,
+  type,
+  status,
+  progress,
+  error,
+  created_at_ms,
+  started_at_ms,
+  finished_at_ms,
+  logs_path,
+  params_json,
+  target_title,
+  retry_of_job_id,
+  retry_replacement_job_id,
+  track
+FROM job
+WHERE status IN (?1, ?2)
+ORDER BY created_at_ms DESC
+LIMIT ?3
+"#,
+    )?;
+
+    let mut terminal_stmt = conn.prepare(
+        r#"
+SELECT
+  id,
+  item_id,
+  batch_id,
+  type,
+  status,
+  progress,
+  error,
+  created_at_ms,
+  started_at_ms,
+  finished_at_ms,
+  logs_path,
+  params_json,
+  target_title,
+  retry_of_job_id,
+  retry_replacement_job_id,
+  track
+FROM job
+WHERE status IN (?1, ?2)
+ORDER BY created_at_ms DESC
+LIMIT ?3
+"#,
+    )?;
+
+    let active_rows = active_stmt
+        .query_map(
+            params![
+                JobStatus::Queued.as_str(),
+                JobStatus::Running.as_str(),
+                active_limit as i64,
+            ],
+            job_row_from_query_row,
+        )?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+    append_rows(active_rows);
+
+    let recent_rows = list_jobs(paths, recent_limit, 0)?;
+    append_rows(recent_rows);
+
+    if terminal_limit > 0 {
+        let terminal_rows = terminal_stmt
+            .query_map(
+                params![
+                    JobStatus::Failed.as_str(),
+                    JobStatus::Canceled.as_str(),
+                    terminal_limit as i64,
+                ],
+                job_row_from_query_row,
+            )?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        append_rows(terminal_rows);
+    }
+
+    rows.sort_by(|a, b| b.created_at_ms.cmp(&a.created_at_ms));
+    hydrate_job_target_titles(&conn, &mut rows)?;
+
+    Ok(rows)
+}
+
+/// WP-0258 v2: the Jobs landing page is a bounded current-work projection, not a hydrated copy
+/// of the entire durable history. Running jobs and the newest queued jobs are queried separately
+/// so a large queued backlog cannot hide work that is actually executing. Failed/canceled and
+/// succeeded previews feed the explicit Attention and History views. Canonical totals are counted
+/// independently from preview lengths, preserving VV-SOT visible-subset truth.
+pub fn jobs_overview_snapshot(
+    paths: &AppPaths,
+    requested_view: Option<&str>,
+    requested_track: Option<&str>,
+) -> Result<JobsOverviewSnapshot> {
+    const RUNNING_PREVIEW_LIMIT: usize = 100;
+    const QUEUED_PREVIEW_LIMIT: usize = 200;
+    const ATTENTION_PREVIEW_LIMIT: usize = 200;
+    const HISTORY_PREVIEW_LIMIT: usize = 200;
+
+    let preview_view = match requested_view.map(str::trim) {
+        Some("attention") => "attention",
+        Some("history") => "history",
+        _ => "now",
+    };
+    let selected_track = match requested_track
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+    {
+        None | Some("all") => None,
+        Some("unclassified") => Some("unclassified".to_string()),
+        Some(value) if JobTrack::from_str(value).is_some() => Some(value.to_string()),
+        Some(value) => {
+            return Err(EngineError::InstallFailed(format!(
+                "unsupported canonical job track: {value}"
+            )))
+        }
+    };
+
+    let conn = db::open_readonly(paths)?;
+    let mut jobs = Vec::with_capacity(
+        RUNNING_PREVIEW_LIMIT
+            + QUEUED_PREVIEW_LIMIT
+            + ATTENTION_PREVIEW_LIMIT
+            + HISTORY_PREVIEW_LIMIT,
+    );
+    let mut seen = HashSet::new();
+
+    let mut append = |rows: Vec<JobRow>| {
+        for row in rows {
+            if seen.insert(row.id.clone()) {
+                jobs.push(row);
+            }
+        }
+    };
+
+    let query_status = |status: JobStatus, limit: usize| -> Result<Vec<JobRow>> {
+        let base_select = r#"
+SELECT
+  id,
+  item_id,
+  batch_id,
+  type,
+  status,
+  progress,
+  error,
+  created_at_ms,
+  started_at_ms,
+  finished_at_ms,
+  logs_path,
+  params_json,
+  target_title,
+  retry_of_job_id,
+  retry_replacement_job_id,
+  track
+FROM job
+"#;
+        let rows = match selected_track.as_deref() {
+            None => {
+                let mut stmt = conn.prepare(&format!(
+                    "{base_select} WHERE status=?1 ORDER BY created_at_ms DESC LIMIT ?2"
+                ))?;
+                let rows = stmt
+                    .query_map(
+                        params![status.as_str(), limit as i64],
+                        job_row_from_query_row,
+                    )?
+                    .collect::<rusqlite::Result<Vec<_>>>()?;
+                rows
+            }
+            Some("unclassified") => {
+                let mut stmt = conn.prepare(&format!(
+                    "{base_select} WHERE status=?1 AND (track IS NULL OR track='' OR track NOT IN ('youtube_single','youtube_recurring','instagram','other_video','image_archive','localization')) ORDER BY created_at_ms DESC LIMIT ?2"
+                ))?;
+                let rows = stmt
+                    .query_map(
+                        params![status.as_str(), limit as i64],
+                        job_row_from_query_row,
+                    )?
+                    .collect::<rusqlite::Result<Vec<_>>>()?;
+                rows
+            }
+            Some(track) => {
+                let mut stmt = conn.prepare(&format!(
+                    "{base_select} WHERE track=?1 AND status=?2 ORDER BY created_at_ms DESC LIMIT ?3"
+                ))?;
+                let rows = stmt
+                    .query_map(
+                        params![track, status.as_str(), limit as i64],
+                        job_row_from_query_row,
+                    )?
+                    .collect::<rusqlite::Result<Vec<_>>>()?;
+                rows
+            }
+        };
+        Ok(rows)
+    };
+
+    match preview_view {
+        "attention" => append(query_status(JobStatus::Failed, ATTENTION_PREVIEW_LIMIT)?),
+        "history" => {
+            append(query_status(JobStatus::Succeeded, HISTORY_PREVIEW_LIMIT)?);
+            append(query_status(JobStatus::Failed, HISTORY_PREVIEW_LIMIT)?);
+            append(query_status(JobStatus::Canceled, HISTORY_PREVIEW_LIMIT)?);
+        }
+        _ => {
+            append(query_status(JobStatus::Running, RUNNING_PREVIEW_LIMIT)?);
+            append(query_status(JobStatus::Queued, QUEUED_PREVIEW_LIMIT)?);
+        }
+    }
+
+    jobs.sort_by(|a, b| b.created_at_ms.cmp(&a.created_at_ms));
+
+    let counts = conn.query_row(
+        r#"
+SELECT
+  (SELECT COUNT(*) FROM job WHERE status='queued'),
+  (SELECT COUNT(*) FROM job WHERE status='running'),
+  (SELECT COUNT(*) FROM job WHERE status='succeeded'),
+  (SELECT COUNT(*) FROM job WHERE status='failed'),
+  (SELECT COUNT(*) FROM job WHERE status='canceled')
+"#,
+        [],
+        |row| {
+            Ok(JobsOverviewCounts {
+                queued: row.get::<_, i64>(0)? as usize,
+                running: row.get::<_, i64>(1)? as usize,
+                succeeded: row.get::<_, i64>(2)? as usize,
+                failed: row.get::<_, i64>(3)? as usize,
+                canceled: row.get::<_, i64>(4)? as usize,
+                total: 0,
+            })
+        },
+    )?;
+    let counts = JobsOverviewCounts {
+        total: counts.queued + counts.running + counts.succeeded + counts.failed + counts.canceled,
+        ..counts
+    };
+
+    let selected_counts = match selected_track.as_deref() {
+        None => counts.clone(),
+        Some("unclassified") => conn.query_row(
+            r#"
+SELECT
+  SUM(CASE WHEN status='queued' THEN 1 ELSE 0 END),
+  SUM(CASE WHEN status='running' THEN 1 ELSE 0 END),
+  SUM(CASE WHEN status='succeeded' THEN 1 ELSE 0 END),
+  SUM(CASE WHEN status='failed' THEN 1 ELSE 0 END),
+  SUM(CASE WHEN status='canceled' THEN 1 ELSE 0 END),
+  COUNT(*)
+FROM job
+WHERE track IS NULL OR track='' OR track NOT IN ('youtube_single','youtube_recurring','instagram','other_video','image_archive','localization')
+"#,
+            [],
+            |row| {
+                Ok(JobsOverviewCounts {
+                    queued: row.get::<_, Option<i64>>(0)?.unwrap_or(0) as usize,
+                    running: row.get::<_, Option<i64>>(1)?.unwrap_or(0) as usize,
+                    succeeded: row.get::<_, Option<i64>>(2)?.unwrap_or(0) as usize,
+                    failed: row.get::<_, Option<i64>>(3)?.unwrap_or(0) as usize,
+                    canceled: row.get::<_, Option<i64>>(4)?.unwrap_or(0) as usize,
+                    total: row.get::<_, i64>(5)? as usize,
+                })
+            },
+        )?,
+        Some(track) => conn.query_row(
+            r#"
+SELECT
+  SUM(CASE WHEN status='queued' THEN 1 ELSE 0 END),
+  SUM(CASE WHEN status='running' THEN 1 ELSE 0 END),
+  SUM(CASE WHEN status='succeeded' THEN 1 ELSE 0 END),
+  SUM(CASE WHEN status='failed' THEN 1 ELSE 0 END),
+  SUM(CASE WHEN status='canceled' THEN 1 ELSE 0 END),
+  COUNT(*)
+FROM job
+WHERE track=?1
+"#,
+            [track],
+            |row| {
+                Ok(JobsOverviewCounts {
+                    queued: row.get::<_, Option<i64>>(0)?.unwrap_or(0) as usize,
+                    running: row.get::<_, Option<i64>>(1)?.unwrap_or(0) as usize,
+                    succeeded: row.get::<_, Option<i64>>(2)?.unwrap_or(0) as usize,
+                    failed: row.get::<_, Option<i64>>(3)?.unwrap_or(0) as usize,
+                    canceled: row.get::<_, Option<i64>>(4)?.unwrap_or(0) as usize,
+                    total: row.get::<_, i64>(5)? as usize,
+                })
+            },
+        )?,
+    };
+
+    Ok(JobsOverviewSnapshot {
+        jobs,
+        counts,
+        selected_counts,
+        generated_at_ms: now_ms(),
+        preview_view: preview_view.to_string(),
+        selected_track,
+        running_preview_limit: RUNNING_PREVIEW_LIMIT,
+        queued_preview_limit: QUEUED_PREVIEW_LIMIT,
+        attention_preview_limit: ATTENTION_PREVIEW_LIMIT,
+        history_preview_limit: HISTORY_PREVIEW_LIMIT,
+    })
+}
+
+/// Small canonical active projection used by progress-heavy product surfaces. Unlike the Jobs
+/// overview this never reads terminal history or hydrates library rows, and paging makes every
+/// active batch member inspectable without rendering an unbounded DOM list.
+pub fn jobs_track_activity_page(
+    paths: &AppPaths,
+    requested_track: &str,
+    limit: usize,
+    offset: usize,
+) -> Result<JobsTrackActivityPage> {
+    let track = requested_track.trim();
+    if JobTrack::from_str(track).is_none() {
+        return Err(EngineError::InstallFailed(format!(
+            "unsupported canonical job track: {track}"
+        )));
+    }
+    let limit = limit.clamp(1, 500);
+    let offset = offset.min(1_000_000);
+    let conn = db::open_readonly(paths)?;
+    let (queued, running) = conn.query_row(
+        r#"
+SELECT
+  SUM(CASE WHEN status='queued' THEN 1 ELSE 0 END),
+  SUM(CASE WHEN status='running' THEN 1 ELSE 0 END)
+FROM job
+WHERE track=?1 AND status IN ('queued','running')
+"#,
+        [track],
+        |row| {
+            Ok((
+                row.get::<_, Option<i64>>(0)?.unwrap_or(0) as usize,
+                row.get::<_, Option<i64>>(1)?.unwrap_or(0) as usize,
+            ))
+        },
+    )?;
+    let active_total = queued + running;
+    let mut stmt = conn.prepare(
+        r#"
+SELECT
+  id, item_id, batch_id, type, status, progress, error, created_at_ms,
+  started_at_ms, finished_at_ms, logs_path, params_json, target_title,
+  retry_of_job_id, retry_replacement_job_id, track
+FROM job
+WHERE track=?1 AND status IN ('queued','running')
+ORDER BY CASE status WHEN 'running' THEN 0 ELSE 1 END, created_at_ms DESC
+LIMIT ?2 OFFSET ?3
+"#,
+    )?;
+    let jobs = stmt
+        .query_map(
+            params![track, limit as i64, offset as i64],
+            job_row_from_query_row,
+        )?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+    Ok(JobsTrackActivityPage {
+        jobs,
+        queued,
+        running,
+        active_total,
+        limit,
+        offset,
+        has_more: offset.saturating_add(limit) < active_total,
+        generated_at_ms: now_ms(),
+    })
+}
+
+/// Lightweight element-level refresh for rows the Jobs page has already rendered. The caller's
+/// bounded id set is canonical for this projection; no history count, grouping, or library join is
+/// repeated on each animation tick.
+pub fn jobs_progress_many(paths: &AppPaths, job_ids: &[String]) -> Result<Vec<JobRow>> {
+    let mut ids = job_ids
+        .iter()
+        .map(|id| id.trim())
+        .filter(|id| !id.is_empty())
+        .take(500)
+        .map(str::to_string)
+        .collect::<Vec<_>>();
+    ids.sort();
+    ids.dedup();
+    if ids.is_empty() {
+        return Ok(Vec::new());
+    }
+    let placeholders = (1..=ids.len())
+        .map(|index| format!("?{index}"))
+        .collect::<Vec<_>>()
+        .join(",");
+    let sql = format!(
+        r#"
+SELECT
+  id, item_id, batch_id, type, status, progress, error, created_at_ms,
+  started_at_ms, finished_at_ms, logs_path, params_json, target_title,
+  retry_of_job_id, retry_replacement_job_id, track
+FROM job
+WHERE id IN ({placeholders})
+"#
+    );
+    let conn = db::open_readonly(paths)?;
+    let mut stmt = conn.prepare(&sql)?;
+    let jobs = stmt
+        .query_map(rusqlite::params_from_iter(ids), job_row_from_query_row)?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+    Ok(jobs)
+}
+
 pub fn search_jobs(paths: &AppPaths, query: &str, limit: usize) -> Result<Vec<JobRow>> {
+    search_jobs_for_track(paths, query, limit, None)
+}
+
+pub fn search_jobs_for_track(
+    paths: &AppPaths,
+    query: &str,
+    limit: usize,
+    requested_track: Option<&str>,
+) -> Result<Vec<JobRow>> {
+    const RECENT_SEARCH_CANDIDATE_LIMIT: usize = 10_000;
     let query = query.trim();
+    let track_filter = match requested_track
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+    {
+        None | Some("all") => "all",
+        Some("unclassified") => "unclassified",
+        Some(value) if JobTrack::from_str(value).is_some() => value,
+        Some(value) => {
+            return Err(EngineError::InstallFailed(format!(
+                "unsupported canonical job track: {value}"
+            )))
+        }
+    };
     if query.is_empty() {
-        return list_jobs(paths, limit, 0);
+        let mut rows = jobs_overview_snapshot(paths, Some("history"), Some(track_filter))?.jobs;
+        rows.truncate(limit.clamp(1, 500));
+        return Ok(rows);
     }
 
     let limit = limit.clamp(1, 500);
@@ -3478,7 +4915,19 @@ pub fn search_jobs(paths: &AppPaths, query: &str, limit: usize) -> Result<Vec<Jo
     // WP-0226: read-only connection bypasses job-runner write queue.
     let conn = db::open_readonly(paths)?;
 
-    let mut stmt = conn.prepare(
+    // WP-0258 v2: resolve identifiers and freshly queued single-video receipts without scanning
+    // historical params JSON. The URL expression and deterministic YouTube receipt label are
+    // indexed by schema v22. This is the path used when an operator pastes the same URL or video
+    // ID they just queued.
+    let youtube_video_id = subscriptions::youtube_video_id_from_url(query).or_else(|| {
+        (query.len() == 11
+            && query
+                .chars()
+                .all(|ch| ch.is_ascii_alphanumeric() || ch == '-' || ch == '_'))
+        .then(|| query.to_string())
+    });
+    let exact_target_title = youtube_video_id.map(|id| format!("YouTube video {id}"));
+    let mut exact_stmt = conn.prepare(
         r#"
 SELECT
   j.id,
@@ -3495,31 +4944,114 @@ SELECT
   j.params_json,
   j.target_title,
   j.retry_of_job_id,
-  j.retry_replacement_job_id
+  j.retry_replacement_job_id,
+  j.track
 FROM job j
 WHERE
-  j.id LIKE ?1
-  OR COALESCE(j.batch_id, '') LIKE ?1
-  OR j.type LIKE ?1
-  OR j.status LIKE ?1
-  OR COALESCE(j.error, '') LIKE ?1
-  OR j.params_json LIKE ?1
-  OR EXISTS (
-    SELECT 1
-    FROM library_item li
-    WHERE li.title LIKE ?1
-      AND TRIM(li.source_uri) <> ''
-      AND j.params_json LIKE '%' || li.source_uri || '%'
+  (
+    j.id = ?1
+    OR j.batch_id = ?1
+    OR j.target_title = ?2
+    OR CASE WHEN json_valid(j.params_json) THEN json_extract(j.params_json, '$.url') END = ?1
+  )
+  AND (
+    ?4 = 'all'
+    OR j.track = ?4
+    OR (?4 = 'unclassified' AND (j.track IS NULL OR j.track='' OR j.track NOT IN ('youtube_single','youtube_recurring','instagram','other_video','image_archive','localization')))
   )
 ORDER BY j.created_at_ms DESC
+LIMIT ?3
+"#,
+    )?;
+    let mut exact_rows = exact_stmt
+        .query_map(
+            params![
+                query,
+                exact_target_title.as_deref(),
+                limit as i64,
+                track_filter
+            ],
+            job_row_from_query_row,
+        )?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+    if !exact_rows.is_empty() {
+        hydrate_job_target_titles(&conn, &mut exact_rows)?;
+        return Ok(exact_rows);
+    }
+
+    // Arbitrary title/error/substring search is intentionally restricted to a materialized recent
+    // candidate window. The former query scanned every params row and ran a correlated library
+    // lookup for each candidate, which could stall Jobs on a large database. Exact job IDs, batch
+    // IDs, source URLs, and new YouTube receipt labels remain global through the indexed path above.
+    let mut stmt = conn.prepare(
+        r#"
+WITH recent AS MATERIALIZED (
+SELECT
+  j.id,
+  j.item_id,
+  j.batch_id,
+  j.type,
+  j.status,
+  j.progress,
+  j.error,
+  j.created_at_ms,
+  j.started_at_ms,
+  j.finished_at_ms,
+  j.logs_path,
+  j.params_json,
+  j.target_title,
+  j.retry_of_job_id,
+  j.retry_replacement_job_id,
+  j.track
+FROM job j
+WHERE
+  ?4 = 'all'
+  OR j.track = ?4
+  OR (?4 = 'unclassified' AND (j.track IS NULL OR j.track='' OR j.track NOT IN ('youtube_single','youtube_recurring','instagram','other_video','image_archive','localization')))
+ORDER BY j.created_at_ms DESC
 LIMIT ?2
+)
+SELECT
+  id,
+  item_id,
+  batch_id,
+  type,
+  status,
+  progress,
+  error,
+  created_at_ms,
+  started_at_ms,
+  finished_at_ms,
+  logs_path,
+  params_json,
+  target_title,
+  retry_of_job_id,
+  retry_replacement_job_id,
+  track
+FROM recent
+WHERE
+  id LIKE ?1
+  OR COALESCE(batch_id, '') LIKE ?1
+  OR type LIKE ?1
+  OR status LIKE ?1
+  OR COALESCE(error, '') LIKE ?1
+  OR params_json LIKE ?1
+  OR COALESCE(target_title, '') LIKE ?1
+ORDER BY created_at_ms DESC
+LIMIT ?3
 "#,
     )?;
 
     let mut rows = stmt
-        .query_map(params![like, limit as i64], |row| {
-            job_row_from_query_row(row)
-        })?
+        .query_map(
+            params![
+                like,
+                RECENT_SEARCH_CANDIDATE_LIMIT as i64,
+                limit as i64,
+                track_filter
+            ],
+            job_row_from_query_row,
+        )?
         .collect::<rusqlite::Result<Vec<_>>>()?;
     hydrate_job_target_titles(&conn, &mut rows)?;
 
@@ -3553,7 +5085,8 @@ SELECT
   params_json,
   target_title,
   retry_of_job_id,
-  retry_replacement_job_id
+  retry_replacement_job_id,
+  track
 FROM job
 WHERE id=?1
 "#,
@@ -3589,11 +5122,558 @@ fn direct_download_url_from_params_json(params_json: &str) -> Option<String> {
         .map(str::to_string)
 }
 
+const YOUTUBE_QUEUE_RECONCILE_SCAN_PAGE: usize = 2_000;
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct QueuedYoutubeIdentityJob {
+    id: String,
+    created_at_ms: i64,
+    params_json: String,
+    track: Option<String>,
+    source_url: String,
+    media_id: String,
+    subscription_id: Option<String>,
+    source_page_url: Option<String>,
+    source_display_name: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct QueuedDirectScan {
+    all_rows: Vec<(String, i64, String, Option<String>)>,
+    youtube_rows: Vec<QueuedYoutubeIdentityJob>,
+    invalid_jobs: usize,
+    non_youtube_jobs: usize,
+    legacy_track_jobs: usize,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct QueueIdentityDbState {
+    active_job_id: Option<String>,
+    library_item_id: Option<String>,
+    media_path: Option<String>,
+    file_status: Option<String>,
+    file_redownload_authorized_job_id: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct QueueIdentityObservation {
+    library_item_id: String,
+    media_path: String,
+    state: library::MediaPathObservation,
+}
+
+fn scan_queued_direct_jobs(conn: &rusqlite::Connection) -> Result<QueuedDirectScan> {
+    let mut all_rows = Vec::new();
+    let mut youtube_rows = Vec::new();
+    let mut invalid_jobs = 0_usize;
+    let mut non_youtube_jobs = 0_usize;
+    let mut legacy_track_jobs = 0_usize;
+    let mut cursor_created_at_ms = i64::MIN;
+    let mut cursor_id = String::new();
+
+    loop {
+        let page = {
+            let mut stmt = conn.prepare(
+                r#"
+SELECT id, created_at_ms, params_json, track
+FROM job
+WHERE status='queued'
+  AND type='download_direct_url'
+  AND (created_at_ms>?1 OR (created_at_ms=?1 AND id>?2))
+ORDER BY created_at_ms ASC, id ASC
+LIMIT ?3
+"#,
+            )?;
+            let rows = stmt
+                .query_map(
+                    params![
+                        cursor_created_at_ms,
+                        cursor_id,
+                        YOUTUBE_QUEUE_RECONCILE_SCAN_PAGE as i64
+                    ],
+                    |row| {
+                        Ok((
+                            row.get::<_, String>(0)?,
+                            row.get::<_, i64>(1)?,
+                            row.get::<_, String>(2)?,
+                            row.get::<_, Option<String>>(3)?,
+                        ))
+                    },
+                )?
+                .collect::<rusqlite::Result<Vec<_>>>()?;
+            rows
+        };
+        if page.is_empty() {
+            break;
+        }
+        for (id, created_at_ms, params_json, track) in &page {
+            all_rows.push((
+                id.clone(),
+                *created_at_ms,
+                params_json.clone(),
+                track.clone(),
+            ));
+            if track
+                .as_deref()
+                .map(str::trim)
+                .unwrap_or_default()
+                .is_empty()
+            {
+                legacy_track_jobs += 1;
+            }
+            let Some(source_url) = direct_download_url_from_params_json(params_json) else {
+                invalid_jobs += 1;
+                continue;
+            };
+            let Some(source) = library::canonical_media_source(&source_url) else {
+                invalid_jobs += 1;
+                continue;
+            };
+            if source.service != "youtube" {
+                non_youtube_jobs += 1;
+                continue;
+            }
+            let parsed = serde_json::from_str::<DownloadDirectUrlParams>(params_json).ok();
+            youtube_rows.push(QueuedYoutubeIdentityJob {
+                id: id.clone(),
+                created_at_ms: *created_at_ms,
+                params_json: params_json.clone(),
+                track: track.clone(),
+                source_url,
+                media_id: source.media_id,
+                subscription_id: parsed
+                    .as_ref()
+                    .and_then(|params| params.subscription_id.clone()),
+                source_page_url: parsed
+                    .as_ref()
+                    .and_then(|params| params.source_page_url.clone()),
+                source_display_name: parsed
+                    .as_ref()
+                    .and_then(|params| params.source_display_name.clone()),
+            });
+        }
+        let Some((id, created_at_ms, _, _)) = page.last() else {
+            break;
+        };
+        cursor_created_at_ms = *created_at_ms;
+        cursor_id = id.clone();
+        if page.len() < YOUTUBE_QUEUE_RECONCILE_SCAN_PAGE {
+            break;
+        }
+    }
+
+    Ok(QueuedDirectScan {
+        all_rows,
+        youtube_rows,
+        invalid_jobs,
+        non_youtube_jobs,
+        legacy_track_jobs,
+    })
+}
+
+fn youtube_identity_db_states(
+    conn: &rusqlite::Connection,
+) -> Result<HashMap<String, QueueIdentityDbState>> {
+    let mut stmt = conn.prepare(
+        r#"
+SELECT i.media_id, i.active_job_id, i.library_item_id, li.media_path,
+       li.file_status, li.file_redownload_authorized_job_id
+FROM media_source_identity i
+LEFT JOIN library_item li ON li.id=i.library_item_id
+WHERE i.service='youtube'
+"#,
+    )?;
+    let rows = stmt
+        .query_map([], |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                QueueIdentityDbState {
+                    active_job_id: row.get(1)?,
+                    library_item_id: row.get(2)?,
+                    media_path: row.get(3)?,
+                    file_status: row.get(4)?,
+                    file_redownload_authorized_job_id: row.get(5)?,
+                },
+            ))
+        })?
+        .collect::<rusqlite::Result<HashMap<_, _>>>()?;
+    Ok(rows)
+}
+
+fn is_playlist_source_url(value: &str) -> bool {
+    let lower = value.trim().to_ascii_lowercase();
+    lower.contains("/playlist") || lower.contains("list=")
+}
+
+pub fn youtube_queue_identity_reconcile(
+    paths: &AppPaths,
+    dry_run: bool,
+    _after_job_id: Option<&str>,
+    limit: Option<usize>,
+) -> Result<YoutubeQueueIdentityReconcileSummary> {
+    let operation_id = format!("youtube-queue-compact-{}", Uuid::new_v4());
+    let candidate_limit = limit.unwrap_or(500).clamp(1, 500);
+    let mut conn = db::open(paths)?;
+    db::migrate(&conn)?;
+    let queue_paused = is_queue_paused_conn(&conn)?;
+    let scan = scan_queued_direct_jobs(&conn)?;
+    let running_direct_jobs: usize = conn
+        .query_row(
+            "SELECT COUNT(*) FROM job WHERE status='running' AND type='download_direct_url'",
+            [],
+            |row| row.get::<_, i64>(0),
+        )?
+        .max(0) as usize;
+    if !dry_run && !queue_paused {
+        return Err(EngineError::InstallFailed(
+            "queue identity compaction requires the global queue to remain paused".to_string(),
+        ));
+    }
+    if !dry_run && running_direct_jobs > 0 {
+        return Err(EngineError::InstallFailed(format!(
+            "queue identity compaction requires zero running direct-download jobs; found {running_direct_jobs}"
+        )));
+    }
+
+    let identity_states = youtube_identity_db_states(&conn)?;
+    let subscription_source_urls = {
+        let mut stmt = conn.prepare("SELECT id, source_url FROM youtube_subscription")?;
+        let rows = stmt
+            .query_map([], |row| {
+                Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+            })?
+            .collect::<rusqlite::Result<HashMap<_, _>>>()?;
+        rows
+    };
+    let mut by_media_id: HashMap<String, Vec<&QueuedYoutubeIdentityJob>> = HashMap::new();
+    for row in &scan.youtube_rows {
+        by_media_id
+            .entry(row.media_id.clone())
+            .or_default()
+            .push(row);
+    }
+    let mut observations: HashMap<String, QueueIdentityObservation> = HashMap::new();
+    for media_id in by_media_id.keys() {
+        let Some(state) = identity_states.get(media_id) else {
+            continue;
+        };
+        let (Some(library_item_id), Some(media_path)) =
+            (state.library_item_id.as_ref(), state.media_path.as_ref())
+        else {
+            continue;
+        };
+        observations.insert(
+            media_id.clone(),
+            QueueIdentityObservation {
+                library_item_id: library_item_id.clone(),
+                media_path: media_path.clone(),
+                state: library::observe_media_path_fresh(media_path),
+            },
+        );
+    }
+
+    let mut keeper_by_media_id: HashMap<String, Option<String>> = HashMap::new();
+    let mut present_jobs = 0_usize;
+    let mut missing_jobs = 0_usize;
+    let mut unreachable_jobs = 0_usize;
+    let mut linked_candidate_jobs = 0_usize;
+    let mut duplicate_identities = 0_usize;
+    let mut would_cancel_jobs = 0_usize;
+    let mut candidates = Vec::new();
+    for (media_id, rows) in &by_media_id {
+        if rows.len() > 1 {
+            duplicate_identities += 1;
+        }
+        let observation = observations.get(media_id);
+        let keeper = if observation
+            .is_some_and(|value| value.state == library::MediaPathObservation::Present)
+        {
+            None
+        } else {
+            identity_states
+                .get(media_id)
+                .and_then(|state| state.active_job_id.as_ref())
+                .filter(|active_job_id| rows.iter().any(|row| row.id == **active_job_id))
+                .cloned()
+                .or_else(|| {
+                    rows.iter()
+                        .copied()
+                        .min_by(|left, right| {
+                            let left_source_url = left
+                                .subscription_id
+                                .as_ref()
+                                .and_then(|id| subscription_source_urls.get(id))
+                                .or(left.source_page_url.as_ref())
+                                .map(String::as_str)
+                                .unwrap_or_default();
+                            let right_source_url = right
+                                .subscription_id
+                                .as_ref()
+                                .and_then(|id| subscription_source_urls.get(id))
+                                .or(right.source_page_url.as_ref())
+                                .map(String::as_str)
+                                .unwrap_or_default();
+                            is_playlist_source_url(left_source_url)
+                                .cmp(&is_playlist_source_url(right_source_url))
+                                .then_with(|| right.created_at_ms.cmp(&left.created_at_ms))
+                                .then_with(|| left.id.cmp(&right.id))
+                        })
+                        .map(|row| row.id.clone())
+                })
+        };
+        would_cancel_jobs += rows
+            .iter()
+            .filter(|row| keeper.as_deref() != Some(row.id.as_str()))
+            .count();
+        keeper_by_media_id.insert(media_id.clone(), keeper);
+
+        for row in rows {
+            if let Some(observation) = observation {
+                linked_candidate_jobs += 1;
+                let storage_state = match observation.state {
+                    library::MediaPathObservation::Present => {
+                        present_jobs += 1;
+                        "present"
+                    }
+                    library::MediaPathObservation::Missing => {
+                        missing_jobs += 1;
+                        "missing"
+                    }
+                    library::MediaPathObservation::Unreachable => {
+                        unreachable_jobs += 1;
+                        "storage_unreachable"
+                    }
+                };
+                if candidates.len() < candidate_limit {
+                    candidates.push(YoutubeQueueIdentityReconcileCandidate {
+                        job_id: row.id.clone(),
+                        source_url: row.source_url.clone(),
+                        media_id: row.media_id.clone(),
+                        library_item_id: observation.library_item_id.clone(),
+                        media_path: observation.media_path.clone(),
+                        storage_state: storage_state.to_string(),
+                    });
+                }
+            }
+        }
+    }
+    let membership_keys = scan
+        .youtube_rows
+        .iter()
+        .filter_map(|row| {
+            row.subscription_id
+                .as_ref()
+                .map(|subscription_id| (row.media_id.clone(), subscription_id.clone()))
+        })
+        .collect::<HashSet<_>>();
+
+    let mut summary = YoutubeQueueIdentityReconcileSummary {
+        operation_id: operation_id.clone(),
+        dry_run,
+        scanned_queued_jobs: scan.all_rows.len(),
+        canonical_youtube_jobs: scan.youtube_rows.len(),
+        canonical_identities: by_media_id.len(),
+        duplicate_identities,
+        kept_jobs: keeper_by_media_id
+            .values()
+            .filter(|keeper| keeper.is_some())
+            .count(),
+        would_cancel_jobs,
+        legacy_track_jobs: scan.legacy_track_jobs,
+        invalid_jobs: scan.invalid_jobs,
+        non_youtube_jobs: scan.non_youtube_jobs,
+        source_memberships_preserved: membership_keys.len(),
+        running_direct_jobs,
+        queue_paused,
+        remaining_duplicate_identities: 0,
+        remaining_present_jobs: 0,
+        claim_mismatches: 0,
+        linked_candidate_jobs,
+        present_jobs,
+        missing_jobs,
+        unreachable_jobs,
+        canceled_jobs: 0,
+        has_more: false,
+        next_cursor: None,
+        candidates,
+    };
+    if dry_run {
+        return Ok(summary);
+    }
+
+    let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
+    if !is_queue_paused_conn(&tx)? {
+        return Err(EngineError::InstallFailed(
+            "global queue pause changed during identity compaction".to_string(),
+        ));
+    }
+    let current_scan = scan_queued_direct_jobs(&tx)?;
+    if current_scan.all_rows != scan.all_rows {
+        return Err(EngineError::InstallFailed(
+            "queued direct-download state changed during identity compaction; rerun the preview"
+                .to_string(),
+        ));
+    }
+    let current_running: i64 = tx.query_row(
+        "SELECT COUNT(*) FROM job WHERE status='running' AND type='download_direct_url'",
+        [],
+        |row| row.get(0),
+    )?;
+    if current_running > 0 {
+        return Err(EngineError::InstallFailed(
+            "a direct-download job started during identity compaction".to_string(),
+        ));
+    }
+
+    let mut preserved_contexts = HashSet::new();
+    for row in &scan.youtube_rows {
+        if !preserved_contexts.insert((
+            row.media_id.clone(),
+            row.subscription_id.clone(),
+            row.source_url.clone(),
+        )) {
+            continue;
+        }
+        library::record_queued_download_source_context_without_library_backfill_conn(
+            &tx,
+            &row.source_url,
+            if row.subscription_id.is_some() {
+                "subscription"
+            } else {
+                "single"
+            },
+            row.subscription_id.as_deref(),
+            &row.id,
+            row.source_page_url.as_deref(),
+            row.source_display_name.as_deref(),
+            "queue_compaction_wp0283",
+        )?;
+    }
+    let current_identity_states = youtube_identity_db_states(&tx)?;
+    for (media_id, observation) in &observations {
+        let Some(current) = current_identity_states.get(media_id) else {
+            return Err(EngineError::InstallFailed(format!(
+                "canonical identity disappeared during compaction: {media_id}"
+            )));
+        };
+        if current.library_item_id.as_deref() != Some(observation.library_item_id.as_str())
+            || current.media_path.as_deref() != Some(observation.media_path.as_str())
+        {
+            return Err(EngineError::InstallFailed(format!(
+                "canonical media path changed during compaction: {media_id}"
+            )));
+        }
+    }
+
+    let finished_at_ms = now_ms();
+    let mut canceled_job_ids = Vec::new();
+    for row in &scan.youtube_rows {
+        let keeper = keeper_by_media_id
+            .get(&row.media_id)
+            .and_then(|value| value.as_deref());
+        if keeper == Some(row.id.as_str()) {
+            continue;
+        }
+        let keeper_label = keeper.unwrap_or("present-media");
+        let reason =
+            format!("[{operation_id}] duplicate canonical YouTube identity; keeper={keeper_label}");
+        let changed = tx.execute(
+            "UPDATE job SET status='canceled', error=?1, finished_at_ms=?2 WHERE id=?3 AND status='queued'",
+            params![reason, finished_at_ms, row.id],
+        )?;
+        if changed > 0 {
+            summary.canceled_jobs += changed;
+            canceled_job_ids.push(row.id.clone());
+        }
+    }
+    for (media_id, keeper) in &keeper_by_media_id {
+        match keeper {
+            Some(keeper_job_id) => {
+                tx.execute(
+                    "UPDATE media_source_identity SET active_job_id=?1, repair_state=CASE WHEN library_item_id IS NULL THEN 'downloading' ELSE repair_state END, updated_at_ms=?2 WHERE service='youtube' AND media_id=?3",
+                    params![keeper_job_id, finished_at_ms, media_id],
+                )?;
+            }
+            None => {
+                tx.execute(
+                    "UPDATE media_source_identity SET active_job_id=NULL, repair_state=CASE WHEN library_item_id IS NULL THEN repair_state ELSE 'ready' END, updated_at_ms=?1 WHERE service='youtube' AND media_id=?2",
+                    params![finished_at_ms, media_id],
+                )?;
+            }
+        }
+    }
+    tx.commit()?;
+    for job_id in canceled_job_ids {
+        remove_job_cookie_secret(paths, &job_id);
+    }
+    append_engine_diagnostics_trace_row_best_effort(
+        paths,
+        "youtube_queue_identity_compacted",
+        "info",
+        serde_json::json!({
+            "operation_id": summary.operation_id,
+            "scanned_queued_jobs": summary.scanned_queued_jobs,
+            "canonical_youtube_jobs": summary.canonical_youtube_jobs,
+            "canonical_identities": summary.canonical_identities,
+            "duplicate_identities": summary.duplicate_identities,
+            "kept_jobs": summary.kept_jobs,
+            "canceled_jobs": summary.canceled_jobs,
+            "present_jobs": summary.present_jobs,
+            "missing_jobs": summary.missing_jobs,
+            "unreachable_jobs": summary.unreachable_jobs,
+            "source_memberships_preserved": summary.source_memberships_preserved,
+        }),
+    );
+    let audit_conn = db::open(paths)?;
+    db::migrate(&audit_conn)?;
+    let audit_scan = scan_queued_direct_jobs(&audit_conn)?;
+    let audit_states = youtube_identity_db_states(&audit_conn)?;
+    let mut audit_groups: HashMap<String, Vec<&QueuedYoutubeIdentityJob>> = HashMap::new();
+    for row in &audit_scan.youtube_rows {
+        audit_groups
+            .entry(row.media_id.clone())
+            .or_default()
+            .push(row);
+    }
+    summary.remaining_duplicate_identities =
+        audit_groups.values().filter(|rows| rows.len() > 1).count();
+    for (media_id, rows) in &audit_groups {
+        let state = audit_states.get(media_id);
+        if state.and_then(|value| value.active_job_id.as_deref())
+            != rows.first().map(|row| row.id.as_str())
+        {
+            summary.claim_mismatches += 1;
+        }
+        if let Some(media_path) = state.and_then(|value| value.media_path.as_deref()) {
+            if library::observe_media_path_fresh(media_path)
+                == library::MediaPathObservation::Present
+            {
+                summary.remaining_present_jobs += rows.len();
+            }
+        }
+    }
+    if summary.remaining_duplicate_identities > 0
+        || summary.remaining_present_jobs > 0
+        || summary.claim_mismatches > 0
+    {
+        return Err(EngineError::InstallFailed(format!(
+            "queue identity post-audit failed: duplicate_identities={}, present_jobs={}, claim_mismatches={}",
+            summary.remaining_duplicate_identities,
+            summary.remaining_present_jobs,
+            summary.claim_mismatches
+        )));
+    }
+    Ok(summary)
+}
+
 fn hydrate_job_target_titles(conn: &rusqlite::Connection, rows: &mut [JobRow]) -> Result<()> {
     let mut urls = Vec::new();
     let mut seen = HashSet::new();
     for row in rows.iter() {
-        if row.item_id.is_some() || row.job_type != JobType::DownloadDirectUrl.as_str() {
+        if row.target_title.is_some()
+            || row.item_id.is_some()
+            || row.job_type != JobType::DownloadDirectUrl.as_str()
+        {
             continue;
         }
         if let Some(url) = direct_download_url_from_params_json(&row.params_json) {
@@ -3660,6 +5740,13 @@ LIMIT 1
     Ok(())
 }
 
+// WP-0257 pacing follow-up: the "updating now" set must reflect the subscriptions the runner is
+// ACTUALLY checking right now, not every subscription merely queued for a refresh. "Update all"
+// enqueues up to `update_all_batch_size` refresh jobs at once (all `queued`); the recurring lane
+// then dispatches them one at a time behind the anti-bot cooldown, so at most ONE refresh is
+// `running` at any moment. Counting the whole queued backlog here made the UI read "258 updating
+// now" while only a single channel was being enumerated. Restrict to `running` so the operator
+// sees the true handful being checked; the queued remainder is plainly waiting, not "updating".
 pub fn active_youtube_subscription_refresh_ids(paths: &AppPaths) -> Result<HashSet<String>> {
     // UI status read: use a read-only connection so Video Archiver refreshes do
     // not contend with the runner's writer path.
@@ -3668,14 +5755,13 @@ pub fn active_youtube_subscription_refresh_ids(paths: &AppPaths) -> Result<HashS
     let mut stmt = conn.prepare(
         r#"
 SELECT params_json FROM job
-WHERE type = ?1 AND status IN (?2, ?3)
+WHERE type = ?1 AND status = ?2
 "#,
     )?;
     let rows = stmt
         .query_map(
             params![
                 JobType::YoutubeSubscriptionRefreshV1.as_str(),
-                JobStatus::Queued.as_str(),
                 JobStatus::Running.as_str(),
             ],
             |row| row.get::<_, String>(0),
@@ -3722,7 +5808,8 @@ SELECT
   params_json,
   target_title,
   retry_of_job_id,
-  retry_replacement_job_id
+  retry_replacement_job_id,
+  track
 FROM job
 WHERE item_id=?1
 ORDER BY created_at_ms DESC
@@ -3782,6 +5869,43 @@ pub fn set_queue_paused(paths: &AppPaths, paused: bool) -> Result<JobQueueContro
     Ok(JobQueueControlState { paused })
 }
 
+// WP-0254: "Stop" / "Update all" the recurring (playlist/channel/subscription) lane.
+// Pausing only stops the recurring lane; single one-off downloads and localization keep
+// running. Queued recurring work is remembered (rows persist) and resumes on the next
+// startup (the flag is cleared in `start_runner`) or when the operator updates-all.
+pub fn set_recurring_paused(paths: &AppPaths, paused: bool) -> Result<bool> {
+    let conn = db::open(paths)?;
+    db::migrate(&conn)?;
+    conn.execute(
+        "INSERT INTO meta(key, value) VALUES(?1, ?2)
+         ON CONFLICT(key) DO UPDATE SET value=excluded.value",
+        params![
+            META_KEY_JOBS_RECURRING_PAUSED,
+            if paused { "1" } else { "0" }
+        ],
+    )?;
+    Ok(paused)
+}
+
+pub fn is_recurring_paused(paths: &AppPaths) -> Result<bool> {
+    let conn = db::open(paths)?;
+    db::migrate(&conn)?;
+    is_recurring_paused_conn(&conn)
+}
+
+fn is_recurring_paused_conn(conn: &rusqlite::Connection) -> Result<bool> {
+    let value: std::result::Result<String, rusqlite::Error> = conn.query_row(
+        "SELECT value FROM meta WHERE key=?1",
+        [META_KEY_JOBS_RECURRING_PAUSED],
+        |row| row.get(0),
+    );
+    match value {
+        Ok(v) => Ok(v.trim() == "1"),
+        Err(rusqlite::Error::QueryReturnedNoRows) => Ok(false),
+        Err(err) => Err(EngineError::Database(err)),
+    }
+}
+
 pub fn cancel_job(paths: &AppPaths, job_id: &str) -> Result<()> {
     let conn = db::open(paths)?;
     db::migrate(&conn)?;
@@ -3830,7 +5954,52 @@ WHERE batch_id=?3 AND id<>?4 AND status IN (?5, ?6)
     }
 
     remove_job_cookie_secret(paths, job_id);
+    let _ = library::release_download_source_claim(paths, job_id, None, None);
     Ok(())
+}
+
+pub fn cancel_youtube_subscription_refresh_jobs(
+    paths: &AppPaths,
+    subscription_id: &str,
+) -> Result<usize> {
+    let conn = db::open(paths)?;
+    db::migrate(&conn)?;
+    let mut stmt = conn.prepare(
+        "SELECT id FROM job \
+         WHERE type=?1 AND status IN (?2, ?3) \
+           AND json_extract(params_json, '$.subscription_id')=?4 \
+         ORDER BY created_at_ms ASC, id ASC",
+    )?;
+    let ids = stmt
+        .query_map(
+            params![
+                JobType::YoutubeSubscriptionRefreshV1.as_str(),
+                JobStatus::Queued.as_str(),
+                JobStatus::Running.as_str(),
+                subscription_id
+            ],
+            |row| row.get::<_, String>(0),
+        )?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+    drop(stmt);
+    drop(conn);
+
+    let mut canceled = 0_usize;
+    for job_id in ids {
+        let before = get_job(paths, &job_id)?;
+        cancel_job(paths, &job_id)?;
+        let after = get_job(paths, &job_id)?;
+        if before
+            .as_ref()
+            .is_some_and(|row| matches!(row.status, JobStatus::Queued | JobStatus::Running))
+            && after
+                .as_ref()
+                .is_some_and(|row| row.status == JobStatus::Canceled)
+        {
+            canceled += 1;
+        }
+    }
+    Ok(canceled)
 }
 
 pub fn cancel_all_jobs(paths: &AppPaths) -> Result<usize> {
@@ -3848,6 +6017,16 @@ pub fn cancel_all_jobs(paths: &AppPaths) -> Result<usize> {
 
     if updated > 0 {
         let _ = clear_dir_entries(&paths.job_secrets_dir());
+        conn.execute(
+            r#"
+UPDATE media_source_identity
+SET active_job_id=NULL,
+    repair_state=CASE WHEN library_item_id IS NULL THEN 'ready' ELSE 'missing' END,
+    updated_at_ms=?1
+WHERE active_job_id IN (SELECT id FROM job WHERE status='canceled')
+"#,
+            [now_ms()],
+        )?;
     }
     Ok(updated)
 }
@@ -4197,15 +6376,38 @@ pub fn retry_job(paths: &AppPaths, job_id: &str) -> Result<JobRow> {
     let conn = db::open(paths)?;
     db::migrate(&conn)?;
 
-    let (type_str, status_str, params_json, batch_id): (String, String, String, Option<String>) =
-        conn.query_row(
-            "SELECT type, status, params_json, batch_id FROM job WHERE id=?1",
-            [job_id],
-            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
-        )?;
+    let (type_str, status_str, params_json, batch_id, persisted_track, legacy_lane): (
+        String,
+        String,
+        String,
+        Option<String>,
+        Option<String>,
+        Option<String>,
+    ) = conn.query_row(
+        "SELECT type, status, params_json, batch_id, track, lane FROM job WHERE id=?1",
+        [job_id],
+        |row| {
+            Ok((
+                row.get(0)?,
+                row.get(1)?,
+                row.get(2)?,
+                row.get(3)?,
+                row.get(4)?,
+                row.get(5)?,
+            ))
+        },
+    )?;
 
     let job_type = JobType::from_str(&type_str)
         .ok_or_else(|| EngineError::InstallFailed(format!("unknown job type in db: {type_str}")))?;
+    // Retry preserves the original canonical scheduling contract. For a historical row that
+    // predates persisted `track` (or carries an invalid stale value), use the internal legacy
+    // classifier only for the replacement write; public rows remain `unclassified` until a
+    // durable track has been stamped.
+    let track = persisted_track
+        .as_deref()
+        .and_then(JobTrack::from_str)
+        .unwrap_or_else(|| legacy_job_track(&type_str, &params_json, legacy_lane.as_deref()));
     let status = JobStatus::from_str(&status_str).ok_or_else(|| {
         EngineError::InstallFailed(format!("unknown job status in db: {status_str}"))
     })?;
@@ -4284,9 +6486,68 @@ pub fn retry_job(paths: &AppPaths, job_id: &str) -> Result<JobRow> {
         _ => None,
     };
 
-    // Re-enqueue with identical params.
-    let mut retry =
-        enqueue_with_type_item_and_batch_id(paths, job_type, params_json, item_id, batch_id)?;
+    // Re-enqueue with identical params and the source's persisted/canonical track. Direct media
+    // retries participate in the same canonical claim as fresh single/subscription submissions;
+    // otherwise a retry button could bypass duplicate prevention while another ingress owned it.
+    let retry_id = Uuid::new_v4().to_string();
+    if matches!(job_type, JobType::DownloadDirectUrl) {
+        let direct: DownloadDirectUrlParams = serde_json::from_str(&params_json)?;
+        match library::claim_download_source(
+            paths,
+            &direct.url,
+            &retry_id,
+            true,
+            false,
+            if direct.subscription_id.is_some() {
+                "subscription"
+            } else {
+                "single"
+            },
+            direct.subscription_id.as_deref(),
+        )? {
+            library::DownloadSourceClaim::Claimed => {}
+            library::DownloadSourceClaim::Active(active_job_id) => {
+                if let Some(active) = get_job(paths, &active_job_id)? {
+                    link_retry_jobs(paths, job_id, &active.id, false)?;
+                    return Ok(active);
+                }
+                return Err(EngineError::InstallFailed(
+                    "the canonical source is already being claimed for download".to_string(),
+                ));
+            }
+            library::DownloadSourceClaim::Present(item_id) => {
+                return Err(EngineError::InstallFailed(format!(
+                    "duplicate prevented: canonical media is already present in library item {item_id}"
+                )));
+            }
+            library::DownloadSourceClaim::Missing(_) => {
+                return Err(EngineError::InstallFailed(
+                    "the missing canonical media requires explicit redownload approval".to_string(),
+                ));
+            }
+            library::DownloadSourceClaim::OperatorDeleted(_) => {
+                return Err(EngineError::InstallFailed(
+                    "operator-deleted media requires an explicit selected-item redownload"
+                        .to_string(),
+                ));
+            }
+        }
+    }
+    let mut retry = match enqueue_with_type_item_batch_track_and_id(
+        paths,
+        job_type,
+        params_json,
+        item_id,
+        batch_id,
+        track,
+        retry_id.clone(),
+    ) {
+        Ok(retry) => retry,
+        Err(err) => {
+            let _ = library::release_download_source_claim(paths, &retry_id, None, None);
+            return Err(err);
+        }
+    };
     link_retry_jobs(paths, job_id, &retry.id, true)?;
     retry.retry_of_job_id = Some(job_id.to_string());
     Ok(retry)
@@ -4327,6 +6588,50 @@ fn link_retry_jobs_conn(
     Ok(())
 }
 
+// WP-0258 (2d): idempotency guard for batch retry/repair. A double-click (the operator or a
+// slow UI firing `jobs_retry_batch_failed` twice) must not double-enqueue the same canonical
+// batch. This process-global set holds the canonical `batch_id`s that currently have a retry in
+// flight; the second concurrent caller for the same batch returns a fast no-op summary instead of
+// re-running the whole re-enqueue. This is a coordination marker only — it does NOT change retry
+// lineage or canonical scope (VV-SOT / WP-0248); it just prevents a redundant second pass.
+static BATCH_RETRY_INFLIGHT: OnceLock<Mutex<HashSet<String>>> = OnceLock::new();
+
+fn batch_retry_inflight() -> &'static Mutex<HashSet<String>> {
+    BATCH_RETRY_INFLIGHT.get_or_init(|| Mutex::new(HashSet::new()))
+}
+
+/// RAII marker: inserts `batch_id` into the in-flight set on `acquire` (returning `None` if it was
+/// already present) and removes it on drop, so a panic or early return never leaks a stuck marker.
+struct BatchRetryInflightGuard {
+    batch_id: String,
+}
+
+impl BatchRetryInflightGuard {
+    fn acquire(batch_id: &str) -> Option<Self> {
+        let mut set = batch_retry_inflight()
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        if set.contains(batch_id) {
+            return None;
+        }
+        set.insert(batch_id.to_string());
+        Some(Self {
+            batch_id: batch_id.to_string(),
+        })
+    }
+}
+
+impl Drop for BatchRetryInflightGuard {
+    fn drop(&mut self) {
+        // Recover from a poisoned lock so a panic elsewhere never permanently wedges this batch's
+        // retry marker.
+        let mut set = batch_retry_inflight()
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        set.remove(&self.batch_id);
+    }
+}
+
 pub fn retry_failed_jobs_for_batch(
     paths: &AppPaths,
     batch_id_or_prefix: &str,
@@ -4338,6 +6643,32 @@ pub fn retry_failed_jobs_for_batch(
 
     let detail = get_batch_detail(paths, query)?;
     let batch_id = detail.health.batch_id.clone();
+
+    // WP-0258 (2d): dedupe concurrent/double-clicked retries of the same canonical batch. If a
+    // retry for this batch is already running, return a fast no-op summary rather than queuing a
+    // second identical pass. Scope/lineage is unchanged; the in-flight caller does the real work.
+    let _inflight = match BatchRetryInflightGuard::acquire(&batch_id) {
+        Some(guard) => guard,
+        None => {
+            return Ok(RetryBatchFailedSummary {
+                batch_id,
+                matched_retryable_jobs: 0,
+                queued_jobs: 0,
+                reused_active_jobs: 0,
+                failed_retries: 0,
+                blocked_jobs: 0,
+                skipped_succeeded_jobs: 0,
+                skipped_active_jobs: 0,
+                unresolved_jobs: 0,
+                dry_run: false,
+                first_error: Some(
+                    "A retry for this batch is already in progress; skipped the duplicate request."
+                        .to_string(),
+                ),
+            });
+        }
+    };
+
     let conn = db::open(paths)?;
     db::migrate(&conn)?;
     let active_before = active_job_ids(&conn)?;
@@ -4388,7 +6719,15 @@ pub fn retry_failed_jobs_for_batch(
     let mut failed_retries = 0_usize;
     let mut first_error: Option<String> = None;
 
-    for job_id in &retryable_job_ids {
+    // WP-0258 (2d): process the identical canonical retryable set, but in bounded chunks with a
+    // short yield between chunks. Each `retry_job` opens+drops its own short write conn, so no
+    // single long transaction is held; the yield lets a pending read-only `jobs_list` /
+    // `jobs_batch_detail` grab the WAL lock between bursts instead of waiting minutes behind a
+    // 12k-child re-enqueue. Every retryable job is still processed exactly once (counts unchanged).
+    for (index, job_id) in retryable_job_ids.iter().enumerate() {
+        if index > 0 && index % BATCH_RETRY_CHUNK_SIZE == 0 {
+            thread::sleep(Duration::from_millis(BATCH_RETRY_CHUNK_YIELD_MS));
+        }
         match retry_job(paths, job_id) {
             Ok(row) => {
                 if active_before.contains(&row.id)
@@ -4498,6 +6837,20 @@ fn youtube_auth_key_from_download_params_json(
     )
 }
 
+/// The auth circuit is shared across every YouTube direct download, independent of whether the
+/// source was a foreground paste, playlist/channel expansion, or a saved subscription. A
+/// rejected browser/cookie session is not a recurring-only condition.
+fn youtube_direct_download_is_held(paths: &AppPaths, params_json: &str) -> bool {
+    if !youtube_auth_circuit_open(paths) {
+        return false;
+    }
+    serde_json::from_str::<DownloadDirectUrlParams>(params_json)
+        .ok()
+        .and_then(|params| normalize_direct_url(&params.url).ok())
+        .map(|url| is_youtube_url(&url))
+        .unwrap_or(false)
+}
+
 fn active_direct_download_retry_for_key(
     conn: &rusqlite::Connection,
     source_job_id: &str,
@@ -4520,7 +6873,8 @@ SELECT
   params_json,
   target_title,
   retry_of_job_id,
-  retry_replacement_job_id
+  retry_replacement_job_id,
+  track
 FROM job
 WHERE type=?1 AND id<>?2 AND status IN (?3, ?4)
 ORDER BY created_at_ms ASC
@@ -4566,7 +6920,8 @@ SELECT
   params_json,
   target_title,
   retry_of_job_id,
-  retry_replacement_job_id
+  retry_replacement_job_id,
+  track
 FROM job
 WHERE batch_id=?1
 ORDER BY created_at_ms ASC
@@ -4600,7 +6955,8 @@ SELECT
   params_json,
   target_title,
   retry_of_job_id,
-  retry_replacement_job_id
+  retry_replacement_job_id,
+  track
 FROM job
 WHERE id=?1
 "#,
@@ -4639,7 +6995,8 @@ SELECT
   params_json,
   target_title,
   retry_of_job_id,
-  retry_replacement_job_id
+  retry_replacement_job_id,
+  track
 FROM job
 WHERE batch_id=?1
 ORDER BY created_at_ms ASC
@@ -4663,7 +7020,8 @@ SELECT
   params_json,
   target_title,
   retry_of_job_id,
-  retry_replacement_job_id
+  retry_replacement_job_id,
+  track
 FROM job
 ORDER BY created_at_ms ASC
 "#,
@@ -5291,11 +7649,13 @@ pub fn delete_terminal_jobs_matching_search(
 #[derive(Debug, Clone)]
 pub struct JobRunnerHandle {
     stop: Arc<AtomicBool>,
+    runtime_state: Arc<Mutex<JobTrackRunnerRuntimeState>>,
 }
 
 impl JobRunnerHandle {
     pub fn stop(&self) {
         self.stop.store(true, Ordering::SeqCst);
+        update_youtube_gate_runtime(&self.runtime_state, "ready", None, None);
     }
 }
 
@@ -5306,9 +7666,17 @@ pub fn start_runner(paths: AppPaths) -> Result<JobRunnerHandle> {
 
     // If the app crashed, requeue any running jobs.
     requeue_orphaned_running_jobs(&conn)?;
+    // WP-0269 intentionally avoids a startup-wide rewrite of a potentially very large queue.
+    // Stamp only a small active slice now; the scheduler continues bounded backfill while its
+    // legacy fallback keeps the untouched remainder dispatchable.
+    let _ = backfill_active_job_tracks_batch(&paths, LEGACY_TRACK_BACKFILL_BATCH);
+    // WP-0254: a restart resumes recurring work, so clear any recurring-lane "Stop" left
+    // set in the previous session — the re-queued recurring downloads should flow again.
+    let _ = set_recurring_paused(&paths, false);
 
     let stop = Arc::new(AtomicBool::new(false));
-    let running = Arc::new(AtomicUsize::new(0));
+    let runtime_state = job_track_runtime_state(&paths);
+    update_youtube_gate_runtime(&runtime_state, "ready", None, None);
 
     let prune_paths = paths.clone();
     thread::spawn(move || {
@@ -5316,24 +7684,127 @@ pub fn start_runner(paths: AppPaths) -> Result<JobRunnerHandle> {
     });
 
     let stop_thread = stop.clone();
-    let running_thread = running.clone();
-    thread::spawn(move || runner_loop(paths, stop_thread, running_thread));
+    let runtime_state_thread = runtime_state.clone();
+    thread::spawn(move || runner_loop(paths, stop_thread, runtime_state_thread));
 
-    Ok(JobRunnerHandle { stop })
+    Ok(JobRunnerHandle {
+        stop,
+        runtime_state,
+    })
 }
 
 fn requeue_orphaned_running_jobs(conn: &rusqlite::Connection) -> Result<usize> {
-    let updated = conn.execute(
-        "UPDATE job
-         SET status=?1, started_at_ms=NULL, finished_at_ms=?2, error=?3
-         WHERE status=?4",
+    // A stop/restart mid-work must not forget a download. Localization work is intentionally
+    // failed (rather than resumed) because its heavyweight multi-stage Python steps need an
+    // explicit retry. `track` is canonical, but type/params fallback keeps this correct for
+    // rows written before v24 without a table-wide migration.
+    let finished_at = now_ms();
+    let failed = conn.execute(
+        "UPDATE job \
+         SET status=?1, started_at_ms=NULL, finished_at_ms=?2, error=?3 \
+         WHERE status=?4 AND (\
+           track='localization' OR type IN (\
+             'asr_local', 'translate_local', 'diarize_local_v1', \
+             'dub_voice_preserving_v1', 'experimental_voice_backend_render_v1', \
+             'tts_preview_pyttsx3_v1', 'tts_neural_local_v1', 'mix_dub_preview_v1', \
+             'mux_dub_preview_v1', 'separate_audio_spleeter', 'separate_audio_demucs_v1', \
+             'clean_vocals_v1', 'qc_report_v1', 'export_pack_v1', 'install_phase2_packs_v1'\
+           )\
+         )",
         params![
             JobStatus::Failed.as_str(),
-            now_ms(),
+            finished_at,
             "interrupted by app shutdown",
             JobStatus::Running.as_str()
         ],
     )?;
+
+    let mut legacy_imports = conn.prepare(
+        "SELECT id, type, params_json, lane FROM job \
+         WHERE status=?1 AND type='import_local' AND (track IS NULL OR TRIM(track)='')",
+    )?;
+    let legacy_imports = legacy_imports
+        .query_map([JobStatus::Running.as_str()], |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, String>(2)?,
+                row.get::<_, Option<String>>(3)?,
+            ))
+        })?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+    let mut classified_imports = 0;
+    for (id, job_type, params_json, lane) in legacy_imports {
+        let track = legacy_job_track(&job_type, &params_json, lane.as_deref());
+        let (status, error, row_finished_at) = if track == JobTrack::Localization {
+            (
+                JobStatus::Failed.as_str(),
+                Some("interrupted by app shutdown"),
+                Some(finished_at),
+            )
+        } else {
+            (JobStatus::Queued.as_str(), None, None)
+        };
+        classified_imports += conn.execute(
+            "UPDATE job SET status=?1, started_at_ms=NULL, finished_at_ms=?2, error=?3, \
+             track=COALESCE(track, ?4) WHERE id=?5 AND status=?6",
+            params![
+                status,
+                row_finished_at,
+                error,
+                track.as_str(),
+                id,
+                JobStatus::Running.as_str()
+            ],
+        )?;
+    }
+
+    let resumed = conn.execute(
+        "UPDATE job \
+         SET status=?1, started_at_ms=NULL, finished_at_ms=NULL, error=NULL \
+         WHERE status=?2",
+        params![JobStatus::Queued.as_str(), JobStatus::Running.as_str()],
+    )?;
+    Ok(resumed + failed + classified_imports)
+}
+
+/// Stamp at most `requested_limit` active legacy rows with their canonical WP-0269 track. This
+/// deliberately does not scan terminal history or execute a schema-time bulk migration: a 55k
+/// historical queue remains usable through the scheduler's bounded legacy fallback while the
+/// active edge is progressively normalized.
+fn backfill_active_job_tracks_batch(paths: &AppPaths, requested_limit: usize) -> Result<usize> {
+    let limit = requested_limit.clamp(1, 500);
+    let mut conn = db::open(paths)?;
+    db::migrate(&conn)?;
+    // Orphan recovery above has already returned interrupted work to `queued`, and every claim
+    // stamps its canonical track atomically. Limiting this normalizer to queued rows preserves
+    // the v25 partial-index order instead of merging two status ranges through a temp sort.
+    let mut stmt = conn.prepare(
+        "SELECT id, type, params_json, lane FROM job \
+         WHERE (track IS NULL OR track='') AND status=?1 \
+         ORDER BY created_at_ms ASC, id ASC LIMIT ?2",
+    )?;
+    let rows = stmt
+        .query_map(params![JobStatus::Queued.as_str(), limit as i64], |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, String>(2)?,
+                row.get::<_, Option<String>>(3)?,
+            ))
+        })?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+    drop(stmt);
+    let tx = conn.transaction()?;
+    let mut updated = 0;
+    for (id, job_type, params_json, lane) in rows {
+        let track = legacy_job_track(&job_type, &params_json, lane.as_deref());
+        updated += tx.execute(
+            "UPDATE job SET track=?1 WHERE id=?2 AND (track IS NULL OR track='')",
+            params![track.as_str(), id],
+        )?;
+    }
+    tx.commit()?;
     Ok(updated)
 }
 
@@ -5357,10 +7828,44 @@ fn enqueue_with_type_item_and_batch_id(
     item_id: Option<String>,
     batch_id: Option<String>,
 ) -> Result<JobRow> {
+    let track = JobTrack::for_type(&job_type);
+    enqueue_with_type_item_batch_and_track(paths, job_type, params_json, item_id, batch_id, track)
+}
+
+// WP-0269: track-aware enqueue. The old `lane` is still written as a compatibility projection,
+// while `track` is the canonical scheduler/UI/diagnostic vocabulary. Direct-download callers
+// supply an explicit source-derived track; all other job types use the centralized map above.
+fn enqueue_with_type_item_batch_and_track(
+    paths: &AppPaths,
+    job_type: JobType,
+    params_json: String,
+    item_id: Option<String>,
+    batch_id: Option<String>,
+    track: JobTrack,
+) -> Result<JobRow> {
+    enqueue_with_type_item_batch_track_and_id(
+        paths,
+        job_type,
+        params_json,
+        item_id,
+        batch_id,
+        track,
+        Uuid::new_v4().to_string(),
+    )
+}
+
+fn enqueue_with_type_item_batch_track_and_id(
+    paths: &AppPaths,
+    job_type: JobType,
+    params_json: String,
+    item_id: Option<String>,
+    batch_id: Option<String>,
+    track: JobTrack,
+    id: String,
+) -> Result<JobRow> {
     let conn = db::open(paths)?;
     db::migrate(&conn)?;
 
-    let id = Uuid::new_v4().to_string();
     let created_at_ms = now_ms();
     let logs_path = paths
         .job_logs_dir()
@@ -5382,8 +7887,10 @@ INSERT INTO job (
   created_at_ms,
   started_at_ms,
   finished_at_ms,
-  logs_path
-) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)
+  logs_path,
+  lane,
+  track
+) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14)
 "#,
         params![
             &id,
@@ -5397,7 +7904,9 @@ INSERT INTO job (
             created_at_ms,
             Option::<i64>::None,
             Option::<i64>::None,
-            &logs_path
+            &logs_path,
+            track.legacy_lane().as_str(),
+            track.as_str()
         ],
     )?;
 
@@ -5417,6 +7926,7 @@ INSERT INTO job (
         target_title: None,
         retry_of_job_id: None,
         retry_replacement_job_id: None,
+        track: track.as_str().to_string(),
     })
 }
 
@@ -5657,6 +8167,108 @@ fn queue_clean_dub_separation_followup(
     Ok(Some(queued))
 }
 
+/// Render the dub segments with the isolated CosyVoice 2 backend instead of
+/// Kokoro+OpenVoice. Consumes the same `request_path` and writes the same
+/// `report_path` (VoiceCloneReport) + per-segment `out_path` wavs as the Kokoro
+/// path, so the dub job's manifest + separation -> mix -> mux -> subtitle follow-up
+/// is reused unchanged. Returns `Ok(false)` if the job was canceled mid-render.
+fn run_cosyvoice_dub_render(
+    paths: &AppPaths,
+    job_id: &str,
+    request_path: &Path,
+    report_path: &Path,
+    segment_count: usize,
+) -> Result<bool> {
+    let pack = tools::cosyvoice_pack_status(paths);
+    if !pack.installed {
+        return Err(EngineError::InstallFailed(format!(
+            "CosyVoice voice-clone pack is not installed: {}",
+            pack.status_detail
+        )));
+    }
+    let cosy_python = tools::cosyvoice_venv_python_path(paths).map_err(|_| {
+        EngineError::InstallFailed(
+            "CosyVoice isolated Python environment is not installed.".to_string(),
+        )
+    })?;
+    let render_script = paths
+        .cosyvoice_backend_dir()
+        .join("voxvulgi_cosyvoice_render.py");
+    let model_parent = paths.cosyvoice_model_parent_dir();
+
+    log_line(
+        paths,
+        job_id,
+        "info",
+        "tts_preview_cosyvoice_python_begin",
+        serde_json::json!({
+            "request_path": request_path.to_string_lossy(),
+            "model_dir": model_parent.to_string_lossy(),
+            "segments": segment_count,
+        }),
+    )?;
+
+    let mut cmd = cmd::command(&cosy_python);
+    cmd.arg(&render_script);
+    cmd.arg("--request").arg(request_path);
+    cmd.arg("--report").arg(report_path);
+    cmd.arg("--model-dir").arg(&model_parent);
+    cmd.arg("--backend").arg("cosyvoice");
+    cmd.env("PYTHONNOUSERSITE", "1");
+    // The CosyVoice model itself is loaded from a local dir (offline-by-design), and the
+    // Qwen LLM base loads from the local snapshot, so HF/transformers stay offline.
+    // ModelScope is intentionally NOT forced offline: the wetext text-frontend fetches
+    // small normalizer assets on first use and caches them; forcing offline before that
+    // cache is warmed would break the render. Install warmup pre-warms this cache.
+    cmd.env("HF_HUB_OFFLINE", "1");
+    cmd.env("TRANSFORMERS_OFFLINE", "1");
+
+    let output = match run_command_output_with_control(
+        paths,
+        &mut cmd,
+        Some(job_id),
+        PYTHON_MODEL_JOB_TIMEOUT_SECS,
+    ) {
+        Ok(output) => output,
+        Err(CommandRunError::Spawn(error)) => {
+            return Err(EngineError::InstallFailed(format!(
+                "failed to run CosyVoice render: {error}"
+            )))
+        }
+        Err(CommandRunError::Wait(error)) => {
+            return Err(EngineError::InstallFailed(format!(
+                "CosyVoice render failed while running: {error}"
+            )))
+        }
+        Err(CommandRunError::Canceled) => {
+            log_line(paths, job_id, "info", "job_canceled", serde_json::json!({}))?;
+            return Ok(false);
+        }
+        Err(CommandRunError::TimedOut(limit)) => {
+            return Err(EngineError::InstallFailed(format!(
+                "CosyVoice render timed out after {limit}s"
+            )))
+        }
+    };
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        return Err(EngineError::InstallFailed(format!(
+            "CosyVoice render failed (code={:?}): {}",
+            output.status.code(),
+            stderr.trim()
+        )));
+    }
+
+    log_line(
+        paths,
+        job_id,
+        "info",
+        "tts_preview_cosyvoice_python_done",
+        serde_json::json!({ "report_path": report_path.to_string_lossy() }),
+    )?;
+    Ok(true)
+}
+
 fn queue_post_voice_preserving_dub_followup(
     paths: &AppPaths,
     item: &library::LibraryItem,
@@ -5845,111 +8457,1242 @@ fn run_job_stall_watchdog(
     seen.retain(|id, _| still_running.contains(id));
 }
 
-fn runner_loop(paths: AppPaths, stop: Arc<AtomicBool>, running: Arc<AtomicUsize>) {
+#[derive(Debug, Clone)]
+struct YoutubeGateRuntimeState {
+    state: &'static str,
+    next_eligible_at_ms: Option<i64>,
+    hold_reason: Option<&'static str>,
+}
+
+impl Default for YoutubeGateRuntimeState {
+    fn default() -> Self {
+        Self {
+            state: "ready",
+            next_eligible_at_ms: None,
+            hold_reason: None,
+        }
+    }
+}
+
+#[derive(Debug, Default)]
+struct JobTrackRunnerRuntimeState {
+    youtube_gate: YoutubeGateRuntimeState,
+}
+
+fn job_track_runtime_state(paths: &AppPaths) -> Arc<Mutex<JobTrackRunnerRuntimeState>> {
+    let states = JOB_TRACK_RUNTIME_STATES.get_or_init(|| Mutex::new(HashMap::new()));
+    let key = paths.base_dir.clone();
+    let mut states = states
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    states
+        .entry(key)
+        .or_insert_with(|| Arc::new(Mutex::new(JobTrackRunnerRuntimeState::default())))
+        .clone()
+}
+
+fn update_youtube_gate_runtime(
+    runtime_state: &Arc<Mutex<JobTrackRunnerRuntimeState>>,
+    state: &'static str,
+    next_eligible_at_ms: Option<i64>,
+    hold_reason: Option<&'static str>,
+) {
+    let mut runtime = runtime_state
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    runtime.youtube_gate = YoutubeGateRuntimeState {
+        state,
+        next_eligible_at_ms,
+        hold_reason,
+    };
+}
+
+fn youtube_gate_snapshot(paths: &AppPaths) -> YoutubeSharedGateSnapshot {
+    let runtime_state = job_track_runtime_state(paths);
+    let runtime = runtime_state
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    YoutubeSharedGateSnapshot {
+        state: runtime.youtube_gate.state.to_string(),
+        next_eligible_at_ms: runtime.youtube_gate.next_eligible_at_ms,
+        hold_reason: runtime.youtube_gate.hold_reason.map(str::to_string),
+    }
+}
+
+/// A start gate, not a worker permit: it only spaces the moment a direct YouTube command is
+/// launched. Once a job has started, its worker runs independently and never monopolizes a
+/// scheduler-wide lock. The preferred track flips after each start, yielding foreground-first
+/// service with bounded recurring fairness whenever both tracks have queued work.
+#[derive(Debug)]
+struct YoutubeStartGate {
+    last_start: Option<std::time::Instant>,
+    next_after_secs: u64,
+    next_eligible_at_ms: Option<i64>,
+    preferred_track: JobTrack,
+}
+
+impl YoutubeStartGate {
+    fn new() -> Self {
+        Self {
+            last_start: None,
+            next_after_secs: 0,
+            next_eligible_at_ms: None,
+            preferred_track: JobTrack::YoutubeSingle,
+        }
+    }
+
+    fn ready(&self) -> bool {
+        self.next_after_secs == 0
+            || self.last_start.map_or(true, |last| {
+                last.elapsed() >= Duration::from_secs(self.next_after_secs)
+            })
+    }
+
+    fn candidate_order(&self) -> [JobTrack; 2] {
+        match self.preferred_track {
+            JobTrack::YoutubeRecurring => [JobTrack::YoutubeRecurring, JobTrack::YoutubeSingle],
+            _ => [JobTrack::YoutubeSingle, JobTrack::YoutubeRecurring],
+        }
+    }
+
+    fn record_start(&mut self, paths: &AppPaths, job_id: &str, track: JobTrack) -> u64 {
+        self.last_start = Some(std::time::Instant::now());
+        self.next_after_secs = recurring_download_sleep_secs(paths, job_id) as u64;
+        self.next_eligible_at_ms = Some(
+            now_ms().saturating_add(
+                self.next_after_secs
+                    .saturating_mul(1_000)
+                    .min(i64::MAX as u64) as i64,
+            ),
+        );
+        self.preferred_track = match track {
+            JobTrack::YoutubeSingle => JobTrack::YoutubeRecurring,
+            JobTrack::YoutubeRecurring => JobTrack::YoutubeSingle,
+            _ => JobTrack::YoutubeSingle,
+        };
+        self.next_after_secs
+    }
+}
+
+/// Deduplicates gate-state traces. The runner observes its pacing state every short scheduler
+/// tick, but an operator needs state changes plus a bounded heartbeat, not hundreds of identical
+/// diagnostics rows. Details intentionally contain no URLs, cookie material, params, or paths.
+#[derive(Debug, Default)]
+struct YoutubeGateTraceGate {
+    last_state: Option<(&'static str, Option<&'static str>)>,
+    last_trace: Option<std::time::Instant>,
+}
+
+impl YoutubeGateTraceGate {
+    fn should_emit(&mut self, state: &'static str, hold_reason: Option<&'static str>) -> bool {
+        const TRACE_INTERVAL_SECS: u64 = 30;
+        let now = std::time::Instant::now();
+        let changed = self.last_state != Some((state, hold_reason));
+        let interval_elapsed = self.last_trace.map_or(true, |last| {
+            now.duration_since(last) >= Duration::from_secs(TRACE_INTERVAL_SECS)
+        });
+        if changed || interval_elapsed {
+            self.last_state = Some((state, hold_reason));
+            self.last_trace = Some(now);
+            true
+        } else {
+            false
+        }
+    }
+}
+
+fn observe_youtube_gate(
+    paths: &AppPaths,
+    runtime_state: &Arc<Mutex<JobTrackRunnerRuntimeState>>,
+    trace_gate: &mut YoutubeGateTraceGate,
+    state: &'static str,
+    next_eligible_at_ms: Option<i64>,
+    hold_reason: Option<&'static str>,
+) {
+    update_youtube_gate_runtime(runtime_state, state, next_eligible_at_ms, hold_reason);
+    if trace_gate.should_emit(state, hold_reason) {
+        let event = match state {
+            "ready" => "youtube_shared_gate_open",
+            "waiting" => "youtube_shared_gate_wait",
+            "held" => "youtube_shared_gate_held",
+            _ => return,
+        };
+        append_engine_diagnostics_trace_row_best_effort(
+            paths,
+            event,
+            if state == "held" { "warn" } else { "info" },
+            serde_json::json!({
+                "state": state,
+                "next_eligible_at_ms": next_eligible_at_ms,
+                "hold_reason": hold_reason,
+                "dedupe_interval_secs": 30,
+            }),
+        );
+    }
+}
+
+/// A per-track/type keyset cursor for bounded discovery of rows that predate persisted `track`.
+/// Every scheduler track advances independently through its own legacy slice, so a large prefix
+/// classified to another service cannot indefinitely hide a later eligible target. These cursors
+/// are process-local scheduling hints only: they never alter public job truth or database rows.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+struct LegacyTrackFetchKey {
+    track: JobTrack,
+    job_type: Option<String>,
+}
+
+#[derive(Debug, Clone)]
+struct LegacyTrackCursor {
+    created_at_ms: i64,
+    id: String,
+}
+
+#[derive(Default)]
+struct LegacyTrackFallbackCursors {
+    by_key: HashMap<LegacyTrackFetchKey, LegacyTrackCursor>,
+}
+
+impl LegacyTrackFallbackCursors {
+    fn key(track: JobTrack, job_type: Option<&str>) -> LegacyTrackFetchKey {
+        LegacyTrackFetchKey {
+            track,
+            job_type: job_type.map(str::to_string),
+        }
+    }
+
+    fn cursor(&self, track: JobTrack, job_type: Option<&str>) -> Option<&LegacyTrackCursor> {
+        self.by_key.get(&Self::key(track, job_type))
+    }
+
+    fn advance(&mut self, track: JobTrack, job_type: Option<&str>, cursor: LegacyTrackCursor) {
+        self.by_key.insert(Self::key(track, job_type), cursor);
+    }
+
+    fn reset(&mut self, track: JobTrack, job_type: Option<&str>) {
+        self.by_key.remove(&Self::key(track, job_type));
+    }
+}
+
+fn runner_loop(
+    paths: AppPaths,
+    stop: Arc<AtomicBool>,
+    runtime_state: Arc<Mutex<JobTrackRunnerRuntimeState>>,
+) {
     let mut stall_seen: std::collections::HashMap<String, JobProgressMark> =
         std::collections::HashMap::new();
     let mut last_watchdog = std::time::Instant::now()
         .checked_sub(Duration::from_secs(JOB_WATCHDOG_SCAN_INTERVAL_SECS))
         .unwrap_or_else(std::time::Instant::now);
+    let mut last_backfill = std::time::Instant::now()
+        .checked_sub(Duration::from_secs(LEGACY_TRACK_BACKFILL_INTERVAL_SECS))
+        .unwrap_or_else(std::time::Instant::now);
+    let mut active_track_backfill_complete = false;
+    let mut last_lineage_backfill = std::time::Instant::now()
+        .checked_sub(Duration::from_secs(DOWNLOAD_LINEAGE_BACKFILL_INTERVAL_SECS))
+        .unwrap_or_else(std::time::Instant::now);
+    let mut lineage_backfill_complete = false;
+    let mut last_recurring_dispatch: Option<std::time::Instant> = None;
+    let mut next_recurring_dispatch_after_secs = 0_u64;
+    let mut youtube_start_gate = YoutubeStartGate::new();
+    let mut legacy_track_cursors = LegacyTrackFallbackCursors::default();
+    let mut youtube_gate_trace_gate = YoutubeGateTraceGate::default();
 
     while !stop.load(Ordering::SeqCst) {
-        // Stuck-job watchdog heartbeat — runs regardless of queue/concurrency
-        // state below so a wedged job is caught even while others are queued.
         if last_watchdog.elapsed() >= Duration::from_secs(JOB_WATCHDOG_SCAN_INTERVAL_SECS) {
             last_watchdog = std::time::Instant::now();
             run_job_stall_watchdog(&paths, &mut stall_seen);
         }
+        if !active_track_backfill_complete
+            && last_backfill.elapsed() >= Duration::from_secs(LEGACY_TRACK_BACKFILL_INTERVAL_SECS)
+        {
+            last_backfill = std::time::Instant::now();
+            if let Ok(updated) =
+                backfill_active_job_tracks_batch(&paths, LEGACY_TRACK_BACKFILL_BATCH)
+            {
+                if updated > 0 {
+                    append_engine_diagnostics_trace_row_best_effort(
+                        &paths,
+                        "job_track_backfill",
+                        "info",
+                        serde_json::json!({ "rows": updated }),
+                    );
+                } else {
+                    active_track_backfill_complete = true;
+                    append_engine_diagnostics_trace_row_best_effort(
+                        &paths,
+                        "job_track_backfill_complete",
+                        "info",
+                        serde_json::json!({}),
+                    );
+                }
+            }
+        }
+        // WP-0268 recovery must not depend on the operator leaving one frontend tab visible.
+        // The engine advances the same durable cursor in short transactions, while the existing
+        // UI command remains available for an explicit foreground retry after a transient error.
+        if !lineage_backfill_complete
+            && last_lineage_backfill.elapsed()
+                >= Duration::from_secs(DOWNLOAD_LINEAGE_BACKFILL_INTERVAL_SECS)
+        {
+            last_lineage_backfill = std::time::Instant::now();
+            if let Ok(state) =
+                library::backfill_download_lineage_batch(&paths, DOWNLOAD_LINEAGE_BACKFILL_BATCH)
+            {
+                lineage_backfill_complete = state.complete;
+                append_engine_diagnostics_trace_row_best_effort(
+                    &paths,
+                    if state.complete {
+                        "library_download_lineage_backfill_complete"
+                    } else {
+                        "library_download_lineage_backfill_progress"
+                    },
+                    "info",
+                    serde_json::json!({
+                        "cursor_job_rowid": state.cursor_job_rowid,
+                        "remaining_candidates": state.remaining_candidates,
+                    }),
+                );
+            }
+        }
 
-        let paused = match is_queue_paused(&paths) {
-            Ok(v) => v,
-            Err(_) => false,
-        };
-        if paused {
+        if is_queue_paused(&paths).unwrap_or(false) {
+            observe_youtube_gate(
+                &paths,
+                &runtime_state,
+                &mut youtube_gate_trace_gate,
+                "held",
+                None,
+                Some("queue_paused"),
+            );
             thread::sleep(Duration::from_millis(250));
             continue;
         }
 
-        let max_concurrency = match get_max_concurrency(&paths) {
-            Ok(v) => v,
-            Err(_) => DEFAULT_MAX_CONCURRENT_JOBS,
-        };
-        let available = max_concurrency.saturating_sub(running.load(Ordering::SeqCst));
-        if available == 0 {
-            thread::sleep(Duration::from_millis(200));
-            continue;
+        let recurring_paused = is_recurring_paused(&paths).unwrap_or(false);
+        let mut dispatched_any = false;
+
+        if youtube_auth_circuit_open(&paths) {
+            observe_youtube_gate(
+                &paths,
+                &runtime_state,
+                &mut youtube_gate_trace_gate,
+                "held",
+                None,
+                Some("youtube_auth_circuit_open"),
+            );
+        } else if youtube_start_gate.ready() {
+            observe_youtube_gate(
+                &paths,
+                &runtime_state,
+                &mut youtube_gate_trace_gate,
+                "ready",
+                None,
+                None,
+            );
+        } else {
+            observe_youtube_gate(
+                &paths,
+                &runtime_state,
+                &mut youtube_gate_trace_gate,
+                "waiting",
+                youtube_start_gate.next_eligible_at_ms,
+                Some("paced_after_youtube_start"),
+            );
         }
 
-        let queued = match fetch_queued_jobs(&paths, available) {
-            Ok(v) => v,
-            Err(_) => {
-                thread::sleep(Duration::from_millis(400));
-                continue;
+        // Both YouTube tracks have their own running budgets, but all direct YouTube starts
+        // share this gate. A held auth session never consumes capacity or blocks non-YouTube
+        // tracks. The one-start loop intentionally provides alternating fairness when both
+        // queues are eligible rather than launching a burst in a single scheduler tick.
+        if youtube_start_gate.ready() {
+            'youtube_tracks: for track in youtube_start_gate.candidate_order() {
+                if track == JobTrack::YoutubeRecurring && recurring_paused {
+                    continue;
+                }
+                let limit =
+                    get_track_limit(&paths, track).unwrap_or_else(|_| track.default_limit());
+                let running = running_count_for_track_and_type(
+                    &paths,
+                    track,
+                    JobType::DownloadDirectUrl.as_str(),
+                )
+                .unwrap_or(0);
+                let available = limit.saturating_sub(running);
+                if available == 0 {
+                    continue;
+                }
+                let scan_limit = available
+                    .saturating_mul(LEGACY_TRACK_FETCH_SCAN_MULTIPLIER)
+                    .max(1);
+                let Ok(jobs) = fetch_queued_jobs_for_track_and_type_with_cursors(
+                    &paths,
+                    track,
+                    JobType::DownloadDirectUrl.as_str(),
+                    scan_limit,
+                    &mut legacy_track_cursors,
+                ) else {
+                    continue;
+                };
+                for (job_id, type_str, params_json) in jobs {
+                    if stop.load(Ordering::SeqCst) {
+                        break 'youtube_tracks;
+                    }
+                    if youtube_direct_download_is_held(&paths, &params_json) {
+                        observe_youtube_gate(
+                            &paths,
+                            &runtime_state,
+                            &mut youtube_gate_trace_gate,
+                            "held",
+                            None,
+                            Some("youtube_auth_circuit_open"),
+                        );
+                        continue;
+                    }
+                    if claim_and_spawn_for_track(
+                        &paths,
+                        job_id.clone(),
+                        type_str,
+                        params_json,
+                        track,
+                    ) {
+                        youtube_start_gate.record_start(&paths, &job_id, track);
+                        observe_youtube_gate(
+                            &paths,
+                            &runtime_state,
+                            &mut youtube_gate_trace_gate,
+                            "waiting",
+                            youtube_start_gate.next_eligible_at_ms,
+                            Some("paced_after_youtube_start"),
+                        );
+                        dispatched_any = true;
+                        break 'youtube_tracks;
+                    }
+                }
             }
-        };
-
-        if queued.is_empty() {
-            thread::sleep(Duration::from_millis(300));
-            continue;
         }
 
-        for (job_id, type_str, params_json) in queued {
+        // Channel/playlist enumeration remains separately paced. It retains its historical
+        // cooldown and one-at-a-time behavior without making subscription downloads serialize
+        // behind the same long refresh interval.
+        if !recurring_paused && !youtube_auth_circuit_open(&paths) {
+            let running_refresh = running_count_for_track_and_type(
+                &paths,
+                JobTrack::YoutubeRecurring,
+                JobType::YoutubeSubscriptionRefreshV1.as_str(),
+            )
+            .unwrap_or(0);
+            let cooldown_ok = next_recurring_dispatch_after_secs == 0
+                || last_recurring_dispatch.map_or(true, |last| {
+                    last.elapsed() >= Duration::from_secs(next_recurring_dispatch_after_secs)
+                });
+            if running_refresh == 0 && cooldown_ok {
+                if let Ok(jobs) = fetch_queued_jobs_for_track_and_type_with_cursors(
+                    &paths,
+                    JobTrack::YoutubeRecurring,
+                    JobType::YoutubeSubscriptionRefreshV1.as_str(),
+                    1,
+                    &mut legacy_track_cursors,
+                ) {
+                    for (job_id, type_str, params_json) in jobs {
+                        let interval = recurring_dispatch_interval_secs(&paths, &job_id);
+                        if claim_and_spawn_for_track(
+                            &paths,
+                            job_id.clone(),
+                            type_str,
+                            params_json,
+                            JobTrack::YoutubeRecurring,
+                        ) {
+                            last_recurring_dispatch = Some(std::time::Instant::now());
+                            next_recurring_dispatch_after_secs = interval;
+                            append_engine_diagnostics_trace_row_best_effort(
+                                &paths,
+                                "youtube_recurring_enumeration_dispatched",
+                                "info",
+                                serde_json::json!({
+                                    "job_id": job_id,
+                                    "next_dispatch_after_secs": interval,
+                                }),
+                            );
+                            dispatched_any = true;
+                            break;
+                        }
+                    }
+                }
+            }
+        }
+
+        // Non-YouTube services never share a budget with either YouTube track or each other.
+        for track in [
+            JobTrack::Instagram,
+            JobTrack::OtherVideo,
+            JobTrack::ImageArchive,
+            JobTrack::Localization,
+        ] {
             if stop.load(Ordering::SeqCst) {
                 break;
             }
-
-            let claimed = match claim_job(&paths, &job_id) {
-                Ok(v) => v,
-                Err(_) => false,
+            let limit = get_track_limit(&paths, track).unwrap_or_else(|_| track.default_limit());
+            let running = match running_count_for_track(&paths, track) {
+                Ok(value) => value,
+                Err(_) => continue,
             };
-            if !claimed {
+            let available = limit.saturating_sub(running);
+            if available == 0 {
                 continue;
             }
-
-            running.fetch_add(1, Ordering::SeqCst);
-            let paths_worker = paths.clone();
-            let running_worker = running.clone();
-            thread::spawn(move || {
-                let result = execute_job(&paths_worker, &job_id, &type_str, &params_json);
-                if let Err(e) = result {
-                    let _ = set_failed(&paths_worker, &job_id, &e.to_string());
+            let Ok(jobs) = fetch_queued_jobs_for_track_with_cursors(
+                &paths,
+                track,
+                available,
+                &mut legacy_track_cursors,
+            ) else {
+                continue;
+            };
+            for (job_id, type_str, params_json) in jobs {
+                if stop.load(Ordering::SeqCst) {
+                    break;
                 }
-                running_worker.fetch_sub(1, Ordering::SeqCst);
-            });
+                if claim_and_spawn_for_track(&paths, job_id, type_str, params_json, track) {
+                    dispatched_any = true;
+                }
+            }
+        }
+
+        thread::sleep(Duration::from_millis(if dispatched_any {
+            100
+        } else {
+            300
+        }));
+    }
+
+    update_youtube_gate_runtime(&runtime_state, "ready", None, None);
+}
+
+fn fetch_queued_jobs_for_track_inner(
+    paths: &AppPaths,
+    wanted_track: JobTrack,
+    wanted_type: Option<&str>,
+    limit: usize,
+    legacy_cursors: &mut LegacyTrackFallbackCursors,
+) -> Result<Vec<(String, String, String)>> {
+    let limit = limit.max(1);
+    let conn = db::open_readonly(paths)?;
+    let mut result = Vec::with_capacity(limit);
+
+    // New rows use the indexable persisted track predicate. The fallback below is intentionally
+    // bounded so a 55k pre-v24 queue cannot turn one scheduler tick into a full migration scan.
+    let primary = if wanted_track == JobTrack::YoutubeRecurring
+        && wanted_type == Some(JobType::YoutubeSubscriptionRefreshV1.as_str())
+    {
+        // WP-0281: preserve FIFO between refresh cohorts, but within the same cohort enumerate
+        // channel, `/videos`, and `/shorts` subscriptions before playlists. The first successful
+        // feed claim makes a later playlist candidate `active`/`present`; a failed feed does not
+        // suppress playlist recovery because canonical preflight remains the final gate.
+        let mut stmt = conn.prepare(
+            "SELECT id, type, params_json FROM (\
+             SELECT j.id, j.type, j.params_json, j.created_at_ms, \
+                    MIN(j.created_at_ms) OVER (\
+                      PARTITION BY COALESCE(NULLIF(j.batch_id, ''), j.id)\
+                    ) AS cohort_created_at_ms, \
+                    CASE WHEN INSTR(LOWER(COALESCE(s.source_url, '')), '/playlist') > 0 \
+                           OR INSTR(LOWER(COALESCE(s.source_url, '')), 'list=') > 0 \
+                         THEN 1 ELSE 0 END AS source_priority \
+             FROM job j \
+             LEFT JOIN youtube_subscription s \
+               ON s.id = json_extract(j.params_json, '$.subscription_id') \
+             WHERE j.status=?1 AND j.track=?2 AND j.type=?3 \
+               AND COALESCE(s.source_status, 'normal') <> 'deleted'\
+             ) queued_refreshes \
+             ORDER BY cohort_created_at_ms ASC, source_priority ASC, created_at_ms ASC, id ASC \
+             LIMIT ?4",
+        )?;
+        let rows = stmt
+            .query_map(
+                params![
+                    JobStatus::Queued.as_str(),
+                    wanted_track.as_str(),
+                    JobType::YoutubeSubscriptionRefreshV1.as_str(),
+                    limit as i64
+                ],
+                |row| {
+                    Ok((
+                        row.get::<_, String>(0)?,
+                        row.get::<_, String>(1)?,
+                        row.get::<_, String>(2)?,
+                    ))
+                },
+            )?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        rows
+    } else if let Some(job_type) = wanted_type {
+        let mut stmt = conn.prepare(
+            "SELECT id, type, params_json FROM job \
+             WHERE status=?1 AND track=?2 AND type=?3 ORDER BY created_at_ms ASC LIMIT ?4",
+        )?;
+        let rows = stmt
+            .query_map(
+                params![
+                    JobStatus::Queued.as_str(),
+                    wanted_track.as_str(),
+                    job_type,
+                    limit as i64
+                ],
+                |row| {
+                    Ok((
+                        row.get::<_, String>(0)?,
+                        row.get::<_, String>(1)?,
+                        row.get::<_, String>(2)?,
+                    ))
+                },
+            )?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        rows
+    } else {
+        let mut stmt = conn.prepare(
+            "SELECT id, type, params_json FROM job \
+             WHERE status=?1 AND track=?2 ORDER BY created_at_ms ASC LIMIT ?3",
+        )?;
+        let rows = stmt
+            .query_map(
+                params![
+                    JobStatus::Queued.as_str(),
+                    wanted_track.as_str(),
+                    limit as i64
+                ],
+                |row| {
+                    Ok((
+                        row.get::<_, String>(0)?,
+                        row.get::<_, String>(1)?,
+                        row.get::<_, String>(2)?,
+                    ))
+                },
+            )?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        rows
+    };
+    result.extend(primary);
+    if result.len() >= limit {
+        return Ok(result);
+    }
+
+    let cursor = legacy_cursors.cursor(wanted_track, wanted_type).cloned();
+    // Fixed-size keyset slices make legacy discovery fair without a startup migration or a
+    // table-wide per-tick scan. A track's cursor advances past wrong-track rows independently;
+    // with the 4,096-row cap, a target after a 55k prefix is discovered in bounded passes.
+    let legacy_rows = match (wanted_type, cursor.as_ref()) {
+        (Some(job_type), Some(cursor)) => {
+            let mut stmt = conn.prepare(
+                "SELECT id, type, params_json, lane, created_at_ms FROM job \
+                 WHERE status=?1 AND (track IS NULL OR track='') AND type=?2 \
+                   AND (created_at_ms>?3 OR (created_at_ms=?3 AND id>?4)) \
+                 ORDER BY created_at_ms ASC, id ASC LIMIT ?5",
+            )?;
+            let rows = stmt
+                .query_map(
+                    params![
+                        JobStatus::Queued.as_str(),
+                        job_type,
+                        cursor.created_at_ms,
+                        &cursor.id,
+                        LEGACY_TRACK_CURSOR_SCAN_BATCH as i64,
+                    ],
+                    |row| {
+                        Ok((
+                            row.get::<_, String>(0)?,
+                            row.get::<_, String>(1)?,
+                            row.get::<_, String>(2)?,
+                            row.get::<_, Option<String>>(3)?,
+                            row.get::<_, i64>(4)?,
+                        ))
+                    },
+                )?
+                .collect::<rusqlite::Result<Vec<_>>>()?;
+            rows
+        }
+        (Some(job_type), None) => {
+            let mut stmt = conn.prepare(
+                "SELECT id, type, params_json, lane, created_at_ms FROM job \
+                 WHERE status=?1 AND (track IS NULL OR track='') AND type=?2 \
+                 ORDER BY created_at_ms ASC, id ASC LIMIT ?3",
+            )?;
+            let rows = stmt
+                .query_map(
+                    params![
+                        JobStatus::Queued.as_str(),
+                        job_type,
+                        LEGACY_TRACK_CURSOR_SCAN_BATCH as i64,
+                    ],
+                    |row| {
+                        Ok((
+                            row.get::<_, String>(0)?,
+                            row.get::<_, String>(1)?,
+                            row.get::<_, String>(2)?,
+                            row.get::<_, Option<String>>(3)?,
+                            row.get::<_, i64>(4)?,
+                        ))
+                    },
+                )?
+                .collect::<rusqlite::Result<Vec<_>>>()?;
+            rows
+        }
+        (None, Some(cursor)) => {
+            let mut stmt = conn.prepare(
+                "SELECT id, type, params_json, lane, created_at_ms FROM job \
+                 WHERE status=?1 AND (track IS NULL OR track='') \
+                   AND (created_at_ms>?2 OR (created_at_ms=?2 AND id>?3)) \
+                 ORDER BY created_at_ms ASC, id ASC LIMIT ?4",
+            )?;
+            let rows = stmt
+                .query_map(
+                    params![
+                        JobStatus::Queued.as_str(),
+                        cursor.created_at_ms,
+                        &cursor.id,
+                        LEGACY_TRACK_CURSOR_SCAN_BATCH as i64,
+                    ],
+                    |row| {
+                        Ok((
+                            row.get::<_, String>(0)?,
+                            row.get::<_, String>(1)?,
+                            row.get::<_, String>(2)?,
+                            row.get::<_, Option<String>>(3)?,
+                            row.get::<_, i64>(4)?,
+                        ))
+                    },
+                )?
+                .collect::<rusqlite::Result<Vec<_>>>()?;
+            rows
+        }
+        (None, None) => {
+            let mut stmt = conn.prepare(
+                "SELECT id, type, params_json, lane, created_at_ms FROM job \
+                 WHERE status=?1 AND (track IS NULL OR track='') \
+                 ORDER BY created_at_ms ASC, id ASC LIMIT ?2",
+            )?;
+            let rows = stmt
+                .query_map(
+                    params![
+                        JobStatus::Queued.as_str(),
+                        LEGACY_TRACK_CURSOR_SCAN_BATCH as i64,
+                    ],
+                    |row| {
+                        Ok((
+                            row.get::<_, String>(0)?,
+                            row.get::<_, String>(1)?,
+                            row.get::<_, String>(2)?,
+                            row.get::<_, Option<String>>(3)?,
+                            row.get::<_, i64>(4)?,
+                        ))
+                    },
+                )?
+                .collect::<rusqlite::Result<Vec<_>>>()?;
+            rows
+        }
+    };
+    let scanned_count = legacy_rows.len();
+    if let Some((id, _, _, _, created_at_ms)) = legacy_rows.last() {
+        if scanned_count >= LEGACY_TRACK_CURSOR_SCAN_BATCH {
+            legacy_cursors.advance(
+                wanted_track,
+                wanted_type,
+                LegacyTrackCursor {
+                    created_at_ms: *created_at_ms,
+                    id: id.clone(),
+                },
+            );
+        } else {
+            legacy_cursors.reset(wanted_track, wanted_type);
+        }
+    } else if cursor.is_some() {
+        // Reached the end since the prior slice. Reset for a future bounded cycle rather than
+        // pinning a cursor beyond newly queued legacy rows.
+        legacy_cursors.reset(wanted_track, wanted_type);
+    }
+    for (id, job_type, params_json, lane, _) in legacy_rows {
+        if legacy_job_track(&job_type, &params_json, lane.as_deref()) == wanted_track {
+            result.push((id, job_type, params_json));
+            if result.len() >= limit {
+                break;
+            }
+        }
+    }
+    Ok(result)
+}
+
+#[cfg(test)]
+fn fetch_queued_jobs_for_track(
+    paths: &AppPaths,
+    track: JobTrack,
+    limit: usize,
+) -> Result<Vec<(String, String, String)>> {
+    let mut cursors = LegacyTrackFallbackCursors::default();
+    fetch_queued_jobs_for_track_inner(paths, track, None, limit, &mut cursors)
+}
+
+#[cfg(test)]
+fn fetch_queued_jobs_for_track_and_type(
+    paths: &AppPaths,
+    track: JobTrack,
+    job_type: &str,
+    limit: usize,
+) -> Result<Vec<(String, String, String)>> {
+    let mut cursors = LegacyTrackFallbackCursors::default();
+    fetch_queued_jobs_for_track_inner(paths, track, Some(job_type), limit, &mut cursors)
+}
+
+fn fetch_queued_jobs_for_track_with_cursors(
+    paths: &AppPaths,
+    track: JobTrack,
+    limit: usize,
+    legacy_cursors: &mut LegacyTrackFallbackCursors,
+) -> Result<Vec<(String, String, String)>> {
+    fetch_queued_jobs_for_track_inner(paths, track, None, limit, legacy_cursors)
+}
+
+fn fetch_queued_jobs_for_track_and_type_with_cursors(
+    paths: &AppPaths,
+    track: JobTrack,
+    job_type: &str,
+    limit: usize,
+    legacy_cursors: &mut LegacyTrackFallbackCursors,
+) -> Result<Vec<(String, String, String)>> {
+    fetch_queued_jobs_for_track_inner(paths, track, Some(job_type), limit, legacy_cursors)
+}
+
+fn running_count_for_track_inner(
+    paths: &AppPaths,
+    wanted_track: JobTrack,
+    wanted_type: Option<&str>,
+) -> Result<usize> {
+    let conn = db::open_readonly(paths)?;
+    let primary_count: i64 = if let Some(job_type) = wanted_type {
+        conn.query_row(
+            "SELECT COUNT(*) FROM job WHERE status=?1 AND track=?2 AND type=?3",
+            params![JobStatus::Running.as_str(), wanted_track.as_str(), job_type],
+            |row| row.get(0),
+        )?
+    } else {
+        conn.query_row(
+            "SELECT COUNT(*) FROM job WHERE status=?1 AND track=?2",
+            params![JobStatus::Running.as_str(), wanted_track.as_str()],
+            |row| row.get(0),
+        )?
+    };
+    let legacy_rows = if let Some(job_type) = wanted_type {
+        let mut stmt = conn.prepare(
+            "SELECT type, params_json, lane FROM job WHERE status=?1 \
+             AND (track IS NULL OR TRIM(track)='') AND type=?2",
+        )?;
+        let rows = stmt
+            .query_map(params![JobStatus::Running.as_str(), job_type], |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, Option<String>>(2)?,
+                ))
+            })?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        rows
+    } else {
+        let mut stmt = conn.prepare(
+            "SELECT type, params_json, lane FROM job WHERE status=?1 \
+             AND (track IS NULL OR TRIM(track)='')",
+        )?;
+        let rows = stmt
+            .query_map([JobStatus::Running.as_str()], |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, Option<String>>(2)?,
+                ))
+            })?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        rows
+    };
+    let legacy_count = legacy_rows
+        .into_iter()
+        .filter(|(job_type, params_json, lane)| {
+            legacy_job_track(job_type, params_json, lane.as_deref()) == wanted_track
+        })
+        .count();
+    Ok(primary_count.max(0) as usize + legacy_count)
+}
+
+fn running_count_for_track(paths: &AppPaths, track: JobTrack) -> Result<usize> {
+    running_count_for_track_inner(paths, track, None)
+}
+
+fn running_count_for_track_and_type(
+    paths: &AppPaths,
+    track: JobTrack,
+    job_type: &str,
+) -> Result<usize> {
+    running_count_for_track_inner(paths, track, Some(job_type))
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum DispatchClaimOutcome {
+    Claimed {
+        job_type: String,
+        params_json: String,
+    },
+    SkippedPresent,
+    SkippedActive,
+    SkippedOperatorDeleted,
+    DeferredStorage,
+    DeferredChanged,
+    NotQueued,
+}
+
+fn youtube_identity_state_conn(
+    conn: &rusqlite::Connection,
+    media_id: &str,
+) -> Result<Option<QueueIdentityDbState>> {
+    conn.query_row(
+        r#"
+SELECT i.active_job_id, i.library_item_id, li.media_path,
+       li.file_status, li.file_redownload_authorized_job_id
+FROM media_source_identity i
+LEFT JOIN library_item li ON li.id=i.library_item_id
+WHERE i.service='youtube' AND i.media_id=?1
+"#,
+        [media_id],
+        |row| {
+            Ok(QueueIdentityDbState {
+                active_job_id: row.get(0)?,
+                library_item_id: row.get(1)?,
+                media_path: row.get(2)?,
+                file_status: row.get(3)?,
+                file_redownload_authorized_job_id: row.get(4)?,
+            })
+        },
+    )
+    .optional()
+    .map_err(EngineError::from)
+}
+
+fn cancel_queued_dispatch_conn(
+    conn: &rusqlite::Connection,
+    job_id: &str,
+    reason: &str,
+) -> Result<bool> {
+    Ok(conn.execute(
+        "UPDATE job SET status='canceled', error=?1, finished_at_ms=?2 WHERE id=?3 AND status='queued'",
+        params![reason, now_ms(), job_id],
+    )? == 1)
+}
+
+fn claim_job_for_track(
+    paths: &AppPaths,
+    job_id: &str,
+    track: JobTrack,
+) -> Result<DispatchClaimOutcome> {
+    let mut conn = db::open(paths)?;
+    db::migrate(&conn)?;
+    let prefetched: Option<(String, String, String)> = conn
+        .query_row(
+            "SELECT status, type, params_json FROM job WHERE id=?1",
+            [job_id],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+        )
+        .optional()?;
+    let Some((status, prefetched_type, prefetched_params)) = prefetched else {
+        return Ok(DispatchClaimOutcome::NotQueued);
+    };
+    if status != JobStatus::Queued.as_str() {
+        return Ok(DispatchClaimOutcome::NotQueued);
+    }
+
+    let youtube_source = if prefetched_type == JobType::DownloadDirectUrl.as_str() {
+        direct_download_url_from_params_json(&prefetched_params)
+            .and_then(|url| library::canonical_media_source(&url).map(|source| (url, source)))
+            .filter(|(_, source)| source.service == "youtube")
+    } else {
+        None
+    };
+    let prefetched_identity = match youtube_source.as_ref() {
+        Some((_, source)) => youtube_identity_state_conn(&conn, &source.media_id)?,
+        None => None,
+    };
+    let path_observation = prefetched_identity.as_ref().and_then(|state| {
+        let operator_deleted = state
+            .file_status
+            .as_deref()
+            .is_some_and(|value| matches!(value, "operator_deleted" | "delete_pending"));
+        if operator_deleted && state.file_redownload_authorized_job_id.as_deref() != Some(job_id) {
+            None
+        } else {
+            state
+                .media_path
+                .as_ref()
+                .map(|path| library::observe_media_path_fresh(path))
+        }
+    });
+
+    let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
+    let current: Option<(String, String, String)> = tx
+        .query_row(
+            "SELECT status, type, params_json FROM job WHERE id=?1",
+            [job_id],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+        )
+        .optional()?;
+    let Some((current_status, current_type, current_params)) = current else {
+        return Ok(DispatchClaimOutcome::NotQueued);
+    };
+    if current_status != JobStatus::Queued.as_str() {
+        return Ok(DispatchClaimOutcome::NotQueued);
+    }
+    if current_type != prefetched_type || current_params != prefetched_params {
+        return Ok(DispatchClaimOutcome::DeferredChanged);
+    }
+
+    let Some((source_url, source)) = youtube_source else {
+        let updated = tx.execute(
+            "UPDATE job SET status=?1, started_at_ms=?2, \
+             track=COALESCE(NULLIF(TRIM(track), ''), ?3) \
+             WHERE id=?4 AND status=?5",
+            params![
+                JobStatus::Running.as_str(),
+                now_ms(),
+                track.as_str(),
+                job_id,
+                JobStatus::Queued.as_str()
+            ],
+        )?;
+        tx.commit()?;
+        return Ok(if updated == 1 {
+            DispatchClaimOutcome::Claimed {
+                job_type: current_type,
+                params_json: current_params,
+            }
+        } else {
+            DispatchClaimOutcome::NotQueued
+        });
+    };
+
+    let parsed = serde_json::from_str::<DownloadDirectUrlParams>(&current_params).ok();
+    library::record_queued_download_source_context_conn(
+        &tx,
+        &source_url,
+        if parsed
+            .as_ref()
+            .and_then(|params| params.subscription_id.as_ref())
+            .is_some()
+        {
+            "subscription"
+        } else {
+            "single"
+        },
+        parsed
+            .as_ref()
+            .and_then(|params| params.subscription_id.as_deref()),
+        job_id,
+        parsed
+            .as_ref()
+            .and_then(|params| params.source_page_url.as_deref()),
+        parsed
+            .as_ref()
+            .and_then(|params| params.source_display_name.as_deref()),
+        "execution_gate_wp0283",
+    )?;
+    let mut current_identity =
+        youtube_identity_state_conn(&tx, &source.media_id)?.ok_or_else(|| {
+            EngineError::InstallFailed(
+                "canonical YouTube identity disappeared during dispatch".to_string(),
+            )
+        })?;
+    let prefetched_library_tuple = prefetched_identity.as_ref().map(|state| {
+        (
+            state.library_item_id.as_deref(),
+            state.media_path.as_deref(),
+            state.file_status.as_deref(),
+            state.file_redownload_authorized_job_id.as_deref(),
+        )
+    });
+    let current_library_tuple = Some((
+        current_identity.library_item_id.as_deref(),
+        current_identity.media_path.as_deref(),
+        current_identity.file_status.as_deref(),
+        current_identity
+            .file_redownload_authorized_job_id
+            .as_deref(),
+    ));
+    if prefetched_identity.is_some() && prefetched_library_tuple != current_library_tuple {
+        return Ok(DispatchClaimOutcome::DeferredChanged);
+    }
+
+    let operator_deleted = current_identity
+        .file_status
+        .as_deref()
+        .is_some_and(|value| matches!(value, "operator_deleted" | "delete_pending"));
+    if operator_deleted
+        && current_identity
+            .file_redownload_authorized_job_id
+            .as_deref()
+            != Some(job_id)
+    {
+        cancel_queued_dispatch_conn(
+            &tx,
+            job_id,
+            "[operator-delete-wp0284] canonical video was deleted by the operator; only an exact selected-item redownload is allowed",
+        )?;
+        tx.execute(
+            "UPDATE media_source_identity SET active_job_id=CASE WHEN active_job_id=?1 THEN NULL ELSE active_job_id END, \
+             repair_state='operator_deleted', updated_at_ms=?2 \
+             WHERE service='youtube' AND media_id=?3",
+            params![job_id, now_ms(), source.media_id],
+        )?;
+        tx.commit()?;
+        remove_job_cookie_secret(paths, job_id);
+        return Ok(DispatchClaimOutcome::SkippedOperatorDeleted);
+    }
+    if prefetched_identity.is_none()
+        && (current_identity.library_item_id.is_some() || current_identity.media_path.is_some())
+    {
+        return Ok(DispatchClaimOutcome::DeferredChanged);
+    }
+
+    if let Some(active_job_id) = current_identity.active_job_id.clone() {
+        if active_job_id != job_id {
+            let active_status: Option<String> = tx
+                .query_row(
+                    "SELECT status FROM job WHERE id=?1",
+                    [&active_job_id],
+                    |row| row.get(0),
+                )
+                .optional()?;
+            if active_status
+                .as_deref()
+                .is_some_and(|value| matches!(value, "queued" | "running"))
+            {
+                cancel_queued_dispatch_conn(
+                    &tx,
+                    job_id,
+                    &format!(
+                        "[execution-gate-wp0283] canonical YouTube identity is owned by job {active_job_id}"
+                    ),
+                )?;
+                tx.commit()?;
+                remove_job_cookie_secret(paths, job_id);
+                return Ok(DispatchClaimOutcome::SkippedActive);
+            }
+            tx.execute(
+                "UPDATE media_source_identity SET active_job_id=NULL, updated_at_ms=?1 WHERE service='youtube' AND media_id=?2 AND active_job_id=?3",
+                params![now_ms(), source.media_id, active_job_id],
+            )?;
+            current_identity.active_job_id = None;
+        }
+    }
+
+    match path_observation {
+        Some(library::MediaPathObservation::Present) => {
+            cancel_queued_dispatch_conn(
+                &tx,
+                job_id,
+                "[execution-gate-wp0283] canonical YouTube media is already present",
+            )?;
+            tx.execute(
+                "UPDATE media_source_identity SET active_job_id=NULL, repair_state='ready', updated_at_ms=?1 WHERE service='youtube' AND media_id=?2 AND (active_job_id IS NULL OR active_job_id=?3)",
+                params![now_ms(), source.media_id, job_id],
+            )?;
+            tx.commit()?;
+            remove_job_cookie_secret(paths, job_id);
+            Ok(DispatchClaimOutcome::SkippedPresent)
+        }
+        Some(library::MediaPathObservation::Unreachable) => {
+            tx.commit()?;
+            Ok(DispatchClaimOutcome::DeferredStorage)
+        }
+        Some(library::MediaPathObservation::Missing) | None => {
+            let claimed = tx.execute(
+                "UPDATE media_source_identity SET active_job_id=?1, repair_state=CASE WHEN library_item_id IS NULL THEN 'downloading' ELSE 'redownloading' END, updated_at_ms=?2 WHERE service='youtube' AND media_id=?3 AND (active_job_id IS NULL OR active_job_id=?1)",
+                params![job_id, now_ms(), source.media_id],
+            )?;
+            if claimed != 1 {
+                return Ok(DispatchClaimOutcome::DeferredChanged);
+            }
+            let updated = tx.execute(
+                "UPDATE job SET status=?1, started_at_ms=?2, \
+                 track=COALESCE(NULLIF(TRIM(track), ''), ?3) \
+                 WHERE id=?4 AND status=?5",
+                params![
+                    JobStatus::Running.as_str(),
+                    now_ms(),
+                    track.as_str(),
+                    job_id,
+                    JobStatus::Queued.as_str()
+                ],
+            )?;
+            if updated != 1 {
+                return Ok(DispatchClaimOutcome::NotQueued);
+            }
+            tx.commit()?;
+            Ok(DispatchClaimOutcome::Claimed {
+                job_type: current_type,
+                params_json: current_params,
+            })
         }
     }
 }
 
-fn fetch_queued_jobs(paths: &AppPaths, limit: usize) -> Result<Vec<(String, String, String)>> {
-    let conn = db::open(paths)?;
-    db::migrate(&conn)?;
-
-    let mut stmt = conn.prepare(
-        "SELECT id, type, params_json FROM job WHERE status=?1 ORDER BY created_at_ms ASC LIMIT ?2",
-    )?;
-
-    let rows = stmt
-        .query_map(params![JobStatus::Queued.as_str(), limit as i64], |row| {
-            Ok((row.get(0)?, row.get(1)?, row.get(2)?))
-        })?
-        .collect::<rusqlite::Result<Vec<_>>>()?;
-
-    Ok(rows)
-}
-
-fn claim_job(paths: &AppPaths, job_id: &str) -> Result<bool> {
-    let conn = db::open(paths)?;
-    db::migrate(&conn)?;
-
-    let updated = conn.execute(
-        "UPDATE job SET status=?1, started_at_ms=?2 WHERE id=?3 AND status=?4",
-        params![
-            JobStatus::Running.as_str(),
-            now_ms(),
-            job_id,
-            JobStatus::Queued.as_str()
-        ],
-    )?;
-    Ok(updated == 1)
+fn claim_and_spawn_for_track(
+    paths: &AppPaths,
+    job_id: String,
+    type_str: String,
+    params_json: String,
+    track: JobTrack,
+) -> bool {
+    let outcome = match claim_job_for_track(paths, &job_id, track) {
+        Ok(outcome) => outcome,
+        Err(_) => return false,
+    };
+    if let DispatchClaimOutcome::Claimed {
+        job_type,
+        params_json: durable_params_json,
+    } = outcome
+    {
+        append_engine_diagnostics_trace_row_best_effort(
+            paths,
+            "job_track_dispatched",
+            "info",
+            serde_json::json!({
+                "track": track.as_str(),
+                "job_type": job_type,
+            }),
+        );
+        let paths_worker = paths.clone();
+        thread::spawn(move || {
+            let result = execute_job(&paths_worker, &job_id, &job_type, &durable_params_json);
+            if let Err(e) = result {
+                let _ = set_failed(&paths_worker, &job_id, &e.to_string());
+            }
+        });
+        true
+    } else {
+        let outcome_name = match outcome {
+            DispatchClaimOutcome::SkippedPresent => "skipped_present",
+            DispatchClaimOutcome::SkippedActive => "skipped_active",
+            DispatchClaimOutcome::SkippedOperatorDeleted => "skipped_operator_deleted",
+            DispatchClaimOutcome::DeferredStorage => "deferred_storage",
+            DispatchClaimOutcome::DeferredChanged => "deferred_changed",
+            DispatchClaimOutcome::NotQueued => "not_queued",
+            DispatchClaimOutcome::Claimed { .. } => unreachable!(),
+        };
+        append_engine_diagnostics_trace_row_best_effort(
+            paths,
+            "job_track_dispatch_suppressed",
+            "info",
+            serde_json::json!({
+                "job_id": job_id,
+                "track": track.as_str(),
+                "job_type": type_str,
+                "outcome": outcome_name,
+            }),
+        );
+        let _ = params_json;
+        false
+    }
 }
 
 fn execute_job(paths: &AppPaths, job_id: &str, type_str: &str, params_json: &str) -> Result<()> {
@@ -6008,8 +9751,8 @@ fn execute_job(paths: &AppPaths, job_id: &str, type_str: &str, params_json: &str
             let conn = db::open(paths)?;
             db::migrate(&conn)?;
             conn.execute(
-                "UPDATE job SET item_id=?1 WHERE id=?2",
-                params![item.id, job_id],
+                "UPDATE job SET item_id=?1, target_title=?2 WHERE id=?3",
+                params![item.id, item.title, job_id],
             )?;
 
             if is_canceled(paths, job_id)? {
@@ -6118,7 +9861,7 @@ fn execute_job(paths: &AppPaths, job_id: &str, type_str: &str, params_json: &str
                     let params_json = serde_json::to_string(&AsrLocalParams {
                         item_id: item.id.clone(),
                         lang: None,
-                        model_id: "whispercpp-tiny".to_string(),
+                        model_id: paths.effective_asr_model_id(),
                         batch_on_import: true,
                         pipeline: None,
                     })?;
@@ -6155,15 +9898,46 @@ fn execute_job(paths: &AppPaths, job_id: &str, type_str: &str, params_json: &str
             let subscription_id = p.subscription_id.clone();
             let url = normalize_direct_url(&p.url)?;
             let provider = effective_download_provider(&p.provider, &url);
-            let auth_cookie = resolve_youtube_auth_cookie_for_job(paths, job_id, p.auth_cookie)?;
+            // Every YouTube direct download uses the proven recurring-safe profile. The queue
+            // track controls admission/fairness; it must not weaken the yt-dlp sleep, fragment,
+            // retry, throttle, or auth-circuit behavior for a foreground paste/playlist.
+            let (effective_sleep_interval, effective_concurrent_fragments) =
+                effective_direct_download_profile(
+                    paths,
+                    &url,
+                    job_id,
+                    p.yt_dlp_sleep_interval,
+                    p.yt_dlp_concurrent_fragments,
+                );
+            // WP-0263: Instagram operations resolve auth with Instagram precedence
+            // (explicit per-job/per-subscription cookie -> global Instagram cookie ->
+            // browser-cookie fallback) rather than the YouTube global cookie, so a saved
+            // YouTube login never leaks into an Instagram request and vice versa.
+            let auth_cookie = if is_instagram_url(&url) {
+                resolve_instagram_auth_cookie(
+                    paths,
+                    read_job_cookie_secret(paths, job_id).as_deref(),
+                )?
+            } else {
+                resolve_youtube_auth_cookie_for_job(paths, job_id, p.auth_cookie)?
+            };
             remove_job_cookie_secret(paths, job_id);
             let mut output_dir = normalize_output_dir(p.output_dir);
             let output_subdir = normalize_output_subdir(p.output_subdir);
-            let use_browser_cookies = p.use_browser_cookies;
-            let browser_cookie_source = browser_cookie_source_for_request(
-                use_browser_cookies,
-                p.browser_cookie_source.as_deref(),
-            )?;
+            let browser_cookie_source = if is_youtube_url(&url) {
+                effective_youtube_browser_source(
+                    paths,
+                    auth_cookie.is_some(),
+                    p.use_browser_cookies,
+                    p.browser_cookie_source.as_deref(),
+                )?
+            } else {
+                browser_cookie_source_for_request(
+                    p.use_browser_cookies,
+                    p.browser_cookie_source.as_deref(),
+                )?
+            };
+            let use_browser_cookies = browser_cookie_source.is_some();
             let youtube_auth_key = if is_youtube_url(&url) {
                 youtube_auth_material_key(
                     paths,
@@ -6213,10 +9987,10 @@ fn execute_job(paths: &AppPaths, job_id: &str, type_str: &str, params_json: &str
                 p.quality_preference.as_deref(),
                 p.yt_dlp_retries,
                 p.yt_dlp_fragment_retries,
-                p.yt_dlp_concurrent_fragments,
+                effective_concurrent_fragments,
                 p.yt_dlp_throttled_rate.as_deref(),
                 p.yt_dlp_file_access_retries,
-                p.yt_dlp_sleep_interval,
+                effective_sleep_interval,
                 p.yt_dlp_sleep_requests,
                 p.subtitle_mode.as_deref(),
             ) {
@@ -6224,14 +9998,18 @@ fn execute_job(paths: &AppPaths, job_id: &str, type_str: &str, params_json: &str
                 Err(err) => {
                     if let Some(auth_key) = youtube_auth_key {
                         if is_youtube_saved_cookie_rejection(&url, &err.to_string()) {
-                            let _ = record_youtube_auth_block(
-                                paths,
-                                auth_key,
-                                "saved YouTube cookies were rejected by YouTube during download"
-                                    .to_string(),
-                                Some(url.clone()),
-                                Some(job_id.to_string()),
-                            );
+                            // WP-0257: corroboration gate (see refresh path) — a single video's
+                            // rejection only counts toward the shared suspicion window.
+                            if register_youtube_auth_suspicion(paths, &auth_key, &url) {
+                                let _ = record_youtube_auth_block(
+                                    paths,
+                                    auth_key,
+                                    "saved YouTube cookies were rejected by YouTube during download"
+                                        .to_string(),
+                                    Some(url.clone()),
+                                    Some(job_id.to_string()),
+                                );
+                            }
                         }
                     }
                     return Err(err);
@@ -6244,13 +10022,30 @@ fn execute_job(paths: &AppPaths, job_id: &str, type_str: &str, params_json: &str
                 return Ok(());
             }
 
-            let item = library::import_downloaded_file(
+            let classification =
+                library::classify_direct_download_execution(&url, subscription_id.as_deref())
+                    .ok_or_else(|| {
+                        EngineError::InstallFailed(
+                            "successful direct download has no classifiable execution URL"
+                                .to_string(),
+                        )
+                    })?;
+            // Publish the library item, ingest provenance, source-job link, and canonical
+            // execution lineage in one database transaction. The successful job cannot become
+            // visible without the durable context later lists require.
+            let item = library::import_downloaded_file_with_lineage(
                 paths,
                 &downloaded_path,
                 &url,
                 DOWNLOAD_RIGHTS_NOTE_UNSPECIFIED,
                 provider,
                 now_ms(),
+                library::DownloadedFileLineageInput {
+                    source_job_id: job_id.to_string(),
+                    source_batch_id: None,
+                    source_subscription_id: subscription_id.clone(),
+                    classification,
+                },
             )?;
             set_progress(paths, job_id, 1.0)?;
 
@@ -6268,13 +10063,6 @@ fn execute_job(paths: &AppPaths, job_id: &str, type_str: &str, params_json: &str
                     );
                 }
             }
-
-            let conn = db::open(paths)?;
-            db::migrate(&conn)?;
-            conn.execute(
-                "UPDATE job SET item_id=?1 WHERE id=?2",
-                params![item.id, job_id],
-            )?;
 
             log_line(
                 paths,
@@ -6306,17 +10094,36 @@ fn execute_job(paths: &AppPaths, job_id: &str, type_str: &str, params_json: &str
                             p.subscription_id
                         ))
                     })?;
+                if sub.source_status == subscriptions::YOUTUBE_SUBSCRIPTION_STATUS_DELETED {
+                    return Err(EngineError::InstallFailed(format!(
+                        "subscription is marked deleted and cannot be refreshed: {}",
+                        sub.id
+                    )));
+                }
 
-                let max_items = p.max_items.unwrap_or(200).clamp(1, MAX_DOWNLOAD_BATCH_URLS);
+                // WP-0255: raise the default enumeration depth 200 -> 1000 so the persisted
+                // upstream total reflects the true playlist/channel length for the operator's
+                // real playlists (most are well under 1000; hard cap stays MAX_DOWNLOAD_BATCH_URLS).
+                // --flat-playlist enumeration is one cheap request; the recurring lane (limit 1) +
+                // WP-0257 pacing + yt-dlp archive keep the resulting download fan-out safe.
+                let max_items = p
+                    .max_items
+                    .unwrap_or(1000)
+                    .clamp(1, MAX_DOWNLOAD_BATCH_URLS);
                 let output_dir = subscriptions::youtube_subscription_output_dir(paths, &sub)?;
                 std::fs::create_dir_all(&output_dir)?;
-                let subscription_use_browser_cookies =
-                    sub.use_browser_cookies && auth_cookie.is_none();
+                let subscription_browser_cookie_source = effective_youtube_browser_source(
+                    paths,
+                    auth_cookie.is_some(),
+                    sub.use_browser_cookies,
+                    sub.browser_cookie_source.as_deref(),
+                )?;
+                let subscription_use_browser_cookies = subscription_browser_cookie_source.is_some();
                 let youtube_auth_key = youtube_auth_material_key(
                     paths,
                     auth_cookie.as_deref(),
                     subscription_use_browser_cookies,
-                    sub.browser_cookie_source.as_deref(),
+                    subscription_browser_cookie_source.as_deref(),
                 )?;
                 ensure_youtube_auth_not_blocked(paths, youtube_auth_key.as_deref())?;
 
@@ -6335,28 +10142,45 @@ fn execute_job(paths: &AppPaths, job_id: &str, type_str: &str, params_json: &str
                         "max_items": max_items,
                     }),
                 )?;
+                // WP-0261: mirror subscription progress into the diagnostics trace so an external
+                // monitor (vvwatch / /agent/subscriptions_activity) can see per-subscription work.
+                append_engine_diagnostics_trace_row_best_effort(
+                    paths,
+                    "subscription_refresh_begin",
+                    "info",
+                    serde_json::json!({
+                        "subscription_id": sub.id,
+                        "title": sub.title,
+                        "source_url": redact_url_for_log(&sub.source_url),
+                    }),
+                );
 
-                let expanded = match expand_yt_dlp_urls(
+                let entries = match expand_yt_dlp_entries(
                     paths,
                     &sub.source_url,
                     max_items,
                     auth_cookie.as_deref(),
                     use_browser_cookies_for_url(&sub.source_url, subscription_use_browser_cookies),
-                    sub.browser_cookie_source.as_deref(),
+                    subscription_browser_cookie_source.as_deref(),
                 ) {
                     Ok(value) => value,
                     Err(err) => {
                         if let Some(auth_key) = youtube_auth_key {
                             if is_youtube_saved_cookie_rejection(&sub.source_url, &err.to_string())
                             {
-                                let _ = record_youtube_auth_block(
-                                    paths,
-                                    auth_key,
-                                    "saved YouTube cookies were rejected by YouTube during subscription expansion"
-                                        .to_string(),
-                                    Some(sub.source_url.clone()),
-                                    Some(job_id.to_string()),
-                                );
+                                // WP-0257: one channel's rejection must not block the whole
+                                // fleet — only arm the global block after several DISTINCT
+                                // subscriptions reject under the same cookie within the window.
+                                if register_youtube_auth_suspicion(paths, &auth_key, &sub.id) {
+                                    let _ = record_youtube_auth_block(
+                                        paths,
+                                        auth_key,
+                                        "saved YouTube cookies were rejected by YouTube during subscription expansion"
+                                            .to_string(),
+                                        Some(sub.source_url.clone()),
+                                        Some(job_id.to_string()),
+                                    );
+                                }
                             }
                         }
                         return Err(err);
@@ -6369,23 +10193,98 @@ fn execute_job(paths: &AppPaths, job_id: &str, type_str: &str, params_json: &str
                     return Ok(());
                 }
 
+                // WP-0255: total entries seen upstream at this refresh (the "Y" in "X of Y").
+                let upstream_total = entries.len() as i64;
+                let mut title_by_url: std::collections::HashMap<String, String> =
+                    std::collections::HashMap::new();
                 let mut new_urls: Vec<String> = Vec::new();
                 let mut skipped_archived = 0_usize;
-                for candidate in expanded {
+                let entry_urls = entries
+                    .iter()
+                    .map(|(candidate, _)| candidate.clone())
+                    .collect::<Vec<_>>();
+                let preflight_rows = library::preflight_download_urls(paths, &entry_urls)?;
+                for ((candidate, title), preflight) in entries.into_iter().zip(preflight_rows) {
                     let Some(video_id) =
                         subscriptions::youtube_video_id_from_url(candidate.as_str())
                     else {
                         continue;
                     };
-                    if archived.contains(video_id.as_str()) {
-                        skipped_archived += 1;
-                        continue;
+                    match preflight.status.as_str() {
+                        "present" => {
+                            let _ = library::record_source_association(
+                                paths,
+                                &candidate,
+                                "subscription",
+                                Some(&sub.id),
+                                Some(job_id),
+                            );
+                            if !archived.contains(video_id.as_str()) {
+                                let _ =
+                                    append_youtube_archive_on_success(paths, &sub.id, &candidate);
+                            }
+                            skipped_archived += 1;
+                            continue;
+                        }
+                        "active" => {
+                            let _ = library::record_source_association(
+                                paths,
+                                &candidate,
+                                "subscription",
+                                Some(&sub.id),
+                                Some(job_id),
+                            );
+                            skipped_archived += 1;
+                            continue;
+                        }
+                        "duplicate_input" => {
+                            skipped_archived += 1;
+                            continue;
+                        }
+                        "storage_unreachable" => {
+                            // Never turn an unreachable NAS into a second copy. Leave it pending
+                            // for the next refresh and expose the state through preflight/repair.
+                            skipped_archived += 1;
+                            continue;
+                        }
+                        "missing" | "ready" => {
+                            // An archive hit is not enough: a missing physical file must be repaired.
+                        }
+                        _ => continue,
+                    }
+                    if let Some(title) = title {
+                        title_by_url.insert(candidate.clone(), title);
                     }
                     new_urls.push(candidate);
                 }
 
                 if new_urls.is_empty() {
                     set_progress(paths, job_id, 1.0)?;
+                    // WP-0255: persist progress even when nothing new (so the UI shows the
+                    // true total + that 0 new were found this check).
+                    let _ = subscriptions::record_subscription_refresh_counts(
+                        paths,
+                        &sub.id,
+                        upstream_total,
+                        0,
+                        0,
+                    );
+                    // WP-0261: external-monitor visibility for the "nothing new" outcome.
+                    // batch_id == the refresh job id: that is the value the fanned-out child
+                    // download jobs carry as their batch_id and that youtube_subscriptions_activity
+                    // joins on, so it directly correlates this trace with the activity endpoint.
+                    append_engine_diagnostics_trace_row_best_effort(
+                        paths,
+                        "subscription_refresh_enumerated",
+                        "info",
+                        serde_json::json!({
+                            "subscription_id": sub.id,
+                            "upstream_total": upstream_total,
+                            "new_found": 0,
+                            "queued": 0,
+                            "batch_id": job_id,
+                        }),
+                    );
                     log_line(
                         paths,
                         job_id,
@@ -6394,10 +10293,22 @@ fn execute_job(paths: &AppPaths, job_id: &str, type_str: &str, params_json: &str
                         serde_json::json!({
                             "queued": 0,
                             "skipped_archived": skipped_archived,
+                            "upstream_total": upstream_total,
                         }),
                     )?;
+                    append_engine_diagnostics_trace_row_best_effort(
+                        paths,
+                        "subscription_refresh_done",
+                        "info",
+                        serde_json::json!({
+                            "subscription_id": sub.id,
+                            "queued": 0,
+                            "skipped_archived": skipped_archived,
+                        }),
+                    );
                     return Ok(());
                 }
+                let new_found = new_urls.len() as i64;
 
                 let queued = enqueue_download_direct_url_batch_raw_with_subscription(
                     paths,
@@ -6405,12 +10316,41 @@ fn execute_job(paths: &AppPaths, job_id: &str, type_str: &str, params_json: &str
                     Some(DOWNLOAD_PROVIDER_YOUTUBE_YT_DLP.to_string()),
                     auth_cookie.clone(),
                     Some(output_dir.to_string_lossy().to_string()),
-                    Some(sub.use_browser_cookies && auth_cookie.is_none()),
-                    sub.browser_cookie_source.clone(),
+                    Some(subscription_use_browser_cookies),
+                    subscription_browser_cookie_source.clone(),
                     p.preset_id.clone().or_else(|| sub.preset_id.clone()),
                     Some(job_id.to_string()),
                     Some(sub.id.clone()),
+                    Vec::new(),
+                    Vec::new(),
                 )?;
+                // WP-0256: show the real video title in Jobs for these recurring child
+                // downloads immediately (free from the enumeration above).
+                stamp_job_target_titles_by_url(paths, &queued, &title_by_url);
+                // WP-0255: persist the per-subscription progress the UI shows as "X of Y · N new".
+                let _ = subscriptions::record_subscription_refresh_counts(
+                    paths,
+                    &sub.id,
+                    upstream_total,
+                    new_found,
+                    queued.len() as i64,
+                );
+                // WP-0261: external-monitor visibility for the enumeration + queue result.
+                // batch_id == the refresh job id: that is the value the fanned-out child download
+                // jobs carry as their batch_id and that youtube_subscriptions_activity joins on, so
+                // it directly correlates this trace with the activity endpoint.
+                append_engine_diagnostics_trace_row_best_effort(
+                    paths,
+                    "subscription_refresh_enumerated",
+                    "info",
+                    serde_json::json!({
+                        "subscription_id": sub.id,
+                        "upstream_total": upstream_total,
+                        "new_found": new_found,
+                        "queued": queued.len(),
+                        "batch_id": job_id,
+                    }),
+                );
                 set_progress(paths, job_id, 1.0)?;
 
                 log_line(
@@ -6421,9 +10361,21 @@ fn execute_job(paths: &AppPaths, job_id: &str, type_str: &str, params_json: &str
                     serde_json::json!({
                         "queued": queued.len(),
                         "skipped_archived": skipped_archived,
+                        "upstream_total": upstream_total,
+                        "new_found": new_found,
                         "archive_path": archive_path.to_string_lossy().to_string(),
                     }),
                 )?;
+                append_engine_diagnostics_trace_row_best_effort(
+                    paths,
+                    "subscription_refresh_done",
+                    "info",
+                    serde_json::json!({
+                        "subscription_id": sub.id,
+                        "queued": queued.len(),
+                        "skipped_archived": skipped_archived,
+                    }),
+                );
                 Ok(())
             })();
 
@@ -6434,13 +10386,33 @@ fn execute_job(paths: &AppPaths, job_id: &str, type_str: &str, params_json: &str
                         paths,
                         &p.subscription_id,
                     );
+                    // WP-0257: a success proves the cookie works — drop accumulated suspicions.
+                    clear_youtube_auth_suspect(paths);
                 }
                 Err(err) => {
                     remove_job_cookie_secret(paths, job_id);
-                    let _ = subscriptions::record_subscription_refresh_failure(
+                    // WP-0261: external-monitor visibility for a failed refresh.
+                    append_engine_diagnostics_trace_row_best_effort(
                         paths,
-                        &p.subscription_id,
+                        "subscription_refresh_failed",
+                        "warn",
+                        serde_json::json!({
+                            "subscription_id": p.subscription_id,
+                            "error": err.to_string(),
+                        }),
                     );
+                    // WP-0257: do NOT pin a subscription in per-sub backoff when it merely hit
+                    // the shared auth block — that would keep it failing even after the operator
+                    // re-authenticates. The global block is the single source of truth there.
+                    if !is_youtube_auth_blocked_error(Some(&err.to_string())) {
+                        // WP-0264: persist the raw error so the subscription panel + Jobs can
+                        // classify it (handle-not-found vs sign-in vs rate-limit vs busy).
+                        let _ = subscriptions::record_subscription_refresh_failure_with_error(
+                            paths,
+                            &p.subscription_id,
+                            Some(&err.to_string()),
+                        );
+                    }
                     return Err(err);
                 }
             }
@@ -6724,7 +10696,7 @@ INSERT INTO subtitle_track (
                         let params_json = serde_json::to_string(&TranslateLocalParams {
                             item_id: item.id.clone(),
                             source_track_id: track_id.clone(),
-                            model_id: "whispercpp-tiny".to_string(),
+                            model_id: paths.effective_asr_model_id(),
                             batch_on_import: true,
                             pipeline: None,
                         })?;
@@ -6752,6 +10724,24 @@ INSERT INTO subtitle_track (
                         },
                         batch_id,
                     )?;
+                    // WP-0262: surface a VISIBLE terminal failure when multi-speaker voice
+                    // references could not be built (nothing queued), instead of a silent stall.
+                    if outcome.voice_reference_blocked {
+                        let message = voice_reference_blocked_message(&outcome.notes);
+                        log_line(
+                            paths,
+                            job_id,
+                            "error",
+                            "localization_voice_reference_blocked",
+                            serde_json::json!({
+                                "item_id": &item.id,
+                                "track_id": &inserted_track.id,
+                                "stage": outcome.stage,
+                                "notes": outcome.notes,
+                            }),
+                        )?;
+                        return Err(EngineError::InstallFailed(message));
+                    }
                     if outcome.queued_jobs.is_empty() && !outcome.notes.is_empty() {
                         log_line(
                             paths,
@@ -7011,6 +11001,24 @@ INSERT INTO subtitle_track (
                     },
                     batch_id.clone(),
                 )?;
+                // WP-0262: surface a VISIBLE terminal failure when multi-speaker voice
+                // references could not be built (nothing queued), instead of a silent stall.
+                if outcome.voice_reference_blocked {
+                    let message = voice_reference_blocked_message(&outcome.notes);
+                    log_line(
+                        paths,
+                        job_id,
+                        "error",
+                        "localization_voice_reference_blocked",
+                        serde_json::json!({
+                            "item_id": &item.id,
+                            "track_id": &inserted_track.id,
+                            "stage": outcome.stage,
+                            "notes": outcome.notes,
+                        }),
+                    )?;
+                    return Err(EngineError::InstallFailed(message));
+                }
                 if outcome.queued_jobs.is_empty() && !outcome.notes.is_empty() {
                     log_line(
                         paths,
@@ -7863,6 +11871,24 @@ INSERT INTO subtitle_track (
                     },
                     batch_id,
                 )?;
+                // WP-0262: surface a VISIBLE terminal failure when multi-speaker voice
+                // references could not be built (nothing queued), instead of a silent stall.
+                if outcome.voice_reference_blocked {
+                    let message = voice_reference_blocked_message(&outcome.notes);
+                    log_line(
+                        paths,
+                        job_id,
+                        "error",
+                        "localization_voice_reference_blocked",
+                        serde_json::json!({
+                            "item_id": &item.id,
+                            "track_id": &inserted_track.id,
+                            "stage": outcome.stage,
+                            "notes": outcome.notes,
+                        }),
+                    )?;
+                    return Err(EngineError::InstallFailed(message));
+                }
                 if outcome.queued_jobs.is_empty() && !outcome.notes.is_empty() {
                     log_line(
                         paths,
@@ -8788,20 +12814,36 @@ if __name__ == "__main__":
                 }),
             )?;
 
-            let pack = tools::tts_voice_preserving_local_v1_pack_status(paths);
-            if !pack.installed {
-                return Err(EngineError::InstallFailed(
-                    "Voice-preserving TTS pack is not installed. Open Diagnostics -> Tools -> Install voice-preserving TTS pack."
-                        .to_string(),
-                ));
-            }
+            let dub_backend_id = canonical_tts_backend_id(
+                p.pipeline
+                    .as_ref()
+                    .and_then(|pl| pl.tts_backend_id.as_deref())
+                    .unwrap_or("openvoice_v2"),
+            );
+            if dub_backend_id == "cosyvoice" {
+                let cosy = tools::cosyvoice_pack_status(paths);
+                if !cosy.installed {
+                    return Err(EngineError::InstallFailed(format!(
+                        "CosyVoice voice-clone pack is not installed: {}",
+                        cosy.status_detail
+                    )));
+                }
+            } else {
+                let pack = tools::tts_voice_preserving_local_v1_pack_status(paths);
+                if !pack.installed {
+                    return Err(EngineError::InstallFailed(
+                        "Voice-preserving TTS pack is not installed. Open Diagnostics -> Tools -> Install voice-preserving TTS pack."
+                            .to_string(),
+                    ));
+                }
 
-            let neural_pack = tools::tts_neural_local_v1_pack_status(paths);
-            if !neural_pack.installed {
-                return Err(EngineError::InstallFailed(
-                    "Neural TTS pack is not installed (Kokoro is required as the base TTS stage). Open Diagnostics -> Tools -> Install neural TTS pack."
-                        .to_string(),
-                ));
+                let neural_pack = tools::tts_neural_local_v1_pack_status(paths);
+                if !neural_pack.installed {
+                    return Err(EngineError::InstallFailed(
+                        "Neural TTS pack is not installed (Kokoro is required as the base TTS stage). Open Diagnostics -> Tools -> Install neural TTS pack."
+                            .to_string(),
+                    ));
+                }
             }
 
             let ffmpeg = tools::ffmpeg_tools_status(paths);
@@ -8920,15 +12962,32 @@ if __name__ == "__main__":
                 return Ok(());
             }
 
-            let venv_python = tools::python_venv_python_path(paths).map_err(|_| {
+            let report_path = artifacts_dir.join(match variant_label.as_deref() {
+                Some(label) => format!("tts_voice_preserving_report_{label}.json"),
+                None => "tts_voice_preserving_report.json".to_string(),
+            });
+            if dub_backend_id == "cosyvoice" {
+                // CosyVoice 2 cross-lingual clone in its isolated venv; produces the same
+                // report + segment wavs the shared downstream expects.
+                if !run_cosyvoice_dub_render(
+                    paths,
+                    job_id,
+                    &request_path,
+                    &report_path,
+                    request.len(),
+                )? {
+                    return Ok(());
+                }
+            } else {
+                let venv_python = tools::python_venv_python_path(paths).map_err(|_| {
                 EngineError::InstallFailed(
                     "Python toolchain is not set up. Open Diagnostics -> Tools -> Setup Python toolchain."
                         .to_string(),
                 )
             })?;
 
-            let script_path = artifacts_dir.join("tts_voice_preserving_v1.py");
-            let script = r###"
+                let script_path = artifacts_dir.join("tts_voice_preserving_v1.py");
+                let script = r###"
 import argparse
 import json
 import os
@@ -9337,90 +13396,87 @@ def main() -> None:
 if __name__ == "__main__":
     main()
 "###;
-            std::fs::write(&script_path, script)?;
+                std::fs::write(&script_path, script)?;
 
-            log_line(
-                paths,
-                job_id,
-                "info",
-                "tts_preview_voice_preserving_python_begin",
-                serde_json::json!({ "request_path": &request_path, "segments": request.len() }),
-            )?;
+                log_line(
+                    paths,
+                    job_id,
+                    "info",
+                    "tts_preview_voice_preserving_python_begin",
+                    serde_json::json!({ "request_path": &request_path, "segments": request.len() }),
+                )?;
 
-            let mut py_cmd = cmd::command(&venv_python);
-            py_cmd.arg(&script_path);
-            py_cmd.arg("--request").arg(&request_path);
-            py_cmd
-                .arg("--models-dir")
-                .arg(paths.python_models_dir().join("openvoice_v2"));
-            py_cmd.arg("--ffmpeg").arg(paths.ffmpeg_cmd());
-            let report_path = artifacts_dir.join(match variant_label.as_deref() {
-                Some(label) => format!("tts_voice_preserving_report_{label}.json"),
-                None => "tts_voice_preserving_report.json".to_string(),
-            });
-            py_cmd.arg("--report").arg(&report_path);
-            py_cmd.env("PYTHONNOUSERSITE", "1");
-            py_cmd.env(
-                "XDG_CACHE_HOME",
-                paths
-                    .cache_dir()
-                    .join("python")
-                    .to_string_lossy()
-                    .to_string(),
-            );
-            py_cmd.env(
-                "HF_HOME",
-                paths
-                    .cache_dir()
-                    .join("huggingface")
-                    .to_string_lossy()
-                    .to_string(),
-            );
-            py_cmd.env(
-                "HUGGINGFACE_HUB_CACHE",
-                paths
-                    .cache_dir()
-                    .join("huggingface")
-                    .join("hub")
-                    .to_string_lossy()
-                    .to_string(),
-            );
-            py_cmd.env("HF_HUB_OFFLINE", "1");
-            py_cmd.env("TRANSFORMERS_OFFLINE", "1");
-            let output = match run_command_output_with_control(
-                paths,
-                &mut py_cmd,
-                Some(job_id),
-                PYTHON_MODEL_JOB_TIMEOUT_SECS,
-            ) {
-                Ok(output) => output,
-                Err(CommandRunError::Spawn(error)) => {
+                let mut py_cmd = cmd::command(&venv_python);
+                py_cmd.arg(&script_path);
+                py_cmd.arg("--request").arg(&request_path);
+                py_cmd
+                    .arg("--models-dir")
+                    .arg(paths.python_models_dir().join("openvoice_v2"));
+                py_cmd.arg("--ffmpeg").arg(paths.ffmpeg_cmd());
+                py_cmd.arg("--report").arg(&report_path);
+                py_cmd.env("PYTHONNOUSERSITE", "1");
+                py_cmd.env(
+                    "XDG_CACHE_HOME",
+                    paths
+                        .cache_dir()
+                        .join("python")
+                        .to_string_lossy()
+                        .to_string(),
+                );
+                py_cmd.env(
+                    "HF_HOME",
+                    paths
+                        .cache_dir()
+                        .join("huggingface")
+                        .to_string_lossy()
+                        .to_string(),
+                );
+                py_cmd.env(
+                    "HUGGINGFACE_HUB_CACHE",
+                    paths
+                        .cache_dir()
+                        .join("huggingface")
+                        .join("hub")
+                        .to_string_lossy()
+                        .to_string(),
+                );
+                py_cmd.env("HF_HUB_OFFLINE", "1");
+                py_cmd.env("TRANSFORMERS_OFFLINE", "1");
+                let output = match run_command_output_with_control(
+                    paths,
+                    &mut py_cmd,
+                    Some(job_id),
+                    PYTHON_MODEL_JOB_TIMEOUT_SECS,
+                ) {
+                    Ok(output) => output,
+                    Err(CommandRunError::Spawn(error)) => {
+                        return Err(EngineError::InstallFailed(format!(
+                            "failed to run voice-preserving TTS script: {error}"
+                        )))
+                    }
+                    Err(CommandRunError::Wait(error)) => {
+                        return Err(EngineError::InstallFailed(format!(
+                            "voice-preserving TTS script failed while running: {error}"
+                        )))
+                    }
+                    Err(CommandRunError::Canceled) => {
+                        log_line(paths, job_id, "info", "job_canceled", serde_json::json!({}))?;
+                        return Ok(());
+                    }
+                    Err(CommandRunError::TimedOut(limit)) => {
+                        return Err(EngineError::InstallFailed(format!(
+                            "voice-preserving TTS script timed out after {limit}s"
+                        )))
+                    }
+                };
+                if !output.status.success() {
+                    let stderr = String::from_utf8_lossy(&output.stderr);
                     return Err(EngineError::InstallFailed(format!(
-                        "failed to run voice-preserving TTS script: {error}"
-                    )))
+                        "voice-preserving TTS script failed (code={:?}): {}",
+                        output.status.code(),
+                        stderr.trim()
+                    )));
                 }
-                Err(CommandRunError::Wait(error)) => {
-                    return Err(EngineError::InstallFailed(format!(
-                        "voice-preserving TTS script failed while running: {error}"
-                    )))
-                }
-                Err(CommandRunError::Canceled) => {
-                    log_line(paths, job_id, "info", "job_canceled", serde_json::json!({}))?;
-                    return Ok(());
-                }
-                Err(CommandRunError::TimedOut(limit)) => {
-                    return Err(EngineError::InstallFailed(format!(
-                        "voice-preserving TTS script timed out after {limit}s"
-                    )))
-                }
-            };
-            if !output.status.success() {
-                let stderr = String::from_utf8_lossy(&output.stderr);
-                return Err(EngineError::InstallFailed(format!(
-                    "voice-preserving TTS script failed (code={:?}): {}",
-                    output.status.code(),
-                    stderr.trim()
-                )));
             }
             set_progress(paths, job_id, 0.80)?;
 
@@ -12033,6 +16089,11 @@ ORDER BY created_at_ms ASC
                         let _ = tools::install_tts_voice_preserving_local_v1_pack(paths)?;
                         Ok(())
                     }
+                    "voice_clone_cosyvoice_v1" => {
+                        append_log_line(&log_path, "install: CosyVoice 2 voice-clone pack");
+                        let _ = tools::install_voice_clone_cosyvoice_v1_pack(paths)?;
+                        Ok(())
+                    }
                     other => Err(EngineError::InstallFailed(format!(
                         "unknown phase2 pack step id: {other}"
                     ))),
@@ -12189,7 +16250,7 @@ fn set_succeeded(paths: &AppPaths, job_id: &str) -> Result<()> {
 fn set_failed(paths: &AppPaths, job_id: &str, error: &str) -> Result<()> {
     let conn = db::open(paths)?;
     db::migrate(&conn)?;
-    conn.execute(
+    let changed = conn.execute(
         "UPDATE job SET status=?1, finished_at_ms=?2, error=?3 WHERE id=?4 AND status=?5",
         params![
             JobStatus::Failed.as_str(),
@@ -12199,6 +16260,26 @@ fn set_failed(paths: &AppPaths, job_id: &str, error: &str) -> Result<()> {
             JobStatus::Running.as_str()
         ],
     )?;
+    if changed > 0 {
+        let context: Option<(String, String)> = conn
+            .query_row(
+                "SELECT type, params_json FROM job WHERE id=?1",
+                [job_id],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .optional()?;
+        if let Some((job_type, params_json)) = context {
+            if job_type == JobType::DownloadDirectUrl.as_str() {
+                let failed_url = direct_download_url_from_params_json(&params_json);
+                let _ = library::release_download_source_claim(
+                    paths,
+                    job_id,
+                    failed_url.as_deref(),
+                    Some(error),
+                );
+            }
+        }
+    }
     Ok(())
 }
 
@@ -12217,12 +16298,6 @@ fn is_queue_paused(paths: &AppPaths) -> Result<bool> {
     is_queue_paused_conn(&conn)
 }
 
-fn get_max_concurrency(paths: &AppPaths) -> Result<usize> {
-    let conn = db::open(paths)?;
-    db::migrate(&conn)?;
-    get_max_concurrency_conn(&conn)
-}
-
 fn get_max_concurrency_conn(conn: &rusqlite::Connection) -> Result<usize> {
     let value: std::result::Result<String, rusqlite::Error> = conn.query_row(
         "SELECT value FROM meta WHERE key=?1",
@@ -12237,6 +16312,422 @@ fn get_max_concurrency_conn(conn: &rusqlite::Connection) -> Result<usize> {
         Err(rusqlite::Error::QueryReturnedNoRows) => Ok(DEFAULT_MAX_CONCURRENT_JOBS),
         Err(err) => Err(EngineError::Database(err)),
     }
+}
+
+fn track_limit_conn(conn: &rusqlite::Connection, track: JobTrack) -> usize {
+    let value: std::result::Result<String, rusqlite::Error> = conn.query_row(
+        "SELECT value FROM meta WHERE key=?1",
+        [track.meta_key()],
+        |row| row.get(0),
+    );
+    match value {
+        Ok(v) => v
+            .trim()
+            .parse::<usize>()
+            .map(|parsed| parsed.clamp(1, MAX_MAX_CONCURRENT_JOBS))
+            .unwrap_or_else(|_| track.default_limit()),
+        _ => track.default_limit(),
+    }
+}
+
+fn get_track_limit(paths: &AppPaths, track: JobTrack) -> Result<usize> {
+    let conn = db::open_readonly(paths)?;
+    Ok(track_limit_conn(&conn, track))
+}
+
+pub fn get_job_track_runtime_settings(paths: &AppPaths) -> Result<JobTrackRuntimeSettings> {
+    let conn = db::open_readonly(paths)?;
+    Ok(JobTrackRuntimeSettings {
+        youtube_single: track_limit_conn(&conn, JobTrack::YoutubeSingle),
+        youtube_recurring: track_limit_conn(&conn, JobTrack::YoutubeRecurring),
+        instagram: track_limit_conn(&conn, JobTrack::Instagram),
+        other_video: track_limit_conn(&conn, JobTrack::OtherVideo),
+        image_archive: track_limit_conn(&conn, JobTrack::ImageArchive),
+        localization: track_limit_conn(&conn, JobTrack::Localization),
+    })
+}
+
+fn add_job_track_status_total(totals: &mut JobTrackStatusTotals, status: &str, count: u64) {
+    totals.total = totals.total.saturating_add(count);
+    match status {
+        "queued" => totals.queued = totals.queued.saturating_add(count),
+        "running" => totals.running = totals.running.saturating_add(count),
+        "succeeded" => totals.succeeded = totals.succeeded.saturating_add(count),
+        "failed" => totals.failed = totals.failed.saturating_add(count),
+        "canceled" => totals.canceled = totals.canceled.saturating_add(count),
+        // Preserve total truth even if an old/corrupt row contains a status outside the current
+        // enum. There is no rendered-row inference or silent data loss in this aggregate.
+        _ => {}
+    }
+}
+
+/// Read the canonical track runtime snapshot shared by Jobs controls, diagnostics, and the
+/// localhost bridge. The single aggregate query groups durable `job.track` and `job.status`
+/// directly; it deliberately does not enumerate or inspect bounded overview rows. NULL, blank,
+/// and invalid persisted track values remain explicitly `unclassified`.
+pub fn get_job_tracks_runtime_snapshot(paths: &AppPaths) -> Result<JobTracksRuntimeSnapshot> {
+    let conn = db::open_readonly(paths)?;
+    let queue_paused = is_queue_paused_conn(&conn)?;
+    let recurring_paused = is_recurring_paused_conn(&conn)?;
+    let settings = JobTrackRuntimeSettings {
+        youtube_single: track_limit_conn(&conn, JobTrack::YoutubeSingle),
+        youtube_recurring: track_limit_conn(&conn, JobTrack::YoutubeRecurring),
+        instagram: track_limit_conn(&conn, JobTrack::Instagram),
+        other_video: track_limit_conn(&conn, JobTrack::OtherVideo),
+        image_archive: track_limit_conn(&conn, JobTrack::ImageArchive),
+        localization: track_limit_conn(&conn, JobTrack::Localization),
+    };
+
+    let mut by_track = HashMap::<JobTrack, JobTrackStatusTotals>::new();
+    let mut unclassified = JobTrackStatusTotals::default();
+    let mut stmt =
+        conn.prepare("SELECT track, status, COUNT(*) FROM job GROUP BY track, status")?;
+    let groups = stmt
+        .query_map([], |row| {
+            Ok((
+                row.get::<_, Option<String>>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, i64>(2)?.max(0) as u64,
+            ))
+        })?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+    for (persisted_track, status, count) in groups {
+        if let Some(track) = persisted_track.as_deref().and_then(JobTrack::from_str) {
+            add_job_track_status_total(by_track.entry(track).or_default(), &status, count);
+        } else {
+            add_job_track_status_total(&mut unclassified, &status, count);
+        }
+    }
+
+    let youtube_gate = youtube_gate_snapshot(paths);
+    let tracks = JobTrack::ALL
+        .into_iter()
+        .map(|track| {
+            let configured_budget = settings.for_track(track);
+            let paused = queue_paused || (track == JobTrack::YoutubeRecurring && recurring_paused);
+            let hold_reason = if queue_paused {
+                Some("queue_paused".to_string())
+            } else if track == JobTrack::YoutubeRecurring && recurring_paused {
+                Some("recurring_paused".to_string())
+            } else if matches!(track, JobTrack::YoutubeSingle | JobTrack::YoutubeRecurring)
+                && youtube_gate.state != "ready"
+            {
+                youtube_gate.hold_reason.clone()
+            } else {
+                None
+            };
+            let totals = by_track.remove(&track).unwrap_or_default();
+            JobTrackRuntimeRow {
+                track,
+                configured_budget,
+                effective_budget: if paused { 0 } else { configured_budget },
+                paused,
+                hold_reason,
+                queued: totals.queued,
+                running: totals.running,
+                succeeded: totals.succeeded,
+                failed: totals.failed,
+                canceled: totals.canceled,
+                total: totals.total,
+            }
+        })
+        .collect();
+
+    Ok(JobTracksRuntimeSnapshot {
+        tracks,
+        unclassified,
+        youtube_gate,
+    })
+}
+
+pub fn set_job_track_runtime_settings(
+    paths: &AppPaths,
+    settings: JobTrackRuntimeSettings,
+) -> Result<JobTrackRuntimeSettings> {
+    // Validate before opening a write connection so a bad multi-track request is strictly
+    // no-op. The six writes then commit as one SQLite transaction, never as a half-updated set.
+    settings.validate()?;
+    let mut conn = db::open(paths)?;
+    db::migrate(&conn)?;
+    let tx = conn.transaction()?;
+    for track in JobTrack::ALL {
+        tx.execute(
+            "INSERT INTO meta(key, value) VALUES(?1, ?2) \
+             ON CONFLICT(key) DO UPDATE SET value=excluded.value",
+            params![track.meta_key(), settings.for_track(track).to_string()],
+        )?;
+    }
+    tx.commit()?;
+    // Return the canonical persisted values rather than echoing request data, so callers see
+    // the same settings a subsequent scheduler read observes.
+    let persisted = get_job_track_runtime_settings(paths)?;
+    append_engine_diagnostics_trace_row_best_effort(
+        paths,
+        "job_track_budget_changed",
+        "info",
+        serde_json::json!({
+            "youtube_single": persisted.youtube_single,
+            "youtube_recurring": persisted.youtube_recurring,
+            "instagram": persisted.instagram,
+            "other_video": persisted.other_video,
+            "image_archive": persisted.image_archive,
+            "localization": persisted.localization,
+        }),
+    );
+    Ok(persisted)
+}
+
+// WP-0257 (#3/#4): operator-tunable anti-bot pacing settings (Options -> Anti-bot pacing).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AntiBotPacingSettings {
+    pub recurring_min_interval_secs: u64,
+    pub recurring_jitter_secs: u64,
+    pub enumeration_sleep_requests: u32,
+    pub update_all_batch_size: usize,
+    pub recurring_download_min_sleep_secs: u32,
+    pub recurring_download_max_sleep_secs: u32,
+}
+
+fn meta_u64_conn(conn: &rusqlite::Connection, key: &str, default: u64) -> u64 {
+    let value: std::result::Result<String, rusqlite::Error> =
+        conn.query_row("SELECT value FROM meta WHERE key=?1", [key], |row| {
+            row.get(0)
+        });
+    match value {
+        Ok(v) => v.trim().parse::<u64>().unwrap_or(default),
+        _ => default,
+    }
+}
+
+fn upsert_meta_conn(conn: &rusqlite::Connection, key: &str, value: &str) -> Result<()> {
+    conn.execute(
+        "INSERT INTO meta(key, value) VALUES(?1, ?2) ON CONFLICT(key) DO UPDATE SET value=excluded.value",
+        params![key, value],
+    )?;
+    Ok(())
+}
+
+fn antibot_pacing_from_conn(conn: &rusqlite::Connection) -> AntiBotPacingSettings {
+    AntiBotPacingSettings {
+        recurring_min_interval_secs: meta_u64_conn(
+            conn,
+            META_KEY_RECURRING_MIN_INTERVAL_SECS,
+            DEFAULT_RECURRING_MIN_INTERVAL_SECS,
+        )
+        .min(MAX_RECURRING_MIN_INTERVAL_SECS),
+        recurring_jitter_secs: meta_u64_conn(
+            conn,
+            META_KEY_RECURRING_JITTER_SECS,
+            DEFAULT_RECURRING_JITTER_SECS,
+        )
+        .min(MAX_RECURRING_JITTER_SECS),
+        enumeration_sleep_requests: (meta_u64_conn(
+            conn,
+            META_KEY_ENUM_SLEEP_REQUESTS,
+            DEFAULT_ENUM_SLEEP_REQUESTS as u64,
+        ) as u32)
+            .min(MAX_ENUM_SLEEP_REQUESTS),
+        update_all_batch_size: (meta_u64_conn(
+            conn,
+            META_KEY_UPDATE_ALL_BATCH,
+            DEFAULT_UPDATE_ALL_BATCH as u64,
+        ) as usize)
+            .clamp(1, MAX_UPDATE_ALL_BATCH),
+        recurring_download_min_sleep_secs: (meta_u64_conn(
+            conn,
+            META_KEY_RECURRING_DOWNLOAD_MIN_SLEEP,
+            DEFAULT_RECURRING_DOWNLOAD_MIN_SLEEP_SECS as u64,
+        ) as u32)
+            .min(MAX_RECURRING_DOWNLOAD_SLEEP_SECS),
+        recurring_download_max_sleep_secs: (meta_u64_conn(
+            conn,
+            META_KEY_RECURRING_DOWNLOAD_MAX_SLEEP,
+            DEFAULT_RECURRING_DOWNLOAD_MAX_SLEEP_SECS as u64,
+        ) as u32)
+            .min(MAX_RECURRING_DOWNLOAD_SLEEP_SECS),
+    }
+}
+
+pub fn get_antibot_pacing(paths: &AppPaths) -> Result<AntiBotPacingSettings> {
+    let conn = db::open_readonly(paths)?;
+    Ok(antibot_pacing_from_conn(&conn))
+}
+
+pub fn set_antibot_pacing(
+    paths: &AppPaths,
+    settings: AntiBotPacingSettings,
+) -> Result<AntiBotPacingSettings> {
+    let conn = db::open(paths)?;
+    db::migrate(&conn)?;
+    let clamped = AntiBotPacingSettings {
+        recurring_min_interval_secs: settings
+            .recurring_min_interval_secs
+            .min(MAX_RECURRING_MIN_INTERVAL_SECS),
+        recurring_jitter_secs: settings
+            .recurring_jitter_secs
+            .min(MAX_RECURRING_JITTER_SECS),
+        enumeration_sleep_requests: settings
+            .enumeration_sleep_requests
+            .min(MAX_ENUM_SLEEP_REQUESTS),
+        update_all_batch_size: settings
+            .update_all_batch_size
+            .clamp(1, MAX_UPDATE_ALL_BATCH),
+        recurring_download_min_sleep_secs: settings
+            .recurring_download_min_sleep_secs
+            .min(MAX_RECURRING_DOWNLOAD_SLEEP_SECS),
+        recurring_download_max_sleep_secs: settings
+            .recurring_download_max_sleep_secs
+            .max(settings.recurring_download_min_sleep_secs)
+            .min(MAX_RECURRING_DOWNLOAD_SLEEP_SECS),
+    };
+    upsert_meta_conn(
+        &conn,
+        META_KEY_RECURRING_MIN_INTERVAL_SECS,
+        &clamped.recurring_min_interval_secs.to_string(),
+    )?;
+    upsert_meta_conn(
+        &conn,
+        META_KEY_RECURRING_JITTER_SECS,
+        &clamped.recurring_jitter_secs.to_string(),
+    )?;
+    upsert_meta_conn(
+        &conn,
+        META_KEY_ENUM_SLEEP_REQUESTS,
+        &clamped.enumeration_sleep_requests.to_string(),
+    )?;
+    upsert_meta_conn(
+        &conn,
+        META_KEY_UPDATE_ALL_BATCH,
+        &clamped.update_all_batch_size.to_string(),
+    )?;
+    upsert_meta_conn(
+        &conn,
+        META_KEY_RECURRING_DOWNLOAD_MIN_SLEEP,
+        &clamped.recurring_download_min_sleep_secs.to_string(),
+    )?;
+    upsert_meta_conn(
+        &conn,
+        META_KEY_RECURRING_DOWNLOAD_MAX_SLEEP,
+        &clamped.recurring_download_max_sleep_secs.to_string(),
+    )?;
+    Ok(clamped)
+}
+
+fn bounded_runtime_jitter(max_inclusive: u64, salt: &str) -> u64 {
+    if max_inclusive == 0 {
+        return 0;
+    }
+    let mut hasher = Sha256::new();
+    hasher.update(now_ms().to_le_bytes());
+    hasher.update(salt.as_bytes());
+    let digest = hasher.finalize();
+    let mut bytes = [0_u8; 8];
+    bytes.copy_from_slice(&digest[..8]);
+    u64::from_le_bytes(bytes) % max_inclusive.saturating_add(1)
+}
+
+fn recurring_dispatch_interval_secs(paths: &AppPaths, salt: &str) -> u64 {
+    let pacing = get_antibot_pacing(paths).unwrap_or(AntiBotPacingSettings {
+        recurring_min_interval_secs: DEFAULT_RECURRING_MIN_INTERVAL_SECS,
+        recurring_jitter_secs: DEFAULT_RECURRING_JITTER_SECS,
+        enumeration_sleep_requests: DEFAULT_ENUM_SLEEP_REQUESTS,
+        update_all_batch_size: DEFAULT_UPDATE_ALL_BATCH,
+        recurring_download_min_sleep_secs: DEFAULT_RECURRING_DOWNLOAD_MIN_SLEEP_SECS,
+        recurring_download_max_sleep_secs: DEFAULT_RECURRING_DOWNLOAD_MAX_SLEEP_SECS,
+    });
+    pacing
+        .recurring_min_interval_secs
+        .saturating_add(bounded_runtime_jitter(pacing.recurring_jitter_secs, salt))
+}
+
+fn recurring_download_sleep_secs(paths: &AppPaths, job_id: &str) -> u32 {
+    let pacing = get_antibot_pacing(paths).unwrap_or(AntiBotPacingSettings {
+        recurring_min_interval_secs: DEFAULT_RECURRING_MIN_INTERVAL_SECS,
+        recurring_jitter_secs: DEFAULT_RECURRING_JITTER_SECS,
+        enumeration_sleep_requests: DEFAULT_ENUM_SLEEP_REQUESTS,
+        update_all_batch_size: DEFAULT_UPDATE_ALL_BATCH,
+        recurring_download_min_sleep_secs: DEFAULT_RECURRING_DOWNLOAD_MIN_SLEEP_SECS,
+        recurring_download_max_sleep_secs: DEFAULT_RECURRING_DOWNLOAD_MAX_SLEEP_SECS,
+    });
+    let min = pacing
+        .recurring_download_min_sleep_secs
+        .min(MAX_RECURRING_DOWNLOAD_SLEEP_SECS);
+    let max = pacing
+        .recurring_download_max_sleep_secs
+        .max(min)
+        .min(MAX_RECURRING_DOWNLOAD_SLEEP_SECS);
+    min.saturating_add(bounded_runtime_jitter((max - min) as u64, job_id) as u32)
+}
+
+/// The safe download profile is service-based, never origin-based. A direct YouTube URL pasted
+/// by the operator receives the same low-fragment, randomized-sleep behavior as a subscription
+/// child; the queue track only changes scheduling priority and does not create an anti-bot hole.
+fn effective_direct_download_profile(
+    paths: &AppPaths,
+    url: &str,
+    job_id: &str,
+    requested_sleep_interval: u32,
+    requested_concurrent_fragments: u32,
+) -> (u32, u32) {
+    if is_youtube_url(url) {
+        (
+            requested_sleep_interval.max(recurring_download_sleep_secs(paths, job_id)),
+            1,
+        )
+    } else {
+        (requested_sleep_interval, requested_concurrent_fragments)
+    }
+}
+
+// WP-0263: Instagram-specific (more passive) enumeration cooldown for the recurring lane.
+// Read separately from the YouTube key so Meta's stricter anti-bot gets long gaps between
+// profile refreshes without slowing the YouTube fleet.
+pub fn instagram_recurring_min_interval_secs(paths: &AppPaths) -> u64 {
+    let Ok(conn) = db::open_readonly(paths) else {
+        return DEFAULT_INSTAGRAM_RECURRING_MIN_INTERVAL_SECS;
+    };
+    meta_u64_conn(
+        &conn,
+        META_KEY_INSTAGRAM_RECURRING_MIN_INTERVAL_SECS,
+        DEFAULT_INSTAGRAM_RECURRING_MIN_INTERVAL_SECS,
+    )
+    .min(MAX_INSTAGRAM_RECURRING_MIN_INTERVAL_SECS)
+}
+
+// WP-0263: last-Instagram-enumeration-dispatch timestamp (ms). Gates how often a new Instagram
+// profile enumeration is enqueued so Meta's stricter anti-bot never sees a burst — at most one
+// profile refresh per `instagram_recurring_min_interval_secs`, one profile at a time.
+const META_KEY_INSTAGRAM_LAST_ENUM_DISPATCH_MS: &str = "antibot_instagram_last_enum_dispatch_ms";
+
+/// Returns true when enough time has elapsed since the last Instagram enumeration dispatch
+/// (per the conservative Instagram interval) to enqueue another profile refresh. Best-effort:
+/// on any DB error it returns true so pacing never becomes a hard stall.
+pub fn instagram_enumeration_dispatch_allowed(paths: &AppPaths) -> bool {
+    let cooldown_secs = instagram_recurring_min_interval_secs(paths);
+    if cooldown_secs == 0 {
+        return true;
+    }
+    let Ok(conn) = db::open_readonly(paths) else {
+        return true;
+    };
+    let last_ms = meta_u64_conn(&conn, META_KEY_INSTAGRAM_LAST_ENUM_DISPATCH_MS, 0);
+    if last_ms == 0 {
+        return true;
+    }
+    let now = now_ms().max(0) as u64;
+    now.saturating_sub(last_ms) >= cooldown_secs.saturating_mul(1000)
+}
+
+/// Stamp "now" as the last Instagram enumeration dispatch. Best-effort. Called after enqueuing
+/// a single Instagram subscription's refresh so the next one waits the conservative interval.
+pub fn record_instagram_enumeration_dispatch(paths: &AppPaths) -> Result<()> {
+    let conn = db::open(paths)?;
+    db::migrate(&conn)?;
+    upsert_meta_conn(
+        &conn,
+        META_KEY_INSTAGRAM_LAST_ENUM_DISPATCH_MS,
+        &(now_ms().max(0) as u64).to_string(),
+    )
 }
 
 fn is_queue_paused_conn(conn: &rusqlite::Connection) -> Result<bool> {
@@ -12693,6 +17184,12 @@ fn normalize_and_expand_download_targets(
     let mut targets: Vec<DownloadTarget> = Vec::new();
     let mut seen: HashSet<String> = HashSet::new();
 
+    // WP-0263: for Instagram profile/post expansion, resolve auth with Instagram precedence
+    // (explicit cookie -> global Instagram cookie from Options). yt-dlp fallbacks still use the
+    // raw `auth_cookie` argument; only the Instagram JSON-API expansion uses the global fallback.
+    let instagram_auth = resolve_instagram_auth_cookie(paths, auth_cookie)?;
+    let instagram_auth = instagram_auth.as_deref().or(auth_cookie);
+
     for url in urls {
         if is_instagram_user_profile_url(&url) {
             let remaining = MAX_DOWNLOAD_BATCH_URLS.saturating_sub(targets.len());
@@ -12703,7 +17200,7 @@ fn normalize_and_expand_download_targets(
             }
 
             let expanded =
-                match expand_instagram_profile_media_targets(&url, remaining + 1, auth_cookie) {
+                match expand_instagram_profile_media_targets(&url, remaining + 1, instagram_auth) {
                     Ok(values) if !values.is_empty() => values,
                     Ok(_) | Err(_) => {
                         let fallback_urls = expand_yt_dlp_urls(
@@ -12757,7 +17254,7 @@ fn normalize_and_expand_download_targets(
                 )));
             }
 
-            if let Ok(expanded) = expand_instagram_post_media_targets(&url, auth_cookie) {
+            if let Ok(expanded) = expand_instagram_post_media_targets(&url, instagram_auth) {
                 if !expanded.is_empty() {
                     for candidate in expanded {
                         let normalized = normalize_direct_url(&candidate.url)?;
@@ -13716,6 +18213,41 @@ fn redact_url_for_log(value: &str) -> String {
     }
 }
 
+// WP-0261: best-effort engine-side diagnostics trace writer. The desktop bridge owns the primary
+// DiagnosticsTraceEntry writer (product/desktop/src-tauri/src/lib.rs), but the engine runs
+// subscription refresh inside the job runner where an external monitor (vvwatch / /agent/*) has no
+// per-subscription visibility. This appends a JSON line shaped exactly like DiagnosticsTraceEntry
+// ({ts_ms, event, level, details, process:null}) to diagnostics_trace.jsonl under the effective
+// trace dir (honoring the operator's trace-dir override). It never panics and never returns an
+// error: diagnostics must not affect job execution.
+fn append_engine_diagnostics_trace_row_best_effort(
+    paths: &AppPaths,
+    event: &str,
+    level: &str,
+    details: serde_json::Value,
+) {
+    let Ok(dir) = paths.effective_diagnostics_trace_dir() else {
+        return;
+    };
+    if std::fs::create_dir_all(&dir).is_err() {
+        return;
+    }
+    let path = dir.join("diagnostics_trace.jsonl");
+    let row = serde_json::json!({
+        "ts_ms": now_ms(),
+        "event": event,
+        "level": level,
+        "details": details,
+        "process": serde_json::Value::Null,
+    });
+    let Ok(line) = serde_json::to_string(&row) else {
+        return;
+    };
+    if let Ok(mut file) = OpenOptions::new().create(true).append(true).open(&path) {
+        let _ = writeln!(file, "{line}");
+    }
+}
+
 fn append_youtube_archive_on_success(
     paths: &AppPaths,
     subscription_id: &str,
@@ -14156,6 +18688,20 @@ fn build_youtube_auth_preflight_args(url: &str, cookie_file: &str) -> Vec<String
     ]
 }
 
+fn build_youtube_browser_auth_preflight_args(url: &str, browser_source: &str) -> Vec<String> {
+    vec![
+        "--socket-timeout".to_string(),
+        "30".to_string(),
+        "--skip-download".to_string(),
+        "--no-warnings".to_string(),
+        "--cookies-from-browser".to_string(),
+        browser_source.to_string(),
+        "--print".to_string(),
+        "title".to_string(),
+        url.to_string(),
+    ]
+}
+
 fn yt_dlp_failure_program_detail(line: &str) -> &str {
     line.split_once(": ")
         .map(|(_, detail)| detail)
@@ -14267,6 +18813,59 @@ fn kill_child_process_tree(child: &mut std::process::Child) {
     let _ = child.wait();
 }
 
+fn yt_dlp_progress_fraction(line: &str) -> Option<f32> {
+    let marker = "VV_PROGRESS:";
+    let raw = line
+        .split_once(marker)?
+        .1
+        .trim()
+        .trim_end_matches('%')
+        .trim();
+    raw.parse::<f32>()
+        .ok()
+        .map(|value| (value / 100.0).clamp(0.0, 1.0))
+}
+
+fn read_command_pipe_with_progress<R: Read>(
+    reader: R,
+    paths: AppPaths,
+    job_id: Option<String>,
+) -> Vec<u8> {
+    use std::time::Instant;
+
+    let mut reader = std::io::BufReader::new(reader);
+    let mut output = Vec::new();
+    let mut line = Vec::new();
+    let mut last_written = -1.0_f32;
+    let mut last_write_at = Instant::now() - Duration::from_secs(1);
+    loop {
+        line.clear();
+        let read = reader.read_until(b'\n', &mut line).unwrap_or(0);
+        if read == 0 {
+            break;
+        }
+        output.extend_from_slice(&line);
+        let Some(id) = job_id.as_deref() else {
+            continue;
+        };
+        let text = String::from_utf8_lossy(&line);
+        let Some(fraction) = yt_dlp_progress_fraction(&text) else {
+            continue;
+        };
+        // Keep the DB write rate bounded while still giving the UI several truthful updates per
+        // second. The direct-download job reserves 5–70% for yt-dlp transfer/merge work.
+        let mapped = 0.05 + (fraction * 0.65);
+        let enough_change = (mapped - last_written).abs() >= 0.005 || fraction >= 1.0;
+        let enough_time = last_write_at.elapsed() >= Duration::from_millis(350);
+        if enough_change && enough_time {
+            let _ = set_progress(&paths, id, mapped);
+            last_written = mapped;
+            last_write_at = Instant::now();
+        }
+    }
+    output
+}
+
 fn run_command_output_with_control(
     paths: &AppPaths,
     cmd: &mut std::process::Command,
@@ -14282,23 +18881,21 @@ fn run_command_output_with_control(
 
     let mut child = cmd.spawn().map_err(CommandRunError::Spawn)?;
 
-    let mut stdout = child.stdout.take().ok_or_else(|| {
+    let stdout = child.stdout.take().ok_or_else(|| {
         CommandRunError::Wait(std::io::Error::new(ErrorKind::Other, "stdout pipe missing"))
     })?;
-    let mut stderr = child.stderr.take().ok_or_else(|| {
+    let stderr = child.stderr.take().ok_or_else(|| {
         CommandRunError::Wait(std::io::Error::new(ErrorKind::Other, "stderr pipe missing"))
     })?;
 
-    let stdout_handle = thread::spawn(move || {
-        let mut buf = Vec::new();
-        let _ = stdout.read_to_end(&mut buf);
-        buf
-    });
-    let stderr_handle = thread::spawn(move || {
-        let mut buf = Vec::new();
-        let _ = stderr.read_to_end(&mut buf);
-        buf
-    });
+    let stdout_paths = paths.clone();
+    let stderr_paths = paths.clone();
+    let stdout_job_id = job_id.map(str::to_string);
+    let stderr_job_id = stdout_job_id.clone();
+    let stdout_handle =
+        thread::spawn(move || read_command_pipe_with_progress(stdout, stdout_paths, stdout_job_id));
+    let stderr_handle =
+        thread::spawn(move || read_command_pipe_with_progress(stderr, stderr_paths, stderr_job_id));
 
     let started = Instant::now();
     let mut abort_reason: Option<CommandRunError> = None;
@@ -14474,6 +19071,31 @@ fn expand_yt_dlp_urls(
     use_browser_cookies: bool,
     browser_cookie_source: Option<&str>,
 ) -> Result<Vec<String>> {
+    Ok(expand_yt_dlp_entries(
+        paths,
+        url,
+        limit,
+        auth_cookie,
+        use_browser_cookies,
+        browser_cookie_source,
+    )?
+    .into_iter()
+    .map(|(entry_url, _title)| entry_url)
+    .collect())
+}
+
+// WP-0256: enumerate a playlist/channel/subscription into (url, title) pairs. The title
+// comes free from the same `--flat-playlist` pass (no extra yt-dlp call / no extra
+// anti-bot exposure), so child download jobs can show the real video title in Jobs even
+// while queued/running/failed. yt-dlp prints "NA" for a missing field -> None.
+fn expand_yt_dlp_entries(
+    paths: &AppPaths,
+    url: &str,
+    limit: usize,
+    auth_cookie: Option<&str>,
+    use_browser_cookies: bool,
+    browser_cookie_source: Option<&str>,
+) -> Result<Vec<(String, Option<String>)>> {
     let limit = limit.max(1);
     let mut args = vec![
         "--socket-timeout".to_string(),
@@ -14483,11 +19105,22 @@ fn expand_yt_dlp_urls(
         "--ignore-errors".to_string(),
         "--no-warnings".to_string(),
         "--print".to_string(),
-        "webpage_url".to_string(),
+        "%(webpage_url)s\t%(title)s".to_string(),
         "--playlist-end".to_string(),
         limit.to_string(),
         url.to_string(),
     ];
+
+    // WP-0257 (#3): pace API page requests during enumeration to reduce anti-bot exposure.
+    // This is the dominant anti-bot surface (a channel/playlist enumeration issues many API
+    // page requests). Operator-tunable in Options -> Anti-bot pacing; 0 disables.
+    let sleep_requests = get_antibot_pacing(paths)
+        .map(|s| s.enumeration_sleep_requests)
+        .unwrap_or(DEFAULT_ENUM_SLEEP_REQUESTS);
+    if sleep_requests > 0 {
+        args.push("--sleep-requests".to_string());
+        args.push(sleep_requests.to_string());
+    }
 
     let mut cookie_file_path: Option<PathBuf> = None;
     let mut using_cookie_file = false;
@@ -14535,22 +19168,64 @@ fn expand_yt_dlp_urls(
         )
     })?;
     let mut seen: HashSet<String> = HashSet::new();
-    let mut urls: Vec<String> = Vec::new();
+    let mut entries: Vec<(String, Option<String>)> = Vec::new();
     for line in String::from_utf8_lossy(&output.stdout).lines() {
-        let trimmed = line.trim();
-        if trimmed.is_empty() {
+        let line = line.trim_end_matches(['\r', '\n']);
+        if line.trim().is_empty() {
             continue;
         }
-        if seen.insert(trimmed.to_string()) {
-            urls.push(trimmed.to_string());
+        let (entry_url, title) = match line.split_once('\t') {
+            Some((u, t)) => {
+                let t = t.trim();
+                let title = if t.is_empty() || t == "NA" {
+                    None
+                } else {
+                    Some(t.to_string())
+                };
+                (u.trim().to_string(), title)
+            }
+            None => (line.trim().to_string(), None),
+        };
+        if entry_url.is_empty() {
+            continue;
+        }
+        if seen.insert(entry_url.clone()) {
+            entries.push((entry_url, title));
         }
     }
 
-    if urls.is_empty() && is_likely_youtube_video_url(url) {
-        urls.push(url.to_string());
+    if entries.is_empty() && is_likely_youtube_video_url(url) {
+        entries.push((url.to_string(), None));
     }
 
-    Ok(urls)
+    Ok(entries)
+}
+
+// WP-0256: stamp the enumerated video title onto each freshly-queued child download job so
+// Jobs shows the real title immediately (not only after a successful download). Best-effort:
+// only fills an empty target_title, matched by the job's download URL.
+fn stamp_job_target_titles_by_url(
+    paths: &AppPaths,
+    jobs: &[JobRow],
+    title_by_url: &std::collections::HashMap<String, String>,
+) {
+    if title_by_url.is_empty() {
+        return;
+    }
+    let Ok(conn) = db::open(paths) else {
+        return;
+    };
+    for job in jobs {
+        let Ok(params) = serde_json::from_str::<DownloadDirectUrlParams>(&job.params_json) else {
+            continue;
+        };
+        if let Some(title) = title_by_url.get(&params.url) {
+            let _ = conn.execute(
+                "UPDATE job SET target_title=?1 WHERE id=?2 AND (target_title IS NULL OR TRIM(target_title)='')",
+                params![title, job.id],
+            );
+        }
+    }
 }
 
 fn expand_instagram_profile_media_targets(
@@ -14943,18 +19618,25 @@ fn resolve_downloads_dir_with_override(
         }
         custom_dir
     } else {
-        let base_dir = paths.effective_download_dir()?;
-        if !base_dir.exists() {
-            return Err(EngineError::InstallFailed(format!(
-                "download folder not found: {}. Choose an existing folder or create a new one from Library.",
-                base_dir.to_string_lossy()
-            )));
-        }
-        if !base_dir.is_dir() {
-            return Err(EngineError::InstallFailed(format!(
-                "download path is not a folder: {}",
-                base_dir.to_string_lossy()
-            )));
+        // WP-0253 Item 2d: if the configured download root (e.g. a NAS share) is
+        // unreachable, fall back to a stable local folder so downloads don't fail when the
+        // connection drops. The bounded reachability probe avoids hanging on the SMB
+        // timeout. Fallback items live locally (one library, origin-stamped); moving them
+        // back to the NAS is an operator-confirmed action, never silent (data preservation).
+        let (base_dir, used_fallback) = paths.effective_download_dir_with_fallback()?;
+        if !used_fallback {
+            if !base_dir.exists() {
+                return Err(EngineError::InstallFailed(format!(
+                    "download folder not found: {}. Choose an existing folder or create a new one from Library.",
+                    base_dir.to_string_lossy()
+                )));
+            }
+            if !base_dir.is_dir() {
+                return Err(EngineError::InstallFailed(format!(
+                    "download path is not a folder: {}",
+                    base_dir.to_string_lossy()
+                )));
+            }
         }
         ensure_default_download_subdirs(&base_dir)?;
         if let Some(subdir) = output_subdir {
@@ -15830,7 +20512,9 @@ fn download_yt_dlp_url_to_library(
         "--no-warnings".to_string(),
         "--ignore-errors".to_string(),
         "--restrict-filenames".to_string(),
-        "--no-progress".to_string(),
+        "--newline".to_string(),
+        "--progress-template".to_string(),
+        "download:VV_PROGRESS:%(progress._percent_str)s".to_string(),
         "--print".to_string(),
         "after_move:filepath".to_string(),
         "-P".to_string(),
@@ -15967,7 +20651,7 @@ fn download_yt_dlp_url_to_library(
     let downloaded = String::from_utf8_lossy(&output.stdout)
         .lines()
         .map(str::trim)
-        .filter(|line| !line.is_empty())
+        .filter(|line| !line.is_empty() && !line.contains("VV_PROGRESS:"))
         .last()
         .map(PathBuf::from)
         .ok_or_else(|| {
@@ -16056,6 +20740,28 @@ fn resolve_global_youtube_auth_cookie(paths: &AppPaths) -> Option<String> {
         .flatten()
 }
 
+fn resolve_global_youtube_browser_source(paths: &AppPaths) -> Option<String> {
+    let auth_config = config::load_youtube_auth_config(paths).ok()?;
+    normalize_browser_cookie_source(auth_config.browser_cookie_source.as_deref())
+        .ok()
+        .flatten()
+}
+
+fn effective_youtube_browser_source(
+    paths: &AppPaths,
+    auth_cookie_present: bool,
+    requested: bool,
+    requested_source: Option<&str>,
+) -> Result<Option<String>> {
+    if auth_cookie_present {
+        return Ok(None);
+    }
+    if let Some(global_source) = resolve_global_youtube_browser_source(paths) {
+        return Ok(Some(global_source));
+    }
+    browser_cookie_source_for_request(requested, requested_source)
+}
+
 fn resolve_youtube_auth_cookie_for_job(
     paths: &AppPaths,
     job_id: &str,
@@ -16064,10 +20770,78 @@ fn resolve_youtube_auth_cookie_for_job(
     if let Some(global) = resolve_global_youtube_auth_cookie(paths) {
         return Ok(Some(global));
     }
+    // A newly connected global browser session supersedes auth material stamped onto
+    // older queued jobs. Otherwise a stale per-job cookie can fail after a successful
+    // browser preflight and immediately re-arm the shared auth circuit.
+    if resolve_global_youtube_browser_source(paths).is_some() {
+        return Ok(None);
+    }
     if let Some(secret) = read_job_cookie_secret(paths, job_id) {
         return Ok(Some(secret));
     }
     normalize_auth_cookie(inline_auth_cookie)
+}
+
+// ----- WP-0263: global Instagram auth (Options-pasted, used for every Instagram op) -----
+
+/// Resolve the app-global Instagram auth cookie pasted once in Options.
+/// Returns `None` if unset or empty. Stored as a normalized cookie-header secret file
+/// (mirrors the per-subscription Instagram cookie storage) rather than a JSON config struct,
+/// because the Instagram auth material is a session cookie header, not a browser-extension
+/// cookie JSON array.
+pub(crate) fn resolve_global_instagram_auth_cookie(paths: &AppPaths) -> Option<String> {
+    read_auth_cookie_secret_path(&paths.instagram_global_auth_cookie_secret_path())
+}
+
+/// Persist (or clear, when `value` normalizes to empty) the global Instagram cookie.
+/// Public wrapper for the desktop `config_instagram_auth_set` command. Clearing an Instagram
+/// auth block on save mirrors the YouTube `config_youtube_auth_set` behavior.
+pub fn set_global_instagram_auth_cookie(paths: &AppPaths, value: Option<String>) -> Result<()> {
+    paths.ensure_dirs()?;
+    let secret_path = paths.instagram_global_auth_cookie_secret_path();
+    match normalize_non_empty(value.as_deref()) {
+        Some(raw) => write_auth_cookie_secret_path(&secret_path, &raw)?,
+        None => remove_auth_cookie_secret_path(&secret_path),
+    }
+    clear_instagram_auth_block(paths)?;
+    Ok(())
+}
+
+/// Report whether a global Instagram cookie is configured (public wrapper for
+/// `config_instagram_auth_get`). We never return the secret itself to the frontend.
+pub fn get_global_instagram_auth_configured(paths: &AppPaths) -> bool {
+    resolve_global_instagram_auth_cookie(paths).is_some()
+}
+
+/// WP-0263 auth precedence for every Instagram operation:
+/// explicit per-job / per-subscription cookie -> global Instagram cookie (Options) ->
+/// browser-cookie fallback (handled downstream by yt-dlp when no cookie header resolves).
+/// Returns the resolved cookie header, or `None` to signal "fall back to browser cookies".
+pub(crate) fn resolve_instagram_auth_cookie(
+    paths: &AppPaths,
+    explicit_auth_cookie: Option<&str>,
+) -> Result<Option<String>> {
+    if let Some(explicit) = normalize_auth_cookie(explicit_auth_cookie.map(str::to_string))? {
+        return Ok(Some(explicit));
+    }
+    if let Some(global) = resolve_global_instagram_auth_cookie(paths) {
+        return Ok(Some(global));
+    }
+    Ok(None)
+}
+
+fn instagram_auth_block_path(paths: &AppPaths) -> PathBuf {
+    paths.config_dir().join("instagram_auth_block.json")
+}
+
+/// Clear any armed Instagram auth block. Called when the operator saves fresh Instagram
+/// cookies in Options (a re-auth should let the fleet retry immediately). Best-effort.
+pub fn clear_instagram_auth_block(paths: &AppPaths) -> Result<()> {
+    let path = instagram_auth_block_path(paths);
+    if path.exists() {
+        std::fs::remove_file(path)?;
+    }
+    Ok(())
 }
 
 fn delete_job_by_id(paths: &AppPaths, job_id: &str) -> Result<()> {
@@ -16293,6 +21067,24 @@ struct LoadedTtsManifestCandidate {
     variant_label: Option<String>,
     manifest_path: PathBuf,
     meta: TtsManifestMeta,
+}
+
+/// The voice-clone backend a NEW localization dub should use by default. Honors the
+/// operator override (`config/dub_backend_id.txt`); otherwise prefers CosyVoice 2 when
+/// its pack is installed (genuine cross-lingual timbre preservation) and falls back to
+/// the Kokoro+OpenVoice baseline. Swappable like the ASR model selection.
+fn default_dub_backend_id(paths: &AppPaths) -> String {
+    if let Ok(Some(id)) = paths.dub_backend_id_override() {
+        let canonical = canonical_tts_backend_id(&id);
+        if !canonical.is_empty() {
+            return canonical;
+        }
+    }
+    if tools::cosyvoice_pack_status(paths).installed {
+        "cosyvoice".to_string()
+    } else {
+        "openvoice_v2".to_string()
+    }
 }
 
 fn canonical_tts_backend_id(raw: &str) -> String {
@@ -17889,6 +22681,8 @@ mod tests {
                 netscape_cookie_json: Some(format!(
                     r#"[{{"domain":".youtube.com","name":"SID","value":"{value}"}}]"#
                 )),
+                browser_cookie_source: None,
+                ..Default::default()
             },
         )
         .expect("save global auth");
@@ -17932,6 +22726,104 @@ mod tests {
             row.get(0)
         })
         .expect("job status")
+    }
+
+    #[test]
+    fn recurring_subscription_scheduler_keeps_cohorts_fifo_and_feeds_before_playlists() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let paths = AppPaths::new(dir.path().to_path_buf());
+        db::ensure_schema(&paths).expect("schema");
+        let conn = db::open(&paths).expect("open");
+        db::migrate(&conn).expect("migrate");
+
+        let subscriptions = [
+            (
+                "old-playlist",
+                "https://www.youtube.com/playlist?list=PLold",
+            ),
+            ("old-videos", "https://www.youtube.com/@creator/videos"),
+            (
+                "new-playlist",
+                "https://www.youtube.com/playlist?list=PLnew",
+            ),
+            ("new-shorts", "https://www.youtube.com/@creator/shorts"),
+        ];
+        for (id, source_url) in subscriptions {
+            conn.execute(
+                "INSERT INTO youtube_subscription \
+                 (id, title, source_url, folder_map, created_at_ms, updated_at_ms) \
+                 VALUES (?1, ?1, ?2, '', 1, 1)",
+                params![id, source_url],
+            )
+            .expect("subscription");
+        }
+        drop(conn);
+
+        let queue_refresh = |subscription_id: &str, batch_id: &str| {
+            enqueue_with_type_item_and_batch_id(
+                &paths,
+                JobType::YoutubeSubscriptionRefreshV1,
+                serde_json::to_string(&YoutubeSubscriptionRefreshV1Params {
+                    subscription_id: subscription_id.to_string(),
+                    source_display_name: None,
+                    source_page_url: None,
+                    max_items: None,
+                    output_dir: None,
+                    preset_id: None,
+                })
+                .expect("params"),
+                None,
+                Some(batch_id.to_string()),
+            )
+            .expect("queue refresh")
+        };
+
+        let old_playlist = queue_refresh("old-playlist", "cohort-old");
+        let old_videos = queue_refresh("old-videos", "cohort-old");
+        let new_playlist = queue_refresh("new-playlist", "cohort-new");
+        let new_shorts = queue_refresh("new-shorts", "cohort-new");
+
+        let conn = db::open(&paths).expect("open jobs");
+        for (id, created_at_ms) in [
+            (&old_playlist.id, 10_i64),
+            (&old_videos.id, 11_i64),
+            (&new_playlist.id, 20_i64),
+            (&new_shorts.id, 21_i64),
+        ] {
+            conn.execute(
+                "UPDATE job SET created_at_ms=?1 WHERE id=?2",
+                params![created_at_ms, id],
+            )
+            .expect("fix test timestamp");
+        }
+        drop(conn);
+
+        let rows = fetch_queued_jobs_for_track_and_type(
+            &paths,
+            JobTrack::YoutubeRecurring,
+            JobType::YoutubeSubscriptionRefreshV1.as_str(),
+            8,
+        )
+        .expect("scheduled refreshes");
+        let ordered_subscriptions = rows
+            .iter()
+            .map(|(_, _, params_json)| {
+                serde_json::from_str::<YoutubeSubscriptionRefreshV1Params>(params_json)
+                    .expect("refresh params")
+                    .subscription_id
+            })
+            .collect::<Vec<_>>();
+
+        assert_eq!(
+            ordered_subscriptions,
+            vec![
+                "old-videos".to_string(),
+                "old-playlist".to_string(),
+                "new-shorts".to_string(),
+                "new-playlist".to_string(),
+            ],
+            "refresh cohorts stay FIFO, while feeds run before playlists inside each cohort"
+        );
     }
 
     fn seed_subtitle_track_named(
@@ -18128,6 +23020,799 @@ mod tests {
         assert_eq!(pipeline.separation_backend.as_deref(), Some("demucs"));
         assert!(pipeline.queue_qc);
         assert!(pipeline.queue_export_pack);
+    }
+
+    fn job_track_of(paths: &AppPaths, job_id: &str) -> String {
+        let conn = db::open(paths).expect("open");
+        conn.query_row("SELECT track FROM job WHERE id=?1", [job_id], |row| {
+            row.get::<_, String>(0)
+        })
+        .expect("track")
+    }
+
+    #[test]
+    fn job_tracks_classify_types_and_direct_download_origins() {
+        assert_eq!(
+            JobTrack::for_type(&JobType::YoutubeSubscriptionRefreshV1),
+            JobTrack::YoutubeRecurring
+        );
+        assert_eq!(
+            JobTrack::for_type(&JobType::DownloadImageBatch),
+            JobTrack::ImageArchive
+        );
+        assert_eq!(
+            JobTrack::for_type(&JobType::ImportLocal),
+            JobTrack::OtherVideo
+        );
+        assert_eq!(
+            JobTrack::for_type(&JobType::DubVoicePreservingV1),
+            JobTrack::Localization
+        );
+        assert_eq!(
+            JobTrack::for_direct_download("https://www.youtube.com/playlist?list=PLtest123", None),
+            JobTrack::YoutubeSingle
+        );
+        assert_eq!(
+            JobTrack::for_direct_download(
+                "https://www.youtube.com/watch?v=test12345",
+                Some("subscription-1"),
+            ),
+            JobTrack::YoutubeRecurring
+        );
+        assert_eq!(
+            JobTrack::for_direct_download("https://www.instagram.com/reel/example/", None),
+            JobTrack::Instagram
+        );
+    }
+
+    #[test]
+    fn enqueue_stamps_persisted_track_by_type_and_origin() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let paths = AppPaths::new(dir.path().to_path_buf());
+
+        let single = enqueue(&paths, JobType::DownloadDirectUrl, "{}".to_string()).expect("single");
+        assert_eq!(job_track_of(&paths, &single.id), "other_video");
+
+        let loc = enqueue(&paths, JobType::DubVoicePreservingV1, "{}".to_string()).expect("loc");
+        assert_eq!(job_track_of(&paths, &loc.id), "localization");
+
+        let recurring = enqueue_with_type_item_batch_and_track(
+            &paths,
+            JobType::DownloadDirectUrl,
+            "{}".to_string(),
+            None,
+            None,
+            JobTrack::YoutubeRecurring,
+        )
+        .expect("recurring");
+        assert_eq!(job_track_of(&paths, &recurring.id), "youtube_recurring");
+    }
+
+    #[test]
+    fn manual_youtube_playlist_jobs_stay_on_foreground_track() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let paths = AppPaths::new(dir.path().to_path_buf());
+        let jobs = enqueue_download_direct_url_batch_raw(
+            &paths,
+            vec!["https://www.youtube.com/playlist?list=PLtest123".to_string()],
+            Some(DOWNLOAD_PROVIDER_YOUTUBE_YT_DLP.to_string()),
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            Vec::new(),
+        )
+        .expect("enqueue playlist");
+        assert_eq!(jobs.len(), 1);
+        assert_eq!(job_track_of(&paths, &jobs[0].id), "youtube_single");
+    }
+
+    #[test]
+    fn per_track_fetch_isolates_youtube_single_from_recurring_backlog() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let paths = AppPaths::new(dir.path().to_path_buf());
+
+        enqueue_with_type_item_batch_and_track(
+            &paths,
+            JobType::DownloadDirectUrl,
+            "{}".to_string(),
+            None,
+            None,
+            JobTrack::YoutubeSingle,
+        )
+        .expect("single");
+        for _ in 0..200 {
+            enqueue_with_type_item_batch_and_track(
+                &paths,
+                JobType::DownloadDirectUrl,
+                "{}".to_string(),
+                None,
+                None,
+                JobTrack::YoutubeRecurring,
+            )
+            .expect("recurring");
+        }
+
+        assert_eq!(
+            fetch_queued_jobs_for_track(&paths, JobTrack::YoutubeSingle, 10)
+                .expect("single fetch")
+                .len(),
+            1
+        );
+        assert_eq!(
+            fetch_queued_jobs_for_track(&paths, JobTrack::YoutubeRecurring, 500)
+                .expect("recurring fetch")
+                .len(),
+            200
+        );
+        assert_eq!(
+            get_track_limit(&paths, JobTrack::YoutubeSingle).expect("limit"),
+            DEFAULT_TRACK_LIMIT_YOUTUBE_SINGLE
+        );
+    }
+
+    #[test]
+    fn large_recurring_backlog_does_not_hide_foreground_youtube_track() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let paths = AppPaths::new(dir.path().to_path_buf());
+        let mut conn = db::open(&paths).expect("open");
+        db::migrate(&conn).expect("migrate");
+        let tx = conn.transaction().expect("transaction");
+        for index in 0..55_000_i64 {
+            tx.execute(
+                "INSERT INTO job (id, type, status, progress, params_json, created_at_ms, logs_path, lane, track) \
+                 VALUES (?1, ?2, ?3, 0.0, ?4, ?5, '', 'recurring', 'youtube_recurring')",
+                params![
+                    format!("recurring-{index}"),
+                    JobType::DownloadDirectUrl.as_str(),
+                    JobStatus::Queued.as_str(),
+                    r#"{"url":"https://youtu.be/dNUkrrqmwug","subscription_id":"sub-1"}"#,
+                    index,
+                ],
+            )
+            .expect("seed recurring row");
+        }
+        tx.commit().expect("commit");
+
+        let foreground = enqueue_with_type_item_batch_and_track(
+            &paths,
+            JobType::DownloadDirectUrl,
+            r#"{"url":"https://youtu.be/foreground1"}"#.to_string(),
+            None,
+            None,
+            JobTrack::YoutubeSingle,
+        )
+        .expect("enqueue foreground");
+
+        let foreground_rows =
+            fetch_queued_jobs_for_track(&paths, JobTrack::YoutubeSingle, 1).expect("fetch");
+        assert_eq!(foreground_rows.len(), 1);
+        assert_eq!(foreground_rows[0].0, foreground.id);
+    }
+
+    #[test]
+    fn bounded_track_backfill_preserves_public_unclassified_truth_until_stamped() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let paths = AppPaths::new(dir.path().to_path_buf());
+        let conn = db::open(&paths).expect("open");
+        db::migrate(&conn).expect("migrate");
+        for index in 0..30_i64 {
+            conn.execute(
+                "INSERT INTO job (id, type, status, progress, params_json, created_at_ms, logs_path, lane) \
+                 VALUES (?1, ?2, ?3, 0.0, ?4, ?5, '', 'single')",
+                params![
+                    format!("legacy-{index}"),
+                    JobType::DownloadDirectUrl.as_str(),
+                    JobStatus::Queued.as_str(),
+                    r#"{"url":"https://youtu.be/dNUkrrqmwug"}"#,
+                    index,
+                ],
+            )
+            .expect("seed legacy row");
+        }
+        let before = get_job(&paths, "legacy-29")
+            .expect("get")
+            .expect("legacy row");
+        assert_eq!(before.track, UNCLASSIFIED_JOB_TRACK);
+
+        assert_eq!(
+            backfill_active_job_tracks_batch(&paths, 25).expect("backfill"),
+            25
+        );
+        let stamped = get_job(&paths, "legacy-0")
+            .expect("get")
+            .expect("stamped row");
+        let pending = get_job(&paths, "legacy-29")
+            .expect("get")
+            .expect("pending row");
+        assert_eq!(stamped.track, "youtube_single");
+        assert_eq!(pending.track, UNCLASSIFIED_JOB_TRACK);
+    }
+
+    #[test]
+    fn youtube_start_gate_blocks_second_same_tick_and_alternates_tracks() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let paths = AppPaths::new(dir.path().to_path_buf());
+        db::ensure_schema(&paths).expect("schema");
+        let mut gate = YoutubeStartGate::new();
+
+        assert!(gate.ready());
+        assert_eq!(gate.candidate_order()[0], JobTrack::YoutubeSingle);
+        let first_delay = gate.record_start(&paths, "foreground-job", JobTrack::YoutubeSingle);
+        assert!((5..=10).contains(&first_delay));
+        assert!(
+            !gate.ready(),
+            "one same-tick start must close the shared gate"
+        );
+        assert_eq!(gate.candidate_order()[0], JobTrack::YoutubeRecurring);
+
+        gate.last_start = Some(
+            std::time::Instant::now()
+                .checked_sub(Duration::from_secs(first_delay))
+                .expect("clock supports test interval"),
+        );
+        assert!(gate.ready());
+        let second_delay = gate.record_start(&paths, "recurring-job", JobTrack::YoutubeRecurring);
+        assert!((5..=10).contains(&second_delay));
+        assert_eq!(gate.candidate_order()[0], JobTrack::YoutubeSingle);
+    }
+
+    #[test]
+    fn every_youtube_direct_url_uses_recurring_safe_download_profile() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let paths = AppPaths::new(dir.path().to_path_buf());
+        db::ensure_schema(&paths).expect("schema");
+
+        for url in [
+            "https://www.youtube.com/watch?v=manual12345",
+            "https://www.youtube.com/playlist?list=PLmanual",
+            "https://youtu.be/subscript1",
+        ] {
+            let (sleep, fragments) =
+                effective_direct_download_profile(&paths, url, "profile-job", 0, 8);
+            assert!((5..=10).contains(&sleep), "safe sleep for {url}");
+            assert_eq!(fragments, 1, "safe fragment limit for {url}");
+        }
+        assert_eq!(
+            effective_direct_download_profile(
+                &paths,
+                "https://example.com/video.mp4",
+                "non-youtube-job",
+                0,
+                8,
+            ),
+            (0, 8)
+        );
+    }
+
+    #[test]
+    fn legacy_cursor_discovers_target_after_large_wrong_track_prefix_without_stamping_public_track()
+    {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let paths = AppPaths::new(dir.path().to_path_buf());
+        let mut conn = db::open(&paths).expect("open");
+        db::migrate(&conn).expect("migrate");
+        let tx = conn.transaction().expect("transaction");
+        for index in 0..55_000_i64 {
+            tx.execute(
+                "INSERT INTO job (id, type, status, progress, params_json, created_at_ms, logs_path, lane) \
+                 VALUES (?1, ?2, ?3, 0.0, ?4, ?5, '', 'recurring')",
+                params![
+                    format!("legacy-wrong-{index:06}"),
+                    JobType::DownloadDirectUrl.as_str(),
+                    JobStatus::Queued.as_str(),
+                    r#"{"url":"https://youtu.be/dNUkrrqmwug","subscription_id":"sub-1"}"#,
+                    index,
+                ],
+            )
+            .expect("seed wrong-track legacy row");
+        }
+        tx.execute(
+            "INSERT INTO job (id, type, status, progress, params_json, created_at_ms, logs_path, lane) \
+             VALUES ('legacy-target', ?1, ?2, 0.0, ?3, ?4, '', 'single')",
+            params![
+                JobType::DownloadDirectUrl.as_str(),
+                JobStatus::Queued.as_str(),
+                r#"{"url":"https://youtu.be/foreground-target"}"#,
+                55_000_i64,
+            ],
+        )
+        .expect("seed target legacy row");
+        tx.commit().expect("commit");
+
+        let mut cursors = LegacyTrackFallbackCursors::default();
+        let mut discovered = Vec::new();
+        for _ in 0..15 {
+            discovered = fetch_queued_jobs_for_track_and_type_with_cursors(
+                &paths,
+                JobTrack::YoutubeSingle,
+                JobType::DownloadDirectUrl.as_str(),
+                1,
+                &mut cursors,
+            )
+            .expect("bounded cursor fetch");
+            if discovered.iter().any(|(id, _, _)| id == "legacy-target") {
+                break;
+            }
+        }
+        assert!(
+            discovered.iter().any(|(id, _, _)| id == "legacy-target"),
+            "independent keyset passes must reach a target after another track's 55k prefix"
+        );
+        assert_eq!(
+            get_job(&paths, "legacy-target")
+                .expect("get")
+                .expect("target")
+                .track,
+            UNCLASSIFIED_JOB_TRACK,
+            "scheduler fallback must not manufacture a public persisted track"
+        );
+    }
+
+    #[test]
+    fn retry_preserves_persisted_track_for_every_workflow_class() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let paths = AppPaths::new(dir.path().to_path_buf());
+        db::ensure_schema(&paths).expect("schema");
+        let cases = [
+            (
+                JobType::DownloadDirectUrl,
+                r#"{"url":"https://youtu.be/single-track"}"#,
+                JobTrack::YoutubeSingle,
+            ),
+            (
+                JobType::DownloadDirectUrl,
+                r#"{"url":"https://youtu.be/recurring-track","subscription_id":"sub-1"}"#,
+                JobTrack::YoutubeRecurring,
+            ),
+            (
+                JobType::ImportLocal,
+                r#"{"path":"C:/legacy-localization.mp4","add_to_localization_workspace":true}"#,
+                JobTrack::Localization,
+            ),
+            (
+                JobType::DownloadDirectUrl,
+                r#"{"url":"https://www.instagram.com/reel/tracktest/"}"#,
+                JobTrack::Instagram,
+            ),
+            (
+                JobType::DownloadDirectUrl,
+                r#"{"url":"https://example.com/other-track.mp4"}"#,
+                JobTrack::OtherVideo,
+            ),
+            (JobType::DownloadImageBatch, "{}", JobTrack::ImageArchive),
+        ];
+
+        for (index, (job_type, params_json, track)) in cases.into_iter().enumerate() {
+            let original = enqueue_with_type_item_batch_and_track(
+                &paths,
+                job_type,
+                params_json.to_string(),
+                None,
+                Some(format!("retry-track-{index}")),
+                track,
+            )
+            .expect("enqueue source");
+            let conn = db::open(&paths).expect("open");
+            conn.execute(
+                "UPDATE job SET status=?1, finished_at_ms=?2, error='forced retry source' WHERE id=?3",
+                params![JobStatus::Failed.as_str(), now_ms(), &original.id],
+            )
+            .expect("fail source");
+
+            let retry = retry_job(&paths, &original.id).expect("retry");
+            assert_eq!(retry.track, track.as_str(), "retry track case {index}");
+            let persisted: String = conn
+                .query_row("SELECT track FROM job WHERE id=?1", [&retry.id], |row| {
+                    row.get(0)
+                })
+                .expect("persisted retry track");
+            assert_eq!(
+                persisted,
+                track.as_str(),
+                "persisted retry track case {index}"
+            );
+        }
+    }
+
+    #[test]
+    fn retry_uses_legacy_track_fallback_only_when_source_track_is_null_or_invalid() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let paths = AppPaths::new(dir.path().to_path_buf());
+        db::ensure_schema(&paths).expect("schema");
+
+        let source = enqueue_with_type_item_batch_and_track(
+            &paths,
+            JobType::DownloadDirectUrl,
+            r#"{"url":"https://youtu.be/legacy-recurring","subscription_id":"sub-1"}"#.to_string(),
+            None,
+            None,
+            JobTrack::YoutubeRecurring,
+        )
+        .expect("enqueue");
+        let conn = db::open(&paths).expect("open");
+        conn.execute(
+            "UPDATE job SET status=?1, finished_at_ms=?2, track=NULL WHERE id=?3",
+            params![JobStatus::Failed.as_str(), now_ms(), &source.id],
+        )
+        .expect("legacy null source");
+        let retry = retry_job(&paths, &source.id).expect("retry null track");
+        assert_eq!(retry.track, "youtube_recurring");
+
+        let invalid = enqueue_with_type_item_batch_and_track(
+            &paths,
+            JobType::DownloadDirectUrl,
+            r#"{"url":"https://youtu.be/legacy-single"}"#.to_string(),
+            None,
+            None,
+            JobTrack::YoutubeSingle,
+        )
+        .expect("enqueue invalid source");
+        conn.execute(
+            "UPDATE job SET status=?1, finished_at_ms=?2, track='invalid-track' WHERE id=?3",
+            params![JobStatus::Failed.as_str(), now_ms(), &invalid.id],
+        )
+        .expect("invalid source");
+        let retry = retry_job(&paths, &invalid.id).expect("retry invalid track");
+        assert_eq!(retry.track, "youtube_single");
+    }
+
+    #[test]
+    fn track_runtime_settings_reject_invalid_values_and_commit_as_one_set() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let paths = AppPaths::new(dir.path().to_path_buf());
+        db::ensure_schema(&paths).expect("schema");
+        let saved = set_job_track_runtime_settings(
+            &paths,
+            JobTrackRuntimeSettings {
+                youtube_single: 2,
+                youtube_recurring: 3,
+                instagram: 4,
+                other_video: 5,
+                image_archive: 6,
+                localization: 7,
+            },
+        )
+        .expect("initial settings");
+        assert_eq!(
+            get_job_track_runtime_settings(&paths).expect("reload"),
+            saved
+        );
+
+        let mut invalid = saved.clone();
+        invalid.instagram = 0;
+        assert!(set_job_track_runtime_settings(&paths, invalid).is_err());
+        assert_eq!(
+            get_job_track_runtime_settings(&paths).expect("after invalid"),
+            saved,
+            "invalid request must write no partial settings"
+        );
+        let mut above_max = saved.clone();
+        above_max.localization = MAX_MAX_CONCURRENT_JOBS + 1;
+        assert!(set_job_track_runtime_settings(&paths, above_max).is_err());
+        assert_eq!(
+            get_job_track_runtime_settings(&paths).expect("after above-max invalid"),
+            saved,
+            "above-max request must also write no partial settings"
+        );
+
+        let conn = db::open(&paths).expect("open");
+        conn.execute_batch(
+            "CREATE TRIGGER reject_image_track_limit \
+             BEFORE UPDATE ON meta WHEN NEW.key='jobs_track_limit_image_archive' \
+             BEGIN SELECT RAISE(ABORT, 'forced atomicity failure'); END;",
+        )
+        .expect("install failure trigger");
+        let failed_transaction = JobTrackRuntimeSettings {
+            youtube_single: 8,
+            youtube_recurring: 9,
+            instagram: 10,
+            other_video: 11,
+            image_archive: 12,
+            localization: 13,
+        };
+        assert!(set_job_track_runtime_settings(&paths, failed_transaction).is_err());
+        assert_eq!(
+            get_job_track_runtime_settings(&paths).expect("after transaction failure"),
+            saved,
+            "a mid-set SQLite error must roll back every track write"
+        );
+    }
+
+    #[test]
+    fn job_tracks_runtime_snapshot_uses_canonical_persisted_totals_not_bounded_preview_rows() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let paths = AppPaths::new(dir.path().to_path_buf());
+        let mut conn = db::open(&paths).expect("open");
+        db::migrate(&conn).expect("migrate");
+        let tx = conn.transaction().expect("transaction");
+        for index in 0..300_i64 {
+            tx.execute(
+                "INSERT INTO job (id, type, status, progress, params_json, created_at_ms, logs_path, lane, track) \
+                 VALUES (?1, 'download_direct_url', 'queued', 0.0, '{}', ?2, '', 'single', 'youtube_single')",
+                params![format!("single-preview-{index}"), index],
+            )
+            .expect("seed single queue");
+        }
+        for (id, status, track) in [
+            ("recurring-running", "running", Some("youtube_recurring")),
+            ("instagram-success", "succeeded", Some("instagram")),
+            ("other-failed", "failed", Some("other_video")),
+            ("image-canceled", "canceled", Some("image_archive")),
+            ("localization-queued", "queued", Some("localization")),
+            ("legacy-null", "queued", None),
+            ("legacy-invalid", "failed", Some("not_a_track")),
+            ("legacy-blank", "canceled", Some("")),
+        ] {
+            tx.execute(
+                "INSERT INTO job (id, type, status, progress, params_json, created_at_ms, logs_path, lane, track) \
+                 VALUES (?1, 'dummy_sleep', ?2, 0.0, '{}', 1000, '', 'single', ?3)",
+                params![id, status, track],
+            )
+            .expect("seed track/status row");
+        }
+        tx.commit().expect("commit");
+
+        let overview = jobs_overview_snapshot(&paths, Some("now"), None).expect("bounded overview");
+        let preview_single_count = overview
+            .jobs
+            .iter()
+            .filter(|job| job.track == "youtube_single")
+            .count();
+        assert!(
+            overview.jobs.len() < 303,
+            "overview remains a bounded preview rather than the full canonical set"
+        );
+        assert!(
+            preview_single_count < 300,
+            "other current work can occupy bounded preview rows, but canonical track truth must not shrink"
+        );
+
+        let snapshot = get_job_tracks_runtime_snapshot(&paths).expect("runtime snapshot");
+        assert_eq!(snapshot.tracks.len(), JobTrack::ALL.len());
+        let single = snapshot
+            .tracks
+            .iter()
+            .find(|row| row.track == JobTrack::YoutubeSingle)
+            .expect("youtube single row");
+        assert_eq!(single.queued, 300);
+        assert_eq!(single.total, 300);
+        let recurring = snapshot
+            .tracks
+            .iter()
+            .find(|row| row.track == JobTrack::YoutubeRecurring)
+            .expect("youtube recurring row");
+        assert_eq!(recurring.running, 1);
+        assert_eq!(
+            snapshot
+                .tracks
+                .iter()
+                .find(|row| row.track == JobTrack::Instagram)
+                .expect("instagram row")
+                .succeeded,
+            1
+        );
+        assert_eq!(
+            snapshot
+                .tracks
+                .iter()
+                .find(|row| row.track == JobTrack::OtherVideo)
+                .expect("other-video row")
+                .failed,
+            1
+        );
+        assert_eq!(
+            snapshot
+                .tracks
+                .iter()
+                .find(|row| row.track == JobTrack::ImageArchive)
+                .expect("image row")
+                .canceled,
+            1
+        );
+        assert_eq!(
+            snapshot
+                .tracks
+                .iter()
+                .find(|row| row.track == JobTrack::Localization)
+                .expect("localization row")
+                .queued,
+            1
+        );
+        assert_eq!(snapshot.unclassified.queued, 1, "NULL remains unclassified");
+        assert_eq!(
+            snapshot.unclassified.failed, 1,
+            "invalid remains unclassified"
+        );
+        assert_eq!(
+            snapshot.unclassified.canceled, 1,
+            "blank remains unclassified"
+        );
+        assert_eq!(snapshot.unclassified.total, 3);
+    }
+
+    #[test]
+    fn job_tracks_runtime_settings_survive_restart_and_drive_snapshot_budgets() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let paths = AppPaths::new(dir.path().to_path_buf());
+        db::ensure_schema(&paths).expect("schema");
+        let settings = JobTrackRuntimeSettings {
+            youtube_single: 2,
+            youtube_recurring: 3,
+            instagram: 4,
+            other_video: 5,
+            image_archive: 6,
+            localization: 7,
+        };
+        set_job_track_runtime_settings(&paths, settings.clone()).expect("save settings");
+
+        let restarted_paths = AppPaths::new(dir.path().to_path_buf());
+        let snapshot = get_job_tracks_runtime_snapshot(&restarted_paths).expect("restart snapshot");
+        for (track, expected_budget) in [
+            (JobTrack::YoutubeSingle, 2),
+            (JobTrack::YoutubeRecurring, 3),
+            (JobTrack::Instagram, 4),
+            (JobTrack::OtherVideo, 5),
+            (JobTrack::ImageArchive, 6),
+            (JobTrack::Localization, 7),
+        ] {
+            let row = snapshot
+                .tracks
+                .iter()
+                .find(|row| row.track == track)
+                .expect("track row");
+            assert_eq!(row.configured_budget, expected_budget);
+            assert_eq!(row.effective_budget, expected_budget);
+            assert!(!row.paused);
+        }
+        assert_eq!(
+            get_job_track_runtime_settings(&restarted_paths).expect("reload"),
+            settings
+        );
+    }
+
+    #[test]
+    fn job_tracks_runtime_snapshot_aggregate_uses_index_without_temp_sort_on_large_backlog() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let paths = AppPaths::new(dir.path().to_path_buf());
+        let mut conn = db::open(&paths).expect("open");
+        db::migrate(&conn).expect("migrate");
+        let tx = conn.transaction().expect("transaction");
+        for index in 0..55_000_i64 {
+            tx.execute(
+                "INSERT INTO job (id, type, status, progress, params_json, created_at_ms, logs_path, lane, track) \
+                 VALUES (?1, 'download_direct_url', 'queued', 0.0, '{}', ?2, '', 'recurring', 'youtube_recurring')",
+                params![format!("aggregate-{index}"), index],
+            )
+            .expect("seed backlog row");
+        }
+        tx.commit().expect("commit");
+
+        let plan = conn
+            .prepare(
+                "EXPLAIN QUERY PLAN SELECT track, status, COUNT(*) FROM job GROUP BY track, status",
+            )
+            .expect("prepare explain")
+            .query_map([], |row| row.get::<_, String>(3))
+            .expect("run explain")
+            .collect::<rusqlite::Result<Vec<_>>>()
+            .expect("collect explain")
+            .join(" | ");
+        assert!(
+            plan.contains("idx_job_track_status_created"),
+            "aggregate must use the durable track/status index; plan: {plan}"
+        );
+        assert!(
+            !plan.contains("USE TEMP B-TREE"),
+            "aggregate must not materialize a sort; plan: {plan}"
+        );
+
+        let started = std::time::Instant::now();
+        let snapshot = get_job_tracks_runtime_snapshot(&paths).expect("aggregate snapshot");
+        assert!(
+            started.elapsed() < Duration::from_secs(5),
+            "55k-row aggregate should stay bounded; elapsed={:?}",
+            started.elapsed()
+        );
+        let recurring = snapshot
+            .tracks
+            .iter()
+            .find(|row| row.track == JobTrack::YoutubeRecurring)
+            .expect("recurring row");
+        assert_eq!(recurring.queued, 55_000);
+        assert_eq!(recurring.total, 55_000);
+    }
+
+    #[test]
+    fn youtube_gate_trace_deduplicates_repeated_state_and_emits_state_changes() {
+        let mut gate = YoutubeGateTraceGate::default();
+        assert!(gate.should_emit("held", Some("youtube_auth_circuit_open")));
+        assert!(!gate.should_emit("held", Some("youtube_auth_circuit_open")));
+        assert!(gate.should_emit("waiting", Some("paced_after_youtube_start")));
+        gate.last_trace = Some(
+            std::time::Instant::now()
+                .checked_sub(Duration::from_secs(30))
+                .expect("clock supports interval"),
+        );
+        assert!(gate.should_emit("waiting", Some("paced_after_youtube_start")));
+    }
+
+    // WP-0254: recurring-lane Stop/Update-all pause flag round-trips and defaults to off.
+    #[test]
+    fn recurring_pause_round_trips() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let paths = AppPaths::new(dir.path().to_path_buf());
+        db::ensure_schema(&paths).expect("schema");
+
+        assert!(!is_recurring_paused(&paths).expect("default off"));
+        set_recurring_paused(&paths, true).expect("stop");
+        assert!(is_recurring_paused(&paths).expect("paused"));
+        set_recurring_paused(&paths, false).expect("update-all clears");
+        assert!(!is_recurring_paused(&paths).expect("resumed"));
+    }
+
+    // WP-0257 (#3/#4): anti-bot pacing settings round-trip + clamping.
+    #[test]
+    fn antibot_pacing_round_trips_and_clamps() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let paths = AppPaths::new(dir.path().to_path_buf());
+        db::ensure_schema(&paths).expect("schema");
+
+        let def = get_antibot_pacing(&paths).expect("get default");
+        assert_eq!(
+            def.recurring_min_interval_secs,
+            DEFAULT_RECURRING_MIN_INTERVAL_SECS
+        );
+        assert_eq!(def.enumeration_sleep_requests, DEFAULT_ENUM_SLEEP_REQUESTS);
+        assert_eq!(def.update_all_batch_size, DEFAULT_UPDATE_ALL_BATCH);
+        assert_eq!(def.recurring_jitter_secs, DEFAULT_RECURRING_JITTER_SECS);
+        assert_eq!(
+            def.recurring_download_min_sleep_secs,
+            DEFAULT_RECURRING_DOWNLOAD_MIN_SLEEP_SECS
+        );
+        assert_eq!(
+            def.recurring_download_max_sleep_secs,
+            DEFAULT_RECURRING_DOWNLOAD_MAX_SLEEP_SECS
+        );
+        let sleep = recurring_download_sleep_secs(&paths, "stable-job-id");
+        assert!((5..=10).contains(&sleep));
+
+        let saved = set_antibot_pacing(
+            &paths,
+            AntiBotPacingSettings {
+                recurring_min_interval_secs: 999_999,
+                recurring_jitter_secs: 999_999,
+                enumeration_sleep_requests: 999,
+                update_all_batch_size: 10,
+                recurring_download_min_sleep_secs: 999,
+                recurring_download_max_sleep_secs: 1,
+            },
+        )
+        .expect("set");
+        assert_eq!(
+            saved.recurring_min_interval_secs,
+            MAX_RECURRING_MIN_INTERVAL_SECS
+        );
+        assert_eq!(saved.enumeration_sleep_requests, MAX_ENUM_SLEEP_REQUESTS);
+        assert_eq!(saved.update_all_batch_size, 10);
+        assert_eq!(saved.recurring_jitter_secs, MAX_RECURRING_JITTER_SECS);
+        assert_eq!(
+            saved.recurring_download_min_sleep_secs,
+            MAX_RECURRING_DOWNLOAD_SLEEP_SECS
+        );
+        assert_eq!(
+            saved.recurring_download_max_sleep_secs,
+            MAX_RECURRING_DOWNLOAD_SLEEP_SECS
+        );
+
+        let reloaded = get_antibot_pacing(&paths).expect("reget");
+        assert_eq!(
+            reloaded.recurring_min_interval_secs,
+            MAX_RECURRING_MIN_INTERVAL_SECS
+        );
+        assert_eq!(reloaded.update_all_batch_size, 10);
     }
 
     #[test]
@@ -18892,6 +24577,164 @@ EOF
     }
 
     #[test]
+    fn jobs_overview_is_bounded_current_work_with_canonical_counts() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let paths = AppPaths::new(dir.path().to_path_buf());
+        db::ensure_schema(&paths).expect("schema");
+
+        let queued = enqueue_with_type_item_batch_and_track(
+            &paths,
+            JobType::DownloadDirectUrl,
+            r#"{"url":"https://youtu.be/dNUkrrqmwug"}"#.to_string(),
+            None,
+            Some("single-batch".to_string()),
+            JobTrack::YoutubeSingle,
+        )
+        .expect("queued");
+        let running = enqueue_dummy_sleep(&paths, 10).expect("running");
+        let failed = enqueue_dummy_sleep(&paths, 10).expect("failed");
+        let succeeded = enqueue_dummy_sleep(&paths, 10).expect("succeeded");
+
+        let conn = db::open(&paths).expect("open");
+        db::migrate(&conn).expect("migrate");
+        conn.execute(
+            "UPDATE job SET status=?1, started_at_ms=?2 WHERE id=?3",
+            params![JobStatus::Running.as_str(), now_ms(), &running.id],
+        )
+        .expect("mark running");
+        conn.execute(
+            "UPDATE job SET status=?1, finished_at_ms=?2, error='forced' WHERE id=?3",
+            params![JobStatus::Failed.as_str(), now_ms(), &failed.id],
+        )
+        .expect("mark failed");
+        conn.execute(
+            "UPDATE job SET status=?1, progress=1.0, finished_at_ms=?2 WHERE id=?3",
+            params![JobStatus::Succeeded.as_str(), now_ms(), &succeeded.id],
+        )
+        .expect("mark succeeded");
+        conn.execute(
+            "INSERT INTO library_item (id, created_at_ms, source_type, source_uri, title, media_path) \
+             VALUES ('downloaded-item', ?1, 'url', 'https://youtu.be/dNUkrrqmwug', 'Hydrated title', 'C:/media.mp4')",
+            [now_ms()],
+        )
+        .expect("seed matching library title");
+        drop(conn);
+
+        let overview = jobs_overview_snapshot(&paths, Some("now"), None).expect("now overview");
+        assert_eq!(overview.counts.total, 4);
+        assert_eq!(overview.counts.queued, 1);
+        assert_eq!(overview.counts.running, 1);
+        assert_eq!(overview.counts.failed, 1);
+        assert_eq!(overview.counts.succeeded, 1);
+        assert_eq!(overview.counts.canceled, 0);
+        assert!(overview.jobs.iter().any(|job| job.id == queued.id));
+        assert!(overview.jobs.iter().any(|job| job.id == running.id));
+        assert!(!overview.jobs.iter().any(|job| job.id == failed.id));
+        assert!(!overview.jobs.iter().any(|job| job.id == succeeded.id));
+        assert_eq!(overview.preview_view, "now");
+        assert_eq!(
+            overview
+                .jobs
+                .iter()
+                .find(|job| job.id == queued.id)
+                .and_then(|job| job.target_title.as_deref()),
+            None,
+            "overview must not run historical per-URL title hydration",
+        );
+
+        let attention =
+            jobs_overview_snapshot(&paths, Some("attention"), None).expect("attention overview");
+        assert_eq!(attention.preview_view, "attention");
+        assert_eq!(attention.jobs.len(), 1);
+        assert_eq!(attention.jobs[0].id, failed.id);
+
+        let history =
+            jobs_overview_snapshot(&paths, Some("history"), None).expect("history overview");
+        assert_eq!(history.preview_view, "history");
+        assert!(history.jobs.iter().any(|job| job.id == failed.id));
+        assert!(history.jobs.iter().any(|job| job.id == succeeded.id));
+        assert!(!history.jobs.iter().any(|job| job.id == queued.id));
+        assert!(!history.jobs.iter().any(|job| job.id == running.id));
+    }
+
+    #[test]
+    fn jobs_overview_empty_store_has_zero_counts() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let paths = AppPaths::new(dir.path().to_path_buf());
+        db::ensure_schema(&paths).expect("schema");
+
+        let overview = jobs_overview_snapshot(&paths, None, None).expect("empty overview");
+        assert_eq!(overview.preview_view, "now");
+        assert!(overview.jobs.is_empty());
+        assert_eq!(overview.counts.total, 0);
+        assert_eq!(overview.counts.queued, 0);
+        assert_eq!(overview.counts.running, 0);
+        assert_eq!(overview.counts.succeeded, 0);
+        assert_eq!(overview.counts.failed, 0);
+        assert_eq!(overview.counts.canceled, 0);
+    }
+
+    #[test]
+    fn jobs_search_uses_global_exact_receipts_and_bounded_text_fallback() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let paths = AppPaths::new(dir.path().to_path_buf());
+        db::ensure_schema(&paths).expect("schema");
+
+        let mut conn = db::open(&paths).expect("open");
+        db::migrate(&conn).expect("migrate");
+        let tx = conn.transaction().expect("transaction");
+        tx.execute(
+            "INSERT INTO job (id, type, status, progress, params_json, created_at_ms, logs_path, target_title) \
+             VALUES ('ancient-exact', 'download_direct_url', 'failed', 0.0, ?1, 1, 'ancient.log', ?2)",
+            params![
+                r#"{"url":"https://youtu.be/dNUkrrqmwug?si=search-test","note":"ancient-marker"}"#,
+                "YouTube video dNUkrrqmwug",
+            ],
+        )
+        .expect("insert exact row");
+        {
+            let mut insert = tx
+                .prepare(
+                    "INSERT INTO job (id, type, status, progress, params_json, created_at_ms, logs_path) \
+                     VALUES (?1, 'dummy_sleep', 'succeeded', 1.0, '{}', ?2, 'recent.log')",
+                )
+                .expect("prepare recent insert");
+            for index in 0..10_001_i64 {
+                insert
+                    .execute(params![format!("recent-{index:05}"), index + 2])
+                    .expect("insert recent row");
+            }
+        }
+        tx.execute(
+            "INSERT INTO job (id, type, status, progress, params_json, created_at_ms, logs_path) \
+             VALUES ('malformed-json', 'dummy_sleep', 'failed', 0.0, 'not-json', 20000, 'malformed.log')",
+            [],
+        )
+        .expect("insert malformed params row");
+        tx.commit().expect("commit");
+        drop(conn);
+
+        let by_url = search_jobs(&paths, "https://youtu.be/dNUkrrqmwug?si=search-test", 10)
+            .expect("exact URL search");
+        assert_eq!(by_url.len(), 1);
+        assert_eq!(by_url[0].id, "ancient-exact");
+
+        let by_video_id = search_jobs(&paths, "dNUkrrqmwug", 10).expect("video ID search");
+        assert_eq!(by_video_id.len(), 1);
+        assert_eq!(by_video_id[0].id, "ancient-exact");
+
+        assert!(
+            search_jobs(&paths, "ancient-marker", 10)
+                .expect("bounded old text search")
+                .is_empty(),
+            "arbitrary substring search must not scan beyond the recent candidate window",
+        );
+        let malformed = search_jobs(&paths, "not-json", 10).expect("malformed JSON fallback");
+        assert_eq!(malformed.len(), 1);
+        assert_eq!(malformed[0].id, "malformed-json");
+    }
+
+    #[test]
     fn enqueue_localization_import_reuses_existing_workspace_item() {
         let dir = tempfile::tempdir().expect("tempdir");
         let paths = AppPaths::new(dir.path().to_path_buf());
@@ -18974,12 +24817,14 @@ EOF
         assert_eq!(child_status, JobStatus::Canceled);
     }
 
+    // WP-0254: interrupted download work resumes on restart instead of being forgotten.
     #[test]
-    fn running_jobs_are_marked_failed_after_restart_recovery() {
+    fn running_download_jobs_resume_after_restart_recovery() {
         let dir = tempfile::tempdir().expect("tempdir");
         let paths = AppPaths::new(dir.path().to_path_buf());
         db::ensure_schema(&paths).expect("schema");
 
+        // DummySleep maps to the single (download-style) lane → re-queued on restart.
         let job = enqueue_dummy_sleep(&paths, 10).expect("enqueue");
 
         let conn = db::open(&paths).expect("open");
@@ -19005,9 +24850,42 @@ EOF
                 |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
             )
             .expect("select");
-        assert_eq!(status, JobStatus::Failed.as_str());
+        assert_eq!(status, JobStatus::Queued.as_str());
         assert!(started_at_ms.is_none());
-        assert!(finished_at_ms.is_some());
+        assert!(finished_at_ms.is_none());
+        assert!(error.is_none());
+    }
+
+    // WP-0254: heavy localization jobs are NOT auto-resumed; they fail on restart so the
+    // operator re-runs them deliberately (a half-run Python pipeline is not idempotent).
+    #[test]
+    fn running_localization_jobs_fail_after_restart_recovery() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let paths = AppPaths::new(dir.path().to_path_buf());
+        db::ensure_schema(&paths).expect("schema");
+
+        let job =
+            enqueue(&paths, JobType::DubVoicePreservingV1, "{}".to_string()).expect("enqueue");
+
+        let conn = db::open(&paths).expect("open");
+        db::migrate(&conn).expect("migrate");
+        conn.execute(
+            "UPDATE job SET status=?1, started_at_ms=?2 WHERE id=?3",
+            params![JobStatus::Running.as_str(), now_ms(), job.id],
+        )
+        .expect("force running");
+
+        let updated = requeue_orphaned_running_jobs(&conn).expect("requeue");
+        assert_eq!(updated, 1);
+
+        let (status, error): (String, Option<String>) = conn
+            .query_row(
+                "SELECT status, error FROM job WHERE id=?1",
+                [job.id],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .expect("select");
+        assert_eq!(status, JobStatus::Failed.as_str());
         assert_eq!(error.as_deref(), Some("interrupted by app shutdown"));
     }
 
@@ -19860,8 +25738,83 @@ EOF
         assert_eq!(retried.status, JobStatus::Queued);
     }
 
+    // WP-0257: one channel's cookie rejection must NOT arm a global block.
     #[test]
-    fn youtube_auth_block_cancels_matching_queued_youtube_jobs() {
+    fn single_cookie_rejection_does_not_arm_global_block() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let paths = AppPaths::new(dir.path().to_path_buf());
+        db::ensure_schema(&paths).expect("schema");
+
+        let key = "cookie:deadbeef";
+        assert!(!register_youtube_auth_suspicion(&paths, key, "sub-1"));
+        assert!(!register_youtube_auth_suspicion(&paths, key, "sub-2"));
+        // A repeat of an already-counted target does not advance the threshold.
+        assert!(!register_youtube_auth_suspicion(&paths, key, "sub-2"));
+        // The third DISTINCT target arms the block.
+        assert!(register_youtube_auth_suspicion(&paths, key, "sub-3"));
+        // A success drops accumulated suspicion -> counting restarts.
+        clear_youtube_auth_suspect(&paths);
+        assert!(!register_youtube_auth_suspicion(&paths, key, "sub-4"));
+    }
+
+    // WP-0257: a pre-TTL sticky block (expires_at_ms == 0) auto-clears on the first check.
+    #[test]
+    fn old_sticky_auth_block_auto_clears_on_check() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let paths = AppPaths::new(dir.path().to_path_buf());
+        db::ensure_schema(&paths).expect("schema");
+
+        let key = "cookie:legacy";
+        save_youtube_auth_block(
+            &paths,
+            &YoutubeAuthBlockState {
+                auth_key: key.to_string(),
+                source: "youtube".to_string(),
+                blocked_at_ms: now_ms(),
+                reason: "old sticky block".to_string(),
+                url: None,
+                job_id: None,
+                expires_at_ms: 0,
+                backoff_count: 0,
+            },
+        )
+        .expect("save old block");
+        assert!(active_youtube_auth_block(&paths, Some(key))
+            .expect("active")
+            .is_none());
+        assert!(load_youtube_auth_block(&paths).expect("load").is_none());
+    }
+
+    // WP-0257: repeated rejections escalate the auto-clear TTL.
+    #[test]
+    fn auth_block_backoff_escalates_ttl() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let paths = AppPaths::new(dir.path().to_path_buf());
+        db::ensure_schema(&paths).expect("schema");
+
+        let key = "cookie:escalate";
+        record_youtube_auth_block(&paths, key.to_string(), "r1".to_string(), None, None)
+            .expect("record 1");
+        let first = load_youtube_auth_block(&paths)
+            .expect("load")
+            .expect("state 1");
+        assert_eq!(first.backoff_count, 1);
+        assert!(first.expires_at_ms > first.blocked_at_ms);
+
+        record_youtube_auth_block(&paths, key.to_string(), "r2".to_string(), None, None)
+            .expect("record 2");
+        let second = load_youtube_auth_block(&paths)
+            .expect("load")
+            .expect("state 2");
+        assert_eq!(second.backoff_count, 2);
+        assert!(
+            (second.expires_at_ms - second.blocked_at_ms)
+                > (first.expires_at_ms - first.blocked_at_ms)
+        );
+    }
+
+    #[test]
+    fn youtube_auth_block_holds_matching_queued_youtube_jobs_without_canceling() {
         let dir = tempfile::tempdir().expect("tempdir");
         let paths = AppPaths::new(dir.path().to_path_buf());
         db::ensure_schema(&paths).expect("schema");
@@ -19882,6 +25835,7 @@ EOF
             None,
             None,
             Some("42a89117-test".to_string()),
+            Vec::new(),
         )
         .expect("enqueue batch");
 
@@ -19896,16 +25850,24 @@ EOF
 
         assert_eq!(
             stored_job_status(&paths, &jobs[0].id),
-            JobStatus::Canceled.as_str()
+            JobStatus::Queued.as_str()
         );
         assert_eq!(
             stored_job_status(&paths, &jobs[1].id),
-            JobStatus::Canceled.as_str()
+            JobStatus::Queued.as_str()
         );
         assert_eq!(
             stored_job_status(&paths, &jobs[2].id),
             JobStatus::Queued.as_str()
         );
+        assert!(youtube_direct_download_is_held(
+            &paths,
+            &jobs[0].params_json
+        ));
+        assert!(!youtube_direct_download_is_held(
+            &paths,
+            &jobs[2].params_json
+        ));
     }
 
     #[test]
@@ -20024,6 +25986,7 @@ EOF
             None,
             None,
             Some("42a89117-test".to_string()),
+            Vec::new(),
         )
         .expect_err("known-bad auth should block enqueue");
         assert!(err.to_string().contains("YouTube auth is blocked"));
@@ -20639,7 +26602,7 @@ EOF
 
         let jobs = enqueue_download_direct_url_batch_raw(
             &paths,
-            vec!["https://www.youtube.com/watch?v=abc123".to_string()],
+            vec!["https://youtu.be/dNUkrrqmwug?si=enqueue-test".to_string()],
             None,
             None,
             None,
@@ -20647,9 +26610,15 @@ EOF
             None,
             None,
             None,
+            Vec::new(),
         )
         .expect("enqueue");
         assert_eq!(jobs.len(), 1);
+        assert_eq!(
+            jobs[0].target_title.as_deref(),
+            Some("YouTube video dNUkrrqmwug"),
+            "enqueue returns an immediate traceable label without waiting for yt-dlp metadata",
+        );
 
         let conn = db::open(&paths).expect("db open");
         db::migrate(&conn).expect("migrate");
@@ -20688,6 +26657,8 @@ EOF
             None,
             Some("parent-job".to_string()),
             Some("subscription-1".to_string()),
+            Vec::new(),
+            Vec::new(),
         )
         .expect("enqueue subscription child");
 
@@ -20721,6 +26692,8 @@ EOF
                     r#"[{"domain":".youtube.com","name":"SID","value":"fresh-global"}]"#
                         .to_string(),
                 ),
+                browser_cookie_source: None,
+                ..Default::default()
             },
         )
         .expect("save global auth");
@@ -20732,6 +26705,63 @@ EOF
         let resolved = resolved.expect("resolved cookie");
         assert!(resolved.contains("fresh-global"));
         assert!(!resolved.contains("stale-job"));
+    }
+
+    #[test]
+    fn global_youtube_browser_source_is_used_without_saved_cookie() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let paths = AppPaths::new(dir.path().to_path_buf());
+        db::ensure_schema(&paths).expect("schema");
+        config::save_youtube_auth_config(
+            &paths,
+            &config::YoutubeAuthConfig {
+                netscape_cookie_json: None,
+                browser_cookie_source: Some("firefox".to_string()),
+                ..Default::default()
+            },
+        )
+        .expect("save browser source");
+
+        assert_eq!(
+            effective_youtube_browser_source(&paths, false, false, None)
+                .expect("resolve")
+                .as_deref(),
+            Some("firefox")
+        );
+        assert_eq!(
+            youtube_auth_material_key(&paths, None, false, None)
+                .expect("auth key")
+                .as_deref(),
+            Some("browser:firefox")
+        );
+    }
+
+    #[test]
+    fn global_youtube_browser_source_overrides_stale_job_cookie() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let paths = AppPaths::new(dir.path().to_path_buf());
+        db::ensure_schema(&paths).expect("schema");
+        config::save_youtube_auth_config(
+            &paths,
+            &config::YoutubeAuthConfig {
+                netscape_cookie_json: None,
+                browser_cookie_source: Some("firefox".to_string()),
+                ..Default::default()
+            },
+        )
+        .expect("save browser source");
+        write_job_cookie_secret(&paths, "job-stale", "SID=stale-job").expect("write stale");
+
+        assert_eq!(
+            resolve_youtube_auth_cookie_for_job(&paths, "job-stale", None).expect("resolve auth"),
+            None
+        );
+        assert_eq!(
+            effective_youtube_browser_source(&paths, false, false, None)
+                .expect("resolve browser")
+                .as_deref(),
+            Some("firefox")
+        );
     }
 
     #[test]
@@ -21050,7 +27080,7 @@ EOF
 
         assert!(!result.ok);
         assert_eq!(result.url, DEFAULT_YOUTUBE_AUTH_PREFLIGHT_URL);
-        assert!(result.message.contains("No saved global YouTube cookies"));
+        assert!(result.message.contains("No YouTube session is configured"));
     }
 
     #[test]
@@ -21071,6 +27101,20 @@ EOF
         assert!(args
             .iter()
             .any(|value| value == "https://www.youtube.com/watch?v=Y1I5KHIMaEo"));
+    }
+
+    #[test]
+    fn build_youtube_browser_auth_preflight_never_adds_guest_fallback() {
+        let args = build_youtube_browser_auth_preflight_args(
+            "https://www.youtube.com/watch?v=Y1I5KHIMaEo",
+            "firefox",
+        );
+
+        assert!(args
+            .windows(2)
+            .any(|pair| pair == ["--cookies-from-browser", "firefox"]));
+        assert!(!args.iter().any(|value| value == "--cookies"));
+        assert!(args.iter().any(|value| value == "--skip-download"));
     }
 
     #[test]
@@ -21225,5 +27269,482 @@ EOF
         assert_eq!(summary.removed_artifact_dirs, 1);
         assert!(!failed_artifacts.exists());
         assert!(ok_artifacts.exists());
+    }
+
+    #[test]
+    fn selected_track_projection_is_applied_before_limits_and_progress_refresh_is_bounded() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let paths = AppPaths::new(dir.path().to_path_buf());
+        db::ensure_schema(&paths).expect("schema");
+        let mut conn = db::open(&paths).expect("open");
+        db::migrate(&conn).expect("migrate");
+        let tx = conn.transaction().expect("transaction");
+        for index in 0..400_i64 {
+            tx.execute(
+                "INSERT INTO job (id, type, status, progress, params_json, created_at_ms, logs_path, lane, track) VALUES (?1, 'download_direct_url', 'queued', 0.0, ?2, ?3, '', 'recurring', 'youtube_recurring')",
+                params![
+                    format!("recurring-projection-{index}"),
+                    format!(r#"{{"url":"https://youtu.be/recurring{index}"}}"#),
+                    10_000 + index,
+                ],
+            )
+            .expect("seed recurring backlog");
+        }
+        for index in 0..3_i64 {
+            tx.execute(
+                "INSERT INTO job (id, type, status, progress, params_json, created_at_ms, logs_path, lane, track) VALUES (?1, 'download_direct_url', 'queued', 0.0, ?2, ?3, '', 'single', 'youtube_single')",
+                params![
+                    format!("single-projection-{index}"),
+                    format!(r#"{{"url":"https://youtu.be/single-needle-{index}"}}"#),
+                    index,
+                ],
+            )
+            .expect("seed foreground row");
+        }
+        tx.commit().expect("commit");
+        drop(conn);
+
+        let overview = jobs_overview_snapshot(&paths, Some("now"), Some("youtube_single"))
+            .expect("selected overview");
+        assert_eq!(overview.selected_track.as_deref(), Some("youtube_single"));
+        assert_eq!(overview.selected_counts.queued, 3);
+        assert_eq!(overview.jobs.len(), 3);
+        assert!(overview
+            .jobs
+            .iter()
+            .all(|job| job.track == "youtube_single"));
+
+        let activity =
+            jobs_track_activity_page(&paths, "youtube_single", 2, 0).expect("activity page");
+        assert_eq!(activity.active_total, 3);
+        assert_eq!(activity.jobs.len(), 2);
+        assert!(activity.has_more);
+
+        let conn = db::open(&paths).expect("update progress");
+        conn.execute(
+            "UPDATE job SET status='running', progress=0.375 WHERE id='single-projection-1'",
+            [],
+        )
+        .expect("set progress");
+        drop(conn);
+        let progress = jobs_progress_many(
+            &paths,
+            &["single-projection-1".to_string(), "not-a-job".to_string()],
+        )
+        .expect("bounded progress projection");
+        assert_eq!(progress.len(), 1);
+        assert_eq!(progress[0].status, JobStatus::Running);
+        assert!((progress[0].progress - 0.375).abs() < f32::EPSILON);
+    }
+
+    #[test]
+    fn yt_dlp_progress_parser_accepts_template_lines_and_clamps_values() {
+        assert_eq!(
+            yt_dlp_progress_fraction("VV_PROGRESS: 42.5%\n"),
+            Some(0.425)
+        );
+        assert_eq!(
+            yt_dlp_progress_fraction("prefix VV_PROGRESS:100%"),
+            Some(1.0)
+        );
+        assert_eq!(yt_dlp_progress_fraction("VV_PROGRESS:120%"), Some(1.0));
+        assert_eq!(yt_dlp_progress_fraction("[download] 20%"), None);
+    }
+
+    #[test]
+    fn queue_identity_reconcile_cancels_only_verified_present_jobs() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let paths = AppPaths::new(dir.path().join("app_data"));
+        db::ensure_schema(&paths).expect("schema");
+        let present_path = dir.path().join("present.mp4");
+        let missing_path = dir.path().join("missing.mp4");
+        std::fs::write(&present_path, b"present").expect("present fixture");
+        let conn = db::open(&paths).expect("open");
+        let now = now_ms();
+        for (item_id, media_id, media_path, job_id) in [
+            (
+                "present-item",
+                "present1234",
+                present_path.to_string_lossy().to_string(),
+                "present-job",
+            ),
+            (
+                "missing-item",
+                "missing1234",
+                missing_path.to_string_lossy().to_string(),
+                "missing-job",
+            ),
+        ] {
+            conn.execute(
+                "INSERT INTO library_item (id, created_at_ms, source_type, source_uri, title, media_path, origin) VALUES (?1, ?2, 'local_file', ?3, ?1, ?3, '4kvdp_import')",
+                params![item_id, now, media_path],
+            )
+            .expect("library item");
+            conn.execute(
+                "INSERT INTO media_source_identity (service, media_id, canonical_url, library_item_id, active_job_id, repair_state, created_at_ms, updated_at_ms) VALUES ('youtube', ?1, ?2, ?3, ?4, 'downloading', ?5, ?5)",
+                params![
+                    media_id,
+                    format!("https://www.youtube.com/watch?v={media_id}"),
+                    item_id,
+                    job_id,
+                    now
+                ],
+            )
+            .expect("identity");
+            conn.execute(
+                "INSERT INTO job (id, type, status, progress, params_json, created_at_ms, logs_path, lane, track) VALUES (?1, 'download_direct_url', 'queued', 0.0, ?2, ?3, '', 'recurring', 'youtube_recurring')",
+                params![
+                    job_id,
+                    format!(r#"{{"url":"https://www.youtube.com/watch?v={media_id}"}}"#),
+                    now
+                ],
+            )
+            .expect("queued job");
+        }
+        drop(conn);
+
+        let preview = youtube_queue_identity_reconcile(&paths, true, None, None).expect("preview");
+        assert_eq!(preview.scanned_queued_jobs, 2);
+        assert_eq!(preview.present_jobs, 1);
+        assert_eq!(preview.missing_jobs, 1);
+        assert_eq!(preview.canceled_jobs, 0);
+
+        set_queue_paused(&paths, true).expect("pause queue");
+        let applied = youtube_queue_identity_reconcile(&paths, false, None, None).expect("apply");
+        assert_eq!(applied.canceled_jobs, 1);
+        let conn = db::open_readonly(&paths).expect("verify");
+        let statuses = conn
+            .prepare("SELECT id, status FROM job ORDER BY id")
+            .expect("status query")
+            .query_map([], |row| {
+                Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+            })
+            .expect("status rows")
+            .collect::<rusqlite::Result<HashMap<_, _>>>()
+            .expect("status collect");
+        assert_eq!(
+            statuses.get("present-job").map(String::as_str),
+            Some("canceled")
+        );
+        assert_eq!(
+            statuses.get("missing-job").map(String::as_str),
+            Some("queued")
+        );
+        assert!(
+            present_path.is_file(),
+            "reconciliation must not alter media"
+        );
+    }
+
+    fn seed_queued_youtube_job(
+        conn: &rusqlite::Connection,
+        id: &str,
+        media_id: &str,
+        subscription_id: &str,
+        source_page_url: &str,
+        created_at_ms: i64,
+    ) {
+        let params_json = serde_json::json!({
+            "url": format!("https://www.youtube.com/watch?v={media_id}"),
+            "subscription_id": subscription_id,
+            "source_page_url": source_page_url,
+            "source_display_name": subscription_id,
+        })
+        .to_string();
+        conn.execute(
+            "INSERT INTO job (id, type, status, progress, params_json, created_at_ms, logs_path, lane, track) \
+             VALUES (?1, 'download_direct_url', 'queued', 0.0, ?2, ?3, '', 'recurring', 'youtube_recurring')",
+            params![id, params_json, created_at_ms],
+        )
+        .expect("seed queued YouTube job");
+    }
+
+    #[test]
+    fn queue_identity_reconcile_compacts_full_identity_set_and_preserves_memberships() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let paths = AppPaths::new(dir.path().join("app_data"));
+        db::ensure_schema(&paths).expect("schema");
+        let conn = db::open(&paths).expect("open");
+        for (id, title, source_url) in [
+            (
+                "sub-playlist",
+                "Creator playlist",
+                "https://www.youtube.com/playlist?list=PL123",
+            ),
+            (
+                "sub-videos",
+                "Creator videos",
+                "https://www.youtube.com/@creator/videos",
+            ),
+        ] {
+            conn.execute(
+                "INSERT INTO youtube_subscription (id, title, source_url, folder_map, created_at_ms, updated_at_ms) \
+                 VALUES (?1, ?2, ?3, ?1, 1, 1)",
+                params![id, title, source_url],
+            )
+            .expect("seed subscription");
+        }
+
+        let source_priority_media_id = "sourceprio1";
+        seed_queued_youtube_job(
+            &conn,
+            "playlist-newest",
+            source_priority_media_id,
+            "sub-playlist",
+            "https://www.youtube.com/playlist?list=PL123",
+            30,
+        );
+        seed_queued_youtube_job(
+            &conn,
+            "videos-old",
+            source_priority_media_id,
+            "sub-videos",
+            "https://www.youtube.com/@creator/videos",
+            10,
+        );
+        seed_queued_youtube_job(
+            &conn,
+            "videos-new",
+            source_priority_media_id,
+            "sub-videos",
+            "https://www.youtube.com/@creator/videos",
+            20,
+        );
+
+        let active_owner_media_id = "activeownr1";
+        seed_queued_youtube_job(
+            &conn,
+            "active-playlist",
+            active_owner_media_id,
+            "sub-playlist",
+            "https://www.youtube.com/playlist?list=PL123",
+            1,
+        );
+        seed_queued_youtube_job(
+            &conn,
+            "newer-videos",
+            active_owner_media_id,
+            "sub-videos",
+            "https://www.youtube.com/@creator/videos",
+            2,
+        );
+        conn.execute(
+            "INSERT INTO media_source_identity (service, media_id, canonical_url, active_job_id, repair_state, created_at_ms, updated_at_ms) \
+             VALUES ('youtube', ?1, ?2, 'active-playlist', 'downloading', 1, 1)",
+            params![
+                active_owner_media_id,
+                format!("https://www.youtube.com/watch?v={active_owner_media_id}")
+            ],
+        )
+        .expect("seed active identity");
+        drop(conn);
+
+        set_queue_paused(&paths, true).expect("pause queue");
+        let preview = youtube_queue_identity_reconcile(&paths, true, None, None).expect("preview");
+        assert_eq!(preview.scanned_queued_jobs, 5);
+        assert_eq!(preview.canonical_identities, 2);
+        assert_eq!(preview.duplicate_identities, 2);
+        assert_eq!(preview.would_cancel_jobs, 3);
+
+        let applied = youtube_queue_identity_reconcile(&paths, false, None, None).expect("apply");
+        assert_eq!(applied.canceled_jobs, 3);
+        assert_eq!(applied.remaining_duplicate_identities, 0);
+        assert_eq!(applied.remaining_present_jobs, 0);
+        assert_eq!(applied.claim_mismatches, 0);
+
+        let conn = db::open_readonly(&paths).expect("verify");
+        let statuses = conn
+            .prepare("SELECT id, status FROM job ORDER BY id")
+            .expect("status query")
+            .query_map([], |row| {
+                Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+            })
+            .expect("status rows")
+            .collect::<rusqlite::Result<HashMap<_, _>>>()
+            .expect("status collect");
+        assert_eq!(
+            statuses.get("videos-new").map(String::as_str),
+            Some("queued")
+        );
+        assert_eq!(
+            statuses.get("active-playlist").map(String::as_str),
+            Some("queued")
+        );
+        for canceled in ["playlist-newest", "videos-old", "newer-videos"] {
+            assert_eq!(statuses.get(canceled).map(String::as_str), Some("canceled"));
+        }
+        let active_jobs = conn
+            .prepare(
+                "SELECT media_id, active_job_id FROM media_source_identity \
+                 WHERE service='youtube' ORDER BY media_id",
+            )
+            .expect("identity query")
+            .query_map([], |row| {
+                Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+            })
+            .expect("identity rows")
+            .collect::<rusqlite::Result<HashMap<_, _>>>()
+            .expect("identity collect");
+        assert_eq!(
+            active_jobs
+                .get(source_priority_media_id)
+                .map(String::as_str),
+            Some("videos-new")
+        );
+        assert_eq!(
+            active_jobs.get(active_owner_media_id).map(String::as_str),
+            Some("active-playlist")
+        );
+        let membership_count: i64 = conn
+            .query_row("SELECT COUNT(*) FROM media_source_membership", [], |row| {
+                row.get(0)
+            })
+            .expect("membership count");
+        assert_eq!(membership_count, 4);
+    }
+
+    #[test]
+    fn execution_identity_gate_suppresses_present_and_duplicate_jobs_and_claims_missing() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let paths = AppPaths::new(dir.path().join("app_data"));
+        db::ensure_schema(&paths).expect("schema");
+        let present_path = dir.path().join("present-gate.mp4");
+        let missing_path = dir.path().join("missing-gate.mp4");
+        let deleted_path = dir.path().join("deleted-gate.mp4");
+        let authorized_deleted_path = dir.path().join("authorized-deleted-gate.mp4");
+        std::fs::write(&present_path, b"present").expect("present fixture");
+        let conn = db::open(&paths).expect("open");
+        for (item_id, media_id, media_path, job_id, file_status, authorized_job_id) in [
+            (
+                "present-gate-item",
+                "presentgt01",
+                present_path.to_string_lossy().to_string(),
+                "present-gate-job",
+                "available",
+                None,
+            ),
+            (
+                "missing-gate-item",
+                "missinggt01",
+                missing_path.to_string_lossy().to_string(),
+                "missing-gate-job",
+                "available",
+                None,
+            ),
+            (
+                "deleted-gate-item",
+                "deletedgt01",
+                deleted_path.to_string_lossy().to_string(),
+                "deleted-gate-job",
+                "operator_deleted",
+                None,
+            ),
+            (
+                "authorized-deleted-gate-item",
+                "authorized01",
+                authorized_deleted_path.to_string_lossy().to_string(),
+                "authorized-deleted-gate-job",
+                "operator_deleted",
+                Some("authorized-deleted-gate-job"),
+            ),
+        ] {
+            conn.execute(
+                "INSERT INTO library_item (id, created_at_ms, source_type, source_uri, title, media_path, origin, file_status, file_redownload_authorized_job_id) \
+                 VALUES (?1, 1, 'local_file', ?2, ?1, ?2, '4kvdp_import', ?3, ?4)",
+                params![item_id, media_path, file_status, authorized_job_id],
+            )
+            .expect("library item");
+            conn.execute(
+                "INSERT INTO media_source_identity (service, media_id, canonical_url, library_item_id, active_job_id, repair_state, created_at_ms, updated_at_ms) \
+                 VALUES ('youtube', ?1, ?2, ?3, ?4, 'downloading', 1, 1)",
+                params![
+                    media_id,
+                    format!("https://www.youtube.com/watch?v={media_id}"),
+                    item_id,
+                    job_id
+                ],
+            )
+            .expect("identity");
+            seed_queued_youtube_job(
+                &conn,
+                job_id,
+                media_id,
+                "gate-sub",
+                "https://www.youtube.com/@gate/videos",
+                1,
+            );
+        }
+        seed_queued_youtube_job(
+            &conn,
+            "duplicate-gate-job",
+            "missinggt01",
+            "gate-sub",
+            "https://www.youtube.com/@gate/videos",
+            2,
+        );
+        drop(conn);
+
+        assert_eq!(
+            claim_job_for_track(&paths, "present-gate-job", JobTrack::YoutubeRecurring)
+                .expect("present gate"),
+            DispatchClaimOutcome::SkippedPresent
+        );
+        assert_eq!(
+            claim_job_for_track(&paths, "duplicate-gate-job", JobTrack::YoutubeRecurring)
+                .expect("duplicate gate"),
+            DispatchClaimOutcome::SkippedActive
+        );
+        assert!(matches!(
+            claim_job_for_track(&paths, "missing-gate-job", JobTrack::YoutubeRecurring)
+                .expect("missing gate"),
+            DispatchClaimOutcome::Claimed { .. }
+        ));
+        assert_eq!(
+            claim_job_for_track(&paths, "deleted-gate-job", JobTrack::YoutubeRecurring)
+                .expect("deleted gate"),
+            DispatchClaimOutcome::SkippedOperatorDeleted
+        );
+        assert!(matches!(
+            claim_job_for_track(
+                &paths,
+                "authorized-deleted-gate-job",
+                JobTrack::YoutubeRecurring
+            )
+            .expect("authorized deleted gate"),
+            DispatchClaimOutcome::Claimed { .. }
+        ));
+
+        let conn = db::open_readonly(&paths).expect("verify");
+        let statuses = conn
+            .prepare("SELECT id, status FROM job ORDER BY id")
+            .expect("status query")
+            .query_map([], |row| {
+                Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+            })
+            .expect("status rows")
+            .collect::<rusqlite::Result<HashMap<_, _>>>()
+            .expect("status collect");
+        assert_eq!(
+            statuses.get("present-gate-job").map(String::as_str),
+            Some("canceled")
+        );
+        assert_eq!(
+            statuses.get("duplicate-gate-job").map(String::as_str),
+            Some("canceled")
+        );
+        assert_eq!(
+            statuses.get("missing-gate-job").map(String::as_str),
+            Some("running")
+        );
+        assert_eq!(
+            statuses.get("deleted-gate-job").map(String::as_str),
+            Some("canceled")
+        );
+        assert_eq!(
+            statuses
+                .get("authorized-deleted-gate-job")
+                .map(String::as_str),
+            Some("running")
+        );
     }
 }

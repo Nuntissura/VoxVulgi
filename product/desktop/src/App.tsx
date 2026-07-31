@@ -1,4 +1,13 @@
-import { Suspense, lazy, type ReactNode, useCallback, useEffect, useMemo, useState } from "react";
+import {
+  Suspense,
+  lazy,
+  type ReactNode,
+  useCallback,
+  useEffect,
+  useMemo,
+  useRef,
+  useState,
+} from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { getCurrentWindow } from "@tauri-apps/api/window";
@@ -19,9 +28,16 @@ import {
 } from "./lib/diarizationSpeakerCount";
 import { openPathBestEffort, revealPath } from "./lib/pathOpener";
 import { joinPath } from "./lib/pathUtils";
+import { jobTrackLabel } from "./lib/archiverRuntime";
 import { featureRootStatus, useSharedDownloadDirStatus } from "./lib/sharedDownloadDir";
 import { safeLocalStorageGet, safeLocalStorageSet } from "./lib/persist";
 import { installFreezeDetector, setFreezeDetectorPage } from "./lib/freezeDetector";
+import {
+  buildAgentUiAudit,
+  performAgentUiAction,
+  type AgentUiActionRequest,
+  type AgentUiAuditRequest,
+} from "./lib/agentUiAudit";
 
 // ---------------------------------------------------------------------------
 // Visual debugger console buffer (WP-0209)
@@ -122,8 +138,15 @@ async function withVisualDebuggerTimeout<T>(
 function captureVisualDebuggerCanvas(): Promise<HTMLCanvasElement> {
   const target = getVisualDebuggerCaptureTarget();
   const rect = target.getBoundingClientRect();
-  const width = Math.max(1, Math.ceil(rect.width || window.innerWidth || 1));
-  const height = Math.max(1, Math.ceil(rect.height || window.innerHeight || 1));
+  // Capture the FULL scrollable content (scrollHeight), not just the visible viewport
+  // (getBoundingClientRect height). Otherwise below-the-fold surfaces — e.g. the
+  // "Subscription groups" card and the full subscription list on the Video Archiver — are
+  // cut off, so a model inspecting a snapshot never "sees" them. Capped to avoid a runaway
+  // canvas on very long lists (Jobs history).
+  const MAX_CAPTURE_PX = 16_000;
+  const width = Math.max(1, Math.ceil(target.scrollWidth || rect.width || window.innerWidth || 1));
+  const fullHeight = Math.max(target.scrollHeight || 0, rect.height || 0, window.innerHeight || 1);
+  const height = Math.max(1, Math.min(Math.ceil(fullHeight), MAX_CAPTURE_PX));
   return withVisualDebuggerTimeout(
     html2canvas(target, {
       backgroundColor: null,
@@ -236,6 +259,7 @@ type HomeJobRow = {
   progress: number;
   error: string | null;
   created_at_ms?: number;
+  track?: string | null;
 };
 
 type PendingImportJobRow = {
@@ -244,6 +268,7 @@ type PendingImportJobRow = {
   progress: number;
   error: string | null;
   item_id?: string | null;
+  track?: string | null;
 };
 
 type HomeItemOutputs = {
@@ -293,7 +318,7 @@ type RecentLocalizationItemStatus = {
 type LocalizationRunQueueSummary = {
   batch_id: string;
   stage: string;
-  queued_jobs: Array<{ id: string; type: string }>;
+  queued_jobs: Array<{ id: string; type: string; track?: string | null }>;
   notes: string[];
 };
 
@@ -1013,8 +1038,8 @@ function LocalizationStudioHome({
       setVoiceSetupJob(job);
       setNotice(
         action === "repair"
-          ? "Voice cloning repair queued. Jobs/Queue shows live progress and keeps a recovery record."
-          : "Voice cloning setup queued. Jobs/Queue shows live progress and keeps a recovery record.",
+          ? `${jobTrackLabel(job.track)} voice cloning repair queued. Jobs/Queue shows live progress and keeps a recovery record.`
+          : `${jobTrackLabel(job.track)} voice cloning setup queued. Jobs/Queue shows live progress and keeps a recovery record.`,
       );
       void diagnosticsTrace("localization_voice_setup_queued", {
         action,
@@ -1280,7 +1305,7 @@ function LocalizationStudioHome({
     setPendingImportJob(job);
     setPendingImportPath(path);
     setNotice(
-      "Queued local import for the Localization workspace. Import only adds the file here; localization jobs will not start until you press Start localization run.",
+      `Queued ${jobTrackLabel(job.track)} import for the Localization workspace. Import only adds the file here; localization jobs will not start until you press Start localization run.`,
     );
     void diagnosticsTrace("localization_home_import_queued", {
       path,
@@ -1325,7 +1350,7 @@ function LocalizationStudioHome({
         summary.stage === "voice_setup"
           ? "Preparing voice cloning for this run. This is a one-time setup; localization will continue automatically when it finishes."
           : summary.queued_jobs.length
-          ? `Queued ${summary.queued_jobs.length} localization job(s). Current stage: ${summary.stage}.`
+          ? `Queued ${summary.queued_jobs.length} Localization job(s). Current stage: ${summary.stage}.`
           : `Localization run is waiting at stage ${summary.stage}. ${summary.notes[0] ?? "No new jobs were queued."}`,
       );
       const items = await refreshRecentItems();
@@ -2350,10 +2375,10 @@ function LocalizationStudioHome({
                   }}
                 >
                   <option value="">Apply a preset...</option>
-                  <option value="ja_anime">Japanese Anime (ASR+Translate+Diarize)</option>
-                  <option value="ko_variety">Korean Variety (ASR+Translate+Diarize)</option>
-                  <option value="subtitles_only">Quick Subtitles Only (ASR)</option>
-                  <option value="full_dub">Full Dub Pipeline (all stages)</option>
+                  <option value="ja_anime">Japanese anime — subtitles + speaker labels</option>
+                  <option value="ko_variety">Korean variety — subtitles + speaker labels</option>
+                  <option value="subtitles_only">Subtitles only</option>
+                  <option value="full_dub">Full English dub</option>
                 </select>
               </label>
               <div style={{ fontSize: 13, color: "#4b5563" }}>
@@ -2373,7 +2398,7 @@ function LocalizationStudioHome({
               </label>
               <details style={{ marginTop: 8 }}>
                 <summary style={{ cursor: "pointer", fontSize: 13, color: "#4b5563" }}>
-                  Legacy global auto-processing defaults{" "}
+                  Global auto-processing defaults{" "}
                   {batchRules && (batchRules.auto_asr || batchRules.auto_translate || batchRules.auto_dub_preview)
                     ? "(active)"
                     : "(off)"}
@@ -2389,7 +2414,7 @@ function LocalizationStudioHome({
                       ["auto_translate", "Translate to English"],
                       ["auto_separate", "Separate audio stems"],
                       ["auto_diarize", "Label speakers"],
-                      ["auto_dub_preview", "Dub preview (TTS + Mix + Mux)"],
+                      ["auto_dub_preview", "Dub preview"],
                     ] as const
                   ).map(([key, label]) => (
                     <label key={key} style={{ display: "flex", alignItems: "center", gap: 6 }}>
@@ -2421,8 +2446,8 @@ function LocalizationStudioHome({
               <div className="loc-home-eyebrow">Workflow</div>
               <h2 style={{ marginTop: 0 }}>What happens here</h2>
               <div className="loc-home-support">
-                The shipped Localization path is staged and operator-visible rather than a black
-                box.
+                Every step below is shown so you can see exactly what's happening — nothing is
+                hidden.
               </div>
               <div className="loc-home-stage-list">
                 {LOCALIZATION_HOME_STAGES.map((stage) => (
@@ -2439,7 +2464,7 @@ function LocalizationStudioHome({
                     disabled={uiBusy}
                     onClick={() => onOpenEditorSection(currentHomeItem.id, "loc-run")}
                   >
-                    Open run contract
+                    Open run details
                   </button>
                   <button
                     type="button"
@@ -2661,6 +2686,7 @@ function App() {
   const [startupDetailsOpen, setStartupDetailsOpen] = useState(false);
   const [shellWindowMode, setShellWindowMode] = useState<ShellWindowMode>("floating");
   const [appInfo, setAppInfo] = useState<ShellAppInfo | null>(null);
+  const panelTransitionSequenceRef = useRef(0);
   const desktopActivity = useDesktopActivity();
 
   const refreshShellWindowMode = useCallback(async () => {
@@ -2878,6 +2904,71 @@ function App() {
           await invoke("agent_dump_complete", { path: "" }).catch(() => {});
         }
       });
+      await register<
+        {
+          request_id?: string;
+          operation?: "audit" | "action";
+          request?: AgentUiAuditRequest | AgentUiActionRequest;
+        }
+      >("agent-ui-request", async (event) => {
+        const startedAt = performance.now();
+        const requestId = event.payload?.request_id ?? "";
+        const operation = event.payload?.operation;
+        try {
+          const result =
+            operation === "audit"
+              ? buildAgentUiAudit((event.payload?.request ?? {}) as AgentUiAuditRequest)
+              : operation === "action"
+                ? performAgentUiAction((event.payload?.request ?? {}) as AgentUiActionRequest)
+                : (() => {
+                    throw new Error(`unsupported UI audit operation: ${String(operation)}`);
+                  })();
+          await new Promise<void>((resolve) => {
+            window.requestAnimationFrame(() => {
+              window.requestAnimationFrame(() => resolve());
+            });
+          });
+          const response = {
+            ok: true,
+            request_id: requestId,
+            operation,
+            elapsed_ms: Math.round(performance.now() - startedAt),
+            result,
+          };
+          await invoke("agent_ui_request_complete", { payload: JSON.stringify(response) });
+          void diagnosticsTrace(
+            operation === "audit" ? "agent_ui_audit" : "agent_ui_action",
+            {
+              request_id: requestId,
+              elapsed_ms: response.elapsed_ms,
+              ok: true,
+              action:
+                operation === "action"
+                  ? ((event.payload?.request ?? {}) as AgentUiActionRequest).action ?? null
+                  : null,
+            },
+          );
+        } catch (error) {
+          const response = {
+            ok: false,
+            request_id: requestId,
+            operation,
+            elapsed_ms: Math.round(performance.now() - startedAt),
+            error: String(error),
+          };
+          await invoke("agent_ui_request_complete", { payload: JSON.stringify(response) }).catch(() => {});
+          void diagnosticsTrace(
+            operation === "audit" ? "agent_ui_audit" : "agent_ui_action",
+            {
+              request_id: requestId,
+              elapsed_ms: response.elapsed_ms,
+              ok: false,
+              error: response.error,
+            },
+            "warn",
+          );
+        }
+      });
     })();
     return () => {
       disposed = true;
@@ -3050,12 +3141,28 @@ function App() {
   }
 
   function switchPage(next: AppPage, details?: Record<string, unknown>) {
+    const transitionId = ++panelTransitionSequenceRef.current;
+    const startedAt = performance.now();
     setVisitedPages((prev) => (prev[next] ? prev : { ...prev, [next]: true }));
     setPage(next);
     // WP-0221: keep freeze-detector context aware of the current page so
     // freeze records identify which surface was active at the freeze moment.
     setFreezeDetectorPage(next);
-    void diagnosticsTrace("panel_switch", { page: next, ...(details ?? {}) });
+    void diagnosticsTrace("panel_switch", {
+      page: next,
+      transition_id: transitionId,
+      ...(details ?? {}),
+    });
+    window.requestAnimationFrame(() => {
+      window.requestAnimationFrame(() => {
+        void diagnosticsTrace("panel_switch_rendered", {
+          page: next,
+          transition_id: transitionId,
+          elapsed_ms: Math.round(performance.now() - startedAt),
+          superseded: panelTransitionSequenceRef.current !== transitionId,
+        });
+      });
+    });
   }
 
   function openLocalizationItem(itemId: string, sectionId: LocalizationSectionId | null = null) {
@@ -3272,6 +3379,8 @@ function App() {
                   Options
                 </button>
               </nav>
+            </div>
+            <div className="topbar-chrome">
               <button
                 type="button"
                 className={`safe-mode-pill ${
@@ -3284,8 +3393,6 @@ function App() {
               >
                 {safeMode?.enabled ? "Safe Mode ON" : "Safe Mode OFF"}
               </button>
-            </div>
-            <div className="topbar-chrome">
               <div
                 className="move-handle"
                 title="Move window"

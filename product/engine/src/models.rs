@@ -235,13 +235,29 @@ struct ModelInventoryMeta {
 
 fn model_inventory_meta(model_id: &str) -> ModelInventoryMeta {
     match model_id {
-        "whispercpp-tiny" => ModelInventoryMeta {
+        "whispercpp-large-v3-q5_0" => ModelInventoryMeta {
             role: ModelInventoryRole::Required,
             delivery: ModelInventoryDelivery::OfflineHydrated,
             expected_installed: true,
             operator_summary:
-                "Core local ASR runtime for subtitle generation and translation. The installer/offline bundle is expected to hydrate this automatically.",
+                "Primary Korean/Japanese ASR runtime (Whisper large-v3, q5_0). Default model for subtitle generation and JA/KO to EN translation; the installer/offline bundle is expected to hydrate this automatically.",
             features: &["Localization Studio ASR", "JA/KO to EN translation"],
+        },
+        "whispercpp-large-v3" => ModelInventoryMeta {
+            role: ModelInventoryRole::Optional,
+            delivery: ModelInventoryDelivery::ManualInstall,
+            expected_installed: false,
+            operator_summary:
+                "Optional max-quality ASR (Whisper large-v3, full precision, ~3.1 GB). Swap to it via the ASR model setting when q5_0 quality is not enough; slower on CPU.",
+            features: &["Localization Studio ASR", "JA/KO to EN translation"],
+        },
+        "whispercpp-tiny" => ModelInventoryMeta {
+            role: ModelInventoryRole::Optional,
+            delivery: ModelInventoryDelivery::OfflineHydrated,
+            expected_installed: true,
+            operator_summary:
+                "Fast fallback ASR runtime (Whisper tiny). Much faster but low accuracy on Korean/Japanese; the KO/JA default is large-v3 q5_0. Kept bundled so the ASR model setting can revert to it offline.",
+            features: &["Localization Studio ASR (fallback)", "JA/KO to EN translation (fallback)"],
         },
         "demo-ja-asr" => ModelInventoryMeta {
             role: ModelInventoryRole::Demo,
@@ -511,13 +527,15 @@ mod tests {
         let whisper = inventory
             .models
             .iter()
-            .find(|model| model.id == "whispercpp-tiny")
-            .expect("whisper model");
+            .find(|model| model.id == "whispercpp-large-v3-q5_0")
+            .expect("primary whisper model");
         assert_eq!(whisper.role, ModelInventoryRole::Required);
         assert_eq!(whisper.delivery, ModelInventoryDelivery::OfflineHydrated);
         assert!(whisper.expected_installed);
         assert!(
-            whisper.operator_summary.contains("Core local ASR runtime"),
+            whisper
+                .operator_summary
+                .contains("Primary Korean/Japanese ASR"),
             "required model summary should explain the runtime role"
         );
 

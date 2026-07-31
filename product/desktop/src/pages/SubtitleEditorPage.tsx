@@ -82,6 +82,7 @@ type JobRow = {
   finished_at_ms?: number | null;
   logs_path?: string;
   params_json?: string;
+  track?: string | null;
 };
 
 type TtsVoicePreservingLocalV1PackStatus = {
@@ -1010,26 +1011,26 @@ const SECTION_HELP: Record<string, { what: string; when: string; steps: string[]
     steps: ["Select an item in Localization Studio", "Check the output table rows for each stage", "Click Open/Reveal to access files on disk"],
   },
   "loc-workflow": {
-    what: "The central work surface for Localization Studio. Owns the explicit run controls plus a per-stage stepper showing each pipeline stage with an explainer, status, and direct link to the underlying controls.",
+    what: "The central work surface for Localization Studio. Owns the clear run controls plus a step-by-step list showing each stage with an explainer, its status, and a direct link to the controls behind it.",
     when: "Anytime you start, continue, or inspect a localization run. This is the panel to keep open while a run is in flight.",
-    steps: ["Press Start / continue localization run", "Watch each stage row update from Needs attention to Running to Done", "Click Open controls on a stage when you need to adjust something specific", "Open the Advanced expander for benchmark, backend, batch, A/B, QC, and artifact surfaces"],
+    steps: ["Press Start / continue localization run", "Watch each stage row update from Needs attention to Running to Done", "Click Open controls on a stage when you need to adjust something specific", "Open the Advanced section for comparison reports, voice engines, batch runs, A/B, quality checks, and saved files"],
     concepts: { "Done": "This stage already has its expected output for the current item.", "Needs attention": "The stage is missing input or hasn't been run yet.", "Running": "A job for this stage is currently active.", "Failed": "The most recent attempt at this stage failed; open the controls to inspect or rerun." },
   },
   "loc-run": {
-    what: "The Workflow panel: explicit run controls plus a per-stage stepper with inline pickers and Run buttons for ASR, Translate, Diarize, Voice plan, Dub, Mix, and Mux.",
+    what: "The Workflow panel: clear run controls plus a step-by-step list, each step with its own pickers and Run button, covering speech-to-text (ASR), Translate, speaker labelling (diarize), Voice plan, Dub, Mix, and Combine audio and video (mux).",
     when: "Anytime you start, continue, or inspect a localization run. This is the panel to keep open while a run is in flight.",
-    steps: ["Press Start / continue localization run for an automatic staged run, or use a row's inline Run button to drive a single stage", "Watch each stage row transition Needs attention -> Running -> Done", "Open Reusable Voice Basics for speaker setup when the Voice plan row needs attention", "Open the Advanced expander for benchmark, backend, batch, A/B, QC, and artifact surfaces"],
+    steps: ["Press Start / continue localization run for an automatic staged run, or use a row's inline Run button to drive a single stage", "Watch each stage row transition Needs attention -> Running -> Done", "Open Reusable Voice Basics for speaker setup when the Voice plan row needs attention", "Open the Advanced section for comparison reports, voice engines, batch runs, A/B, quality checks, and saved files"],
     concepts: { "Clone status": "Whether the dub used actual voice cloning or fell back to standard text-to-speech.", "Export pack": "A zip containing all outputs (subtitles, audio stems, dubbed video)." },
   },
   "loc-voice-basics": {
     what: "The simple path to voice cloning: choose a speaker, capture voice samples, save them for reuse, and apply them to other items.",
     when: "When you want to clone a speaker's voice for dubbing. Start here before exploring advanced voice tools.",
     steps: ["Select a speaker from the dropdown", "Generate or choose voice samples (short audio clips of the speaker)", "Save as a reusable voice for later items", "Apply a saved voice when working on a different item"],
-    concepts: { "Voice samples": "Short audio clips of a speaker used as reference for voice cloning.", "Saved voice": "A reusable voice profile stored for future items.", "Speaker": "A labeled voice in the media (Speaker 1, Speaker 2, etc. from diarization)." },
+    concepts: { "Voice samples": "Short audio clips of a speaker used as a reference for voice cloning.", "Saved voice": "A reusable voice profile stored for future items.", "Speaker": "A labelled voice in the media (Speaker 1, Speaker 2, etc. from speaker labelling)." },
   },
   "loc-advanced": {
-    what: "Index of all advanced localization tools. Most operators only need the sections above Ã¢â‚¬â€ these are for power users.",
-    when: "When you need fine-grained control over backends, benchmarks, cast packs, or A/B comparisons.",
+    what: "Index of all advanced localization tools. Most people only need the sections above — these are for power users.",
+    when: "When you need fine-grained control over voice engines, comparison reports, cast packs, or A/B comparisons.",
     steps: ["Scan the list to find the tool you need", "Click the button to jump to that section"],
   },
   "loc-first-dub": {
@@ -1038,22 +1039,22 @@ const SECTION_HELP: Record<string, { what: string; when: string; steps: string[]
     steps: ["Follow the numbered steps from top to bottom", "Each step links to the relevant section"],
   },
   "loc-outputs": {
-    what: "Export your finished work Ã¢â‚¬â€ subtitles, dubbed audio, and muxed video.",
+    what: "Export your finished work — subtitles, dubbed audio, and the combined video file.",
     when: "After a successful localization run when you want to save deliverables to a specific folder.",
     steps: ["Choose export folder (app default or custom)", "Check the boxes for what to export (SRT, VTT, video)", "Choose video container (MP4 recommended)", "Click Export selected"],
-    concepts: { "Mux": "Combining the dubbed audio track with the original video into a single file.", "Stems": "Separated audio layers Ã¢â‚¬â€ speech only, background only, or final mix." },
+    concepts: { "Combine audio and video (mux)": "Joining the dubbed audio with the original video into a single file.", "Stems": "Separate audio layers — speech only, background only, or the final mix." },
   },
   "loc-track": {
     what: "Track switching, segment editing, and the manual/advanced extras (TTS preview variants, stem separation, vocals cleanup, mix-detail tweaks, QC).",
     when: "When you need to switch tracks, edit subtitle segments, or run the manual extras that aren't part of the staged workflow run.",
-    steps: ["Select the track to work with from the dropdown", "Edit segments below, then Save new version", "Use the Workflow panel above to run the staged pipeline (ASR / Translate / Diarize / Dub / Mix / Mux)", "Use the buttons here only for TTS preview, stem separation, vocals cleanup, or QC variants"],
-    concepts: { "ASR": "Automatic Speech Recognition Ã¢â‚¬â€ converts audio to text subtitles.", "Diarization": "Identifying which speaker is talking in each segment.", "Ducking": "Lowering the background volume when dubbed speech plays.", "Source language": "The language spoken in the original media (Japanese or Korean)." },
+    steps: ["Select the track to work with from the dropdown", "Edit segments below, then Save new version", "Use the Workflow panel above to run the staged pipeline (speech-to-text, Translate, speaker labelling, Dub, Mix, and combine audio and video)", "Use the buttons here only for voice preview, splitting the audio into layers, cleaning up vocals, or quality-check variants"],
+    concepts: { "Speech to text (ASR)": "Turning the spoken audio into written subtitles.", "Speaker labelling (diarization)": "Working out which speaker is talking in each part.", "Background dip (ducking)": "Lowering the background volume while the dubbed voice speaks.", "Source language": "The language spoken in the original media (Japanese or Korean)." },
   },
   "loc-voice-plan": {
     what: "Map each speaker to voice samples and choose whether they use voice cloning or standard text-to-speech.",
-    when: "After diarization labels speakers. The localization run pauses here if voice samples are missing.",
-    steps: ["Review each speaker box Ã¢â‚¬â€ green means samples are ready", "Generate voice samples from the source media, or choose your own audio clips", "Optionally apply cleanup (denoise, de-reverb) to samples", "Continue the localization run once all speakers have samples or are set to standard TTS"],
-    concepts: { "Voice samples": "Audio clips of the speaker used as reference for cloning.", "Standard TTS": "Computer-generated voice without cloning Ã¢â‚¬â€ used when no samples are available.", "Cleanup": "Removing noise, echo, or music from voice sample clips." },
+    when: "After speaker labelling names the speakers. The localization run pauses here if voice samples are missing.",
+    steps: ["Review each speaker box — green means samples are ready", "Generate voice samples from the source media, or choose your own audio clips", "Optionally clean up the samples (remove noise and echo)", "Continue the localization run once every speaker has samples or is set to the standard computer voice"],
+    concepts: { "Voice samples": "Audio clips of the speaker used as a reference for cloning.", "Standard computer voice (TTS)": "A computer-generated voice without cloning — used when no samples are available.", "Cleanup": "Removing noise, echo, or music from voice sample clips." },
   },
   "loc-templates": {
     what: "Save and reuse speaker voice setups across multiple items. Useful for recurring shows with the same hosts.",
@@ -1066,23 +1067,23 @@ const SECTION_HELP: Record<string, { what: string; when: string; steps: string[]
     steps: ["Create a cast pack with a name", "Add roles (host, narrator, contestant, etc.)", "Apply the cast pack to new items to set up all speakers at once"],
   },
   "loc-backends": {
-    what: "Choose which voice synthesis engine to use for dubbing. The default (OpenVoice V2 + Kokoro) works well Ã¢â‚¬â€ change this only if benchmarks suggest a better option.",
-    when: "Only when benchmark results show a different backend performs better for your content.",
-    steps: ["Select a goal (balanced, identity, expressive, timing, speed)", "Review the recommended backend", "Click Promote to plan to apply the recommendation"],
+    what: "Choose which voice engine to use for dubbing. The default (OpenVoice V2 + Kokoro) works well — change this only if the comparison reports suggest a better option.",
+    when: "Only when the comparison reports show a different voice engine performs better for your content.",
+    steps: ["Select a goal (balanced, identity, expressive, timing, speed)", "Review the recommended voice engine", "Click Promote to plan to apply the recommendation"],
   },
   "loc-characters": {
-    what: "Save named character voices (narrator, teacher, etc.) that can be reused across any item Ã¢â‚¬â€ separate from show-specific templates.",
+    what: "Save named character voices (narrator, teacher, etc.) that can be reused across any item — separate from show-specific templates.",
     when: "For generic recurring voices that aren't tied to a specific show or cast.",
     steps: ["Create a character profile with a name", "Add voice samples from any item", "Apply the character voice to future items"],
   },
   "loc-benchmark": {
     what: "Compare voice cloning quality across different settings. Generates a ranked report with scores.",
-    when: "When deciding which backend or voice samples produce the best results for your content.",
-    steps: ["Click Generate report to analyze current outputs", "Review the ranked candidates Ã¢â‚¬â€ higher score is better", "Promote the winner to your voice plan or template"],
-    concepts: { "Coverage": "How many segments were successfully dubbed.", "Timing fit": "How well the dubbed speech fits within the original timing.", "Clone status": "Whether actual voice cloning was used vs. standard TTS fallback." },
+    when: "When deciding which voice engine or voice samples produce the best results for your content.",
+    steps: ["Click Generate report to analyze current outputs", "Review the ranked candidates — a higher score is better", "Promote the winner to your voice plan or template"],
+    concepts: { "Coverage": "How many segments were successfully dubbed.", "Timing fit": "How well the dubbed speech fits within the original timing.", "Clone status": "Whether real voice cloning was used, or it fell back to the standard computer voice." },
   },
   "loc-batch": {
-    what: "Run the dubbing pipeline across multiple items at once instead of one at a time.",
+    what: "Run the dubbing process across multiple items at once instead of one at a time.",
     when: "When you have a series or playlist of videos that all need the same dubbing treatment.",
     steps: ["Select items from the list (or click Select all)", "Optionally enable QC reports and export packs", "Click Queue batch dubbing"],
   },
@@ -1095,7 +1096,7 @@ const SECTION_HELP: Record<string, { what: string; when: string; steps: string[]
     what: "Quality check report that flags potential issues: timing problems, audio anomalies, missing segments.",
     when: "After dubbing to verify the output quality before exporting.",
     steps: ["Click Generate QC report", "Review the issues table", "Fix flagged problems in the relevant sections"],
-    concepts: { "CPS": "Characters per second Ã¢â‚¬â€ too high means text is too fast to read.", "Silence": "Unexpectedly silent segments that might indicate a rendering failure." },
+    concepts: { "Reading speed (CPS)": "Characters per second — too high means the text goes by too fast to read.", "Silence": "Unexpectedly silent segments that might mean something failed to render." },
   },
   "loc-glossary": {
     what: "Define custom term mappings so names, places, and domain terms translate consistently.",
@@ -1140,7 +1141,7 @@ const WORKSPACE_STAGES: WorkspaceStageDef[] = [
   { id: "voice_plan", title: "Voice plan",   runStageId: "voice_plan" },
   { id: "dub",        title: "Dub",          runStageId: "dub" },
   { id: "mix",        title: "Mix",          runStageId: "mix" },
-  { id: "mux",        title: "Mux",          runStageId: "mux" },
+  { id: "mux",        title: "Combine A/V",  runStageId: "mux" },
   { id: "files",      title: "Files",        runStageId: null },
 ];
 
@@ -3709,6 +3710,53 @@ export function SubtitleEditorPage({
     }
   }
 
+  // WP-0262: Subtitles-only path. Runs the same localization pipeline but stops
+  // once the English subtitles are ready (output_mode "subtitles"), so the
+  // operator can get working subtitles without the voice/dub steps.
+  async function enqueueSubtitlesOnlyRun() {
+    setLocalizationRunBusy(true);
+    setError(null);
+    setNotice(null);
+    logDiagnosticsEvent("localization.enqueue_subtitles_only_run", {
+      asr_lang: asrLang,
+      speaker_count: speakerCountRequest,
+    });
+    try {
+      const summary = await invoke<LocalizationRunQueueSummary>("jobs_enqueue_localization_run_v1", {
+        request: {
+          item_id: itemId,
+          asr_lang: asrLang,
+          separation_backend: separationBackend,
+          queue_qc: localizationRunQueueQc,
+          queue_export_pack: localizationRunQueueExportPack,
+          output_mode: "subtitles",
+          speaker_count: speakerCountRequest,
+        },
+      });
+      setLocalizationRunSummary(summary);
+      setNotice(
+        summary.stage === "subtitles"
+          ? "Subtitles are ready. No dubbing steps were started."
+          : summary.queued_jobs.length
+          ? `Making subtitles: step "${summary.stage}". ${summary.queued_jobs.length} job(s) added.`
+          : `Subtitles run is waiting at step "${summary.stage}". ${summary.notes[0] ?? "Nothing new to do yet."}`,
+      );
+      refreshItemJobs().catch(() => undefined);
+      refreshTracks().catch(() => undefined);
+      refreshArtifacts().catch(() => undefined);
+      refreshOutputs().catch(() => undefined);
+    } catch (e) {
+      logDiagnosticsEvent(
+        "localization.enqueue_subtitles_only_run.failed",
+        { error: String(e) },
+        "error",
+      );
+      setError(String(e));
+    } finally {
+      setLocalizationRunBusy(false);
+    }
+  }
+
   async function enqueueAsrLocal() {
     setBusy(true);
     setError(null);
@@ -6189,8 +6237,22 @@ export function SubtitleEditorPage({
           <button type="button" disabled={busy || !item?.media_path} onClick={revealSourceFile}>
             Reveal source file
           </button>
-          <button type="button" disabled={busy || localizationRunBusy} onClick={enqueueLocalizationRun}>
-            Start / continue run
+          <button
+            type="button"
+            disabled={busy || localizationRunBusy}
+            onClick={enqueueSubtitlesOnlyRun}
+            title="Create English subtitles only. Skips the voice/dubbing steps, so you get working subtitles fast."
+            style={{ fontWeight: 600 }}
+          >
+            Make subtitles only
+          </button>
+          <button
+            type="button"
+            disabled={busy || localizationRunBusy}
+            onClick={enqueueLocalizationRun}
+            title="Run the full job: subtitles plus a dubbed voice track."
+          >
+            Subtitles + dubbed voice
           </button>
         </div>
       </header>
@@ -6269,14 +6331,19 @@ export function SubtitleEditorPage({
                   value={asrLang}
                   disabled={busy}
                   onChange={(e) => setAsrLang(e.currentTarget.value as typeof asrLang)}
-                  title="Source language"
+                  title="The language spoken in the original video. Leave on auto-detect if you are unsure."
                 >
-                  <option value="auto">Source: auto-detect</option>
-                  <option value="ja">Source: Japanese</option>
-                  <option value="ko">Source: Korean</option>
+                  <option value="auto">Spoken language: auto-detect</option>
+                  <option value="ja">Spoken language: Japanese</option>
+                  <option value="ko">Spoken language: Korean</option>
                 </select>
-                <button type="button" disabled={busy} onClick={enqueueAsrLocal}>
-                  Run ASR
+                <button
+                  type="button"
+                  disabled={busy}
+                  onClick={enqueueAsrLocal}
+                  title="Listen to the video and write down what is said as captions."
+                >
+                  Make captions
                 </button>
               </>
             ) : null}
@@ -6286,29 +6353,29 @@ export function SubtitleEditorPage({
                   value={translationStyle}
                   disabled={busy}
                   onChange={(e) => setTranslationStyle(e.currentTarget.value as typeof translationStyle)}
-                  title="Translation style"
+                  title="The tone of the English translation."
                 >
-                  <option value="neutral">Style: neutral</option>
-                  <option value="formal">Style: formal</option>
-                  <option value="informal">Style: informal</option>
+                  <option value="neutral">Tone: neutral</option>
+                  <option value="formal">Tone: formal</option>
+                  <option value="informal">Tone: casual</option>
                 </select>
                 <select
                   value={honorificMode}
                   disabled={busy}
                   onChange={(e) => setHonorificMode(e.currentTarget.value as typeof honorificMode)}
-                  title="Honorific handling"
+                  title="How to handle polite name endings like -san or -nim in the translation."
                 >
-                  <option value="preserve">Honorifics: keep</option>
-                  <option value="translate">Honorifics: translate</option>
-                  <option value="drop">Honorifics: drop</option>
+                  <option value="preserve">Polite name endings: keep as-is</option>
+                  <option value="translate">Polite name endings: translate</option>
+                  <option value="drop">Polite name endings: remove</option>
                 </select>
                 <button
                   type="button"
                   disabled={busy || !trackId}
                   onClick={enqueueTranslateEn}
-                  title={!trackId ? "Run ASR first" : undefined}
+                  title={!trackId ? "Make captions first." : "Translate the captions into English."}
                 >
-                  Run Translate &rarr; EN
+                  Translate to English
                 </button>
               </>
             ) : null}
@@ -6320,20 +6387,22 @@ export function SubtitleEditorPage({
                   onChange={(e) =>
                     setDiarizationBackend(e.currentTarget.value as typeof diarizationBackend)
                   }
-                  title="Diarization backend"
+                  title="How speakers are detected: choose High-accuracy only if you have set up the optional speaker model."
                 >
-                  <option value="baseline">Backend: baseline</option>
-                  <option value="pyannote_byo_v1">Backend: pyannote (BYO)</option>
+                  <option value="baseline">How speakers are detected: Standard</option>
+                  <option value="pyannote_byo_v1">
+                    How speakers are detected: High-accuracy (needs setup)
+                  </option>
                 </select>
                 <select
                   value={speakerCountMode}
                   disabled={busy}
                   onChange={(e) => setSpeakerCountMode(e.currentTarget.value as DiarizationSpeakerCountMode)}
-                  title="Speaker count mode"
+                  title="How many people speak in this video. Leave on Auto to let VoxVulgi decide."
                 >
-                  <option value="auto">Speakers: auto</option>
-                  <option value="exact">Speakers: exact</option>
-                  <option value="range">Speakers: range</option>
+                  <option value="auto">Number of speakers: auto</option>
+                  <option value="exact">Number of speakers: exact</option>
+                  <option value="range">Number of speakers: a range</option>
                 </select>
                 {speakerCountMode === "exact" ? (
                   <input
@@ -6381,9 +6450,9 @@ export function SubtitleEditorPage({
                   type="button"
                   disabled={busy || !trackId}
                   onClick={enqueueDiarize}
-                  title={!trackId ? "Run Translate -> EN first" : undefined}
+                  title={!trackId ? "Translate to English first." : "Figure out who is speaking in each line."}
                 >
-                  Run diarization
+                  Detect speakers
                 </button>
               </>
             ) : null}
@@ -7328,10 +7397,10 @@ export function SubtitleEditorPage({
             value={separationBackend}
             disabled={busy}
             onChange={(e) => setSeparationBackend(e.currentTarget.value as typeof separationBackend)}
-            title="Separation backend"
+            title="How the original music and background are split from the voice. Higher quality is slower."
           >
-            <option value="spleeter">Separate: Spleeter</option>
-            <option value="demucs">Separate: Demucs</option>
+            <option value="spleeter">Music/voice split method: Faster (Spleeter)</option>
+            <option value="demucs">Music/voice split method: Higher quality (Demucs)</option>
           </select>
           <button type="button" disabled={busy} onClick={enqueueSeparation}>
             Separate (stems)
@@ -7353,10 +7422,18 @@ export function SubtitleEditorPage({
           </button>
         </div>
 
+        <details style={{ marginTop: 10 }}>
+          <summary style={{ cursor: "pointer", color: "#4b5563", fontSize: 13 }}>
+            Advanced audio/video (most people can leave these alone)
+          </summary>
+
         <div className="row" style={{ marginTop: 10, flexWrap: "wrap" }}>
-          <div style={{ fontSize: 12, opacity: 0.85 }}>Mix settings</div>
-          <label style={{ display: "flex", alignItems: "center", gap: 8 }}>
-            <span>Ducking</span>
+          <div style={{ fontSize: 12, opacity: 0.85 }}>Voice-over sound</div>
+          <label
+            style={{ display: "flex", alignItems: "center", gap: 8 }}
+            title="How much to lower the original music and background while the new voice is speaking. 0 = no change, 1 = quietest."
+          >
+            <span>Lower background during speech</span>
             <input
               type="number"
               min={0}
@@ -7368,8 +7445,11 @@ export function SubtitleEditorPage({
               style={{ width: 90 }}
             />
           </label>
-          <label style={{ display: "flex", alignItems: "center", gap: 8 }}>
-            <span>Loudness (LUFS)</span>
+          <label
+            style={{ display: "flex", alignItems: "center", gap: 8 }}
+            title="Overall target volume for the finished audio. More negative is quieter; leave the default unless the result is too loud or too quiet."
+          >
+            <span>Target volume</span>
             <input
               type="number"
               min={-40}
@@ -7381,17 +7461,23 @@ export function SubtitleEditorPage({
               style={{ width: 110 }}
             />
           </label>
-          <label style={{ display: "flex", alignItems: "center", gap: 8 }}>
+          <label
+            style={{ display: "flex", alignItems: "center", gap: 8 }}
+            title="Gently speed up or slow down the new voice so it fits the length of each original line."
+          >
             <input
               type="checkbox"
               checked={mixTimingFitEnabled}
               disabled={busy}
               onChange={(e) => setMixTimingFitEnabled(e.currentTarget.checked)}
             />
-            <span>Timing fit</span>
+            <span>Fit voice to the timing</span>
           </label>
-          <label style={{ display: "flex", alignItems: "center", gap: 8 }}>
-            <span>Min</span>
+          <label
+            style={{ display: "flex", alignItems: "center", gap: 8 }}
+            title="Slowest the voice may be stretched to fit (as a fraction of normal speed)."
+          >
+            <span>Slowest</span>
             <input
               type="number"
               min={0.5}
@@ -7403,8 +7489,11 @@ export function SubtitleEditorPage({
               style={{ width: 90 }}
             />
           </label>
-          <label style={{ display: "flex", alignItems: "center", gap: 8 }}>
-            <span>Max</span>
+          <label
+            style={{ display: "flex", alignItems: "center", gap: 8 }}
+            title="Fastest the voice may be sped up to fit (as a multiple of normal speed)."
+          >
+            <span>Fastest</span>
             <input
               type="number"
               min={1}
@@ -7419,29 +7508,38 @@ export function SubtitleEditorPage({
         </div>
 
         <div className="row" style={{ marginTop: 10, flexWrap: "wrap" }}>
-          <div style={{ fontSize: 12, opacity: 0.85 }}>Mux settings</div>
-          <label style={{ display: "flex", alignItems: "center", gap: 8 }}>
-            <span>Container</span>
+          <div style={{ fontSize: 12, opacity: 0.85 }}>Video file</div>
+          <label
+            style={{ display: "flex", alignItems: "center", gap: 8 }}
+            title="The type of video file to create. MP4 works almost everywhere."
+          >
+            <span>File type</span>
             <select
               value={muxContainer}
               disabled={busy}
               onChange={(e) => setMuxContainer(e.currentTarget.value as typeof muxContainer)}
             >
-              <option value="mp4">mp4</option>
-              <option value="mkv">mkv</option>
+              <option value="mp4">MP4 (recommended)</option>
+              <option value="mkv">MKV</option>
             </select>
           </label>
-          <label style={{ display: "flex", alignItems: "center", gap: 8 }}>
+          <label
+            style={{ display: "flex", alignItems: "center", gap: 8 }}
+            title="Also keep the original spoken audio as a second track in the video file."
+          >
             <input
               type="checkbox"
               checked={muxKeepOriginalAudio}
               disabled={busy}
               onChange={(e) => setMuxKeepOriginalAudio(e.currentTarget.checked)}
             />
-            <span>Keep original audio</span>
+            <span>Keep the original audio too</span>
           </label>
-          <label style={{ display: "flex", alignItems: "center", gap: 8 }}>
-            <span>Dub lang</span>
+          <label
+            style={{ display: "flex", alignItems: "center", gap: 8 }}
+            title="Language label for the new voice track (for example: eng for English)."
+          >
+            <span>New voice language</span>
             <input
               value={muxDubbedAudioLang}
               disabled={busy}
@@ -7450,8 +7548,11 @@ export function SubtitleEditorPage({
               style={{ width: 90 }}
             />
           </label>
-          <label style={{ display: "flex", alignItems: "center", gap: 8 }}>
-            <span>Orig lang</span>
+          <label
+            style={{ display: "flex", alignItems: "center", gap: 8 }}
+            title="Language label for the original audio track (for example: kor or jpn)."
+          >
+            <span>Original language</span>
             <input
               value={muxOriginalAudioLang}
               disabled={busy}
@@ -7461,6 +7562,7 @@ export function SubtitleEditorPage({
             />
           </label>
         </div>
+        </details>
 
         <div className="row" style={{ marginTop: 10, flexWrap: "wrap" }}>
           <label style={{ display: "flex", alignItems: "center", gap: 8 }}>
@@ -9078,6 +9180,10 @@ export function SubtitleEditorPage({
               </div>
             </div>
 
+            <details style={{ marginTop: 16 }}>
+            <summary style={{ cursor: "pointer", color: "#4b5563", fontSize: 13 }}>
+              Advanced tools (voice comparison, batch dubbing, side-by-side previews)
+            </summary>
             <div style={{ marginTop: 16, display: "flex", flexDirection: "column", gap: 16 }}>
               <div
                 style={{
@@ -10232,6 +10338,7 @@ export function SubtitleEditorPage({
                 </div>
               ) : null}
             </div>
+            </details>
           </div>
         ) : null}
       </div>

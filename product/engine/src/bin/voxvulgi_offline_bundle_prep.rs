@@ -4,7 +4,6 @@ use voxvulgi_engine::models::ModelStore;
 use voxvulgi_engine::paths::AppPaths;
 use voxvulgi_engine::pinned_dependency_manifest;
 use voxvulgi_engine::{cmd, db, tools, EngineError, Result};
-use zip::write::FileOptions;
 
 fn main() -> std::result::Result<(), String> {
     run().map_err(|e| e.to_string())
@@ -196,18 +195,20 @@ fn run() -> Result<()> {
         }
     }
 
-    println!("installing engine model whispercpp-tiny...");
     {
+        // Ship the KO/JA default ASR model (large-v3 q5_0) AND keep tiny as an offline
+        // fallback the operator can revert to via the ASR model setting without a download.
         let store = ModelStore::new(paths.clone());
-        let inv = store.inventory()?;
-        let installed = inv
-            .models
-            .iter()
-            .any(|m| m.id == "whispercpp-tiny" && m.installed);
-        if !installed {
-            store.install_model("whispercpp-tiny")?;
-        } else {
-            println!("whispercpp-tiny already installed.");
+        let asr_models = [AppPaths::DEFAULT_ASR_MODEL_ID, "whispercpp-tiny"];
+        for model_id in asr_models {
+            println!("installing engine model {model_id}...");
+            let inv = store.inventory()?;
+            let installed = inv.models.iter().any(|m| m.id == model_id && m.installed);
+            if !installed {
+                store.install_model(model_id)?;
+            } else {
+                println!("{model_id} already installed.");
+            }
         }
     }
 
@@ -293,52 +294,20 @@ fn export_offline_payload(paths: &AppPaths, out_dir: &Path) -> Result<()> {
     let models_src = paths.models_dir();
     let hf_cache_src = paths.cache_dir().join("huggingface");
 
-    let file = std::fs::File::create(&payload_path)?;
-    let writer = std::io::BufWriter::new(file);
-    let mut zip = zip::ZipWriter::new(writer);
+    copy_tree(&tools_src, &out_dir.join("tools"))?;
+    copy_tree(&models_src, &out_dir.join("models"))?;
+    copy_tree(&hf_cache_src, &out_dir.join("cache").join("huggingface"))?;
 
-    let dir_options = FileOptions::default().compression_method(zip::CompressionMethod::Stored);
-    let file_options = FileOptions::default()
-        .compression_method(zip::CompressionMethod::Deflated)
-        .compression_level(Some(9));
-
-    zip.add_directory("tools/", dir_options).map_err(|e| {
-        EngineError::InstallFailed(format!("failed to write payload zip directory entry: {e}"))
-    })?;
-    zip.add_directory("models/", dir_options).map_err(|e| {
-        EngineError::InstallFailed(format!("failed to write payload zip directory entry: {e}"))
-    })?;
-    zip.add_directory("cache/", dir_options).map_err(|e| {
-        EngineError::InstallFailed(format!("failed to write payload zip directory entry: {e}"))
-    })?;
-    zip.add_directory("cache/huggingface/", dir_options)
-        .map_err(|e| {
-            EngineError::InstallFailed(format!("failed to write payload zip directory entry: {e}"))
-        })?;
-
-    zip_add_tree(&mut zip, &tools_src, "tools", file_options, dir_options)?;
-    zip_add_tree(&mut zip, &models_src, "models", file_options, dir_options)?;
-    zip_add_tree(
-        &mut zip,
-        &hf_cache_src,
-        "cache/huggingface",
-        file_options,
-        dir_options,
-    )?;
-
-    zip.finish()
-        .map_err(|e| EngineError::InstallFailed(format!("failed to finalize payload zip: {e}")))?;
-
-    let payload_bytes = std::fs::metadata(&payload_path)
-        .map(|m| m.len())
-        .unwrap_or(0);
+    let payload_bytes = dir_size(&out_dir.join("tools"))?
+        + dir_size(&out_dir.join("models"))?
+        + dir_size(&out_dir.join("cache").join("huggingface"))?;
 
     let bundle_id = format!("offline_full_win64_{}", chrono_yyyymmdd_hhmmss());
     let manifest = serde_json::json!({
         "schema_version": 1,
         "bundle_id": bundle_id,
         "created_at_ms": now_ms(),
-        "payload_zip": "payload.zip",
+        "payload_format": "directory",
         "payload_bytes": payload_bytes,
     });
     std::fs::write(
@@ -352,18 +321,58 @@ fn export_offline_payload(paths: &AppPaths, out_dir: &Path) -> Result<()> {
     Ok(())
 }
 
-fn zip_add_tree<W: std::io::Write + std::io::Seek>(
-    zip: &mut zip::ZipWriter<W>,
-    src_root: &Path,
-    zip_root: &str,
-    file_options: FileOptions,
-    dir_options: FileOptions,
-) -> Result<()> {
+fn copy_tree(src_root: &Path, dst_root: &Path) -> Result<()> {
     if !src_root.exists() {
         return Ok(());
     }
+    std::fs::create_dir_all(dst_root)?;
 
     let mut stack: Vec<PathBuf> = vec![src_root.to_path_buf()];
+    while let Some(dir) = stack.pop() {
+        for entry in std::fs::read_dir(&dir)? {
+            let entry = match entry {
+                Ok(v) => v,
+                Err(_) => continue,
+            };
+            let path = entry.path();
+            let rel = match path.strip_prefix(src_root) {
+                Ok(v) => v,
+                Err(_) => continue,
+            };
+            if should_skip_payload_entry(&rel) {
+                continue;
+            }
+            let file_type = match entry.file_type() {
+                Ok(v) => v,
+                Err(_) => continue,
+            };
+            let dst = dst_root.join(rel);
+            if file_type.is_dir() {
+                std::fs::create_dir_all(&dst)?;
+                stack.push(path);
+            } else if file_type.is_file() {
+                if let Some(parent) = dst.parent() {
+                    std::fs::create_dir_all(parent)?;
+                }
+                std::fs::copy(&path, &dst)?;
+            }
+        }
+    }
+    Ok(())
+}
+
+fn should_skip_payload_entry(relative_path: &Path) -> bool {
+    relative_path.components().any(|component| {
+        component == std::path::Component::Normal("_voxvulgi_stale_python_artifacts".as_ref())
+    })
+}
+
+fn dir_size(root: &Path) -> Result<u64> {
+    if !root.exists() {
+        return Ok(0);
+    }
+    let mut total = 0_u64;
+    let mut stack: Vec<PathBuf> = vec![root.to_path_buf()];
     while let Some(dir) = stack.pop() {
         for entry in std::fs::read_dir(&dir)? {
             let entry = match entry {
@@ -375,38 +384,15 @@ fn zip_add_tree<W: std::io::Write + std::io::Seek>(
                 Ok(v) => v,
                 Err(_) => continue,
             };
-            let rel = match path.strip_prefix(src_root) {
-                Ok(v) => v,
-                Err(_) => continue,
-            };
-            let rel = rel.to_string_lossy().replace('\\', "/");
-            let zip_path = if rel.is_empty() {
-                zip_root.to_string()
-            } else {
-                format!("{zip_root}/{rel}")
-            };
-
             if file_type.is_dir() {
-                zip.add_directory(zip_path, dir_options).map_err(|e| {
-                    EngineError::InstallFailed(format!(
-                        "failed to write payload zip directory entry: {e}"
-                    ))
-                })?;
                 stack.push(path);
-                continue;
+            } else if file_type.is_file() {
+                total =
+                    total.saturating_add(std::fs::metadata(&path).map(|m| m.len()).unwrap_or(0));
             }
-            if !file_type.is_file() {
-                continue;
-            }
-
-            zip.start_file(zip_path, file_options).map_err(|e| {
-                EngineError::InstallFailed(format!("failed to write payload zip file header: {e}"))
-            })?;
-            let mut file = std::fs::File::open(&path)?;
-            std::io::copy(&mut file, zip)?;
         }
     }
-    Ok(())
+    Ok(total)
 }
 
 fn write_test_wav_44k_mono_16bit(path: &Path) -> Result<()> {

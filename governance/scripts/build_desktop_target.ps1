@@ -59,6 +59,18 @@ function Get-FileSha256Hex([string]$Path) {
   }
 }
 
+function Get-DirectoryPayloadBytes([string]$Path) {
+  if (-not (Test-Path -LiteralPath $Path -PathType Container)) {
+    return 0L
+  }
+  $sum = Get-ChildItem -LiteralPath $Path -Recurse -File -Force -ErrorAction SilentlyContinue |
+    Measure-Object -Property Length -Sum
+  if ($null -eq $sum.Sum) {
+    return 0L
+  }
+  return [int64]$sum.Sum
+}
+
 function Get-JsonVersion([string]$Path) {
   $content = Get-Content -LiteralPath $Path -Raw
   $match = [regex]::Match($content, '"version"\s*:\s*"(?<version>\d+\.\d+\.\d+)"')
@@ -193,21 +205,36 @@ function Test-OfflinePayloadState([string]$RepoRoot) {
     return [pscustomobject]$state
   }
 
-  $payloadName = "payload.zip"
-  if (-not [string]::IsNullOrWhiteSpace($manifest.payload_zip)) {
-    $payloadName = [string]$manifest.payload_zip
-  }
-  $payloadPath = Join-Path $offlineDir $payloadName
-  $state.PayloadPath = $payloadPath
   $state.BundleId = if ($manifest.bundle_id) { [string]$manifest.bundle_id } else { "unknown" }
 
-  if (-not (Test-Path -LiteralPath $payloadPath -PathType Leaf)) {
-    $state.Reason = "offline payload is missing: $payloadPath"
-    return [pscustomobject]$state
+  $payloadItem = $null
+  if (-not [string]::IsNullOrWhiteSpace($manifest.payload_zip)) {
+    $payloadName = [string]$manifest.payload_zip
+    $payloadPath = Join-Path $offlineDir $payloadName
+    $state.PayloadPath = $payloadPath
+    if (-not (Test-Path -LiteralPath $payloadPath -PathType Leaf)) {
+      $state.Reason = "offline payload is missing: $payloadPath"
+      return [pscustomobject]$state
+    }
+    $payloadItem = Get-Item -LiteralPath $payloadPath
+    $state.PayloadBytes = [int64]$payloadItem.Length
+  } else {
+    $state.PayloadPath = $offlineDir
+    $toolsDir = Join-Path $offlineDir 'tools'
+    $modelsDir = Join-Path $offlineDir 'models'
+    $cacheDir = Join-Path $offlineDir 'cache\huggingface'
+    if (-not (Test-Path -LiteralPath $toolsDir -PathType Container) -and
+        -not (Test-Path -LiteralPath $modelsDir -PathType Container) -and
+        -not (Test-Path -LiteralPath $cacheDir -PathType Container)) {
+      $state.Reason = "offline directory payload is missing tools/models/cache resources under: $offlineDir"
+      return [pscustomobject]$state
+    }
+    $state.PayloadBytes =
+      (Get-DirectoryPayloadBytes -Path $toolsDir) +
+      (Get-DirectoryPayloadBytes -Path $modelsDir) +
+      (Get-DirectoryPayloadBytes -Path $cacheDir)
+    $payloadItem = Get-Item -LiteralPath $offlineDir
   }
-
-  $payloadItem = Get-Item -LiteralPath $payloadPath
-  $state.PayloadBytes = [int64]$payloadItem.Length
   if ($manifest.payload_bytes -eq $null) {
     $state.Reason = "offline bundle manifest is missing payload_bytes"
     return [pscustomobject]$state
@@ -223,11 +250,15 @@ function Test-OfflinePayloadState([string]$RepoRoot) {
   if (Test-Path -LiteralPath $fingerprintPath -PathType Leaf) {
     try {
       $fingerprint = Get-Content -LiteralPath $fingerprintPath -Raw | ConvertFrom-Json
-      if ([string]$fingerprint.pinned_dependency_manifest_sha256 -eq $state.PinnedManifestSha256) {
+      $expectedPayloadPath = Get-RelativeRepoPath -RepoRoot $RepoRoot -Path $state.PayloadPath
+      if ([string]$fingerprint.pinned_dependency_manifest_sha256 -eq $state.PinnedManifestSha256 -and
+          [string]$fingerprint.offline_bundle_id -eq $state.BundleId -and
+          [string]$fingerprint.payload_path -eq $expectedPayloadPath -and
+          [int64]$fingerprint.payload_bytes -eq [int64]$state.PayloadBytes) {
         $state.IsFresh = $true
         $state.Reason = "offline payload fingerprint matches pinned dependency manifest"
       } else {
-        $state.Reason = "offline payload fingerprint does not match pinned dependency manifest"
+        $state.Reason = "offline payload fingerprint does not match current manifest/payload"
       }
     } catch {
       $state.Reason = "offline payload fingerprint is unreadable: $($_.Exception.Message)"
@@ -302,7 +333,8 @@ function Append-BuildChangelogEntry(
   [string]$RepoRoot,
   [string]$Version,
   [string[]]$WpIds,
-  [string]$Notes
+  [string]$Notes,
+  [string[]]$BundleTargets
 ) {
   $path = Join-Path $RepoRoot 'governance\release\BUILD_CHANGELOG.md'
   if (-not (Test-Path -LiteralPath $path)) {
@@ -341,15 +373,34 @@ function Append-BuildChangelogEntry(
     $Notes.Trim()
   }
 
+  $targets = if ($BundleTargets -and $BundleTargets.Count -gt 0) {
+    $BundleTargets | ForEach-Object { $_.Trim().ToLowerInvariant() } | Where-Object { $_ } | Sort-Object -Unique
+  } else {
+    @("msi", "nsis")
+  }
+  $artifactLines = New-Object System.Collections.Generic.List[string]
+  $nsisRelativePath = "product/desktop/build_target/Current/release/bundle/nsis/VoxVulgi_${Version}_x64-setup.exe"
+  $msiRelativePath = "product/desktop/build_target/Current/release/bundle/msi/VoxVulgi_${Version}_x64_en-US.msi"
+  if (($targets -contains "nsis") -and (Test-Path -LiteralPath (Join-Path $RepoRoot $nsisRelativePath))) {
+    $artifactLines.Add("  - ``$nsisRelativePath``")
+  }
+  if (($targets -contains "msi") -and (Test-Path -LiteralPath (Join-Path $RepoRoot $msiRelativePath))) {
+    $artifactLines.Add("  - ``$msiRelativePath``")
+  }
+  if ($artifactLines.Count -eq 0) {
+    $artifactLines.Add("  - ``No bundle artifact target recorded``")
+  }
+
   $entry = @(
     "",
     "## $Version - $timestampUtc",
     "- Work Packets: $wpText",
     "- Commit: ``$commit``",
     "- Offline Bundle ID: ``$offlineBundleId``",
-    "- Artifacts:",
-    "  - ``product/desktop/build_target/Current/release/bundle/nsis/VoxVulgi_${Version}_x64-setup.exe``",
-    "  - ``product/desktop/build_target/Current/release/bundle/msi/VoxVulgi_${Version}_x64_en-US.msi``",
+    "- Artifacts:"
+  )
+  $entry += $artifactLines
+  $entry += @(
     "- Notes: $notesText"
   ) -join "`n"
 
@@ -409,6 +460,24 @@ if ($normalizedWpIds.Count -eq 0) {
   throw "Missing Work Packet IDs. Pass -WorkPackets WP-XXXX (or set VOXVULGI_BUILD_WP_IDS)."
 }
 
+$requestedBundleTargets = New-Object System.Collections.Generic.List[string]
+if ($TauriArgs) {
+  for ($i = 0; $i -lt $TauriArgs.Count; $i++) {
+    $arg = $TauriArgs[$i]
+    if ($arg -eq "--bundles" -or $arg -eq "-b") {
+      if ($i + 1 -lt $TauriArgs.Count) {
+        ($TauriArgs[$i + 1] -split '[,;\s]+') |
+          Where-Object { -not [string]::IsNullOrWhiteSpace($_) } |
+          ForEach-Object { $requestedBundleTargets.Add($_) }
+      }
+    } elseif ($arg -like "--bundles=*") {
+      (($arg.Substring("--bundles=".Length)) -split '[,;\s]+') |
+        Where-Object { -not [string]::IsNullOrWhiteSpace($_) } |
+        ForEach-Object { $requestedBundleTargets.Add($_) }
+    }
+  }
+}
+
 $originalTauriConf = Get-Content -LiteralPath $tauriConfPath -Raw
 $originalPackageJson = Get-Content -LiteralPath $packageJsonPath -Raw
 $originalDesktopCargoToml = Get-Content -LiteralPath $desktopCargoTomlPath -Raw
@@ -442,6 +511,20 @@ try {
     $transcriptStarted = $true
   } catch {
     Write-Warning "Could not start transcript log at ${logFile}: $($_.Exception.Message)"
+  }
+
+  # WP-0252 Item 2a: keep the bundled watcher in sync with the governance source of truth
+  # (governance/scripts/vv_watch.ps1) so the operator's manual vvwatch.cmd and the installed
+  # copy never drift. The supervisor + WATCHER_VERSION are authored under src-tauri/watcher/.
+  Step "Syncing bundled external watcher"
+  $watcherSrc = Join-Path $repoRoot "governance\scripts\vv_watch.ps1"
+  $watcherDestDir = Join-Path $repoRoot "product\desktop\src-tauri\watcher"
+  if (Test-Path -LiteralPath $watcherSrc) {
+    New-Item -ItemType Directory -Force -Path $watcherDestDir | Out-Null
+    Copy-Item -LiteralPath $watcherSrc -Destination (Join-Path $watcherDestDir "vv_watch.ps1") -Force
+    Write-Host "Watcher synced: $watcherSrc -> $watcherDestDir\vv_watch.ps1"
+  } else {
+    Write-Warning "Watcher source not found at $watcherSrc; bundling existing copy."
   }
 
   # WP-0233: pack warmup gate. Catches resolver / lockfile / install regressions on the
@@ -551,7 +634,7 @@ try {
   }
 
   Step "Appending build changelog entry"
-  Append-BuildChangelogEntry -RepoRoot $repoRoot -Version $nextVersion -WpIds $normalizedWpIds -Notes $BuildNotes
+  Append-BuildChangelogEntry -RepoRoot $repoRoot -Version $nextVersion -WpIds $normalizedWpIds -Notes $BuildNotes -BundleTargets $requestedBundleTargets
 
   Step "Build completed"
   Write-Host "Build artifacts are in: $buildRoot"

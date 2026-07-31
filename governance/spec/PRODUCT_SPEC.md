@@ -42,15 +42,37 @@ Initial language focus: **Korean + Japanese → English**.
   - direct HTTP/HTTPS media URLs (strict schemes; best-effort),
   - YouTube (and many webpage video links) via `yt-dlp`, with a supported local JavaScript runtime available when current upstream extraction requires it,
   - Instagram batch ingest (posts/reels/stories/profiles) that expands into media targets (optional session cookie header for private content),
-  - provenance captured per ingest (provider + source URL).
+  - provenance captured per ingest (provider + source URL),
+  - every successful downloaded library item also receives durable canonical lineage for service, origin kind, execution track, originating job/batch, and subscription when applicable; this lineage survives terminal-job cleanup,
+  - `Downloaded single videos` is a backend-defined canonical projection of one-off single-video lineage, never a path/URL guess; subscription, playlist, channel, and unclassified imported outputs remain preserved but do not enter that projection.
 - Add YouTube subscription management:
   - save persistent subscriptions (channel/playlist/video feed URLs),
   - define a folder map per subscription so each subscription writes into its own mapped folder,
+  - treat a folder map as the preferred landing location for newly materialized files, not as an ownership boundary that justifies duplicate copies,
   - preserve the current mapped folder for an existing subscription and reconcile already-downloaded items where practical before queueing fresh downloads,
-  - keep per-subscription "already downloaded" continuity state in VoxVulgi-managed storage rather than the physical output folder so legacy/NAS overrides remain usable when the global root changes,
+  - keep per-subscription "already downloaded" continuity state in VoxVulgi-managed storage rather than the physical output folder so imported/NAS overrides remain usable when the global root changes,
+  - when one refresh cohort contains overlapping playlist and channel-page, `/videos`, or `/shorts` subscriptions, enumerate the non-playlist sources first so their canonical IDs claim the physical item before playlist discovery,
+  - record every playlist/feed association, but only suppress a playlist download when the canonical item is already present or actively claimed; historical membership alone must never hide a missing or unavailable video,
+  - backfill existing subscription-source associations into durable source memberships idempotently so upgrades use the same cross-source behavior as newly discovered items,
+  - retain a durable subscription source status distinct from the Active/pause toggle: `normal`, automatically recoverable `unavailable`, or manually controlled `deleted`,
+  - only an explicit operator or assistant action may set or clear `deleted`; search results, connection failures, authentication failures, extractor failures, and refresh outcomes must never set it,
+  - a manually deleted subscription remains stored with its groups, source memberships, videos, library metadata, and job history, while all refresh queue entry points refuse it,
+  - an exact HTTP 404 refresh result sets `unavailable`; its operator-facing explanation must state that the missing URL does not prove the hosting channel was deleted, because the URL may be renamed, private, restricted, temporarily unavailable, or undisclosed,
+  - a later successful refresh clears `unavailable`, while unrelated network/auth/tool errors neither imply deletion nor overwrite the unavailable status,
+  - select one or many canonical subscription videos by stable item ID in both Video Archiver subscription detail and Media Library; page-level selection must say `Select loaded` and never imply an unseen canonical set,
+  - explicit file deletion defaults to the OS Recycle Bin, offers separately confirmed permanent deletion, preserves the library item plus identity/membership/subscription/playlist/job metadata, and records a durable operator-deleted lifecycle state distinct from missing or unreachable media,
+  - subscription refresh, automatic repair, retry, retry-all, batch repair, redownload-all, and already-queued execution must refuse operator-deleted video items,
+  - redownload of an operator-deleted video is available only as an explicit action on the exact selected deleted items; only the exact jobs created by that action are authorized, and the deleted state clears only after a replacement file imports successfully,
   - set a per-subscription refresh interval (minutes) that can be edited in the Library UI,
   - queue refresh for one subscription or all active subscriptions,
   - keep loaded subscriptions stable across pane switches and window focus changes.
+- Download execution tracks:
+  - operator-submitted YouTube work, background YouTube subscription work, Instagram, other video services, Image Archive, and Localization Studio use independent durable tracks so a backlog in one does not consume another track's worker budget,
+  - a manually submitted YouTube batch remains foreground work even when one URL is a playlist/channel; its downloaded members keep their truthful `playlist`/`channel` origin rather than being presented as individual singles,
+  - the foreground and background YouTube tracks may each make progress, but every aggregate YouTube process start passes through one shared randomized pacing/auth gate,
+  - all YouTube single downloads use the same conservative effective download profile as subscription children: one concurrent fragment, the configured 5-10 second pre-download delay, and the same retry, throttling, browser-session, and auth-circuit behavior,
+  - foreground YouTube starts lead when both tracks become eligible, while bounded alternating fairness keeps subscriptions draining in the background,
+  - a YouTube account/rate hold leaves both YouTube tracks queued and actionable while Instagram, other video, Image Archive, and Localization Studio remain dispatchable.
 - Shared storage-root behavior:
   - the operator configures persistent roots from a global Options surface rather than pane-local blocks,
   - roots may be set per feature/export class (for example Video Archiver, Instagram Archiver, Image Archive, and Localization exports),
@@ -69,7 +91,11 @@ Initial language focus: **Korean + Japanese → English**.
   - login-required YouTube and Instagram workflows must support explicit operator-provided session material,
   - accepted operator inputs should include raw cookie headers, Netscape cookie files, browser-export JSON cookie blobs, and explicit cookie-file paths,
   - authenticated-session inputs must be reusable across one-shot batches and saved subscriptions where the operator chooses,
-  - browser-profile cookie fallback must remain explicit, optional, and clearly disclosed when used.
+  - browser-profile cookie fallback must remain explicit, optional, and clearly disclosed when used,
+  - YouTube Options must provide a goal-led supported-browser sign-in flow: open YouTube in the selected normal browser, let the user sign in there, then run an exact-source test; cookie terminology and manual export stay in an advanced fallback,
+  - Google OAuth must not be presented as media-download authentication because yt-dlp requires cookies, and Google login must not run in an app-controlled embedded WebView,
+  - YouTube connection state must distinguish configured-but-unverified, verified-ready, and reconnect-required; a rejected preflight or corroborated runtime rejection must remain visibly reconnect-required after restart until a new exact-source test passes,
+  - a rejected global YouTube session must be shown as one actionable account state and must hold queued recurring YouTube work instead of multiplying the same account failure across the queue.
 - Instagram archive additions:
   - support saved recurring Instagram archive targets with an interval-based refresh model,
   - show the last 10 archived pictures/stories/reels with uncropped thumbnail framing.
@@ -84,10 +110,33 @@ Initial language focus: **Korean + Japanese → English**.
 - Auto-extract metadata (duration, codecs, resolution) + generate thumbnails.
 - Existing-library reconciliation:
   - allow non-destructive indexing of large existing downloader-managed or NAS-backed archive roots,
-  - preserve playlist/channel/subscription folder structure where possible instead of flattening existing trees.
+  - preserve playlist/channel/subscription folder structure where possible instead of flattening existing trees,
+  - present imported and VoxVulgi-downloaded items as one unified library; import origin remains internal provenance for audit and rollback, not a user-facing `legacy` versus `new` distinction,
+  - identify each YouTube video canonically by service plus extractor video ID and allow it to belong to any number of playlist, `/videos`, `/shorts`, channel-page, or direct-video sources without creating another physical media copy,
+  - treat source subscriptions and playlists as library memberships and discovery inputs, not owners of separate physical copies; reuse an existing canonical file wherever it is already stored,
+  - enrich imported 4K Video Downloader records from the third-party database in read-only mode using structured URL, download-item, subscription-entry, and exact-path evidence before filename or content heuristics,
+  - auto-link imported identity only from unambiguous exact evidence and preserve ambiguous or unresolved records in an inspectable review state,
+  - separate duplicate inventory from mutation and default to dry-run; progress candidates from canonical source-ID evidence to exact file-size and staged content-hash evidence,
+  - allow decoded or perceptual similarity to assist review but never to authorize automatic deletion,
+  - show the proposed keeper, all affected source memberships, reclaimable bytes, evidence strength, and exact filesystem action before apply,
+  - apply cleanup through a recoverable quarantine and durable rollback manifest; permanent deletion is a separate operator-confirmed action,
+  - reconcile physical-only media and missing/zero-byte VV paths before duplicate decisions:
+    automatically relink only deterministic one-to-one evidence, index unmatched physical media,
+    preserve unresolved/ambiguous records, and delete no metadata,
+  - keep preserved library metadata path-true during cleanup: after quarantine, redundant records
+    resolve to the verified keeper path in the same database handoff as canonical identity relinking,
+    and rollback restores their original source path and identity ownership,
+  - keep NAS inventory, hashing, and cleanup resumable, pauseable, bounded in concurrency, and observable without blocking navigation or foreground interaction.
 - Performance stance (large libraries):
   - thumbnails should be stored on disk (cache) and lazy-loaded (no giant DB BLOB storage),
   - Library list/grid should be virtualized to stay responsive with very large libraries.
+- Built-in headless UI audit:
+  - a no-context model must be able to inventory visible page structure and interactive elements with accessible names, roles, states, bounds, and stable audit identifiers,
+  - headless audit navigation must support top-level pages, scrolling, tabs, filters, and disclosures without foreground focus or keyboard/mouse simulation,
+  - interaction is read-only by default: structural controls may be exercised, while queue starts, retries, cancellation, deletion, file operations, settings writes, and other mutations are refused unless a future explicit authority surface adds a separately gated workflow,
+  - every audit action must return a structured receipt and write timing/outcome evidence into the existing diagnostics trace so internal Diagnostics and `vvwatch` can correlate UI behavior with freezes or slow commands,
+  - audit interaction endpoints are available only when the app was launched with `--agent-headless`,
+  - `--agent-headless` must not start the job runner, subscription auto-sync, offline-payload hydration, fallback-media relocation, or watcher supervisor; audit startup must not enqueue, resume, relocate, install, or otherwise mutate operator work.
 - Library list with:
   - search (title/tags/text),
   - filters (language, status, date, source),
@@ -99,7 +148,9 @@ Initial language focus: **Korean + Japanese → English**.
   - rows should surface provider, container type, container label, source reference, codecs, and file path without forcing the operator to open a detail view,
   - explicit container semantics so operators can tell whether a row/group represents a playlist, subscription, folder, or single imported file.
 - Current Media Library filter controls:
-  - search input filters by title and file path (real-time client-side),
+  - search, source, media-type, lifecycle, canonical-single, and sort controls are applied by the backend to the full canonical library set before pagination; the UI must never filter only the currently loaded slice,
+  - the response reports the full matching total separately from the loaded row count so empty/partial rendered pages cannot be mistaken for empty backend state,
+  - search matches title, file path, source reference, and codec metadata,
   - source filter (YouTube / Instagram / Local import / All),
   - media-type filter (Video / Image / Audio / Other / All),
   - sort selector (Date added / Title),
@@ -326,6 +377,7 @@ Current implementation status:
 
 - Fast: UI never blocks on AI jobs (always queued with progress).
 - Fast: queueing URL/subscription downloads must return quickly; heavy URL expansion/extraction runs in worker jobs, not on the UI thread.
+- Parallel and safe: independent product tracks must continue making progress under unrelated backlogs, while shared provider gates pace work that reaches the same upstream service.
 - Transparent: show what data is stored and where; easy cleanup.
 - Editable: every AI output is reviewable and editable.
 - Offline by default: no background network egress. Windows "full" installers bundle required local tools/models for Phase 1+2 and bootstrap them into app-data on first launch, so the core pipeline can run fully offline without manual pack installs.
@@ -360,8 +412,19 @@ Current implementation status:
   - translation side-by-side,
   - QC warnings (too fast, too long),
   - in-context help system: (?) button on every section heading that expands a help panel showing "What this does", "When to use it", "Steps", and "Key terms"; persistent "Show all help" toggle for learning mode.
-- **Jobs/Queue**: running/failed/completed, retry, logs link; developer-only test controls behind toggle; secondary actions grouped into expandable dropdown; "Clean up old jobs and logs" replaces "Flush cache". Jobs/Queue must be a trustworthy recovery and inspection surface for failed, retried, bundled, and batched downloads: it shows original title, URL, video ID, job ID, batch ID, source/output paths, retry lineage, attempt history, canonical batch health, and safe next actions. Batch truth comes from backend canonical summaries, not visible/rendered row counts.
-- **Diagnostics**: storage usage, logs export, version info, privacy settings.
+- **Jobs/Queue**: current work first, with separate `Now`, `Needs attention`, and `History` views; retry and cancel stay primary while logs, outputs, IDs, raw types/errors, and lineage live in focused detail paths. Developer-only test controls stay behind an advanced disclosure, and "Clean up old jobs and logs" remains separate from media/library deletion. Jobs/Queue must be a trustworthy recovery and inspection surface for failed, retried, bundled, and batched downloads: it shows original title, URL, video ID, job ID, batch ID, source/output paths, retry lineage, attempt history, canonical batch health, persisted product track, and safe next actions. Every failed status leads with a classified plain-language reason and required action; raw technical detail remains directly discoverable. Batch, status, and per-track totals come from backend canonical summaries, not visible/rendered row counts. Loading, query failure, no current work, held-provider state, and no job history are distinct states.
+- Jobs/Queue must use one compact command row for queue state and primary actions. Per-track scheduler health and the shared YouTube pacing/auth gate belong in one secondary disclosure instead of an always-expanded status wall. Advanced controls must write the settings the scheduler actually consumes.
+- Jobs/Queue must expose one backend-selected source/track filter for All, YouTube singles, subscriptions, Instagram, other video, Image Archive, and Localization. The selected value filters the canonical bounded query, not only the rendered rows. Subscription job rows retain their enqueue-time channel/playlist/page display identity across queued, running, failed, retried, and completed states.
+- Jobs/Queue tables and expanded batch members must use panel-local scrolling plus bounded incremental rendering or virtualization. Canonical totals remain visible and explicitly distinct from the loaded/rendered window; expanding a large batch must not mount every member at once.
+- Batch retry and repair must start as bounded background operations and return an attributable receipt immediately. Jobs remains navigable while canonical dry-run/retry/repair work executes, exposes running/completed/failed state, prevents duplicate concurrent work for the same batch and mode, and refreshes canonical Jobs truth after completion.
+- The Video Archiver Single Videos surface must combine canonical active batch members with canonical completed history: every submitted member has a queued/running/held/failed/downloaded state, stable job identity, and truthful numeric or labeled indeterminate progress. Progress ticks must not trigger full history/library refreshes.
+- All archive ingress paths must use one canonical media identity per source video. Existing present or active media is not enqueued again. Missing media, unreachable storage, and invalid sources are distinct states; missing-media repair offers verified relocation or explicit redownload, while a failed old URL offers replace-link/retry or explicit metadata-only removal. Single and subscription discovery associate with the same canonical item/file and retain all lineage.
+- Queue reconciliation must inspect the full canonical queued YouTube set, group work by service plus media ID across every batch and track, cancel all queued work for media already present, and otherwise retain one deterministic queued keeper while canceling—not deleting—redundant attempts. Every source membership, batch association, and attempt record remains durable.
+- Immediately before a queued direct YouTube job can start network or `yt-dlp` work, execution must revalidate canonical present/active/missing/unreachable state. Stale work suppressed by this gate must not start a downloader process, and its terminal record must explain the canonical reason.
+- Operator-deleted media is a canonical lifecycle tombstone, not repairable missing media. Normal Video Archiver and Media Library projections exclude it; dedicated Deleted projections keep it discoverable. An All projection orders available rows before deleted rows. Delete and redownload actions operate on explicit stable item IDs and return per-item receipts.
+- Library maintenance must expose unified imported/current identity coverage, source memberships, duplicate candidates, keeper selection, quarantine state, and rollback through existing toolbar, drawer, table, and detail patterns without adding a new dashboard card.
+- Progress UI must update through bounded active projections and stable keyed rows. Heavy history, archive statistics, and filesystem/storage checks run at separate cadences only for visible surfaces, with bounded NAS health states and no whole-page loading flash on progress ticks.
+- **Diagnostics**: storage usage, logs export, version info, privacy settings, panel-switch latency, command overlap, database wait state, queue/identity-claim pressure, bounded NAS-stage timing, and host process-pressure evidence.
 - **Diagnostics** should also surface a voice-backend catalog, backend readiness, and recommendation reasoning instead of only package versions.
 
 ### 8.0.1 Current top-level windows (implemented 2026-03-03)
@@ -369,23 +432,23 @@ Current implementation status:
 - **Localization Studio**: first/default window, focused on subtitles + dubbing workflow.
 - **Localization Studio** also keeps a lightweight ingest block in-context for local import and source language selection, even when the editor is already open.
 - **Localization Studio** first-screen home should prioritize current-item continuation, recent localization items, workflow/readiness, outputs handoff, and advanced-tool entrypoints before import/setup utilities.
-- **Video Archiver**: local import + URL batch ingest + presets/templates + YouTube subscriptions/groups + legacy archive reconciliation. Quick/Advanced toggle (Quick shows batch URL input only; Advanced adds subscriptions, groups, presets, legacy import). Subscription table includes Type/Downloaded/Status progress columns.
+- **Video Archiver**: local import + URL batch ingest + presets/templates + YouTube subscriptions/groups + imported archive reconciliation. Its only primary workflow selector is `Single videos`, `Subscriptions`, and `Other websites`; it must not add a competing page-wide Quick/Advanced mode. Destination/library state stays compact and always visible, while library administration, presets, migration, and rare controls use contextual disclosures beside the workflow they affect. The subscription surface is a master-detail manager with bounded incremental rendering or virtualization for both the source list and selected-source video lists. Canonical totals remain visible and explicitly distinct from the rendered window. Its downloaded-single-video history is a canonical paged backend projection; mapped subscription outputs and unclassified older items cannot leak into it through path conventions. The canonical page must render independently of the secondary full-library unclassified-legacy count; that exact count loads in the background and reports unavailable state without blocking navigation.
 - **Instagram Archiver**: dedicated Instagram batch ingest workflow plus recurring archive targets. Quick/Advanced toggle (Quick shows batch + recent media; Advanced adds subscriptions).
 - **Image Archive**: dedicated crawler-based image archive ingest workflow. Quick/Advanced toggle (Quick shows URL + output; Advanced adds Pinterest crawler and crawl settings).
 - **Media Library**: renamed from ambiguous "Items"; browse imported media and hand off to Localization Studio. Includes search, source filter, type filter, sort, view mode, and group-by controls.
-- **Jobs/Queue**: execution state + retry/cancel + logs and output reveal. Developer tools behind toggle; per-job actions grouped into dropdown. Large batches must remain scrollable and inspectable, collapsed batch rows must still expose title/link/source context, and latest-attempt state should lead the display while historical failures remain available in attempt history.
+- **Jobs/Queue**: execution state + retry/cancel + logs and output reveal. The default view is current queued/running work; failed work needing action and terminal history are separate explicit views. A compact queue command row leads the page. One secondary scheduler-health disclosure contains canonical foreground YouTube, background YouTube, Instagram, other-video, Image Archive, and Localization totals plus shared YouTube gate state. One compact source/track filter replaces a second horizontal tab strip. Developer tools and real track tuning stay behind an advanced disclosure; per-job actions are grouped into a primary action plus detail/more path. Large batches remain locally scrollable and incrementally rendered, collapsed batch rows still expose title/link/source context, and latest-attempt state leads the display while historical failures remain available in attempt history.
 - **Diagnostics**: non-blocking, section-by-section loading with explicit readiness states, recent local trace rows, and startup/tool-lifecycle visibility.
 - Localization Studio artifact rows must receive typed runtime metadata from the bridge for rerun/status matching, rather than reconstructing artifact identity from filenames in the UI.
 
 ### 8.0.2 Workspace hardening state (implemented 2026-03-07)
 
 - **Localization Studio** now includes the lightweight ingest block for local import/refresh plus ASR-language selection because this is the primary operator workflow.
-- **Video Archiver** is the dedicated home for URL ingest, presets/templates, subscription groups, YouTube subscriptions, and legacy archive reconciliation.
-- **Legacy archive reconciliation** now distinguishes 4KVDP-managed subscription/playlist containers from unmatched manual folders and loose root files, using the old 4KVDP app-state SQLite when available to preserve folder mapping while keeping ongoing subscription continuity state inside VoxVulgi-managed storage rather than the legacy archive path.
-- The Library subscription surface should treat mapped output folders and continuity tracking as separate concepts: output overrides decide where media lands, while dedupe / "already downloaded" state is app-managed and may be seeded or merged from legacy archive files.
+- **Video Archiver** is the dedicated home for URL ingest, presets/templates, subscription groups, YouTube subscriptions, and imported archive reconciliation.
+- **Imported archive reconciliation** distinguishes 4KVDP-managed subscription/playlist containers from unmatched manual folders and loose root files, using the old 4KVDP app-state SQLite when available to preserve folder mapping while keeping ongoing subscription continuity state inside VoxVulgi-managed storage rather than the imported archive path.
+- The Library subscription surface should treat mapped output folders and continuity tracking as separate concepts: output overrides decide where media lands, while dedupe / "already downloaded" state is app-managed and may be seeded or merged from imported archive files.
 - **Instagram Archiver** is the dedicated home for direct Instagram archive runs plus recurring archive targets.
 - **Options** is the discoverable home for shared storage-root configuration and related global path behavior. Feature roots consolidated into a single table (Feature/Path/Status/Actions) instead of 4 separate cards. YouTube auth improved with help text and clear button.
-- Browser-cookie auth and recovery flows default to Firefox because that is the operator's current browser session, while Chrome and Edge remain supported browser-cookie sources.
+- Browser-cookie auth and recovery flows default to Firefox because that is the operator's current browser session. Automated credential validation and operator-environment testing use Firefox only and must not launch, inspect, or source credentials from another browser; other product-supported sources remain outside this environment's automated test path.
 - **Localization Studio** Workflow Map buttons grouped into 4 categories (Captions & Translation, Voice & Dubbing, Quality & Review, Advanced) instead of a flat button row.
 - **Built-in visual debugger**: deterministic snapshot tool that captures the active worksurface to `governance/snapshots/` for AI orchestrators; supports subfolder and label for organized captures; triggered by Ctrl+Shift+S hotkey or `window.__voxVulgiRequestSnapshot()`.
 - **Headless agent bridge**: localhost-only HTTP server that lets AI agents navigate pages (`POST /agent/navigate`), capture snapshots (`POST /agent/snapshot`), read state (`GET /agent/state`), and check health (`GET /agent/health`) without stealing window focus; port written to `agent_bridge_port.txt` in app data on startup.

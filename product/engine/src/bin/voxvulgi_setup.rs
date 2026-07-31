@@ -45,8 +45,11 @@ fn main() -> Result<(), String> {
 
     if install_all {
         install_ffmpeg = true;
-        if !install_models.iter().any(|m| m == "whispercpp-tiny") {
-            install_models.push("whispercpp-tiny".to_string());
+        // KO/JA default ASR (large-v3 q5_0) + tiny fallback.
+        for model_id in ["whispercpp-large-v3-q5_0", "whispercpp-tiny"] {
+            if !install_models.iter().any(|m| m == model_id) {
+                install_models.push(model_id.to_string());
+            }
         }
     }
 
@@ -142,7 +145,7 @@ Usage:
 
 Options:
   --base-dir <path>     Override base dir (default: %APPDATA%\com.voxvulgi.voxvulgi on Windows)
-  --install-all         Install FFmpeg + whispercpp-tiny
+  --install-all         Install FFmpeg + whispercpp-large-v3-q5_0 (KO/JA default) + whispercpp-tiny (fallback)
   --install-ffmpeg      Install FFmpeg tools into <base-dir>\tools\ffmpeg
   --install-model <id>  Install a model from the manifest
   --force               Reinstall even if present

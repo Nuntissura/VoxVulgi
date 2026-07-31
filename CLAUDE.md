@@ -95,6 +95,8 @@
 
 The app exposes a localhost-only HTTP API so agents can navigate pages, trigger snapshots, and read state **without stealing window focus or using keyboard/mouse simulation**.
 
+For quiet app-boundary verification, launch the desktop executable with `--agent-headless`. The WebView remains mounted for navigation, snapshots, and dumps, but its window is hidden before background work starts. Confirm the launch mode through `GET /agent/state`; `agent_headless` must be `true`, and `app_version` identifies the artifact under test.
+
 ### Discovery
 
 On startup the app writes two files:
@@ -116,10 +118,13 @@ A timed-out health check on a stale port file is the most common false-negative 
 | Method | Path | Body | Description |
 |--------|------|------|-------------|
 | `GET` | `/agent/health` | — | Liveness check. Returns `{"status":"ok"}`. |
-| `GET` | `/agent/state` | — | Returns `{"current_page","editor_item_id","safe_mode"}`. |
+| `GET` | `/agent/state` | — | Returns `{"current_page","editor_item_id","safe_mode","agent_headless","app_version"}`. |
 | `POST` | `/agent/navigate` | `{"page":"video_ingest"}` | Switches the active page. Valid pages: `localization`, `video_ingest`, `instagram_archive`, `image_archive`, `media_library`, `jobs`, `diagnostics`, `options`. |
 | `POST` | `/agent/snapshot` | `{"subfolder":"WP-0171","label":"jobs_page"}` | Captures a snapshot via html2canvas and returns `{"path":"..."}`. Blocks up to 30 seconds. |
 | `POST` | `/agent/dump` | `{"subfolder":"WP-0209","label":"after_run"}` | Writes a JSON state dump (URL, viewport, `.content` scroll, filtered `voxvulgi.*` localStorage, mounted `loc-*` element ids, last 200 console entries) and returns `{"path":"..."}`. Blocks up to 10 seconds. (WP-0209) |
+| `POST` | `/agent/ui_audit` | `{"limit":700,"include_offscreen":true}` | Headless-only semantic inventory of rendered headings, regions, tables, disclosures, controls, roles, names, states, bounds, product IDs/test IDs, temporary audit IDs, and allowlisted actions. Returns a structured receipt. (WP-0279) |
+| `POST` | `/agent/ui_action` | `{"audit_id":"vv-audit-12","action":"click"}` | Headless-only structural interaction. Allowed actions are `scroll_into_view`, `scroll_content`, and safe clicks on disclosures, tabs/`aria-pressed`, semantic options/expanded controls, or explicit `data-agent-safe-action` controls. Mutating buttons and arbitrary selectors/scripts are refused. Re-run `ui_audit` after state changes. (WP-0279) |
+| `POST` | `/agent/subscription_status` | `{"id":"<subscription-id>","status":"deleted"}` | Headless-only, explicit assistant mutation for the manual subscription lifecycle status. Accepted statuses are `deleted` and `normal`; the engine attributes the action to `assistant`, preserves subscription/video/metadata/history records, and returns the updated row plus canceled refresh-job count. Automatic failures cannot call this path. (WP-0282) |
 | `POST` | `/agent/freeze_event` | `{"event":"freeze_detected","details":{...},"level":"warn"}` | Worker-only ingress used by the freeze detector. Accepted `event` values: `freeze_detected`, `freeze_recovered`, `worker_alive` (the v0.1.20 liveness heartbeat, fires every 30 s). Appends a row to `diagnostics_trace.jsonl`. Returns `{"status":"ok"}`. (WP-0221) |
 | `POST` | `/agent/freeze_dump` | `{"limit":1000,"note":"..."}` | Bundles app version, pid, bridge port, agent state, and the recent trace tail into a single JSON report. Writes a timestamped file plus `freeze_report_latest.json` under the trace dir's `freeze_reports/` subfolder. Returns `{"path","latest_path","trace_rows_included"}`. Runs on the bridge thread, so it works even when the WebView is frozen. (WP-0221) |
 
@@ -134,6 +139,8 @@ sleep 2
 curl -s -X POST http://127.0.0.1:$PORT/agent/snapshot -d '{"subfolder":"audit","label":"video_archiver"}'
 curl -s -X POST http://127.0.0.1:$PORT/agent/dump     -d '{"subfolder":"audit","label":"video_archiver"}'
 ```
+
+For a full UI audit, launch with `--agent-headless`, call `/agent/ui_audit`, choose only an action listed in the target row's `safe_actions`, call `/agent/ui_action` with that row's `audit_id`, then audit and snapshot again. Audit IDs belong to the current mounted DOM and must not be cached across rerenders. Both routes return `403` outside headless mode and write `agent_ui_audit` / `agent_ui_action` timing and outcome rows into the existing diagnostics trace. Headless mode skips the job runner, startup subscription auto-sync, offline hydration/seeding, fallback-media relocation, and watcher-supervisor startup so inspection does not enqueue or resume operator work.
 
 ### JS globals (in-WebView use)
 
@@ -207,3 +214,12 @@ Each run includes:
 - `summary.md` for quick human/agent triage.
 
 Use `vvwatch.cmd` when the app itself may be frozen or when evidence must distinguish app UI hangs from DB locks, child process fan-out, bridge stalls, NAS stalls, and Python environment drift.
+
+## [OPERATOR-AUTHORITY] Operator Authority Over Pace, Scope, and Stopping
+
+- [OPERATOR-AUTHORITY-001] The assistant/agent is FORBIDDEN to decide pace, scope, or when it stops working.
+- [OPERATOR-AUTHORITY-002] The operator alone decides scope, pace, and when work stops.
+- [OPERATOR-AUTHORITY-003] The assistant must not defer, split, subset, reprioritize, hand off, or drop any operator-requested work on its own judgment.
+- [OPERATOR-AUTHORITY-004] The assistant must not stop, pause, slow down, or declare work "done for now" or "the rest is optional" unless the operator explicitly says so.
+- [OPERATOR-AUTHORITY-005] When the operator lists multiple requirements, the assistant implements ALL of them and may not hand back a partial result and call it done.
+- [OPERATOR-AUTHORITY-006] The assistant may not use tokens, session limits, capacity, or effort as a reason to stop, slow, or narrow operator-requested work.

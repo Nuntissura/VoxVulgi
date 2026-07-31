@@ -182,12 +182,12 @@ mod tests {
             .tts_neural_local_v1
             .pinned
             .iter()
-            .any(|pin| pin == "huggingface_hub==1.5.0"));
+            .any(|pin| pin == "huggingface_hub==0.34.4"));
         assert!(manifest
             .tts_neural_local_v1
             .pinned
             .iter()
-            .any(|pin| pin == "transformers==5.8.1"));
+            .any(|pin| pin == "transformers==4.49.0"));
         assert!(manifest
             .tts_neural_local_v1
             .warmup_recovery_force_reinstall
@@ -211,7 +211,7 @@ mod tests {
             .iter()
             .find(|pin| pin.starts_with("huggingface_hub=="))
             .expect("OpenVoice must pin huggingface_hub");
-        assert_eq!(openvoice_hf, "huggingface_hub==1.5.0");
+        assert_eq!(openvoice_hf, "huggingface_hub==0.34.4");
     }
 
     #[test]

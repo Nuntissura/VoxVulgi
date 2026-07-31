@@ -51,16 +51,17 @@ test("global Instagram subscription heartbeat is gated to the Instagram page", (
 
 test("Jobs active polling refreshes only the lightweight job snapshot", () => {
   const jobsSource = readRepoFile("src", "pages", "JobsPage.tsx");
+  const engineSource = readRepoFile("..", "engine", "src", "jobs.rs");
 
   assert.match(
-    jobsSource,
-    /const\s+JOBS_PAGE_REFRESH_LIMIT\s*=\s*80;/,
-    "Jobs page refresh must keep each polling query bounded",
+    engineSource,
+    /pub fn jobs_overview_snapshot[\s\S]{0,500}RUNNING_PREVIEW_LIMIT:\s*usize\s*=\s*100[\s\S]{0,160}QUEUED_PREVIEW_LIMIT:\s*usize\s*=\s*200/,
+    "Jobs polling must use explicit bounded current-work previews",
   );
   assert.match(
     jobsSource,
-    /const\s+ACTIVE_JOBS_POLL_INTERVAL_MS\s*=\s*2_500;/,
-    "active-job polling must not run once per second while DB contention is present",
+    /const\s+ACTIVE_JOBS_OVERVIEW_POLL_INTERVAL_MS\s*=\s*5_000;/,
+    "the heavyweight Jobs overview must remain on a conservative cadence",
   );
   assert.match(
     jobsSource,
@@ -69,8 +70,13 @@ test("Jobs active polling refreshes only the lightweight job snapshot", () => {
   );
   assert.match(
     jobsSource,
-    /usePollingLoop\(\s*async\s*\(\)\s*=>\s*\{\s*await\s+refreshJobsSnapshot\(\)\.catch\(\(\)\s*=>\s*undefined\);/s,
-    "active polling must call refreshJobsSnapshot instead of full refresh",
+    /invoke<JobRow\[]>\("jobs_progress_many"[\s\S]{0,1600}ACTIVE_JOB_PROGRESS_POLL_INTERVAL_MS/s,
+    "lively progress must use the bounded element-level projection",
+  );
+  assert.match(
+    jobsSource,
+    /usePollingLoop\([\s\S]{0,240}refreshJobsSnapshot\(\)\.catch\(\(\)\s*=>\s*undefined\)[\s\S]{0,260}ACTIVE_JOBS_OVERVIEW_POLL_INTERVAL_MS/s,
+    "canonical overview refresh must remain separate from progress ticks",
   );
   assert.match(
     jobsSource,
@@ -82,6 +88,65 @@ test("Jobs active polling refreshes only the lightweight job snapshot", () => {
     false,
     "active polling must not call full refresh because it also polls controls/subscriptions",
   );
+});
+
+test("Jobs landing view is bounded, current-work-first, and receipt-linked", () => {
+  const jobsSource = readRepoFile("src", "pages", "JobsPage.tsx");
+  const librarySource = readRepoFile("src", "pages", "LibraryPage.tsx");
+  const tauriSource = readRepoFile("src-tauri", "src", "lib.rs");
+  const engineSource = readRepoFile("..", "engine", "src", "jobs.rs");
+  const refreshStart = jobsSource.indexOf("const refreshJobsSnapshot = useCallback");
+  const refreshEnd = jobsSource.indexOf("const refreshQueueControls", refreshStart);
+  const refreshBlock = jobsSource.slice(refreshStart, refreshEnd);
+  const overviewStart = engineSource.indexOf("pub fn jobs_overview_snapshot");
+  const overviewEnd = engineSource.indexOf("pub fn search_jobs", overviewStart);
+  const overviewBlock = engineSource.slice(overviewStart, overviewEnd);
+
+  assert.match(
+    refreshBlock,
+    /invoke<JobsOverviewSnapshot>\("jobs_overview",\s*\{\s*view:\s*primaryView,\s*track:\s*selectedTrack,?\s*\}\)/,
+  );
+  assert.doesNotMatch(
+    refreshBlock,
+    /jobs_list_live/,
+    "the Jobs landing page must not load and hydrate the durable history",
+  );
+  assert.match(jobsSource, /Now\s+<span>/);
+  assert.match(jobsSource, /Needs attention\s+<span>/);
+  assert.match(jobsSource, /History\s+<span>/);
+  assert.doesNotMatch(jobsSource, /No jobs yet/);
+  assert.match(jobsSource, /<th>Work<\/th>[\s\S]*<th>Timing<\/th>/);
+  assert.doesNotMatch(jobsSource, /<th>Created<\/th>[\s\S]*<th>Started<\/th>[\s\S]*<th>Finished<\/th>/);
+
+  assert.match(tauriSource, /async fn jobs_overview/);
+  assert.match(tauriSource, /jobs::jobs_overview_snapshot/);
+  assert.ok(overviewStart > 0, "bounded jobs overview must exist in the engine");
+  assert.doesNotMatch(
+    overviewBlock,
+    /hydrate_job_target_titles/,
+    "bounded overview must not perform per-row fallback title hydration",
+  );
+  assert.match(
+    overviewBlock,
+    /SELECT COUNT\(\*\) FROM job WHERE status='queued'/,
+    "canonical totals must use the status index instead of scanning every job row",
+  );
+  assert.match(
+    jobsSource,
+    /visibleGroupedJobs\s*\.filter\([\s\S]{0,220}expandedGroups\[group\.key\]\s*===\s*true[\s\S]{0,320}\.flatMap\(\(group\) => group\.batchIds/,
+    "collapsed overview rows must not fan out canonical batch-detail commands",
+  );
+  assert.match(
+    jobsSource,
+    /jobsLoaded[\s\S]{0,120}"Loading current work…"/,
+    "the Jobs header must show an explicit loading state instead of false zero counts",
+  );
+  assert.match(
+    librarySource,
+    /const\s+visibleJobIds\s*=\s*queued[\s\S]{0,500}Job \$\{visibleJobIds\.join/,
+    "single-video enqueue must return durable job IDs in its receipt",
+  );
+  assert.match(librarySource, /Queued and downloading/);
 });
 
 test("Jobs context hydration is page-visible and fan-out bounded", () => {
@@ -97,10 +162,10 @@ test("Jobs context hydration is page-visible and fan-out bounded", () => {
     /\.slice\(0,\s*JOB_CONTEXT_HYDRATION_LIMIT\)/,
     "Jobs item-id hydration must slice to the hydration limit",
   );
-  const pageActiveGateCount = jobsSource.match(/if \(!pageActive\) return;/g)?.length ?? 0;
+  const pageActiveGateCount = jobsSource.match(/if \(!shouldPoll\) return;/g)?.length ?? 0;
   assert.ok(
     pageActiveGateCount >= 3,
-    "Jobs initial refresh plus both context hydration effects must stop while hidden",
+    "both Jobs context hydration effects must stop while hidden",
   );
 });
 
@@ -317,7 +382,7 @@ test("Jobs page retry and progress stay operator-readable under batches", () => 
   );
   assert.match(
     jobsSource,
-    /Retry unresolved \(\$\{batchRetryableCount\}\)/,
+    /Retry unfinished \(\$\{batchRetryableCount\}\)/,
     "Batch retry button should not imply that historical failed attempts are current failed videos.",
   );
   assert.doesNotMatch(
@@ -338,9 +403,9 @@ test("Jobs page keeps list refresh usable when non-critical queue-control reads 
     "queue paused state is advisory and must not make the whole Jobs page show a database error under read contention",
   );
   assert.match(
-    refreshControls,
-    /jobs_runtime_settings_get"[\s\S]{0,220}\.catch/,
-    "runtime settings reads are advisory and must not make the whole Jobs page show a database error under read contention",
+    jobsSource,
+    /function\s+refreshTrackRuntime[\s\S]{0,300}jobs_track_runtime_get"[\s\S]{0,900}catch\s*\(err\)[\s\S]{0,320}setTrackRuntimeState/,
+    "canonical track runtime failures must remain contained while visibly changing the runtime-state surface",
   );
   assert.match(
     refreshBlock,
@@ -357,6 +422,125 @@ test("Jobs page keeps list refresh usable when non-critical queue-control reads 
     /catch \(e\)[\s\S]{0,160}isTransientDatabaseLock\(e\)[\s\S]{0,180}sleep\(1_500\)[\s\S]{0,180}refreshJobsSnapshot\(\)/,
     "Jobs refresh should retry one transient DB-lock snapshot before surfacing a terminal banner",
   );
+});
+
+test("Jobs tracks use persisted scheduler truth rather than a global concurrency guess", () => {
+  const jobsSource = readRepoFile("src", "pages", "JobsPage.tsx");
+  const librarySource = readRepoFile("src", "pages", "LibraryPage.tsx");
+  const runtimeSource = readRepoFile("src", "lib", "archiverRuntime.ts");
+
+  for (const track of [
+    "youtube_single",
+    "youtube_recurring",
+    "instagram",
+    "other_video",
+    "image_archive",
+    "localization",
+  ]) {
+    assert.match(jobsSource, new RegExp(`"${track}"`));
+  }
+  assert.match(jobsSource, /jobs-track-summary-\$\{track\.track\}/);
+  assert.match(jobsSource, /jobs-track-control-\$\{track\.track\}/);
+  assert.match(jobsSource, /jobs-youtube-gate/);
+  assert.match(jobsSource, /data-testid="jobs-track-filter"/);
+  assert.match(jobsSource, /selected_counts/);
+  assert.match(jobsSource, /jobs_track_runtime_get/);
+  assert.match(jobsSource, /jobs_track_runtime_set/);
+  assert.match(
+    jobsSource,
+    /track\.track === "youtube_recurring"[\s\S]{0,180}Direct transfers/,
+    "the recurring budget must be labeled as a direct-transfer budget because enumeration is paced separately",
+  );
+  assert.match(jobsSource, /subscription checks and transfers/);
+  assert.doesNotMatch(jobsSource, /jobs_runtime_settings_get/);
+  assert.doesNotMatch(jobsSource, /Apply concurrency/);
+  assert.match(
+    jobsSource,
+    /Search is only a bounded preview[\s\S]{0,520}setOverviewCounts\(overview\.counts\)/,
+    "canonical totals must continue to refresh while the preview uses search",
+  );
+  assert.match(
+    jobsSource,
+    /jobs-track-filter/,
+    "the source selector must show backend-filtered canonical counts rather than loaded-row guesses",
+  );
+  assert.match(jobsSource, /countForJobsView\(selectedOverviewCounts, primaryView\)/);
+  assert.match(jobsSource, /jobTrackLabel\(job\.track\)/);
+  assert.match(runtimeSource, /case "instagram":[\s\S]{0,80}return "Instagram"/);
+  assert.match(runtimeSource, /case "other_video":[\s\S]{0,80}return "Other video"/);
+  assert.match(librarySource, /type EnqueuedJobReceipt[\s\S]{0,180}track\?:/);
+  assert.match(librarySource, /summarizeEnqueuedTracks\(queued\)/);
+});
+
+test("Jobs track runtime distinguishes loading, stale, error, and canonical state", () => {
+  const jobsSource = readRepoFile("src", "pages", "JobsPage.tsx");
+
+  assert.match(
+    jobsSource,
+    /useState<"loading"\s*\|\s*"ready"\s*\|\s*"stale"\s*\|\s*"error">\("loading"\)/,
+    "track runtime must begin explicitly loading rather than as fabricated zero canonical state",
+  );
+  assert.match(
+    jobsSource,
+    /function\s+canonicalTrackRows[\s\S]{0,180}if\s*\(!snapshot\)\s*return\s*\[\];/,
+    "missing runtime state must not synthesize canonical track rows",
+  );
+  assert.doesNotMatch(
+    jobsSource,
+    /DEFAULT_TRACK_SETTINGS/,
+    "missing runtime state must not synthesize default budgets",
+  );
+  assert.match(jobsSource, /Loading canonical track status and scheduler budgets…/);
+  assert.match(jobsSource, /Canonical track status is unavailable\. No track totals or budgets are shown until it loads\./);
+  assert.match(jobsSource, /showing the last confirmed state/);
+  assert.match(
+    jobsSource,
+    /function\s+plainTrackHoldReason[\s\S]{0,1200}The scheduler is temporarily holding new starts for this track\./,
+    "raw scheduler hold codes must be translated to operator copy",
+  );
+  assert.match(
+    jobsSource,
+    /plainTrackHoldReason\(track\.hold_reason\)/,
+    "track strip must render translated hold copy rather than the raw code",
+  );
+  assert.match(
+    jobsSource,
+    /plainTrackHoldReason\(youtubeGate\.hold_reason\)/,
+    "gate strip must render translated hold copy rather than the raw code",
+  );
+});
+
+test("Diagnostics app-state snapshot preserves and exports the canonical scheduler tracks", () => {
+  const diagnosticsSource = readRepoFile("src", "pages", "DiagnosticsPage.tsx");
+  const tauriSource = readRepoFile("src-tauri", "src", "lib.rs");
+
+  assert.match(
+    diagnosticsSource,
+    /type\s+DiagnosticsJobsTracksSnapshot\s*=\s*\{[\s\S]{0,320}tracks:\s*DiagnosticsJobTrackRuntimeRow\[\];[\s\S]{0,240}unclassified:[\s\S]{0,160}youtube_gate:/,
+    "Diagnostics must consume the exact captured canonical tracks, unclassified totals, and shared gate state",
+  );
+  assert.match(
+    diagnosticsSource,
+    /jobs_tracks:\s*DiagnosticsJobsTracksSnapshot;/,
+    "Diagnostics app-state DTO must retain the backend jobs_tracks field",
+  );
+  assert.match(
+    tauriSource,
+    /## Scheduler tracks[\s\S]{0,5000}unclassified[\s\S]{0,1400}### Shared YouTube start gate/,
+    "operator-readable app-state Markdown must include six track rows, unclassified totals, and the shared YouTube gate",
+  );
+  for (const track of [
+    "youtube_single",
+    "youtube_recurring",
+    "instagram",
+    "other_video",
+    "image_archive",
+    "localization",
+  ]) {
+    assert.match(tauriSource, new RegExp(`"${track}"`));
+  }
+  assert.match(tauriSource, /Next eligible start:/);
+  assert.match(tauriSource, /Hold reason:/);
 });
 
 test("visual debugger snapshots capture a bounded app viewport under load", () => {
@@ -463,8 +647,8 @@ test("read-only SQLite UI connections fail fast on DB contention", () => {
 
   assert.match(
     dbSource,
-    /const\s+READ_ONLY_BUSY_TIMEOUT_MS:\s*u64\s*=\s*750;/,
-    "read-only UI commands should fail fast instead of waiting multiple seconds",
+    /const\s+READ_ONLY_BUSY_TIMEOUT_MS:\s*u64\s*=\s*4000;/,
+    "read-only UI commands should wait out a WAL checkpoint (WP-0258) instead of erroring with 'database is locked'",
   );
   assert.match(
     openReadonlyBlock,

@@ -114,6 +114,27 @@ Core tables (suggested):
   - `language_detected`, `speaker_count_est`
 - `ingest_provenance`:
   - `item_id`, `provider`, `source_url`, `created_at_ms`
+- `library_download_lineage`:
+  - `item_id` (primary key), `service`, `origin_kind`, `work_track`, `source_job_id`, `source_batch_id`, `source_subscription_id`, `item_created_at_ms`, `created_at_ms`, `updated_at_ms`
+  - `source_job_id` is durable text rather than a deleting foreign key because terminal-job cleanup must not erase library origin,
+  - `service`, `origin_kind`, and `work_track` are independent dimensions: a manually submitted YouTube playlist can be foreground `youtube_single` work while retaining `origin_kind='playlist'`,
+  - new downloaded items receive lineage during the successful job-to-library handoff; historical backfill accepts only exact structured job/item evidence and leaves missing or conflicting history `unclassified`,
+  - indexes support canonical single-history paging (`service`, `origin_kind`, item time), source-job repair, subscription inspection, and work-track diagnostics.
+- `media_source_identity`:
+  - canonical key is `service + media_id`; URLs, job attempts, physical paths, and import generations are aliases or observations rather than identity,
+  - one identity may reference one current physical library item while retaining historical observations needed for repair and rollback.
+- `media_source_membership`:
+  - `service`, `media_id`, `source_subscription_id`, `source_kind`, `source_url_snapshot`, `source_title_snapshot`, `evidence_kind`, `created_at_ms`, `updated_at_ms`,
+  - `source_kind` distinguishes playlist, `/videos`, `/shorts`, channel page, direct video, and imported archive source without changing canonical media ownership,
+  - membership uniqueness prevents the same identity/source pair from multiplying while preserving many memberships for one canonical video.
+  - schema migration backfills pre-membership `media_source_association` rows by joining the current subscription source URL/title; the backfill is additive, idempotent, and never changes media, jobs, archive files, subtitles, or subscription configuration.
+- `media_import_evidence`:
+  - `library_item_id`, `service`, `media_id`, `evidence_kind`, `source_record_key`, `source_path_snapshot`, `source_url_snapshot`, `match_state`, `details_json`, `created_at_ms`,
+  - `match_state` distinguishes exact, ambiguous, and unresolved evidence; only an exact single-candidate match may bind an imported item automatically,
+  - third-party database and export sources remain read-only; evidence is copied into VoxVulgi-managed storage with its source record identifiers.
+- `media_cleanup_run` / `media_cleanup_candidate` / `media_cleanup_action`:
+  - persist resumable inventory stage, bounded progress, evidence strength, candidate members, proposed keeper, reclaimable bytes, review decision, quarantine action, and rollback state,
+  - inventory and apply are distinct commands; permanent deletion is not an inventory or reconciliation side effect.
 - `tag` / `library_item_tag` (manual tags)
 - `smart_tag` / `library_item_smart_tag` (model-driven tags, with confidence)
 - `subtitle_track`:
@@ -158,19 +179,23 @@ Core tables (suggested):
   - one-shot jobs and saved subscription rows should be able to reference explicit operator-managed session inputs,
   - accepted import forms should include raw cookie headers, Netscape cookie files, browser-export JSON cookie blobs, and explicit cookie-file paths,
   - secrets must remain redacted in logs and excluded from durable `job.params_json`.
-- Planned archive-expansion tables:
-  - `library_container`:
-    - `id`, `kind` (`playlist`, `subscription`, `folder`, `channel`, or similar),
-      `source_key`, `display_name`, `created_at_ms`, `updated_at_ms`
-  - `library_item_container`:
-    - `item_id`, `container_id`
+- Source grouping is implemented from canonical `media_source_membership` rows. Storage folders remain physical observations or preferred landing locations and do not become duplicate ownership containers.
 
 - Current Media Library UX should remain list-first for large archives even before the normalized
-  `library_container` tables exist. Until those tables are introduced, the frontend may infer
-  provider and container semantics from source URI plus storage-relative path segments so operators
-  can still distinguish playlist/subscription/folder/single-file rows.
+  `library_container` tables exist. Presentation-only provider/folder hints may still be inferred
+  when canonical lineage is absent, but frontend source URI or storage-path inference must never
+  decide whether an item is a single, subscription, playlist, or channel download. Those origin
+  labels come from `library_download_lineage`; older unclassifiable rows are labeled `Unknown` and
+  remain available in Media Library without entering canonical single-video history.
+- The main Media Library query is a backend canonical projection. Lifecycle, search, media type,
+  canonical source identity, single-video lineage, and sort predicates execute before
+  `LIMIT`/`OFFSET`, and the response returns `filtered_total` independently from the bounded page.
+  Canonical source service prefers durable download lineage, then exact imported
+  `media_source_identity`; unresolved imports remain local/unclassified rather than being guessed
+  from a folder name. Frontend grouping is presentation-only and may operate on the returned page,
+  but frontend filtering must not redefine the canonical matching set.
 
-- Legacy reconciliation reports are written as local JSON artifacts under the app-managed derived tree so large/NAS-backed archive analysis remains read-only and inspectable.
+- Imported archive reconciliation reports are written as local JSON artifacts under the app-managed derived tree so large/NAS-backed archive analysis remains read-only and inspectable.
 
 Additional tables (planned; large-subscription UX hardening):
 
@@ -205,6 +230,11 @@ Implementation sketch:
 - Concurrency controls:
   - limit CPU-heavy tasks (ASR/separation)
   - limit IO-heavy tasks (download/mux)
+  - persist independent product tracks for `youtube_single`, `youtube_recurring`, `instagram`, `other_video`, `image_archive`, and `localization`, with indexed per-track queued fetches and real scheduler-consumed budgets,
+  - classify and stamp a job at enqueue from job type plus structured service/origin context; preserve the older `lane` field during compatibility migration rather than rewriting or re-enqueueing canonical jobs,
+  - use provider/resource gates in addition to track budgets: the two YouTube tracks retain one active direct-download slot each by default, but every aggregate YouTube process claim/start is separated by the shared randomized 5-10 second start gate,
+  - choose foreground YouTube first when both tracks become eligible at one gate opening, then alternate continuously eligible tracks so recurring work keeps a bounded background share,
+  - provider holds are scoped: the YouTube circuit leaves both YouTube tracks queued while unrelated service tracks remain dispatchable.
 
 ## 5) Media & AI Pipelines
 
@@ -530,12 +560,29 @@ Phase 1 implementation status (2026-02-22):
   - Pinterest board/folder crawl support should plug into the existing crawler-style image archive flow.
   - Instagram recurring archive targets should reuse the subscription/interval model already established for YouTube where practical.
 - Downloaded media is imported into `library_item`, provenance is persisted in `ingest_provenance`, and downloads are grouped via `job.batch_id` for UI batching.
+  - Successful downloads also persist `library_download_lineage` from execution context before the item is eligible for origin-specific projections. Job cleanup preserves this row.
+  - Canonical downloaded-single-video queries select `service='youtube' AND origin_kind='single'`; the bounded canonical count/page never calls frontend path heuristics. The exact unclassified-legacy diagnostic is a separate read-only Tauri command because its evidence predicates require a full `library_item` scan; the frontend starts that count without awaiting it, preserves explicit loading/unavailable state, and never lets it delay canonical history navigation.
+  - Historical lineage backfill runs outside the schema-migration transaction in bounded, resumable batches with a durable checkpoint/receipt; schema migration only creates the additive table/indexes so a large database does not incur an unbounded startup write.
+  - Every job persists one canonical product `track`; enqueue receipts, Jobs labels, scheduler fetches, provenance lineage, and diagnostics consume that value rather than reclassifying in React.
   - Jobs/Queue recovery truth must be derived from backend canonical job/batch queries, not from the current page of rendered rows.
-  - Retry operations should persist lineage for new attempts (`retry_of_job_id` / `retry_replacement_job_id` or equivalent) and use best-effort legacy inference only when explicit lineage is missing.
+  - The initial Jobs projection must be bounded and current-work-first: return canonical status totals separately from the one requested `Now`, `Needs attention`, or `History` preview so inactive history is not fetched on every active poll and a rendered subset is never presented as the full store. Canonical totals must use indexed status counts, and collapsed overview rows must not fan out batch-detail aggregation calls; canonical batch detail loads only when the operator expands that batch.
+  - Initial Jobs reads must use one read-only connection and indexed predicates. They must not perform per-row/per-URL library or provenance hydration; persisted `target_title`, batched item context, and URL/video-ID fallback are the display path, with historical title repair kept explicit.
+  - Jobs overview returns canonical per-track queued/running totals and effective limits separately from the bounded requested preview. A rendered filter/page count is always labeled as preview-scoped.
+  - Runtime track state includes configured/effective budgets, pause/hold reason, active counts, and shared provider-gate next-eligible state. Settings updates validate and persist in one transaction, then return the reread canonical state.
+  - Successful enqueue UI receipts are constructed from the persisted `JobRow` values returned by the command and include job IDs so the operator can trace the attempt before any later list refresh.
+  - Retry operations should persist lineage for new attempts (`retry_of_job_id` / `retry_replacement_job_id` or equivalent) and use best-effort historical inference only when explicit lineage is missing.
+  - Canonical batch dry-run, retry, and repair execute behind an in-process background-task receipt (`request_id`, mode, batch query, state, timestamps, summary/error). The start command returns before batch inspection/re-enqueue work begins; a bounded status command reports completion. Concurrent starts for the same mode and batch query reuse the running receipt, completed receipts are pruned, and engine-level canonical scope, lineage, chunking, and idempotency remain authoritative.
   - Batch inspection APIs should return canonical health counts, latest-attempt state, retryable/unresolved counts, and attempt history for all matching batch rows.
   - Deleting queue/history rows must remain separate from deleting media, library metadata, subscriptions, playlists, or third-party exports.
   - YouTube auth uses the current global Options auth at execution/retry time for old queued/waiting/retried jobs. Cookie Editor `.js`/JSON exports, Netscape cookie text, cookie headers, and cookie-file paths are accepted inputs and normalized internally.
-  - Browser-cookie auth source selection defaults to Firefox when browser cookies are enabled without an explicit saved source; Chrome and Edge remain supported first-class alternatives, and existing Opera support remains valid.
+   - Browser-cookie auth source selection defaults to Firefox when browser cookies are enabled without an explicit saved source. In the operator environment, automated credential checks and runtime auth verification use Firefox only and must not launch, inspect, or source credentials from Chrome, Edge, Opera, or another browser. Other product-supported sources remain outside that automated test path. The global Options browser source is persisted separately from manual cookie material and is resolved at job execution time when no current global cookie is saved. A current global browser source supersedes stale per-job cookie secrets on already queued YouTube work so a successful replacement session cannot be undone by imported rows.
+  - Browser-session setup is a three-step external-browser flow: launch YouTube in the explicitly selected supported browser on a user click, let the user complete Google/YouTube sign-in in that normal browser, then run exact-source preflight. Do not host Google sign-in in the Tauri WebView. Browser-session preflight must execute the selected `--cookies-from-browser` source without the normal anonymous fallback retry; otherwise a public URL can falsely report a connected account. Google OAuth is reserved for a future YouTube Data API integration and is not a yt-dlp download-auth path.
+  - `YoutubeAuthConfig` persists `last_verified_at_ms` and `reconnect_required_at_ms` in addition to the browser/manual source. Saving a new source clears both timestamps; successful preflight sets verified and clears reconnect-required; rejected preflight or a corroborated runtime auth block clears verified and sets reconnect-required. The source remains stored so the matching auth circuit can hold recurring work. The app never deletes or signs out the user's real browser session.
+  - Recurring YouTube work remains single-download concurrency, uses a 5-10 second pre-download delay, checks subscriptions one at a time with randomized inter-dispatch spacing, and defaults forced update-all to a bounded 25-subscription most-overdue tranche.
+  - Foreground YouTube direct downloads use the same effective safety profile as recurring children: fragment concurrency 1, configured randomized 5-10 second pre-download sleep, current retry/throttled-rate/file-access settings, and current browser-session/auth resolution.
+  - Foreground and background YouTube direct-download tracks have independent active slots so a long subscription transfer does not block one-off work, while a runner-owned shared start gate staggers all aggregate YouTube process starts and prevents same-tick bursts.
+  - The existing corroborated/TTL-bound global YouTube auth block is a shared YouTube circuit breaker: queued YouTube refresh/download rows in both tracks remain queued while the matching account state is blocked, while Instagram, other-video, image-archive, and localization tracks remain dispatchable.
+  - Failed Jobs rows render the shared classified state as the status headline (`Failed - <reason>`) with the required action adjacent and the raw engine error behind disclosure.
   - Privacy hardening: cookie headers are not persisted in `job.params_json` and browser-cookie usage is opt-in via explicit Library toggles.
 
 Phase 1 extension status (2026-02-25):
@@ -547,18 +594,51 @@ Phase 1 extension status (2026-02-25):
   - default mapped path: `downloads/video/subscriptions/<folder_map>/`
   - optional absolute output override per subscription (`output_dir_override`)
 - For subscriptions that already point at an existing archive folder, refresh logic should reconcile already-downloaded items against that folder and seed/refresh dedupe state where practical before queueing new media.
-- Per-subscription dedupe / "already downloaded" continuity state must live in VoxVulgi-managed app data and must not rely on the output folder remaining writable or stable. Legacy output-folder archive files may be merged as migration input, but ongoing tracking state should be app-managed.
+- Per-subscription dedupe / "already downloaded" continuity state must live in VoxVulgi-managed app data and must not rely on the output folder remaining writable or stable. Imported output-folder archive files may be merged as migration input, but ongoing tracking state should be app-managed.
+- Within one queued subscription-refresh cohort, channel-page, `/videos`, and `/shorts` sources are enumerated before playlists. Each candidate still takes the canonical present/active/missing preflight, so a healthy feed claims shared IDs first while a failed or unavailable feed cannot suppress a playlist recovery download.
+- `youtube_subscription.source_status` is the durable lifecycle authority (`normal`, `unavailable`, `deleted`) and remains separate from the existing `active` pause toggle. Schema fields also retain the status-change timestamp and source.
+- The only write path to `deleted` or from `deleted` to `normal` is the validated manual-status command, attributed as `operator` or `assistant`. It sets `active=0` when deleted, cancels queued/running refresh jobs without deleting them, and preserves the subscription row plus all media/source metadata.
+- Refresh failure recording recognizes only explicit HTTP 404 status forms as `unavailable`; generic not-found wording, empty tabs, network errors, authentication errors, and tool failures remain ordinary failure classifications. Refresh success returns `unavailable` to `normal` but cannot change `deleted`.
+- All subscription refresh enqueue and execution boundaries defensively reject `deleted`, including direct, group, bulk, scheduler, and already-queued execution paths. Existing child video downloads are not deleted or rewritten.
+- The subscription manager replaces its destructive primary Delete action with `Mark deleted` / `Restore subscription`, renders durable Deleted and Unavailable states, and always explains that a 404 URL does not prove its hosting channel was deleted.
 - Current managed-state layout is `library/subscriptions/youtube/<subscription_id>/voxvulgi_youtube_archive.txt` under the VoxVulgi app-data root; `output_dir_override` continues to control where downloaded media lands, but not where continuity state is persisted.
 - Added JSON export/import for subscription portability:
   - export path is user selected in desktop UI,
   - import uses URL-keyed upsert (`source_url`) and keeps existing rows not present in the import file.
 - Subscriptions are loaded from DB whenever the Library page mounts, so pane/window switches do not clear loaded subscription state.
-- Legacy reconciliation now also supports the old 4KVDP app-state SQLite:
+- Imported archive reconciliation also supports the old 4KVDP app-state SQLite:
   - auto-detect the largest Local AppData 4KVDP SQLite store when available,
-  - correlate stored `dirname` basenames against the selected legacy root,
+  - correlate stored `dirname` basenames against the selected imported root,
   - classify managed subscription/channel rows vs playlist rows, then separate those from unmatched manual folders and loose root files,
   - import managed rows directly into `youtube_subscription` plus `youtube_subscription_group` memberships,
-  - seed VoxVulgi-managed subscription archive state from legacy `subscription_entries`, with one-time merge from any older output-folder archive file when present, so refresh jobs inherit dedupe state without requiring ongoing NAS-side state writes.
+  - seed VoxVulgi-managed subscription archive state from imported `subscription_entries`, with one-time merge from any older output-folder archive file when present, so refresh jobs inherit dedupe state without requiring ongoing NAS-side state writes.
+  - ingest per-download URL identity evidence through the verified `download_item -> media_item_description -> url_description` relation, normalize UNC path spelling before exact comparison, and retain ambiguous/unresolved matches without mutating the third-party database,
+  - bind each exact imported item to canonical source identity and all known source memberships before future subscription discovery or one-off enqueue can materialize another copy.
+- Unified library and duplicate prevention:
+  - imported and newly downloaded items use the same canonical identity, membership, lineage, and library queries; import generation remains provenance, not a product-library partition,
+  - discovery from playlists, `/videos`, `/shorts`, channel pages, and direct URLs records membership before returning `active` or `present`, so duplicate suppression never loses source context,
+  - a subscription folder map is a preferred destination only when no canonical physical item exists,
+  - `library_item.file_status` is the durable per-physical-item lifecycle authority: `available`, internal `delete_pending`, or `operator_deleted`. It stores change time/source, delete method, and the latest exact authorized redownload job ID; lifecycle state is independent of filesystem present/missing/unreachable observation,
+  - deletion accepts only explicit canonical item IDs, writes `delete_pending` before the filesystem handoff, uses the OS Recycle Bin by default or an explicitly selected permanent mode, preserves every identity/membership/history row, and returns a per-item receipt. Unreachable storage never becomes a successful deletion,
+  - all preflight, enqueue, subscription discovery, retry, batch repair, and execution paths suppress `delete_pending` and `operator_deleted`. An explicit selected-item manual-redownload path may replace the stored authorization with its newly created exact job ID; no aggregate or generic retry path receives this authority,
+  - successful authorized import clears lifecycle state and authorization only after the replacement path is present. Failed, canceled, stale, or generic jobs leave the tombstone intact,
+  - Video Archiver subscription detail queries `media_source_membership -> media_source_identity -> library_item` rather than output-folder prefixes and returns bounded available/deleted projections. Media Library applies lifecycle filtering in the backend before pagination and orders deleted rows last only in the explicit All projection,
+  - Media Library applies search, media-type, canonical source, canonical-single, lifecycle, and sort predicates to the full backend set before pagination; its page receipt returns the exact filtered total and each item exposes the resolved canonical service used by source filtering,
+  - queued work reconciliation is dry-run first and targets the full canonical queued set, not a rendered, filtered, or paginated subset,
+  - reconciliation canonicalizes every queued direct YouTube URL, records every job's source association and subscription membership, groups by `service + media_id` across batches and tracks, cancels every group member when canonical media is present, and otherwise retains the valid canonical active claimant when one exists; without one it prefers channel-page, `/videos`, or `/shorts` discovery over playlist discovery per the source-priority contract, then the newest `created_at_ms`, then stable `id`, while canceling redundant attempts,
+  - one immediate SQLite write transaction applies the selected queued-job status changes and retargets `media_source_identity.active_job_id` to the keeper; canceled job, batch, retry, association, and membership rows are retained as history,
+  - the reconciliation receipt distinguishes scanned, unidentifiable, present-suppressed, keeper, duplicate-canceled, missing, and unreachable counts and proves that the full canonical set—not only a requested page—was processed,
+  - direct YouTube dispatch performs an execution-boundary identity gate before changing the job to `running` or launching network/`yt-dlp` work. The gate atomically admits the current keeper only when it still owns or can acquire the canonical active claim; present media or another active queued/running owner suppresses the stale job, while missing and unreachable storage remain distinct and follow the existing explicit-repair/storage policy.
+- Recoverable NAS duplicate cleanup:
+  - inventory compares normalized canonical filesystem paths with the full `library_item` set before
+    hashing; path reconciliation applies only unique one-to-one basename/canonical-source evidence,
+    indexes unmatched physical media, and retains missing or ambiguous metadata for repair,
+  - inventory starts with structured identity evidence, then groups unresolved files by size, bounded prefix/suffix digest, full-file digest, and optional byte comparison,
+  - ffprobe metadata and decoded-frame fingerprints may rank or explain variants but cannot authorize automatic deletion,
+  - scans use bounded low concurrency, durable checkpoints, pause/cancel controls, incremental SQLite commits, and path/read timeouts,
+  - apply moves non-keeper files into an operator-visible quarantine, records a rollback manifest with source and quarantine paths plus memberships, atomically changes every preserved redundant `library_item.media_path` to the verified keeper path with its identity relink, and never replaces canonical association with a hardlink or symlink by default,
+  - rollback restores the quarantined file, original redundant library path, and recorded identity links together; a database-handoff failure must compensate the filesystem move when possible or retain an explicit recoverable `attention` action,
+  - permanent deletion is a separate explicit confirmation after quarantine validation.
 
 Responsiveness hardening:
 
@@ -639,7 +719,28 @@ Subscription export JSON shape (v1):
   - loaded,
   - ready.
 - Diagnostics should also be able to assemble one coherent app-state snapshot spanning startup state, storage roots, tool/model readiness, queue/library counts, recent trace rows, and feature-health summaries.
+- Diagnostics and the localhost agent bridge should expose one bounded read-only track runtime snapshot containing canonical per-track totals, configured/effective budgets, held reasons, and shared YouTube gate state. The UI, bridge, trace, and tests must consume the same engine contract.
+- Jobs overview accepts an optional canonical track selector and applies it in the indexed backend query before its row limit. Track totals remain a separate unfiltered canonical aggregate. Jobs persist enqueue-time source display snapshots so UI metadata does not depend on a later subscription lookup.
+- The Jobs frontend exposes that canonical track selector through one compact source filter rather than a second horizontal tab rail. Queue controls remain visible; scheduler budgets, per-track totals, and shared YouTube gate detail share one secondary disclosure backed by the same canonical runtime snapshot.
+- Large Jobs groups and Video Archiver subscription-video projections use explicit bounded render windows with stable keys and visible `shown of canonical total` truth. `Load more` expands the local window by a fixed bound; filters, counts, retry, update-all, and cleanup actions continue to target canonical backend sets rather than the rendered slice. Panel-local scroll containers prevent document-height and horizontal-table growth from becoming page-navigation or WebView layout work.
+- Video-file selection is controlled by stable canonical item IDs. Header selection is labeled `Select loaded`, mixed selections expose eligible available/deleted counts, and destructive commands return exact per-item outcomes. Delete/redownload controls are never marked as agent-safe actions and remain unavailable to the read-only headless audit bridge.
+- The first bounded-render implementation remains dependency-free to preserve routine offline-payload reuse. A later measured transition to a headless virtualizer is allowed only if it preserves stable accessibility position/set-size metadata, selection, scroll restoration, audit identifiers, and canonical-set action semantics.
+- A bounded active-job projection keyed by stable job ID serves Jobs and Video Archiver progress. Frontends reconcile changed fields without replacing unrelated rows; completed history refreshes only on terminal transitions or explicit refresh. Persisted job state is canonical even if an event/listener is missed.
+- Canonical source identity is `service + normalized extractor/media ID`, stored independently from URL aliases, job attempts, library items, source associations, output paths, and physical-file observations. Identity claim and active-job suppression are transactional. Imported ambiguity is preserved for review rather than auto-merged.
+- Imported media identity enrichment consumes copied read-only evidence and records exact, ambiguous, and unresolved outcomes. Exact linkage must be idempotent and resumable; conflicts never overwrite the existing canonical item automatically.
+- Source membership is many-to-many and survives `active`/`present` preflight suppression, queue cleanup, retry, quarantine, rollback, and terminal-job cleanup.
+- Download preflight is ordered and batch-capable, returning `ready`, `active`, `present`, `missing`, `storage_unreachable`, or `invalid` with evidence. Relocation verifies before atomically updating the path; redownload binds to the existing identity/item and attaches a new output only after success; removal is explicit and metadata-only by default.
+- Slow archive statistics, history, and storage probes are isolated from progress cadence and inactive pages. Network-path checks are bounded worker operations with present/missing/unreachable/slow outcomes. Trace rows record command, duration, row count, selected track, storage class, overlap skips, and cache age without exposing secrets.
+- External watcher evidence must include requested versus actual sample cadence, bridge latency/failures, database probe waits, page-transition timing, in-flight/overlapping command summaries, queue and identity-claim pressure, NAS scan stage, and bounded host process pressure. Probes must remain read-only, low-priority, and skip rather than accumulate when the host is already delayed.
+- Panel navigation must render from cached/lightweight state first and must not synchronously await archive statistics, full history, NAS traversal, browser credential extraction, or queue-wide aggregation. Background refreshes are cancelable or stale-result guarded when the active panel changes.
 - Snapshot exports should emit both JSON and Markdown from the same captured state so support handoff and LLM analysis use the same underlying point-in-time record.
+- The localhost agent bridge exposes bounded `POST /agent/ui_audit` and `POST /agent/ui_action` routes only in `agent_headless` mode:
+  - `ui_audit` inventories the mounted `.content` subtree using semantic HTML/ARIA roles and accessible names plus visibility, enabled/selected/expanded state, current value metadata, viewport/scroll bounds, and generated per-mount audit IDs,
+  - `ui_action` resolves exactly one current audit ID and permits only scroll, disclosure activation, semantic selection/expansion controls (`aria-pressed`, tabs, `role=option` with `aria-selected`, and `aria-expanded`), and controls explicitly marked `data-agent-safe-action`; arbitrary selectors, script evaluation, file selection, form submission, and mutating buttons are rejected,
+  - frontend execution uses the existing Tauri event/completion channel rather than exposing arbitrary JavaScript evaluation over HTTP,
+  - each request is serialized, bounded by timeout and element-count limits, emits `agent_ui_audit` or `agent_ui_action` diagnostics timing/outcome rows, and returns a JSON receipt that identifies the page and resulting state,
+  - role/name/state inventory follows native semantics first and ARIA overrides where present; stable product `id`/`data-testid` remains preferable to generated audit IDs for durable automated checks,
+  - headless setup skips all runtime background work that can mutate operator work or compete for resources: offline payload hydration, backend seeding, watcher-supervisor startup, NAS fallback resync, the job runner, and YouTube/Instagram startup auto-sync; diagnostics sampling and the localhost audit bridge remain active.
 
 ### 6.5 Desktop shell interaction rules
 

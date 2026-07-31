@@ -8,13 +8,23 @@ use std::collections::{HashMap, HashSet};
 use std::io::{BufRead, BufReader, Write};
 use std::path::Path;
 use std::path::PathBuf;
-use std::sync::OnceLock;
+use std::sync::{Mutex, OnceLock};
+use std::time::{Duration, Instant};
 use url::Url;
 use uuid::Uuid;
 
-const EXPORT_SCHEMA_VERSION: u32 = 1;
+const EXPORT_SCHEMA_VERSION: u32 = 2;
+const MIN_SUPPORTED_EXPORT_SCHEMA_VERSION: u32 = 1;
 const DEFAULT_SUBSCRIPTION_MAP: &str = "subscription";
-const DEFAULT_REFRESH_INTERVAL_MINUTES: i64 = 60;
+pub const YOUTUBE_SUBSCRIPTION_STATUS_NORMAL: &str = "normal";
+pub const YOUTUBE_SUBSCRIPTION_STATUS_UNAVAILABLE: &str = "unavailable";
+pub const YOUTUBE_SUBSCRIPTION_STATUS_DELETED: &str = "deleted";
+pub const YOUTUBE_SUBSCRIPTION_STATUS_ACTOR_OPERATOR: &str = "operator";
+pub const YOUTUBE_SUBSCRIPTION_STATUS_ACTOR_ASSISTANT: &str = "assistant";
+// WP-0255: operator does not expect uploads frequently per subscription; default a new
+// subscription to a 12-hour refresh (was 60 min). UI edits this in hours. Storage stays
+// minutes; existing rows keep their stored value. MIN 5 min / MAX 7 days unchanged.
+const DEFAULT_REFRESH_INTERVAL_MINUTES: i64 = 720;
 const MIN_REFRESH_INTERVAL_MINUTES: i64 = 5;
 const MAX_REFRESH_INTERVAL_MINUTES: i64 = 10080;
 const FOURKVDP_SUBSCRIPTIONS_JSON_FILENAME: &str = "subscriptions.json";
@@ -28,9 +38,12 @@ const MAX_LEGACY_ANALYSIS_MAX_DEPTH: usize = 16;
 const MAX_LEGACY_ANALYSIS_MAX_FILES: usize = 100000;
 const LEGACY_CONTAINER_HINT_SCAN_DIR_LIMIT: usize = 120;
 const LEGACY_SAMPLE_NAME_LIMIT: usize = 24;
-const LEGACY_4KVDP_GROUP_ALL: &str = "Legacy 4KVDP";
-const LEGACY_4KVDP_GROUP_SUBSCRIPTIONS: &str = "Legacy 4KVDP Subscriptions";
-const LEGACY_4KVDP_GROUP_PLAYLISTS: &str = "Legacy 4KVDP Playlists";
+// WP-0259: operator treats 4K Video Downloader-imported and new subscriptions identically and
+// wants no "legacy" wording in the app. Neutral display names for the groups an import creates
+// (identifiers kept internal). Existing "Legacy 4KVDP*" groups are renamed in place by db v19.
+const LEGACY_4KVDP_GROUP_ALL: &str = "Imported";
+const LEGACY_4KVDP_GROUP_SUBSCRIPTIONS: &str = "Imported subscriptions";
+const LEGACY_4KVDP_GROUP_PLAYLISTS: &str = "Imported playlists";
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct YoutubeSubscriptionRow {
@@ -44,14 +57,36 @@ pub struct YoutubeSubscriptionRow {
     pub browser_cookie_source: Option<String>,
     pub auth_session_configured: bool,
     pub active: bool,
+    #[serde(default = "default_youtube_subscription_source_status")]
+    pub source_status: String,
+    #[serde(default)]
+    pub source_status_changed_at_ms: Option<i64>,
+    #[serde(default)]
+    pub source_status_change_source: Option<String>,
     pub preset_id: Option<String>,
     pub refresh_interval_minutes: i64,
     pub last_queued_at_ms: Option<i64>,
     pub last_error_at_ms: Option<i64>,
+    // WP-0264: failure-state telegraphing. Raw (truncated ~500 chars) error text from the last
+    // failed refresh, so the FE `classifyFailure` can derive a state + required action without a
+    // per-poll join to the job. Cleared (NULL) on a successful refresh. Additive schema v21.
+    #[serde(default)]
+    pub last_error_message: Option<String>,
     pub consecutive_failures: i64,
     pub next_allowed_refresh_at_ms: Option<i64>,
     pub created_at_ms: i64,
     pub updated_at_ms: i64,
+    // WP-0255: honest per-subscription progress (additive schema v18). Written by the
+    // refresh job on completion; only `archive` downloaded count comes from the fs side
+    // channel (archive_stats), the rest live on the row.
+    #[serde(default)]
+    pub last_checked_at_ms: Option<i64>,
+    #[serde(default)]
+    pub upstream_total: Option<i64>,
+    #[serde(default)]
+    pub last_new_found: Option<i64>,
+    #[serde(default)]
+    pub last_refresh_queued: Option<i64>,
     #[serde(default)]
     pub group_ids: Vec<String>,
 }
@@ -77,6 +112,12 @@ pub struct YoutubeSubscriptionUpsert {
     #[serde(default)]
     pub group_ids: Vec<String>,
     pub refresh_interval_minutes: Option<i64>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct YoutubeSubscriptionStatusChangeReceipt {
+    pub subscription: YoutubeSubscriptionRow,
+    pub canceled_refresh_jobs: usize,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -218,7 +259,30 @@ pub struct YoutubeSubscriptionsImport4kvdpStateSummary {
     pub archive_seeded_entries: usize,
     pub archive_skipped_entries: usize,
     pub archive_seed_failures: usize,
+    pub identity_scanned_items: usize,
+    pub identity_exact_items: usize,
+    pub identity_ambiguous_items: usize,
+    pub identity_unresolved_items: usize,
+    pub identity_conflict_items: usize,
+    pub source_memberships_added: usize,
     pub group_names: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct YoutubeImportedIdentityEnrichmentSummary {
+    pub sqlite_path: String,
+    pub dry_run: bool,
+    pub source_schema_supported: bool,
+    pub source_download_evidence_rows: usize,
+    pub complete: bool,
+    pub next_cursor: Option<String>,
+    pub scanned_items: usize,
+    pub exact_items: usize,
+    pub ambiguous_items: usize,
+    pub unresolved_items: usize,
+    pub conflict_items: usize,
+    pub already_linked_items: usize,
+    pub evidence_rows_written: usize,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -239,6 +303,8 @@ struct YoutubeSubscriptionsExportEntry {
     #[serde(default)]
     browser_cookie_source: Option<String>,
     active: bool,
+    #[serde(default = "default_youtube_subscription_source_status")]
+    source_status: String,
     #[serde(default)]
     preset_id: Option<String>,
     #[serde(default)]
@@ -276,6 +342,14 @@ SELECT
   s.next_allowed_refresh_at_ms,
   s.created_at_ms,
   s.updated_at_ms,
+  s.source_status,
+  s.source_status_changed_at_ms,
+  s.source_status_change_source,
+  s.last_checked_at_ms,
+  s.upstream_total,
+  s.last_new_found,
+  s.last_refresh_queued,
+  s.last_error_message,
   COALESCE(
     (SELECT GROUP_CONCAT(m.group_id, char(10))
      FROM youtube_subscription_group_member m
@@ -283,14 +357,25 @@ SELECT
     ''
   ) AS group_ids_concat
 FROM youtube_subscription s
-ORDER BY s.active DESC, s.updated_at_ms DESC, s.created_at_ms DESC
+ORDER BY
+  CASE s.source_status WHEN 'deleted' THEN 2 WHEN 'unavailable' THEN 1 ELSE 0 END,
+  s.active DESC,
+  s.updated_at_ms DESC,
+  s.created_at_ms DESC
 "#,
     )?;
 
     let rows = stmt
         .query_map([], |row| {
             let mut subscription = row_to_subscription(row)?;
-            let concat: String = row.get(17)?;
+            // WP-0255: progress fields (schema v18) follow the WP-0282 status fields.
+            subscription.last_checked_at_ms = row.get(20)?;
+            subscription.upstream_total = row.get(21)?;
+            subscription.last_new_found = row.get(22)?;
+            subscription.last_refresh_queued = row.get(23)?;
+            // WP-0264: persisted refresh error; group concat remains the final field.
+            subscription.last_error_message = row.get(24)?;
+            let concat: String = row.get(25)?;
             if !concat.is_empty() {
                 let mut ids: Vec<String> = concat.split('\n').map(String::from).collect();
                 ids.sort();
@@ -321,13 +406,29 @@ pub fn upsert_youtube_subscription(
 UPDATE youtube_subscription
 SET
   title = ?1,
+  source_status = CASE
+    WHEN source_status = 'unavailable' AND source_url <> ?2 THEN 'normal'
+    ELSE source_status
+  END,
+  source_status_changed_at_ms = CASE
+    WHEN source_status = 'unavailable' AND source_url <> ?2 THEN ?11
+    ELSE source_status_changed_at_ms
+  END,
+  source_status_change_source = CASE
+    WHEN source_status = 'unavailable' AND source_url <> ?2 THEN 'url_edit'
+    ELSE source_status_change_source
+  END,
+  consecutive_failures = CASE WHEN source_url <> ?2 THEN 0 ELSE consecutive_failures END,
+  last_error_at_ms = CASE WHEN source_url <> ?2 THEN NULL ELSE last_error_at_ms END,
+  last_error_message = CASE WHEN source_url <> ?2 THEN NULL ELSE last_error_message END,
+  next_allowed_refresh_at_ms = CASE WHEN source_url <> ?2 THEN NULL ELSE next_allowed_refresh_at_ms END,
   source_url = ?2,
   folder_map = ?3,
   output_dir_override = ?4,
   library_id = ?5,
   browser_cookie_source = ?6,
   use_browser_cookies = ?7,
-  active = ?8,
+  active = CASE WHEN source_status = 'deleted' THEN 0 ELSE ?8 END,
   preset_id = ?9,
   refresh_interval_minutes = ?10,
   updated_at_ms = ?11
@@ -383,7 +484,10 @@ ON CONFLICT(source_url) DO UPDATE SET
   library_id = COALESCE(excluded.library_id, youtube_subscription.library_id),
   browser_cookie_source = excluded.browser_cookie_source,
   use_browser_cookies = excluded.use_browser_cookies,
-  active = excluded.active,
+  active = CASE
+    WHEN youtube_subscription.source_status = 'deleted' THEN 0
+    ELSE excluded.active
+  END,
   preset_id = excluded.preset_id,
   refresh_interval_minutes = excluded.refresh_interval_minutes,
   updated_at_ms = excluded.updated_at_ms
@@ -427,6 +531,78 @@ pub fn delete_youtube_subscription(paths: &AppPaths, id: &str) -> Result<()> {
     conn.execute("DELETE FROM youtube_subscription WHERE id = ?1", [id])?;
     jobs::remove_auth_cookie_secret_path(&paths.youtube_subscription_cookie_secret_path(id));
     Ok(())
+}
+
+pub fn set_youtube_subscription_manual_status(
+    paths: &AppPaths,
+    id: &str,
+    status: &str,
+    actor: &str,
+) -> Result<YoutubeSubscriptionStatusChangeReceipt> {
+    let id = id.trim();
+    if id.is_empty() {
+        return Err(EngineError::InstallFailed(
+            "subscription id is required".to_string(),
+        ));
+    }
+    let normalized_status = status.trim().to_ascii_lowercase();
+    if !matches!(
+        normalized_status.as_str(),
+        YOUTUBE_SUBSCRIPTION_STATUS_NORMAL | YOUTUBE_SUBSCRIPTION_STATUS_DELETED
+    ) {
+        return Err(EngineError::InstallFailed(
+            "manual subscription status must be normal or deleted".to_string(),
+        ));
+    }
+    let normalized_actor = actor.trim().to_ascii_lowercase();
+    if !matches!(
+        normalized_actor.as_str(),
+        YOUTUBE_SUBSCRIPTION_STATUS_ACTOR_OPERATOR | YOUTUBE_SUBSCRIPTION_STATUS_ACTOR_ASSISTANT
+    ) {
+        return Err(EngineError::InstallFailed(
+            "manual subscription status actor must be operator or assistant".to_string(),
+        ));
+    }
+
+    let conn = db::open(paths)?;
+    db::migrate(&conn)?;
+    let now = now_ms();
+    let changed = conn.execute(
+        r#"
+UPDATE youtube_subscription
+SET
+  source_status = ?1,
+  source_status_changed_at_ms = ?2,
+  source_status_change_source = ?3,
+  active = CASE WHEN ?1 = 'deleted' THEN 0 ELSE 1 END,
+  consecutive_failures = CASE WHEN ?1 = 'normal' THEN 0 ELSE consecutive_failures END,
+  last_error_at_ms = CASE WHEN ?1 = 'normal' THEN NULL ELSE last_error_at_ms END,
+  last_error_message = CASE WHEN ?1 = 'normal' THEN NULL ELSE last_error_message END,
+  next_allowed_refresh_at_ms = CASE WHEN ?1 = 'normal' THEN NULL ELSE next_allowed_refresh_at_ms END,
+  updated_at_ms = ?2
+WHERE id = ?4
+"#,
+        params![normalized_status, now, normalized_actor, id],
+    )?;
+    if changed == 0 {
+        return Err(EngineError::InstallFailed(format!(
+            "subscription not found: {id}"
+        )));
+    }
+    drop(conn);
+
+    let canceled_refresh_jobs = if normalized_status == YOUTUBE_SUBSCRIPTION_STATUS_DELETED {
+        jobs::cancel_youtube_subscription_refresh_jobs(paths, id)?
+    } else {
+        0
+    };
+    let subscription = get_youtube_subscription_by_id(paths, id)?.ok_or_else(|| {
+        EngineError::InstallFailed(format!("subscription not found after status update: {id}"))
+    })?;
+    Ok(YoutubeSubscriptionStatusChangeReceipt {
+        subscription,
+        canceled_refresh_jobs,
+    })
 }
 
 pub fn set_youtube_subscription_library(
@@ -495,11 +671,23 @@ pub fn queue_youtube_subscription(paths: &AppPaths, id: &str) -> Result<Vec<jobs
     db::migrate(&conn)?;
     let sub = subscription_by_id_conn(&conn, id)?
         .ok_or_else(|| EngineError::InstallFailed(format!("subscription not found: {id}")))?;
+    ensure_subscription_is_not_deleted(&sub)?;
     drop(conn);
     queue_subscription_internal(paths, &sub, Some(Uuid::new_v4().to_string()))
 }
 
 pub fn queue_all_active_youtube_subscriptions(paths: &AppPaths) -> Result<Vec<jobs::JobRow>> {
+    queue_active_youtube_subscriptions(paths, false)
+}
+
+// WP-0254: "Update all subscriptions" — refresh every active subscription now, ignoring
+// the per-subscription refresh-interval (due) gate. Failure backoff is still honored so a
+// repeatedly-failing subscription is not hammered. Feeds the conservative recurring lane.
+pub fn queue_all_active_youtube_subscriptions_now(paths: &AppPaths) -> Result<Vec<jobs::JobRow>> {
+    queue_active_youtube_subscriptions(paths, true)
+}
+
+fn queue_active_youtube_subscriptions(paths: &AppPaths, force: bool) -> Result<Vec<jobs::JobRow>> {
     let conn = db::open(paths)?;
     db::migrate(&conn)?;
     let mut stmt = conn.prepare(
@@ -521,10 +709,13 @@ SELECT
   consecutive_failures,
   next_allowed_refresh_at_ms,
   created_at_ms,
-  updated_at_ms
+  updated_at_ms,
+  source_status,
+  source_status_changed_at_ms,
+  source_status_change_source
 FROM youtube_subscription
-WHERE active = 1
-ORDER BY updated_at_ms DESC, created_at_ms DESC
+WHERE active = 1 AND source_status <> 'deleted'
+ORDER BY COALESCE(last_queued_at_ms, 0) ASC, updated_at_ms DESC
 "#,
     )?;
     let rows = stmt
@@ -535,14 +726,37 @@ ORDER BY updated_at_ms DESC, created_at_ms DESC
 
     let now = now_ms();
     let batch_id = Some(Uuid::new_v4().to_string());
-    let mut all_jobs: Vec<jobs::JobRow> = Vec::new();
+    // WP-0257 (#4): trickle. "Update all" (force) enqueues at most `update_all_batch_size`
+    // subscriptions per invocation (most-overdue first, via the ORDER BY above) so it doesn't
+    // flood the queue; the recurring-lane cooldown then paces their dispatch. The due-path
+    // (startup auto-sync) is uncapped because the cooldown already paces it.
+    let cap = if force {
+        jobs::get_antibot_pacing(paths)
+            .map(|s| s.update_all_batch_size)
+            .unwrap_or(usize::MAX)
+    } else {
+        usize::MAX
+    };
+    // Preserve the most-overdue selection boundary before source priority. Otherwise a forced
+    // 25-subscription tranche would continually choose newer feed rows and starve an overdue
+    // playlist. Once this cohort is fixed, feed pages go first and claim shared canonical IDs.
+    let mut selected_subscriptions: Vec<YoutubeSubscriptionRow> = Vec::new();
     for sub in rows {
-        if !is_subscription_due(&sub, now) {
+        if selected_subscriptions.len() >= cap {
+            break;
+        }
+        if !force && !is_subscription_due(&sub, now) {
             continue;
         }
         if !is_subscription_backoff_ready(&sub, now) {
             continue;
         }
+        selected_subscriptions.push(sub);
+    }
+    selected_subscriptions.sort_by_key(|sub| subscription_refresh_source_priority(&sub.source_url));
+
+    let mut all_jobs: Vec<jobs::JobRow> = Vec::new();
+    for sub in selected_subscriptions {
         let mut queued = queue_subscription_internal(paths, &sub, batch_id.clone())?;
         all_jobs.append(&mut queued);
     }
@@ -647,6 +861,13 @@ pub fn set_youtube_subscription_groups(
     list_group_ids_for_subscription_conn(&conn, subscription_id)
 }
 
+pub fn clear_youtube_subscription_group_memberships(paths: &AppPaths) -> Result<usize> {
+    let conn = db::open(paths)?;
+    db::migrate(&conn)?;
+    let removed = conn.execute("DELETE FROM youtube_subscription_group_member", [])?;
+    Ok(removed)
+}
+
 pub fn queue_youtube_subscription_group(
     paths: &AppPaths,
     group_id: &str,
@@ -661,6 +882,8 @@ SELECT
   sub.source_url,
   sub.folder_map,
   sub.output_dir_override,
+  sub.library_id,
+  sub.browser_cookie_source,
   sub.use_browser_cookies,
   sub.active,
   sub.preset_id,
@@ -670,18 +893,23 @@ SELECT
   sub.consecutive_failures,
   sub.next_allowed_refresh_at_ms,
   sub.created_at_ms,
-  sub.updated_at_ms
+  sub.updated_at_ms,
+  sub.source_status,
+  sub.source_status_changed_at_ms,
+  sub.source_status_change_source
 FROM youtube_subscription sub
 JOIN youtube_subscription_group_member gm ON gm.subscription_id = sub.id
-WHERE gm.group_id = ?1 AND sub.active = 1
+WHERE gm.group_id = ?1 AND sub.active = 1 AND sub.source_status <> 'deleted'
 ORDER BY sub.updated_at_ms DESC, sub.created_at_ms DESC
 "#,
     )?;
-    let rows = stmt
+    let mut rows = stmt
         .query_map(params![group_id], row_to_subscription)?
         .collect::<rusqlite::Result<Vec<_>>>()?;
     drop(stmt);
     drop(conn);
+
+    rows.sort_by_key(|sub| subscription_refresh_source_priority(&sub.source_url));
 
     let now = now_ms();
     let batch_id = Some(Uuid::new_v4().to_string());
@@ -708,7 +936,23 @@ UPDATE youtube_subscription
 SET
   consecutive_failures = 0,
   last_error_at_ms = NULL,
+  -- WP-0264: clear the persisted failure text so a recovered subscription shows NO state
+  -- in the panel (the FE keys the state chip off consecutive_failures>0 + last_error_message).
+  last_error_message = NULL,
   next_allowed_refresh_at_ms = NULL,
+  source_status = CASE
+    WHEN source_status = 'unavailable' THEN 'normal'
+    ELSE source_status
+  END,
+  source_status_changed_at_ms = CASE
+    WHEN source_status = 'unavailable' THEN ?1
+    ELSE source_status_changed_at_ms
+  END,
+  source_status_change_source = CASE
+    WHEN source_status = 'unavailable' THEN 'refresh_success'
+    ELSE source_status_change_source
+  END,
+  last_checked_at_ms = ?1,
   updated_at_ms = ?1
 WHERE id = ?2
 "#,
@@ -717,7 +961,51 @@ WHERE id = ?2
     Ok(())
 }
 
+// WP-0264: max stored length for the raw error text. ~500 chars is enough for the FE
+// `classifyFailure` to match the decisive HTTP status / phrase, while bounding the row size
+// (yt-dlp tracebacks can be multi-KB). Truncation is on a char boundary, not a byte boundary.
+const MAX_LAST_ERROR_MESSAGE_CHARS: usize = 500;
+
+fn truncate_error_message(error_message: Option<&str>) -> Option<String> {
+    error_message.map(|raw| {
+        if raw.chars().count() > MAX_LAST_ERROR_MESSAGE_CHARS {
+            raw.chars().take(MAX_LAST_ERROR_MESSAGE_CHARS).collect()
+        } else {
+            raw.to_string()
+        }
+    })
+}
+
+fn is_confirmed_http_404_refresh_error(error_message: Option<&str>) -> bool {
+    let Some(raw) = error_message else {
+        return false;
+    };
+    let lower = raw.to_ascii_lowercase();
+    lower.contains("http error 404")
+        || lower.contains("http response error 404")
+        || lower.contains("404: not found")
+        || lower.contains("status code 404")
+        || lower.contains("status=404")
+        || lower.contains("status: 404")
+}
+
+/// Back-compat shim (pre-WP-0264 signature). Callers that do not yet have the error text
+/// route here and persist a NULL `last_error_message`. Prefer
+/// [`record_subscription_refresh_failure_with_error`] so the subscription panel can classify
+/// the failure state (WP-0264).
 pub fn record_subscription_refresh_failure(paths: &AppPaths, subscription_id: &str) -> Result<()> {
+    record_subscription_refresh_failure_with_error(paths, subscription_id, None)
+}
+
+/// WP-0264: record a failed refresh AND persist the (truncated) raw error text so the FE can
+/// classify the failure into a state + required action. Increments `consecutive_failures`,
+/// stamps `last_error_at_ms`, applies the existing exponential backoff, and writes the
+/// truncated error into `last_error_message` (NULL when `error_message` is None).
+pub fn record_subscription_refresh_failure_with_error(
+    paths: &AppPaths,
+    subscription_id: &str,
+    error_message: Option<&str>,
+) -> Result<()> {
     let conn = db::open(paths)?;
     db::migrate(&conn)?;
     let now = now_ms();
@@ -738,13 +1026,30 @@ pub fn record_subscription_refresh_failure(paths: &AppPaths, subscription_id: &s
         .saturating_mul(1000)
         .min(24 * 60 * 60 * 1000);
 
+    let truncated_error = truncate_error_message(error_message);
+    let confirmed_http_404 = is_confirmed_http_404_refresh_error(error_message);
+
     conn.execute(
         r#"
 UPDATE youtube_subscription
 SET
   consecutive_failures = ?1,
   last_error_at_ms = ?2,
+  last_error_message = ?5,
   next_allowed_refresh_at_ms = ?3,
+  last_checked_at_ms = ?2,
+  source_status = CASE
+    WHEN ?6 = 1 AND source_status <> 'deleted' THEN 'unavailable'
+    ELSE source_status
+  END,
+  source_status_changed_at_ms = CASE
+    WHEN ?6 = 1 AND source_status <> 'deleted' THEN ?2
+    ELSE source_status_changed_at_ms
+  END,
+  source_status_change_source = CASE
+    WHEN ?6 = 1 AND source_status <> 'deleted' THEN 'refresh_404'
+    ELSE source_status_change_source
+  END,
   updated_at_ms = ?2
 WHERE id = ?4
 "#,
@@ -752,8 +1057,37 @@ WHERE id = ?4
             next_failures,
             now,
             now.saturating_add(delay_ms),
-            subscription_id
+            subscription_id,
+            truncated_error,
+            bool_to_i64(confirmed_http_404),
         ],
+    )?;
+    Ok(())
+}
+
+/// WP-0255: persist the per-subscription progress counts the refresh job already computes
+/// (upstream playlist/channel length, new videos found, downloads enqueued). Schema v18.
+/// Does NOT bump `updated_at_ms` — the success/failure recorders own the "last checked"
+/// timestamp and list ordering; this only fills the count columns the UI shows as "X of Y".
+pub fn record_subscription_refresh_counts(
+    paths: &AppPaths,
+    subscription_id: &str,
+    upstream_total: i64,
+    new_found: i64,
+    queued: i64,
+) -> Result<()> {
+    let conn = db::open(paths)?;
+    db::migrate(&conn)?;
+    conn.execute(
+        r#"
+UPDATE youtube_subscription
+SET
+  upstream_total = ?1,
+  last_new_found = ?2,
+  last_refresh_queued = ?3
+WHERE id = ?4
+"#,
+        params![upstream_total, new_found, queued, subscription_id],
     )?;
     Ok(())
 }
@@ -1317,6 +1651,7 @@ pub fn export_youtube_subscriptions_json(
                 use_browser_cookies: row.use_browser_cookies,
                 browser_cookie_source: row.browser_cookie_source.clone(),
                 active: row.active,
+                source_status: row.source_status.clone(),
                 preset_id: row.preset_id.clone(),
                 group_ids: row.group_ids.clone(),
                 refresh_interval_minutes: Some(row.refresh_interval_minutes),
@@ -1344,7 +1679,9 @@ pub fn import_youtube_subscriptions_json(
 ) -> Result<YoutubeSubscriptionsImportSummary> {
     let bytes = std::fs::read(in_path)?;
     let payload: YoutubeSubscriptionsExportFile = serde_json::from_slice(&bytes)?;
-    if payload.schema_version != EXPORT_SCHEMA_VERSION {
+    if !(MIN_SUPPORTED_EXPORT_SCHEMA_VERSION..=EXPORT_SCHEMA_VERSION)
+        .contains(&payload.schema_version)
+    {
         return Err(EngineError::InstallFailed(format!(
             "unsupported subscriptions export schema_version: {}",
             payload.schema_version
@@ -1358,6 +1695,7 @@ pub fn import_youtube_subscriptions_json(
     let mut updated = 0_usize;
     let now = now_ms();
     for raw in &payload.subscriptions {
+        let imported_source_status = normalize_imported_source_status(&raw.source_status)?;
         let normalized = normalize_upsert(YoutubeSubscriptionUpsert {
             id: None,
             title: raw.title.clone(),
@@ -1389,6 +1727,9 @@ INSERT INTO youtube_subscription (
   browser_cookie_source,
   use_browser_cookies,
   active,
+  source_status,
+  source_status_changed_at_ms,
+  source_status_change_source,
   preset_id,
   refresh_interval_minutes,
   last_queued_at_ms,
@@ -1397,7 +1738,14 @@ INSERT INTO youtube_subscription (
   next_allowed_refresh_at_ms,
   created_at_ms,
   updated_at_ms
-) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, NULL, NULL, 0, NULL, ?12, ?12)
+) VALUES (
+  ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8,
+  CASE WHEN ?10 = 'deleted' THEN 0 ELSE ?9 END,
+  ?10,
+  CASE WHEN ?10 = 'normal' THEN NULL ELSE ?13 END,
+  CASE WHEN ?10 = 'normal' THEN NULL ELSE 'operator_import' END,
+  ?11, ?12, NULL, NULL, 0, NULL, ?13, ?13
+)
 ON CONFLICT(source_url) DO UPDATE SET
   title = excluded.title,
   folder_map = excluded.folder_map,
@@ -1405,7 +1753,29 @@ ON CONFLICT(source_url) DO UPDATE SET
   library_id = COALESCE(excluded.library_id, youtube_subscription.library_id),
   browser_cookie_source = excluded.browser_cookie_source,
   use_browser_cookies = excluded.use_browser_cookies,
-  active = excluded.active,
+  active = CASE
+    WHEN youtube_subscription.source_status = 'deleted' OR excluded.source_status = 'deleted'
+      THEN 0
+    ELSE excluded.active
+  END,
+  source_status = CASE
+    WHEN youtube_subscription.source_status = 'deleted' OR excluded.source_status = 'deleted'
+      THEN 'deleted'
+    WHEN excluded.source_status = 'unavailable' THEN 'unavailable'
+    ELSE youtube_subscription.source_status
+  END,
+  source_status_changed_at_ms = CASE
+    WHEN excluded.source_status <> 'normal'
+      AND youtube_subscription.source_status <> excluded.source_status
+      THEN excluded.source_status_changed_at_ms
+    ELSE youtube_subscription.source_status_changed_at_ms
+  END,
+  source_status_change_source = CASE
+    WHEN excluded.source_status <> 'normal'
+      AND youtube_subscription.source_status <> excluded.source_status
+      THEN excluded.source_status_change_source
+    ELSE youtube_subscription.source_status_change_source
+  END,
   preset_id = excluded.preset_id,
   refresh_interval_minutes = excluded.refresh_interval_minutes,
   updated_at_ms = excluded.updated_at_ms
@@ -1420,6 +1790,7 @@ ON CONFLICT(source_url) DO UPDATE SET
                 normalized.browser_cookie_source,
                 bool_to_i64(normalized.use_browser_cookies),
                 bool_to_i64(normalized.active),
+                imported_source_status,
                 normalized.preset_id,
                 normalized.refresh_interval_minutes,
                 now,
@@ -1442,6 +1813,18 @@ ON CONFLICT(source_url) DO UPDATE SET
         inserted,
         updated,
     })
+}
+
+fn normalize_imported_source_status(value: &str) -> Result<String> {
+    let normalized = value.trim().to_ascii_lowercase();
+    match normalized.as_str() {
+        YOUTUBE_SUBSCRIPTION_STATUS_NORMAL
+        | YOUTUBE_SUBSCRIPTION_STATUS_UNAVAILABLE
+        | YOUTUBE_SUBSCRIPTION_STATUS_DELETED => Ok(normalized),
+        _ => Err(EngineError::InstallFailed(format!(
+            "unsupported subscription source_status in import: {value}"
+        ))),
+    }
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -1507,6 +1890,14 @@ struct LegacyResolvedOutputDir {
     path: PathBuf,
     matched_root_dir: bool,
     retained_legacy_dir: bool,
+}
+
+#[derive(Debug, Clone)]
+struct FourkvdDownloadEvidence {
+    record_key: String,
+    filename: String,
+    source_url: String,
+    media_id: String,
 }
 
 pub fn import_youtube_subscriptions_4kvdp_dir(
@@ -1637,10 +2028,11 @@ ON CONFLICT(source_url) DO UPDATE SET
         archive_seeded_entries,
         archive_skipped_entries,
         archive_seed_failures,
+        _source_memberships_added,
     ) = if entries_path.exists() {
         seed_archives_from_4kvdp_entries(paths, &conn, &fourk_id_to_source_url, &entries_path)?
     } else {
-        (0, 0, 0, 0)
+        (0, 0, 0, 0, 0)
     };
 
     Ok(YoutubeSubscriptionsImport4kvdpSummary {
@@ -1838,11 +2230,19 @@ ON CONFLICT(source_url) DO UPDATE SET
         archive_seeded_entries,
         archive_skipped_entries,
         archive_seed_failures,
+        source_memberships_added,
     ) = seed_archives_from_4kvdp_state_entries(
         paths,
         &conn,
         &legacy_conn,
         &fourk_id_to_source_url,
+    )?;
+    let identity_summary = enrich_imported_youtube_identity_4kvdp_conn(
+        &conn,
+        &legacy_conn,
+        &sqlite_path,
+        false,
+        None,
     )?;
 
     Ok(YoutubeSubscriptionsImport4kvdpStateSummary {
@@ -1861,6 +2261,12 @@ ON CONFLICT(source_url) DO UPDATE SET
         archive_seeded_entries,
         archive_skipped_entries,
         archive_seed_failures,
+        identity_scanned_items: identity_summary.scanned_items,
+        identity_exact_items: identity_summary.exact_items,
+        identity_ambiguous_items: identity_summary.ambiguous_items,
+        identity_unresolved_items: identity_summary.unresolved_items,
+        identity_conflict_items: identity_summary.conflict_items,
+        source_memberships_added,
         group_names: vec![
             LEGACY_4KVDP_GROUP_ALL.to_string(),
             LEGACY_4KVDP_GROUP_SUBSCRIPTIONS.to_string(),
@@ -1874,7 +2280,7 @@ fn seed_archives_from_4kvdp_entries(
     conn: &rusqlite::Connection,
     fourk_id_to_source_url: &HashMap<i64, String>,
     entries_path: &Path,
-) -> Result<(usize, usize, usize, usize)> {
+) -> Result<(usize, usize, usize, usize, usize)> {
     let mut rdr = ReaderBuilder::new()
         .has_headers(true)
         .flexible(true)
@@ -1916,6 +2322,7 @@ fn seed_archives_from_4kvdp_entries(
 
     let mut seeded_subs = 0_usize;
     let mut failures = 0_usize;
+    let mut memberships_added = 0_usize;
     for (source_url, ids) in by_source_url {
         let Some(sub) = subscription_by_source_url_conn(conn, source_url.as_str())? else {
             continue;
@@ -1933,10 +2340,20 @@ fn seed_archives_from_4kvdp_entries(
             failures += 1;
             continue;
         }
+        for media_id in &ids {
+            memberships_added +=
+                upsert_imported_source_membership(conn, media_id, &sub, "4kvdp_export_entry")?;
+        }
         seeded_subs += 1;
     }
 
-    Ok((seeded_subs, seeded_entries, skipped_entries, failures))
+    Ok((
+        seeded_subs,
+        seeded_entries,
+        skipped_entries,
+        failures,
+        memberships_added,
+    ))
 }
 
 fn seed_archives_from_4kvdp_state_entries(
@@ -1944,7 +2361,7 @@ fn seed_archives_from_4kvdp_state_entries(
     conn: &rusqlite::Connection,
     legacy_conn: &rusqlite::Connection,
     fourk_id_to_source_url: &HashMap<i64, String>,
-) -> Result<(usize, usize, usize, usize)> {
+) -> Result<(usize, usize, usize, usize, usize)> {
     let mut stmt = legacy_conn.prepare(
         r#"
 SELECT downloader_subscription_info_id, reference, status
@@ -1982,6 +2399,7 @@ ORDER BY downloader_subscription_info_id ASC, id ASC
 
     let mut seeded_subs = 0_usize;
     let mut failures = 0_usize;
+    let mut memberships_added = 0_usize;
     for (source_url, ids) in by_source_url {
         let Some(sub) = subscription_by_source_url_conn(conn, source_url.as_str())? else {
             continue;
@@ -1999,10 +2417,24 @@ ORDER BY downloader_subscription_info_id ASC, id ASC
             failures += 1;
             continue;
         }
+        for media_id in &ids {
+            memberships_added += upsert_imported_source_membership(
+                conn,
+                media_id,
+                &sub,
+                "4kvdp_subscription_entry",
+            )?;
+        }
         seeded_subs += 1;
     }
 
-    Ok((seeded_subs, seeded_entries, skipped_entries, failures))
+    Ok((
+        seeded_subs,
+        seeded_entries,
+        skipped_entries,
+        failures,
+        memberships_added,
+    ))
 }
 
 fn ensure_subscription_group_by_name_conn(
@@ -2075,6 +2507,611 @@ fn open_legacy_4kvdp_state_db(path: &Path) -> Result<rusqlite::Connection> {
         OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NO_MUTEX,
     )
     .map_err(Into::into)
+}
+
+pub fn enrich_imported_youtube_identity_4kvdp(
+    paths: &AppPaths,
+    sqlite_path: Option<&Path>,
+    dry_run: bool,
+    max_items: Option<usize>,
+) -> Result<YoutubeImportedIdentityEnrichmentSummary> {
+    let sqlite_path = resolve_legacy_4kvdp_state_db_path(sqlite_path).ok_or_else(|| {
+        EngineError::InstallFailed(
+            "4K Video Downloader app-state database not found; provide a valid SQLite path"
+                .to_string(),
+        )
+    })?;
+    let legacy_conn = open_legacy_4kvdp_state_db(&sqlite_path)?;
+    let conn = db::open(paths)?;
+    db::migrate(&conn)?;
+    enrich_imported_youtube_identity_4kvdp_conn(
+        &conn,
+        &legacy_conn,
+        &sqlite_path,
+        dry_run,
+        max_items,
+    )
+}
+
+fn enrich_imported_youtube_identity_4kvdp_conn(
+    conn: &rusqlite::Connection,
+    legacy_conn: &rusqlite::Connection,
+    sqlite_path: &Path,
+    dry_run: bool,
+    max_items: Option<usize>,
+) -> Result<YoutubeImportedIdentityEnrichmentSummary> {
+    const BATCH_SIZE: i64 = 500;
+
+    let source_schema_supported = has_4kvdp_download_evidence_schema(legacy_conn)?;
+    let download_evidence = read_4kvdp_download_evidence(legacy_conn)?;
+    let source_download_evidence_rows = download_evidence.len();
+    let mut evidence_by_path: HashMap<String, Vec<FourkvdDownloadEvidence>> = HashMap::new();
+    for evidence in download_evidence {
+        evidence_by_path
+            .entry(normalize_import_match_path(&evidence.filename))
+            .or_default()
+            .push(evidence);
+    }
+
+    let metadata = std::fs::metadata(sqlite_path)?;
+    let source_size = i64::try_from(metadata.len()).unwrap_or(i64::MAX);
+    let source_modified_ms = metadata
+        .modified()
+        .ok()
+        .and_then(|value| value.duration_since(std::time::UNIX_EPOCH).ok())
+        .map(|value| i64::try_from(value.as_millis()).unwrap_or(i64::MAX))
+        .unwrap_or(0);
+    let source_path = sqlite_path.to_string_lossy().to_string();
+
+    let mut summary = YoutubeImportedIdentityEnrichmentSummary {
+        sqlite_path: source_path.clone(),
+        dry_run,
+        source_schema_supported,
+        source_download_evidence_rows,
+        ..YoutubeImportedIdentityEnrichmentSummary::default()
+    };
+    let mut scanned_this_call = 0_usize;
+    let mut cursor = String::new();
+    if !dry_run {
+        if let Some(checkpoint) = conn
+            .query_row(
+                r#"
+SELECT source_size, source_modified_ms, last_library_item_id, status,
+       scanned_items, exact_items, ambiguous_items, unresolved_items, conflict_items
+FROM media_import_enrichment_checkpoint
+WHERE source_path=?1
+"#,
+                [&source_path],
+                |row| {
+                    Ok((
+                        row.get::<_, i64>(0)?,
+                        row.get::<_, i64>(1)?,
+                        row.get::<_, Option<String>>(2)?,
+                        row.get::<_, String>(3)?,
+                        row.get::<_, i64>(4)?,
+                        row.get::<_, i64>(5)?,
+                        row.get::<_, i64>(6)?,
+                        row.get::<_, i64>(7)?,
+                        row.get::<_, i64>(8)?,
+                    ))
+                },
+            )
+            .optional()?
+        {
+            if checkpoint.0 == source_size
+                && checkpoint.1 == source_modified_ms
+                && matches!(checkpoint.3.as_str(), "in_progress" | "paused")
+            {
+                cursor = checkpoint.2.unwrap_or_default();
+                summary.scanned_items = usize::try_from(checkpoint.4).unwrap_or(0);
+                summary.exact_items = usize::try_from(checkpoint.5).unwrap_or(0);
+                summary.ambiguous_items = usize::try_from(checkpoint.6).unwrap_or(0);
+                summary.unresolved_items = usize::try_from(checkpoint.7).unwrap_or(0);
+                summary.conflict_items = usize::try_from(checkpoint.8).unwrap_or(0);
+            } else {
+                conn.execute(
+                    "DELETE FROM media_import_enrichment_checkpoint WHERE source_path=?1",
+                    [&source_path],
+                )?;
+            }
+        }
+        upsert_import_enrichment_checkpoint(
+            conn,
+            &source_path,
+            source_size,
+            source_modified_ms,
+            if cursor.is_empty() {
+                None
+            } else {
+                Some(&cursor)
+            },
+            "in_progress",
+            &summary,
+        )?;
+    }
+
+    loop {
+        let query_limit = max_items
+            .map(|limit| {
+                limit
+                    .max(1)
+                    .saturating_sub(scanned_this_call)
+                    .min(BATCH_SIZE as usize)
+            })
+            .unwrap_or(BATCH_SIZE as usize);
+        if query_limit == 0 {
+            summary.complete = false;
+            summary.next_cursor = if cursor.is_empty() {
+                None
+            } else {
+                Some(cursor.clone())
+            };
+            return Ok(summary);
+        }
+        let items = {
+            let mut stmt = conn.prepare(
+                r#"
+SELECT id, media_path
+FROM library_item
+WHERE origin='4kvdp_import' AND id > ?1
+ORDER BY id ASC
+LIMIT ?2
+"#,
+            )?;
+            let rows = stmt
+                .query_map(params![&cursor, query_limit as i64], |row| {
+                    Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+                })?
+                .collect::<rusqlite::Result<Vec<_>>>()?;
+            rows
+        };
+        if items.is_empty() {
+            break;
+        }
+
+        let tx = if dry_run {
+            None
+        } else {
+            Some(conn.unchecked_transaction()?)
+        };
+        let write_conn: &rusqlite::Connection = tx.as_ref().map(|value| &**value).unwrap_or(conn);
+
+        for (item_id, media_path) in &items {
+            summary.scanned_items += 1;
+            scanned_this_call += 1;
+            let normalized_path = normalize_import_match_path(media_path);
+            let candidates = evidence_by_path
+                .get(&normalized_path)
+                .map(Vec::as_slice)
+                .unwrap_or(&[]);
+            let mut by_media_id: HashMap<&str, &FourkvdDownloadEvidence> = HashMap::new();
+            for candidate in candidates {
+                by_media_id
+                    .entry(candidate.media_id.as_str())
+                    .or_insert(candidate);
+            }
+
+            match by_media_id.len() {
+                0 => {
+                    summary.unresolved_items += 1;
+                    if !dry_run {
+                        summary.evidence_rows_written += upsert_import_evidence(
+                            write_conn,
+                            item_id,
+                            None,
+                            "4kvdp_exact_path",
+                            &format!("library_item:{item_id}"),
+                            Some(media_path),
+                            None,
+                            "unresolved",
+                            r#"{"reason":"no_exact_download_path"}"#,
+                        )?;
+                    }
+                }
+                1 => {
+                    let evidence = *by_media_id.values().next().expect("single evidence");
+                    let mut match_state = "exact";
+                    let linked_item = write_conn
+                        .query_row(
+                            "SELECT library_item_id FROM media_source_identity WHERE service='youtube' AND media_id=?1",
+                            [&evidence.media_id],
+                            |row| row.get::<_, Option<String>>(0),
+                        )
+                        .optional()?
+                        .flatten();
+                    match linked_item {
+                        Some(existing) if existing != *item_id => {
+                            summary.conflict_items += 1;
+                            match_state = "conflict";
+                        }
+                        Some(_) => {
+                            summary.already_linked_items += 1;
+                        }
+                        None if !dry_run => {
+                            ensure_imported_media_identity(
+                                write_conn,
+                                &evidence.media_id,
+                                &evidence.source_url,
+                            )?;
+                            write_conn.execute(
+                                "UPDATE media_source_identity SET library_item_id=?1, repair_state='ready', updated_at_ms=?2 WHERE service='youtube' AND media_id=?3 AND library_item_id IS NULL",
+                                params![item_id, now_ms(), &evidence.media_id],
+                            )?;
+                            write_conn.execute(
+                                r#"
+INSERT INTO ingest_provenance (
+  item_id, provider, source_url, rights_note, attested_at_ms, created_at_ms
+) VALUES (?1, '4kvdp_import', ?2, 'Imported from read-only 4K Video Downloader evidence.', ?3, ?3)
+ON CONFLICT(item_id) DO NOTHING
+"#,
+                                params![item_id, &evidence.source_url, now_ms()],
+                            )?;
+                        }
+                        None => {}
+                    }
+                    if match_state == "exact" {
+                        summary.exact_items += 1;
+                    }
+                    if !dry_run {
+                        for candidate in candidates {
+                            summary.evidence_rows_written += upsert_import_evidence(
+                                write_conn,
+                                item_id,
+                                Some(&candidate.media_id),
+                                "4kvdp_exact_path",
+                                &candidate.record_key,
+                                Some(&candidate.filename),
+                                Some(&candidate.source_url),
+                                match_state,
+                                r#"{"path_match":"normalized_exact"}"#,
+                            )?;
+                        }
+                    }
+                }
+                _ => {
+                    summary.ambiguous_items += 1;
+                    if !dry_run {
+                        for candidate in candidates {
+                            summary.evidence_rows_written += upsert_import_evidence(
+                                write_conn,
+                                item_id,
+                                Some(&candidate.media_id),
+                                "4kvdp_exact_path",
+                                &candidate.record_key,
+                                Some(&candidate.filename),
+                                Some(&candidate.source_url),
+                                "ambiguous",
+                                r#"{"reason":"multiple_media_ids_for_exact_path"}"#,
+                            )?;
+                        }
+                    }
+                }
+            }
+        }
+
+        cursor = items.last().map(|row| row.0.clone()).unwrap_or(cursor);
+        if let Some(tx) = tx {
+            upsert_import_enrichment_checkpoint(
+                &tx,
+                &source_path,
+                source_size,
+                source_modified_ms,
+                Some(&cursor),
+                "in_progress",
+                &summary,
+            )?;
+            tx.commit()?;
+        }
+        if max_items
+            .map(|limit| scanned_this_call >= limit.max(1))
+            .unwrap_or(false)
+        {
+            summary.complete = false;
+            summary.next_cursor = Some(cursor.clone());
+            if !dry_run {
+                upsert_import_enrichment_checkpoint(
+                    conn,
+                    &source_path,
+                    source_size,
+                    source_modified_ms,
+                    Some(&cursor),
+                    "paused",
+                    &summary,
+                )?;
+            }
+            return Ok(summary);
+        }
+    }
+
+    summary.complete = true;
+    summary.next_cursor = None;
+    if !dry_run {
+        upsert_import_enrichment_checkpoint(
+            conn,
+            &source_path,
+            source_size,
+            source_modified_ms,
+            None,
+            "complete",
+            &summary,
+        )?;
+    }
+    Ok(summary)
+}
+
+fn read_4kvdp_download_evidence(
+    legacy_conn: &rusqlite::Connection,
+) -> Result<Vec<FourkvdDownloadEvidence>> {
+    if !has_4kvdp_download_evidence_schema(legacy_conn)? {
+        return Ok(Vec::new());
+    }
+    let mut stmt = legacy_conn.prepare(
+        r#"
+SELECT d.id, m.id, u.id, COALESCE(d.filename, ''), COALESCE(u.url, '')
+FROM download_item d
+JOIN media_item_description m ON m.download_item_id=d.id
+JOIN url_description u ON u.media_item_description_id=m.id
+WHERE lower(COALESCE(u.service_name, ''))='youtube'
+ORDER BY d.id ASC, m.id ASC, u.id ASC
+"#,
+    )?;
+    let rows = stmt
+        .query_map([], |row| {
+            let download_id: i64 = row.get(0)?;
+            let description_id: i64 = row.get(1)?;
+            let url_id: i64 = row.get(2)?;
+            let filename: String = row.get(3)?;
+            let source_url: String = row.get(4)?;
+            Ok((
+                format!("{download_id}:{description_id}:{url_id}"),
+                filename,
+                source_url,
+            ))
+        })?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+
+    Ok(rows
+        .into_iter()
+        .filter_map(|(record_key, filename, source_url)| {
+            if filename.trim().is_empty() {
+                return None;
+            }
+            let media_id = youtube_video_id_from_url(&source_url)?;
+            Some(FourkvdDownloadEvidence {
+                record_key,
+                filename,
+                source_url,
+                media_id,
+            })
+        })
+        .collect())
+}
+
+fn has_4kvdp_download_evidence_schema(legacy_conn: &rusqlite::Connection) -> Result<bool> {
+    for table in ["download_item", "media_item_description", "url_description"] {
+        let exists = legacy_conn.query_row(
+            "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type='table' AND name=?1)",
+            [table],
+            |row| row.get::<_, i64>(0),
+        )? != 0;
+        if !exists {
+            return Ok(false);
+        }
+    }
+    Ok(true)
+}
+
+fn ensure_imported_media_identity(
+    conn: &rusqlite::Connection,
+    media_id: &str,
+    source_url: &str,
+) -> Result<()> {
+    let canonical_url = if source_url.trim().is_empty() {
+        format!("https://www.youtube.com/watch?v={media_id}")
+    } else {
+        source_url.trim().to_string()
+    };
+    let now = now_ms();
+    conn.execute(
+        r#"
+INSERT INTO media_source_identity (
+  service, media_id, canonical_url, library_item_id, active_job_id, repair_state,
+  last_failed_url, last_error, created_at_ms, updated_at_ms
+) VALUES ('youtube', ?1, ?2, NULL, NULL, 'imported_unresolved', NULL, NULL, ?3, ?3)
+ON CONFLICT(service, media_id) DO UPDATE SET
+  canonical_url=CASE
+    WHEN media_source_identity.canonical_url='' THEN excluded.canonical_url
+    ELSE media_source_identity.canonical_url
+  END,
+  updated_at_ms=excluded.updated_at_ms
+"#,
+        params![media_id, canonical_url, now],
+    )?;
+    conn.execute(
+        "INSERT OR IGNORE INTO media_source_alias (service, media_id, source_url, created_at_ms) VALUES ('youtube', ?1, ?2, ?3)",
+        params![media_id, canonical_url, now],
+    )?;
+    Ok(())
+}
+
+fn upsert_imported_source_membership(
+    conn: &rusqlite::Connection,
+    media_id: &str,
+    sub: &YoutubeSubscriptionRow,
+    evidence_kind: &str,
+) -> Result<usize> {
+    let canonical_url = format!("https://www.youtube.com/watch?v={media_id}");
+    ensure_imported_media_identity(conn, media_id, &canonical_url)?;
+    let source_kind = youtube_source_membership_kind(&sub.source_url);
+    let now = now_ms();
+    let inserted = conn.execute(
+        r#"
+INSERT OR IGNORE INTO media_source_membership (
+  service, media_id, source_subscription_id, source_kind, source_url_snapshot,
+  source_title_snapshot, evidence_kind, created_at_ms, updated_at_ms
+) VALUES ('youtube', ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?7)
+"#,
+        params![
+            media_id,
+            &sub.id,
+            source_kind,
+            &sub.source_url,
+            &sub.title,
+            evidence_kind,
+            now
+        ],
+    )?;
+    if inserted == 0 {
+        conn.execute(
+            r#"
+UPDATE media_source_membership SET
+  source_kind=?1,
+  source_url_snapshot=?2,
+  source_title_snapshot=?3,
+  evidence_kind=?4,
+  updated_at_ms=?5
+WHERE service='youtube' AND media_id=?6 AND source_subscription_id=?7
+"#,
+            params![
+                source_kind,
+                &sub.source_url,
+                &sub.title,
+                evidence_kind,
+                now,
+                media_id,
+                &sub.id
+            ],
+        )?;
+    }
+    conn.execute(
+        "INSERT OR IGNORE INTO media_source_association (id, service, media_id, origin_kind, source_subscription_id, source_job_id, created_at_ms) VALUES (?1, 'youtube', ?2, ?3, ?4, NULL, ?5)",
+        params![Uuid::new_v4().to_string(), media_id, source_kind, &sub.id, now],
+    )?;
+    Ok(inserted)
+}
+
+fn youtube_source_membership_kind(source_url: &str) -> &'static str {
+    let lower = source_url.trim().to_ascii_lowercase();
+    if lower.contains("/playlist") || lower.contains("list=") {
+        "playlist"
+    } else if lower.trim_end_matches('/').ends_with("/shorts") {
+        "shorts_page"
+    } else if lower.trim_end_matches('/').ends_with("/videos") {
+        "videos_page"
+    } else if youtube_video_id_from_url(source_url).is_some() {
+        "direct_video"
+    } else {
+        "channel_page"
+    }
+}
+
+/// Channel, `/videos`, and `/shorts` sources are the preferred discovery paths for a refresh
+/// cohort. A playlist still records its membership and can recover a video if no canonical item
+/// is present or actively claimed; this ranking only avoids its becoming the first owner.
+fn subscription_refresh_source_priority(source_url: &str) -> u8 {
+    match youtube_source_membership_kind(source_url) {
+        "playlist" => 1,
+        _ => 0,
+    }
+}
+
+fn normalize_import_match_path(path: &str) -> String {
+    let mut value = path.trim().replace('/', "\\");
+    if let Some(rest) = value.strip_prefix(r"\\?\UNC\") {
+        value = format!(r"\\{rest}");
+    } else if let Some(rest) = value.strip_prefix(r"\\?\") {
+        value = rest.to_string();
+    }
+    while value.ends_with('\\') && value.len() > 3 {
+        value.pop();
+    }
+    value.to_ascii_lowercase()
+}
+
+fn upsert_import_evidence(
+    conn: &rusqlite::Connection,
+    library_item_id: &str,
+    media_id: Option<&str>,
+    evidence_kind: &str,
+    source_record_key: &str,
+    source_path: Option<&str>,
+    source_url: Option<&str>,
+    match_state: &str,
+    details_json: &str,
+) -> Result<usize> {
+    let now = now_ms();
+    conn.execute(
+        r#"
+INSERT INTO media_import_evidence (
+  id, library_item_id, service, media_id, evidence_kind, source_record_key,
+  source_path_snapshot, source_url_snapshot, match_state, details_json,
+  created_at_ms, updated_at_ms
+) VALUES (?1, ?2, 'youtube', ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?10)
+ON CONFLICT DO UPDATE SET
+  source_path_snapshot=excluded.source_path_snapshot,
+  source_url_snapshot=excluded.source_url_snapshot,
+  match_state=excluded.match_state,
+  details_json=excluded.details_json,
+  updated_at_ms=excluded.updated_at_ms
+"#,
+        params![
+            Uuid::new_v4().to_string(),
+            library_item_id,
+            media_id,
+            evidence_kind,
+            source_record_key,
+            source_path,
+            source_url,
+            match_state,
+            details_json,
+            now
+        ],
+    )
+    .map_err(Into::into)
+}
+
+fn upsert_import_enrichment_checkpoint(
+    conn: &rusqlite::Connection,
+    source_path: &str,
+    source_size: i64,
+    source_modified_ms: i64,
+    last_library_item_id: Option<&str>,
+    status: &str,
+    summary: &YoutubeImportedIdentityEnrichmentSummary,
+) -> Result<()> {
+    conn.execute(
+        r#"
+INSERT INTO media_import_enrichment_checkpoint (
+  source_path, source_size, source_modified_ms, last_library_item_id, status,
+  scanned_items, exact_items, ambiguous_items, unresolved_items, conflict_items, updated_at_ms
+) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)
+ON CONFLICT(source_path) DO UPDATE SET
+  source_size=excluded.source_size,
+  source_modified_ms=excluded.source_modified_ms,
+  last_library_item_id=excluded.last_library_item_id,
+  status=excluded.status,
+  scanned_items=excluded.scanned_items,
+  exact_items=excluded.exact_items,
+  ambiguous_items=excluded.ambiguous_items,
+  unresolved_items=excluded.unresolved_items,
+  conflict_items=excluded.conflict_items,
+  updated_at_ms=excluded.updated_at_ms
+"#,
+        params![
+            source_path,
+            source_size,
+            source_modified_ms,
+            last_library_item_id,
+            status,
+            i64::try_from(summary.scanned_items).unwrap_or(i64::MAX),
+            i64::try_from(summary.exact_items).unwrap_or(i64::MAX),
+            i64::try_from(summary.ambiguous_items).unwrap_or(i64::MAX),
+            i64::try_from(summary.unresolved_items).unwrap_or(i64::MAX),
+            i64::try_from(summary.conflict_items).unwrap_or(i64::MAX),
+            now_ms()
+        ],
+    )?;
+    Ok(())
 }
 
 fn read_legacy_4kvdp_state_rows(conn: &rusqlite::Connection) -> Result<Vec<Legacy4kvdpStateRow>> {
@@ -2319,6 +3356,141 @@ pub fn preview_youtube_subscription_output_dir(
     })
 }
 
+// WP-0257: read-only detail-pane payload for a single subscription. `title` mirrors the queued
+// job's `target_title` column (may be null before the job resolves a title); `url` is the source
+// URL read from the job's params_json.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PendingVideo {
+    pub title: Option<String>,
+    pub url: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct YoutubeSubscriptionVideos {
+    pub downloaded: Vec<library::LibraryItem>,
+    pub deleted: Vec<library::LibraryItem>,
+    pub pending: Vec<PendingVideo>,
+}
+
+/// Max rows returned per projection (downloaded / deleted / pending). The caller-supplied `limit` is clamped
+/// into `[1, MAX]` so a bad value can never turn this into an unbounded scan.
+const MAX_SUBSCRIPTION_VIDEOS_LIMIT: usize = 500;
+
+/// WP-0257: READ-ONLY per-subscription video listing for the detail pane.
+///
+/// Returns canonical source-membership projections for available and operator-deleted library
+/// items (bounded, newest-first), plus still-queued download jobs (title + URL). Folder placement
+/// is not treated as subscription identity, so moved media remains attached to its source. This
+/// is the deliberate opposite of a hot-loop DB writer: all reads use [`db::open_readonly`], every
+/// query has a hard `LIMIT`, and nothing here writes or migrates, so it cannot lock `app.sqlite`
+/// or block the job runner.
+pub fn youtube_subscription_videos(
+    paths: &AppPaths,
+    subscription_id: &str,
+    limit: usize,
+) -> Result<YoutubeSubscriptionVideos> {
+    let limit = limit.clamp(1, MAX_SUBSCRIPTION_VIDEOS_LIMIT);
+
+    // Load the subscription over a READ-ONLY connection. Deliberately NOT
+    // `get_youtube_subscription_by_id`, which opens a writable connection and runs `migrate()`.
+    {
+        let conn = db::open_readonly(paths)?;
+        subscription_by_id_conn(&conn, subscription_id)?.ok_or_else(|| {
+            EngineError::InstallFailed(format!("subscription not found: {subscription_id}"))
+        })?;
+    }
+
+    let downloaded = library::list_subscription_items_by_file_status(
+        paths,
+        subscription_id,
+        library::LIBRARY_FILE_STATUS_AVAILABLE,
+        limit,
+    )?;
+    let deleted = library::list_subscription_items_by_file_status(
+        paths,
+        subscription_id,
+        library::LIBRARY_FILE_STATUS_OPERATOR_DELETED,
+        limit,
+    )?;
+    let pending = list_pending_subscription_videos(paths, subscription_id, limit)?;
+
+    Ok(YoutubeSubscriptionVideos {
+        downloaded,
+        deleted,
+        pending,
+    })
+}
+
+/// Read-only, bounded lookup of the still-`queued` `download_direct_url` jobs that carry this
+/// `subscription_id` in their `params_json`. Pre-filters in SQL with an escaped `LIKE` on the
+/// exact `"subscription_id":"<id>"` needle (the id is a UUID, so no realistic false positives),
+/// then re-parses `params_json` per row to confirm the id and pull the source `url`. The job
+/// `target_title` column supplies the display title.
+fn list_pending_subscription_videos(
+    paths: &AppPaths,
+    subscription_id: &str,
+    limit: usize,
+) -> Result<Vec<PendingVideo>> {
+    let conn = db::open_readonly(paths)?;
+    // The literal `"subscription_id":"..."` contains `_`, a LIKE wildcard, so it must be escaped.
+    let needle = format!("\"subscription_id\":\"{subscription_id}\"");
+    let pattern = format!("%{}%", escape_like_pipe(&needle));
+
+    let mut stmt = conn.prepare(
+        r#"
+SELECT target_title, params_json
+FROM job
+WHERE type = 'download_direct_url'
+  AND status = 'queued'
+  AND params_json LIKE ?1 ESCAPE '|'
+ORDER BY created_at_ms DESC
+LIMIT ?2
+"#,
+    )?;
+    let rows = stmt
+        .query_map(params![pattern, limit as i64], |row| {
+            Ok((row.get::<_, Option<String>>(0)?, row.get::<_, String>(1)?))
+        })?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+    drop(stmt);
+
+    let mut pending = Vec::with_capacity(rows.len());
+    for (target_title, params_json) in rows {
+        let Ok(value) = serde_json::from_str::<serde_json::Value>(&params_json) else {
+            continue;
+        };
+        // Confirm the match is the actual `subscription_id` field, not an incidental substring
+        // elsewhere in params_json.
+        if value.get("subscription_id").and_then(|v| v.as_str()) != Some(subscription_id) {
+            continue;
+        }
+        let Some(url) = value
+            .get("url")
+            .and_then(|v| v.as_str())
+            .map(str::trim)
+            .filter(|v| !v.is_empty())
+        else {
+            continue;
+        };
+        pending.push(PendingVideo {
+            title: target_title
+                .map(|t| t.trim().to_string())
+                .filter(|t| !t.is_empty()),
+            url: url.to_string(),
+        });
+    }
+    Ok(pending)
+}
+
+/// Escape SQLite `LIKE` wildcards (`|`, `%`, `_`) using `|` as the ESCAPE character, matching the
+/// convention used by the library-side prefix queries.
+fn escape_like_pipe(value: &str) -> String {
+    value
+        .replace('|', "||")
+        .replace('%', "|%")
+        .replace('_', "|_")
+}
+
 fn legacy_output_youtube_subscription_archive_path(
     paths: &AppPaths,
     sub: &YoutubeSubscriptionRow,
@@ -2361,7 +3533,40 @@ pub fn load_youtube_subscription_archive_ids(
     read_archive_file_ids(&archive_path).map_err(Into::into)
 }
 
+// WP-0258: this function walks per-subscription yt-dlp archive files on disk (observed up to
+// 43s) and is polled repeatedly by the UI, adding load under DB contention. A short-TTL
+// in-process cache serves recent results so back-to-back UI polls do not re-scan the disk.
+// Read-only and thread-safe; the public signature and Tauri command are unchanged.
+const ARCHIVE_STATS_CACHE_TTL_SECS: u64 = 30;
+
+#[allow(clippy::type_complexity)]
+static ARCHIVE_STATS_CACHE: OnceLock<Mutex<Option<(Instant, HashMap<String, usize>)>>> =
+    OnceLock::new();
+
 pub fn youtube_subscriptions_archive_stats(paths: &AppPaths) -> Result<HashMap<String, usize>> {
+    let cache = ARCHIVE_STATS_CACHE.get_or_init(|| Mutex::new(None));
+
+    // Serve a fresh-enough cached snapshot (younger than the TTL) without touching disk.
+    if let Ok(guard) = cache.lock() {
+        if let Some((stored_at, stats)) = guard.as_ref() {
+            if stored_at.elapsed() < Duration::from_secs(ARCHIVE_STATS_CACHE_TTL_SECS) {
+                return Ok(stats.clone());
+            }
+        }
+    }
+
+    let stats = compute_youtube_subscriptions_archive_stats(paths)?;
+
+    // Store the recomputed snapshot for subsequent polls. If the lock is poisoned we still
+    // return the freshly computed value rather than failing the read-only query.
+    if let Ok(mut guard) = cache.lock() {
+        *guard = Some((Instant::now(), stats.clone()));
+    }
+
+    Ok(stats)
+}
+
+fn compute_youtube_subscriptions_archive_stats(paths: &AppPaths) -> Result<HashMap<String, usize>> {
     let state_dir = paths.youtube_subscription_state_dir();
     let entries = match std::fs::read_dir(&state_dir) {
         Ok(entries) => entries,
@@ -2389,6 +3594,273 @@ pub fn youtube_subscriptions_archive_stats(paths: &AppPaths) -> Result<HashMap<S
         stats.insert(id, count);
     }
     Ok(stats)
+}
+
+/// WP-0261: live per-subscription activity for the consumer "Processing now" signal.
+/// Read-only + lean: derives phase + child-download counts from the job table only (joined by
+/// batch_id = the refresh job id), so it stays off the writer path and does NOT call the slow
+/// filesystem archive_stats — the UI already has downloaded/total/title from its other polls.
+#[derive(Debug, Clone, Serialize)]
+pub struct SubscriptionActivityRow {
+    pub subscription_id: String,
+    pub phase: String, // "checking" | "downloading" | "idle"
+    pub queued: i64,
+    pub running: i64,
+    pub succeeded: i64,
+    pub failed: i64,
+    pub current_title: Option<String>,
+    pub current_progress: Option<f32>,
+}
+
+pub fn youtube_subscriptions_activity(paths: &AppPaths) -> Result<Vec<SubscriptionActivityRow>> {
+    let conn = db::open_readonly(paths)?;
+
+    // WP-0257 pacing follow-up: only report subscriptions whose refresh is ACTUALLY running.
+    // "Update all" enqueues the whole batch as `queued` refresh jobs, but the recurring lane
+    // dispatches them one at a time behind the anti-bot cooldown. Including `queued` refreshes
+    // here made every waiting subscription render as "Checking … for new videos", so the
+    // "processing now" list flooded with hundreds of rows while only one channel was live.
+    // Restricting to `running` keeps this list to the handful actually being checked.
+    //
+    // Running refresh jobs -> (subscription_id, refresh_job_id). The refresh job id is the
+    // batch_id shared by its fanned-out child download jobs.
+    let mut stmt = conn.prepare(
+        "SELECT id, params_json FROM job \
+         WHERE type = 'youtube_subscription_refresh_v1' AND status = 'running'",
+    )?;
+    let refreshers: Vec<(String, String)> = stmt
+        .query_map([], |row| {
+            Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+        })?
+        .collect::<rusqlite::Result<Vec<_>>>()?
+        .into_iter()
+        .filter_map(|(job_id, params)| {
+            serde_json::from_str::<serde_json::Value>(&params)
+                .ok()
+                .and_then(|v| {
+                    v.get("subscription_id")
+                        .and_then(|s| s.as_str())
+                        .map(String::from)
+                })
+                .map(|sub_id| (sub_id, job_id))
+        })
+        .collect();
+    drop(stmt);
+
+    let mut out = Vec::new();
+    for (sub_id, refresh_job_id) in refreshers {
+        let mut cnt = conn.prepare(
+            "SELECT status, COUNT(*) FROM job \
+             WHERE type = 'download_direct_url' AND batch_id = ?1 GROUP BY status",
+        )?;
+        let counts = cnt
+            .query_map(params![refresh_job_id], |row| {
+                Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)?))
+            })?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        drop(cnt);
+
+        let (mut queued, mut running, mut succeeded, mut failed) = (0_i64, 0_i64, 0_i64, 0_i64);
+        for (status, c) in counts {
+            match status.as_str() {
+                "queued" => queued += c,
+                "running" => running += c,
+                "succeeded" => succeeded += c,
+                "failed" | "canceled" => failed += c,
+                _ => {}
+            }
+        }
+        let child_total = queued + running + succeeded + failed;
+
+        let mut inflight = conn.prepare(
+            "SELECT target_title, progress FROM job \
+             WHERE type = 'download_direct_url' AND batch_id = ?1 AND status = 'running' \
+             ORDER BY started_at_ms DESC LIMIT 1",
+        )?;
+        let (current_title, current_progress) = inflight
+            .query_row(params![refresh_job_id], |row| {
+                Ok((
+                    row.get::<_, Option<String>>(0)?,
+                    row.get::<_, Option<f32>>(1)?,
+                ))
+            })
+            .optional()?
+            .unwrap_or((None, None));
+        drop(inflight);
+
+        let phase = if running > 0 || queued > 0 {
+            "downloading"
+        } else if child_total == 0 {
+            "checking"
+        } else {
+            "idle"
+        };
+
+        out.push(SubscriptionActivityRow {
+            subscription_id: sub_id,
+            phase: phase.to_string(),
+            queued,
+            running,
+            succeeded,
+            failed,
+            current_title,
+            current_progress,
+        });
+    }
+
+    Ok(out)
+}
+
+/// Parse the `subscription_id` carried in a `youtube_subscription_refresh_v1` job's params.
+fn subscription_id_from_refresh_params(params_json: &str) -> Option<String> {
+    serde_json::from_str::<serde_json::Value>(params_json)
+        .ok()
+        .and_then(|v| {
+            v.get("subscription_id")
+                .and_then(|s| s.as_str())
+                .map(String::from)
+        })
+}
+
+/// WP-0257 pacing follow-up: READ-ONLY per-subscription DOWNLOAD activity.
+///
+/// `youtube_subscriptions_activity` is keyed off *running refresh* jobs, so it goes blank the
+/// moment a channel finishes enumerating — even while that channel's newly-found videos are still
+/// downloading. This command reports refresh batches that still contain queued or running
+/// `download_direct_url` jobs (including batches whose refresh job already completed), so the UI
+/// can keep showing "N waiting / M downloading · <title>" after enumeration ends. Succeeded and
+/// failed counts remain included for those active drain batches; fully terminal historical batches
+/// are deliberately outside this live-activity projection.
+///
+/// Child downloads are joined back to their subscription via `batch_id = refresh_job_id` (the
+/// refresh job carries `subscription_id` in its params). Non-subscription one-off/playlist
+/// downloads have a `batch_id` that does not resolve to a refresh job and are naturally excluded.
+///
+/// Safety: single read-only connection (`db::open_readonly`, never the writer path); counts are
+/// aggregated in SQL so memory is bounded by the subscription count rather than the download
+/// backlog; the title lookup is `LIMIT`-capped. It cannot lock the DB or grow unbounded.
+#[derive(Debug, Clone, Serialize)]
+pub struct SubscriptionDownloadActivityRow {
+    pub subscription_id: String,
+    pub queued: i64,
+    pub running: i64,
+    pub succeeded: i64,
+    pub failed: i64,
+    pub current_title: Option<String>,
+    pub current_progress: Option<f32>,
+}
+
+pub fn subscription_download_activity(
+    paths: &AppPaths,
+) -> Result<Vec<SubscriptionDownloadActivityRow>> {
+    let conn = db::open_readonly(paths)?;
+
+    // First identify only batches that still have queued/running child downloads, then aggregate
+    // every status inside those active drains. The prior query joined and grouped the entire direct
+    // download history on every page entry (2.06s on the operator's 775MB DB). This shape uses the
+    // existing `(type,status,...)` and `(batch_id,created_at_ms)` indexes and measured ~0.40s while
+    // preserving queued/running plus done/failed progress for current drains.
+    let mut stmt = conn.prepare(
+        "WITH active_batches AS MATERIALIZED ( \
+           SELECT DISTINCT batch_id \
+           FROM job \
+           WHERE type = 'download_direct_url' \
+             AND status IN ('queued', 'running') \
+             AND batch_id IS NOT NULL \
+         ) \
+         SELECT r.params_json, d.status, COUNT(*) \
+         FROM active_batches a \
+         JOIN job r ON r.id = a.batch_id \
+           AND r.type = 'youtube_subscription_refresh_v1' \
+         JOIN job d ON d.batch_id = a.batch_id \
+           AND d.type = 'download_direct_url' \
+         GROUP BY r.id, d.status",
+    )?;
+    let count_rows = stmt
+        .query_map([], |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, i64>(2)?,
+            ))
+        })?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+    drop(stmt);
+
+    // Preserve first-seen order so the output is stable for the polling UI.
+    let mut order: Vec<String> = Vec::new();
+    let mut agg: HashMap<String, (i64, i64, i64, i64)> = HashMap::new();
+    for (params_json, status, count) in count_rows {
+        let Some(sub_id) = subscription_id_from_refresh_params(&params_json) else {
+            continue;
+        };
+        let entry = agg.entry(sub_id.clone()).or_insert_with(|| {
+            order.push(sub_id.clone());
+            (0, 0, 0, 0)
+        });
+        match status.as_str() {
+            "queued" => entry.0 += count,
+            "running" => entry.1 += count,
+            "succeeded" => entry.2 += count,
+            "failed" | "canceled" => entry.3 += count,
+            _ => {}
+        }
+    }
+
+    // Current running title + progress per subscription (latest-started wins). LIMIT-bounded so a
+    // huge in-flight set never blows up the payload; recurring lane keeps this small.
+    let mut title_stmt = conn.prepare(
+        "SELECT r.params_json, d.target_title \
+         , d.progress \
+         FROM job d \
+         JOIN job r ON r.id = d.batch_id \
+         WHERE d.type = 'download_direct_url' \
+         AND d.status = 'running' \
+           AND r.type = 'youtube_subscription_refresh_v1' \
+         ORDER BY d.started_at_ms DESC \
+         LIMIT 200",
+    )?;
+    let title_rows = title_stmt
+        .query_map([], |row| {
+            let params_json = row.get::<_, String>(0)?;
+            let title = row.get::<_, Option<String>>(1)?;
+            let progress = row.get::<_, Option<f32>>(2)?;
+            Ok((params_json, title, progress))
+        })?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+    drop(title_stmt);
+
+    let mut titles: HashMap<String, String> = HashMap::new();
+    let mut current_progress_by_sub_id: HashMap<String, f32> = HashMap::new();
+    for (params_json, title, progress) in title_rows {
+        let Some(sub_id) = subscription_id_from_refresh_params(&params_json) else {
+            continue;
+        };
+        if let Some(t) = title.filter(|t| !t.trim().is_empty()) {
+            titles.entry(sub_id.clone()).or_insert(t);
+        }
+        if let Some(p) = progress.filter(|value| value.is_finite()) {
+            current_progress_by_sub_id.entry(sub_id).or_insert(p);
+        }
+    }
+
+    let mut out = Vec::with_capacity(order.len());
+    for sub_id in order {
+        let (queued, running, succeeded, failed) =
+            agg.get(&sub_id).copied().unwrap_or((0, 0, 0, 0));
+        let current_title = titles.get(&sub_id).cloned();
+        let current_progress = current_progress_by_sub_id.get(&sub_id).copied();
+        out.push(SubscriptionDownloadActivityRow {
+            subscription_id: sub_id,
+            queued,
+            running,
+            succeeded,
+            failed,
+            current_title,
+            current_progress,
+        });
+    }
+    Ok(out)
 }
 
 fn fourkvd_title(raw: &FourkvdSubscription) -> String {
@@ -2482,6 +3954,7 @@ fn queue_subscription_internal(
     sub: &YoutubeSubscriptionRow,
     batch_id: Option<String>,
 ) -> Result<Vec<jobs::JobRow>> {
+    ensure_subscription_is_not_deleted(sub)?;
     let output_dir = youtube_subscription_output_dir(paths, sub)?
         .to_string_lossy()
         .to_string();
@@ -2506,6 +3979,16 @@ fn queue_subscription_internal(
     Ok(vec![queued])
 }
 
+fn ensure_subscription_is_not_deleted(sub: &YoutubeSubscriptionRow) -> Result<()> {
+    if sub.source_status == YOUTUBE_SUBSCRIPTION_STATUS_DELETED {
+        return Err(EngineError::InstallFailed(format!(
+            "subscription is marked deleted and cannot be queued: {}",
+            sub.id
+        )));
+    }
+    Ok(())
+}
+
 fn hydrate_group_ids(
     conn: &rusqlite::Connection,
     mut rows: Vec<YoutubeSubscriptionRow>,
@@ -2520,8 +4003,20 @@ fn hydrate_auth_session_flags(
     paths: &AppPaths,
     mut rows: Vec<YoutubeSubscriptionRow>,
 ) -> Vec<YoutubeSubscriptionRow> {
+    // WP-0252 Item 2b: read the cookie-secrets directory ONCE into a set instead of one
+    // filesystem stat per subscription (was 255 syscalls on the subscription-list command
+    // path, a measured contributor to list latency).
+    let cookie_files: std::collections::HashSet<String> =
+        std::fs::read_dir(paths.youtube_subscription_secrets_dir())
+            .map(|entries| {
+                entries
+                    .flatten()
+                    .filter_map(|entry| entry.file_name().into_string().ok())
+                    .collect()
+            })
+            .unwrap_or_default();
     for row in rows.iter_mut() {
-        row.auth_session_configured = youtube_subscription_has_auth_session(paths, &row.id);
+        row.auth_session_configured = cookie_files.contains(&format!("{}.cookie.txt", row.id));
     }
     rows
 }
@@ -2813,7 +4308,10 @@ SELECT
   consecutive_failures,
   next_allowed_refresh_at_ms,
   created_at_ms,
-  updated_at_ms
+  updated_at_ms,
+  source_status,
+  source_status_changed_at_ms,
+  source_status_change_source
 FROM youtube_subscription
 WHERE id = ?1
 "#,
@@ -2846,7 +4344,10 @@ SELECT
   consecutive_failures,
   next_allowed_refresh_at_ms,
   created_at_ms,
-  updated_at_ms
+  updated_at_ms,
+  source_status,
+  source_status_changed_at_ms,
+  source_status_change_source
 FROM youtube_subscription
 WHERE source_url = ?1
 "#,
@@ -3056,16 +4557,34 @@ fn row_to_subscription(row: &rusqlite::Row<'_>) -> rusqlite::Result<YoutubeSubsc
         use_browser_cookies: i64_to_bool(row.get::<_, i64>(7)?),
         auth_session_configured: false,
         active: i64_to_bool(row.get::<_, i64>(8)?),
+        source_status: row.get(17)?,
+        source_status_changed_at_ms: row.get(18)?,
+        source_status_change_source: row.get(19)?,
         preset_id: row.get(9)?,
         refresh_interval_minutes: row.get(10)?,
         last_queued_at_ms: row.get(11)?,
         last_error_at_ms: row.get(12)?,
+        // WP-0264: default None here; only the UI list + group queries select + populate
+        // last_error_message (like the WP-0255 progress fields below), so the internal
+        // queue/lookup SELECTs that share this mapper stay unchanged.
+        last_error_message: None,
         consecutive_failures: row.get(13)?,
         next_allowed_refresh_at_ms: row.get(14)?,
         created_at_ms: row.get(15)?,
         updated_at_ms: row.get(16)?,
+        // WP-0255: progress fields default to None here; only the UI list query
+        // (list_youtube_subscriptions) selects + populates them, so the internal
+        // queue/lookup SELECTs that share this mapper stay unchanged.
+        last_checked_at_ms: None,
+        upstream_total: None,
+        last_new_found: None,
+        last_refresh_queued: None,
         group_ids: Vec::new(),
     })
+}
+
+fn default_youtube_subscription_source_status() -> String {
+    YOUTUBE_SUBSCRIPTION_STATUS_NORMAL.to_string()
 }
 
 fn bool_to_i64(value: bool) -> i64 {
@@ -3789,6 +5308,123 @@ CREATE TABLE subscription_entries (
         Ok(())
     }
 
+    fn seed_4kvdp_download_evidence(
+        sqlite_path: &Path,
+        filename: &str,
+        source_url: &str,
+    ) -> rusqlite::Result<()> {
+        let conn = rusqlite::Connection::open(sqlite_path)?;
+        conn.execute_batch(
+            r#"
+CREATE TABLE IF NOT EXISTS download_item (
+  id INTEGER PRIMARY KEY,
+  filename TEXT,
+  state INTEGER,
+  position INTEGER,
+  timestampNs BIGINT
+);
+CREATE TABLE IF NOT EXISTS media_item_description (
+  download_item_id INTEGER NOT NULL,
+  id INTEGER PRIMARY KEY,
+  item_index INTEGER,
+  title TEXT,
+  duration INTEGER,
+  publishing_timestamp INTEGER
+);
+CREATE TABLE IF NOT EXISTS url_description (
+  media_item_description_id INTEGER NOT NULL,
+  id INTEGER PRIMARY KEY,
+  type INTEGER,
+  service_name TEXT,
+  url TEXT,
+  handler_name TEXT
+);
+"#,
+        )?;
+        conn.execute(
+            "INSERT INTO download_item (id, filename, state, position, timestampNs) VALUES (10, ?1, 1, 0, 0)",
+            [filename],
+        )?;
+        conn.execute(
+            "INSERT INTO media_item_description (download_item_id, id, item_index, title, duration, publishing_timestamp) VALUES (10, 20, 0, 'Exact video', 1000, 0)",
+            [],
+        )?;
+        conn.execute(
+            "INSERT INTO url_description (media_item_description_id, id, type, service_name, url, handler_name) VALUES (20, 30, 1, 'youtube', ?1, 'youtube')",
+            [source_url],
+        )?;
+        Ok(())
+    }
+
+    #[test]
+    fn import_path_normalization_matches_extended_unc_without_changing_structure() {
+        assert_eq!(
+            normalize_import_match_path(r"\\?\UNC\MediaNas\Videos\Clip.mp4"),
+            normalize_import_match_path(r"\\MediaNas\Videos\Clip.mp4")
+        );
+        assert_eq!(
+            normalize_import_match_path(r"\\?\C:\Archive\Clip.mp4"),
+            normalize_import_match_path(r"C:\Archive\Clip.mp4")
+        );
+    }
+
+    #[test]
+    fn imported_identity_enrichment_links_exact_only_and_preserves_unresolved() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let paths = AppPaths::new(dir.path().to_path_buf());
+        crate::db::ensure_schema(&paths).expect("schema");
+        let sqlite_path = dir.path().join("state.sqlite");
+        let root = dir.path().join("imported_root");
+        std::fs::create_dir_all(&root).expect("root");
+        seed_legacy_4kvdp_state_db(&sqlite_path, &root).expect("state db");
+        seed_4kvdp_download_evidence(
+            &sqlite_path,
+            r"\\?\UNC\MediaNas\Videos\Exact.mp4",
+            "https://www.youtube.com/watch?v=EXACT123456",
+        )
+        .expect("download evidence");
+
+        let conn = crate::db::open(&paths).expect("open app db");
+        crate::db::migrate(&conn).expect("migrate app db");
+        conn.execute(
+            "INSERT INTO library_item (id, created_at_ms, source_type, source_uri, title, media_path, origin) VALUES ('exact-item', 1, 'local_file', ?1, 'Exact', ?1, '4kvdp_import')",
+            [r"\\MediaNas\Videos\Exact.mp4"],
+        )
+        .expect("exact item");
+        conn.execute(
+            "INSERT INTO library_item (id, created_at_ms, source_type, source_uri, title, media_path, origin) VALUES ('unresolved-item', 2, 'local_file', ?1, 'Unknown', ?1, '4kvdp_import')",
+            [r"\\MediaNas\Videos\Unknown.mp4"],
+        )
+        .expect("unresolved item");
+        drop(conn);
+
+        let summary =
+            enrich_imported_youtube_identity_4kvdp(&paths, Some(&sqlite_path), false, None)
+                .expect("enrich");
+        assert_eq!(summary.scanned_items, 2);
+        assert_eq!(summary.exact_items, 1);
+        assert_eq!(summary.unresolved_items, 1);
+        assert_eq!(summary.ambiguous_items, 0);
+
+        let conn = crate::db::open_readonly(&paths).expect("readonly");
+        let linked: Option<String> = conn
+            .query_row(
+                "SELECT library_item_id FROM media_source_identity WHERE service='youtube' AND media_id='EXACT123456'",
+                [],
+                |row| row.get(0),
+            )
+            .expect("identity");
+        assert_eq!(linked.as_deref(), Some("exact-item"));
+        let unresolved_state: String = conn
+            .query_row(
+                "SELECT match_state FROM media_import_evidence WHERE library_item_id='unresolved-item'",
+                [],
+                |row| row.get(0),
+            )
+            .expect("unresolved evidence");
+        assert_eq!(unresolved_state, "unresolved");
+    }
+
     #[test]
     fn analyze_legacy_archive_root_correlates_4kvdp_state_and_root_shape() {
         let dir = tempfile::tempdir().expect("tempdir");
@@ -3851,6 +5487,7 @@ CREATE TABLE subscription_entries (
         assert_eq!(summary.imported_playlist_sources, 1);
         assert_eq!(summary.mapped_to_selected_root, 2);
         assert_eq!(summary.archive_seeded_subscriptions, 2);
+        assert_eq!(summary.source_memberships_added, 2);
 
         let rows = list_youtube_subscriptions(&paths).expect("list");
         assert_eq!(rows.len(), 2);
@@ -3901,6 +5538,18 @@ CREATE TABLE subscription_entries (
         assert!(std::fs::read_to_string(playlist_archive)
             .expect("read playlist archive")
             .contains("youtube BBBB2222BBB"));
+        let conn = crate::db::open_readonly(&paths).expect("membership db");
+        let membership_kinds = conn
+            .prepare("SELECT source_kind FROM media_source_membership ORDER BY source_kind ASC")
+            .expect("membership query")
+            .query_map([], |row| row.get::<_, String>(0))
+            .expect("membership rows")
+            .collect::<rusqlite::Result<Vec<_>>>()
+            .expect("membership collect");
+        assert_eq!(
+            membership_kinds,
+            vec!["playlist".to_string(), "videos_page".to_string()]
+        );
     }
 
     #[test]
@@ -4083,5 +5732,564 @@ CREATE TABLE subscription_entries (
 
         let queued = queue_all_active_youtube_subscriptions(&paths).expect("queue ready");
         assert_eq!(queued.len(), 1);
+    }
+
+    // WP-0284: subscription detail is membership-scoped rather than folder-prefix-scoped and
+    // separates available from operator-deleted canonical items.
+    #[test]
+    fn youtube_subscription_videos_scopes_downloaded_and_pending() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let paths = AppPaths::new(dir.path().to_path_buf());
+        crate::db::ensure_schema(&paths).expect("schema");
+
+        let output_dir = dir.path().join("FancamBot");
+        std::fs::create_dir_all(&output_dir).expect("mkdir output");
+        let sibling_dir = dir.path().join("FancamBot2");
+        std::fs::create_dir_all(&sibling_dir).expect("mkdir sibling");
+
+        let sub = upsert_youtube_subscription(
+            &paths,
+            YoutubeSubscriptionUpsert {
+                id: None,
+                title: "FancamBot".to_string(),
+                source_url: "https://www.youtube.com/@fancambot/videos".to_string(),
+                folder_map: None,
+                output_dir_override: Some(output_dir.to_string_lossy().to_string()),
+                library_id: None,
+                use_browser_cookies: false,
+                browser_cookie_source: None,
+                auth_session_input: None,
+                clear_auth_session: false,
+                active: true,
+                preset_id: None,
+                group_ids: Vec::new(),
+                refresh_interval_minutes: Some(MIN_REFRESH_INTERVAL_MINUTES),
+            },
+        )
+        .expect("upsert");
+
+        let conn = crate::db::open(&paths).expect("open");
+        crate::db::migrate(&conn).expect("migrate");
+
+        let insert_item = |id: &str, media_path: &str, created: i64| {
+            conn.execute(
+                r#"
+INSERT INTO library_item (id, created_at_ms, source_type, source_uri, title, media_path)
+VALUES (?1, ?2, 'url_direct', ?3, ?4, ?3)
+"#,
+                params![id, created, media_path, id],
+            )
+            .expect("insert library_item");
+        };
+        let under_output = output_dir
+            .join("clip_one.mp4")
+            .to_string_lossy()
+            .to_string();
+        let under_output_old = output_dir
+            .join("clip_two.mp4")
+            .to_string_lossy()
+            .to_string();
+        let under_sibling = sibling_dir.join("other.mp4").to_string_lossy().to_string();
+        insert_item("item-new", &under_output, 2_000);
+        insert_item("item-old", &under_output_old, 1_000);
+        insert_item("item-sibling", &under_sibling, 3_000);
+        for (item_id, media_id) in [("item-new", "membernew01"), ("item-old", "memberold01")] {
+            conn.execute(
+                "INSERT INTO media_source_identity (service, media_id, canonical_url, library_item_id, created_at_ms, updated_at_ms) VALUES ('youtube', ?1, ?2, ?3, 1, 1)",
+                params![
+                    media_id,
+                    format!("https://www.youtube.com/watch?v={media_id}"),
+                    item_id
+                ],
+            )
+            .expect("identity");
+            conn.execute(
+                "INSERT INTO media_source_membership (service, media_id, source_subscription_id, source_kind, source_url_snapshot, source_title_snapshot, evidence_kind, created_at_ms, updated_at_ms) VALUES ('youtube', ?1, ?2, 'videos_page', ?3, 'FancamBot', 'test', 1, 1)",
+                params![media_id, &sub.id, &sub.source_url],
+            )
+            .expect("membership");
+        }
+        conn.execute(
+            "UPDATE library_item SET file_status='operator_deleted', file_status_changed_at_ms=3, file_status_change_source='operator', file_delete_method='permanent' WHERE id='item-old'",
+            [],
+        )
+        .expect("mark deleted");
+
+        let insert_job = |id: &str, status: &str, params: serde_json::Value, title: &str| {
+            conn.execute(
+                r#"
+INSERT INTO job (id, type, status, progress, params_json, created_at_ms, logs_path, target_title)
+VALUES (?1, 'download_direct_url', ?2, 0.0, ?3, ?4, '', ?5)
+"#,
+                params![
+                    id,
+                    status,
+                    serde_json::to_string(&params).unwrap(),
+                    now_ms(),
+                    title
+                ],
+            )
+            .expect("insert job");
+        };
+        insert_job(
+            "job-queued",
+            "queued",
+            serde_json::json!({
+                "url": "https://www.youtube.com/watch?v=aaaaaaaaaaa",
+                "subscription_id": sub.id,
+            }),
+            "Pending Clip",
+        );
+        // Different subscription -> must be excluded.
+        insert_job(
+            "job-other-sub",
+            "queued",
+            serde_json::json!({
+                "url": "https://www.youtube.com/watch?v=bbbbbbbbbbb",
+                "subscription_id": "some-other-subscription-id",
+            }),
+            "Other Clip",
+        );
+        // Same subscription but already running -> must be excluded (not still-to-download).
+        insert_job(
+            "job-running",
+            "running",
+            serde_json::json!({
+                "url": "https://www.youtube.com/watch?v=ccccccccccc",
+                "subscription_id": sub.id,
+            }),
+            "Running Clip",
+        );
+        drop(conn);
+
+        let result = youtube_subscription_videos(&paths, &sub.id, 50).expect("videos");
+
+        let downloaded_paths: Vec<String> = result
+            .downloaded
+            .iter()
+            .map(|i| i.media_path.clone())
+            .collect();
+        assert_eq!(
+            result.downloaded.len(),
+            1,
+            "only available canonical membership items are returned: {downloaded_paths:?}"
+        );
+        assert!(downloaded_paths.contains(&under_output));
+        assert!(
+            !downloaded_paths.contains(&under_sibling),
+            "folder proximity without membership must not create ownership"
+        );
+        assert_eq!(result.deleted.len(), 1);
+        assert_eq!(result.deleted[0].id, "item-old");
+        // Newest-first ordering.
+        assert_eq!(result.downloaded[0].media_path, under_output);
+
+        assert_eq!(result.pending.len(), 1, "only this sub's queued jobs");
+        assert_eq!(
+            result.pending[0].url,
+            "https://www.youtube.com/watch?v=aaaaaaaaaaa"
+        );
+        assert_eq!(result.pending[0].title.as_deref(), Some("Pending Clip"));
+    }
+
+    #[test]
+    fn subscription_download_activity_scopes_to_active_drain_batches() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let paths = AppPaths::new(dir.path().to_path_buf());
+        crate::db::ensure_schema(&paths).expect("schema");
+        let conn = crate::db::open(&paths).expect("open");
+        crate::db::migrate(&conn).expect("migrate");
+
+        let insert_job = |id: &str,
+                          batch_id: Option<&str>,
+                          job_type: &str,
+                          status: &str,
+                          params_json: serde_json::Value,
+                          title: Option<&str>| {
+            conn.execute(
+                r#"
+INSERT INTO job (
+  id, batch_id, type, status, progress, params_json, created_at_ms, logs_path, target_title
+)
+VALUES (?1, ?2, ?3, ?4, 0.0, ?5, ?6, '', ?7)
+"#,
+                params![
+                    id,
+                    batch_id,
+                    job_type,
+                    status,
+                    serde_json::to_string(&params_json).unwrap(),
+                    now_ms(),
+                    title,
+                ],
+            )
+            .expect("insert job");
+        };
+
+        insert_job(
+            "refresh-active",
+            None,
+            "youtube_subscription_refresh_v1",
+            "succeeded",
+            serde_json::json!({"subscription_id": "sub-active"}),
+            None,
+        );
+        insert_job(
+            "active-queued",
+            Some("refresh-active"),
+            "download_direct_url",
+            "queued",
+            serde_json::json!({"subscription_id": "sub-active"}),
+            Some("Waiting"),
+        );
+        insert_job(
+            "active-done",
+            Some("refresh-active"),
+            "download_direct_url",
+            "succeeded",
+            serde_json::json!({"subscription_id": "sub-active"}),
+            Some("Done"),
+        );
+        insert_job(
+            "active-failed",
+            Some("refresh-active"),
+            "download_direct_url",
+            "failed",
+            serde_json::json!({"subscription_id": "sub-active"}),
+            Some("Failed"),
+        );
+
+        insert_job(
+            "refresh-terminal",
+            None,
+            "youtube_subscription_refresh_v1",
+            "succeeded",
+            serde_json::json!({"subscription_id": "sub-terminal"}),
+            None,
+        );
+        insert_job(
+            "terminal-done",
+            Some("refresh-terminal"),
+            "download_direct_url",
+            "succeeded",
+            serde_json::json!({"subscription_id": "sub-terminal"}),
+            Some("Old done"),
+        );
+        drop(conn);
+
+        let rows = subscription_download_activity(&paths).expect("activity");
+        assert_eq!(rows.len(), 1, "terminal-only history is not live activity");
+        let active = &rows[0];
+        assert_eq!(active.subscription_id, "sub-active");
+        assert_eq!(active.queued, 1);
+        assert_eq!(active.running, 0);
+        assert_eq!(active.succeeded, 1);
+        assert_eq!(active.failed, 1);
+    }
+
+    #[test]
+    fn clear_youtube_subscription_group_memberships_keeps_groups_and_subscriptions() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let paths = AppPaths::new(dir.path().to_path_buf());
+        crate::db::ensure_schema(&paths).expect("schema");
+
+        let group = upsert_youtube_subscription_group(
+            &paths,
+            YoutubeSubscriptionGroupUpsert {
+                id: None,
+                name: "Imported subscriptions".to_string(),
+            },
+        )
+        .expect("group");
+        let sub = upsert_youtube_subscription(
+            &paths,
+            YoutubeSubscriptionUpsert {
+                id: None,
+                title: "Grouped".to_string(),
+                source_url: "https://www.youtube.com/@grouped/videos".to_string(),
+                folder_map: None,
+                output_dir_override: None,
+                library_id: None,
+                use_browser_cookies: false,
+                browser_cookie_source: None,
+                auth_session_input: None,
+                clear_auth_session: false,
+                active: true,
+                preset_id: None,
+                group_ids: vec![group.id.clone()],
+                refresh_interval_minutes: Some(MIN_REFRESH_INTERVAL_MINUTES),
+            },
+        )
+        .expect("subscription");
+        assert_eq!(sub.group_ids, vec![group.id.clone()]);
+
+        let removed = clear_youtube_subscription_group_memberships(&paths).expect("clear");
+
+        assert_eq!(removed, 1);
+        let groups = list_youtube_subscription_groups(&paths).expect("groups");
+        assert_eq!(groups.len(), 1, "group rows are retained");
+        let subscriptions = list_youtube_subscriptions(&paths).expect("subscriptions");
+        assert_eq!(subscriptions.len(), 1, "subscription rows are retained");
+        assert!(subscriptions[0].group_ids.is_empty());
+    }
+
+    #[test]
+    fn manual_deleted_status_preserves_subscription_context_and_blocks_queueing() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let paths = AppPaths::new(dir.path().join("app_state"));
+        crate::db::ensure_schema(&paths).expect("schema");
+        let output_dir = dir.path().join("archive");
+        std::fs::create_dir_all(&output_dir).expect("output");
+
+        let group = upsert_youtube_subscription_group(
+            &paths,
+            YoutubeSubscriptionGroupUpsert {
+                id: None,
+                name: "Preserved".to_string(),
+            },
+        )
+        .expect("group");
+        let sub = upsert_youtube_subscription(
+            &paths,
+            YoutubeSubscriptionUpsert {
+                id: Some("sub-manual-deleted".to_string()),
+                title: "Deleted source".to_string(),
+                source_url: "https://www.youtube.com/channel/UCdeletedtest".to_string(),
+                folder_map: Some("deleted_source".to_string()),
+                output_dir_override: Some(output_dir.to_string_lossy().to_string()),
+                library_id: None,
+                use_browser_cookies: false,
+                browser_cookie_source: None,
+                auth_session_input: None,
+                clear_auth_session: false,
+                active: true,
+                preset_id: None,
+                group_ids: vec![group.id.clone()],
+                refresh_interval_minutes: Some(MIN_REFRESH_INTERVAL_MINUTES),
+            },
+        )
+        .expect("subscription");
+        let queued = queue_youtube_subscription(&paths, &sub.id).expect("initial queue");
+        assert_eq!(queued.len(), 1);
+
+        let conn = crate::db::open(&paths).expect("open");
+        crate::db::migrate(&conn).expect("migrate");
+        conn.execute(
+            "INSERT INTO media_source_identity \
+             (service, media_id, canonical_url, created_at_ms, updated_at_ms) \
+             VALUES ('youtube', 'preserved-video', 'https://www.youtube.com/watch?v=preserved-video', 1, 1)",
+            [],
+        )
+        .expect("identity");
+        conn.execute(
+            "INSERT INTO media_source_membership \
+             (service, media_id, source_subscription_id, source_kind, source_url_snapshot, \
+              source_title_snapshot, evidence_kind, created_at_ms, updated_at_ms) \
+             VALUES ('youtube', 'preserved-video', ?1, 'channel_page', ?2, ?3, 'test', 1, 1)",
+            params![&sub.id, &sub.source_url, &sub.title],
+        )
+        .expect("membership");
+        drop(conn);
+
+        let receipt = set_youtube_subscription_manual_status(
+            &paths,
+            &sub.id,
+            YOUTUBE_SUBSCRIPTION_STATUS_DELETED,
+            YOUTUBE_SUBSCRIPTION_STATUS_ACTOR_ASSISTANT,
+        )
+        .expect("mark deleted");
+        assert_eq!(receipt.subscription.source_status, "deleted");
+        assert!(!receipt.subscription.active);
+        assert_eq!(receipt.subscription.group_ids, vec![group.id.clone()]);
+        assert_eq!(receipt.canceled_refresh_jobs, 1);
+
+        let queue_error =
+            queue_youtube_subscription(&paths, &sub.id).expect_err("deleted queue rejected");
+        assert!(queue_error.to_string().contains("marked deleted"));
+        assert!(
+            queue_all_active_youtube_subscriptions_now(&paths)
+                .expect("queue all")
+                .is_empty(),
+            "bulk queue excludes deleted"
+        );
+        assert!(
+            queue_youtube_subscription_group(&paths, &group.id)
+                .expect("queue group")
+                .is_empty(),
+            "group queue excludes deleted"
+        );
+
+        record_subscription_refresh_failure_with_error(
+            &paths,
+            &sub.id,
+            Some("HTTP Error 404: Not Found"),
+        )
+        .expect("record failure");
+        record_subscription_refresh_success(&paths, &sub.id).expect("record success");
+        let still_deleted = get_youtube_subscription_by_id(&paths, &sub.id)
+            .expect("read")
+            .expect("row");
+        assert_eq!(
+            still_deleted.source_status, YOUTUBE_SUBSCRIPTION_STATUS_DELETED,
+            "automatic refresh outcomes cannot change deleted"
+        );
+
+        let conn = crate::db::open_readonly(&paths).expect("readonly");
+        let membership_count: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM media_source_membership WHERE source_subscription_id=?1",
+                [&sub.id],
+                |row| row.get(0),
+            )
+            .expect("membership count");
+        assert_eq!(membership_count, 1, "source/video metadata is retained");
+        drop(conn);
+
+        let restored = set_youtube_subscription_manual_status(
+            &paths,
+            &sub.id,
+            YOUTUBE_SUBSCRIPTION_STATUS_NORMAL,
+            YOUTUBE_SUBSCRIPTION_STATUS_ACTOR_OPERATOR,
+        )
+        .expect("restore");
+        assert_eq!(restored.subscription.source_status, "normal");
+        assert!(restored.subscription.active);
+        assert_eq!(restored.subscription.group_ids, vec![group.id]);
+        assert_eq!(
+            queue_youtube_subscription(&paths, &sub.id)
+                .expect("queue restored")
+                .len(),
+            1
+        );
+    }
+
+    #[test]
+    fn exact_404_sets_unavailable_and_success_recovers_without_inferring_deleted() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let paths = AppPaths::new(dir.path().join("app_state"));
+        crate::db::ensure_schema(&paths).expect("schema");
+        let sub = upsert_youtube_subscription(
+            &paths,
+            YoutubeSubscriptionUpsert {
+                id: Some("sub-unavailable".to_string()),
+                title: "Unavailable playlist".to_string(),
+                source_url: "https://www.youtube.com/playlist?list=PLunavailable".to_string(),
+                folder_map: None,
+                output_dir_override: Some(dir.path().join("archive").to_string_lossy().to_string()),
+                library_id: None,
+                use_browser_cookies: false,
+                browser_cookie_source: None,
+                auth_session_input: None,
+                clear_auth_session: false,
+                active: true,
+                preset_id: None,
+                group_ids: Vec::new(),
+                refresh_interval_minutes: Some(MIN_REFRESH_INTERVAL_MINUTES),
+            },
+        )
+        .expect("subscription");
+
+        record_subscription_refresh_failure_with_error(
+            &paths,
+            &sub.id,
+            Some("network connection timed out"),
+        )
+        .expect("network failure");
+        assert_eq!(
+            get_youtube_subscription_by_id(&paths, &sub.id)
+                .expect("read")
+                .expect("row")
+                .source_status,
+            YOUTUBE_SUBSCRIPTION_STATUS_NORMAL,
+            "bad connection cannot set unavailable or deleted"
+        );
+
+        record_subscription_refresh_failure_with_error(
+            &paths,
+            &sub.id,
+            Some("Unable to download API page: HTTP Error 404: Not Found"),
+        )
+        .expect("404 failure");
+        let unavailable = get_youtube_subscription_by_id(&paths, &sub.id)
+            .expect("read")
+            .expect("row");
+        assert_eq!(
+            unavailable.source_status,
+            YOUTUBE_SUBSCRIPTION_STATUS_UNAVAILABLE
+        );
+        assert_eq!(
+            unavailable.source_status_change_source.as_deref(),
+            Some("refresh_404")
+        );
+        assert!(
+            unavailable.active,
+            "unavailable remains eligible for a later paced recovery check"
+        );
+
+        record_subscription_refresh_success(&paths, &sub.id).expect("success");
+        let recovered = get_youtube_subscription_by_id(&paths, &sub.id)
+            .expect("read")
+            .expect("row");
+        assert_eq!(recovered.source_status, YOUTUBE_SUBSCRIPTION_STATUS_NORMAL);
+        assert_eq!(
+            recovered.source_status_change_source.as_deref(),
+            Some("refresh_success")
+        );
+    }
+
+    #[test]
+    fn manual_status_command_rejects_automatic_status_and_unknown_actor() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let paths = AppPaths::new(dir.path().join("app_state"));
+        crate::db::ensure_schema(&paths).expect("schema");
+        let sub = upsert_youtube_subscription(
+            &paths,
+            YoutubeSubscriptionUpsert {
+                id: Some("sub-authority".to_string()),
+                title: "Authority".to_string(),
+                source_url: "https://www.youtube.com/@authority/videos".to_string(),
+                folder_map: None,
+                output_dir_override: Some(dir.path().join("archive").to_string_lossy().to_string()),
+                library_id: None,
+                use_browser_cookies: false,
+                browser_cookie_source: None,
+                auth_session_input: None,
+                clear_auth_session: false,
+                active: true,
+                preset_id: None,
+                group_ids: Vec::new(),
+                refresh_interval_minutes: Some(MIN_REFRESH_INTERVAL_MINUTES),
+            },
+        )
+        .expect("subscription");
+
+        let unavailable_error = set_youtube_subscription_manual_status(
+            &paths,
+            &sub.id,
+            YOUTUBE_SUBSCRIPTION_STATUS_UNAVAILABLE,
+            YOUTUBE_SUBSCRIPTION_STATUS_ACTOR_OPERATOR,
+        )
+        .expect_err("manual unavailable rejected");
+        assert!(unavailable_error
+            .to_string()
+            .contains("must be normal or deleted"));
+
+        let actor_error = set_youtube_subscription_manual_status(
+            &paths,
+            &sub.id,
+            YOUTUBE_SUBSCRIPTION_STATUS_DELETED,
+            "network_probe",
+        )
+        .expect_err("unknown actor rejected");
+        assert!(actor_error
+            .to_string()
+            .contains("must be operator or assistant"));
+        assert_eq!(
+            get_youtube_subscription_by_id(&paths, &sub.id)
+                .expect("read")
+                .expect("row")
+                .source_status,
+            YOUTUBE_SUBSCRIPTION_STATUS_NORMAL
+        );
     }
 }

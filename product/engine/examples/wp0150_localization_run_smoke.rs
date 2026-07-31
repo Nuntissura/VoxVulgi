@@ -430,7 +430,7 @@ fn main() -> Result<()> {
     }
 
     let store = ModelStore::new(paths.clone());
-    ensure_model_installed(&store, "whispercpp-tiny")?;
+    ensure_model_installed(&store, &paths.effective_asr_model_id())?;
 
     let runner = jobs::start_runner(paths.clone())?;
 
