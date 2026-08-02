@@ -3,7 +3,7 @@
 ## Metadata
 - ID: WP-0288
 - Owner: assistant (execution) + operator (listening/judgement calls on voice quality)
-- Status: BACKLOG
+- Status: IN_PROGRESS
 - Created: 2026-08-01
 - Depends on: WP-0287 (research basis: `governance/spec/LOCALIZATION_STACK_LANDSCAPE_2026_07.md`)
 - Blocks: WP-0289 (implementation freezes its defaults from this packet's results)
@@ -65,3 +65,23 @@
 
 ## Status updates
 - 2026-08-01: WP created from operator decision "benchmark and record other methods as backups".
+- 2026-08-02: **Baseline stage-reproduction run complete.** Proof:
+  `product/desktop/build_target/tool_artifacts/wp_runs/WP-0288/20260802_stage_reproduction/summary.md`.
+  - Hardware context recorded (RTX 3090 24 GB / 5950X 16C32T / 128 GB), but the cloning venv
+    carries `torch 2.3.1+cpu` and `torch.cuda.is_available()` is `False` — **every number in this
+    run is CPU-tier and the GPU is unused by any localization stage.**
+  - Root cause of the never-produced deliverable identified from the canonical job store: exactly
+    one localization job has ever existed (`dub_voice_preserving_v1`, `5b648db6`), which failed at
+    5 % on 2026-06-14 20:11 with `OfflineModeIsEnabled` -> `LocalEntryNotFoundError` for
+    `hexgrad/Kokoro-82M/config.json`. The app-local HF cache was populated 2026-06-15 00:51,
+    4 h 40 m later, and no dub job has been queued since.
+  - Shipped-component baseline measured by re-running the app's own scripts/venvs/models with the
+    engine's exact environment: voice-preserving TTS `EXIT=0` (`clone_preserved` 1/1, 3.37 s real
+    cloned audio, 87.6 s warm / 433 s cold); Spleeter separation `EXIT=0` (135 s);
+    mix+mux `EXIT=0` -> 7.15 s dubbed MP4. **No shipped stage is broken on this machine.**
+  - The revised-stack case is therefore narrowed to quality grounds (ASR model routing,
+    whisper-translate hallucination + segment loss, cloning similarity), not "nothing works".
+  - Still owed by this WP: per-stage candidate A/B/C runs, the packaging gate, frozen defaults,
+    the backup registry artifact, and the operator listening verdict.
+  - **Blocked input**: the corpus spec requires >= 2 KO and >= 2 JA clips at 3-10 min; only the
+    Haerin (7.2 s) and Miyeon (174.7 s) clips exist. Operator supply or selection needed.
