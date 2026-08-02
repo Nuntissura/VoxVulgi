@@ -71,6 +71,14 @@ Design goals:
 
 To minimize setup friction and support offline use, the Windows "full" installer bundles the core local toolchain for Phase 1 + Phase 2 (FFmpeg/ffprobe, yt-dlp, a supported JavaScript runtime for yt-dlp's current extractor path, whisper model(s), portable Python + venv, and Phase 2 packs/models).
 
+Normative status (operator decision 2026-07-31; see PRODUCT_SPEC.md 8.1.8):
+
+- The batteries-included payload is mandatory for public releases; the "full" installer is the public default, and slim payloads are development-only.
+- The payload must contain ALL models and dependencies for the complete default localization pipeline: the default ASR model (currently `whispercpp-large-v3-q5_0`), the diarization pack, the source-separation pack, the TTS and voice-conversion models with their populated Hugging Face cache (so `HF_HUB_OFFLINE=1` resolution succeeds on first run with no cache misses), portable Python with all pinned wheels, and FFmpeg/ffprobe.
+- Python pack installs for the default path must resolve from bundled wheels (`pip --no-index --find-links <bundled wheels> --require-hashes`); no PyPI network access may be required on first run.
+- First run must be able to pass the complete default localization workflow offline with zero downloads; release verification must include an offline first-run check of that path.
+- Bundled models/backends remain user-swappable later via in-app surfaces; swapping is optional and never required.
+
 Implementation notes (desktop):
 
 - The installer includes an `offline/` resource payload:

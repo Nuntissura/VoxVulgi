@@ -1,7 +1,7 @@
 # Voice dubbing tooling landscape (2026): local-first, open-source, license-aware
 
 Date: 2026-02-22  
-Status: Final (WP-0020; informs Phase 2 implementation choices).
+Status: SUPERSEDED (2026-08-01) by `LOCALIZATION_STACK_LANDSCAPE_2026_07.md` (WP-0287 refresh under the batteries-included installer constraint). Originally: Final (WP-0020; informs Phase 2 implementation choices). Retained for traceability.
 
 ## 1) Goal
 

@@ -30,6 +30,17 @@
   - `governance/spec/PRODUCT_SPEC.md`
   - `governance/spec/TECHNICAL_DESIGN.md`
 
+## Installer Payload Policy (Batteries-Included)
+
+- The public VoxVulgi installer must bundle ALL models and dependencies for the complete default localization pipeline: ASR model, diarization pack, separation pack, TTS/voice-conversion models with populated Hugging Face cache, portable Python with all pinned wheels, FFmpeg/ffprobe, and supporting tools.
+- First run must be able to complete the full default localization workflow (import -> captions -> translate -> dub -> export) fully offline with zero downloads.
+- Readiness/"ready" states must reflect verified bytes on disk, never network reachability, for the default path.
+- Non-technical users are the primary persona; no terminal, pip, or manual model steps may ever be required for the default path.
+- Bundled models and backends are user-swappable later through in-app surfaces; swapping is optional and never required.
+- Slim/dev installers without the full payload are development-only and must not be the public download default.
+- The app must define, detect, and state a full-quality GPU tier and a CPU-only fallback tier; a missing GPU must never hard-fail the default path, and both tiers must be fully covered by the bundled payload.
+- Canonical detail: `governance/spec/PRODUCT_SPEC.md` sections 8.1.8 (payload) and 8.1.9 (minimum-hardware contract), `governance/spec/TECHNICAL_DESIGN.md` section 2.1, and the stack research basis in `governance/spec/LOCALIZATION_STACK_LANDSCAPE_2026_07.md`.
+
 ## Artifact Cleanup Policy
 
 - Use `governance/scripts/cleanup_artifacts.ps1` to remove generated test/tool artifacts.

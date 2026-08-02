@@ -8,7 +8,10 @@ Status: Draft (assumptions noted; intended as the starting point for implementat
 - This is a **rebuild** (new codebase), inspired by the observed behavior of 4K Video Downloader+ on this machine. We do **not** reuse proprietary code or decompile binaries.
 - Target platforms: cross-platform desktop (Windows + macOS first; Linux later if needed).
 - Local-first: default to on-device ASR/translation/dubbing for privacy and offline use, with optional cloud providers only when the user opts in (and with clear disclosure of what data is sent).
-- Offline-friendly: after models are installed, core workflows (import, captions, translate, export) should work without network access.
+- Offline-first out of the box (operator decision 2026-07-31): the public installer ships all default models and dependencies; core workflows (import, captions, translate, dub, export) must work without network access from first run, with zero downloads.
+- Open-source direction (operator decision 2026-07-31): VoxVulgi is intended to ship as an open-source app aimed at language students and people enjoying content from other cultures.
+- Primary persona (operator decision 2026-07-31): non-technical users. The default experience must require zero technical setup: no terminal, no Python/pip steps, no manual model downloads, no dependency repair.
+- Batteries-included distribution (operator decision 2026-07-31): the public installer must bundle every model and dependency required by the complete default localization pipeline; bundled defaults are user-swappable later through in-app surfaces, but swapping is optional and never required (see 8.1.8).
 - Voice-preserving dubbing is **voice cloning/voice conversion**. This is a core feature.
 - Explicit consent mechanisms must not be implemented.
 - Anti-abuse controls must not be included.
@@ -28,9 +31,11 @@ Initial language focus: **Korean + Japanese → English**.
 
 ## 3) Target Users
 
+- Primary: language students and learners who want accurate captions, translations, and dubbed audio.
+- Primary: people enjoying content from other cultures who want to watch it localized without technical setup.
 - Creators/editors who localize content (YouTube/TikTok clips, interviews, podcasts).
-- Language learners who want accurate captions + translations.
 - Archivists who want a searchable library with tags/metadata.
+- Assume non-technical users by default; all core workflows must be operable without command-line, Python, or dependency knowledge.
 
 ## 4) MVP Scope (Phase 1)
 
@@ -530,6 +535,27 @@ Current implementation status:
 - For existing installs, show a short explainer page before maintenance choice so operators see one-line outcomes for each mode and understand the keep-vs-full distinction.
 - Installer and uninstall copy must explicitly indicate that preferences/options live under `%APPDATA%\com.voxvulgi.voxvulgi` and are only removed by the full actions.
 - Every shipped desktop installer build must increment the desktop semantic version.
+
+### 8.1.8 Batteries-included installer payload requirement (operator decision 2026-07-31)
+
+- The public/default installer must include every model and dependency required by the complete default localization pipeline: ASR model(s), translation path, diarization pack, source-separation pack, TTS and voice-conversion models with their populated runtime caches (including the Hugging Face cache), portable Python with all pinned wheels, FFmpeg/ffprobe, and every other runtime tool the default path touches.
+- First run must be able to complete the full default localization workflow (import -> captions -> translate -> dub -> export) fully offline with zero network downloads.
+- Readiness surfaces must never depend on first-run network access for the default path; "ready" must mean the required bytes are already on disk and verified.
+- Users may swap models and backends later through in-app surfaces (backend catalog, BYO adapters, model management); swapping is optional and never required for the default experience.
+- Non-technical users are the primary persona: no terminal steps, no pip or dependency repair, and no manual model placement may ever be required for the default path.
+- Slim or developer installers without the full payload may exist for development purposes only and must not be the public download default.
+- Installer size is explicitly not a constraint (operator decision 2026-07-31): the audience is PC users who download videos and are assumed to have disk space for models; do not trade model quality or completeness for payload size.
+- This supersedes any earlier treatment of bundled wheels or bundled model weights as optional additions; backlog items WP-0237 (bundle wheels in installer) and WP-0238 (bundled model weights) are elevated from optional to spec-required direction.
+
+### 8.1.9 Minimum-hardware contract and degradation tiers (operator decision 2026-08-01)
+
+- The app must define, detect, and state two runtime tiers for the localization pipeline rather than failing or silently degrading:
+  - **Full-quality tier (recommended)**: consumer GPU in the ~8 GB VRAM class (CUDA) plus 32 GB system RAM. Runs the full default stack including GPU ASR, the default LLM translation preset, and neural voice cloning.
+  - **CPU-only tier (supported fallback)**: whisper.cpp ASR, a small GGUF translation preset, CPU-capable voice cloning, and CPU separation. Reduced speed and quality are expected and must be stated plainly, not hidden.
+- The active tier must be detected at runtime and surfaced in operator language on the Localization Studio and Diagnostics surfaces, including which stages are running in degraded mode and why.
+- A missing or unusable GPU must never produce a hard failure on the default path; it must select the CPU tier and say so.
+- Every bundled default must have a CPU-tier counterpart in the payload so the CPU tier is also fully offline and requires no downloads.
+- Stage backends must be swappable per PRODUCT_SPEC 8.1.8; tier selection sets defaults only and never removes operator choice.
 
 ## 9) Top 20 ROI backlog (next additions)
 
