@@ -53,6 +53,22 @@ Historical baseline this must beat (measured 2026-07-31 on the operator machine)
 - MT-08: tier detection + operator-visible tier statement (PRODUCT_SPEC 8.1.9).
 - MT-09: visible terminal state for `VoicePlanBlocked` with empty queue.
 - MT-10: closure-unit acceptance run + proof bundle + build/changelog with real commit hash.
+- MT-11 (added 2026-08-05 by operator decision): **Localization export artifact is MKV only.**
+  The Localization Studio deliverable must carry the dubbed audio, the original audio, and the
+  subtitle tracks as separately named, selectable tracks. MP4 is dropped for this artifact
+  because it silently discards per-track `title` metadata (verified: titles written into an MP4
+  do not survive the mux, so players fall back to "Track 1 / Track 2") and is limited to
+  `mov_text` subtitles. **The Video Archiver is explicitly out of scope and keeps exporting
+  MP4**: single and subscription downloads take their container from `format_preference`
+  (`config.rs`) through the yt-dlp path and never reach `MuxDubPreviewV1`.
+  Also folds in three defects found in the same code path:
+  keep-original-audio defaulted to `false` while every auto-pipeline call site passed `None`
+  (so the second track was unreachable in practice); subtitles were never embedded at all
+  (SRT/VTT written only as sidecars); and `-shortest` truncated the output to the shortest
+  input stream (observed: a 7.15 s clip cut to 6.25 s by a 6.32 s subtitle stream), which
+  violates the field lesson "preserve trailing video after the last dubbed segment".
+  Legacy `mux_dub_preview_v1.mp4` files from older builds stay playable; the app simply never
+  produces a new one.
 
 ## Test / verification plan
 - Per-microtask: focused automated checks on the touched boundary (engine `cargo test`, desktop build, contract tests).
@@ -69,3 +85,28 @@ Historical baseline this must beat (measured 2026-07-31 on the operator machine)
 
 ## Status updates
 - 2026-08-01: WP created; closure unit folded in per operator decision.
+- 2026-08-05: **MT-11 implemented** (engine + frontend), ahead of MT-01..MT-10, on operator
+  instruction ("drop mp4 for localization studio entirely as export artifact, but make sure
+  video archiver, single or subscriptions still export mp4").
+  - `jobs.rs` `MuxDubPreviewV1`: container forced to MKV (a non-MKV `output_container` request is
+    honoured as MKV and logged as `mux_dub_preview_container_forced_mkv`);
+    `keep_original_audio` now defaults to `true`; newest translated + source subtitle tracks are
+    exported to SRT and embedded as named, language-tagged subtitle tracks; audio tracks carry
+    `title` ("English (AI dub - cloned voice)" / "Original audio") with the dub as default
+    disposition; `-shortest` removed with the reason recorded inline.
+  - `SubtitleEditorPage.tsx`: the "Dub container" MP4/MKV/Auto selector is removed (no longer an
+    operator choice) and replaced with a plain-language statement; `getPreferredMuxExportExt()`
+    returns `mkv`; the persisted `export_dub_container` preference is now a constant. The preview
+    dropdown still plays a legacy `.mp4` artifact when one exists on disk.
+  - Video Archiver untouched and verified independent: its MP4 comes from `format_preference`
+    (`config.rs:196`) via the yt-dlp download path, which never reaches this job.
+  - Verification: `cargo check` clean; `npx tsc --noEmit` exit 0; desktop contract tests
+    **104/104 pass**; engine `cargo test --lib` **281 passed / 3 failed**, and all 3 failures were
+    reproduced on unmodified HEAD with the changes stashed — 2 `media_cleanup` tests fail
+    identically at HEAD (pre-existing, WP-0277 queue-pause precondition) and the
+    `job_tracks_runtime_snapshot_aggregate` perf test passes in isolation both at HEAD and with
+    these changes applied (it only failed inside the full run while CosyVoice/Spleeter benchmark
+    jobs were saturating the CPU). No regression attributable to MT-11.
+  - NOT yet done for MT-11: no desktop build produced, so the running installed app (0.1.133)
+    still contains the old MP4 mux. Needs a build + version bump + changelog entry before the
+    operator can see this in the app.

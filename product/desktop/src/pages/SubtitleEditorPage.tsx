@@ -1502,11 +1502,9 @@ export function SubtitleEditorPage({
     const raw = safeLocalStorageGet("voxvulgi.v1.editor.export_include_source_copy");
     return raw === null ? true : raw === "1";
   });
-  const [exportDubContainer, setExportDubContainer] = useState<"auto" | "mp4" | "mkv">(() => {
-    const raw = safeLocalStorageGet("voxvulgi.v1.editor.export_dub_container");
-    if (raw === "mp4" || raw === "mkv") return raw;
-    return "mp4";
-  });
+  // WP-0289 MT-11: the localization export container is fixed to MKV, so this is no longer an
+  // operator choice. Kept as a constant so the export request payload shape is unchanged.
+  const exportDubContainer = "mkv" as const;
   const [qcJobId, setQcJobId] = useState<string | null>(null);
   const [qcJobStatus, setQcJobStatus] = useState<JobStatus | null>(null);
   const [qcJobError, setQcJobError] = useState<string | null>(null);
@@ -1804,10 +1802,6 @@ export function SubtitleEditorPage({
       exportIncludeSourceCopy ? "1" : "0",
     );
   }, [exportIncludeSourceCopy]);
-
-  useEffect(() => {
-    safeLocalStorageSet("voxvulgi.v1.editor.export_dub_container", exportDubContainer);
-  }, [exportDubContainer]);
 
   useEffect(() => {
     safeLocalStorageSet("voxvulgi.v1.editor.voice_backend_goal", voiceBackendGoal);
@@ -3155,13 +3149,14 @@ export function SubtitleEditorPage({
     return joinPath(effectiveLocalizationRoot, exportFolderStem);
   }, [effectiveLocalizationRoot, exportFolderStem]);
 
+  // WP-0289 MT-11 (operator decision 2026-08-05): the Localization Studio export artifact is
+  // MKV only. MKV is the only container that carries the dubbed audio, the original audio, and
+  // the subtitle tracks as separately named, selectable tracks. Video Archiver downloads are
+  // unaffected and still export MP4.
+  // Legacy `mux_dub_preview_v1.mp4` files produced by older builds remain playable in the
+  // preview dropdown; we simply never produce a new one.
   function getPreferredMuxExportExt(): "mp4" | "mkv" {
-    if (exportDubContainer === "mp4" || exportDubContainer === "mkv") {
-      return exportDubContainer;
-    }
-    if (outputs?.mux_dub_preview_v1_mp4_exists) return "mp4";
-    if (outputs?.mux_dub_preview_v1_mkv_exists) return "mkv";
-    return "mp4";
+    return "mkv";
   }
 
   function resolveExportDir(): string {
@@ -7080,20 +7075,10 @@ export function SubtitleEditorPage({
             />
             <span>Dub preview video</span>
           </label>
-          <label style={{ display: "flex", alignItems: "center", gap: 8 }}>
-            <span>Dub container</span>
-            <select
-              value={exportDubContainer}
-              disabled={busy || !exportIncludeDubPreview}
-              onChange={(e) =>
-                setExportDubContainer(e.currentTarget.value as typeof exportDubContainer)
-              }
-            >
-              <option value="auto">Auto</option>
-              <option value="mp4">MP4</option>
-              <option value="mkv">MKV</option>
-            </select>
-          </label>
+          <span className="muted" style={{ display: "flex", alignItems: "center", gap: 8 }}>
+            Dub video is exported as MKV so the dubbed audio, the original audio, and the
+            subtitles stay selectable as separate tracks.
+          </span>
           <button
             type="button"
             disabled={busy || !doc}

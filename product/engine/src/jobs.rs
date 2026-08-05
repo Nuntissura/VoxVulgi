@@ -14371,13 +14371,31 @@ if __name__ == "__main__":
 
             let out_dir = dub_dir;
             std::fs::create_dir_all(&out_dir)?;
-            let container = p
+            // WP-0289 MT-11 (operator decision 2026-08-05): the Localization Studio export
+            // artifact is MKV ONLY. MKV is the only container here that carries several NAMED
+            // audio tracks plus embedded subtitle tracks; MP4 silently discards per-track
+            // `title` metadata (verified: titles written into an MP4 do not survive the mux, so
+            // players fall back to "Track 1 / Track 2") and is limited to `mov_text` subtitles.
+            // This does NOT affect the Video Archiver: single and subscription downloads take
+            // their container from `format_preference` (config.rs) through the yt-dlp path and
+            // never reach this job, so those keep exporting MP4.
+            let requested_container = p
                 .output_container
                 .as_deref()
                 .map(|v| v.trim().to_lowercase())
-                .filter(|v| !v.is_empty())
-                .unwrap_or_else(|| "mp4".to_string());
-            let ext = if container == "mkv" { "mkv" } else { "mp4" };
+                .filter(|v| !v.is_empty());
+            if let Some(requested) = requested_container.as_deref() {
+                if requested != "mkv" {
+                    log_line(
+                        paths,
+                        job_id,
+                        "info",
+                        "mux_dub_preview_container_forced_mkv",
+                        serde_json::json!({ "requested": requested }),
+                    )?;
+                }
+            }
+            let ext = "mkv";
             let out_path = out_dir.join(format!("mux_dub_preview_v1.{ext}"));
 
             if out_path.exists() {
@@ -14392,34 +14410,103 @@ if __name__ == "__main__":
                 return Ok(());
             }
 
-            let keep_original_audio = p.keep_original_audio.unwrap_or(false);
+            // WP-0289 MT-11: keeping the original audio is now the DEFAULT for the localization
+            // artifact. The point of the MKV switch is that the viewer can pick the dub or the
+            // original; defaulting this off made the second track unreachable in practice,
+            // because every auto-pipeline call site passes `None` here.
+            let keep_original_audio = p.keep_original_audio.unwrap_or(true);
             let dubbed_lang = normalize_lang_tag(p.dubbed_audio_lang.as_deref()).unwrap_or("eng");
             let original_lang =
                 normalize_lang_tag(p.original_audio_lang.as_deref()).unwrap_or("und");
+
+            // WP-0289 MT-11: export the subtitle tracks we already hold as sidecar JSON into SRT
+            // and embed them, newest version per kind. Translated first so it is the default.
+            let mut subtitle_inputs: Vec<(PathBuf, String, String)> = Vec::new();
+            let track_rows = subtitle_tracks::list_tracks(paths, &item.id).unwrap_or_default();
+            let newest_of = |kind: &str| -> Option<subtitle_tracks::SubtitleTrackRow> {
+                track_rows
+                    .iter()
+                    .filter(|t| t.kind == kind)
+                    .max_by_key(|t| t.version)
+                    .cloned()
+            };
+            for (kind, title) in [("translated", "English"), ("source", "Original")] {
+                let Some(track_row) = newest_of(kind) else {
+                    continue;
+                };
+                let lang = normalize_lang_tag(Some(&track_row.lang))
+                    .unwrap_or("und")
+                    .to_string();
+                let srt_path = out_dir.join(format!("mux_subs_{kind}_{lang}.srt"));
+                match subtitle_tracks::load_document(paths, &track_row.id).and_then(|doc| {
+                    subtitle_tracks::export_document_srt(&doc, &srt_path)?;
+                    Ok(())
+                }) {
+                    Ok(()) if srt_path.exists() => {
+                        subtitle_inputs.push((srt_path, lang, title.to_string()));
+                    }
+                    Ok(()) => {}
+                    Err(error) => {
+                        log_line(
+                            paths,
+                            job_id,
+                            "warn",
+                            "mux_dub_preview_subtitle_export_failed",
+                            serde_json::json!({ "kind": kind, "error": error.to_string() }),
+                        )?;
+                    }
+                }
+            }
 
             let mut ff = cmd::command(paths.ffmpeg_cmd());
             ff.args(["-nostdin", "-y"]);
             ff.arg("-i").arg(&media_path);
             ff.arg("-i").arg(&dub_audio_path);
+            for (srt_path, _, _) in &subtitle_inputs {
+                ff.arg("-i").arg(srt_path);
+            }
             ff.args(["-map", "0:v:0?"]);
             // Put dubbed audio first so it's the default track in most players.
             ff.args(["-map", "1:a:0"]);
             if keep_original_audio {
                 ff.args(["-map", "0:a:0?"]);
             }
+            for index in 0..subtitle_inputs.len() {
+                ff.args(["-map", &format!("{}:0", index + 2)]);
+            }
             ff.args(["-c:v", "copy"]);
             ff.args(["-c:a", "aac", "-b:a", "192k"]);
-            ff.args(["-shortest"]);
-            if ext == "mp4" {
-                ff.args(["-movflags", "+faststart"]);
+            if !subtitle_inputs.is_empty() {
+                ff.args(["-c:s", "srt"]);
             }
+            // WP-0289 MT-11: `-shortest` is deliberately NOT used. It ends the output when the
+            // shortest INPUT ends, so a subtitle or dub stream that stops before the last frame
+            // truncates the video (observed: a 7.15 s clip cut to 6.25 s by a 6.32 s subtitle
+            // stream). Trailing video after the final dubbed segment must be preserved.
 
-            // Best-effort language metadata.
+            // Language + human-readable track names. MKV stores `title` per track, so players
+            // show "English (AI dub - cloned voice)" instead of "Track 1".
             ff.args(["-metadata:s:a:0", &format!("language={dubbed_lang}")]);
+            ff.args([
+                "-metadata:s:a:0",
+                "title=English (AI dub - cloned voice)",
+            ]);
+            ff.args(["-disposition:a:0", "default"]);
             if keep_original_audio {
                 ff.args(["-metadata:s:a:1", &format!("language={original_lang}")]);
-                ff.args(["-disposition:a:0", "default"]);
+                ff.args(["-metadata:s:a:1", "title=Original audio"]);
                 ff.args(["-disposition:a:1", "0"]);
+            }
+            for (index, (_, lang, title)) in subtitle_inputs.iter().enumerate() {
+                ff.args([
+                    format!("-metadata:s:s:{index}"),
+                    format!("language={lang}"),
+                ]);
+                ff.args([format!("-metadata:s:s:{index}"), format!("title={title}")]);
+                ff.args([
+                    format!("-disposition:s:{index}"),
+                    if index == 0 { "default" } else { "0" }.to_string(),
+                ]);
             }
 
             ff.arg(&out_path);
