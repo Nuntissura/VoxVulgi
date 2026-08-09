@@ -46,6 +46,16 @@
 - Use `governance/scripts/cleanup_artifacts.ps1` to remove generated test/tool artifacts.
 - Default mode is dry-run; pass `-Force` to execute deletions.
 
+## Managed Video Container Policy (MKV-Only New Outputs)
+
+- Every newly managed video download or newly muxed video artifact must finalize as `.mkv`; no new single, subscription, provider, direct-HTTP, preview, or export video output may finalize as `.mp4`.
+- New MKV video outputs must contain the selected video/audio streams and selected or available subtitle tracks with truthful language/title metadata where the source supplies it.
+- Routine video downloads must embed subtitles and must not retain SRT/VTT sidecars as the user-facing video deliverable after successful embedding; explicit subtitle-only export remains allowed when separately requested.
+- Existing `.mp4` media remains a valid input, playback, import, library, identity, dedupe, availability, migration, repair, and cleanup-inventory format.
+- The MKV-only new-output policy does not authorize converting, moving, deleting, redownloading, or otherwise cleaning historical MP4 files.
+- Enforce MKV at the engine/execution boundary so saved legacy presets or queued parameters cannot create a new MP4 output.
+- Keep archive roots machine-configurable and disk-agnostic; never hardcode a drive letter or operator-specific archive path into product code or repo authority.
+
 ## Proof Standard Policy
 
 - A WP is not `DONE` unless it satisfies `governance/workflow/PROOF_STANDARD.md`.

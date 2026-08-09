@@ -163,7 +163,9 @@ Initial language focus: **Korean + Japanese → English**.
   - group mode (Container/folder / Flat list),
   - all filter state persists in localStorage across page switches.
 - Default archive/output media policy:
-  - video workflows should prefer MP4 by default wherever the local toolchain can merge or remux cleanly,
+  - every newly managed video download and newly muxed video deliverable must finalize as MKV; MP4 remains a supported input, playback, import, library, dedupe, and historical-media format but is not a permitted new managed video output,
+  - MKV video deliverables contain the selected video and audio streams plus selected/available subtitle tracks with truthful language/title metadata; routine video downloads must not leave SRT/VTT sidecars as the user-facing deliverable after successful embedding,
+  - explicit subtitle-only export remains allowed to create SRT/VTT when the operator requests subtitle files independently from a video deliverable,
   - image workflows should prefer JPEG defaults where the provider/toolchain offers multiple encodings without destructive tradeoffs.
 - “Smart tags” v1:
   - language detected,
@@ -305,8 +307,8 @@ Initial language focus: **Korean + Japanese → English**.
 
 - Export:
   - dubbed audio track (WAV/AAC),
-  - muxed video with new audio track (MP4/MKV),
-  - subtitles as sidecar or burned-in.
+  - muxed MKV video with selected original/dubbed audio tracks and embedded subtitle tracks,
+  - explicit subtitle-only SRT/VTT export when requested; routine video deliverables keep subtitles embedded instead of creating companion sidecars.
 - Localization Studio must make the run contract explicit before work starts:
   - operators should be able to set options before the localization run begins,
   - the app should expose an explicit start action or an equally explicit pre-start review/confirm contract,
@@ -473,9 +475,9 @@ Current implementation status:
 - Localization Studio should open as a setup-first workbench: select or drop a source file, choose subtitle and dub target outputs, confirm the Options-linked output folder, optionally include a source copy, then use one Start/Stop control with visible percentage progress.
 - When English dubbing is selected, Localization Studio must treat voice-cloning runtime setup as part of the Start workflow. If the local voice-cloning packages are missing, Start queues the one-time setup in plain operator language and the run continues automatically after setup succeeds; operators should not have to discover or manually install voice packs from Diagnostics.
 - Successful Localization outputs should be listed as thumbnail rows with direct actions for source file, output folder, subtitle location, dub file, and job/working folder.
-- Localization deliverable filenames should keep the source stem and add target markers such as `.source.<ext>`, `.sub-en.srt`, `.sub-en.vtt`, and `.dub-en.<ext>`.
+- Localization deliverable filenames should keep the source stem and add target markers such as `.source.<ext>` and `.dub-en.mkv`; explicit subtitle-only exports may use `.sub-en.srt` or `.sub-en.vtt` when requested.
 - Generic cache/history cleanup must never silently remove Localization Studio deliverables, benchmark/report history, or custom output folders.
-- Default preview/download video outputs should be MP4 wherever the local toolchain can merge/remux cleanly.
+- Default preview/download video outputs must be MKV. No new managed single, subscription, provider, direct-HTTP, preview, or export video artifact may finalize as MP4.
 - Default archive image outputs should prefer JPEG where practical.
 - UX must be fast enough for daily production use before any commercial release.
 
@@ -556,6 +558,31 @@ Current implementation status:
 - A missing or unusable GPU must never produce a hard failure on the default path; it must select the CPU tier and say so.
 - Every bundled default must have a CPU-tier counterpart in the payload so the CPU tier is also fully offline and requires no downloads.
 - Stage backends must be swappable per PRODUCT_SPEC 8.1.8; tier selection sets defaults only and never removes operator choice.
+
+### 8.2 Archiver reliability, provider expansion, and library workspace requirements (operator decision 2026-08-09)
+
+- Panel navigation and job startup must remain responsive against the operator's six-figure library/job history and NAS-backed media roots. UI entry must not synchronously wait for NAS file probes, archive-file recounts, queue-wide aggregation, or full-history title repair.
+- Diagnostics must correlate a reported slowdown across UI interaction, frontend long task, Tauri/IPC queue wait, command phase, SQLite query/row work, NAS probe, child-process launch, WebView2 renderer, and host-resource pressure using one incident/span identifier.
+- Internal traces must use bounded rotation and retention. Long-lived diagnostic learning belongs in compact aggregates; an unbounded JSONL trace is not an acceptable history store.
+- Diagnostics must provide bounded normal and incident-capture modes, including operator actions to arm capture for the next job start or panel switch. `vvwatch` remains the sibling out-of-process evidence path and must correlate with the same incident identifiers where practical.
+- The bundled downloader runtime must be current, hash-pinned, offline-bundled, and security-reviewed before authenticated provider work ships. Version/capability changes create a new observation epoch rather than silently mixing unlike behavior.
+- YouTube protection must use a deterministic, inspectable controller over a preserved operator baseline. It may apply a temporary effective overlay for request spacing, download sleep/jitter, concurrency, and batch tranche size, but must not silently rewrite saved settings.
+- YouTube controller transitions require corroborated provider-specific outcomes separated by a minimum time. Authentication, content-unavailable, network, storage, PO-token/capability, and rate-limit failures are distinct and must not drive the same remediation.
+- Automatic protection must expose current mode, effective settings, transition reason, next retry/probe time, recent outcome, and a manual return-to-baseline action. Raw outcome retention is bounded; durable rollups and transition history may grow over time.
+- YouTube PO-token provider capability is a separate readiness state from pacing. A missing/failed PO-token capability must not be misrepresented as a bandwidth or concurrency problem.
+- Canonical provider metadata is keyed by service plus media ID and records remote title, uploader/channel, source URL, published time, thumbnail reference, provider/runtime version, provenance, and observation time independently from job attempts and filename-derived library titles.
+- Display-title precedence is operator override, canonical remote title, imported/file title, then a stable provider/ID fallback. Missing, placeholder, or encoding-damaged titles may be repaired, but operator-authored titles must never be overwritten automatically.
+- Structured downloader output must be parsed through an explicit UTF-8/JSON contract rather than delimiter parsing that can corrupt multilingual titles.
+- Options must provide module-scoped subnavigation for General, Localization Studio, Video Archiver, Instagram Archiver, TikTok Archiver, Image Archive, Media Library, Jobs/Queue, and Diagnostics. Narrow layouts use a compact accessible selector/rail rather than overflowing horizontal tabs.
+- One typed settings registry must identify each setting's owning module, type, validation, default, persisted value, effective value, temporary policy overlay, reset behavior, and diagnostic test path. Existing persisted keys remain compatible unless a governed migration says otherwise.
+- YouTube, Instagram, and TikTok subscription managers must share one accessible, bounded master-detail workspace while preserving provider-specific capabilities. Search, status, group, sort, refresh, last result, next check, queued/running state, and hold reason stay visible without placing optional group management before the source list.
+- Instagram Archiver must support working single-post/reel ingest and recurring profile archive behavior through a provider adapter. The app must persist last attempt, last success, classified failure, provider/runtime version, cursor/checkpoint, next retry, and hold reason; repeated upstream/auth failures must not loop indefinitely.
+- TikTok Archiver must support single-video ingest and recurring profile/channel downloads with canonical TikTok IDs, durable incremental state, provider-specific session/settings, dedupe, job lineage, and the shared subscription workspace. YouTube pacing thresholds must not be copied to TikTok without provider evidence.
+- Media Library remains the canonical product name and must integrate YouTube, Instagram, TikTok, Image Archive, Localization, and local/imported media without splitting imported and current items into different product libraries.
+- Media Library primary tabs are All, Videos, Images, Audio, and Favorites. Provider, availability, lifecycle, source/subscription, date, and sort are compact dropdown filters applied by the backend to the canonical full set before pagination.
+- Favorites are additive metadata keyed by canonical library item ID. Missing, unreachable, deleted, or moved media must not silently remove favorite state or source metadata.
+- Media Library search covers canonical remote title, operator/file title, uploader/channel, provider ID, source URL/reference, and tags through an indexed full-set query. Search, counts, selection, and bulk actions must never operate only on the rendered page unless explicitly labeled `loaded`.
+- Media Library is list-first with an optional bounded grid view, one compact toolbar, saved views where implemented, and a detail drawer for paths/provenance/activity. New card stacks are forbidden; large paths and technical provenance do not dominate the primary row.
 
 ## 9) Top 20 ROI backlog (next additions)
 

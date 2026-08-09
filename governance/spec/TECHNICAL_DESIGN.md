@@ -331,11 +331,11 @@ Phase 2 preview implementation notes (current):
 
 - TTS preview: `tts_preview_pyttsx3_v1` renders per-segment wavs + a manifest (system TTS; quality varies by OS).
 - Mix preview: `mix_dub_preview_v1` overlays TTS segments onto the separation background stem into a single wav, but falls back to the source-media audio when no background stem is available so preview generation does not hard-fail under separation/runtime contention.
-- Mux preview: `mux_dub_preview_v1` muxes the preview dub audio onto the original media into an MP4.
+- Mux preview: `mux_dub_preview_v1` muxes selected original/dubbed audio plus available subtitle tracks with the original video into an MKV.
 - User-facing exports are separated from working artifacts:
   - working artifacts remain under `derived/items/<item_id>/...`
   - exported deliverables default to `<download_root>/localization/en/<media-stem>/`
-  - the separate dubbed audio track remains the working `mix_dub_preview_v1.wav`; the exported/muxed MP4 embeds that dubbed audio into video
+  - the separate dubbed audio track remains the working `mix_dub_preview_v1.wav`; the exported/muxed MKV embeds selected original/dubbed audio and subtitle tracks into video
 - Localization Studio should auto-prefer the latest translated English track for dubbing, benchmarking, experimental backend runs, and A/B preview actions, and should surface a compact workflow/readiness map so operators can see track/runtime state before queueing jobs.
 - The shipped localization path should stay stage-explicit and inspectable:
   - source import/select,
@@ -345,7 +345,7 @@ Phase 2 preview implementation notes (current):
   - generated speech artifacts,
   - voice-preserved or experimental-backend artifacts,
   - mix artifact,
-  - muxed MP4 artifact,
+  - muxed MKV artifact,
   - deliverable/export surface.
 - The localization-run orchestrator should use one shared next-stage decision point instead of scattered ad hoc follow-on queues.
   - translated English tracks without speaker labels should continue to diarization first,
@@ -561,7 +561,12 @@ Phase 1 implementation status (2026-02-22):
   - prefer a bundled/pinned Deno runtime for installer-state reliability,
   - surface JS-runtime readiness in Diagnostics alongside yt-dlp,
   - when a runtime is available, prefer yt-dlp's documented default YouTube client strategy instead of forcing brittle custom `player_client` overrides.
-- Default download presets should prefer MP4-compatible format selection, and yt-dlp execution should request MP4 merge/remux where supported so final containers are predictable by default.
+- Default download presets must select the best compatible source streams without constraining selection to MP4, and every yt-dlp video execution must request MKV merge/remux so the final managed container is predictably MKV.
+- yt-dlp video execution must embed selected/available subtitle tracks into the MKV and remove transient subtitle sidecars after successful embedding. Explicit subtitle-only export remains a separate workflow.
+- Direct-HTTP video assets that arrive as MP4 or another supported container must be staged and remuxed with stream copy into MKV while preserving available video/audio/subtitle streams. A remux failure is a visible failed/attention result; the MP4 staging file must not be imported as a successful new managed output.
+- Existing MP4 files remain fully recognized by library import, availability, canonical identity, dedupe, playback, reveal, migration, repair, and cleanup-inventory logic. The MKV output policy never authorizes conversion, deletion, or redownload of historical MP4 media.
+- Output-container policy is enforced at the engine/execution boundary. A persisted legacy preset or queued job requesting MP4 cannot override MKV finalization; migration updates saved defaults and UI copy without invalidating historical MP4 rows.
+- Machine-specific archive roots remain configuration, not source-code constants. A move from UNC to a directly attached/mapped path requires live path identity/reachability validation and machine-local config update; no drive letter is hardcoded into portable product code or repo authority.
 - Image/archive providers should prefer JPEG defaults when multiple equivalent encodings are available and JPEG is the practical archive target; avoid surprising WebM-first or similarly unsuitable defaults.
 - Instagram batch ingest expands instagram.com URLs (posts/reels/stories/profiles) into direct media asset URLs where possible, then downloads via `direct_http_v1` into `downloads/instagram/` by default (optional session cookie header for private content).
 - Planned archive additions:
@@ -759,6 +764,32 @@ Subscription export JSON shape (v1):
 - Frameless maximize/fullscreen handling must keep the native desktop window bounds synchronized with the visible surface so no invisible blocked area sits over neighboring apps in side-by-side layouts.
 - Dense archive panes should prefer panel-local scrolling/list behavior over clipped actions or invisible controls.
 - Where a dense table cannot fit at practical widths, the panel scroll surface should stay local to that card/pane and action columns should remain visible without forcing the operator to guess where controls went.
+
+### 6.6 Archiver reliability, adaptive-provider, and unified-library design contract
+
+- Panel reads use read-only SQLite connections, bounded indexed projections, cancellation/stale-result guards, and explicit cache age. Opening a pane must not run migrations, acquire a write connection only to read, enumerate archive files, or synchronously probe every NAS media path.
+- Physical media availability is a cached observation with `present`, `missing`, `unreachable`, `slow`, and observation-time evidence. A bounded reconciler refreshes observations independently from rendering; execution-boundary checks may force one exact fresh probe where product correctness requires it.
+- Subscription archive totals and current job/subscription activity are maintained as indexed database state or event-updated rollups. UI polling reads the rollup and does not repeatedly derive it from all historical jobs or filesystem archive files.
+- Performance traces carry `incident_id`, `span_id`, `parent_span_id`, page, interaction, command, job/batch/provider identity where applicable, queue-wait time, execution phase, row count, storage class, cache age, child PID, outcome, and bounded error classification. Secrets, full authenticated URLs, and cookie material remain redacted.
+- Frontend diagnostics use supported `PerformanceObserver`/long-task and render/interaction timing where available. Windows deep capture is optional and operator-triggered through the existing Diagnostics/`vvwatch` workflow, using WebView2/ETW/WPR evidence without stealing focus or running indefinitely.
+- `diagnostics_trace.jsonl` and external-watch artifacts rotate by bounded size/age. Incident capture may temporarily increase detail for a fixed duration; dropped/sampled event counts are explicit.
+- Downloader execution stores an immutable request/effective-policy receipt. The receipt distinguishes the saved operator baseline from adaptive overlay and records downloader/runtime/plugin versions plus provider capability epoch.
+- Adaptive outcomes are append-only and keyed by provider, operation class, auth/session identity fingerprint, source target, runtime epoch, error class, policy mode, and timing. Raw rows use retention/compaction; daily outcome rollups and policy transitions are durable.
+- YouTube policy states are `normal`, `cautious`, `conservative`, `cooldown`, and `hold`. Transitions use corroboration, minimum spacing, dwell time, hysteresis, a one-target canary after cooldown, and slow recovery after a sustained success window.
+- Rate-limit outcomes may reduce aggregate starts and add request/download delay. Authentication outcomes hold the affected auth identity. PO-token/capability outcomes require capability remediation. Content-unavailable, local storage, and generic network outcomes do not train the pacing controller.
+- `limit_rate` is modeled as maximum transfer bandwidth; `throttled_rate` is modeled only as yt-dlp's slow-transfer detection threshold. UI labels, validation, effective receipts, and command arguments must preserve that distinction.
+- Provider enumeration consumes structured JSON with explicit UTF-8. Canonical metadata upsert preserves raw provider values and normalized search/display fields; repair jobs are bounded, resumable, provenance-recorded, and never replace an operator override.
+- Display-title resolution is one engine/shared-frontend contract consumed by Jobs, Video Archiver, provider subscription detail, and Media Library. Frontends must not independently reconstruct title precedence.
+- The settings registry is a typed product-code module, not repo governance. It exposes module, stable setting ID, persistence key, schema/type, default, validation, restart requirement, secret/redaction class, baseline value, effective overlay, reset action, help, and optional test action.
+- Options navigation is URL/local-state addressable, keyboard accessible, stable across restart/page switches, and represented through stable product IDs for headless audit. Moving a setting between panes does not change its persistence key without a migration.
+- A provider adapter defines URL classification, canonical media ID, single-media expansion, subscription/profile enumeration, incremental cursor/archive behavior, authentication/session test, effective pacing inputs, error classification, and canonical metadata mapping.
+- The shared subscription workspace queries one bounded provider-neutral projection while provider-specific tables/adapters remain allowed behind it. Bulk actions target canonical backend sets; `Select loaded` remains the only page-local selection label.
+- Instagram provider selection starts with the current pinned yt-dlp profile/post capability tested against the exact failing target. A second adapter such as Instaloader may own profile/subscription enumeration when selected by proof; provider choice/version is persisted in lifecycle state and does not create duplicate canonical media.
+- TikTok uses canonical video IDs, one provider-specific execution track/budget, incremental profile cursor/archive state, and provider-specific session/device/app capability. It reuses the shared identity, membership, job, settings, adaptive-outcome, and subscription-projection contracts.
+- Media Library favorites use an additive table keyed by library item ID with creation/update attribution. Favorite state survives file lifecycle changes and participates in canonical backend filtering before pagination.
+- Media Library search uses an inspected SQLite FTS5 design when available, with an explicit synchronization/integrity/rebuild contract; a measured indexed fallback is required if bundled SQLite lacks FTS5. Search results join back to canonical lifecycle/provider filters before pagination and exact totals.
+- Media Library pagination uses stable deterministic ordering and keyset/row-value continuation where measured offset cost is material. Every page receipt reports query/filter version, exact matching total or explicitly bounded count mode, loaded count, continuation token, and observation time.
+- List and grid renderers are bounded/virtualized, lazy-load thumbnails, preserve stable item IDs and accessibility position, and never derive canonical counts or bulk-action scope from mounted DOM rows.
 
 ## 7) Testing Strategy
 
