@@ -3,7 +3,7 @@
 ## Metadata
 - ID: WP-0161
 - Owner: Codex
-- Status: REVIEW
+- Status: DONE
 - Created: 2026-04-08
 - Target milestone: UX Parity
 
@@ -38,3 +38,4 @@ In scope:
   - Frontend: Three new columns in subscription table — **Type** (Channel/Shorts/Playlist/URL), **Downloaded** (archive count), **Status** (Downloading…/Idle).
   - Note: "detected" count (total items on remote) deferred — requires yt-dlp expand call which is not cheap. Only downloaded count shown for now.
   - Verified: `cargo check` (0 errors, pre-existing warnings only) + `npm run build` (exit 0).
+- 2026-08-14: Closure proof completed on governed desktop v0.1.139. Later WP-0255 implementation filled the deferred upstream total, and the live 303-subscription surface now shows fractional `downloaded / upstream total` progress plus distinct Shorts, Channel/Videos, and Playlist rows.
