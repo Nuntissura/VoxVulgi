@@ -20,6 +20,7 @@ fn run() -> Result<()> {
     let mut stage_base_dir: Option<PathBuf> = None;
     let mut out_dir: Option<PathBuf> = None;
     let mut force = false;
+    let mut export_only = false;
 
     let mut i = 1;
     while i < args.len() {
@@ -39,6 +40,7 @@ fn run() -> Result<()> {
                 out_dir = Some(PathBuf::from(v));
             }
             "--force" => force = true,
+            "--export-only" => export_only = true,
             other => {
                 return Err(EngineError::InstallFailed(format!(
                     "unknown arg: {other} (try --help)"
@@ -54,6 +56,12 @@ fn run() -> Result<()> {
     let out_dir = out_dir
         .ok_or_else(|| EngineError::InstallFailed("missing required --out-dir".to_string()))?;
 
+    if force && export_only {
+        return Err(EngineError::InstallFailed(
+            "--force and --export-only cannot be used together".to_string(),
+        ));
+    }
+
     let paths = AppPaths::new(stage_base_dir.clone());
     paths.ensure_dirs()?;
     db::ensure_schema(&paths)?;
@@ -67,6 +75,13 @@ fn run() -> Result<()> {
 
     println!("stage base dir: {}", paths.base_dir.to_string_lossy());
     println!("out dir: {}", out_dir.to_string_lossy());
+
+    if export_only {
+        println!("export-only requested; reusing the existing prepared stage.");
+        export_offline_payload(&paths, &out_dir)?;
+        println!("done.");
+        return Ok(());
+    }
 
     // Phase 1: FFmpeg + whisper model.
     {
@@ -371,22 +386,46 @@ fn copy_tree(src_root: &Path, dst_root: &Path) -> Result<()> {
             if should_skip_payload_entry(&rel) {
                 continue;
             }
-            let file_type = match entry.file_type() {
-                Ok(v) => v,
-                Err(_) => continue,
-            };
+            let file_type = entry.file_type().map_err(|error| {
+                EngineError::InstallFailed(format!(
+                    "failed to inspect offline payload entry {}: {error}",
+                    path.display()
+                ))
+            })?;
             let dst = dst_root.join(rel);
             if file_type.is_dir() {
                 std::fs::create_dir_all(&dst)?;
                 stack.push(path);
-            } else if file_type.is_file() {
-                if let Some(parent) = dst.parent() {
-                    std::fs::create_dir_all(parent)?;
-                }
-                std::fs::copy(&path, &dst)?;
+            } else if file_type.is_file() || file_type.is_symlink() {
+                copy_payload_file(&path, &dst, file_type.is_symlink())?;
             }
         }
     }
+    Ok(())
+}
+
+fn copy_payload_file(src: &Path, dst: &Path, is_symlink: bool) -> Result<()> {
+    if is_symlink {
+        let target_metadata = std::fs::metadata(src).map_err(|error| {
+            EngineError::InstallFailed(format!(
+                "offline payload contains an unreadable symbolic link {}: {error}",
+                src.display()
+            ))
+        })?;
+        if !target_metadata.is_file() {
+            return Err(EngineError::InstallFailed(format!(
+                "offline payload only supports symbolic links to files; {} resolves to a non-file",
+                src.display()
+            )));
+        }
+    }
+    if let Some(parent) = dst.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    // std::fs::copy follows a file symlink and materializes the target bytes at the
+    // destination. Hugging Face snapshots rely on these links; copying only
+    // DirEntry::file_type().is_file() silently produced incomplete installers.
+    std::fs::copy(src, dst)?;
     Ok(())
 }
 
@@ -526,11 +565,94 @@ Usage:
   cargo run --bin voxvulgi_offline_bundle_prep -- \
     --stage-base-dir "<repo>/tmp_offline_bundle_stage" \
     --out-dir "<repo>/product/desktop/src-tauri/offline" \
-    [--force]
+    [--force | --export-only]
 
 Notes:
   - Downloads required tools/models during prep (build-time), but the exported payload is local-only.
+  - --export-only re-exports an already prepared stage without installs, downloads, or warmups.
   - The desktop app bootstraps the payload into the real app-data dir on first run.
 "#
     );
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn copy_tree_copies_regular_files() {
+        let temp = tempfile::tempdir().unwrap();
+        let source = temp.path().join("source");
+        let destination = temp.path().join("destination");
+        std::fs::create_dir_all(source.join("nested")).unwrap();
+        std::fs::write(source.join("nested").join("weights.bin"), b"weights").unwrap();
+
+        copy_tree(&source, &destination).unwrap();
+
+        assert_eq!(
+            std::fs::read(destination.join("nested").join("weights.bin")).unwrap(),
+            b"weights"
+        );
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn copy_tree_materializes_file_symlinks() {
+        let temp = tempfile::tempdir().unwrap();
+        let source = temp.path().join("source");
+        let destination = temp.path().join("destination");
+        let blobs = source.join("blobs");
+        let snapshot = source.join("snapshots").join("revision");
+        std::fs::create_dir_all(&blobs).unwrap();
+        std::fs::create_dir_all(&snapshot).unwrap();
+        let target = blobs.join("model.bin");
+        std::fs::write(&target, b"model-bytes").unwrap();
+        let link = snapshot.join("model.bin");
+        if let Err(error) = std::os::windows::fs::symlink_file(&target, &link) {
+            if error.raw_os_error() == Some(1314) {
+                eprintln!("skipped: Windows test process lacks symbolic-link privilege");
+                return;
+            }
+            panic!("failed to create test symlink: {error}");
+        }
+
+        copy_tree(&source, &destination).unwrap();
+
+        let copied = destination
+            .join("snapshots")
+            .join("revision")
+            .join("model.bin");
+        assert_eq!(std::fs::read(&copied).unwrap(), b"model-bytes");
+        assert!(!std::fs::symlink_metadata(copied)
+            .unwrap()
+            .file_type()
+            .is_symlink());
+    }
+
+    #[test]
+    fn copy_payload_file_materializes_configured_real_symlink() {
+        let Some(source) = std::env::var_os("VOXVULGI_TEST_FILE_SYMLINK") else {
+            eprintln!("skipped: VOXVULGI_TEST_FILE_SYMLINK was not provided");
+            return;
+        };
+        let source = PathBuf::from(source);
+        assert!(
+            std::fs::symlink_metadata(&source)
+                .unwrap()
+                .file_type()
+                .is_symlink(),
+            "configured source must be a symbolic link"
+        );
+        let expected = std::fs::read(&source).unwrap();
+        let temp = tempfile::tempdir().unwrap();
+        let copied = temp.path().join("materialized.bin");
+
+        copy_payload_file(&source, &copied, true).unwrap();
+
+        assert_eq!(std::fs::read(&copied).unwrap(), expected);
+        assert!(!std::fs::symlink_metadata(copied)
+            .unwrap()
+            .file_type()
+            .is_symlink());
+    }
 }

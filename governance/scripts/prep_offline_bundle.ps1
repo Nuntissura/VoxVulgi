@@ -1,10 +1,15 @@
 param(
   [string]$StageBaseDir,
   [string]$OutDir,
-  [switch]$Force
+  [switch]$Force,
+  [switch]$ExportOnly
 )
 
 $ErrorActionPreference = "Stop"
+
+if ($Force -and $ExportOnly) {
+  throw "Use either -Force or -ExportOnly, not both."
+}
 
 $repoRoot = (Resolve-Path (Join-Path $PSScriptRoot "..\\..")).Path
 
@@ -33,6 +38,9 @@ $cargoArgs = @(
 )
 if ($Force) {
   $cargoArgs += "--force"
+}
+if ($ExportOnly) {
+  $cargoArgs += "--export-only"
 }
 
 Push-Location $repoRoot

@@ -1122,3 +1122,11 @@ This changelog tracks desktop installer builds produced by `governance/scripts/b
 - Artifacts:
   - `product/desktop/build_target/Current/release/bundle/nsis/VoxVulgi_0.1.133_x64-setup.exe`
 - Notes: Canonical Media Library backend filtering and live imported identity unification
+
+## 0.1.134 - 2026-08-14T07:56:10Z
+- Work Packets: `WP-0298`, `WP-0299`, `WP-0300`, `WP-0301`, `WP-0306`
+- Commit: `b5f0b8c`
+- Offline Bundle ID: `offline_full_win64_20260814_074826`
+- Artifacts:
+  - `product/desktop/build_target/Current/release/bundle/nsis/VoxVulgi_0.1.134_x64-setup.exe`
+- Notes: Crash-wave diagnostics, secure provider runtime, canonical metadata repair, Options registry, MKV enforcement and root-rebind safety

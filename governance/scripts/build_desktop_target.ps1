@@ -71,6 +71,46 @@ function Get-DirectoryPayloadBytes([string]$Path) {
   return [int64]$sum.Sum
 }
 
+function Test-OfflineDirectoryPayloadArtifacts([string]$OfflineDir) {
+  $requiredFiles = @(
+    'tools\ffmpeg\ffmpeg.exe',
+    'tools\ffmpeg\ffprobe.exe',
+    'tools\yt-dlp\yt-dlp.exe',
+    'tools\js_runtime\deno\deno.exe',
+    'tools\js_runtime\node\node.exe',
+    'tools\js_runtime\node\npm.cmd',
+    'tools\youtube_po_provider\server\build\main.js',
+    'tools\python\portable\python.exe'
+  )
+  foreach ($relativePath in $requiredFiles) {
+    $path = Join-Path $OfflineDir $relativePath
+    $item = Get-Item -LiteralPath $path -Force -ErrorAction SilentlyContinue
+    if (-not $item -or $item.PSIsContainer -or $item.Length -le 0 -or $item.LinkType) {
+      return "offline directory payload required file is missing, empty, or still linked: $relativePath"
+    }
+  }
+
+  $kokoroRoot = Join-Path $OfflineDir 'cache\huggingface\hub\models--hexgrad--Kokoro-82M'
+  $kokoroRefPath = Join-Path $kokoroRoot 'refs\main'
+  if (-not (Test-Path -LiteralPath $kokoroRefPath -PathType Leaf)) {
+    return 'offline directory payload is missing the Kokoro refs/main revision pointer'
+  }
+  $kokoroRevision = (Get-Content -LiteralPath $kokoroRefPath -ErrorAction SilentlyContinue | Select-Object -First 1)
+  if ([string]::IsNullOrWhiteSpace($kokoroRevision)) {
+    return 'offline directory payload has an empty Kokoro refs/main revision pointer'
+  }
+  $kokoroSnapshot = Join-Path $kokoroRoot ("snapshots\{0}" -f $kokoroRevision.Trim())
+  foreach ($relativePath in 'config.json','kokoro-v1_0.pth','voices\af_heart.pt') {
+    $path = Join-Path $kokoroSnapshot $relativePath
+    $item = Get-Item -LiteralPath $path -Force -ErrorAction SilentlyContinue
+    if (-not $item -or $item.PSIsContainer -or $item.Length -le 0 -or $item.LinkType) {
+      return "offline directory payload Kokoro snapshot file is missing, empty, or still linked: $relativePath"
+    }
+  }
+
+  return $null
+}
+
 function Get-JsonVersion([string]$Path) {
   $content = Get-Content -LiteralPath $Path -Raw
   $match = [regex]::Match($content, '"version"\s*:\s*"(?<version>\d+\.\d+\.\d+)"')
@@ -227,6 +267,11 @@ function Test-OfflinePayloadState([string]$RepoRoot) {
         -not (Test-Path -LiteralPath $modelsDir -PathType Container) -and
         -not (Test-Path -LiteralPath $cacheDir -PathType Container)) {
       $state.Reason = "offline directory payload is missing tools/models/cache resources under: $offlineDir"
+      return [pscustomobject]$state
+    }
+    $artifactError = Test-OfflineDirectoryPayloadArtifacts -OfflineDir $offlineDir
+    if (-not [string]::IsNullOrWhiteSpace($artifactError)) {
+      $state.Reason = $artifactError
       return [pscustomobject]$state
     }
     $state.PayloadBytes =
