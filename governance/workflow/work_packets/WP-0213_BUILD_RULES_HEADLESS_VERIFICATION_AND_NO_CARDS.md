@@ -2,7 +2,7 @@
 
 ## Status
 
-REVIEW
+DONE
 
 ## Owner
 
@@ -31,4 +31,4 @@ Codex
 ## Notes
 
 - 2026-05-12: Created after operator direction to make all build inspection headless/non-invasive and stop adding card-based UI.
-
+- 2026-08-14: DONE. The canonical rules, Codex links, and mirrored agent-facing notes were re-read against every acceptance item. Proof: `product/desktop/build_target/tool_artifacts/wp_runs/WP-0213/20260814_final/`.

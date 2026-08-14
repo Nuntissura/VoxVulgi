@@ -1,0 +1,16 @@
+{
+  "wp": "WP-0213",
+  "status": "DONE",
+  "verified_at": "2026-08-14T14:03:00Z",
+  "verification_class": "governance-only",
+  "acceptance": {
+    "build_rules_exists": true,
+    "quiet_headless_rule_present": true,
+    "visual_and_navigation_interaction_rule_present": true,
+    "no_new_cards_rule_present": true,
+    "project_codex_links_build_rules": true,
+    "agent_notes_link_build_rules": true,
+    "claude_notes_semantically_match": true
+  },
+  "product_code_changed": false
+}
