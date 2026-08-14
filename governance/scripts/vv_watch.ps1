@@ -1034,27 +1034,61 @@ function Get-WprCapability([string]$ProfilePath, [string]$RunDir) {
 }
 
 function Get-BoundedDiagnosticsTraceRows([string]$TraceDir, [string]$CorrelationIncidentId, [int]$Limit = 750) {
-    $lines = [Collections.Generic.List[string]]::new()
-    $candidates = [Collections.Generic.List[object]]::new()
+    $recentLines = [Collections.Generic.List[string]]::new()
+    $historicalBatches = [Collections.Generic.List[object]]::new()
+    $maxCompressedGenerationBytes = 8MB
+    $current = Join-Path $TraceDir "diagnostics_trace.jsonl"
+    if (Test-Path -LiteralPath $current -PathType Leaf) {
+        foreach ($line in @(Get-Content -LiteralPath $current -Tail $Limit -ErrorAction SilentlyContinue)) {
+            $recentLines.Add([string]$line)
+        }
+    }
     if (-not [string]::IsNullOrWhiteSpace($CorrelationIncidentId)) {
         $incidentTrace = Join-Path $TraceDir ("incidents\{0}\trace.jsonl" -f $CorrelationIncidentId)
-        if (Test-Path -LiteralPath $incidentTrace -PathType Leaf) { $candidates.Add([pscustomobject]@{ path=$incidentTrace; zip=$false }) }
+        if (Test-Path -LiteralPath $incidentTrace -PathType Leaf) {
+            foreach ($line in @(Get-Content -LiteralPath $incidentTrace -Tail $Limit -ErrorAction SilentlyContinue)) {
+                $recentLines.Add([string]$line)
+            }
+        }
     }
-    $current = Join-Path $TraceDir "diagnostics_trace.jsonl"
-    $generationFiles = @(Get-ChildItem -LiteralPath $TraceDir -File -ErrorAction SilentlyContinue |
-        Where-Object { $_.Name -match '^diagnostics_trace\.(?:generation\..+|[1-5])\.(?:jsonl|zip)$' } |
-        Sort-Object LastWriteTimeUtc -Descending | Select-Object -First 5)
-    foreach ($file in @($generationFiles | Sort-Object LastWriteTimeUtc)) { $candidates.Add([pscustomobject]@{ path=$file.FullName; zip=($file.Extension -eq '.zip') }) }
-    if (Test-Path -LiteralPath $current -PathType Leaf) { $candidates.Add([pscustomobject]@{ path=$current; zip=$false }) }
-    foreach ($candidate in $candidates) {
-        if (-not $candidate.zip) { foreach ($line in @(Get-Content -LiteralPath $candidate.path -Tail $Limit -ErrorAction SilentlyContinue)) { $lines.Add([string]$line) }; continue }
-        try {
-            Add-Type -AssemblyName System.IO.Compression.FileSystem -ErrorAction SilentlyContinue
-            $archive = [IO.Compression.ZipFile]::OpenRead([string]$candidate.path)
-            try { $entry = $archive.Entries | Select-Object -First 1; if ($entry) { $reader = [IO.StreamReader]::new($entry.Open()); try { $ring = [Collections.Generic.Queue[string]]::new(); while (($line = $reader.ReadLine()) -ne $null) { if ($ring.Count -ge $Limit) { $null = $ring.Dequeue() }; $ring.Enqueue($line) }; foreach ($line in $ring) { $lines.Add($line) } } finally { $reader.Dispose() } } } finally { $archive.Dispose() }
-        } catch {}
+    if ($recentLines.Count -lt $Limit) {
+        $generationFiles = @(Get-ChildItem -LiteralPath $TraceDir -File -ErrorAction SilentlyContinue |
+            Where-Object { $_.Name -match '^diagnostics_trace\.(?:generation\..+|[1-5])\.(?:jsonl|zip)$' } |
+            Sort-Object LastWriteTimeUtc -Descending | Select-Object -First 5)
+        foreach ($file in $generationFiles) {
+            $batch = [Collections.Generic.List[string]]::new()
+            if ($file.Extension -ne '.zip') {
+                foreach ($line in @(Get-Content -LiteralPath $file.FullName -Tail $Limit -ErrorAction SilentlyContinue)) {
+                    $batch.Add([string]$line)
+                }
+            } elseif ($file.Length -le $maxCompressedGenerationBytes) {
+                try {
+                    Add-Type -AssemblyName System.IO.Compression.FileSystem -ErrorAction SilentlyContinue
+                    $archive = [IO.Compression.ZipFile]::OpenRead($file.FullName)
+                    try { $entry = $archive.Entries | Select-Object -First 1; if ($entry) { $reader = [IO.StreamReader]::new($entry.Open()); try { $ring = [Collections.Generic.Queue[string]]::new(); while (($line = $reader.ReadLine()) -ne $null) { if ($ring.Count -ge $Limit) { $null = $ring.Dequeue() }; $ring.Enqueue($line) }; foreach ($line in $ring) { $batch.Add($line) } } finally { $reader.Dispose() } } } finally { $archive.Dispose() }
+                } catch {}
+            }
+            if ($batch.Count -gt 0) {
+                # Generations are inspected newest-first, then prepended so the final bounded
+                # projection remains chronological before current and incident rows.
+                $historicalBatches.Insert(0, @($batch))
+            }
+            if (($recentLines.Count + ($historicalBatches | ForEach-Object { $_.Count } | Measure-Object -Sum).Sum) -ge $Limit) {
+                break
+            }
+        }
     }
-    return @($lines | Where-Object { -not [string]::IsNullOrWhiteSpace($_) } | Select-Object -Last $Limit | ForEach-Object { try { $_ | ConvertFrom-Json } catch { $null } } | Where-Object { $null -ne $_ })
+    $lines = [Collections.Generic.List[string]]::new()
+    $seen = [Collections.Generic.HashSet[string]]::new([StringComparer]::Ordinal)
+    foreach ($batch in $historicalBatches) {
+        foreach ($line in $batch) {
+            if (-not [string]::IsNullOrWhiteSpace($line) -and $seen.Add($line)) { $lines.Add($line) }
+        }
+    }
+    foreach ($line in $recentLines) {
+        if (-not [string]::IsNullOrWhiteSpace($line) -and $seen.Add($line)) { $lines.Add($line) }
+    }
+    return @($lines | Select-Object -Last $Limit | ForEach-Object { try { $_ | ConvertFrom-Json } catch { $null } } | Where-Object { $null -ne $_ })
 }
 
 function Get-TraceSummary([string]$AppDir, $CurrentProcessPid, $ProcessStartedAtMs, [string]$CorrelationIncidentId) {

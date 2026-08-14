@@ -39,6 +39,8 @@ try {
     Assert-True ($scriptSource -match "incident_event_count") "vv_watch.ps1 must correlate internal trace rows by incident id"
     Assert-True ($scriptSource -match "function Get-BoundedDiagnosticsTraceRows") "vv_watch.ps1 must read a bounded set of rotated generations"
     Assert-True ($scriptSource -match 'incidents\\\{0\}\\trace\.jsonl') "vvwatch must read the app-owned active incident artifact"
+    Assert-True ($scriptSource -match '\$maxCompressedGenerationBytes = 8MB') "vvwatch must bound compressed historical trace work on the sampling path"
+    Assert-True ($scriptSource -match 'if \(\$recentLines\.Count -lt \$Limit\)') "vvwatch must skip historical generations when current/incident tails already satisfy the bounded read"
 
     $watchRoot = Join-Path $tmpRoot "watch"
     $appDir = Join-Path $tmpRoot "appdata"
