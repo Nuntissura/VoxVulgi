@@ -1,0 +1,10 @@
+{
+  "wp": "WP-0165",
+  "status": "SUPERSEDED",
+  "verified_at": "2026-08-14T14:12:00Z",
+  "superseded_by": "WP-0254",
+  "authority_file": "governance/workflow/work_packets/WP-0254_JOB_LANES_SCHEDULING_AND_STARTUP_AUTO_SYNC.md",
+  "authority_line": 63,
+  "authority_text": "WP-0165 (Quick/Advanced gate this supersedes for the archiver)",
+  "current_surfaces_inspected": ["video_ingest", "instagram_archive", "image_archive"]
+}

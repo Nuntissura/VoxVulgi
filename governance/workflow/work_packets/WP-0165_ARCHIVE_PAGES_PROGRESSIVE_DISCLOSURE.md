@@ -3,7 +3,7 @@
 ## Metadata
 - ID: WP-0165
 - Owner: Codex
-- Status: REVIEW
+- Status: SUPERSEDED
 - Created: 2026-04-08
 - Target milestone: UX Polish
 
@@ -35,3 +35,4 @@ Out of scope:
 ## Test / verification plan
 - Visual snapshot of each archive page in Quick and Advanced mode.
 - Verify localStorage persistence after page switch.
+- 2026-08-14: SUPERSEDED by WP-0254, whose canonical research basis explicitly supersedes WP-0165's shared Quick/Advanced archiver gate. Current v0.1.138 surfaces confirm the split: Video uses task tabs while Instagram and Image keep page-local disclosure. Evidence: `product/desktop/build_target/tool_artifacts/wp_runs/WP-0165/20260814_superseded/`.
