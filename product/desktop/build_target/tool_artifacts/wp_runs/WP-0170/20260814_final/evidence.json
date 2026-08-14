@@ -1,0 +1,27 @@
+{
+  "wp": "WP-0170",
+  "status": "DONE",
+  "verified_at": "2026-08-14T15:23:00+02:00",
+  "app_version": "0.1.138",
+  "runtime": {
+    "current_page": "media_library",
+    "search": "도리",
+    "source_filter": "youtube",
+    "sort_by": "date",
+    "sort_direction": "desc"
+  },
+  "engine_regression": {
+    "test": "library::tests::media_library_query_filters_the_canonical_set_before_pagination",
+    "passed": 1,
+    "failed": 0,
+    "duration_seconds": 2.39
+  },
+  "required_builds": {
+    "cargo_check_passed": true,
+    "npm_build_passed_in_governed_build": true
+  },
+  "snapshot": "governance/snapshots/WP-0209_build_0_1_138/runtime_state_1786712263595.png",
+  "snapshot_sha256": "3881CCCA5118C23AEAFFB9EA737357EF31185CD9781B8A8C27108E0B9FE0D84B",
+  "dump": "governance/snapshots/WP-0209_build_0_1_138/runtime_state_1786712263626.dump.json",
+  "dump_sha256": "59E659EE167EE0E225313968E237FCA788CC760AD05F642C165D06EF545C4F77"
+}
