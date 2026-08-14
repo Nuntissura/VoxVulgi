@@ -16,10 +16,14 @@ import {
 // WP-0264: shared failure-state classifier (same rules the subscription panel uses).
 import { classifyFailure, toneStyle } from "../lib/failureStates";
 import { diagnosticsTrace } from "../lib/diagnosticsTrace";
+import {
+  titleProvenanceLabel,
+  type CanonicalTitleProjection,
+} from "../lib/providerMetadata";
 
 type JobStatus = "queued" | "running" | "succeeded" | "failed" | "canceled";
 
-type JobRow = {
+type JobRow = CanonicalTitleProjection & {
   id: string;
   item_id: string | null;
   batch_id: string | null;
@@ -32,7 +36,6 @@ type JobRow = {
   finished_at_ms: number | null;
   logs_path: string;
   params_json?: string;
-  target_title?: string | null;
   retry_of_job_id?: string | null;
   retry_replacement_job_id?: string | null;
   // WP-0270: durable scheduler classification. Null/unknown means the engine
@@ -614,6 +617,8 @@ function jobRowsEqual(a: JobRow[], b: JobRow[]): boolean {
       x.started_at_ms !== y.started_at_ms ||
       x.finished_at_ms !== y.finished_at_ms ||
       x.target_title !== y.target_title ||
+      x.target_title_provenance !== y.target_title_provenance ||
+      x.target_title_problem !== y.target_title_problem ||
       x.retry_of_job_id !== y.retry_of_job_id ||
       x.retry_replacement_job_id !== y.retry_replacement_job_id ||
       x.batch_id !== y.batch_id ||
@@ -2362,6 +2367,12 @@ export function JobsPage({ visible = true }: { visible?: boolean }) {
             Job <code>{job.id.slice(0, 8)}</code>
             {job.item_id ? <> · Item <code>{job.item_id.slice(0, 8)}</code></> : null}
           </div>
+          {titleProvenanceLabel(job.target_title_provenance) ? (
+            <div style={{ color: "#6b7a8a", fontSize: 11 }}>
+              {titleProvenanceLabel(job.target_title_provenance)}
+              {job.target_title_problem ? ` · ${job.target_title_problem.replace(/_/g, " ")}` : ""}
+            </div>
+          ) : null}
           {jobContext?.detail ? (
             <div style={{ color: "#4b5563", fontSize: 12, lineHeight: 1.3, wordBreak: "break-word" }}>
               {jobContext.detail}

@@ -29,13 +29,17 @@ import { fileName, joinPath, parentPath } from "../lib/pathUtils";
 import { classifyFailure, toneStyle, type FailureState } from "../lib/failureStates";
 import { usePollingLoop } from "../lib/activity";
 import { isProjectionRequestCurrent } from "../lib/projectionFreshness";
+import {
+  titleProvenanceLabel,
+  type CanonicalLibraryTitleProjection,
+  type CanonicalTitleProjection,
+} from "../lib/providerMetadata";
 
-type LibraryItem = {
+type LibraryItem = CanonicalLibraryTitleProjection & {
   id: string;
   created_at_ms: number;
   source_type: string;
   source_uri: string;
-  title: string;
   media_path: string;
   duration_ms: number | null;
   width: number | null;
@@ -93,13 +97,12 @@ type LibraryItemsPage = {
   items: LibraryItem[];
 };
 
-type LiveSingleJob = {
+type LiveSingleJob = CanonicalTitleProjection & {
   id: string;
   batch_id: string | null;
   status: "queued" | "running";
   progress: number;
   params_json: string;
-  target_title: string | null;
   created_at_ms: number;
   started_at_ms: number | null;
   track: string;
@@ -6018,6 +6021,12 @@ export function LibraryPage({ mode = "all", visible = true }: LibraryPageProps) 
                   height={146}
                 />
                 <strong style={{ lineHeight: 1.2 }}>{item.title}</strong>
+                {titleProvenanceLabel(item.title_provenance) ? (
+                  <div style={{ color: "#4b5563", fontSize: 12 }}>
+                    {titleProvenanceLabel(item.title_provenance)}
+                    {item.title_problem ? ` · ${item.title_problem.replace(/_/g, " ")}` : ""}
+                  </div>
+                ) : null}
                 <div style={{ color: "#4b5563", fontSize: 12, wordBreak: "break-word" }}>
                   {item.media_path}
                 </div>
@@ -6966,6 +6975,14 @@ export function LibraryPage({ mode = "all", visible = true }: LibraryPageProps) 
                                     {item.title}
                                     {isOperatorDeletedItem(item) ? " · Deleted" : ""}
                                   </strong>
+                                  {titleProvenanceLabel(item.title_provenance) ? (
+                                    <div style={{ color: "#4b5563", fontSize: 12 }}>
+                                      {titleProvenanceLabel(item.title_provenance)}
+                                      {item.title_problem
+                                        ? ` · ${item.title_problem.replace(/_/g, " ")}`
+                                        : ""}
+                                    </div>
+                                  ) : null}
                                   <div style={{ color: "#4b5563", fontSize: 12 }}>
                                     {row.mediaKind.toUpperCase()} · {formatDuration(item.duration_ms)} ·{' '}
                                     {row.containerMeta.providerLabel}

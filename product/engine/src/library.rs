@@ -1,7 +1,7 @@
 use crate::ffmpeg;
 use crate::paths::AppPaths;
 use crate::root_rebind;
-use crate::{db, EngineError, Result};
+use crate::{db, provider_metadata, EngineError, Result};
 use rusqlite::{params, OptionalExtension, TransactionBehavior};
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
@@ -1715,6 +1715,10 @@ pub struct LibraryItem {
     pub source_type: String,
     pub source_uri: String,
     pub title: String,
+    #[serde(default)]
+    pub title_provenance: Option<provider_metadata::DisplayTitleProvenance>,
+    #[serde(default)]
+    pub title_problem: Option<String>,
     pub media_path: String,
     pub duration_ms: Option<i64>,
     pub width: Option<i64>,
@@ -1821,6 +1825,8 @@ fn library_item_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<LibraryIte
         source_type: row.get(2)?,
         source_uri: row.get(3)?,
         title: row.get(4)?,
+        title_provenance: None,
+        title_problem: None,
         media_path: row.get(5)?,
         duration_ms: row.get(6)?,
         width: row.get(7)?,
@@ -1878,6 +1884,31 @@ fn library_item_from_lineage_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<Li
     item.lineage_origin_kind = row.get(14)?;
     item.lineage_work_track = row.get(15)?;
     Ok(item)
+}
+
+fn hydrate_library_display_titles(paths: &AppPaths, items: &mut [LibraryItem]) -> Result<()> {
+    let requested = items
+        .iter()
+        .map(|item| (item.id.clone(), item.title.clone()))
+        .collect::<Vec<_>>();
+    let resolved = provider_metadata::resolve_library_display_titles(paths, &requested)?;
+    for item in items {
+        if let Some(title) = resolved.get(&item.id) {
+            item.title = title.value.clone();
+            item.title_provenance = Some(title.provenance);
+            item.title_problem = if title.damaged {
+                Some("encoding_damage".to_string())
+            } else if title.placeholder {
+                Some("provider_placeholder".to_string())
+            } else {
+                None
+            };
+        } else {
+            item.title_provenance = Some(provider_metadata::DisplayTitleProvenance::ImportedOrFile);
+            item.title_problem = None;
+        }
+    }
+    Ok(())
 }
 
 fn path_key(value: &str) -> String {
@@ -2087,12 +2118,14 @@ LIMIT ?2 OFFSET ?3
 "#,
     )?;
 
-    let items = stmt
+    let mut items = stmt
         .query_map(
             params![normalized_status, limit as i64, offset as i64],
             library_item_from_lifecycle_lineage_row,
         )?
         .collect::<rusqlite::Result<Vec<_>>>()?;
+
+    hydrate_library_display_titles(paths, &mut items)?;
 
     Ok(items)
 }
@@ -2316,7 +2349,7 @@ LIMIT ?6 OFFSET ?7
     ];
     let filtered_total: i64 = tx.query_row(&count_sql, predicate_params, |row| row.get(0))?;
     let mut stmt = tx.prepare(&page_sql)?;
-    let items = stmt
+    let mut items = stmt
         .query_map(
             params![
                 normalized_status,
@@ -2332,6 +2365,7 @@ LIMIT ?6 OFFSET ?7
         .collect::<rusqlite::Result<Vec<_>>>()?;
     drop(stmt);
     tx.commit()?;
+    hydrate_library_display_titles(paths, &mut items)?;
 
     Ok(LibraryPage {
         filtered_total: usize::try_from(filtered_total).unwrap_or(usize::MAX),
@@ -2395,12 +2429,13 @@ ORDER BY li.created_at_ms DESC
 LIMIT ?3
 "#,
     )?;
-    let items = stmt
+    let mut items = stmt
         .query_map(
             params![subscription_id.trim(), normalized_status, limit as i64],
             library_item_from_lifecycle_lineage_row,
         )?
         .collect::<rusqlite::Result<Vec<_>>>()?;
+    hydrate_library_display_titles(paths, &mut items)?;
     Ok(items)
 }
 
@@ -3881,6 +3916,8 @@ fn prepare_media_item(
         source_type: source_type.to_string(),
         source_uri: source_uri.to_string(),
         title,
+        title_provenance: None,
+        title_problem: None,
         media_path: media_path_str,
         duration_ms: probe.duration_ms,
         width: probe.width,

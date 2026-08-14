@@ -13,6 +13,34 @@ type DiagnosticsInfo = {
   engine_version: string;
 };
 
+type ProviderTitleRepairPageReceipt = {
+  state: string;
+  page_scanned: number;
+  page_repaired: number;
+  cumulative_scanned: number;
+  cumulative_repaired: number;
+  cumulative_conflicts: number;
+  cumulative_unavailable: number;
+  classifications: Record<string, number>;
+  after_job_created_at_ms: number | null;
+  after_job_id: string | null;
+  completed: boolean;
+};
+
+type ProviderTitleRepairStatus = {
+  state: string;
+  scanned: number;
+  repaired: number;
+  conflicts: number;
+  unavailable: number;
+  total_candidates: number;
+  remaining_candidates: number;
+  canonical_identities: number;
+  canonical_titles: number;
+  observation_receipts: number;
+  repair_change_receipts: number;
+};
+
 type FfmpegToolsStatus = {
   installed: boolean;
   ffmpeg_path: string;
@@ -984,6 +1012,11 @@ export function DiagnosticsPage({ visible = true }: { visible?: boolean }) {
   const [error, setError] = useState<string | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
+  const [providerTitleRepairBusy, setProviderTitleRepairBusy] = useState(false);
+  const [providerTitleRepair, setProviderTitleRepair] = useState<ProviderTitleRepairPageReceipt | null>(null);
+  const [providerTitleRepairStatus, setProviderTitleRepairStatus] =
+    useState<ProviderTitleRepairStatus | null>(null);
+  const providerTitleRepairRunRef = useRef(0);
   const [snapshotBusy, setSnapshotBusy] = useState(false);
   const [sectionStatus, setSectionStatus] = useState<Record<DiagnosticsSectionKey, DiagnosticsSectionStatus>>({
     build: { state: "idle", error: null },
@@ -1289,17 +1322,25 @@ export function DiagnosticsPage({ visible = true }: { visible?: boolean }) {
   const loadStorageSection = useCallback(async () => {
     updateSectionStatus("storage", "loading");
     try {
-      const [nextStorage, nextThumbnailCache, nextPolicy, nextArtifactRetentionPolicy] = await Promise.all([
+      const [
+        nextStorage,
+        nextThumbnailCache,
+        nextPolicy,
+        nextArtifactRetentionPolicy,
+        nextProviderTitleRepairStatus,
+      ] = await Promise.all([
         invoke<StorageBreakdown>("diagnostics_storage_breakdown"),
         invoke<ThumbnailCacheStatus>("diagnostics_thumbnail_cache_status"),
         invoke<JobLogRetentionPolicy>("jobs_log_retention_policy"),
         invoke<ItemArtifactRetentionPolicy>("jobs_item_artifact_retention_policy"),
+        invoke<ProviderTitleRepairStatus>("provider_metadata_repair_status"),
       ]);
       startTransition(() => {
         setStorage(nextStorage);
         setThumbnailCache(nextThumbnailCache);
         setPolicy(nextPolicy);
         setArtifactRetentionPolicy(nextArtifactRetentionPolicy);
+        setProviderTitleRepairStatus(nextProviderTitleRepairStatus);
         updateSectionStatus("storage", "ready");
       });
     } catch (e) {
@@ -2384,6 +2425,83 @@ export function DiagnosticsPage({ visible = true }: { visible?: boolean }) {
       await revealFilesystemPath(job.logs_path);
     } catch (e) {
       setError(String(e));
+    }
+  }
+
+  async function runProviderTitleRepair(continuous: boolean) {
+    const runId = providerTitleRepairRunRef.current + 1;
+    providerTitleRepairRunRef.current = runId;
+    setProviderTitleRepairBusy(true);
+    setError(null);
+    setNotice(null);
+    try {
+      do {
+        const receipt = await invoke<ProviderTitleRepairPageReceipt>("provider_metadata_repair_page", {
+          limit: 200,
+        });
+        if (providerTitleRepairRunRef.current !== runId) return;
+        setProviderTitleRepair(receipt);
+        setProviderTitleRepairStatus((previous) =>
+          previous
+            ? {
+                ...previous,
+                state: receipt.state,
+                scanned: receipt.cumulative_scanned,
+                repaired: receipt.cumulative_repaired,
+                conflicts: receipt.cumulative_conflicts,
+                unavailable: receipt.cumulative_unavailable,
+                remaining_candidates: Math.max(
+                  0,
+                  previous.total_candidates - receipt.cumulative_scanned,
+                ),
+                repair_change_receipts:
+                  previous.repair_change_receipts + receipt.page_repaired,
+              }
+            : previous,
+        );
+        if (receipt.completed || !continuous) {
+          setNotice(
+            receipt.completed
+              ? `Provider title repair completed: ${receipt.cumulative_repaired} repaired, ${receipt.cumulative_conflicts} conflicts preserved.`
+              : `Provider title repair checkpoint advanced by ${receipt.page_scanned} jobs.`,
+          );
+          return;
+        }
+        await new Promise((resolve) => window.setTimeout(resolve, 25));
+      } while (providerTitleRepairRunRef.current === runId);
+    } catch (e) {
+      if (providerTitleRepairRunRef.current === runId) setError(String(e));
+    } finally {
+      if (providerTitleRepairRunRef.current === runId) setProviderTitleRepairBusy(false);
+    }
+  }
+
+  function stopProviderTitleRepair() {
+    providerTitleRepairRunRef.current += 1;
+    setProviderTitleRepairBusy(false);
+    setNotice("Provider title repair will remain at its last committed 200-job checkpoint.");
+  }
+
+  async function resetProviderTitleRepair() {
+    const approved = await confirm(
+      "Restart the title-repair scan from the beginning? Existing accepted repairs and their audit history remain preserved.",
+      { title: "Reset title-repair checkpoint", kind: "warning" },
+    );
+    if (!approved) return;
+    setProviderTitleRepairBusy(true);
+    setError(null);
+    try {
+      await invoke("provider_metadata_repair_reset", {
+        confirmation: "RESET_PROVIDER_TITLE_REPAIR_CHECKPOINT",
+      });
+      setProviderTitleRepair(null);
+      const status = await invoke<ProviderTitleRepairStatus>("provider_metadata_repair_status");
+      setProviderTitleRepairStatus(status);
+      setNotice("Provider title-repair checkpoint reset; existing repaired titles were not reverted.");
+    } catch (e) {
+      setError(String(e));
+    } finally {
+      setProviderTitleRepairBusy(false);
     }
   }
 
@@ -4351,6 +4469,55 @@ export function DiagnosticsPage({ visible = true }: { visible?: boolean }) {
           Storage totals are best-effort and bounded so Diagnostics does not stall on very large artifact trees.
         </div>
         <RootRebindControl />
+        <section aria-labelledby="provider-title-repair-heading" data-testid="provider-title-repair">
+          <h3 id="provider-title-repair-heading">Provider title repair</h3>
+          <p style={{ color: "#4b5563" }}>
+            Scans the canonical job store in committed 200-job pages. Only missing, provider-placeholder,
+            or encoding-damaged titles are repaired from better canonical metadata; valid conflicts are preserved.
+          </p>
+          <div className="kv">
+            <div className="k">Checkpoint</div>
+            <div className="v">
+              {providerTitleRepair
+                ? `${providerTitleRepair.state}: ${providerTitleRepair.cumulative_scanned} scanned, ${providerTitleRepair.cumulative_repaired} repaired, ${providerTitleRepair.cumulative_conflicts} conflicts, ${providerTitleRepair.cumulative_unavailable} unavailable`
+                : providerTitleRepairStatus
+                  ? `${providerTitleRepairStatus.state}: ${providerTitleRepairStatus.scanned}/${providerTitleRepairStatus.total_candidates} scanned, ${providerTitleRepairStatus.repaired} repaired, ${providerTitleRepairStatus.conflicts} conflicts, ${providerTitleRepairStatus.unavailable} unavailable`
+                  : "Not loaded"}
+            </div>
+          </div>
+          <div className="kv">
+            <div className="k">Canonical metadata</div>
+            <div className="v">
+              {providerTitleRepairStatus
+                ? `${providerTitleRepairStatus.canonical_titles}/${providerTitleRepairStatus.canonical_identities} titled · ${providerTitleRepairStatus.observation_receipts} observations · ${providerTitleRepairStatus.repair_change_receipts} repairs receipted · ${providerTitleRepairStatus.remaining_candidates} candidates remaining`
+                : "-"}
+            </div>
+          </div>
+          <div className="row" style={{ flexWrap: "wrap" }}>
+            <button
+              type="button"
+              disabled={providerTitleRepairBusy}
+              onClick={() => runProviderTitleRepair(false)}
+              data-testid="provider-title-repair-next"
+            >
+              Repair next 200
+            </button>
+            <button
+              type="button"
+              disabled={providerTitleRepairBusy || providerTitleRepair?.completed === true}
+              onClick={() => runProviderTitleRepair(true)}
+              data-testid="provider-title-repair-continue"
+            >
+              Continue repair
+            </button>
+            <button type="button" disabled={!providerTitleRepairBusy} onClick={stopProviderTitleRepair}>
+              Stop after checkpoint
+            </button>
+            <button type="button" disabled={providerTitleRepairBusy} onClick={resetProviderTitleRepair}>
+              Restart scan
+            </button>
+          </div>
+        </section>
         <div className="kv">
           <div className="k">Library</div>
           <div className="v">{storage ? formatBytes(storage.library_bytes) : "-"}</div>

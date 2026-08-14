@@ -7,7 +7,7 @@ use std::sync::{
     mpsc::{sync_channel, SyncSender, TrySendError},
     Arc, Mutex, OnceLock,
 };
-use std::time::{Duration, Instant};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use sysinfo::{ProcessesToUpdate, System};
 use tauri::{Emitter, Manager, State};
 use tauri_runtime::ResizeDirection as TauriResizeDirection;
@@ -1271,8 +1271,9 @@ fn agent_handle_freeze_dump(body: &str) -> (&'static str, String) {
 use voxvulgi_engine::models::ModelStore;
 use voxvulgi_engine::paths::AppPaths;
 use voxvulgi_engine::{
-    config, db, diagnostics, instagram_subscriptions, jobs, library, media_cleanup, root_rebind,
-    speakers, subscriptions, subtitle_tracks, subtitles, tools, translate, video_libraries,
+    config, db, diagnostics, instagram_subscriptions, jobs, library, media_cleanup,
+    provider_metadata, root_rebind, speakers, subscriptions, subtitle_tracks, subtitles, tools,
+    translate, video_libraries,
     voice_backend_adapters, voice_backends, voice_benchmarks, voice_cast_packs, voice_cleanup,
     voice_library, voice_plans, voice_reference_candidates, voice_reference_curation,
     voice_templates,
@@ -7161,6 +7162,8 @@ ORDER BY item_id ASC, created_at_ms DESC
                     logs_path: row.get(10)?,
                     params_json: row.get(11)?,
                     target_title: None,
+                    target_title_provenance: None,
+                    target_title_problem: None,
                     retry_of_job_id: None,
                     retry_replacement_job_id: None,
                     track: jobs::durable_job_track_label(persisted_track.as_deref()),
@@ -9194,6 +9197,60 @@ fn root_rebind_task_cancel(
     task_id: String,
 ) -> Result<root_rebind::RootRebindTaskStatus, String> {
     root_rebind::cancel_root_rebind_task(task_id.trim()).map_err(|error| error.to_string())
+}
+
+#[tauri::command]
+async fn provider_metadata_repair_page(
+    state: State<'_, AppState>,
+    limit: Option<usize>,
+) -> Result<provider_metadata::ProviderTitleRepairPageReceipt, String> {
+    let paths = state.paths.clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        provider_metadata::repair_provider_titles_page(&paths, limit.unwrap_or(200))
+    })
+    .await
+    .map_err(|error| error.to_string())?
+    .map_err(|error| error.to_string())
+}
+
+#[tauri::command]
+async fn provider_metadata_repair_status(
+    state: State<'_, AppState>,
+) -> Result<provider_metadata::ProviderTitleRepairStatus, String> {
+    let paths = state.paths.clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        provider_metadata::provider_title_repair_status(&paths)
+    })
+    .await
+    .map_err(|error| error.to_string())?
+    .map_err(|error| error.to_string())
+}
+
+#[tauri::command]
+async fn provider_metadata_repair_reset(
+    state: State<'_, AppState>,
+    confirmation: String,
+) -> Result<(), String> {
+    if confirmation.trim() != "RESET_PROVIDER_TITLE_REPAIR_CHECKPOINT" {
+        return Err(
+            "provider metadata repair reset requires RESET_PROVIDER_TITLE_REPAIR_CHECKPOINT"
+                .to_string(),
+        );
+    }
+    let paths = state.paths.clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        provider_metadata::reset_provider_title_repair_checkpoint(
+            &paths,
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_millis()
+                .min(i64::MAX as u128) as i64,
+        )
+    })
+    .await
+    .map_err(|error| error.to_string())?
+    .map_err(|error| error.to_string())
 }
 
 #[derive(Debug, serde::Serialize)]
@@ -14127,6 +14184,9 @@ pub fn run() {
             root_rebind_recover,
             root_rebind_task_status,
             root_rebind_task_cancel,
+            provider_metadata_repair_page,
+            provider_metadata_repair_status,
+            provider_metadata_repair_reset,
             config_youtube_auth_get,
             youtube_auth_open_sign_in,
             config_youtube_auth_preflight,

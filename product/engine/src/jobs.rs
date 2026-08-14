@@ -1,7 +1,8 @@
 use crate::paths::AppPaths;
 use crate::{
-    asr, cmd, config, db, ffmpeg, image_batch, library, persistence, root_rebind, speakers,
-    subscriptions, subtitle_tracks, subtitles, tools, translate, video_libraries,
+    asr, cmd, config, db, ffmpeg, image_batch, library, persistence, provider_metadata,
+    root_rebind, speakers, subscriptions, subtitle_tracks, subtitles, tools, translate,
+    video_libraries,
     voice_backend_adapters, voice_cast_packs, voice_plans, voice_reference_candidates,
     voice_templates, youtube_protection, EngineError, Result,
 };
@@ -679,6 +680,10 @@ pub struct JobRow {
     pub logs_path: String,
     pub params_json: String,
     pub target_title: Option<String>,
+    #[serde(default)]
+    pub target_title_provenance: Option<String>,
+    #[serde(default)]
+    pub target_title_problem: Option<String>,
     pub retry_of_job_id: Option<String>,
     pub retry_replacement_job_id: Option<String>,
     /// Persisted canonical product scheduling track, or `unclassified` until bounded legacy
@@ -1737,6 +1742,8 @@ fn job_row_from_query_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<JobRow> {
         } else {
             None
         },
+        target_title_provenance: None,
+        target_title_problem: None,
         retry_of_job_id: if column_count > 13 {
             row.get(13)?
         } else {
@@ -5780,72 +5787,170 @@ pub fn youtube_queue_identity_reconcile(
 }
 
 fn hydrate_job_target_titles(conn: &rusqlite::Connection, rows: &mut [JobRow]) -> Result<()> {
-    let mut urls = Vec::new();
+    let mut identities = Vec::new();
     let mut seen = HashSet::new();
     for row in rows.iter() {
-        if row.target_title.is_some()
-            || row.item_id.is_some()
-            || row.job_type != JobType::DownloadDirectUrl.as_str()
-        {
+        if row.job_type != JobType::DownloadDirectUrl.as_str() {
             continue;
         }
         if let Some(url) = direct_download_url_from_params_json(&row.params_json) {
-            if seen.insert(url.clone()) {
-                urls.push(url);
+            if let Some(source) = library::canonical_media_source(&url) {
+                let key = (source.service, source.media_id);
+                if seen.insert(key.clone()) {
+                    identities.push((key.0, key.1, url));
+                }
             }
         }
     }
-    if urls.is_empty() {
+    if identities.is_empty() {
         return Ok(());
     }
 
-    let mut by_url: HashMap<String, String> = HashMap::new();
-    let mut direct_stmt = conn.prepare(
-        r#"
-SELECT title
-FROM library_item
-WHERE source_uri=?1 AND TRIM(title) <> ''
-ORDER BY created_at_ms DESC
-LIMIT 1
-"#,
-    )?;
-    let mut provenance_stmt = conn.prepare(
-        r#"
-SELECT li.title
-FROM library_item li
-JOIN ingest_provenance ip ON ip.item_id = li.id
-WHERE ip.source_url=?1 AND TRIM(li.title) <> ''
-ORDER BY li.created_at_ms DESC
-LIMIT 1
-"#,
-    )?;
-
-    for url in urls {
-        let title = direct_stmt
-            .query_row([url.as_str()], |row| row.get::<_, String>(0))
-            .optional()?
-            .or_else(|| {
-                provenance_stmt
-                    .query_row([url.as_str()], |row| row.get::<_, String>(0))
-                    .optional()
-                    .ok()
-                    .flatten()
-            });
-        if let Some(title) = title
-            .map(|value| value.trim().to_string())
-            .filter(|value| !value.is_empty())
-        {
-            by_url.insert(url, title);
+    type Candidate = (Option<String>, Option<String>, Option<String>);
+    let mut by_identity: HashMap<(String, String), Candidate> = HashMap::new();
+    // UI pages are bounded, but chunk the CTE so this remains below conservative SQLite host
+    // parameter limits if a caller asks for a larger diagnostic page.
+    for chunk in identities.chunks(300) {
+        let values_clause = std::iter::repeat("(?,?,?)")
+            .take(chunk.len())
+            .collect::<Vec<_>>()
+            .join(",");
+        let sql = format!(
+            r#"
+WITH requested(service,media_id,source_url) AS (VALUES {values_clause})
+SELECT requested.service,
+       requested.media_id,
+       title_override.title,
+       metadata.raw_title,
+       COALESCE(library.title,direct_library.title)
+FROM requested
+LEFT JOIN media_title_override title_override
+  ON title_override.service=requested.service
+ AND title_override.media_id=requested.media_id
+LEFT JOIN media_provider_metadata metadata
+  ON metadata.service=requested.service
+ AND metadata.media_id=requested.media_id
+LEFT JOIN media_source_identity identity
+  ON identity.service=requested.service
+ AND identity.media_id=requested.media_id
+LEFT JOIN library_item library ON library.id=identity.library_item_id
+LEFT JOIN library_item direct_library ON direct_library.id=(
+  SELECT candidate.id FROM library_item candidate
+  WHERE candidate.source_uri=requested.source_url
+     OR candidate.source_uri=identity.canonical_url
+  ORDER BY candidate.created_at_ms DESC,candidate.id DESC
+  LIMIT 1
+)
+"#
+        );
+        let parameters = chunk
+            .iter()
+            .flat_map(|(service, media_id, source_url)| {
+                [service.as_str(), media_id.as_str(), source_url.as_str()]
+            })
+            .collect::<Vec<_>>();
+        let mut statement = conn.prepare(&sql)?;
+        let matches = statement.query_map(rusqlite::params_from_iter(parameters), |row| {
+            Ok((
+                (row.get::<_, String>(0)?, row.get::<_, String>(1)?),
+                (
+                    row.get::<_, Option<String>>(2)?,
+                    row.get::<_, Option<String>>(3)?,
+                    row.get::<_, Option<String>>(4)?,
+                ),
+            ))
+        })?;
+        for row in matches {
+            let (identity, candidate) = row?;
+            by_identity.insert(identity, candidate);
         }
     }
 
     for row in rows.iter_mut() {
-        if row.target_title.is_some() {
+        if row.job_type != JobType::DownloadDirectUrl.as_str() {
             continue;
         }
         if let Some(url) = direct_download_url_from_params_json(&row.params_json) {
-            if let Some(title) = by_url.get(&url) {
-                row.target_title = Some(title.clone());
+            let Some(source) = library::canonical_media_source(&url) else {
+                continue;
+            };
+            let current = row
+                .target_title
+                .as_deref()
+                .map(str::trim)
+                .filter(|value| !value.is_empty());
+            let current_problem = current.and_then(|title| {
+                if provider_metadata::title_contains_encoding_damage(title) {
+                    Some("encoding_damage")
+                } else if provider_metadata::title_is_provider_placeholder(
+                    &source.service,
+                    &source.media_id,
+                    title,
+                ) {
+                    Some("provider_placeholder")
+                } else {
+                    None
+                }
+            });
+            let candidate = by_identity
+                .get(&(source.service.clone(), source.media_id.clone()));
+            if let Some(title) = candidate
+                .and_then(|(title, _, _)| title.as_deref())
+                .map(str::trim)
+                .filter(|title| !title.is_empty())
+            {
+                row.target_title = Some(title.to_string());
+                row.target_title_provenance = Some("operator_override".to_string());
+                row.target_title_problem = None;
+                continue;
+            }
+            if let Some(title) = candidate
+                .and_then(|(_, title, _)| title.as_deref())
+                .map(str::trim)
+                .filter(|title| {
+                    !title.is_empty()
+                        && !provider_metadata::title_contains_encoding_damage(title)
+                        && !provider_metadata::title_is_provider_placeholder(
+                            &source.service,
+                            &source.media_id,
+                            title,
+                        )
+                })
+            {
+                row.target_title = Some(title.to_string());
+                row.target_title_provenance = Some("canonical_remote".to_string());
+                row.target_title_problem = None;
+                continue;
+            }
+            if current.is_some() && current_problem.is_none() {
+                row.target_title_provenance = Some("job_snapshot".to_string());
+                row.target_title_problem = None;
+                continue;
+            }
+            if let Some(title) = candidate
+                .and_then(|(_, _, title)| title.as_deref())
+                .map(str::trim)
+                .filter(|title| !title.is_empty())
+            {
+                row.target_title = Some(title.to_string());
+                row.target_title_provenance = Some("imported_file".to_string());
+                row.target_title_problem = None;
+                continue;
+            }
+            row.target_title_problem = current_problem.map(str::to_string);
+            if row.target_title.is_none() {
+                row.target_title = Some(format!(
+                    "{} {}",
+                    source
+                        .service
+                        .chars()
+                        .next()
+                        .map(|first| first.to_uppercase().collect::<String>()
+                            + &source.service[first.len_utf8()..])
+                        .unwrap_or_else(|| "Provider".to_string()),
+                    source.media_id
+                ));
+                row.target_title_provenance = Some("stable_provider_id".to_string());
             }
         }
     }
@@ -8053,6 +8158,8 @@ INSERT INTO job (
         logs_path,
         params_json,
         target_title: None,
+        target_title_provenance: None,
+        target_title_problem: None,
         retry_of_job_id: None,
         retry_replacement_job_id: None,
         track: track.as_str().to_string(),
@@ -10876,6 +10983,7 @@ fn execute_job(
                         .as_ref()
                         .map(|(_, _, _, effective, _)| effective.sleep_requests_secs),
                     Some(job_id),
+                    Some(&sub.id),
                 ) {
                     Ok(value) => value,
                     Err(err) => {
@@ -21536,10 +21644,9 @@ fn expand_yt_dlp_urls(
     .collect())
 }
 
-// WP-0256: enumerate a playlist/channel/subscription into (url, title) pairs. The title
-// comes free from the same `--flat-playlist` pass (no extra yt-dlp call / no extra
-// anti-bot exposure), so child download jobs can show the real video title in Jobs even
-// while queued/running/failed. yt-dlp prints "NA" for a missing field -> None.
+// WP-0256/WP-0300: enumerate a playlist/channel/subscription into (url, title) pairs. The
+// metadata comes from one explicit UTF-8 JSON object per item. Delimiters and lossy decoding
+// are forbidden here because tabs/newlines/non-ASCII titles must survive as canonical bytes.
 fn expand_yt_dlp_entries(
     paths: &AppPaths,
     url: &str,
@@ -21557,6 +21664,7 @@ fn expand_yt_dlp_entries(
         browser_cookie_source,
         None,
         None,
+        None,
     )
 }
 
@@ -21569,17 +21677,19 @@ fn expand_yt_dlp_entries_with_sleep(
     browser_cookie_source: Option<&str>,
     sleep_requests_override: Option<u32>,
     job_id: Option<&str>,
+    source_subscription_id: Option<&str>,
 ) -> Result<Vec<(String, Option<String>)>> {
     let limit = limit.max(1);
     let mut args = vec![
         "--socket-timeout".to_string(),
         "30".to_string(),
+        "--encoding".to_string(),
+        "utf-8".to_string(),
         "--flat-playlist".to_string(),
         "--skip-download".to_string(),
         "--ignore-errors".to_string(),
         "--no-warnings".to_string(),
-        "--print".to_string(),
-        "%(webpage_url)s\t%(title)s".to_string(),
+        "--print-json".to_string(),
         "--playlist-end".to_string(),
         limit.to_string(),
         url.to_string(),
@@ -21652,38 +21762,267 @@ fn expand_yt_dlp_entries_with_sleep(
             js_runtime_available,
         )
     })?;
-    let mut seen: HashSet<String> = HashSet::new();
-    let mut entries: Vec<(String, Option<String>)> = Vec::new();
-    for line in String::from_utf8_lossy(&output.stdout).lines() {
-        let line = line.trim_end_matches(['\r', '\n']);
-        if line.trim().is_empty() {
-            continue;
-        }
-        let (entry_url, title) = match line.split_once('\t') {
-            Some((u, t)) => {
-                let t = t.trim();
-                let title = if t.is_empty() || t == "NA" {
-                    None
-                } else {
-                    Some(t.to_string())
-                };
-                (u.trim().to_string(), title)
-            }
-            None => (line.trim().to_string(), None),
-        };
-        if entry_url.is_empty() {
-            continue;
-        }
-        if seen.insert(entry_url.clone()) {
-            entries.push((entry_url, title));
-        }
-    }
+    let entries = parse_ytdlp_flat_json_entries(
+        paths,
+        &output.stdout,
+        job_id,
+        source_subscription_id,
+    )?;
 
+    let mut entries = entries;
     if entries.is_empty() && is_likely_youtube_video_url(url) {
         entries.push((url.to_string(), None));
     }
 
     Ok(entries)
+}
+
+fn json_non_empty(value: &serde_json::Value, key: &str) -> Option<String> {
+    value
+        .get(key)
+        .and_then(serde_json::Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty() && *value != "NA")
+        .map(str::to_string)
+}
+
+fn json_raw_non_empty(value: &serde_json::Value, key: &str) -> Option<String> {
+    value
+        .get(key)
+        .and_then(serde_json::Value::as_str)
+        .filter(|value| !value.trim().is_empty() && value.trim() != "NA")
+        .map(str::to_string)
+}
+
+fn provider_service_for_flat_entry(value: &serde_json::Value, entry_url: &str) -> String {
+    let extractor = json_non_empty(value, "extractor_key")
+        .or_else(|| json_non_empty(value, "extractor"))
+        .unwrap_or_default()
+        .to_ascii_lowercase();
+    if extractor.contains("youtube") || entry_url.contains("youtu.be/") || entry_url.contains("youtube.com/") {
+        "youtube".to_string()
+    } else if extractor.contains("instagram") || entry_url.contains("instagram.com/") {
+        "instagram".to_string()
+    } else if extractor.contains("tiktok") || entry_url.contains("tiktok.com/") {
+        "tiktok".to_string()
+    } else {
+        "other".to_string()
+    }
+}
+
+fn ytdlp_provider_metadata_observation(
+    value: &serde_json::Value,
+    entry_url: &str,
+    job_id: Option<&str>,
+    source_subscription_id: Option<&str>,
+    source_operation: &str,
+) -> Option<provider_metadata::ProviderMetadataObservation> {
+    let media_id = json_non_empty(value, "id")?;
+    let title = json_raw_non_empty(value, "title");
+    let service = provider_service_for_flat_entry(value, entry_url);
+    let provider_name = json_non_empty(value, "extractor")
+        .or_else(|| json_non_empty(value, "extractor_key"))
+        .unwrap_or_else(|| "yt-dlp".to_string());
+    let published_at_ms = value
+        .get("timestamp")
+        .and_then(serde_json::Value::as_f64)
+        .map(|seconds| (seconds * 1000.0).round() as i64);
+    Some(provider_metadata::ProviderMetadataObservation {
+        service,
+        media_id,
+        raw_title: title.clone(),
+        uploader_id: json_non_empty(value, "uploader_id")
+            .or_else(|| json_non_empty(value, "channel_id")),
+        uploader_name: json_raw_non_empty(value, "uploader")
+            .or_else(|| json_raw_non_empty(value, "channel")),
+        canonical_url: json_non_empty(value, "webpage_url").or_else(|| Some(entry_url.to_string())),
+        source_url: json_non_empty(value, "original_url").or_else(|| Some(entry_url.to_string())),
+        published_at_ms,
+        thumbnail_url: json_non_empty(value, "thumbnail"),
+        provider_name,
+        provider_version: Some(
+            crate::pinned_dependency_manifest::manifest()
+                .yt_dlp_windows
+                .version
+                .clone(),
+        ),
+        capability_epoch: 1,
+        quality: if title.is_some() {
+            provider_metadata::ProviderMetadataQuality::RemoteCanonical
+        } else {
+            provider_metadata::ProviderMetadataQuality::RemotePartial
+        },
+        source_operation: source_operation.to_string(),
+        source_job_id: job_id.map(str::to_string),
+        source_subscription_id: source_subscription_id.map(str::to_string),
+        observed_at_ms: now_ms(),
+    })
+}
+
+fn parse_ytdlp_flat_json_entries(
+    paths: &AppPaths,
+    stdout: &[u8],
+    job_id: Option<&str>,
+    source_subscription_id: Option<&str>,
+) -> Result<Vec<(String, Option<String>)>> {
+    let mut seen = HashSet::new();
+    let mut entries = Vec::new();
+    let mut malformed_count = 0_usize;
+    for (line_index, raw_line) in stdout.split(|byte| *byte == b'\n').enumerate() {
+        let raw_line = raw_line.strip_suffix(b"\r").unwrap_or(raw_line);
+        if raw_line.iter().all(u8::is_ascii_whitespace) {
+            continue;
+        }
+        let value = match serde_json::from_slice::<serde_json::Value>(raw_line) {
+            Ok(value) => value,
+            Err(error) => {
+                malformed_count += 1;
+                if let Some(job_id) = job_id {
+                    let _ = log_line(
+                        paths,
+                        job_id,
+                        "error",
+                        "provider_metadata_json_item_rejected",
+                        serde_json::json!({
+                            "line_number": line_index + 1,
+                            "error": error.to_string(),
+                            "raw_bytes": raw_line.len(),
+                        }),
+                    );
+                }
+                continue;
+            }
+        };
+        let media_id = json_non_empty(&value, "id");
+        let entry_url = json_non_empty(&value, "webpage_url")
+            .or_else(|| json_non_empty(&value, "original_url"))
+            .or_else(|| {
+                json_non_empty(&value, "url").filter(|candidate| {
+                    candidate.starts_with("https://") || candidate.starts_with("http://")
+                })
+            });
+        let Some(entry_url) = entry_url else {
+            malformed_count += 1;
+            continue;
+        };
+        let title = json_raw_non_empty(&value, "title");
+        if media_id.is_some() {
+            let observation = ytdlp_provider_metadata_observation(
+                &value,
+                &entry_url,
+                job_id,
+                source_subscription_id,
+                "flat_enumeration",
+            )
+            .expect("media id checked");
+            provider_metadata::upsert_provider_metadata(
+                paths,
+                observation,
+            )?;
+        }
+        if seen.insert(entry_url.clone()) {
+            entries.push((entry_url, title));
+        }
+    }
+    if entries.is_empty() && malformed_count > 0 {
+        return Err(EngineError::InstallFailed(format!(
+            "yt-dlp returned {malformed_count} malformed UTF-8 JSON metadata item(s) and no valid entries"
+        )));
+    }
+    Ok(entries)
+}
+
+fn source_subscription_id_for_job(paths: &AppPaths, job_id: &str) -> Option<String> {
+    let conn = db::open_readonly(paths).ok()?;
+    let params_json: String = conn
+        .query_row(
+            "SELECT params_json FROM job WHERE id=?1",
+            params![job_id],
+            |row| row.get(0),
+        )
+        .ok()?;
+    serde_json::from_str::<serde_json::Value>(&params_json)
+        .ok()?
+        .get("subscription_id")
+        .and_then(serde_json::Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(str::to_string)
+}
+
+fn ingest_ytdlp_download_metadata(
+    paths: &AppPaths,
+    stdout: &[u8],
+    job_id: &str,
+    requested_url: &str,
+) -> Result<bool> {
+    const POST_PREFIX: &[u8] = b"VV_MEDIA_POST:";
+    const PRE_PREFIX: &[u8] = b"VV_MEDIA_PRE:";
+    let mut pre_value = None;
+    let mut post_value = None;
+    let mut malformed_count = 0_usize;
+    for (line_index, raw_line) in stdout.split(|byte| *byte == b'\n').enumerate() {
+        let raw_line = raw_line.strip_suffix(b"\r").unwrap_or(raw_line);
+        let (payload, is_post) = if let Some(payload) = raw_line.strip_prefix(POST_PREFIX) {
+            (payload, true)
+        } else if let Some(payload) = raw_line.strip_prefix(PRE_PREFIX) {
+            (payload, false)
+        } else {
+            continue;
+        };
+        match serde_json::from_slice::<serde_json::Value>(payload) {
+            Ok(value) if is_post => post_value = Some(value),
+            Ok(value) => pre_value = Some(value),
+            Err(error) => {
+                malformed_count += 1;
+                let _ = log_line(
+                    paths,
+                    job_id,
+                    "error",
+                    "provider_download_metadata_json_rejected",
+                    serde_json::json!({
+                        "line_number": line_index + 1,
+                        "error": error.to_string(),
+                        "raw_bytes": payload.len(),
+                    }),
+                );
+            }
+        }
+    }
+    let Some(value) = post_value.or(pre_value) else {
+        if malformed_count > 0 {
+            let _ = log_line(
+                paths,
+                job_id,
+                "error",
+                "provider_download_metadata_unavailable",
+                serde_json::json!({"malformed_items": malformed_count}),
+            );
+        }
+        return Ok(false);
+    };
+    let entry_url = json_non_empty(&value, "webpage_url")
+        .or_else(|| json_non_empty(&value, "original_url"))
+        .unwrap_or_else(|| requested_url.to_string());
+    let source_subscription_id = source_subscription_id_for_job(paths, job_id);
+    let Some(observation) = ytdlp_provider_metadata_observation(
+        &value,
+        &entry_url,
+        Some(job_id),
+        source_subscription_id.as_deref(),
+        "single_download",
+    ) else {
+        let _ = log_line(
+            paths,
+            job_id,
+            "warning",
+            "provider_download_metadata_identity_missing",
+            serde_json::json!({"url": redact_url_for_log(requested_url)}),
+        );
+        return Ok(false);
+    };
+    provider_metadata::upsert_provider_metadata(paths, observation)?;
+    Ok(true)
 }
 
 // WP-0256: stamp the enumerated video title onto each freshly-queued child download job so
@@ -23900,6 +24239,7 @@ fn download_yt_dlp_url_to_library(
             js_runtime_available,
         )
     })?;
+    ingest_ytdlp_download_metadata(paths, &output.stdout, job_id, url)?;
     let stdout = String::from_utf8_lossy(&output.stdout);
     let media_expectations =
         yt_dlp_managed_media_expectations(&stdout, subtitle_mode).map_err(|error| {
@@ -27999,6 +28339,110 @@ mod tests {
     use std::path::Path;
 
     #[test]
+    fn flat_provider_json_preserves_unicode_and_rejects_only_the_malformed_item() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let paths = AppPaths::new(dir.path().join("app"));
+        db::ensure_schema(&paths).expect("schema");
+        let first = serde_json::json!({
+            "id": "ko-1",
+            "webpage_url": "https://www.youtube.com/watch?v=ko-1",
+            "title": "한국어\t제목\n日本語 😀",
+            "channel": "채널",
+            "channel_id": "channel-1",
+            "timestamp": 1_700_000_000,
+            "thumbnail": "https://i.example/ko.jpg",
+            "extractor": "youtube"
+        });
+        let second = serde_json::json!({
+            "id": "ar-2",
+            "webpage_url": "https://www.youtube.com/watch?v=ar-2",
+            "title": "العربية",
+            "extractor_key": "Youtube"
+        });
+        let mut stdout = serde_json::to_vec(&first).expect("first");
+        stdout.extend_from_slice(b"\n{\"id\":\"bad\",\"title\":\"broken\xff\"}\n");
+        stdout.extend_from_slice(&serde_json::to_vec(&second).expect("second"));
+        stdout.push(b'\n');
+
+        let entries = parse_ytdlp_flat_json_entries(
+            &paths,
+            &stdout,
+            Some("job-json"),
+            Some("subscription-ko"),
+        )
+        .expect("valid adjacent entries survive");
+        assert_eq!(entries.len(), 2);
+        assert_eq!(entries[0].1.as_deref(), Some("한국어\t제목\n日本語 😀"));
+        assert_eq!(entries[1].1.as_deref(), Some("العربية"));
+
+        let conn = db::open_readonly(&paths).expect("readonly");
+        let stored: (String, Option<String>, Option<String>) = conn
+            .query_row(
+                "SELECT raw_title,provider_version,source_subscription_id FROM media_provider_metadata WHERE service='youtube' AND media_id='ko-1'",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            )
+            .expect("canonical metadata");
+        assert_eq!(stored.0, "한국어\t제목\n日本語 😀");
+        assert_eq!(stored.1.as_deref(), Some("2026.07.04"));
+        assert_eq!(stored.2.as_deref(), Some("subscription-ko"));
+    }
+
+    #[test]
+    fn flat_provider_json_fails_when_every_item_is_malformed() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let paths = AppPaths::new(dir.path().join("app"));
+        db::ensure_schema(&paths).expect("schema");
+        let error = parse_ytdlp_flat_json_entries(
+            &paths,
+            b"{\"id\":\"bad\",\"title\":\"broken\xff\"}\n",
+            Some("job-json"),
+            None,
+        )
+        .expect_err("all malformed output must fail truthfully");
+        assert!(error.to_string().contains("malformed UTF-8 JSON"));
+    }
+
+    #[test]
+    fn single_download_metadata_uses_raw_json_bytes_and_prefers_post_move() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let paths = AppPaths::new(dir.path().join("app"));
+        db::ensure_schema(&paths).expect("schema");
+        let post = serde_json::json!({
+            "id": "single-ko-1",
+            "title": "한국어\t제목\n日本語 😀 العربية",
+            "webpage_url": "https://www.youtube.com/watch?v=single-ko-1",
+            "extractor_key": "Youtube",
+            "channel_id": "channel-1",
+            "channel": "채널 日本語"
+        });
+        let mut stdout = b"VV_MEDIA_PRE:{\"id\":\"broken\",\"title\":\"bad\xff\"}\n".to_vec();
+        stdout.extend_from_slice(b"VV_MEDIA_POST:");
+        stdout.extend_from_slice(&serde_json::to_vec(&post).expect("json"));
+        stdout.extend_from_slice(b"\nC:\\downloads\\single-ko-1.mkv\n");
+
+        assert!(ingest_ytdlp_download_metadata(
+            &paths,
+            &stdout,
+            "single-job",
+            "https://youtu.be/single-ko-1",
+        )
+        .expect("metadata ingestion"));
+
+        let conn = db::open_readonly(&paths).expect("readonly");
+        let stored: (String, String, String) = conn
+            .query_row(
+                "SELECT raw_title,source_operation,provider_version FROM media_provider_metadata WHERE service='youtube' AND media_id='single-ko-1'",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            )
+            .expect("canonical single metadata");
+        assert_eq!(stored.0, "한국어\t제목\n日本語 😀 العربية");
+        assert_eq!(stored.1, "single_download");
+        assert_eq!(stored.2, "2026.07.04");
+    }
+
+    #[test]
     fn ytdlp_launch_receipt_redacts_separated_and_equals_credentials_and_locators() {
         let raw = vec![
             "--proxy=http://user:pass@proxy.local".to_string(),
@@ -31664,6 +32108,76 @@ EOF
             rows[0].target_title.as_deref(),
             Some("Cached YouTube title")
         );
+        assert_eq!(
+            rows[0].target_title_provenance.as_deref(),
+            Some("imported_file")
+        );
+    }
+
+    #[test]
+    fn job_projection_replaces_placeholder_from_canonical_metadata_and_reports_provenance() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let paths = AppPaths::new(dir.path().to_path_buf());
+        db::ensure_schema(&paths).expect("schema");
+        let url = "https://www.youtube.com/watch?v=canonical123";
+        let job = enqueue_with_type_item_and_batch_id(
+            &paths,
+            JobType::DownloadDirectUrl,
+            serde_json::json!({
+                "url": url,
+                "provider": DOWNLOAD_PROVIDER_YOUTUBE_YT_DLP,
+                "output_dir": "D:/archive"
+            })
+            .to_string(),
+            None,
+            Some("canonical-title-batch".to_string()),
+        )
+        .expect("enqueue");
+        let conn = db::open(&paths).expect("open");
+        conn.execute(
+            "UPDATE job SET target_title='YouTube video canonical123' WHERE id=?1",
+            [&job.id],
+        )
+        .expect("seed placeholder");
+        provider_metadata::upsert_provider_metadata(
+            &paths,
+            provider_metadata::ProviderMetadataObservation {
+                service: "youtube".to_string(),
+                media_id: "canonical123".to_string(),
+                raw_title: Some("정확한 제목 日本語".to_string()),
+                uploader_id: None,
+                uploader_name: None,
+                canonical_url: Some(url.to_string()),
+                source_url: Some(url.to_string()),
+                published_at_ms: None,
+                thumbnail_url: None,
+                provider_name: "yt-dlp".to_string(),
+                provider_version: Some("2026.07.04".to_string()),
+                capability_epoch: 1,
+                quality: provider_metadata::ProviderMetadataQuality::RemoteCanonical,
+                source_operation: "fixture".to_string(),
+                source_job_id: Some(job.id.clone()),
+                source_subscription_id: None,
+                observed_at_ms: now_ms(),
+            },
+        )
+        .expect("canonical metadata");
+
+        let projected = get_job(&paths, &job.id)
+            .expect("get")
+            .expect("projected job");
+        assert_eq!(projected.target_title.as_deref(), Some("정확한 제목 日本語"));
+        assert_eq!(
+            projected.target_title_provenance.as_deref(),
+            Some("canonical_remote")
+        );
+        assert_eq!(projected.target_title_problem, None);
+        let stored: String = conn
+            .query_row("SELECT target_title FROM job WHERE id=?1", [&job.id], |row| {
+                row.get(0)
+            })
+            .expect("durable snapshot");
+        assert_eq!(stored, "YouTube video canonical123");
     }
 
     #[test]

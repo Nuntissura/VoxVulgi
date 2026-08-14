@@ -15,6 +15,7 @@ pub mod pack_install_state;
 pub mod paths;
 pub mod persistence;
 pub mod pinned_dependency_manifest;
+pub mod provider_metadata;
 pub mod python_lockfile;
 pub mod root_rebind;
 pub mod speakers;

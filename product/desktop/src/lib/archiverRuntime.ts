@@ -1,4 +1,8 @@
 import { fileName, parentPath } from "./pathUtils";
+import type {
+  CanonicalLibraryTitleProjection,
+  CanonicalTitleProjection,
+} from "./providerMetadata";
 
 export type ArchiverMediaKind = "video" | "image" | "audio" | "other";
 
@@ -34,12 +38,11 @@ export function jobTrackLabel(track: string | null | undefined): string {
   }
 }
 
-export type ArchiverLibraryItem = {
+export type ArchiverLibraryItem = CanonicalLibraryTitleProjection & {
   id: string;
   created_at_ms: number;
   source_type: string;
   source_uri: string;
-  title: string;
   media_path: string;
   duration_ms: number | null;
   width: number | null;
@@ -55,12 +58,11 @@ export type ArchiverLibraryItem = {
   lineage_work_track?: string | null;
 };
 
-export type ArchiverJobRow = {
+export type ArchiverJobRow = CanonicalTitleProjection & {
   id: string;
   item_id: string | null;
   job_type: string;
   params_json?: string;
-  target_title?: string | null;
   retry_of_job_id?: string | null;
   retry_replacement_job_id?: string | null;
   // The engine persists this. Optional only while old installed databases are

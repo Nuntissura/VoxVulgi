@@ -3,7 +3,7 @@ use crate::Result;
 use rusqlite::{Connection, OpenFlags};
 use std::time::Duration;
 
-const CURRENT_SCHEMA_VERSION: u32 = 48;
+const CURRENT_SCHEMA_VERSION: u32 = 49;
 // WP-0258: raised from 750ms to 4000ms so read-only UI queries wait out a WAL
 // checkpoint instead of erroring "database is locked". Evidence: 47 subscription
 // refreshes failed with "database is locked" under DB contention.
@@ -172,8 +172,12 @@ const MIGRATION_STEPS: &[MigrationStep] = &[
         apply: apply_schema_v47,
     },
     MigrationStep {
-        version: CURRENT_SCHEMA_VERSION,
+        version: 48,
         apply: apply_schema_v48,
+    },
+    MigrationStep {
+        version: CURRENT_SCHEMA_VERSION,
+        apply: apply_schema_v49,
     },
 ];
 
@@ -2497,6 +2501,118 @@ WHEN EXISTS (
 BEGIN
   SELECT RAISE(ABORT, 'provider installed lineage cannot be deleted while referenced');
 END;
+"#,
+    )?;
+    Ok(())
+}
+
+fn apply_schema_v49(conn: &Connection) -> Result<()> {
+    // WP-0300: provider metadata is canonical by provider identity, independent of a job
+    // attempt, library filename, or rendered row. Operator title overrides live in a separate
+    // table so ingestion and repair cannot accidentally acquire authority over them.
+    conn.execute_batch(
+        r#"
+CREATE TABLE IF NOT EXISTS media_provider_metadata (
+  service TEXT NOT NULL,
+  media_id TEXT NOT NULL,
+  raw_title TEXT,
+  normalized_title TEXT,
+  uploader_id TEXT,
+  uploader_name TEXT,
+  canonical_url TEXT,
+  source_url TEXT,
+  published_at_ms INTEGER,
+  thumbnail_url TEXT,
+  provider_name TEXT NOT NULL,
+  provider_version TEXT,
+  capability_epoch INTEGER NOT NULL DEFAULT 0,
+  quality_class TEXT NOT NULL,
+  quality_rank INTEGER NOT NULL,
+  source_operation TEXT NOT NULL,
+  source_job_id TEXT,
+  source_subscription_id TEXT,
+  observed_at_ms INTEGER NOT NULL,
+  updated_at_ms INTEGER NOT NULL,
+  PRIMARY KEY(service, media_id),
+  CHECK(length(trim(service)) > 0),
+  CHECK(length(trim(media_id)) > 0),
+  CHECK(length(trim(provider_name)) > 0),
+  CHECK(quality_rank >= 0),
+  CHECK(observed_at_ms >= 0),
+  CHECK(updated_at_ms >= 0)
+);
+CREATE INDEX IF NOT EXISTS idx_media_provider_metadata_normalized_title
+  ON media_provider_metadata(normalized_title COLLATE NOCASE, service, media_id);
+CREATE INDEX IF NOT EXISTS idx_media_provider_metadata_uploader
+  ON media_provider_metadata(service, uploader_id, published_at_ms DESC, media_id);
+CREATE INDEX IF NOT EXISTS idx_media_provider_metadata_source_job
+  ON media_provider_metadata(source_job_id) WHERE source_job_id IS NOT NULL;
+
+CREATE TABLE IF NOT EXISTS media_title_override (
+  service TEXT NOT NULL,
+  media_id TEXT NOT NULL,
+  title TEXT NOT NULL,
+  attribution TEXT NOT NULL,
+  created_at_ms INTEGER NOT NULL,
+  updated_at_ms INTEGER NOT NULL,
+  PRIMARY KEY(service, media_id),
+  CHECK(length(trim(service)) > 0),
+  CHECK(length(trim(media_id)) > 0),
+  CHECK(length(trim(title)) > 0),
+  CHECK(length(trim(attribution)) > 0)
+);
+
+CREATE TABLE IF NOT EXISTS media_provider_metadata_observation (
+  observation_id TEXT PRIMARY KEY,
+  service TEXT NOT NULL,
+  media_id TEXT NOT NULL,
+  observed_at_ms INTEGER NOT NULL,
+  provider_name TEXT NOT NULL,
+  provider_version TEXT,
+  capability_epoch INTEGER NOT NULL DEFAULT 0,
+  quality_class TEXT NOT NULL,
+  quality_rank INTEGER NOT NULL,
+  source_operation TEXT NOT NULL,
+  source_job_id TEXT,
+  source_subscription_id TEXT,
+  payload_json TEXT NOT NULL,
+  accepted INTEGER NOT NULL CHECK(accepted IN (0,1)),
+  decision_reason TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_media_provider_metadata_observation_identity
+  ON media_provider_metadata_observation(service, media_id, observed_at_ms DESC, observation_id);
+
+CREATE TABLE IF NOT EXISTS media_provider_metadata_repair_checkpoint (
+  singleton INTEGER PRIMARY KEY CHECK(singleton=1),
+  state TEXT NOT NULL CHECK(state IN ('idle','running','paused','completed','failed')),
+  after_job_created_at_ms INTEGER,
+  after_job_id TEXT,
+  scanned_count INTEGER NOT NULL DEFAULT 0,
+  repaired_count INTEGER NOT NULL DEFAULT 0,
+  conflict_count INTEGER NOT NULL DEFAULT 0,
+  unavailable_count INTEGER NOT NULL DEFAULT 0,
+  updated_at_ms INTEGER NOT NULL,
+  last_error TEXT
+);
+INSERT OR IGNORE INTO media_provider_metadata_repair_checkpoint(
+  singleton,state,after_job_created_at_ms,after_job_id,updated_at_ms
+) VALUES(1,'idle',NULL,NULL,0);
+
+CREATE TABLE IF NOT EXISTS media_provider_metadata_repair_change (
+  change_id TEXT PRIMARY KEY,
+  job_id TEXT NOT NULL,
+  service TEXT NOT NULL,
+  media_id TEXT NOT NULL,
+  classification TEXT NOT NULL,
+  before_title TEXT,
+  after_title TEXT NOT NULL,
+  title_provenance TEXT NOT NULL,
+  changed_at_ms INTEGER NOT NULL,
+  UNIQUE(job_id,after_title),
+  FOREIGN KEY(job_id) REFERENCES job(id) ON DELETE CASCADE
+);
+CREATE INDEX IF NOT EXISTS idx_media_provider_metadata_repair_change_job
+  ON media_provider_metadata_repair_change(job_id,changed_at_ms DESC);
 "#,
     )?;
     Ok(())
