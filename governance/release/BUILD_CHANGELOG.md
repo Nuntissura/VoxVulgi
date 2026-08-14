@@ -1130,3 +1130,11 @@ This changelog tracks desktop installer builds produced by `governance/scripts/b
 - Artifacts:
   - `product/desktop/build_target/Current/release/bundle/nsis/VoxVulgi_0.1.134_x64-setup.exe`
 - Notes: Crash-wave diagnostics, secure provider runtime, canonical metadata repair, Options registry, MKV enforcement and root-rebind safety
+
+## 0.1.135 - 2026-08-14T08:44:10Z
+- Work Packets: `WP-0265`, `WP-0298`, `WP-0299`, `WP-0300`, `WP-0301`, `WP-0306`
+- Commit: `a4fb163`
+- Offline Bundle ID: `offline_full_win64_20260814_082842`
+- Artifacts:
+  - `product/desktop/build_target/Current/release/bundle/nsis/VoxVulgi_0.1.135_x64-setup.exe`
+- Notes: v0.1.135 release candidate: crash-wave product changes plus materialized offline payload validation and composable spanned full-installer inputs. Full Inno packaging follows this NSIS build.

@@ -41,6 +41,7 @@ product/desktop/src-tauri/offline/cache/
 # Installer binaries and local packaging outputs
 *.msi
 *-setup.exe
+.inno_stage/
 product/yt-fetch.exe
 product/yt-fetch_*.exe
 

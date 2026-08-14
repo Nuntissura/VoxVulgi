@@ -80,7 +80,10 @@ WelcomeLabel2=This will install VoxVulgi and all of its offline components (voic
 ; App installer (NSIS) -> temp, run silently, deleted after.
 Source: "{#SetupExe}"; DestDir: "{tmp}"; DestName: "VoxVulgi_app_setup.exe"; Flags: deleteafterinstall
 ; Validated default packs -> per-user AppData.
-Source: "{#PayloadDir}\tools\*"; DestDir: "{userappdata}\com.voxvulgi.voxvulgi\tools"; Flags: recursesubdirs createallsubdirs ignoreversion uninsneveruninstall
+; A governed provider replacement keeps an authenticated youtube_po_provider_previous_<attempt>
+; rollback tree in a live tools directory. That machine-local rollback archive is not a clean-install
+; input and can contain source paths beyond the Inno compiler's Windows path handling limit.
+Source: "{#PayloadDir}\tools\*"; Excludes: "youtube_po_provider_previous_*"; DestDir: "{userappdata}\com.voxvulgi.voxvulgi\tools"; Flags: recursesubdirs createallsubdirs ignoreversion uninsneveruninstall
 Source: "{#PayloadDir}\models\*"; DestDir: "{userappdata}\com.voxvulgi.voxvulgi\models"; Flags: recursesubdirs createallsubdirs ignoreversion uninsneveruninstall
 Source: "{#PayloadDir}\cache\huggingface\*"; DestDir: "{userappdata}\com.voxvulgi.voxvulgi\cache\huggingface"; Flags: recursesubdirs createallsubdirs ignoreversion uninsneveruninstall
 ; Full-quality CosyVoice extras are isolated inputs so the validated default payload is not

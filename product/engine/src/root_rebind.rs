@@ -19,7 +19,7 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use uuid::Uuid;
 
 const ROOT_ALIAS_SCHEMA_VERSION: u32 = 1;
-const ROOT_REBIND_RECEIPT_SCHEMA_VERSION: u32 = 3;
+const ROOT_REBIND_RECEIPT_SCHEMA_VERSION: u32 = 4;
 const MAX_IDENTITY_EVIDENCE: usize = 64;
 const MAX_ACTIVE_ROOT_ALIASES: usize = 64;
 const CANONICAL_IDENTITY_SAMPLE_COUNT: usize = 3;
@@ -142,8 +142,14 @@ pub struct RootRebindDryRun {
 pub struct RootRebindBackupReference {
     pub sqlite_path: String,
     pub sqlite_integrity: String,
+    #[serde(default)]
+    pub sqlite_sha256: String,
     pub feature_config_path: Option<String>,
     pub feature_config_verified: bool,
+    #[serde(default)]
+    pub feature_config_sha256: String,
+    #[serde(default)]
+    pub feature_config_source_existed: bool,
     #[serde(default)]
     pub aliases_config_path: String,
     #[serde(default)]
@@ -1366,6 +1372,20 @@ fn sampled_content_sha256(path: &Path) -> Result<String> {
     Ok(hex::encode(hasher.finalize()))
 }
 
+fn full_file_sha256(path: &Path) -> Result<String> {
+    let mut file = std::fs::File::open(path)?;
+    let mut hasher = Sha256::new();
+    let mut buffer = vec![0_u8; 1024 * 1024];
+    loop {
+        let read = file.read(&mut buffer)?;
+        if read == 0 {
+            break;
+        }
+        hasher.update(&buffer[..read]);
+    }
+    Ok(hex::encode(hasher.finalize()))
+}
+
 fn write_receipt(paths: &AppPaths, receipt: &RootRebindReceipt) -> Result<PathBuf> {
     let path = validated_receipt_path(paths, &receipt.id)?;
     let text = format!("{}\n", serde_json::to_string_pretty(receipt)?);
@@ -1449,15 +1469,30 @@ fn create_verified_backup(paths: &AppPaths, id: &str) -> Result<RootRebindBackup
             "SQLite backup integrity failed: {integrity}"
         )));
     }
+    let sqlite_sha256 = full_file_sha256(&sqlite_path)?;
 
     let source_config = paths.feature_storage_roots_config_path();
-    let (config_path, config_verified) = if source_config.is_file() {
+    let feature_config_source_existed = source_config.is_file();
+    let (config_path, config_verified, feature_config_sha256) = if feature_config_source_existed {
         let destination = backup_dir.join("feature_storage_roots.json");
+        let source_bytes = std::fs::read(&source_config)?;
         std::fs::copy(&source_config, &destination)?;
-        let _: FeatureStorageRootsConfig = serde_json::from_slice(&std::fs::read(&destination)?)?;
-        (Some(destination.to_string_lossy().to_string()), true)
+        let reopened_bytes = std::fs::read(&destination)?;
+        let _: FeatureStorageRootsConfig = serde_json::from_slice(&reopened_bytes)?;
+        let expected_hash = hex::encode(Sha256::digest(&source_bytes));
+        let reopened_hash = hex::encode(Sha256::digest(&reopened_bytes));
+        if reopened_hash != expected_hash {
+            return Err(invalid(
+                "root rebind feature config backup hash verification failed",
+            ));
+        }
+        (
+            Some(destination.to_string_lossy().to_string()),
+            true,
+            expected_hash,
+        )
     } else {
-        (None, true)
+        (None, true, String::new())
     };
 
     // Alias activation is itself one of the rebind side effects, so its prior state needs the
@@ -1494,8 +1529,11 @@ fn create_verified_backup(paths: &AppPaths, id: &str) -> Result<RootRebindBackup
     Ok(RootRebindBackupReference {
         sqlite_path: sqlite_path.to_string_lossy().to_string(),
         sqlite_integrity: integrity,
+        sqlite_sha256,
         feature_config_path: config_path,
         feature_config_verified: config_verified,
+        feature_config_sha256,
+        feature_config_source_existed,
         aliases_config_path: aliases_path.to_string_lossy().to_string(),
         aliases_config_sha256: aliases_source_sha256,
         aliases_config_source_existed: aliases_source_existed,
@@ -1518,6 +1556,78 @@ fn verify_aliases_backup(backup: &RootRebindBackupReference) -> Result<()> {
         return Err(invalid("root aliases backup hash changed after prepare"));
     }
     Ok(())
+}
+
+fn verify_prepared_backups(receipt: &RootRebindReceipt) -> Result<()> {
+    if receipt.backup.sqlite_integrity != "ok"
+        || receipt.backup.sqlite_sha256.trim().is_empty()
+        || !receipt.backup.feature_config_verified
+    {
+        return Err(invalid(
+            "root rebind backups are not independently verified",
+        ));
+    }
+
+    let sqlite_path = Path::new(&receipt.backup.sqlite_path);
+    if !sqlite_path.is_file() {
+        return Err(invalid("root rebind SQLite backup is missing"));
+    }
+    let reopened =
+        Connection::open_with_flags(sqlite_path, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)?;
+    let integrity: String = reopened.query_row("PRAGMA integrity_check", [], |row| row.get(0))?;
+    if integrity != "ok" {
+        return Err(invalid(format!(
+            "root rebind SQLite backup integrity changed after prepare: {integrity}"
+        )));
+    }
+    if full_file_sha256(sqlite_path)? != receipt.backup.sqlite_sha256 {
+        return Err(invalid(
+            "root rebind SQLite backup hash changed after prepare",
+        ));
+    }
+
+    match (
+        receipt.backup.feature_config_source_existed,
+        receipt.backup.feature_config_path.as_deref(),
+    ) {
+        (true, Some(path)) => {
+            if receipt.backup.feature_config_sha256.trim().is_empty() {
+                return Err(invalid("root rebind feature config backup hash is missing"));
+            }
+            let bytes = std::fs::read(path)?;
+            if hex::encode(Sha256::digest(&bytes)) != receipt.backup.feature_config_sha256 {
+                return Err(invalid(
+                    "root rebind feature config backup hash changed after prepare",
+                ));
+            }
+            let backed_up: FeatureStorageRootsConfig = serde_json::from_slice(&bytes)?;
+            if let Some(change) = receipt.affected_rows.iter().find(|change| {
+                change.surface == "feature_storage_roots" && change.field == "video_root"
+            }) {
+                if backed_up.video_root.as_deref() != Some(change.original_value.as_str()) {
+                    return Err(invalid(
+                        "root rebind feature config backup no longer matches the prepared original",
+                    ));
+                }
+            }
+        }
+        (false, None) => {
+            if receipt.affected_rows.iter().any(|change| {
+                change.surface == "feature_storage_roots" && change.field == "video_root"
+            }) {
+                return Err(invalid(
+                    "root rebind feature config backup is missing for a prepared feature-root change",
+                ));
+            }
+        }
+        _ => {
+            return Err(invalid(
+                "root rebind feature config backup source/path state is inconsistent",
+            ));
+        }
+    }
+
+    verify_aliases_backup(&receipt.backup)
 }
 
 fn collect_path_changes(
@@ -2048,15 +2158,7 @@ pub fn apply_prepared_root_rebind_cancellable(
     if cancellation.load(Ordering::Relaxed) {
         return Err(invalid("root rebind canceled before mutation"));
     }
-    if !Path::new(&receipt.backup.sqlite_path).is_file()
-        || receipt.backup.sqlite_integrity != "ok"
-        || !receipt.backup.feature_config_verified
-    {
-        return Err(invalid(
-            "root rebind backups are not independently verified",
-        ));
-    }
-    verify_aliases_backup(&receipt.backup)?;
+    verify_prepared_backups(&receipt)?;
     reject_unrecorded_feature_match(paths, &receipt)?;
     receipt.status = "applying".to_string();
     receipt.updated_at_ms = now_ms();
@@ -3044,6 +3146,107 @@ mod tests {
     }
 
     #[test]
+    fn apply_reopens_sqlite_backup_before_mutation() {
+        let dir = tempfile::tempdir().unwrap();
+        let paths = AppPaths::new(dir.path().join("app"));
+        let old_root = dir.path().join("old");
+        let target = dir.path().join("target");
+        std::fs::create_dir_all(&old_root).unwrap();
+        std::fs::create_dir_all(&target).unwrap();
+        std::fs::write(old_root.join("identity.mkv"), b"identity").unwrap();
+        std::fs::write(target.join("identity.mkv"), b"identity").unwrap();
+        let conn = db::open(&paths).unwrap();
+        db::migrate(&conn).unwrap();
+        conn.execute(
+            "INSERT INTO library_item(id,created_at_ms,source_type,source_uri,title,media_path) VALUES('identity',1,'local_file','file://identity','Identity',?1)",
+            [old_root.join("identity.mkv").to_string_lossy().to_string()],
+        )
+        .unwrap();
+        drop(conn);
+        let receipt = prepare_root_rebind(&paths, &old_root.to_string_lossy(), &target, &[])
+            .expect("prepare with SQLite backup");
+        let replacement_path = dir.path().join("different-valid.sqlite");
+        let replacement = Connection::open(&replacement_path).unwrap();
+        replacement
+            .execute_batch(
+                "CREATE TABLE unrelated(value TEXT); INSERT INTO unrelated VALUES('valid');",
+            )
+            .unwrap();
+        drop(replacement);
+        std::fs::copy(&replacement_path, &receipt.backup.sqlite_path)
+            .expect("replace SQLite backup with another valid database");
+
+        let error = apply_prepared_root_rebind(&paths, &receipt.id, None)
+            .expect_err("corrupted SQLite backup must stop before mutation");
+        assert!(error.to_string().contains("SQLite backup hash changed"));
+        assert!(load_root_aliases(&paths).unwrap().aliases.is_empty());
+        assert_eq!(
+            root_rebind_receipt_status(&paths, &receipt.id)
+                .unwrap()
+                .status,
+            "prepared"
+        );
+    }
+
+    #[test]
+    fn apply_reopens_feature_config_backup_before_mutation() {
+        let dir = tempfile::tempdir().unwrap();
+        let paths = AppPaths::new(dir.path().join("app"));
+        let old_root = dir.path().join("old");
+        let target = dir.path().join("target");
+        std::fs::create_dir_all(&old_root).unwrap();
+        std::fs::create_dir_all(&target).unwrap();
+        std::fs::write(old_root.join("identity.mkv"), b"identity").unwrap();
+        std::fs::write(target.join("identity.mkv"), b"identity").unwrap();
+        let old_root_text = old_root.to_string_lossy().to_string();
+        let conn = db::open(&paths).unwrap();
+        db::migrate(&conn).unwrap();
+        conn.execute(
+            "INSERT INTO library_item(id,created_at_ms,source_type,source_uri,title,media_path) VALUES('identity',1,'local_file','file://identity','Identity',?1)",
+            [old_root.join("identity.mkv").to_string_lossy().to_string()],
+        )
+        .unwrap();
+        drop(conn);
+        config::save_feature_storage_roots_config(
+            &paths,
+            &FeatureStorageRootsConfig {
+                video_root: Some(old_root_text.clone()),
+                ..FeatureStorageRootsConfig::default()
+            },
+        )
+        .unwrap();
+        let receipt = prepare_root_rebind(&paths, &old_root_text, &target, &[])
+            .expect("prepare with feature config backup");
+        let backup_path = receipt
+            .backup
+            .feature_config_path
+            .as_deref()
+            .expect("feature config backup path");
+        let mut backed_up: FeatureStorageRootsConfig =
+            serde_json::from_slice(&std::fs::read(backup_path).unwrap()).unwrap();
+        backed_up.video_root = Some(target.to_string_lossy().to_string());
+        std::fs::write(backup_path, serde_json::to_vec_pretty(&backed_up).unwrap())
+            .expect("tamper feature config backup");
+
+        let error = apply_prepared_root_rebind(&paths, &receipt.id, None)
+            .expect_err("changed feature config backup must stop before mutation");
+        assert!(error.to_string().contains("feature config backup"));
+        assert!(load_root_aliases(&paths).unwrap().aliases.is_empty());
+        assert_eq!(
+            config::load_feature_storage_roots_config(&paths)
+                .unwrap()
+                .video_root,
+            Some(old_root_text)
+        );
+        assert_eq!(
+            root_rebind_receipt_status(&paths, &receipt.id)
+                .unwrap()
+                .status,
+            "prepared"
+        );
+    }
+
+    #[test]
     fn concurrent_alias_updates_preserve_both_non_overlapping_records() {
         let dir = tempfile::tempdir().unwrap();
         let paths = AppPaths::new(dir.path().join("app"));
@@ -3174,8 +3377,11 @@ mod tests {
             backup: RootRebindBackupReference {
                 sqlite_path: String::new(),
                 sqlite_integrity: "ok".to_string(),
+                sqlite_sha256: String::new(),
                 feature_config_path: None,
                 feature_config_verified: true,
+                feature_config_sha256: String::new(),
+                feature_config_source_existed: false,
                 aliases_config_path: String::new(),
                 aliases_config_sha256: String::new(),
                 aliases_config_source_existed: false,

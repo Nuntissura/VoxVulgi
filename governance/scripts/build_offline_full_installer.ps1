@@ -84,30 +84,102 @@ if (-not (Test-Path -LiteralPath $patchedWetextPy) -or -not (Select-String -Lite
 $iscc = Find-Iscc -Explicit $IsccPath
 New-Item -ItemType Directory -Force -Path $OutputDir | Out-Null
 
-Write-Host "ISCC:       $iscc"
-Write-Host "ISS:        $iss"
-Write-Host "PayloadDir: $PayloadDir"
-Write-Host "CosyVoice:  $CosyVoiceVenvDir"
-Write-Host "Backends:   $VoiceBackendsDir"
-Write-Host "SetupExe:   $SetupExe"
-Write-Host "OutputDir:  $OutputDir"
-Write-Host "AppVersion: $AppVersion"
-Write-Host "Kokoro triplet verified as real files under snapshot $sha"
-Write-Host ""
-Write-Host "Compiling (this is large: multi-GB payload -> setup.exe plus required .bin slices; expect many minutes)..."
+# ISCC 6.7 still fails while opening source files whose absolute paths cross the
+# classic Windows path boundary. Both Node and Python dependency trees can do so
+# even though the eventual install paths are valid. Present the already-validated
+# inputs through short, repo-local directory junctions for compilation. Junction
+# removal does not modify or remove any target content.
+$junctionRoot = Join-Path $repoRoot '.inno_stage'
+$junctionTargets = [ordered]@{
+  p = (Resolve-Path -LiteralPath $PayloadDir).Path
+  c = (Resolve-Path -LiteralPath $CosyVoiceVenvDir).Path
+  v = (Resolve-Path -LiteralPath $VoiceBackendsDir).Path
+  w = (Resolve-Path -LiteralPath $WetextDir).Path
+}
+$buildMutex = [System.Threading.Mutex]::new($false, 'Local\VoxVulgiOfflineInstallerBuild')
+$buildMutexAcquired = $false
+try {
+  try {
+    $buildMutexAcquired = $buildMutex.WaitOne(0)
+  } catch [System.Threading.AbandonedMutexException] {
+    # The previous compiler crashed; this process now owns the abandoned mutex and may
+    # validate/clean only the known junction entries below before rebuilding.
+    $buildMutexAcquired = $true
+  }
+  if (-not $buildMutexAcquired) {
+    throw "Another VoxVulgi full-offline installer build already owns the short-path staging area."
+  }
+  if (Test-Path -LiteralPath $junctionRoot) {
+    $existing = Get-Item -LiteralPath $junctionRoot -Force
+    if ($existing.Attributes -band [System.IO.FileAttributes]::ReparsePoint) {
+      throw "Refusing unexpected reparse point at installer junction root: $junctionRoot"
+    }
+    Get-ChildItem -LiteralPath $junctionRoot -Force | ForEach-Object {
+      if (-not $junctionTargets.Contains($_.Name)) {
+        throw "Refusing unexpected installer staging entry: $($_.FullName)"
+      }
+      if (-not ($_.Attributes -band [System.IO.FileAttributes]::ReparsePoint)) {
+        throw "Refusing to clean non-junction installer staging entry: $($_.FullName)"
+      }
+      Remove-Item -LiteralPath $_.FullName -Force
+    }
+  } else {
+    New-Item -ItemType Directory -Path $junctionRoot | Out-Null
+  }
+  foreach ($entry in $junctionTargets.GetEnumerator()) {
+    New-Item -ItemType Junction -Path (Join-Path $junctionRoot $entry.Key) -Target $entry.Value | Out-Null
+  }
+  $compilePayloadDir = Join-Path $junctionRoot 'p'
+  $compileCosyVoiceDir = Join-Path $junctionRoot 'c'
+  $compileVoiceBackendsDir = Join-Path $junctionRoot 'v'
+  $compileWetextDir = Join-Path $junctionRoot 'w'
+  $baseName = "VoxVulgi_{0}_x64_offline_full_setup" -f $AppVersion
+  Get-ChildItem -LiteralPath $OutputDir -File -ErrorAction Stop | Where-Object {
+    $_.Name -eq "$baseName.exe" -or
+    $_.Name -eq "$baseName.artifacts.json" -or
+    $_.Name -like "$baseName-*.bin"
+  } | ForEach-Object {
+    Remove-Item -LiteralPath $_.FullName -Force
+  }
 
-& $iscc `
-  "/DAppVersion=$AppVersion" `
-  "/DPayloadDir=$PayloadDir" `
-  "/DCosyVoiceVenvDir=$CosyVoiceVenvDir" `
-  "/DVoiceBackendsDir=$VoiceBackendsDir" `
-  "/DSetupExe=$SetupExe" `
-  "/DWetextDir=$WetextDir" `
-  "/DOutputDir=$OutputDir" `
-  $iss
-if ($LASTEXITCODE -ne 0) { throw "ISCC failed with exit code $LASTEXITCODE" }
+  Write-Host "ISCC:       $iscc"
+  Write-Host "ISS:        $iss"
+  Write-Host "PayloadDir: $PayloadDir"
+  Write-Host "CosyVoice:  $CosyVoiceVenvDir"
+  Write-Host "Backends:   $VoiceBackendsDir"
+  Write-Host "SetupExe:   $SetupExe"
+  Write-Host "OutputDir:  $OutputDir"
+  Write-Host "AppVersion: $AppVersion"
+  Write-Host "Kokoro triplet verified as real files under snapshot $sha"
+  Write-Host ""
+  Write-Host "Compiling (this is large: multi-GB payload -> setup.exe plus required .bin slices; expect many minutes)..."
 
-$baseName = "VoxVulgi_{0}_x64_offline_full_setup" -f $AppVersion
+  & $iscc `
+    "/DAppVersion=$AppVersion" `
+    "/DPayloadDir=$compilePayloadDir" `
+    "/DCosyVoiceVenvDir=$compileCosyVoiceDir" `
+    "/DVoiceBackendsDir=$compileVoiceBackendsDir" `
+    "/DSetupExe=$SetupExe" `
+    "/DWetextDir=$compileWetextDir" `
+    "/DOutputDir=$OutputDir" `
+    $iss
+  if ($LASTEXITCODE -ne 0) { throw "ISCC failed with exit code $LASTEXITCODE" }
+} finally {
+  if ($buildMutexAcquired) {
+    foreach ($entry in $junctionTargets.GetEnumerator()) {
+      $junction = Join-Path $junctionRoot $entry.Key
+      if (Test-Path -LiteralPath $junction) {
+        Remove-Item -LiteralPath $junction -Force
+      }
+    }
+    if ((Test-Path -LiteralPath $junctionRoot) -and -not (Get-ChildItem -LiteralPath $junctionRoot -Force)) {
+      Remove-Item -LiteralPath $junctionRoot -Force
+    }
+    $buildMutex.ReleaseMutex()
+  }
+  $buildMutex.Dispose()
+}
+
 $out = Join-Path $OutputDir ("$baseName.exe")
 if (-not (Test-Path -LiteralPath $out -PathType Leaf)) { throw "Compile reported success but setup executable was not found: $out" }
 $slices = @(Get-ChildItem -LiteralPath $OutputDir -File -Filter "$baseName-*.bin" | Sort-Object Name)
