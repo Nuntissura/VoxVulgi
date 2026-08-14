@@ -798,7 +798,7 @@ dependencies = [
 
 [[package]]
 name = "desktop"
-version = "0.1.135"
+version = "0.1.136"
 dependencies = [
  "base64 0.22.1",
  "hex",
