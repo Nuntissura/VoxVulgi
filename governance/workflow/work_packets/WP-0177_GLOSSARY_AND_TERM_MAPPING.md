@@ -3,7 +3,7 @@
 ## Metadata
 - ID: WP-0177
 - Owner: Codex
-- Status: REVIEW
+- Status: DONE
 - Created: 2026-04-08
 - Target milestone: Translation Quality
 
@@ -42,8 +42,9 @@ Out of scope:
 - Selected approach: versioned global and per-item documents, per-item override precedence, queue-time snapshots, source-relevant prompt filtering, and atomic writes. Rejected: post-translation-only source-string replacement, because JA/KO source terms are normally absent from English Whisper output; and a new online translation provider, because it would violate the offline-default product contract.
 - Primary sources checked: `https://github.com/ggml-org/whisper.cpp/blob/master/examples/cli/cli.cpp`, `https://github.com/openai/whisper/blob/main/whisper/transcribe.py`, `https://docs.cloud.google.com/translate/docs/advanced/glossary`, `https://developers.deepl.com/api-reference/multilingual-glossaries/create-a-glossary`, and `https://learn.microsoft.com/en-us/azure/ai-services/translator/text-translation/how-to/use-dynamic-dictionary`.
 
-## Implementation status (2026-08-14)
+## Implementation status (2026-08-15)
 
 - Product code implemented: versioned/legacy-compatible data model, global and per-item CRUD, context/notes, JSON/CSV import/export, source highlighting, queue-time effective-glossary snapshots, and native Whisper prompt plumbing.
 - Verification passed: `npm run build`; `cargo check --locked -j 1 --manifest-path product/desktop/src-tauri/Cargo.toml`; targeted engine tests (`7 passed`, including invalid-item-path and invalid-term negative paths).
-- Remaining before `DONE`: governed desktop build plus headless packaged UI inspection under `PROOF_STANDARD.md`.
+- Governed packaged v0.1.149 proof completed the remaining UI/app-boundary gate with a reversible per-item term: trusted UI add/remove, native canonical rereads, visible source highlighting, JSON export/import round trip, real WebView reload, and exact baseline restoration. The temporary export was hash-verified and deleted; the final dump contains zero console errors.
+- Proof: `product/desktop/build_target/tool_artifacts/wp_runs/WP-0177/20260815-0017_v0_1_149/summary.md`.

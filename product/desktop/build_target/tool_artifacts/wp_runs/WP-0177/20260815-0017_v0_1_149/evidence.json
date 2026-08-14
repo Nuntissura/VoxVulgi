@@ -1,0 +1,37 @@
+{
+  "wp": "WP-0177",
+  "status": "DONE",
+  "verified_at": "2026-08-15T00:17:00+02:00",
+  "app_version": "0.1.149",
+  "agent_headless": true,
+  "item_id": "285097bf-b998-4b24-a390-b12e115ea580",
+  "baseline": { "global_entries": 0, "item_entries": 0, "effective_entries": 0 },
+  "probe": {
+    "source": "뭐",
+    "target": "what-wp0177-probe",
+    "context": "WP-0177 reversible packaged proof",
+    "notes": "delete after proof",
+    "native_reread_matched": true,
+    "visible_highlight_count": 1,
+    "highlight_title": "Glossary: what-wp0177-probe"
+  },
+  "interchange": {
+    "export_count": 1,
+    "export_bytes": 208,
+    "export_sha256": "473F8C0EE00B6033E92F141327014C456FAED7C15961D74325A6F0F49720175D",
+    "import_count": 1,
+    "ui_reload_showed_full_entry": true,
+    "temporary_export_deleted": true
+  },
+  "restoration": {
+    "global_entries": 0,
+    "item_entries": 0,
+    "effective_entries": 0,
+    "probe_marks": 0,
+    "console_errors": 0
+  },
+  "artifacts": [
+    { "path": "governance/snapshots/WP-0177/glossary_highlight_v149_1786746019554.png", "bytes": 324486, "sha256": "4E149DCEEA4D5C7E1CE27FF6F3C1E4F4D3EDF1635874CD366862BDB70F1AE97E" },
+    { "path": "governance/snapshots/WP-0177/final_restored_v149_1786746139726.dump.json", "bytes": 5677, "sha256": "58A5D933F8129330E5B641F4CF4C782511F05B73C9E536C502CFAC1116B99B91" }
+  ]
+}
