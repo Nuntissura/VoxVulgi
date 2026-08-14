@@ -12686,6 +12686,60 @@ async fn jobs_queue_control_set(
 }
 
 #[tauri::command]
+async fn jobs_recover_orphaned_running(
+    state: State<'_, AppState>,
+    expected_job_ids: Vec<String>,
+    confirmation: String,
+) -> Result<jobs::OrphanedRunningJobRecoveryReceipt, String> {
+    let _timer = InvokeTimer::start(state.paths.clone(), "jobs_recover_orphaned_running");
+    if !agent_bridge_state().lock().unwrap().agent_headless {
+        return Err("orphaned running-job recovery requires --agent-headless".to_string());
+    }
+    let mut normalized_ids = expected_job_ids
+        .iter()
+        .map(|value| value.trim().to_string())
+        .collect::<Vec<_>>();
+    if normalized_ids.is_empty() || normalized_ids.iter().any(|value| value.is_empty()) {
+        return Err("orphaned running-job recovery requires a non-empty exact job-id set".to_string());
+    }
+    normalized_ids.sort();
+    let input_count = normalized_ids.len();
+    normalized_ids.dedup();
+    if normalized_ids.len() != input_count {
+        return Err("orphaned running-job recovery refuses duplicate job IDs".to_string());
+    }
+    let mut hasher = Sha256::new();
+    for id in &normalized_ids {
+        hasher.update(id.as_bytes());
+        hasher.update([0]);
+    }
+    let expected_confirmation = format!("RECOVER_ORPHANED_RUNNING:{:x}", hasher.finalize());
+    if confirmation.trim() != expected_confirmation {
+        return Err(format!(
+            "orphaned running-job recovery requires confirmation {expected_confirmation}"
+        ));
+    }
+    let paths = state.paths.clone();
+    let receipt = tauri::async_runtime::spawn_blocking(move || {
+        jobs::recover_orphaned_running_jobs_exact(&paths, &normalized_ids)
+            .map_err(|error| error.to_string())
+    })
+    .await
+    .map_err(|error| error.to_string())??;
+    append_diagnostics_trace_row_best_effort(
+        &state.paths,
+        "jobs_orphaned_running_recovered",
+        serde_json::json!({
+            "recovered_count": receipt.rows.len(),
+            "recovered_job_ids": receipt.rows.iter().map(|row| row.id.clone()).collect::<Vec<_>>(),
+            "queue_paused": receipt.queue_paused,
+        }),
+        "warn",
+    );
+    Ok(receipt)
+}
+
+#[tauri::command]
 async fn youtube_queue_identity_reconcile(
     state: State<'_, AppState>,
     dry_run: Option<bool>,
@@ -14305,6 +14359,7 @@ pub fn run() {
             jobs_progress_many,
             jobs_queue_control_get,
             jobs_queue_control_set,
+            jobs_recover_orphaned_running,
             youtube_queue_identity_reconcile,
             media_cleanup_get,
             media_cleanup_latest,

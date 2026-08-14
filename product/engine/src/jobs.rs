@@ -732,6 +732,20 @@ pub struct JobQueueControlState {
     pub paused: bool,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct OrphanedRunningJobRecoveryRow {
+    pub id: String,
+    pub status: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct OrphanedRunningJobRecoveryReceipt {
+    pub schema_version: u32,
+    pub queue_paused: bool,
+    pub recovered_at_ms: i64,
+    pub rows: Vec<OrphanedRunningJobRecoveryRow>,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct JobCleanupPreview {
     pub terminal_job_count: usize,
@@ -7998,6 +8012,91 @@ fn requeue_orphaned_running_jobs(conn: &rusqlite::Connection) -> Result<usize> {
         params![JobStatus::Queued.as_str(), JobStatus::Running.as_str()],
     )?;
     Ok(resumed + failed + classified_imports)
+}
+
+/// Apply the normal crash-restart recovery without starting the runner.
+///
+/// This maintenance path is exact-set and queue-pause gated so a headless agent can recover rows
+/// left `running` by a crashed process before guarded storage work, without starting downloads.
+/// The caller must independently gate this API to an exclusive maintenance context.
+pub fn recover_orphaned_running_jobs_exact(
+    paths: &AppPaths,
+    expected_job_ids: &[String],
+) -> Result<OrphanedRunningJobRecoveryReceipt> {
+    let mut expected = expected_job_ids
+        .iter()
+        .map(|value| value.trim().to_string())
+        .collect::<Vec<_>>();
+    if expected.is_empty() || expected.iter().any(|value| value.is_empty()) {
+        return Err(EngineError::InstallFailed(
+            "orphaned running-job recovery requires a non-empty exact job-id set".to_string(),
+        ));
+    }
+    expected.sort();
+    let input_count = expected.len();
+    expected.dedup();
+    if expected.len() != input_count {
+        return Err(EngineError::InstallFailed(
+            "orphaned running-job recovery refuses duplicate job IDs".to_string(),
+        ));
+    }
+
+    let mut conn = db::open(paths)?;
+    db::migrate(&conn)?;
+    let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
+    if !is_queue_paused_conn(&tx)? {
+        return Err(EngineError::InstallFailed(
+            "orphaned running-job recovery requires the global queue to be paused".to_string(),
+        ));
+    }
+    let current = {
+        let mut stmt = tx.prepare("SELECT id FROM job WHERE status=?1 ORDER BY id ASC")?;
+        let rows = stmt
+            .query_map([JobStatus::Running.as_str()], |row| row.get::<_, String>(0))?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        rows
+    };
+    if current != expected {
+        return Err(EngineError::InstallFailed(format!(
+            "orphaned running-job recovery exact-set mismatch: expected {} IDs, found {}",
+            expected.len(),
+            current.len()
+        )));
+    }
+
+    let recovered = requeue_orphaned_running_jobs(&tx)?;
+    if recovered != expected.len() {
+        return Err(EngineError::InstallFailed(format!(
+            "orphaned running-job recovery count mismatch: expected {}, recovered {recovered}",
+            expected.len()
+        )));
+    }
+    let rows = {
+        let mut stmt = tx.prepare("SELECT id, status FROM job WHERE id=?1")?;
+        expected
+            .iter()
+            .map(|id| {
+                stmt.query_row([id], |row| {
+                    Ok(OrphanedRunningJobRecoveryRow {
+                        id: row.get(0)?,
+                        status: row.get(1)?,
+                    })
+                })
+            })
+            .collect::<rusqlite::Result<Vec<_>>>()?
+    };
+    if rows.iter().any(|row| row.status == JobStatus::Running.as_str()) {
+        return Err(EngineError::InstallFailed(
+            "orphaned running-job recovery left an expected row running".to_string(),
+        ));
+    }
+    tx.commit()?;
+    Ok(OrphanedRunningJobRecoveryReceipt {
+        schema_version: 1,
+        queue_paused: true,
+        recovered_at_ms: now_ms(),
+        rows,
+    })
 }
 
 /// Stamp at most `requested_limit` active legacy rows with their canonical WP-0269 track. This
@@ -31237,6 +31336,64 @@ EOF
             .expect("select");
         assert_eq!(status, JobStatus::Failed.as_str());
         assert_eq!(error.as_deref(), Some("interrupted by app shutdown"));
+    }
+
+    #[test]
+    fn exact_orphan_recovery_requires_paused_queue_and_matching_ids() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let paths = AppPaths::new(dir.path().to_path_buf());
+        db::ensure_schema(&paths).expect("schema");
+        let job = enqueue_dummy_sleep(&paths, 10).expect("enqueue");
+        let conn = db::open(&paths).expect("open");
+        conn.execute(
+            "UPDATE job SET status=?1, started_at_ms=?2 WHERE id=?3",
+            params![JobStatus::Running.as_str(), now_ms(), job.id],
+        )
+        .expect("force running");
+        drop(conn);
+
+        let unpaused = recover_orphaned_running_jobs_exact(&paths, std::slice::from_ref(&job.id))
+            .expect_err("unpaused queue must refuse recovery");
+        assert!(unpaused.to_string().contains("queue to be paused"));
+        set_queue_paused(&paths, true).expect("pause");
+        let mismatch = recover_orphaned_running_jobs_exact(&paths, &["wrong-id".to_string()])
+            .expect_err("mismatched exact set must refuse recovery");
+        assert!(mismatch.to_string().contains("exact-set mismatch"));
+
+        let receipt = recover_orphaned_running_jobs_exact(
+            &paths,
+            std::slice::from_ref(&job.id),
+        )
+        .expect("recover exact set");
+        assert!(receipt.queue_paused);
+        assert_eq!(receipt.rows.len(), 1);
+        assert_eq!(receipt.rows[0].id, job.id);
+        assert_eq!(receipt.rows[0].status, JobStatus::Queued.as_str());
+    }
+
+    #[test]
+    fn exact_orphan_recovery_refuses_duplicate_ids_without_mutation() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let paths = AppPaths::new(dir.path().to_path_buf());
+        db::ensure_schema(&paths).expect("schema");
+        let job = enqueue_dummy_sleep(&paths, 10).expect("enqueue");
+        let conn = db::open(&paths).expect("open");
+        conn.execute(
+            "UPDATE job SET status=?1, started_at_ms=?2 WHERE id=?3",
+            params![JobStatus::Running.as_str(), now_ms(), job.id],
+        )
+        .expect("force running");
+        drop(conn);
+        set_queue_paused(&paths, true).expect("pause");
+
+        let error = recover_orphaned_running_jobs_exact(&paths, &[job.id.clone(), job.id.clone()])
+            .expect_err("duplicate IDs must be rejected");
+        assert!(error.to_string().contains("duplicate job IDs"));
+        let conn = db::open_readonly(&paths).expect("readonly");
+        let status: String = conn
+            .query_row("SELECT status FROM job WHERE id=?1", [job.id], |row| row.get(0))
+            .expect("status");
+        assert_eq!(status, JobStatus::Running.as_str());
     }
 
     #[test]
