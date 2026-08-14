@@ -1,0 +1,80 @@
+{
+  "wp": "WP-0182",
+  "status": "DONE",
+  "verified_at": "2026-08-15T00:03:00+02:00",
+  "app": {
+    "version": "0.1.149",
+    "agent_headless": true,
+    "item_id": "285097bf-b998-4b24-a390-b12e115ea580"
+  },
+  "artifacts": [
+    {
+      "path": "product/desktop/build_target/Current/release/desktop.exe",
+      "bytes": 37883904,
+      "sha256": "6D65A0239130410D6ADD6CEAECEBC2ACD3FFBB3DFA1B3883FDF6A0C0C21E679F"
+    },
+    {
+      "path": "product/desktop/build_target/Current/release/bundle/nsis/VoxVulgi_0.1.149_x64-setup.exe",
+      "bytes": 10375979,
+      "sha256": "62AC8EBE6C098E185E16447BFB15896F289C3C98924685C06B1A162568B2380C"
+    },
+    {
+      "path": "governance/snapshots/WP-0182/segment_audio_playing_v149_1786744864203.png",
+      "bytes": 290086,
+      "sha256": "02BAF41340DE59E28953CF8CEAD0D27A792817F5CBA6AF2D0D85F34D29D2A4A2"
+    },
+    {
+      "path": "governance/snapshots/WP-0182/segment_audio_v149_final_1786744941090.dump.json",
+      "bytes": 5677,
+      "sha256": "B503CBC57C80C60034881EF20350353D75D230D16FC1596358D5955D92D37BB0"
+    },
+    {
+      "path": "product/desktop/build_target/logs/build_desktop_target_20260814-234737_0_1_149.log",
+      "bytes": 3794,
+      "sha256": "E8B6A45C6AA20D155FDC971F145C6B8E39CD901A2ADD225A38E2307EAFDC8285"
+    },
+    {
+      "path": "product/desktop/build_target/logs/wp0182_media_asset_test_exact.out.log",
+      "bytes": 310,
+      "sha256": "F4FB1DE5341FD1EDA7C29360F8ACEC54C5DA8362F542BCC4E79B31F2CDD31B8F"
+    }
+  ],
+  "media_probe": {
+    "source_proof_path": "product/desktop/build_target/tool_artifacts/wp_runs/WP-0074/manual_smoke_queen/smoke_env/derived/items/bcba4ff3-2132-4c7a-844f-6e429e048dc4/dub_preview/mix_dub_preview_v1.wav",
+    "bytes": 29808150,
+    "sha256": "89450340844E36CCE444772C7FE400EFAB7360DC0AEB1AA7D99E6C9A40FE40BD",
+    "codec": "pcm_s16le",
+    "sample_rate_hz": 44100,
+    "channels": 2,
+    "duration_seconds": 168.98,
+    "restored_out_of_live_state": true
+  },
+  "checks": {
+    "native_boundary_test": { "passed": 1, "failed": 0 },
+    "segment_range_tests": { "passed": 3, "failed": 0 },
+    "typescript_vite_build": "passed",
+    "governed_nsis_build": "passed",
+    "audio_ready_state": 4,
+    "audio_duration_seconds": 168.98,
+    "audio_error": null,
+    "video_ready_state": 4,
+    "video_duration_seconds": 7.174966,
+    "video_error": null,
+    "exact_derived_path_allowed": true,
+    "unrelated_existing_path_rejected": true,
+    "segment_start_state": { "text": "Stop", "aria_pressed": true },
+    "reclick_stop_state": { "text": "Play", "aria_pressed": false },
+    "rapid_double_click_state": { "text": "Play", "aria_pressed": false },
+    "auto_stop_wait_ms": 4200,
+    "segment_end_ms": 3720,
+    "auto_stop_state": { "text": "Play", "aria_pressed": false },
+    "navigation_cleanup_state": { "text": "Play", "aria_pressed": false },
+    "console_errors": 0
+  },
+  "host_load_policy": {
+    "cargo_build_jobs": 1,
+    "build_priority": "BelowNormal",
+    "overlapping_voxvulgi_heavy_steps": 0,
+    "foreign_processes_stopped": 0
+  }
+}

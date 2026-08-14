@@ -4048,6 +4048,58 @@ mod tests {
         assert_eq!(dump["viewport"]["width"], 800);
     }
 
+    #[test]
+    fn media_asset_scope_accepts_only_the_item_source_and_derived_files() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let paths = AppPaths::new(dir.path().join("app"));
+        let item_id = "item-1";
+        let source = dir.path().join("source.mp4");
+        let derived = paths.derived_item_dir(item_id).join("dub_preview");
+        let mix = derived.join("mix.wav");
+        let outside = dir.path().join("outside.wav");
+        std::fs::create_dir_all(&derived).expect("derived dir");
+        std::fs::write(&source, b"source").expect("source file");
+        std::fs::write(&mix, b"mix").expect("mix file");
+        std::fs::write(&outside, b"outside").expect("outside file");
+
+        assert_eq!(
+            validate_media_asset_candidate(
+                &paths,
+                item_id,
+                &source.to_string_lossy(),
+                &source.to_string_lossy(),
+            )
+            .expect("source allowed"),
+            std::fs::canonicalize(&source).expect("canonical source")
+        );
+        assert_eq!(
+            validate_media_asset_candidate(
+                &paths,
+                item_id,
+                &source.to_string_lossy(),
+                &mix.to_string_lossy(),
+            )
+            .expect("derived allowed"),
+            std::fs::canonicalize(&mix).expect("canonical mix")
+        );
+        assert!(validate_media_asset_candidate(
+            &paths,
+            item_id,
+            &source.to_string_lossy(),
+            &outside.to_string_lossy(),
+        )
+        .expect_err("outside denied")
+        .contains("outside"));
+        assert!(validate_media_asset_candidate(
+            &paths,
+            "../escape",
+            &source.to_string_lossy(),
+            &mix.to_string_lossy(),
+        )
+        .expect_err("invalid id denied")
+        .contains("invalid localization item id"));
+    }
+
     fn retention_receipt(has_more: bool) -> voxvulgi_engine::youtube_protection::DownloaderRetentionDrainReceipt {
         voxvulgi_engine::youtube_protection::DownloaderRetentionDrainReceipt {
             batches: 1,
@@ -7351,6 +7403,73 @@ fn build_localization_home_item_outputs(
         deliverable_exists,
         recent_jobs: item_jobs.iter().take(40).cloned().collect(),
     })
+}
+
+fn validate_media_asset_candidate(
+    paths: &AppPaths,
+    item_id: &str,
+    source_media_path: &str,
+    candidate_path: &str,
+) -> Result<std::path::PathBuf, String> {
+    let item_id = item_id.trim();
+    if item_id.is_empty()
+        || !item_id
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
+    {
+        return Err("invalid localization item id for media preview".to_string());
+    }
+    let candidate = std::path::Path::new(candidate_path.trim());
+    if candidate_path.trim().is_empty() || !candidate.is_file() {
+        return Err("media preview path is not an existing file".to_string());
+    }
+    let canonical_candidate = std::fs::canonicalize(candidate).map_err(|error| {
+        format!(
+            "failed to resolve media preview path {}: {error}",
+            candidate.to_string_lossy()
+        )
+    })?;
+
+    let source_allowed = std::fs::canonicalize(source_media_path.trim())
+        .map(|source| source == canonical_candidate)
+        .unwrap_or(false);
+    let derived_allowed = std::fs::canonicalize(paths.derived_item_dir(item_id))
+        .map(|derived_root| canonical_candidate.starts_with(derived_root))
+        .unwrap_or(false);
+    if !source_allowed && !derived_allowed {
+        return Err(
+            "media preview path is outside the item's source and derived-output roots".to_string(),
+        );
+    }
+    Ok(canonical_candidate)
+}
+
+#[tauri::command]
+#[allow(non_snake_case)]
+async fn media_asset_allow(
+    state: State<'_, AppState>,
+    app: tauri::AppHandle,
+    item_id: Option<String>,
+    itemId: Option<String>,
+    path: String,
+) -> Result<String, String> {
+    let item_id = item_id
+        .or(itemId)
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty())
+        .ok_or_else(|| "missing required key itemId".to_string())?;
+    let paths = state.paths.clone();
+    let candidate_path = path.trim().to_string();
+    let canonical = tauri::async_runtime::spawn_blocking(move || {
+        let item = library::get_item_by_id(&paths, &item_id).map_err(|error| error.to_string())?;
+        validate_media_asset_candidate(&paths, &item_id, &item.media_path, &candidate_path)
+    })
+    .await
+    .map_err(|error| error.to_string())??;
+    app.asset_protocol_scope()
+        .allow_file(&canonical)
+        .map_err(|error| format!("failed to allow media preview path: {error}"))?;
+    Ok(canonical.to_string_lossy().to_string())
 }
 
 #[tauri::command]
@@ -14430,6 +14549,7 @@ pub fn run() {
             diagnostics_export_app_state_snapshot,
             diagnostics_generate_licensing_report,
             diagnostics_storage_breakdown,
+            media_asset_allow,
             item_outputs,
             item_outputs_many,
             localization_home_item_outputs,

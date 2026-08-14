@@ -337,6 +337,7 @@ Phase 2 preview implementation notes (current):
 - TTS preview: `tts_preview_pyttsx3_v1` renders per-segment wavs + a manifest (system TTS; quality varies by OS).
 - Mix preview: `mix_dub_preview_v1` overlays TTS segments onto the separation background stem into a single wav, but falls back to the source-media audio when no background stem is available so preview generation does not hard-fail under separation/runtime contention.
 - Per-segment audio preview reuses the current item mix WAV without generating another artifact: the editor seeks to the subtitle window, confirms `play()` before showing active playback, and stops by observed media time. Missing/invalid media stays non-destructive and visible; playback is cleared on error, pause, natural end, re-click, item change, and unmount.
+- WebView playback of local source and derived media uses Tauri's asset protocol with an empty static scope. Before constructing an asset URL, the native boundary canonicalizes the requested file and dynamically allows that exact path only when it is either the canonical library source for the requested item or a canonical descendant of that item's derived-output root; missing files, invalid item IDs, traversal, and unrelated paths are rejected. Broad filesystem asset scopes are forbidden.
 - Mux preview: `mux_dub_preview_v1` muxes selected original/dubbed audio plus available subtitle tracks with the original video into an MKV.
 - User-facing exports are separated from working artifacts:
   - working artifacts remain under `derived/items/<item_id>/...`

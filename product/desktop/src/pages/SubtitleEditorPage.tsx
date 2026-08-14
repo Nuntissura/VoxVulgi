@@ -1364,10 +1364,12 @@ export function SubtitleEditorPage({
   const [segmentCloneMap, setSegmentCloneMap] = useState<Record<number, { outcome: string | null; error: string | null }>>({});
   const segmentAudioRef = useRef<HTMLAudioElement | null>(null);
   const segmentAudioTimer = useRef<number | null>(null);
+  const segmentAudioRequest = useRef(0);
   const [loadingSegmentIndex, setLoadingSegmentIndex] = useState<number | null>(null);
   const [playingSegmentIndex, setPlayingSegmentIndex] = useState<number | null>(null);
 
   const stopSegmentAudio = useCallback((updatePlayingState = true) => {
+    segmentAudioRequest.current += 1;
     const audio = segmentAudioRef.current;
     segmentAudioRef.current = null;
     if (audio) {
@@ -1401,25 +1403,31 @@ export function SubtitleEditorPage({
       return;
     }
     stopSegmentAudio();
-    const audio = new Audio(convertFileSrc(mixPath));
-    audio.preload = "auto";
-    segmentAudioRef.current = audio;
-    const stopIfCurrent = () => {
-      if (segmentAudioRef.current === audio) stopSegmentAudio();
-    };
-    audio.onended = stopIfCurrent;
-    audio.onpause = stopIfCurrent;
-    audio.ontimeupdate = () => {
-      if (segmentAudioReachedEnd(audio.currentTime, range.endSeconds)) stopIfCurrent();
-    };
-    audio.onerror = () => {
-      if (segmentAudioRef.current !== audio) return;
-      stopSegmentAudio();
-      setError("This segment could not be played from the current dub audio file.");
-    };
+    const request = segmentAudioRequest.current;
+    setError(null);
+    setLoadingSegmentIndex(segIndex);
     try {
-      setError(null);
-      setLoadingSegmentIndex(segIndex);
+      const allowedMixPath = await invoke<string>("media_asset_allow", {
+        itemId,
+        path: mixPath,
+      });
+      if (segmentAudioRequest.current !== request) return;
+      const audio = new Audio(convertFileSrc(allowedMixPath));
+      audio.preload = "auto";
+      segmentAudioRef.current = audio;
+      const stopIfCurrent = () => {
+        if (segmentAudioRef.current === audio) stopSegmentAudio();
+      };
+      audio.onended = stopIfCurrent;
+      audio.onpause = stopIfCurrent;
+      audio.ontimeupdate = () => {
+        if (segmentAudioReachedEnd(audio.currentTime, range.endSeconds)) stopIfCurrent();
+      };
+      audio.onerror = () => {
+        if (segmentAudioRef.current !== audio) return;
+        stopSegmentAudio();
+        setError("This segment could not be played from the current dub audio file.");
+      };
       audio.currentTime = range.startSeconds;
       await audio.play();
       if (segmentAudioRef.current !== audio) {
@@ -1432,7 +1440,7 @@ export function SubtitleEditorPage({
         if (segmentAudioReachedEnd(audio.currentTime, range.endSeconds)) stopIfCurrent();
       }, 100);
     } catch (playError) {
-      if (segmentAudioRef.current !== audio) return;
+      if (segmentAudioRequest.current !== request) return;
       stopSegmentAudio();
       setError(`This segment could not be played: ${String(playError)}`);
     }
@@ -1479,6 +1487,10 @@ export function SubtitleEditorPage({
     "original",
   );
   const [audioPreviewPath, setAudioPreviewPath] = useState<string>("");
+  const [audioPreviewAssetUrl, setAudioPreviewAssetUrl] = useState<string>("");
+  const [audioPreviewAssetError, setAudioPreviewAssetError] = useState<string | null>(null);
+  const [videoPreviewAssetUrl, setVideoPreviewAssetUrl] = useState<string>("");
+  const [videoPreviewAssetError, setVideoPreviewAssetError] = useState<string | null>(null);
   const [translateJobId, setTranslateJobId] = useState<string | null>(null);
   const [translateJobStatus, setTranslateJobStatus] = useState<JobStatus | null>(null);
   const [translateJobError, setTranslateJobError] = useState<string | null>(null);
@@ -3291,6 +3303,54 @@ export function SubtitleEditorPage({
     }
     return item?.media_path ?? "";
   }, [item?.media_path, outputs, videoPreviewMode]);
+
+  useEffect(() => {
+    const path = audioPreviewPath.trim();
+    let cancelled = false;
+    setAudioPreviewAssetUrl("");
+    setAudioPreviewAssetError(null);
+    if (!path || !itemId) {
+      return () => {
+        cancelled = true;
+      };
+    }
+    void invoke<string>("media_asset_allow", { itemId, path })
+      .then((allowedPath) => {
+        if (!cancelled) setAudioPreviewAssetUrl(convertFileSrc(allowedPath));
+      })
+      .catch((assetError) => {
+        if (!cancelled) {
+          setAudioPreviewAssetError(`Audio preview is unavailable: ${String(assetError)}`);
+        }
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [audioPreviewPath, itemId]);
+
+  useEffect(() => {
+    const path = previewVideoPath.trim();
+    let cancelled = false;
+    setVideoPreviewAssetUrl("");
+    setVideoPreviewAssetError(null);
+    if (!path || !itemId) {
+      return () => {
+        cancelled = true;
+      };
+    }
+    void invoke<string>("media_asset_allow", { itemId, path })
+      .then((allowedPath) => {
+        if (!cancelled) setVideoPreviewAssetUrl(convertFileSrc(allowedPath));
+      })
+      .catch((assetError) => {
+        if (!cancelled) {
+          setVideoPreviewAssetError(`Video preview is unavailable: ${String(assetError)}`);
+        }
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [itemId, previewVideoPath]);
 
   const autoPairTrack = useMemo(() => {
     if (!currentTrack) return null;
@@ -11074,12 +11134,16 @@ export function SubtitleEditorPage({
             </button>
           </div>
 
-          {audioPreviewPath.trim() ? (
+          {audioPreviewAssetUrl ? (
             <audio
               controls
-              src={convertFileSrc(audioPreviewPath)}
+              src={audioPreviewAssetUrl}
               style={{ width: "100%", marginTop: 10 }}
             />
+          ) : audioPreviewAssetError ? (
+            <div className="error" style={{ marginTop: 8 }}>{audioPreviewAssetError}</div>
+          ) : audioPreviewPath.trim() ? (
+            <div style={{ opacity: 0.75, marginTop: 8 }}>Preparing audio preview…</div>
           ) : (
             <div style={{ opacity: 0.75, marginTop: 8 }}>Select an audio artifact to play.</div>
           )}
@@ -11198,13 +11262,17 @@ export function SubtitleEditorPage({
           </button>
         </div>
 
-        {previewVideoPath ? (
+        {videoPreviewAssetUrl ? (
           <video
             ref={videoRef}
-            src={convertFileSrc(previewVideoPath)}
+            src={videoPreviewAssetUrl}
             controls
             style={{ width: "100%", borderRadius: 12, background: "#000" }}
           />
+        ) : videoPreviewAssetError ? (
+          <div className="error">{videoPreviewAssetError}</div>
+        ) : previewVideoPath ? (
+          <div style={{ opacity: 0.75 }}>Preparing video preview…</div>
         ) : (
           <div>-</div>
         )}

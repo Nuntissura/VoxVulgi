@@ -1210,3 +1210,11 @@ This changelog tracks desktop installer builds produced by `governance/scripts/b
 - Artifacts:
   - `product/desktop/build_target/Current/release/bundle/nsis/VoxVulgi_0.1.148_x64-setup.exe`
 - Notes: WP-0183 headless-proof blocker fix: stop Localization item bootstrap from refetch fan-out by calling the latest deferred loader through a stable ref. Reuses the v0.1.146 full pack gate; no pack, resolver, dependency, payload, Rust, or installer input changed.
+
+## 0.1.149 - 2026-08-14T21:56:16Z
+- Work Packets: `WP-0182`
+- Commit: `b260501`
+- Offline Bundle ID: `offline_full_win64_20260814_082842`
+- Artifacts:
+  - `product/desktop/build_target/Current/release/bundle/nsis/VoxVulgi_0.1.149_x64-setup.exe`
+- Notes: WP-0182: enable exact-file dynamic Tauri asset scope for owned source/derived media; harden segment playback cancellation and visible media errors.
