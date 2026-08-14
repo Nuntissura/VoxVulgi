@@ -2,15 +2,58 @@ use crate::asr;
 use crate::paths::AppPaths;
 use crate::subtitles::{SubtitleDocument, SubtitleSegment, SUBTITLE_JSON_SCHEMA_VERSION};
 use crate::{EngineError, Result};
+use regex::Regex;
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 use std::path::Path;
+use std::sync::OnceLock;
 
 const GLOSSARY_SCHEMA_VERSION: u32 = 1;
 const MAX_GLOSSARY_ENTRIES: usize = 5_000;
 const MAX_GLOSSARY_TERM_BYTES: usize = 1_024;
 const MAX_GLOSSARY_NOTE_BYTES: usize = 4_096;
 const MAX_WHISPER_GLOSSARY_PROMPT_CHARS: usize = 480;
+const TRANSLATION_STYLE_SCHEMA_VERSION: u32 = 1;
+const MAX_CUSTOM_STYLE_INSTRUCTION_BYTES: usize = 1_024;
+
+#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum TranslationStyle {
+    #[default]
+    Neutral,
+    Formal,
+    Informal,
+    Custom,
+}
+
+#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum HonorificMode {
+    #[default]
+    Preserve,
+    Translate,
+    Drop,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct TranslationStyleSettings {
+    pub schema_version: u32,
+    pub style: TranslationStyle,
+    pub honorific_mode: HonorificMode,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub custom_instruction: Option<String>,
+}
+
+impl Default for TranslationStyleSettings {
+    fn default() -> Self {
+        Self {
+            schema_version: TRANSLATION_STYLE_SCHEMA_VERSION,
+            style: TranslationStyle::Neutral,
+            honorific_mode: HonorificMode::Preserve,
+            custom_instruction: None,
+        }
+    }
+}
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct GlossaryEntry {
@@ -48,6 +91,7 @@ pub struct TranslateOptions {
     pub max_lines: usize,
     pub max_cps: f64,
     pub glossary_entries: Option<Vec<GlossaryEntry>>,
+    pub translation_style: Option<TranslationStyleSettings>,
 }
 
 impl Default for TranslateOptions {
@@ -57,6 +101,7 @@ impl Default for TranslateOptions {
             max_lines: 2,
             max_cps: 17.0,
             glossary_entries: None,
+            translation_style: None,
         }
     }
 }
@@ -78,6 +123,7 @@ pub struct TranslateReport {
     pub glossary_path: String,
     pub glossary_entries: usize,
     pub glossary_prompt_entries: usize,
+    pub translation_style: TranslationStyleSettings,
     pub source_segment_count: usize,
     pub translated_raw_segment_count: usize,
     pub translated_usable_segment_count: usize,
@@ -113,8 +159,11 @@ pub fn translate_doc_whisper_to_en(
     };
     let glossary_entries_sorted = glossary_entries_sorted(&glossary_entries);
     let glossary_prompt_entries = glossary_entries_for_source(&glossary_entries, source_doc);
-    let (glossary_prompt, glossary_prompt_entry_count) =
-        build_glossary_prompt(&glossary_prompt_entries);
+    let translation_style = normalize_translation_style(
+        options.translation_style.clone().unwrap_or_default(),
+    )?;
+    let (translation_prompt, glossary_prompt_entry_count) =
+        build_translation_prompt(&translation_style, &glossary_prompt_entries);
 
     let source_lang = match source_doc.lang.as_str() {
         "ja" | "ko" => Some(source_doc.lang.clone()),
@@ -127,7 +176,7 @@ pub fn translate_doc_whisper_to_en(
         model_id,
         wav_path,
         source_lang.as_deref(),
-        glossary_prompt.as_deref(),
+        translation_prompt.as_deref(),
     )?;
 
     // Align Whisper segments onto the source segment windows to keep timing stable.
@@ -139,6 +188,7 @@ pub fn translate_doc_whisper_to_en(
     for (i, src) in source_doc.segments.iter().enumerate() {
         let mut text = aligned_texts.get(i).cloned().unwrap_or_default();
         text = apply_glossary(&text, &glossary_entries_sorted);
+        text = apply_translation_style(&text, &translation_style);
         let qc = qc_format_and_warn(i as u32, src.start_ms, src.end_ms, &text, &options);
         text = qc.text;
         warnings.extend(qc.warnings);
@@ -167,6 +217,7 @@ pub fn translate_doc_whisper_to_en(
         glossary_path: glossary_path.to_string_lossy().to_string(),
         glossary_entries: glossary_entries.len(),
         glossary_prompt_entries: glossary_prompt_entry_count,
+        translation_style,
         source_segment_count: source_doc.segments.len(),
         translated_raw_segment_count: translated_raw.stats.raw_segment_count,
         translated_usable_segment_count: translated_raw.stats.usable_segment_count,
@@ -321,32 +372,182 @@ fn glossary_entries_for_source(
     matched.into_iter().map(|(_, _, entry)| entry).collect()
 }
 
-fn build_glossary_prompt(entries: &[GlossaryEntry]) -> (Option<String>, usize) {
-    if entries.is_empty() {
-        return (None, 0);
-    }
-    let mut prompt = String::from(
-        "Preferred exact English terminology for this translation. Use each target when its source term is spoken: ",
-    );
-    let mut included = 0;
-    for entry in entries {
-        let context = entry
-            .context
-            .as_deref()
-            .map(|value| format!(" ({value})"))
-            .unwrap_or_default();
-        let candidate = format!("{} = {}{}; ", entry.source, entry.target, context);
-        if prompt.chars().count() + candidate.chars().count() > MAX_WHISPER_GLOSSARY_PROMPT_CHARS {
-            break;
+fn translation_style_prompt(settings: &TranslationStyleSettings) -> String {
+    let style = match settings.style {
+        TranslationStyle::Neutral => {
+            "Use clear, natural English subtitles with standard English punctuation.".to_string()
         }
-        prompt.push_str(&candidate);
-        included += 1;
+        TranslationStyle::Formal => {
+            "Use formal, professional English, complete sentences, standard punctuation, and avoid slang and contractions."
+                .to_string()
+        }
+        TranslationStyle::Informal => {
+            "Use casual conversational English, natural contractions, and light subtitle punctuation.".to_string()
+        }
+        TranslationStyle::Custom => settings
+            .custom_instruction
+            .as_deref()
+            .filter(|value| !value.is_empty())
+            .map(|value| format!("Follow this English translation style: {value}"))
+            .unwrap_or_else(|| "Use clear, natural English subtitles.".to_string()),
+    };
+    let honorifics = match settings.honorific_mode {
+        HonorificMode::Preserve => {
+            "Preserve romanized Japanese and Korean honorific suffixes such as -san, -sama, -sensei, -senpai, -kun, -chan, and -nim."
+        }
+        HonorificMode::Translate => {
+            "Translate Japanese and Korean honorific meaning into natural English titles when context supports it."
+        }
+        HonorificMode::Drop => {
+            "Omit Japanese and Korean honorific suffixes such as -san, -sama, -sensei, -senpai, -kun, -chan, and -nim."
+        }
+    };
+    // Put the honorific rule first so a long custom instruction cannot displace it when the
+    // bounded Whisper prompt is truncated.
+    format!("{honorifics} {style}")
+}
+
+fn build_translation_prompt(
+    settings: &TranslationStyleSettings,
+    glossary_entries: &[GlossaryEntry],
+) -> (Option<String>, usize) {
+    let mut prompt = translation_style_prompt(settings);
+    if prompt.chars().count() > MAX_WHISPER_GLOSSARY_PROMPT_CHARS {
+        prompt = prompt
+            .chars()
+            .take(MAX_WHISPER_GLOSSARY_PROMPT_CHARS)
+            .collect();
+        return (Some(prompt), 0);
     }
-    if included == 0 {
-        (None, 0)
-    } else {
-        (Some(prompt.trim().to_string()), included)
+
+    let mut included = 0;
+    if !glossary_entries.is_empty() {
+        let heading = " Preferred exact terminology: ";
+        if prompt.chars().count() + heading.chars().count()
+            <= MAX_WHISPER_GLOSSARY_PROMPT_CHARS
+        {
+            prompt.push_str(heading);
+            for entry in glossary_entries {
+                let context = entry
+                    .context
+                    .as_deref()
+                    .map(|value| format!(" ({value})"))
+                    .unwrap_or_default();
+                let candidate = format!("{} = {}{}; ", entry.source, entry.target, context);
+                if prompt.chars().count() + candidate.chars().count()
+                    > MAX_WHISPER_GLOSSARY_PROMPT_CHARS
+                {
+                    break;
+                }
+                prompt.push_str(&candidate);
+                included += 1;
+            }
+        }
     }
+    (Some(prompt.trim().to_string()), included)
+}
+
+fn honorific_suffix_regex() -> &'static Regex {
+    static HONORIFIC_SUFFIX_RE: OnceLock<Regex> = OnceLock::new();
+    HONORIFIC_SUFFIX_RE.get_or_init(|| {
+        Regex::new(
+            r"(?i)[\-\u{2010}\u{2011}\u{2012}\u{2013}\u{2014}](?:san|sama|sensei|senpai|kun|chan|nim)\b",
+        )
+        .expect("valid honorific suffix regex")
+    })
+}
+
+fn apply_translation_style(text: &str, settings: &TranslationStyleSettings) -> String {
+    let mut styled = text.trim().to_string();
+    if settings.honorific_mode == HonorificMode::Drop {
+        styled = honorific_suffix_regex().replace_all(&styled, "").to_string();
+    }
+    match settings.style {
+        TranslationStyle::Formal => {
+            if let Some(first) = styled.chars().next() {
+                if first.is_ascii_lowercase() {
+                    styled.replace_range(
+                        0..first.len_utf8(),
+                        &first.to_ascii_uppercase().to_string(),
+                    );
+                }
+            }
+            if !styled.is_empty()
+                && !styled.ends_with(['.', '?', '!', '…'])
+            {
+                styled.push('.');
+            }
+        }
+        TranslationStyle::Informal => {
+            if styled.ends_with('.') && !styled.ends_with("...") {
+                styled.pop();
+            }
+        }
+        TranslationStyle::Neutral | TranslationStyle::Custom => {}
+    }
+    styled
+}
+
+fn normalize_translation_style(
+    mut settings: TranslationStyleSettings,
+) -> Result<TranslationStyleSettings> {
+    if settings.schema_version != TRANSLATION_STYLE_SCHEMA_VERSION {
+        return Err(EngineError::InstallFailed(format!(
+            "unsupported translation style schema_version: {}",
+            settings.schema_version
+        )));
+    }
+    settings.custom_instruction = normalize_optional(settings.custom_instruction);
+    if let Some(instruction) = settings.custom_instruction.as_deref() {
+        if instruction.len() > MAX_CUSTOM_STYLE_INSTRUCTION_BYTES {
+            return Err(EngineError::InstallFailed(format!(
+                "custom translation style instruction must be at most {MAX_CUSTOM_STYLE_INSTRUCTION_BYTES} UTF-8 bytes"
+            )));
+        }
+        if instruction.chars().any(char::is_control) {
+            return Err(EngineError::InstallFailed(
+                "custom translation style instruction must not contain control characters"
+                    .to_string(),
+            ));
+        }
+    }
+    Ok(settings)
+}
+
+pub fn translation_style_load(
+    paths: &AppPaths,
+    item_id: &str,
+) -> Result<Option<TranslationStyleSettings>> {
+    let path = paths.item_translation_style_path(validate_item_id(item_id)?);
+    if !path.exists() {
+        return Ok(None);
+    }
+    let settings: TranslationStyleSettings = serde_json::from_slice(&std::fs::read(&path)?)
+        .map_err(|error| {
+            EngineError::InstallFailed(format!(
+                "failed to parse translation style json at {}: {error}",
+                path.to_string_lossy()
+            ))
+        })?;
+    Ok(Some(normalize_translation_style(settings)?))
+}
+
+pub fn translation_style_save(
+    paths: &AppPaths,
+    item_id: &str,
+    settings: TranslationStyleSettings,
+) -> Result<TranslationStyleSettings> {
+    let item_id = validate_item_id(item_id)?;
+    let settings = normalize_translation_style(settings)?;
+    let path = paths.item_translation_style_path(item_id);
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    crate::persistence::atomic_write_text(
+        &path,
+        &format!("{}\n", serde_json::to_string_pretty(&settings)?),
+    )?;
+    Ok(settings)
 }
 
 fn apply_glossary(text: &str, entries: &[(String, String)]) -> String {
@@ -803,12 +1004,134 @@ mod tests {
             },
         ];
         let relevant = glossary_entries_for_source(&entries, &source);
-        let (prompt, prompt_entry_count) = build_glossary_prompt(&relevant);
+        let (prompt, prompt_entry_count) =
+            build_translation_prompt(&TranslationStyleSettings::default(), &relevant);
         let prompt = prompt.expect("prompt");
         assert_eq!(relevant.len(), 1);
         assert_eq!(prompt_entry_count, 1);
         assert!(prompt.contains("東京 = Tokyo (place name)"));
         assert!(!prompt.contains("Osaka"));
+    }
+
+    #[test]
+    fn translation_prompt_combines_style_honorifics_and_relevant_glossary() {
+        let settings = TranslationStyleSettings {
+            schema_version: 1,
+            style: TranslationStyle::Formal,
+            honorific_mode: HonorificMode::Drop,
+            custom_instruction: None,
+        };
+        let entries = vec![GlossaryEntry {
+            source: "先生".to_string(),
+            target: "teacher".to_string(),
+            context: Some("school title".to_string()),
+            notes: None,
+        }];
+        let (prompt, count) = build_translation_prompt(&settings, &entries);
+        let prompt = prompt.expect("translation prompt");
+        assert!(prompt.contains("formal, professional English"));
+        assert!(prompt.contains("Omit Japanese and Korean honorific suffixes"));
+        assert!(prompt.contains("先生 = teacher (school title)"));
+        assert_eq!(count, 1);
+        assert!(prompt.chars().count() <= MAX_WHISPER_GLOSSARY_PROMPT_CHARS);
+
+        let long_custom = TranslationStyleSettings {
+            style: TranslationStyle::Custom,
+            honorific_mode: HonorificMode::Drop,
+            custom_instruction: Some("x".repeat(MAX_CUSTOM_STYLE_INSTRUCTION_BYTES)),
+            ..TranslationStyleSettings::default()
+        };
+        let (bounded_prompt, count) = build_translation_prompt(&long_custom, &entries);
+        let bounded_prompt = bounded_prompt.expect("bounded custom prompt");
+        assert!(bounded_prompt.starts_with("Omit Japanese and Korean honorific suffixes"));
+        assert_eq!(bounded_prompt.chars().count(), MAX_WHISPER_GLOSSARY_PROMPT_CHARS);
+        assert_eq!(count, 0);
+    }
+
+    #[test]
+    fn translation_style_changes_punctuation_and_safely_drops_suffixes() {
+        let formal = TranslationStyleSettings {
+            style: TranslationStyle::Formal,
+            ..TranslationStyleSettings::default()
+        };
+        let informal = TranslationStyleSettings {
+            style: TranslationStyle::Informal,
+            ..TranslationStyleSettings::default()
+        };
+        let drop = TranslationStyleSettings {
+            honorific_mode: HonorificMode::Drop,
+            ..TranslationStyleSettings::default()
+        };
+        assert_eq!(
+            apply_translation_style("hello there", &formal),
+            "Hello there."
+        );
+        assert_eq!(
+            apply_translation_style("Hello there.", &informal),
+            "Hello there"
+        );
+        assert_eq!(
+            apply_translation_style("Aiko-san and Sun", &drop),
+            "Aiko and Sun"
+        );
+    }
+
+    #[test]
+    fn translation_style_persists_per_item_and_rejects_unsafe_input() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let paths = AppPaths::new(dir.path().join("app"));
+        paths.ensure_dirs().expect("dirs");
+        assert_eq!(translation_style_load(&paths, "item-1").expect("load"), None);
+
+        let saved = translation_style_save(
+            &paths,
+            "item-1",
+            TranslationStyleSettings {
+                schema_version: 1,
+                style: TranslationStyle::Custom,
+                honorific_mode: HonorificMode::Translate,
+                custom_instruction: Some(" terse broadcast English ".to_string()),
+            },
+        )
+        .expect("save");
+        assert_eq!(saved.custom_instruction.as_deref(), Some("terse broadcast English"));
+        assert_eq!(
+            translation_style_load(&paths, "item-1").expect("reload"),
+            Some(saved)
+        );
+        assert_eq!(translation_style_load(&paths, "item-2").expect("other item"), None);
+
+        let traversal = translation_style_save(
+            &paths,
+            "../outside",
+            TranslationStyleSettings::default(),
+        )
+        .expect_err("path traversal must fail");
+        assert!(traversal.to_string().contains("invalid glossary item id"));
+
+        let control = translation_style_save(
+            &paths,
+            "item-1",
+            TranslationStyleSettings {
+                style: TranslationStyle::Custom,
+                custom_instruction: Some("broadcast\0style".to_string()),
+                ..TranslationStyleSettings::default()
+            },
+        )
+        .expect_err("control characters must fail");
+        assert!(control.to_string().contains("must not contain control characters"));
+
+        let too_long = translation_style_save(
+            &paths,
+            "item-1",
+            TranslationStyleSettings {
+                style: TranslationStyle::Custom,
+                custom_instruction: Some("x".repeat(MAX_CUSTOM_STYLE_INSTRUCTION_BYTES + 1)),
+                ..TranslationStyleSettings::default()
+            },
+        )
+        .expect_err("oversized custom instruction must fail");
+        assert!(too_long.to_string().contains("must be at most"));
     }
 
     #[test]

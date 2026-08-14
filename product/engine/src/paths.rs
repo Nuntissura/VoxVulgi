@@ -121,6 +121,10 @@ impl AppPaths {
         self.derived_item_dir(item_id).join("glossary.json")
     }
 
+    pub fn item_translation_style_path(&self, item_id: &str) -> PathBuf {
+        self.derived_item_dir(item_id).join("translation_style.json")
+    }
+
     pub fn voice_backend_adapters_path(&self) -> PathBuf {
         self.config_dir().join("voice_backend_adapters.json")
     }

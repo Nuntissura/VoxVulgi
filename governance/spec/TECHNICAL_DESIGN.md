@@ -300,6 +300,8 @@ Phase 1 implementation (confirmed):
 - Glossary: versioned JSON documents with `source`, `target`, optional `context`, and optional `notes`. `config/glossary.json` is the global base; `derived/items/<item_id>/glossary.json` contains per-item overrides. Legacy JSON string-to-string maps remain readable and migrate on the next save.
 - Translation jobs snapshot the effective global-plus-item glossary when queued. Only terms present in the source subtitle document are serialized into a bounded Whisper initial prompt, which is carried across decode windows; deterministic longest-key-first replacement remains a compatibility fallback when source terms survive in the translated output.
 - Glossary import/export supports UTF-8 CSV (`source,target,context,notes`) and versioned JSON. Writes use the engine atomic-persistence helper.
+- Translation style is stored per item in `derived/items/<item_id>/translation_style.json` as a versioned compound setting: `neutral`, `formal`, `informal`, or `custom`, plus `preserve`, `translate`, or `drop` honorific handling. Translation jobs snapshot the setting when queued so later UI edits cannot change an in-flight job.
+- The style and honorific instructions share the existing bounded, carried Whisper initial prompt with source-relevant glossary terms. Conservative deterministic cleanup makes formal/casual punctuation observably different and removes only explicitly hyphenated known honorific suffixes in `drop` mode; ambiguous honorific translation remains decoder-guided rather than applying unsafe name/title substitutions.
 - QC: wraps lines (default 42 chars) and emits warnings (default 17 CPS, >2 lines) into job artifacts.
 
 Translation constraints:

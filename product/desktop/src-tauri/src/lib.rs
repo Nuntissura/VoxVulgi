@@ -13702,6 +13702,24 @@ fn glossary_set(
 }
 
 #[tauri::command]
+fn translation_style_get(
+    state: State<'_, AppState>,
+    item_id: String,
+) -> Result<Option<translate::TranslationStyleSettings>, String> {
+    translate::translation_style_load(&state.paths, &item_id).map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+fn translation_style_set(
+    state: State<'_, AppState>,
+    item_id: String,
+    settings: translate::TranslationStyleSettings,
+) -> Result<translate::TranslationStyleSettings, String> {
+    translate::translation_style_save(&state.paths, &item_id, settings)
+        .map_err(|e| e.to_string())
+}
+
+#[tauri::command]
 fn glossary_export(
     state: State<'_, AppState>,
     scope: String,
@@ -14603,6 +14621,8 @@ pub fn run() {
             tts_manifest_clone_segments,
             glossary_get,
             glossary_set,
+            translation_style_get,
+            translation_style_set,
             glossary_export,
             glossary_import,
             glossary_export_csv,

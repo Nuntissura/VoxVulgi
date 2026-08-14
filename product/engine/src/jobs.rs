@@ -869,6 +869,8 @@ struct TranslateLocalParams {
     #[serde(default)]
     glossary_entries: Option<Vec<translate::GlossaryEntry>>,
     #[serde(default)]
+    translation_style: Option<translate::TranslationStyleSettings>,
+    #[serde(default)]
     batch_on_import: bool,
     #[serde(default)]
     pipeline: Option<LocalizationPipelineOptions>,
@@ -2056,11 +2058,14 @@ pub fn enqueue_translate_local(
 ) -> Result<JobRow> {
     let model_id = paths.effective_asr_model_id();
     let glossary_entries = translate::glossary_bundle(paths, Some(&item_id))?.effective_entries;
+    let translation_style =
+        translate::translation_style_load(paths, &item_id)?.unwrap_or_default();
     let params_json = serde_json::to_string(&TranslateLocalParams {
         item_id: item_id.clone(),
         source_track_id,
         model_id,
         glossary_entries: Some(glossary_entries),
+        translation_style: Some(translation_style),
         batch_on_import: false,
         pipeline: None,
     })?;
@@ -2999,6 +3004,9 @@ fn queue_localization_continuation_from_track(
                 model_id: paths.effective_asr_model_id(),
                 glossary_entries: Some(
                     translate::glossary_bundle(paths, Some(&item.id))?.effective_entries,
+                ),
+                translation_style: Some(
+                    translate::translation_style_load(paths, &item.id)?.unwrap_or_default(),
                 ),
                 batch_on_import: false,
                 pipeline: Some(LocalizationPipelineOptions {
@@ -11693,6 +11701,10 @@ INSERT INTO subtitle_track (
                                 translate::glossary_bundle(paths, Some(&item.id))?
                                     .effective_entries,
                             ),
+                            translation_style: Some(
+                                translate::translation_style_load(paths, &item.id)?
+                                    .unwrap_or_default(),
+                            ),
                             batch_on_import: true,
                             pipeline: None,
                         })?;
@@ -11854,11 +11866,17 @@ INSERT INTO subtitle_track (
                     "model_id": &p.model_id,
                     "audio_path": &audio_path,
                     "glossary_entries": p.glossary_entries.as_ref().map(Vec::len).unwrap_or(0),
+                    "translation_style": &p.translation_style,
                 }),
             )?;
             let glossary_entries = match p.glossary_entries.clone() {
                 Some(entries) => entries,
                 None => translate::glossary_bundle(paths, Some(&p.item_id))?.effective_entries,
+            };
+            let translation_style = match p.translation_style.clone() {
+                Some(settings) => settings,
+                None => translate::translation_style_load(paths, &p.item_id)?
+                    .unwrap_or_default(),
             };
             let result = translate::translate_doc_whisper_to_en(
                 paths,
@@ -11867,6 +11885,7 @@ INSERT INTO subtitle_track (
                 &p.model_id,
                 translate::TranslateOptions {
                     glossary_entries: Some(glossary_entries),
+                    translation_style: Some(translation_style),
                     ..translate::TranslateOptions::default()
                 },
             )?;

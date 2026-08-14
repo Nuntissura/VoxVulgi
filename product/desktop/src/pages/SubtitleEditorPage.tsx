@@ -87,6 +87,16 @@ type GlossaryBundle = {
 
 type GlossaryScope = "global" | "item";
 
+type TranslationStyle = "neutral" | "formal" | "informal" | "custom";
+type HonorificMode = "preserve" | "translate" | "drop";
+
+type TranslationStyleSettings = {
+  schema_version: number;
+  style: TranslationStyle;
+  honorific_mode: HonorificMode;
+  custom_instruction: string | null;
+};
+
 type JobStatus = "queued" | "running" | "succeeded" | "failed" | "canceled";
 
 type JobRow = {
@@ -1373,16 +1383,20 @@ export function SubtitleEditorPage({
     setPlayingSegmentIndex(null);
   }
 
-  const [translationStyle, setTranslationStyle] = useState<"neutral" | "formal" | "informal">(() => {
+  const [translationStyle, setTranslationStyle] = useState<TranslationStyle>(() => {
     const raw = safeLocalStorageGet("voxvulgi.v1.editor.translation_style");
-    if (raw === "formal" || raw === "informal") return raw;
+    if (raw === "formal" || raw === "informal" || raw === "custom") return raw;
     return "neutral";
   });
-  const [honorificMode, setHonorificMode] = useState<"preserve" | "translate" | "drop">(() => {
+  const [honorificMode, setHonorificMode] = useState<HonorificMode>(() => {
     const raw = safeLocalStorageGet("voxvulgi.v1.editor.honorific_mode");
     if (raw === "translate" || raw === "drop") return raw;
     return "preserve";
   });
+  const [customTranslationInstruction, setCustomTranslationInstruction] = useState("");
+  const [translationStyleLoadedItemId, setTranslationStyleLoadedItemId] = useState<string | null>(
+    null,
+  );
   const [glossaryBundle, setGlossaryBundle] = useState<GlossaryBundle>({
     global_entries: [],
     item_entries: [],
@@ -1697,6 +1711,64 @@ export function SubtitleEditorPage({
   useEffect(() => {
     safeLocalStorageSet("voxvulgi.v1.editor.honorific_mode", honorificMode);
   }, [honorificMode]);
+
+  useEffect(() => {
+    let canceled = false;
+    const storedStyle = safeLocalStorageGet("voxvulgi.v1.editor.translation_style");
+    const fallbackStyle: TranslationStyle =
+      storedStyle === "formal" ||
+      storedStyle === "informal" ||
+      storedStyle === "custom"
+        ? storedStyle
+        : "neutral";
+    const storedHonorific = safeLocalStorageGet("voxvulgi.v1.editor.honorific_mode");
+    const fallbackHonorific: HonorificMode =
+      storedHonorific === "translate" || storedHonorific === "drop"
+        ? storedHonorific
+        : "preserve";
+    setTranslationStyleLoadedItemId(null);
+    setTranslationStyle(fallbackStyle);
+    setHonorificMode(fallbackHonorific);
+    setCustomTranslationInstruction("");
+    invoke<TranslationStyleSettings | null>("translation_style_get", { itemId })
+      .then((settings) => {
+        if (canceled) return;
+        if (settings) {
+          setTranslationStyle(settings.style);
+          setHonorificMode(settings.honorific_mode);
+          setCustomTranslationInstruction(settings.custom_instruction ?? "");
+        }
+        setTranslationStyleLoadedItemId(itemId);
+      })
+      .catch((error) => {
+        if (!canceled) setError(`Translation style unavailable: ${String(error)}`);
+      });
+    return () => {
+      canceled = true;
+    };
+  }, [itemId]);
+
+  useEffect(() => {
+    if (translationStyleLoadedItemId !== itemId) return;
+    const timer = window.setTimeout(() => {
+      invoke<TranslationStyleSettings>("translation_style_set", {
+        itemId,
+        settings: {
+          schema_version: 1,
+          style: translationStyle,
+          honorific_mode: honorificMode,
+          custom_instruction: customTranslationInstruction || null,
+        } satisfies TranslationStyleSettings,
+      }).catch((error) => setError(`Could not save translation style: ${String(error)}`));
+    }, 300);
+    return () => window.clearTimeout(timer);
+  }, [
+    customTranslationInstruction,
+    honorificMode,
+    itemId,
+    translationStyle,
+    translationStyleLoadedItemId,
+  ]);
 
   useEffect(() => {
     let canceled = false;
@@ -3866,12 +3938,21 @@ export function SubtitleEditorPage({
   }
 
   async function enqueueTranslateEn() {
-    if (!trackId) return;
+    if (!trackId || translationStyleLoadedItemId !== itemId) return;
     setBusy(true);
     setError(null);
     setNotice(null);
     logDiagnosticsEvent("localization.enqueue_translate_en");
     try {
+      await invoke<TranslationStyleSettings>("translation_style_set", {
+        itemId,
+        settings: {
+          schema_version: 1,
+          style: translationStyle,
+          honorific_mode: honorificMode,
+          custom_instruction: customTranslationInstruction || null,
+        } satisfies TranslationStyleSettings,
+      });
       const job = await invoke<JobRow>("jobs_enqueue_translate_local", {
         itemId,
         sourceTrackId: trackId,
@@ -6454,17 +6535,18 @@ export function SubtitleEditorPage({
                 </div>
                 <select
                   value={translationStyle}
-                  disabled={busy}
+                  disabled={busy || translationStyleLoadedItemId !== itemId}
                   onChange={(e) => setTranslationStyle(e.currentTarget.value as typeof translationStyle)}
                   title="The tone of the English translation."
                 >
                   <option value="neutral">Tone: neutral</option>
                   <option value="formal">Tone: formal</option>
                   <option value="informal">Tone: casual</option>
+                  <option value="custom">Tone: custom</option>
                 </select>
                 <select
                   value={honorificMode}
-                  disabled={busy}
+                  disabled={busy || translationStyleLoadedItemId !== itemId}
                   onChange={(e) => setHonorificMode(e.currentTarget.value as typeof honorificMode)}
                   title="How to handle polite name endings like -san or -nim in the translation."
                 >
@@ -6472,9 +6554,23 @@ export function SubtitleEditorPage({
                   <option value="translate">Polite name endings: translate</option>
                   <option value="drop">Polite name endings: remove</option>
                 </select>
+                {translationStyle === "custom" ? (
+                  <input
+                    type="text"
+                    value={customTranslationInstruction}
+                    disabled={busy || translationStyleLoadedItemId !== itemId}
+                    onChange={(event) =>
+                      setCustomTranslationInstruction(event.currentTarget.value)
+                    }
+                    placeholder="Custom translation style instruction"
+                    title="Describe the English tone and punctuation to use for this item."
+                    maxLength={256}
+                    style={{ minWidth: 260 }}
+                  />
+                ) : null}
                 <button
                   type="button"
-                  disabled={busy || !trackId}
+                  disabled={busy || !trackId || translationStyleLoadedItemId !== itemId}
                   onClick={enqueueTranslateEn}
                   title={!trackId ? "Make captions first." : "Translate the captions into English."}
                 >
