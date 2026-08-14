@@ -1216,12 +1216,27 @@ export function SubtitleEditorPage({
   const undoStack = useRef<SubtitleDocument[]>([]);
   const redoStack = useRef<SubtitleDocument[]>([]);
   const skipUndoCapture = useRef(false);
+  const [historyAvailability, setHistoryAvailability] = useState({ undo: 0, redo: 0 });
+  function publishHistoryAvailability() {
+    window.queueMicrotask(() => {
+      setHistoryAvailability({
+        undo: undoStack.current.length,
+        redo: redoStack.current.length,
+      });
+    });
+  }
   const setDoc: typeof setDocRaw = useCallback((updater) => {
     setDocRaw((prev) => {
       const next = typeof updater === "function" ? updater(prev) : updater;
       if (prev && next && prev !== next && !skipUndoCapture.current) {
         undoStack.current = undoStack.current.slice(-49).concat(prev);
         redoStack.current = [];
+        window.queueMicrotask(() => {
+          setHistoryAvailability({
+            undo: undoStack.current.length,
+            redo: redoStack.current.length,
+          });
+        });
       }
       return next;
     });
@@ -1230,7 +1245,12 @@ export function SubtitleEditorPage({
     const prev = undoStack.current.pop();
     if (!prev) return;
     setDocRaw((current) => {
-      if (current) redoStack.current.push(current);
+      if (!current) {
+        undoStack.current.push(prev);
+        return current;
+      }
+      redoStack.current.push(current);
+      publishHistoryAvailability();
       return prev;
     });
     setDirty(true);
@@ -1239,7 +1259,12 @@ export function SubtitleEditorPage({
     const next = redoStack.current.pop();
     if (!next) return;
     setDocRaw((current) => {
-      if (current) undoStack.current.push(current);
+      if (!current) {
+        redoStack.current.push(next);
+        return current;
+      }
+      undoStack.current.push(current);
+      publishHistoryAvailability();
       return next;
     });
     setDirty(true);
@@ -1247,6 +1272,7 @@ export function SubtitleEditorPage({
   function resetUndoStacks() {
     undoStack.current = [];
     redoStack.current = [];
+    publishHistoryAvailability();
   }
   const [dirty, setDirty] = useState(false);
   const [busy, setBusy] = useState(false);
@@ -7336,6 +7362,22 @@ export function SubtitleEditorPage({
             }}
           >
             Normalize
+          </button>
+          <button
+            type="button"
+            disabled={busy || !doc || historyAvailability.undo === 0}
+            onClick={undoDoc}
+            aria-label={`Undo subtitle edit; ${historyAvailability.undo} available`}
+          >
+            Undo ({historyAvailability.undo})
+          </button>
+          <button
+            type="button"
+            disabled={busy || !doc || historyAvailability.redo === 0}
+            onClick={redoDoc}
+            aria-label={`Redo subtitle edit; ${historyAvailability.redo} available`}
+          >
+            Redo ({historyAvailability.redo})
           </button>
           <button type="button" disabled={busy || !doc} onClick={saveNewVersion}>
             Save new version
