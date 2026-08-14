@@ -150,11 +150,20 @@ pub struct ProviderTitleRepairStatus {
     pub repair_change_receipts: i64,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Default)]
 struct RepairCandidate {
     override_title: Option<String>,
     remote_title: Option<String>,
     imported_title: Option<String>,
+}
+
+#[derive(Debug, Clone)]
+struct RepairRequest {
+    job_id: String,
+    service: String,
+    media_id: String,
+    source_url: String,
+    current_title: Option<String>,
 }
 
 fn valid_candidate_title(value: Option<String>, service: &str, media_id: &str) -> Option<String> {
@@ -194,18 +203,25 @@ fn classify_repair_title(
     ProviderTitleRepairClass::ValidSnapshot
 }
 
-fn repair_candidate(
+fn repair_candidates_batch(
     conn: &rusqlite::Connection,
-    service: &str,
-    media_id: &str,
-    source_url: &str,
-) -> Result<RepairCandidate> {
-    let row = conn.query_row(
-        r#"
-SELECT title_override.title,
-       metadata.raw_title,
+    requests: &[RepairRequest],
+) -> Result<BTreeMap<String, RepairCandidate>> {
+    let mut candidates = BTreeMap::new();
+    for chunk in requests.chunks(150) {
+        if chunk.is_empty() {
+            continue;
+        }
+        let value_rows = std::iter::repeat_n("(?,?,?,?)", chunk.len())
+            .collect::<Vec<_>>()
+            .join(",");
+        let sql = format!(
+            r#"
+WITH requested(job_id,service,media_id,source_url) AS (VALUES {value_rows})
+SELECT requested.job_id,requested.service,requested.media_id,
+       title_override.title,metadata.raw_title,
        COALESCE(linked_library.title,direct_library.title)
-FROM (SELECT ?1 AS service,?2 AS media_id,?3 AS source_url) requested
+FROM requested
 LEFT JOIN media_title_override title_override
   ON title_override.service=requested.service AND title_override.media_id=requested.media_id
 LEFT JOIN media_provider_metadata metadata
@@ -218,21 +234,39 @@ LEFT JOIN library_item direct_library ON direct_library.id=(
   WHERE item.source_uri=requested.source_url OR item.source_uri=identity.canonical_url
   ORDER BY item.created_at_ms DESC,item.id DESC LIMIT 1
 )
-"#,
-        params![service, media_id, source_url],
-        |row| {
-            Ok(RepairCandidate {
-                override_title: row.get(0)?,
-                remote_title: row.get(1)?,
-                imported_title: row.get(2)?,
-            })
-        },
-    )?;
-    Ok(RepairCandidate {
-        override_title: valid_candidate_title(row.override_title, service, media_id),
-        remote_title: valid_candidate_title(row.remote_title, service, media_id),
-        imported_title: normalized_optional(row.imported_title),
-    })
+"#
+        );
+        let mut values = Vec::with_capacity(chunk.len() * 4);
+        for request in chunk {
+            values.push(rusqlite::types::Value::Text(request.job_id.clone()));
+            values.push(rusqlite::types::Value::Text(request.service.clone()));
+            values.push(rusqlite::types::Value::Text(request.media_id.clone()));
+            values.push(rusqlite::types::Value::Text(request.source_url.clone()));
+        }
+        let mut statement = conn.prepare(&sql)?;
+        let rows = statement.query_map(rusqlite::params_from_iter(values.iter()), |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, String>(2)?,
+                row.get::<_, Option<String>>(3)?,
+                row.get::<_, Option<String>>(4)?,
+                row.get::<_, Option<String>>(5)?,
+            ))
+        })?;
+        for row in rows {
+            let (job_id, service, media_id, override_title, remote_title, imported_title) = row?;
+            candidates.insert(
+                job_id,
+                RepairCandidate {
+                    override_title: valid_candidate_title(override_title, &service, &media_id),
+                    remote_title: valid_candidate_title(remote_title, &service, &media_id),
+                    imported_title: valid_candidate_title(imported_title, &service, &media_id),
+                },
+            );
+        }
+    }
+    Ok(candidates)
 }
 
 pub fn repair_provider_titles_page(
@@ -297,6 +331,7 @@ pub fn repair_provider_titles_page(
     let page = &rows[..rows.len().min(limit)];
     let mut classifications = BTreeMap::new();
     let mut repairs = Vec::new();
+    let mut repair_requests = Vec::new();
     let mut page_conflicts = 0_i64;
     let mut page_unavailable = 0_i64;
 
@@ -331,11 +366,22 @@ pub fn repair_provider_titles_page(
             page_unavailable += 1;
             continue;
         };
-        let candidate = repair_candidate(&conn, &source.service, &source.media_id, &source_url)?;
+        repair_requests.push(RepairRequest {
+            job_id: job_id.clone(),
+            service: source.service,
+            media_id: source.media_id,
+            source_url,
+            current_title: current_title.clone(),
+        });
+    }
+
+    let candidates = repair_candidates_batch(&conn, &repair_requests)?;
+    for request in repair_requests {
+        let candidate = candidates.get(&request.job_id).cloned().unwrap_or_default();
         let class = classify_repair_title(
-            &source.service,
-            &source.media_id,
-            current_title.as_deref(),
+            &request.service,
+            &request.media_id,
+            request.current_title.as_deref(),
             &candidate,
         );
         *classifications
@@ -368,11 +414,11 @@ pub fn repair_provider_titles_page(
                 });
             if let Some((after_title, provenance)) = selected {
                 repairs.push((
-                    job_id.clone(),
-                    source.service,
-                    source.media_id,
+                    request.job_id,
+                    request.service,
+                    request.media_id,
                     class,
-                    current_title.clone(),
+                    request.current_title,
                     after_title,
                     provenance,
                 ));
@@ -1117,6 +1163,15 @@ mod tests {
         ));
         assert!(title_contains_encoding_damage("COMPL�XITY"));
         assert!(!title_contains_encoding_damage("COMPLEXITY"));
+        assert!(
+            valid_candidate_title(Some("COMPL�XITY".to_string()), "youtube", "abc123").is_none()
+        );
+        assert!(valid_candidate_title(
+            Some("YouTube video abc123".to_string()),
+            "youtube",
+            "abc123"
+        )
+        .is_none());
     }
 
     #[test]
