@@ -3,7 +3,7 @@
 ## Metadata
 - ID: WP-0166
 - Owner: Codex
-- Status: REVIEW
+- Status: DONE
 - Created: 2026-04-08
 - Target milestone: UX Polish
 
@@ -52,3 +52,10 @@ Out of scope:
 ## Test / verification plan
 - Grep for old terms to confirm none remain in rendered UI text.
 - Visual snapshot of Options, Jobs, Diagnostics pages showing new labels.
+
+## Verification result
+
+- Governed desktop build `0.1.140` passed and produced the NSIS installer with the verified offline payload reused.
+- The exact retired rendered phrases have zero hits across desktop source and compiled distribution assets.
+- Hidden app-boundary audits and directly inspected screenshots cover Options, Jobs, Diagnostics, Localization Studio, Video Archiver presets, and Image Archive crawl guidance.
+- Proof bundle: `product/desktop/build_target/tool_artifacts/wp_runs/WP-0166/20260814_final/`.

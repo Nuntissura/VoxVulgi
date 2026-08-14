@@ -1170,3 +1170,11 @@ This changelog tracks desktop installer builds produced by `governance/scripts/b
 - Artifacts:
   - `product/desktop/build_target/Current/release/bundle/nsis/VoxVulgi_0.1.139_x64-setup.exe`
 - Notes: Make Diagnostics summary tiles semantic, accessible, and safe for headless scroll verification while preserving existing live state.
+
+## 0.1.140 - 2026-08-14T14:23:01Z
+- Work Packets: `WP-0166`
+- Commit: `ef8cd2c`
+- Offline Bundle ID: `offline_full_win64_20260814_082842`
+- Artifacts:
+  - `product/desktop/build_target/Current/release/bundle/nsis/VoxVulgi_0.1.140_x64-setup.exe`
+- Notes: Replace remaining technical jargon with plain-language labels and add visible guidance for presets, crawl scope, sign-in, and inherited storage roots.

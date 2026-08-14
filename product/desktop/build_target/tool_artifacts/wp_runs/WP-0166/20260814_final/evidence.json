@@ -1,0 +1,44 @@
+{
+  "wp": "WP-0166",
+  "status": "DONE",
+  "verified_at": "2026-08-14T16:30:25+02:00",
+  "app_version": "0.1.140",
+  "agent_headless": true,
+  "automated_checks": {
+    "npm_run_build": "passed",
+    "vite_elapsed_seconds": 2.79,
+    "retired_phrase_count": 12,
+    "retired_phrase_hits": 0,
+    "locale_files": 0
+  },
+  "ui_audits": [
+    {"page": "options", "total_candidates": 61, "returned_elements": 61, "truncated": false, "missing_accessible_name_count": 0},
+    {"page": "video_ingest", "total_candidates": 117, "returned_elements": 117, "truncated": false, "missing_accessible_name_count": 0},
+    {"page": "image_archive", "total_candidates": 19, "returned_elements": 19, "truncated": false, "missing_accessible_name_count": 0},
+    {"page": "localization", "total_candidates": 25, "returned_elements": 25, "truncated": false, "missing_accessible_name_count": 0},
+    {"page": "diagnostics", "total_candidates": 119, "returned_elements": 119, "truncated": false, "missing_accessible_name_count": 0},
+    {"page": "jobs", "total_candidates": 222, "returned_elements": 222, "truncated": false, "missing_accessible_name_count": 0}
+  ],
+  "build": {
+    "log": "product/desktop/build_target/logs/build_desktop_target_20260814-160011_0_1_140.log",
+    "offline_bundle_id": "offline_full_win64_20260814_082842",
+    "desktop_exe_sha256": "F31327DAC8B059145C1DD6A61789A665026268C17F7A27AB0C250905E45F2DD7",
+    "nsis_sha256": "21E4E515E0ABB77461F422EAD7CF5138A15CD2E737A96C9D277C1138D1249AD4"
+  },
+  "snapshots": [
+    {"path": "governance/snapshots/WP-0166_build_0_1_140/options_page_1786717473174.png", "sha256": "D1A49ED09B511DDFFF49A238B8BE9AA4CF30FC47092F009D9EC346806E5B7953"},
+    {"path": "governance/snapshots/WP-0166_build_0_1_140/options_youtube_cookie_help_1786717503291.png", "sha256": "A691113A5503BE2A96BEAAD328F1C8B872EE61789C7618147BB5A190F2A90569"},
+    {"path": "governance/snapshots/WP-0166_build_0_1_140/video_archiver_preset_plain_language_1786717578045.png", "sha256": "E3D95A34974BB97AC757E8624FB6FDC59B4D71D369793105CE57BB36D876644C"},
+    {"path": "governance/snapshots/WP-0166_build_0_1_140/image_archive_crawl_help_1786717611723.png", "sha256": "A561B0A744B317CBAD9039FE52494A1D98235595E2C7DDEDB477ECC596374ADF"},
+    {"path": "governance/snapshots/WP-0166_build_0_1_140/localization_plain_language_controls_1786717652864.png", "sha256": "5AFAD30544F70839527BEBEED5613DBB561510B3536633001579A7B30CE6630F"},
+    {"path": "governance/snapshots/WP-0166_build_0_1_140/diagnostics_included_ready_labels_1786717716084.png", "sha256": "D1372CC632D20C026F69B4A9F13C1637F1BE833FCAF29FE47FDF0A74A8D410BD"},
+    {"path": "governance/snapshots/WP-0166_build_0_1_140/jobs_plain_language_1786717739334.png", "sha256": "0FBFD3E6BE17EF34BDCA0030E1AA55C0293775C8D9EED73D3DEE6093B4036157"}
+  ],
+  "shutdown": {
+    "tauri_close_resolved": true,
+    "pid": 65716,
+    "process_alive_after_close": false,
+    "json_sidecar_exists_after_close": false,
+    "port_sidecar_exists_after_close": false
+  }
+}
