@@ -28989,6 +28989,130 @@ mod tests {
     }
 
     #[test]
+    fn pipeline_preset_voice_template_waits_for_speakers_then_applies_once() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let paths = AppPaths::new(dir.path().join("app"));
+        seed_item_only(&paths, "template-item", "Template item");
+        seed_item_only(&paths, "target-item", "Target item");
+
+        let source_profile = dir.path().join("profiles").join("host.wav");
+        std::fs::create_dir_all(source_profile.parent().expect("profile parent"))
+            .expect("profile directory");
+        std::fs::write(&source_profile, b"test voice reference").expect("voice reference");
+        speakers::upsert_item_speaker_setting(
+            &paths,
+            "template-item",
+            "S1",
+            Some("Host".to_string()),
+            None,
+            Some("af_heart".to_string()),
+            Some(source_profile.to_string_lossy().to_string()),
+            Some(vec![source_profile.to_string_lossy().to_string()]),
+            Some("documentary".to_string()),
+            Some("warm".to_string()),
+            None,
+            Some("clone".to_string()),
+            None,
+        )
+        .expect("template speaker");
+        let template =
+            voice_templates::create_voice_template_from_item(&paths, "template-item", "Host")
+                .expect("voice template");
+
+        speakers::upsert_item_speaker_setting(
+            &paths,
+            "target-item",
+            "S9",
+            Some("Target host".to_string()),
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+        )
+        .expect("target speaker");
+        config::apply_localization_pipeline_preset_to_item(
+            &paths,
+            "target-item",
+            config::LocalizationPipelinePreset {
+                id: "custom-deferred-voice".to_string(),
+                name: "Deferred voice".to_string(),
+                is_builtin: false,
+                asr_lang: "ko".to_string(),
+                batch_rules: config::BatchOnImportRules::default(),
+                translation_style: "neutral".to_string(),
+                honorific_mode: "preserve".to_string(),
+                custom_translation_instruction: None,
+                default_voice_template_id: Some(template.template.id.clone()),
+                default_voice_cast_pack_id: None,
+            },
+        )
+        .expect("preset snapshot");
+
+        let no_speakers = SubtitleDocument {
+            schema_version: SUBTITLE_JSON_SCHEMA_VERSION,
+            kind: "translated".to_string(),
+            lang: "eng".to_string(),
+            segments: vec![SubtitleSegment {
+                index: 1,
+                start_ms: 0,
+                end_ms: 1_000,
+                text: "Hello".to_string(),
+                speaker: None,
+            }],
+        };
+        assert!(
+            apply_item_pipeline_preset_voice_defaults(&paths, "target-item", &no_speakers,)
+                .expect("defer without speakers")
+                .is_empty()
+        );
+        assert!(
+            !config::load_item_localization_pipeline_preset(&paths, "target-item")
+                .expect("load deferred preset")
+                .expect("preset exists")
+                .voice_defaults_applied
+        );
+
+        let with_speaker = SubtitleDocument {
+            segments: vec![SubtitleSegment {
+                speaker: Some("S9".to_string()),
+                ..no_speakers.segments[0].clone()
+            }],
+            ..no_speakers
+        };
+        let notes = apply_item_pipeline_preset_voice_defaults(&paths, "target-item", &with_speaker)
+            .expect("apply deferred voice template");
+        assert_eq!(notes.len(), 1);
+        assert!(notes[0].contains("applied voice template"));
+
+        let target = speakers::list_item_speaker_settings(&paths, "target-item")
+            .expect("target settings")
+            .into_iter()
+            .find(|speaker| speaker.speaker_key == "S9")
+            .expect("mapped target speaker");
+        assert_eq!(target.tts_voice_id.as_deref(), Some("af_heart"));
+        assert_eq!(target.style_preset.as_deref(), Some("documentary"));
+        assert_eq!(target.prosody_preset.as_deref(), Some("warm"));
+        assert_eq!(target.render_mode.as_deref(), Some("clone"));
+        assert!(
+            config::load_item_localization_pipeline_preset(&paths, "target-item")
+                .expect("load applied preset")
+                .expect("preset exists")
+                .voice_defaults_applied
+        );
+
+        assert!(
+            apply_item_pipeline_preset_voice_defaults(&paths, "target-item", &with_speaker,)
+                .expect("second application")
+                .is_empty()
+        );
+    }
+
+    #[test]
     fn managed_dub_resolution_honors_item_plan_and_explicit_pipeline() {
         let dir = tempfile::tempdir().expect("tempdir");
         let paths = AppPaths::new(dir.path().join("app"));

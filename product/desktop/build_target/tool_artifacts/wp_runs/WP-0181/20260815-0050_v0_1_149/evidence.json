@@ -1,0 +1,71 @@
+{
+  "wp": "WP-0181",
+  "status": "DONE",
+  "app_version": "0.1.149",
+  "governed_build": {
+    "installer": "product/desktop/build_target/Current/release/bundle/nsis/VoxVulgi_0.1.149_x64-setup.exe",
+    "build_log": "product/desktop/build_target/logs/build_desktop_target_20260814-234737_0_1_149.log",
+    "work_packet_recorded_in_build": true
+  },
+  "automated_proof": {
+    "command": "cargo test --manifest-path product/engine/Cargo.toml --lib jobs::tests::pipeline_preset_voice_template_waits_for_speakers_then_applies_once -- --exact --nocapture",
+    "result": "1 passed; 0 failed; 539 filtered out; final-state run finished in 5.25s",
+    "log": "deferred_voice_test.log",
+    "boundaries": [
+      "item preset snapshot begins with voice_defaults_applied=false",
+      "subtitle document without a speaker leaves defaults pending",
+      "speaker appearance auto-matches and applies the selected voice template",
+      "voice_defaults_applied persists as true",
+      "a second invocation is a no-op"
+    ]
+  },
+  "packaged_app_proof": {
+    "launch": "desktop.exe --agent-headless",
+    "agent_state": {
+      "agent_headless": true,
+      "app_version": "0.1.149",
+      "current_page": "localization",
+      "editor_item_id": null,
+      "safe_mode": false
+    },
+    "semantic_audit": {
+      "viewport": "800x600",
+      "missing_accessible_name_count": 0,
+      "built_in_presets": [
+        "Japanese Anime",
+        "Korean Variety",
+        "Quick Subtitles Only"
+      ],
+      "custom_editor_controls": [
+        "Preset name",
+        "Translation tone",
+        "Honorifics",
+        "Default voice template",
+        "Default voice cast pack",
+        "Save as new",
+        "Update custom preset",
+        "Delete custom preset"
+      ]
+    },
+    "scenarios": [
+      "scrolled the packaged Localization Studio to Pipeline preset through the safe headless UI action route",
+      "opened Save or edit a custom preset through a safe semantic click",
+      "re-audited after the state change",
+      "captured and visually inspected the selector and editor at 800x600",
+      "captured a final structured state dump with zero console entries"
+    ]
+  },
+  "artifacts": {
+    "selector_screenshot": "governance/snapshots/WP-0181/pipeline_presets_v149_1786747528549.png",
+    "editor_screenshot": "governance/snapshots/WP-0181/pipeline_preset_editor_v149_1786747556821.png",
+    "state_dump": "governance/snapshots/WP-0181/pipeline_presets_v149_1786747528558.dump.json"
+  },
+  "live_state_safety": {
+    "preset_catalog_exists_after": false,
+    "batch_rules_exists_after": false,
+    "item_preset_exists_after": false,
+    "translation_style_sha256_after": "647B3C44B758684D2D07361862E89F8FCEA45B304007DFB239D0B6762E9D683A",
+    "translation_style_bytes_after": 80,
+    "mutating_ui_actions_executed": false
+  }
+}

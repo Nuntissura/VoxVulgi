@@ -3,7 +3,7 @@
 ## Metadata
 - ID: WP-0181
 - Owner: Codex
-- Status: REVIEW
+- Status: DONE
 - Created: 2026-04-08
 - Target milestone: Automation
 
@@ -43,4 +43,4 @@ Out of scope:
 
 - Product code implemented: three immutable built-ins; versioned atomic custom catalog; custom create/update/delete; active Localization Studio selector; global batch-rule and per-item ASR/translation-style application; per-item full preset snapshots; and deferred one-time voice template/cast-pack auto-matching after translated speaker labels exist.
 - Verification passed: `npm run build`; `cargo check --locked -j 1 --manifest-path product/desktop/src-tauri/Cargo.toml`; and targeted engine tests (`3 passed`, covering the exact built-ins, atomic custom CRUD/item snapshots, built-in immutability, item traversal rejection, control-character rejection, and the required custom instruction boundary).
-- Remaining before `DONE`: governed desktop build and packaged headless UI/app-boundary proof required by `PROOF_STANDARD.md`, including item-level preset persistence and deferred voice-default application evidence.
+- Completion proof: governed v0.1.149 packaged headless UI audit and visually inspected screenshots prove the three built-ins and the complete custom editor surface. A focused engine regression proves item snapshot persistence and that voice-template defaults remain pending without speakers, apply after a speaker appears, persist the one-time flag, and do not apply again. Proof bundle: `product/desktop/build_target/tool_artifacts/wp_runs/WP-0181/20260815-0050_v0_1_149/`.
