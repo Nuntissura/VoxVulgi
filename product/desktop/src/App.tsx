@@ -1518,31 +1518,63 @@ function LocalizationStudioHome({
     }
   }
 
-  function handleDrop(e: React.DragEvent) {
-    e.preventDefault();
-    setDragOver(false);
-    const files = e.dataTransfer?.files;
-    if (!files || files.length === 0) return;
+  async function importDroppedMediaPaths(droppedPaths: string[]) {
     const validExtensions = /\.(mp4|mkv|avi|mov|webm|mp3|wav|flac|ogg|m4a|aac|wma)$/i;
-    const paths: string[] = [];
-    for (let i = 0; i < files.length; i++) {
-      const f = files[i] as File & { path?: string };
-      if (f.path && validExtensions.test(f.name)) {
-        paths.push(f.path);
-      }
-    }
+    const paths = droppedPaths.filter((path) => validExtensions.test(path));
     if (paths.length === 0) {
-      setError("No supported media files found. Supported formats: MP4, MKV, AVI, MOV, WebM, MP3, WAV, FLAC, OGG.");
+      setError(
+        "No supported media files found. Supported formats: MP4, MKV, AVI, MOV, WebM, MP3, WAV, FLAC, OGG, M4A, AAC, WMA.",
+      );
       return;
     }
     setBusy(true);
     setError(null);
     setNotice(null);
-    Promise.all(paths.map((p) => importMediaByPath(p)))
-      .then(() => setNotice(`Queued ${paths.length} file${paths.length === 1 ? "" : "s"} for import.`))
-      .catch((err) => setError(String(err)))
-      .finally(() => setBusy(false));
+    try {
+      await Promise.all(paths.map((path) => importMediaByPath(path)));
+      setNotice(`Queued ${paths.length} file${paths.length === 1 ? "" : "s"} for import.`);
+    } catch (err) {
+      setError(String(err));
+    } finally {
+      setBusy(false);
+    }
   }
+
+  useEffect(() => {
+    if (!pageActive || currentEditorItemId) {
+      setDragOver(false);
+      return;
+    }
+    let disposed = false;
+    let unlisten: (() => void) | null = null;
+    void getCurrentWindow()
+      .onDragDropEvent(({ payload }) => {
+        if (disposed) return;
+        if (payload.type === "enter" || payload.type === "over") {
+          setDragOver(true);
+          return;
+        }
+        setDragOver(false);
+        if (payload.type === "drop") {
+          void importDroppedMediaPaths(payload.paths);
+        }
+      })
+      .then((nextUnlisten) => {
+        if (disposed) {
+          nextUnlisten();
+        } else {
+          unlisten = nextUnlisten;
+        }
+      })
+      .catch((err) => {
+        if (!disposed) setError(`Drag-and-drop setup failed: ${String(err)}`);
+      });
+    return () => {
+      disposed = true;
+      setDragOver(false);
+      unlisten?.();
+    };
+  }, [asrLang, currentEditorItemId, pageActive]);
 
   const currentEditorStatus = currentEditorItemId ? recentItemStatuses[currentEditorItemId] ?? null : null;
   const currentEditorItem = currentEditorItemId
@@ -1619,12 +1651,6 @@ function LocalizationStudioHome({
     return (
       <div
         className={`loc-setup-shell${compact ? " loc-setup-shell-compact" : ""}`}
-        onDragOver={(e) => {
-          e.preventDefault();
-          setDragOver(true);
-        }}
-        onDragLeave={() => setDragOver(false)}
-        onDrop={handleDrop}
       >
         {dragOver ? (
           <div className="loc-setup-drop-overlay">
@@ -2058,9 +2084,6 @@ function LocalizationStudioHome({
 
   return (
     <div
-      onDragOver={(e) => { e.preventDefault(); setDragOver(true); }}
-      onDragLeave={() => setDragOver(false)}
-      onDrop={handleDrop}
       style={{ position: "relative" }}
     >
       {dragOver ? (
