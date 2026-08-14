@@ -2453,6 +2453,42 @@ img {
 .loc-workspace-rail-chip-failed { color: #b91c1c; background: rgba(185, 28, 28, 0.12); }
 .loc-workspace-rail-chip-pending { color: #92400e; background: rgba(146, 64, 14, 0.12); }
 
+.loc-workspace-shortcuts {
+  border-top: 1px solid var(--panel-border);
+  padding-top: 8px;
+  color: var(--ink-soft);
+  font-size: 11px;
+}
+
+.loc-workspace-shortcuts summary {
+  color: var(--ink);
+  cursor: pointer;
+  font-weight: 600;
+}
+
+.loc-workspace-shortcuts dl {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  margin: 8px 0 0;
+}
+
+.loc-workspace-shortcuts dl div {
+  display: grid;
+  grid-template-columns: minmax(94px, auto) 1fr;
+  gap: 8px;
+}
+
+.loc-workspace-shortcuts dt {
+  color: var(--ink);
+  font-family: ui-monospace, SFMono-Regular, Consolas, monospace;
+  font-weight: 600;
+}
+
+.loc-workspace-shortcuts dd {
+  margin: 0;
+}
+
 .loc-workspace-rail-runsummary,
 .loc-workspace-rail-clone {
   font-size: 11px;

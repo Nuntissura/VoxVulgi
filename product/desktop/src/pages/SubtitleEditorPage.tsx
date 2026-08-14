@@ -3403,6 +3403,30 @@ export function SubtitleEditorPage({
     refreshLocalizationOutputStatuses().catch(() => undefined);
   }, [refreshLocalizationOutputStatuses]);
 
+  const refreshLocalizationReadiness = useCallback(async () => {
+    setError(null);
+    try {
+      await Promise.all([
+        refreshTracks(),
+        refreshSpeakerSettings(),
+        refreshOutputs(),
+        refreshArtifacts(),
+        refreshItemJobs(),
+      ]);
+      await refreshLocalizationOutputStatuses();
+      setNotice("Localization readiness refreshed.");
+    } catch (e) {
+      setError(String(e));
+    }
+  }, [
+    refreshArtifacts,
+    refreshItemJobs,
+    refreshLocalizationOutputStatuses,
+    refreshOutputs,
+    refreshSpeakerSettings,
+    refreshTracks,
+  ]);
+
 
   function logDiagnosticsEvent(
     event: string,
@@ -3471,8 +3495,11 @@ export function SubtitleEditorPage({
         return;
       }
       // Ctrl+Shift+R — Refresh readiness
-      // Ctrl+Shift+R was previously bound to "Refresh readiness" against the now-retired
-      // FFmpeg/Whisper/pack readiness rows. Browser refresh fallback is intentional here.
+      if (ctrl && e.shiftKey && e.key.toLowerCase() === "r") {
+        e.preventDefault();
+        void refreshLocalizationReadiness();
+        return;
+      }
       // Ctrl+1..8 — Select workspace stage in the new master-detail layout (WP-0211)
       if (ctrl && !e.shiftKey && e.key >= "1" && e.key <= "8") {
         e.preventDefault();
@@ -6238,6 +6265,16 @@ export function SubtitleEditorPage({
               );
             })}
           </ul>
+          <details className="loc-workspace-shortcuts" data-testid="localization-shortcuts">
+            <summary>Keyboard shortcuts</summary>
+            <dl>
+              <div><dt>Ctrl+Enter</dt><dd>Start or continue localization</dd></div>
+              <div><dt>Ctrl+Shift+E</dt><dd>Export selected outputs</dd></div>
+              <div><dt>Ctrl+Shift+R</dt><dd>Refresh readiness</dd></div>
+              <div><dt>Ctrl+1…8</dt><dd>Open Captions through Files</dd></div>
+              <div><dt>Ctrl+Z / Ctrl+Shift+Z</dt><dd>Undo or redo subtitle edits</dd></div>
+            </dl>
+          </details>
           {localizationRunSummary ? (
             <div className="loc-workspace-rail-runsummary">
               Batch <code>{localizationRunSummary.batch_id}</code> at <strong>{localizationRunSummary.stage}</strong>.
