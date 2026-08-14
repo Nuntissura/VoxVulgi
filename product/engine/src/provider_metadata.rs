@@ -851,12 +851,14 @@ pub fn resolve_library_display_titles(
 SELECT identity.library_item_id,identity.service,identity.media_id,
        title_override.title,metadata.raw_title
 FROM media_source_identity identity
+LEFT JOIN library_download_lineage lineage ON lineage.item_id=identity.library_item_id
 LEFT JOIN media_title_override title_override
   ON title_override.service=identity.service AND title_override.media_id=identity.media_id
 LEFT JOIN media_provider_metadata metadata
   ON metadata.service=identity.service AND metadata.media_id=identity.media_id
 WHERE identity.library_item_id IN ({placeholders})
 ORDER BY identity.library_item_id,
+  CASE WHEN lineage.service IS NOT NULL AND identity.service=lineage.service THEN 0 ELSE 1 END,
   CASE identity.service WHEN 'youtube' THEN 0 WHEN 'instagram' THEN 1 WHEN 'tiktok' THEN 2 ELSE 3 END,
   identity.media_id
 "#
@@ -1114,6 +1116,11 @@ mod tests {
             [],
         )
         .expect("identity");
+        conn.execute(
+            "INSERT INTO media_source_identity(service,media_id,canonical_url,library_item_id,created_at_ms,updated_at_ms) VALUES('instagram','post:ig123','https://www.instagram.com/p/ig123/','item-1',1,1)",
+            [],
+        )
+        .expect("secondary identity");
         drop(conn);
 
         upsert_provider_metadata(
@@ -1147,6 +1154,31 @@ mod tests {
         let item = resolved.get("item-1").expect("resolved item");
         assert_eq!(item.value, "Operator title");
         assert_eq!(item.provenance, DisplayTitleProvenance::OperatorOverride);
+
+        let conn = db::open(&paths).expect("open");
+        conn.execute(
+            "INSERT INTO library_download_lineage(item_id,source_job_id,service,origin_kind,work_track,item_created_at_ms,recorded_at_ms) VALUES('item-1','job-ig','instagram','single','instagram',1,1)",
+            [],
+        )
+        .expect("instagram lineage");
+        drop(conn);
+        let mut instagram = fixture(
+            "Instagram canonical title",
+            ProviderMetadataQuality::RemoteCanonical,
+            300,
+        );
+        instagram.service = "instagram".to_string();
+        instagram.media_id = "post:ig123".to_string();
+        instagram.canonical_url = Some("https://www.instagram.com/p/ig123/".to_string());
+        upsert_provider_metadata(&paths, instagram).expect("instagram metadata");
+        let resolved = resolve_library_display_titles(
+            &paths,
+            &[("item-1".to_string(), "Imported clean title".to_string())],
+        )
+        .expect("lineage-aware bulk resolver");
+        let item = resolved.get("item-1").expect("resolved item");
+        assert_eq!(item.value, "Instagram canonical title");
+        assert_eq!(item.provenance, DisplayTitleProvenance::CanonicalRemote);
     }
 
     #[test]

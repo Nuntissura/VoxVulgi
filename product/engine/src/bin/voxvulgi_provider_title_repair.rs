@@ -16,10 +16,18 @@ struct BackupVerification {
     file_bytes: u64,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+struct MutationGuardVerification {
+    bridge_pid: Option<u32>,
+    bridge_pid_alive: bool,
+    wal_bytes: u64,
+}
+
 #[derive(Debug, Serialize)]
 struct RepairReceipt {
     base_dir: String,
     backup: BackupVerification,
+    mutation_guard: MutationGuardVerification,
     pages_run: usize,
     page_size: usize,
     status: ProviderTitleRepairStatus,
@@ -52,6 +60,63 @@ fn readonly_counts(path: &Path) -> Result<(i64, i64), String> {
         )
         .map_err(|error| format!("download job count for {}: {error}", path.display()))?;
     Ok((job_count, download_job_count))
+}
+
+#[cfg(windows)]
+fn process_is_alive(pid: u32) -> bool {
+    use windows_sys::Win32::Foundation::CloseHandle;
+    use windows_sys::Win32::System::Threading::{OpenProcess, PROCESS_QUERY_LIMITED_INFORMATION};
+    let handle = unsafe { OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, 0, pid) };
+    if handle.is_null() {
+        return false;
+    }
+    unsafe {
+        CloseHandle(handle);
+    }
+    true
+}
+
+#[cfg(not(windows))]
+fn process_is_alive(_pid: u32) -> bool {
+    false
+}
+
+fn verify_mutation_guard(base_dir: &Path) -> Result<MutationGuardVerification, String> {
+    let bridge_path = base_dir.join("agent_bridge.json");
+    let bridge_pid = if bridge_path.is_file() {
+        let bytes = std::fs::read(&bridge_path)
+            .map_err(|error| format!("read {}: {error}", bridge_path.display()))?;
+        serde_json::from_slice::<serde_json::Value>(&bytes)
+            .map_err(|error| format!("parse {}: {error}", bridge_path.display()))?
+            .get("pid")
+            .and_then(serde_json::Value::as_u64)
+            .and_then(|pid| u32::try_from(pid).ok())
+    } else {
+        None
+    };
+    let bridge_pid_alive = bridge_pid.is_some_and(process_is_alive);
+    if bridge_pid_alive {
+        return Err(format!(
+            "refusing live database mutation while VoxVulgi bridge pid {} is alive",
+            bridge_pid.expect("alive pid")
+        ));
+    }
+    let wal_path = base_dir.join("db").join("app.sqlite-wal");
+    let wal_bytes = std::fs::metadata(&wal_path)
+        .map(|metadata| metadata.len())
+        .unwrap_or(0);
+    if wal_bytes != 0 {
+        return Err(format!(
+            "refusing database mutation while WAL is non-empty: {} bytes at {}",
+            wal_bytes,
+            wal_path.display()
+        ));
+    }
+    Ok(MutationGuardVerification {
+        bridge_pid,
+        bridge_pid_alive,
+        wal_bytes,
+    })
 }
 
 fn verify_backup(live_path: &Path, backup_path: &Path) -> Result<BackupVerification, String> {
@@ -143,10 +208,15 @@ fn run() -> Result<RepairReceipt, String> {
     let backup_path = backup_path
         .as_deref()
         .ok_or_else(|| "--apply requires --backup <verified-backup.sqlite>".to_string())?;
+    let mutation_guard = verify_mutation_guard(&base_dir)?;
     let backup = verify_backup(&paths.db_dir().join("app.sqlite"), backup_path)?;
+    if verify_mutation_guard(&base_dir)? != mutation_guard {
+        return Err("VoxVulgi app/bridge state changed during backup verification".to_string());
+    }
 
     let mut pages_run = 0_usize;
     while pages_run < max_pages {
+        verify_mutation_guard(&base_dir)?;
         let page = repair_provider_titles_page(&paths, page_size)
             .map_err(|error| format!("repair page {} failed: {error}", pages_run + 1))?;
         pages_run += 1;
@@ -170,6 +240,7 @@ fn run() -> Result<RepairReceipt, String> {
     Ok(RepairReceipt {
         base_dir: base_dir.to_string_lossy().to_string(),
         backup,
+        mutation_guard,
         pages_run,
         page_size,
         status,
@@ -186,5 +257,34 @@ fn main() {
             eprintln!("{error}");
             std::process::exit(1);
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[cfg(windows)]
+    #[test]
+    fn mutation_guard_rejects_a_live_bridge_pid() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        std::fs::create_dir_all(dir.path().join("db")).expect("db dir");
+        std::fs::write(
+            dir.path().join("agent_bridge.json"),
+            serde_json::json!({"pid": std::process::id(), "port": 1}).to_string(),
+        )
+        .expect("bridge metadata");
+        let error = verify_mutation_guard(dir.path()).expect_err("live bridge must block");
+        assert!(error.contains("bridge pid"));
+    }
+
+    #[test]
+    fn mutation_guard_rejects_a_nonempty_wal() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        std::fs::create_dir_all(dir.path().join("db")).expect("db dir");
+        std::fs::write(dir.path().join("db").join("app.sqlite-wal"), b"active")
+            .expect("wal fixture");
+        let error = verify_mutation_guard(dir.path()).expect_err("nonempty WAL must block");
+        assert!(error.contains("WAL is non-empty"));
     }
 }
