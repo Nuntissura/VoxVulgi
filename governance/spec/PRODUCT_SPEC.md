@@ -284,8 +284,8 @@ Initial language focus: **Korean + Japanese → English**.
   - Ctrl+Enter — start/continue localization run,
   - Ctrl+Shift+E — export selected outputs,
   - Ctrl+Shift+R — refresh readiness,
-  - Ctrl+1 through Ctrl+5 — jump to Track, Voice Basics, Run, Outputs, Artifacts,
-  - visible shortcut reference in the Workflow Map card; disabled when typing in form fields.
+  - Ctrl+1 through Ctrl+8 — select Captions, Translate, Speakers, Voice plan, Dub, Mix, Combine A/V, or Files in the master-detail editor (WP-0211 refinement of WP-0173's original fixed-section mapping),
+  - visible shortcut reference in the master-detail workflow rail; non-undo shortcuts are disabled when typing in form fields.
 - Sticky quick-actions bar: persistent bottom bar visible when an item is open, showing item title, run status (idle/running), and Run/Export/Open Outputs buttons at all scroll positions.
 - Batch-on-import defaults remain configurable through Options/Diagnostics and compatible import flows. Localization-owned intake does not apply them implicitly: import remains idle until the operator reviews source language and run settings, then presses the explicit start action (WP-0199 supersedes WP-0174 on this surface).
 - Provide mix controls:

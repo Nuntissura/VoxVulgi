@@ -1,0 +1,25 @@
+{
+  "wp": "WP-0175",
+  "status": "DONE",
+  "verified_at": "2026-08-15T00:10:00+02:00",
+  "app_version": "0.1.149",
+  "agent_headless": true,
+  "item_id": "285097bf-b998-4b24-a390-b12e115ea580",
+  "track_id": "a975cfce-6d05-4c0a-a4e0-d9bf988d4b40",
+  "runtime": {
+    "edit_marker": "[WP0175_UNDO_PROBE]",
+    "after_edit": { "undo": 1, "redo": 0 },
+    "after_ctrl_z": { "original_restored": true, "undo": 0, "redo": 1 },
+    "after_ctrl_shift_z": { "marker_restored": true, "undo": 1, "redo": 0 },
+    "after_stage_round_trip": { "marker_present": true, "undo": 1, "redo": 0 },
+    "after_ctrl_y": { "marker_restored": true },
+    "final_in_memory_original_restored": true,
+    "save_invoked": false,
+    "canonical_reread_marker_present": false,
+    "canonical_first_text": "I'm not sure if I can express it. I can do\nit."
+  },
+  "artifacts": [
+    { "path": "governance/snapshots/WP-0175/redo_after_navigation_v149_1786745605525.png", "bytes": 322681, "sha256": "D8DB8AF9DE0C30F445941D7CAC3D4C53CBF762C34058CD28628330E8B7AE0958" },
+    { "path": "governance/snapshots/WP-0172_0173_0175_batch/final_v149_1786745652435.dump.json", "bytes": 5678, "sha256": "D5AF940F09576E4EC13D265C1568C6B1B259E8CD321652A2B54A233EC59AFEF1" }
+  ]
+}

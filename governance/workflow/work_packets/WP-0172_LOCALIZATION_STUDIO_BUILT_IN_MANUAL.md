@@ -3,7 +3,7 @@
 ## Metadata
 - ID: WP-0172
 - Owner: Codex
-- Status: REVIEW
+- Status: DONE
 - Created: 2026-04-08
 - Target milestone: UX Polish
 
@@ -39,3 +39,9 @@ Out of scope:
 ## Test / verification plan
 - Visual snapshot with help panels expanded.
 - Read through all help text for accuracy against spec.
+
+## Implementation status (2026-08-15)
+
+- Shipped help definitions cover all 22 current editor sections plus six Localization home topics, using plain-language What/When/Typical workflow/Key concepts structure.
+- Governed packaged proof on v0.1.149 used trusted pointer input to expand and collapse all 22 editor controls, proved the `voxvulgi.v1.loc.help_all` preference across a real WebView reload, and restored the operator's enabled preference afterward.
+- The expanded 800×600 snapshot was visually inspected for readability and overlap. Proof: `product/desktop/build_target/tool_artifacts/wp_runs/WP-0172/20260815-0010_v0_1_149/summary.md`.

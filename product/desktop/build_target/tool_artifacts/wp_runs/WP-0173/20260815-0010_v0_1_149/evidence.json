@@ -1,0 +1,23 @@
+{
+  "wp": "WP-0173",
+  "status": "DONE",
+  "verified_at": "2026-08-15T00:10:00+02:00",
+  "app_version": "0.1.149",
+  "agent_headless": true,
+  "runtime": {
+    "ctrl_2_selected": "Translate",
+    "ctrl_3_with_select_focus_remained": "Translate",
+    "ctrl_8_selected": "Files",
+    "ctrl_shift_r_notice": "Localization readiness refreshed.",
+    "shortcut_reference_open": true,
+    "mutating_shortcuts_fired_against_operator_data": false
+  },
+  "successor_mapping": {
+    "authority": "WP-0211_LOCALIZATION_MASTER_DETAIL_LAYOUT.md",
+    "mapping": ["Captions", "Translate", "Speakers", "Voice plan", "Dub", "Mix", "Combine A/V", "Files"]
+  },
+  "artifacts": [
+    { "path": "governance/snapshots/WP-0173/keyboard_shortcuts_v149_1786745479602.png", "bytes": 135839, "sha256": "BD9398F517404C166BA49FC02FEC6C1FEC85868932F96FCD19F113C4449F8384" },
+    { "path": "governance/snapshots/WP-0172_0173_0175_batch/final_v149_1786745652435.dump.json", "bytes": 5678, "sha256": "D5AF940F09576E4EC13D265C1568C6B1B259E8CD321652A2B54A233EC59AFEF1" }
+  ]
+}

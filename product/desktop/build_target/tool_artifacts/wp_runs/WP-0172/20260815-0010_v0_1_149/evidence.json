@@ -1,0 +1,20 @@
+{
+  "wp": "WP-0172",
+  "status": "DONE",
+  "verified_at": "2026-08-15T00:10:00+02:00",
+  "app_version": "0.1.149",
+  "agent_headless": true,
+  "source_counts": { "editor_help_definitions": 22, "editor_help_controls": 22, "home_help_definitions": 6 },
+  "runtime": {
+    "expanded_hide_controls": 22,
+    "collapsed_show_controls": 22,
+    "collapsed_hide_controls": 0,
+    "stored_disabled": "0",
+    "reload_preserved_disabled": true,
+    "stored_restored": "1"
+  },
+  "artifacts": [
+    { "path": "governance/snapshots/WP-0172/show_all_help_v149_1786745314111.png", "bytes": 349987, "sha256": "350C6890890B43A781FE5C9D1CC541695B4E823728EC9CC71A9D7F685D37D7F5" },
+    { "path": "governance/snapshots/WP-0172_0173_0175_batch/final_v149_1786745652435.dump.json", "bytes": 5678, "sha256": "D5AF940F09576E4EC13D265C1568C6B1B259E8CD321652A2B54A233EC59AFEF1" }
+  ]
+}
