@@ -1,6 +1,6 @@
-; VoxVulgi full-offline single-exe installer (WP-0265 follow-on)
+; VoxVulgi full-offline spanned installer (WP-0265 follow-on)
 ; -------------------------------------------------------------
-; Produces ONE self-installing .exe that bundles:
+; Produces one setup.exe plus required setup-*.bin payload slices that bundle:
 ;   1. the app itself (the existing NSIS setup.exe, run silently), and
 ;   2. the ~13 GB offline pack payload (tools + models + cache + voice_backends)
 ;      laid down into the PER-USER %APPDATA%\com.voxvulgi.voxvulgi so every
@@ -17,7 +17,7 @@
 ; this installer rewrites both pyvenv.cfg files to the target user's AppData.
 ;
 ; Build inputs are passed as /D defines so this script is disk-agnostic:
-;   ISCC /DPayloadDir=<dir> /DSetupExe=<path> /DOutputDir=<dir> /DAppVersion=0.1.91 VoxVulgi_offline_full.iss
+;   ISCC /DPayloadDir=<dir> /DCosyVoiceVenvDir=<dir> /DVoiceBackendsDir=<dir> /DSetupExe=<path> /DOutputDir=<dir> /DAppVersion=0.1.91 VoxVulgi_offline_full.iss
 
 #ifndef AppVersion
   #define AppVersion "0.1.91"
@@ -27,6 +27,12 @@
 #endif
 #ifndef SetupExe
   #define SetupExe "D:\vv_offline_build\inputs\VoxVulgi_setup.exe"
+#endif
+#ifndef CosyVoiceVenvDir
+  #define CosyVoiceVenvDir "D:\vv_offline_build\inputs\venv_cosyvoice"
+#endif
+#ifndef VoiceBackendsDir
+  #define VoiceBackendsDir "D:\vv_offline_build\inputs\voice_backends"
 #endif
 #ifndef OutputDir
   #define OutputDir "D:\vv_offline_build\out"
@@ -54,7 +60,7 @@ Uninstallable=no
 Compression=lzma2/normal
 SolidCompression=no
 ; The 12.83 GB payload exceeds Windows' ~4.2 GB single-Setup.exe ceiling, so span the
-; data into external setup-*.bin slices (delivered together as one zip; user runs setup.exe).
+; data into external setup-*.bin slices kept beside setup.exe in one delivery folder.
 DiskSpanning=yes
 SlicesPerDisk=1
 DiskSliceSize=2100000000
@@ -73,8 +79,16 @@ WelcomeLabel2=This will install VoxVulgi and all of its offline components (voic
 [Files]
 ; App installer (NSIS) -> temp, run silently, deleted after.
 Source: "{#SetupExe}"; DestDir: "{tmp}"; DestName: "VoxVulgi_app_setup.exe"; Flags: deleteafterinstall
-; Offline packs -> per-user AppData (tools/models/cache/voice_backends).
-Source: "{#PayloadDir}\*"; DestDir: "{userappdata}\com.voxvulgi.voxvulgi"; Flags: recursesubdirs createallsubdirs ignoreversion uninsneveruninstall
+; Validated default packs -> per-user AppData.
+Source: "{#PayloadDir}\tools\*"; DestDir: "{userappdata}\com.voxvulgi.voxvulgi\tools"; Flags: recursesubdirs createallsubdirs ignoreversion uninsneveruninstall
+Source: "{#PayloadDir}\models\*"; DestDir: "{userappdata}\com.voxvulgi.voxvulgi\models"; Flags: recursesubdirs createallsubdirs ignoreversion uninsneveruninstall
+Source: "{#PayloadDir}\cache\huggingface\*"; DestDir: "{userappdata}\com.voxvulgi.voxvulgi\cache\huggingface"; Flags: recursesubdirs createallsubdirs ignoreversion uninsneveruninstall
+; Full-quality CosyVoice extras are isolated inputs so the validated default payload is not
+; duplicated into another 6+ GB staging tree before compilation.
+Source: "{#CosyVoiceVenvDir}\*"; DestDir: "{userappdata}\com.voxvulgi.voxvulgi\tools\python\venv_cosyvoice"; Flags: recursesubdirs createallsubdirs ignoreversion uninsneveruninstall
+Source: "{#VoiceBackendsDir}\*"; DestDir: "{userappdata}\com.voxvulgi.voxvulgi\voice_backends"; Flags: recursesubdirs createallsubdirs ignoreversion uninsneveruninstall
+; Overlay the governed offline-only wetext resolver after the upstream venv files.
+Source: "patches\wetext_offline.py"; DestDir: "{userappdata}\com.voxvulgi.voxvulgi\tools\python\venv_cosyvoice\Lib\site-packages\wetext"; DestName: "wetext.py"; Flags: ignoreversion uninsneveruninstall
 ; CosyVoice text-normalizer (wetext) ModelScope cache -> per-user ~/.cache/modelscope.
 ; The bundled wetext.py is patched to snapshot_download(..., local_files_only=True), so
 ; with this cache present it resolves the normalizer with ZERO network (proven under a
