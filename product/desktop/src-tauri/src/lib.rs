@@ -4030,6 +4030,24 @@ mod tests {
     use std::sync::atomic::AtomicU64;
     use voxvulgi_engine::{config, db, paths::AppPaths};
 
+    #[test]
+    fn visual_debugger_dump_adds_authoritative_runtime_state() {
+        let enriched = enrich_visual_debugger_dump(
+            r#"{"timestamp_ms":1,"viewport":{"width":800,"height":600}}"#,
+            "0.1.138-test",
+            "jobs",
+            Some("item-42"),
+            true,
+        )
+        .expect("enrich dump");
+        let dump: serde_json::Value = serde_json::from_str(&enriched).expect("parse dump");
+        assert_eq!(dump["app_version"], "0.1.138-test");
+        assert_eq!(dump["current_page"], "jobs");
+        assert_eq!(dump["editor_item_id"], "item-42");
+        assert_eq!(dump["safe_mode"], true);
+        assert_eq!(dump["viewport"]["width"], 800);
+    }
+
     fn retention_receipt(has_more: bool) -> voxvulgi_engine::youtube_protection::DownloaderRetentionDrainReceipt {
         voxvulgi_engine::youtube_protection::DownloaderRetentionDrainReceipt {
             batches: 1,
@@ -13524,6 +13542,37 @@ fn agent_report_state(page: String, editor_item_id: Option<String>, safe_mode: b
     state.safe_mode = safe_mode;
 }
 
+fn enrich_visual_debugger_dump(
+    json_data: &str,
+    app_version: &str,
+    current_page: &str,
+    editor_item_id: Option<&str>,
+    safe_mode: bool,
+) -> Result<String, String> {
+    let mut dump = serde_json::from_str::<serde_json::Value>(json_data)
+        .map_err(|error| format!("Failed to parse visual debugger dump: {error}"))?;
+    let object = dump
+        .as_object_mut()
+        .ok_or_else(|| "Visual debugger dump must be a JSON object".to_string())?;
+    object.insert(
+        "app_version".to_string(),
+        serde_json::Value::String(app_version.to_string()),
+    );
+    object.insert(
+        "current_page".to_string(),
+        serde_json::Value::String(current_page.to_string()),
+    );
+    object.insert(
+        "editor_item_id".to_string(),
+        editor_item_id
+            .map(|value| serde_json::Value::String(value.to_string()))
+            .unwrap_or(serde_json::Value::Null),
+    );
+    object.insert("safe_mode".to_string(), serde_json::Value::Bool(safe_mode));
+    serde_json::to_string_pretty(&dump)
+        .map_err(|error| format!("Failed to serialize visual debugger dump: {error}"))
+}
+
 #[tauri::command]
 fn admin_save_dump(
     json_data: String,
@@ -13555,6 +13604,23 @@ fn admin_save_dump(
     };
     let path = target_dir.join(file_name);
 
+    let (current_page, editor_item_id, safe_mode) = {
+        let state = agent_bridge_state()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        (
+            state.current_page.clone(),
+            state.editor_item_id.clone(),
+            state.safe_mode,
+        )
+    };
+    let json_data = enrich_visual_debugger_dump(
+        &json_data,
+        env!("CARGO_PKG_VERSION"),
+        &current_page,
+        editor_item_id.as_deref(),
+        safe_mode,
+    )?;
     std::fs::write(&path, json_data.as_bytes())
         .map_err(|e| format!("Failed to write dump: {}", e))?;
     let abs_path = std::fs::canonicalize(&path)
