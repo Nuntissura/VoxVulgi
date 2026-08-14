@@ -3,7 +3,7 @@
 ## Metadata
 - ID: WP-0190
 - Owner: Codex
-- Status: REVIEW
+- Status: DONE
 - Created: 2026-04-23
 - Target milestone: Desktop UX polish
 
@@ -30,3 +30,4 @@ Out of scope:
 - The top-bar brand displays the current app version, for example `VoxVulgi v0.1.8`.
 - `npm run build` passes.
 - Proof bundle records automated verification and any manual/app-boundary verification status.
+- 2026-08-14: DONE on governed v0.1.138. Runtime metadata wiring and global/legacy font rules were inspected, the build passed, and settled screenshots across all eight top-level pages visibly showed the current version badge and readable non-overlapping text. Proof: `product/desktop/build_target/tool_artifacts/wp_runs/WP-0190/20260814_final/`.

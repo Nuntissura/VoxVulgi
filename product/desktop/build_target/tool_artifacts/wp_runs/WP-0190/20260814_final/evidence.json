@@ -1,0 +1,19 @@
+{
+  "wp": "WP-0190",
+  "status": "DONE",
+  "verified_at": "2026-08-14T14:10:00Z",
+  "automated": {
+    "governed_build_version": "0.1.138",
+    "governed_build_completed": true,
+    "base_font_css": "calc(19px * var(--font-scale, 1))",
+    "runtime_version_source": "appInfo.app_version",
+    "legacy_small_text_overrides_present": true
+  },
+  "visual": {
+    "folder": "governance/snapshots/WP-0171_build_0_1_138",
+    "settled_pages_inspected": 8,
+    "version_badge_observed": "v0.1.138",
+    "readable": true,
+    "text_overlap_observed": false
+  }
+}
