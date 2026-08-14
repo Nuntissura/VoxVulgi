@@ -1669,7 +1669,11 @@ function LocalizationStudioHome({
           <div className="loc-setup-header">
             <div>
               <div className="loc-home-eyebrow">Localization Studio</div>
-              <h2>Set up localization</h2>
+              <h2>
+                Set up localization
+                <LocalizationHelpButton helpId="loc-home-import" content={LOCALIZATION_HOME_HELP.import} />
+              </h2>
+              <LocalizationHelpAllToggle />
             </div>
             <button type="button" disabled={uiBusy && !pendingImportJob} onClick={clearWorkbench}>
               Clear workbench
@@ -1959,7 +1963,10 @@ function LocalizationStudioHome({
             <div className="loc-setup-history-header">
               <div>
                 <div className="loc-home-eyebrow">Successful jobs</div>
-                <h2>Latest usable outputs</h2>
+                <h2>
+                  Latest usable outputs
+                  <LocalizationHelpButton helpId="loc-home-outputs" content={LOCALIZATION_HOME_HELP.outputs} />
+                </h2>
               </div>
               <button
                 type="button"
