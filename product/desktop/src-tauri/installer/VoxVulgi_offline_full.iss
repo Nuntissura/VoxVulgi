@@ -37,9 +37,6 @@
 #ifndef OutputDir
   #define OutputDir "D:\vv_offline_build\out"
 #endif
-#ifndef WetextDir
-  #define WetextDir "D:\vv_offline_build\inputs\wetext"
-#endif
 
 [Setup]
 AppId={{com.voxvulgi.voxvulgi.offline}
@@ -87,16 +84,10 @@ Source: "{#PayloadDir}\tools\*"; Excludes: "youtube_po_provider_previous_*"; Des
 Source: "{#PayloadDir}\models\*"; DestDir: "{userappdata}\com.voxvulgi.voxvulgi\models"; Flags: recursesubdirs createallsubdirs ignoreversion uninsneveruninstall
 Source: "{#PayloadDir}\cache\huggingface\*"; DestDir: "{userappdata}\com.voxvulgi.voxvulgi\cache\huggingface"; Flags: recursesubdirs createallsubdirs ignoreversion uninsneveruninstall
 ; Full-quality CosyVoice extras are isolated inputs so the validated default payload is not
-; duplicated into another 6+ GB staging tree before compilation.
+; duplicated into another 6+ GB staging tree before compilation. The backend tree includes
+; the exact app-local wetext TN graph consumed by the governed render wrapper.
 Source: "{#CosyVoiceVenvDir}\*"; DestDir: "{userappdata}\com.voxvulgi.voxvulgi\tools\python\venv_cosyvoice"; Flags: recursesubdirs createallsubdirs ignoreversion uninsneveruninstall
 Source: "{#VoiceBackendsDir}\*"; DestDir: "{userappdata}\com.voxvulgi.voxvulgi\voice_backends"; Flags: recursesubdirs createallsubdirs ignoreversion uninsneveruninstall
-; Overlay the governed offline-only wetext resolver after the upstream venv files.
-Source: "patches\wetext_offline.py"; DestDir: "{userappdata}\com.voxvulgi.voxvulgi\tools\python\venv_cosyvoice\Lib\site-packages\wetext"; DestName: "wetext.py"; Flags: ignoreversion uninsneveruninstall
-; CosyVoice text-normalizer (wetext) ModelScope cache -> per-user ~/.cache/modelscope.
-; The bundled wetext.py is patched to snapshot_download(..., local_files_only=True), so
-; with this cache present it resolves the normalizer with ZERO network (proven under a
-; dead-proxy offline sim). The 'hub' path segment and the .msc cache index are required.
-Source: "{#WetextDir}\*"; DestDir: "{%USERPROFILE}\.cache\modelscope\hub\pengzhendong\wetext"; Flags: recursesubdirs createallsubdirs ignoreversion uninsneveruninstall
 
 [Run]
 ; Install the app itself, silently, after the packs are in place. NSIS self-elevates.

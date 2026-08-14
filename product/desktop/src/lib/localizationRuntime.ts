@@ -100,6 +100,7 @@ export function canonicalTtsBackendId(value: string | null | undefined): string 
   }
   if (raw === "tts_neural_local_v1" || raw === "kokoro") return "tts_neural_local_v1";
   if (raw === "pyttsx3_v1" || raw === "tts_preview_pyttsx3_v1") return "pyttsx3_v1";
+  if (raw === "cosyvoice" || raw === "cosyvoice2" || raw === "cosyvoice_2") return "cosyvoice";
   return raw;
 }
 

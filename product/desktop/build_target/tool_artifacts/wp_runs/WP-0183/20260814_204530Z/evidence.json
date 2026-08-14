@@ -1,0 +1,119 @@
+{
+  "wp": "WP-0183",
+  "run_id": "20260814_204530Z",
+  "status": "done",
+  "final_app": {
+    "version": "0.1.148",
+    "executable": "product/desktop/build_target/Current/release/desktop.exe",
+    "installer": "product/desktop/build_target/Current/release/bundle/nsis/VoxVulgi_0.1.148_x64-setup.exe",
+    "executable_bytes": 37472768,
+    "installer_bytes": 10284308,
+    "installer_sha256": "D856CC6EE31F9C742C5DE7FAD85558CD54D8001AFE63F8FB7D60C0F94C411BE7",
+    "build_log": "product/desktop/build_target/logs/build_desktop_target_20260814-223217_0_1_148.log",
+    "stdout_log": "product/desktop/build_target/logs/wp_0183_governed_build_v148.stdout.log",
+    "stderr_log": "product/desktop/build_target/logs/wp_0183_governed_build_v148.stderr.log"
+  },
+  "automated_checks": {
+    "frontend_contract": {
+      "command": "node --import tsx --test tests/localizationVoiceSetupContract.test.ts",
+      "cwd": "product/desktop",
+      "passed": 7,
+      "failed": 0
+    },
+    "frontend_build": {
+      "command": "npm run build",
+      "cwd": "product/desktop",
+      "passed": true
+    },
+    "cargo_check": {
+      "command": "cargo check --manifest-path product/desktop/src-tauri/Cargo.toml -j1",
+      "passed": true,
+      "note": "Final governed v0.1.148 release compilation also passed after the later TypeScript-only proof remediation."
+    },
+    "focused_engine_tests": [
+      "phase2_plan_includes_managed_cosyvoice_pack",
+      "cosyvoice_readiness_requires_app_local_nonempty_wetext_assets",
+      "managed_dub_resolution_honors_item_plan_and_explicit_pipeline",
+      "managed_dub_resolution_uses_managed_fallback_and_rejects_bad_explicit_id",
+      "balanced_goal_follows_readiness_sensitive_managed_default",
+      "managed_clone_backends_have_distinct_benchmark_labels",
+      "standard_payload_keeps_separate_cosyvoice_inputs_out_of_tools_export"
+    ]
+  },
+  "offline_render": {
+    "passed": true,
+    "network_policy": [
+      "PYTHONNOUSERSITE=1",
+      "HF_HUB_OFFLINE=1",
+      "TRANSFORMERS_OFFLINE=1",
+      "HTTP_PROXY=http://127.0.0.1:9",
+      "HTTPS_PROXY=http://127.0.0.1:9",
+      "ALL_PROXY=http://127.0.0.1:9"
+    ],
+    "wetext_fst_files_nonempty": 4,
+    "synthesized_duration_s": 2.72,
+    "terminal_marker": "cosyvoice_warmup_ok",
+    "network_attempts": 0
+  },
+  "warmup_gate": {
+    "report": "product/desktop/build_target/tool_artifacts/pack_warmup_gate/20260814_202053/report.md",
+    "governed_build_version": "0.1.146",
+    "overall": "ok",
+    "elapsed_s": 1910.0,
+    "packs": {
+      "spleeter": "ok",
+      "demucs": "ok",
+      "diarization": "ok",
+      "tts_preview": "ok",
+      "tts_neural_local_v1": "ok",
+      "tts_voice_preserving_local_v1": "ok"
+    },
+    "v0_1_148_reuse_reason": "Only tested TypeScript UI/bootstrap changes followed the complete v0.1.146 gate; no pack, resolver, dependency, payload, Rust, or installer input changed.",
+    "reuse_record": "governance/release/RELEASE_NOTES_SKIPPED_GATE.md"
+  },
+  "headless_app_boundary": {
+    "agent_headless": true,
+    "app_version": "0.1.148",
+    "item_id": "285097bf-b998-4b24-a390-b12e115ea580",
+    "item_has_subtitle_tracks": true,
+    "single_navigation_command_completions": {
+      "item_outputs": 1,
+      "jobs_list_for_item": 1
+    },
+    "post_navigation_audit_elapsed_ms": 26,
+    "advanced_tools_action_elapsed_ms": 15,
+    "selector_audit_elapsed_ms": 27,
+    "selector": {
+      "accessible_name": "Preferred managed voice backend",
+      "disabled": false,
+      "selected_value": "CosyVoice 2 — managed_ready",
+      "options": [
+        "OpenVoice V2 + Kokoro — managed_ready",
+        "CosyVoice 2 — managed_ready"
+      ],
+      "fallback_rendered": "openvoice_v2"
+    },
+    "screenshot": "governance/snapshots/WP-0183/cosyvoice_backend_selector_v148_1786740311738.png",
+    "dump": "governance/snapshots/WP-0183/cosyvoice_backend_selector_v148_1786740311755.dump.json",
+    "visual_verdict": {
+      "inspected": true,
+      "readable": true,
+      "control_discoverable": true,
+      "text_overlap": false,
+      "important_state_visible": true,
+      "version_badge": "v0.1.148"
+    }
+  },
+  "benchmark": {
+    "source": "product/desktop/build_target/tool_artifacts/wp_runs/WP-0288/20260802_stage_reproduction/evidence.json",
+    "metric": "SECS",
+    "cosyvoice2": 0.7569,
+    "openvoice_v2_kokoro": 0.4634,
+    "absolute_delta": 0.2935,
+    "relative_improvement_pct": 63.3
+  },
+  "scope_boundary": {
+    "public_full_offline_installer_owner": "WP-0265",
+    "clean_machine_full_installer_execution_proven_here": false
+  }
+}

@@ -65,6 +65,26 @@ test("Localization Studio readiness loads when page is visible even without wind
   );
 });
 
+test("Localization item bootstrap does not refetch base data when deferred context changes", () => {
+  const editorSource = readRepoFile("src", "pages", "SubtitleEditorPage.tsx");
+
+  assert.match(
+    editorSource,
+    /const loadDeferredContextRef = useRef\(loadDeferredContext\);[\s\S]{0,180}loadDeferredContextRef\.current = loadDeferredContext/,
+    "The item bootstrap must call the latest deferred loader without depending on its data-sensitive callback identity.",
+  );
+  assert.match(
+    editorSource,
+    /deferredTimer = window\.setTimeout\(\(\) => \{\s*void loadDeferredContextRef\.current\(\)/,
+    "Deferred item context must be scheduled through the stable ref.",
+  );
+  assert.doesNotMatch(
+    editorSource,
+    /refreshItemJobs,\s*loadDeferredContext,\s*loadTrack/,
+    "Changing tracks or speaker settings must not restart base item loading and fan out item_outputs/jobs_list_for_item calls.",
+  );
+});
+
 test("Localization Studio does not render stale failed dub progress as active progress", () => {
   const appSource = readRepoFile("src", "App.tsx");
   const tauriSource = readRepoFile("src-tauri", "src", "lib.rs");
@@ -139,5 +159,89 @@ test("Localization home does not mark source-audio fallback dub mixes as ready",
     appSource,
     /outputs\.mux_dub_preview_v1_mkv_exists/,
     "Localization home must prefer the managed MKV deliverable while legacy MP4 remains readable.",
+  );
+});
+
+test("Item voice plans select a native managed backend and preserve comparable manifests", () => {
+  const editorSource = readRepoFile("src", "pages", "SubtitleEditorPage.tsx");
+  const jobsSource = readRepoFile("..", "engine", "src", "jobs.rs");
+  const tauriSource = readRepoFile("src-tauri", "src", "lib.rs");
+  const fullInstallerScript = readRepoFile(
+    "..",
+    "..",
+    "governance",
+    "scripts",
+    "build_offline_full_installer.ps1",
+  );
+  const fullInstallerDefinition = readRepoFile(
+    "src-tauri",
+    "installer",
+    "VoxVulgi_offline_full.iss",
+  );
+
+  assert.match(
+    editorSource,
+    /aria-label="Preferred managed voice backend"/,
+    "The item voice plan must expose a direct managed backend selector.",
+  );
+  assert.match(
+    editorSource,
+    /className=\{`loc-workspace-rail-stage\$\{isSelected \? " is-selected" : ""\}`\}[\s\S]{0,160}aria-pressed=\{isSelected\}/,
+    "Workspace stages must expose semantic pressed state so the headless agent bridge can safely select Voice plan.",
+  );
+  assert.match(
+    editorSource,
+    /trimOrNull\(itemVoicePlanBackendId\)/,
+    "Saving the item plan must persist the operator's selected backend.",
+  );
+  assert.match(
+    editorSource,
+    /itemVoicePlan && \(!itemVoicePlanBackendDirty \|\| existingPreferredIsExperimental\)[\s\S]*itemVoicePlan\.preferred_backend_id/,
+    "Saving unrelated plan fields must preserve an unchanged experimental preference.",
+  );
+  assert.match(
+    editorSource,
+    /itemVoicePlanBackendDirty && existingPreferredIsExperimental[\s\S]*selectedManagedBackend/,
+    "Changing the managed selector must update an experimental plan's managed fallback without replacing its preference.",
+  );
+  assert.match(
+    jobsSource,
+    /resolve_managed_dub_backend_id\(paths, &item\.id, Some\(&pipeline\)\)/,
+    "Dub queueing must resolve the saved item plan before checking pack readiness.",
+  );
+  assert.match(
+    jobsSource,
+    /let backend_dir_name = tts_backend_dir_name\(&dub_backend_id\)/,
+    "Each managed backend must retain a separate manifest directory for benchmark comparison.",
+  );
+  assert.match(
+    jobsSource,
+    /let mut pipeline = p\.pipeline\.clone\(\)\.unwrap_or_default\(\);\s*pipeline\.tts_backend_id = Some\(dub_backend_id\.clone\(\)\);/,
+    "Dub follow-ups must retain the exact backend resolved for the render.",
+  );
+  assert.match(
+    jobsSource,
+    /backend: dub_backend_id\.clone\(\)/,
+    "The manifest must identify the backend that actually rendered the audio.",
+  );
+  assert.match(
+    tauriSource,
+    /"tts_cosyvoice_manifest"[\s\S]*Some\("cosyvoice"\)[\s\S]*ArtifactRerunKind::DubVoicePreservingV1/,
+    "CosyVoice artifacts must remain in the managed dub inventory and rerun path.",
+  );
+  assert.match(
+    tauriSource,
+    /"dub_voice_preserving_v1" \| "cosyvoice"/,
+    "The experimental artifact scanner must not duplicate or misclassify CosyVoice outputs.",
+  );
+  assert.match(
+    fullInstallerScript,
+    /cosyvoice\\wetext\\en\\tn\\tagger\.fst[\s\S]*cosyvoice\\wetext\\zh\\tn\\verbalizer\.fst/,
+    "The full-offline installer gate must verify the exact app-local wetext graph.",
+  );
+  assert.doesNotMatch(
+    fullInstallerDefinition,
+    /\.cache\\modelscope|wetext_offline\.py/,
+    "The public installer must not depend on an external user-profile cache or a site-packages overlay.",
   );
 });

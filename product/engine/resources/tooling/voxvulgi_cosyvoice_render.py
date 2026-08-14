@@ -45,6 +45,47 @@ IMPORT_WARN_EVERY_SECS = float(os.environ.get("VOXVULGI_COSYVOICE_IMPORT_WARN_SE
 IMPORT_HARD_LIMIT_SECS = float(os.environ.get("VOXVULGI_COSYVOICE_IMPORT_LIMIT_SECS", "300"))
 
 
+def _install_offline_wetext_resolver():
+    """Resolve the wetext normalizer from the managed app-local asset directory.
+
+    wetext 0.0.4 calls ``modelscope.snapshot_download`` while its Normalizer is
+    constructed, even when a complete ModelScope cache already exists. The public
+    VoxVulgi path is offline, so intercept that one known repository before importing
+    CosyVoice and refuse every unexpected ModelScope lookup. This keeps the upstream
+    frontend unchanged while making network silence an execution-boundary property.
+    """
+    model_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "wetext")
+    required = (
+        os.path.join("en", "tn", "tagger.fst"),
+        os.path.join("en", "tn", "verbalizer.fst"),
+        os.path.join("zh", "tn", "tagger.fst"),
+        os.path.join("zh", "tn", "verbalizer.fst"),
+    )
+    missing = [
+        rel
+        for rel in required
+        if not os.path.isfile(os.path.join(model_dir, rel))
+        or os.path.getsize(os.path.join(model_dir, rel)) <= 0
+    ]
+    if missing:
+        raise SystemExit(
+            "cosyvoice render: managed wetext assets are incomplete under "
+            f"{model_dir}: {', '.join(missing)}. Repair the CosyVoice 2 pack in Diagnostics."
+        )
+
+    import modelscope
+
+    def _offline_snapshot_download(model_id=None, *args, **kwargs):
+        requested = str(model_id or kwargs.get("repo_id") or "").strip()
+        if requested == "pengzhendong/wetext":
+            return model_dir
+        raise RuntimeError(
+            f"CosyVoice attempted an unmanaged ModelScope lookup while offline: {requested or '<empty>'}"
+        )
+
+    modelscope.snapshot_download = _offline_snapshot_download
+
+
 def _instrumented_import_cosyvoice():
     """Import the CosyVoice class with a watchdog that logs progress and enforces a
     bounded ceiling.
@@ -56,6 +97,8 @@ def _instrumented_import_cosyvoice():
     the import can silently consume the whole job timeout with no clue where it hung.
     """
     result = {}
+
+    _install_offline_wetext_resolver()
 
     def _do_import():
         t0 = time.monotonic()

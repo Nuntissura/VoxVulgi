@@ -415,7 +415,7 @@ Voice-preserving approach (core feature):
   - current run-level outcomes are `clone_preserved`, `partial_fallback`, `fallback_only`, and `standard_tts_only`,
   - the bridge/frontend should consume that metadata directly for the item voice plan, Localization Run, Outputs, and benchmark surfaces instead of inferring clone success from file existence alone.
 - Voice-backend modernization strategy:
-  - keep the current OpenVoice V2 + Kokoro path as the managed default until benchmark evidence supports a change,
+  - select managed CosyVoice 2 as the default only when its complete offline pack passes the byte-level readiness gate; otherwise use managed OpenVoice V2 + Kokoro,
   - add a built-in backend catalog with descriptors for managed and experimental candidates,
   - add recommendation logic keyed by source language, target language, performance tier, reference availability, and operator goal,
   - add explicit BYO adapter configs for experimental backends that the app should not auto-install,

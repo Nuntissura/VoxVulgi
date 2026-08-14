@@ -246,7 +246,7 @@ Initial language focus: **Korean + Japanese → English**.
   - cross-episode voice memory profiles for recurring real speakers,
   - separate character libraries for reusable narrator/teaching voices.
 - Voice backend strategy should now be a first-class operator-visible layer:
-  - the shipped default remains the managed OpenVoice V2 + Kokoro path until benchmark evidence supports a change,
+  - the shipped default is readiness-sensitive: use managed CosyVoice 2 when its complete offline pack is byte-verified, otherwise fall back to managed OpenVoice V2 + Kokoro,
   - Diagnostics and Localization Studio should expose a research-backed backend catalog covering managed and experimental candidates,
   - the app should distinguish backend families such as two-stage TTS + VC, direct zero-shot TTS, and conversion-only pipelines,
   - the app should support explicit local BYO backend adapters for stronger experimental OSS candidates without silently installing them.
@@ -342,6 +342,7 @@ Current implementation status:
 - Current implementation now also includes bounded batch experimental backend runs across one selected item set.
 - Current implementation now also includes immutable benchmark compare history and leaderboard export artifacts for the current item/track/goal.
 - Current implementation now also includes backend-specific starter recipes so Diagnostics can prefill stronger BYO adapter drafts for known OSS stacks.
+- Current implementation exposes OpenVoice V2 + Kokoro and CosyVoice 2 as item-selectable managed dub backends, keeps their manifests separate for benchmark comparison, and resolves the managed default from verified pack readiness.
 - Current implementation now also lets operators promote benchmark winners directly into the selected reusable voice template or cast pack and optionally seed later item voice plans from those saved defaults during apply.
 - Export packs include speech stems and alternate dubbed variants when available.
 - Voice-preserving runs must not be presented as successful cloned-voice results when conversion did not actually occur; clone-vs-fallback truth is part of the product contract, not an optional detail.

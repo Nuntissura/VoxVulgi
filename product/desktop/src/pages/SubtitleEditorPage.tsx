@@ -855,6 +855,17 @@ const VOICE_BACKEND_GOAL_OPTIONS = [
   { value: "speed", label: "Fastest local turnaround" },
 ] as const;
 
+function managedVoiceBackendId(
+  preferred: string | null | undefined,
+  fallback?: string | null | undefined,
+): string {
+  for (const candidate of [preferred, fallback]) {
+    const canonical = canonicalTtsBackendId(candidate);
+    if (canonical === "openvoice_v2" || canonical === "cosyvoice") return canonical;
+  }
+  return "";
+}
+
 function formatTc(ms: number): string {
   const clamped = Math.max(0, Math.floor(ms));
   const h = Math.floor(clamped / 3_600_000);
@@ -1686,6 +1697,8 @@ export function SubtitleEditorPage({
   const [itemVoicePlan, setItemVoicePlan] = useState<ItemVoicePlan | null>(null);
   const [itemVoicePlanBusy, setItemVoicePlanBusy] = useState(false);
   const [itemVoicePlanNotes, setItemVoicePlanNotes] = useState("");
+  const [itemVoicePlanBackendId, setItemVoicePlanBackendId] = useState("");
+  const [itemVoicePlanBackendDirty, setItemVoicePlanBackendDirty] = useState(false);
   const [voiceBackendGoal, setVoiceBackendGoal] = useState<
     "balanced" | "identity" | "expressive" | "timing" | "speed"
   >(() => {
@@ -2202,8 +2215,16 @@ export function SubtitleEditorPage({
       const plan = await invoke<ItemVoicePlan | null>("item_voice_plan_get", { itemId });
       setItemVoicePlan(plan);
       setItemVoicePlanNotes(plan?.notes ?? "");
+      setItemVoicePlanBackendId(
+        managedVoiceBackendId(plan?.preferred_backend_id, plan?.fallback_backend_id),
+      );
+      setItemVoicePlanBackendDirty(false);
       return plan;
     } catch {
+      setItemVoicePlan(null);
+      setItemVoicePlanNotes("");
+      setItemVoicePlanBackendId("");
+      setItemVoicePlanBackendDirty(false);
       return null;
     }
   }, [itemId]);
@@ -2244,6 +2265,10 @@ export function SubtitleEditorPage({
     refreshItemVoicePlan,
     loadVoiceReferenceCandidates,
   ]);
+  const loadDeferredContextRef = useRef(loadDeferredContext);
+  useEffect(() => {
+    loadDeferredContextRef.current = loadDeferredContext;
+  }, [loadDeferredContext]);
 
   const loadTrack = useCallback(
     async (nextTrackId: string) => {
@@ -2290,7 +2315,7 @@ export function SubtitleEditorPage({
         }
         if (cancelled) return;
         deferredTimer = window.setTimeout(() => {
-          void loadDeferredContext().catch((e) => {
+          void loadDeferredContextRef.current().catch((e) => {
             if (!cancelled) {
               setError((prev) => prev ?? String(e));
             }
@@ -2320,7 +2345,6 @@ export function SubtitleEditorPage({
     refreshOutputs,
     refreshArtifacts,
     refreshItemJobs,
-    loadDeferredContext,
     loadTrack,
   ]);
 
@@ -2543,6 +2567,25 @@ export function SubtitleEditorPage({
         !!detail.last_probe?.ready,
     );
   }, [voiceBackendAdapters]);
+
+  const managedVoiceBackendOptions = useMemo(() => {
+    const options = (voiceBackendCatalog?.backends ?? [])
+      .filter(
+        (backend) =>
+          backend.install_mode === "managed" &&
+          (backend.id === "openvoice_v2" || backend.id === "cosyvoice"),
+      )
+      .map((backend) => ({
+        id: backend.id,
+        display_name: backend.display_name,
+        status: backend.status,
+      }));
+    if (options.length) return options;
+    return [
+      { id: "openvoice_v2", display_name: "OpenVoice V2 + Kokoro", status: "checking" },
+      { id: "cosyvoice", display_name: "CosyVoice 2", status: "checking" },
+    ];
+  }, [voiceBackendCatalog]);
 
   useEffect(() => {
     setExperimentalBackendId((prev) => {
@@ -4295,13 +4338,29 @@ export function SubtitleEditorPage({
     setError(null);
     setItemVoicePlanBusy(true);
     try {
+      const existingManagedBackend = managedVoiceBackendId(
+        itemVoicePlan?.preferred_backend_id,
+        itemVoicePlan?.fallback_backend_id,
+      );
+      const existingPreferredBackend = trimOrNull(itemVoicePlan?.preferred_backend_id ?? "");
+      const existingPreferredIsExperimental = Boolean(
+        existingPreferredBackend && !managedVoiceBackendId(existingPreferredBackend),
+      );
+      const selectedManagedBackend = trimOrNull(itemVoicePlanBackendId);
       const payload: ItemVoicePlanUpsert = {
         goal: itemVoicePlan?.goal ?? voiceBackendGoal,
         preferred_backend_id:
-          itemVoicePlan?.preferred_backend_id ??
+          (itemVoicePlan && (!itemVoicePlanBackendDirty || existingPreferredIsExperimental)
+            ? itemVoicePlan.preferred_backend_id
+            : selectedManagedBackend) ??
+          trimOrNull(existingManagedBackend) ??
+          voiceBackendCatalog?.default_backend_id ??
           voiceBackendRecommendation?.preferred_backend_id ??
           null,
         fallback_backend_id:
+          (itemVoicePlanBackendDirty && existingPreferredIsExperimental
+            ? selectedManagedBackend
+            : null) ??
           itemVoicePlan?.fallback_backend_id ??
           voiceBackendRecommendation?.fallback_backend_id ??
           null,
@@ -4315,6 +4374,10 @@ export function SubtitleEditorPage({
       });
       setItemVoicePlan(plan);
       setItemVoicePlanNotes(plan.notes ?? "");
+      setItemVoicePlanBackendId(
+        managedVoiceBackendId(plan.preferred_backend_id, plan.fallback_backend_id),
+      );
+      setItemVoicePlanBackendDirty(false);
       setNotice("Saved item voice plan.");
     } catch (e) {
       setError(String(e));
@@ -4334,6 +4397,8 @@ export function SubtitleEditorPage({
       await invoke("item_voice_plan_delete", { itemId });
       setItemVoicePlan(null);
       setItemVoicePlanNotes("");
+      setItemVoicePlanBackendId("");
+      setItemVoicePlanBackendDirty(false);
       setNotice("Cleared item voice plan.");
     } catch (e) {
       setError(String(e));
@@ -4356,6 +4421,10 @@ export function SubtitleEditorPage({
       });
       setItemVoicePlan(plan);
       setItemVoicePlanNotes(plan.notes ?? "");
+      setItemVoicePlanBackendId(
+        managedVoiceBackendId(plan.preferred_backend_id, plan.fallback_backend_id),
+      );
+      setItemVoicePlanBackendDirty(false);
       setNotice(`Promoted recommended backend ${plan.preferred_backend_id ?? "-"} into the item voice plan.`);
     } catch (e) {
       setError(String(e));
@@ -4381,6 +4450,10 @@ export function SubtitleEditorPage({
       });
       setItemVoicePlan(plan);
       setItemVoicePlanNotes(plan.notes ?? "");
+      setItemVoicePlanBackendId(
+        managedVoiceBackendId(plan.preferred_backend_id, plan.fallback_backend_id),
+      );
+      setItemVoicePlanBackendDirty(false);
       setNotice(`Promoted benchmark winner ${plan.preferred_backend_id ?? "-"} into the item voice plan.`);
     } catch (e) {
       setError(String(e));
@@ -6550,6 +6623,7 @@ export function SubtitleEditorPage({
                   <button
                     type="button"
                     className={`loc-workspace-rail-stage${isSelected ? " is-selected" : ""}`}
+                    aria-pressed={isSelected}
                     onClick={() => setSelectedStage(stage.id)}
                   >
                     <span className="loc-workspace-rail-stage-index">{idx + 1}</span>
@@ -9628,11 +9702,32 @@ export function SubtitleEditorPage({
                   <div className="v">{itemVoicePlan?.goal ?? voiceBackendGoal}</div>
                 </div>
                 <div className="kv">
-                  <div className="k">Preferred backend</div>
+                  <div className="k">Managed dub backend</div>
                   <div className="v">
-                    {itemVoicePlan?.preferred_backend_id ??
-                      voiceBackendRecommendation?.preferred_backend_id ??
-                      "-"}
+                    <select
+                      aria-label="Preferred managed voice backend"
+                      value={
+                        itemVoicePlanBackendId ||
+                        managedVoiceBackendId(
+                          itemVoicePlan?.preferred_backend_id,
+                          itemVoicePlan?.fallback_backend_id,
+                        ) ||
+                        voiceBackendCatalog?.default_backend_id ||
+                        voiceBackendRecommendation?.preferred_backend_id ||
+                        "openvoice_v2"
+                      }
+                      disabled={busy || itemVoicePlanBusy}
+                      onChange={(event) => {
+                        setItemVoicePlanBackendId(event.currentTarget.value);
+                        setItemVoicePlanBackendDirty(true);
+                      }}
+                    >
+                      {managedVoiceBackendOptions.map((backend) => (
+                          <option key={`item-voice-plan-${backend.id}`} value={backend.id}>
+                            {backend.display_name} — {backend.status}
+                          </option>
+                        ))}
+                    </select>
                   </div>
                 </div>
                 <div className="kv">
@@ -9752,7 +9847,8 @@ export function SubtitleEditorPage({
                   </button>
                 </div>
                 <div style={{ fontSize: 12, opacity: 0.7 }}>
-                  Managed default remains OpenVoice until benchmark evidence supports a change.
+                  Managed default: {voiceBackendCatalog?.backends.find((backend) => backend.managed_default)?.display_name ?? "loading"}.
+                  Save an item voice plan above to override it for this item.
                 </div>
                 {voiceBackendRecommendation ? (
                   <div

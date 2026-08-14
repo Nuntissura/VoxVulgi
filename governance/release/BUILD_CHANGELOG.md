@@ -1178,3 +1178,35 @@ This changelog tracks desktop installer builds produced by `governance/scripts/b
 - Artifacts:
   - `product/desktop/build_target/Current/release/bundle/nsis/VoxVulgi_0.1.140_x64-setup.exe`
 - Notes: Replace remaining technical jargon with plain-language labels and add visible guidance for presets, crawl scope, sign-in, and inherited storage roots.
+
+## 0.1.141 - 2026-08-14T15:12:29Z
+- Work Packets: `WP-0172`
+- Commit: `5812aa1`
+- Offline Bundle ID: `offline_full_win64_20260814_082842`
+- Artifacts:
+  - `product/desktop/build_target/Current/release/bundle/nsis/VoxVulgi_0.1.141_x64-setup.exe`
+- Notes: Complete all 22 editor help placements, home-screen contextual help, and the persistent Show all help learning-mode toggle.
+
+## 0.1.146 - 2026-08-14T19:32:27Z
+- Work Packets: `WP-0183`, `WP-0252`, `WP-0265`
+- Commit: `c6b1bc2`
+- Offline Bundle ID: `offline_full_win64_20260814_082842`
+- Artifacts:
+  - `product/desktop/build_target/Current/release/bundle/nsis/VoxVulgi_0.1.146_x64-setup.exe`
+- Notes: CosyVoice 2 managed backend selection, offline app-local wetext readiness, and public full-installer input hardening.
+
+## 0.1.147 - 2026-08-14T20:14:45Z
+- Work Packets: `WP-0183`
+- Commit: `c6b1bc2`
+- Offline Bundle ID: `offline_full_win64_20260814_082842`
+- Artifacts:
+  - `product/desktop/build_target/Current/release/bundle/nsis/VoxVulgi_0.1.147_x64-setup.exe`
+- Notes: WP-0183 UI-only semantic stage navigation for safe headless verification. Warmup skip reuses the immediately preceding v0.1.146 full-gate result; no pack, resolver, dependency, payload, Rust, or installer input changed.
+
+## 0.1.148 - 2026-08-14T20:40:09Z
+- Work Packets: `WP-0183`
+- Commit: `c6b1bc2`
+- Offline Bundle ID: `offline_full_win64_20260814_082842`
+- Artifacts:
+  - `product/desktop/build_target/Current/release/bundle/nsis/VoxVulgi_0.1.148_x64-setup.exe`
+- Notes: WP-0183 headless-proof blocker fix: stop Localization item bootstrap from refetch fan-out by calling the latest deferred loader through a stable ref. Reuses the v0.1.146 full pack gate; no pack, resolver, dependency, payload, Rust, or installer input changed.

@@ -49,24 +49,47 @@ pub struct VoiceBackendRecommendation {
     pub warnings: Vec<String>,
 }
 
+fn canonical_managed_backend_id(raw: &str) -> Option<String> {
+    match raw.trim().to_ascii_lowercase().as_str() {
+        "openvoice_v2" | "voice_preserving_local_v1" | "dub_voice_preserving_v1" => {
+            Some("openvoice_v2".to_string())
+        }
+        "cosyvoice" | "cosyvoice2" | "cosyvoice_2" => Some("cosyvoice".to_string()),
+        _ => None,
+    }
+}
+
+pub fn managed_default_backend_id(paths: &AppPaths) -> String {
+    if let Ok(Some(raw)) = paths.dub_backend_id_override() {
+        if let Some(id) = canonical_managed_backend_id(&raw) {
+            return id;
+        }
+    }
+    if tools::cosyvoice_pack_status(paths).installed {
+        "cosyvoice".to_string()
+    } else {
+        "openvoice_v2".to_string()
+    }
+}
+
 pub fn backend_catalog(paths: &AppPaths) -> VoiceBackendCatalog {
     let performance = tools::performance_tier_status(paths);
     let pack = tools::tts_voice_preserving_local_v1_pack_status(paths);
     let byo_status = voice_backend_adapters::catalog_status_overrides(paths).unwrap_or_default();
     let tier = performance.tier.clone();
-    let cosy_status = if let Some(override_status) = byo_status.get("cosyvoice") {
-        override_status.clone()
-    } else if let Some(version) = pack.cosyvoice_version.clone() {
+    let cosy_pack = tools::cosyvoice_pack_status(paths);
+    let cosy_status = if cosy_pack.installed {
         (
-            "detected_python_env".to_string(),
-            format!("CosyVoice detected in the current Python environment ({version})."),
+            "managed_ready".to_string(),
+            cosy_pack.status_detail.clone(),
         )
     } else {
         (
-            "available_via_byo".to_string(),
-            "Experimental candidate. Not managed by VoxVulgi yet.".to_string(),
+            "managed_missing_pack".to_string(),
+            cosy_pack.status_detail.clone(),
         )
     };
+    let default_backend_id = managed_default_backend_id(paths);
 
     let openvoice_status = if pack.installed {
         (
@@ -89,7 +112,7 @@ pub fn backend_catalog(paths: &AppPaths) -> VoiceBackendCatalog {
             install_mode: "managed".to_string(),
             status: openvoice_status.0,
             status_detail: openvoice_status.1,
-            managed_default: true,
+            managed_default: default_backend_id == "openvoice_v2",
             language_scope: "multilingual dubbing with explicit EN text control".to_string(),
             reference_expectation: "1+ short clean references; multi-reference supported"
                 .to_string(),
@@ -109,13 +132,13 @@ pub fn backend_catalog(paths: &AppPaths) -> VoiceBackendCatalog {
         },
         VoiceBackendCatalogEntry {
             id: "cosyvoice".to_string(),
-            display_name: "CosyVoice".to_string(),
+            display_name: "CosyVoice 2".to_string(),
             family: "direct_zero_shot_tts".to_string(),
             mode: "direct_conditioned_tts".to_string(),
-            install_mode: "byo".to_string(),
+            install_mode: "managed".to_string(),
             status: cosy_status.0,
             status_detail: cosy_status.1,
-            managed_default: false,
+            managed_default: default_backend_id == "cosyvoice",
             language_scope: "multilingual zero-shot TTS".to_string(),
             reference_expectation:
                 "short clean references; stronger results with higher-quality inputs".to_string(),
@@ -129,7 +152,7 @@ pub fn backend_catalog(paths: &AppPaths) -> VoiceBackendCatalog {
             ],
             risks: vec![
                 "heavier runtime and packaging cost than the shipped backend".to_string(),
-                "still experimental for VoxVulgi integration".to_string(),
+                "CPU rendering is substantially slower than the OpenVoice baseline".to_string(),
             ],
             primary_source: "https://github.com/FunAudioLLM/CosyVoice".to_string(),
         },
@@ -266,7 +289,7 @@ pub fn backend_catalog(paths: &AppPaths) -> VoiceBackendCatalog {
     ];
 
     VoiceBackendCatalog {
-        default_backend_id: "openvoice_v2".to_string(),
+        default_backend_id,
         performance_tier: tier,
         backends,
     }
@@ -328,17 +351,19 @@ fn recommend_backend_for_catalog(
         }
         _ => {
             rationale.push(
-                "Balanced production work should stay on the current managed backend until a benchmark report supports a switch."
+                "Balanced production work should use the current readiness-sensitive managed default."
                     .to_string(),
             );
-            ("openvoice_v2".to_string(), None)
+            let preferred = catalog.default_backend_id.clone();
+            let fallback = (preferred != "openvoice_v2").then(|| "openvoice_v2".to_string());
+            (preferred, fallback)
         }
     };
 
     let mut warnings: Vec<String> = Vec::new();
-    if preferred_backend_id != "openvoice_v2" {
+    if !matches!(preferred_backend_id.as_str(), "openvoice_v2" | "cosyvoice") {
         warnings.push(
-            "Preferred backend is experimental/BYO; keep OpenVoice as the safe production fallback until the benchmark lab proves otherwise."
+            "Preferred backend is experimental/BYO; keep a managed backend as the production fallback until the benchmark lab proves otherwise."
                 .to_string(),
         );
     }
@@ -355,7 +380,7 @@ fn recommend_backend_for_catalog(
     }
     if tier != "gpu" && preferred_backend_id != "openvoice_v2" {
         warnings.push(
-            "The current machine is not in the GPU tier; experimental direct-TTS or VC candidates will be slower and may be impractical."
+            "The current machine is not in the GPU tier; direct-TTS or VC backends will be slower and may be impractical."
                 .to_string(),
         );
     }
@@ -418,6 +443,23 @@ mod tests {
         );
         assert_eq!(rec.preferred_backend_id, "openvoice_v2");
         assert!(rec.fallback_backend_id.is_none());
+    }
+
+    #[test]
+    fn balanced_goal_follows_readiness_sensitive_managed_default() {
+        let mut catalog = test_catalog("cpu");
+        catalog.default_backend_id = "cosyvoice".to_string();
+        let rec = recommend_backend_for_catalog(
+            &catalog,
+            VoiceBackendRecommendationRequest {
+                source_lang: Some("ko".to_string()),
+                target_lang: Some("en".to_string()),
+                reference_count: Some(2),
+                goal: Some("balanced".to_string()),
+            },
+        );
+        assert_eq!(rec.preferred_backend_id, "cosyvoice");
+        assert_eq!(rec.fallback_backend_id.as_deref(), Some("openvoice_v2"));
     }
 
     #[test]

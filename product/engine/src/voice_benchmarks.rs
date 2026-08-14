@@ -1304,7 +1304,8 @@ fn normalize_goal(raw: Option<&str>) -> String {
 
 fn backend_display_name(backend_id: &str) -> &'static str {
     match backend_id {
-        "dub_voice_preserving_v1" => "OpenVoice V2 + Kokoro",
+        "dub_voice_preserving_v1" | "openvoice_v2" => "OpenVoice V2 + Kokoro",
+        "cosyvoice" => "CosyVoice 2",
         "tts_neural_local_v1" => "Kokoro local",
         "pyttsx3_v1" => "pyttsx3 preview",
         _ => "Voice backend",
@@ -1508,6 +1509,12 @@ mod tests {
     use rusqlite::params;
     use sha2::{Digest, Sha256};
     use std::time::Duration;
+
+    #[test]
+    fn managed_clone_backends_have_distinct_benchmark_labels() {
+        assert_eq!(backend_display_name("cosyvoice"), "CosyVoice 2");
+        assert_eq!(backend_display_name("openvoice_v2"), "OpenVoice V2 + Kokoro");
+    }
 
     fn seed_active_preview_lineage(
         paths: &AppPaths,

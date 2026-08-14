@@ -7845,6 +7845,50 @@ fn item_artifacts_list_v1(
             );
         }
     }
+    push(
+        "tts_cosyvoice_manifest",
+        "TTS manifest (CosyVoice 2)",
+        "TTS",
+        ArtifactKind::TtsManifest,
+        Some("dub_voice_preserving_v1"),
+        None,
+        None,
+        None,
+        Some("cosyvoice"),
+        Some(ArtifactRerunKind::DubVoicePreservingV1),
+        item_dir
+            .join("tts_preview")
+            .join("cosyvoice")
+            .join("manifest.json"),
+    );
+    let cosyvoice_variants_dir = item_dir
+        .join("tts_preview")
+        .join("cosyvoice")
+        .join("variants");
+    if let Ok(entries) = std::fs::read_dir(&cosyvoice_variants_dir) {
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if !path.is_dir() {
+                continue;
+            }
+            let Some(label) = path.file_name().and_then(|value| value.to_str()) else {
+                continue;
+            };
+            push(
+                &format!("tts_cosyvoice_manifest_variant_{label}"),
+                &format!("TTS manifest (CosyVoice 2 {label})"),
+                "TTS alternates",
+                ArtifactKind::TtsManifest,
+                Some("dub_voice_preserving_v1"),
+                normalize_variant_label(Some(label)),
+                None,
+                None,
+                Some("cosyvoice"),
+                Some(ArtifactRerunKind::DubVoicePreservingV1),
+                path.join("manifest.json"),
+            );
+        }
+    }
     let tts_root = item_dir.join("tts_preview");
     if let Ok(entries) = std::fs::read_dir(&tts_root) {
         for entry in entries.flatten() {
@@ -7857,7 +7901,7 @@ fn item_artifacts_list_v1(
             };
             if matches!(
                 backend_id,
-                "pyttsx3_v1" | "tts_neural_local_v1" | "dub_voice_preserving_v1"
+                "pyttsx3_v1" | "tts_neural_local_v1" | "dub_voice_preserving_v1" | "cosyvoice"
             ) {
                 continue;
             }

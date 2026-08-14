@@ -41,6 +41,7 @@ test("canonicalTtsBackendId normalizes known aliases", () => {
   assert.equal(canonicalTtsBackendId("dub_voice_preserving_v1"), "openvoice_v2");
   assert.equal(canonicalTtsBackendId("kokoro"), "tts_neural_local_v1");
   assert.equal(canonicalTtsBackendId("tts_preview_pyttsx3_v1"), "pyttsx3_v1");
+  assert.equal(canonicalTtsBackendId("cosyvoice2"), "cosyvoice");
 });
 
 test("ttsBackendIdsMatch respects alias normalization", () => {

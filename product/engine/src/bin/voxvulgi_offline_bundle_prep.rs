@@ -70,6 +70,7 @@ fn run() -> Result<()> {
         let _ = std::fs::remove_dir_all(paths.tools_dir());
         let _ = std::fs::remove_dir_all(paths.models_dir());
         let _ = std::fs::remove_dir_all(paths.cache_dir().join("huggingface"));
+        let _ = std::fs::remove_dir_all(paths.voice_backends_dir());
         paths.ensure_dirs()?;
     }
 
@@ -236,6 +237,41 @@ fn run() -> Result<()> {
             let _ = tools::install_tts_voice_preserving_local_v1_pack(&paths)?;
         } else {
             println!("voice-preserving pack already installed.");
+        }
+    }
+    {
+        let status = tools::cosyvoice_pack_status(&paths);
+        if !status.installed {
+            let seed_src = Path::new(env!("CARGO_MANIFEST_DIR"))
+                .parent()
+                .unwrap_or_else(|| Path::new(env!("CARGO_MANIFEST_DIR")))
+                .join("desktop")
+                .join("src-tauri")
+                .join("voice_backends_seed")
+                .join("cosyvoice");
+            if !seed_src
+                .join("cosyvoice")
+                .join("cli")
+                .join("cosyvoice.py")
+                .is_file()
+            {
+                return Err(EngineError::InstallFailed(format!(
+                    "CosyVoice managed seed is missing from {}",
+                    seed_src.to_string_lossy()
+                )));
+            }
+            println!("seeding managed CosyVoice runtime code...");
+            copy_tree(&seed_src, &paths.cosyvoice_backend_dir())?;
+            println!("installing managed CosyVoice 2 pack...");
+            let next = tools::install_voice_clone_cosyvoice_v1_pack(&paths)?;
+            if !next.installed {
+                return Err(EngineError::InstallFailed(format!(
+                    "CosyVoice install did not result in installed=true: {}",
+                    next.status_detail
+                )));
+            }
+        } else {
+            println!("CosyVoice 2 pack already installed.");
         }
     }
 
@@ -432,6 +468,7 @@ fn copy_payload_file(src: &Path, dst: &Path, is_symlink: bool) -> Result<()> {
 fn should_skip_payload_entry(relative_path: &Path) -> bool {
     relative_path.components().any(|component| {
         component == std::path::Component::Normal("_voxvulgi_stale_python_artifacts".as_ref())
+            || component == std::path::Component::Normal("venv_cosyvoice".as_ref())
     })
 }
 
@@ -578,6 +615,16 @@ Notes:
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn standard_payload_keeps_separate_cosyvoice_inputs_out_of_tools_export() {
+        assert!(should_skip_payload_entry(Path::new(
+            "python/venv_cosyvoice/Lib/site-packages/torch/__init__.py"
+        )));
+        assert!(!should_skip_payload_entry(Path::new(
+            "python/venv/Lib/site-packages/torch/__init__.py"
+        )));
+    }
 
     #[test]
     fn copy_tree_copies_regular_files() {

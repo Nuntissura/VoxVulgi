@@ -1,6 +1,7 @@
 [CmdletBinding()]
 param(
-  # Directory holding the validated default relocatable payload (tools/ models/ cache/).
+  # Directory holding the validated default relocatable payload (tools/ models/ cache/),
+  # excluding the separately supplied CosyVoice venv and backend tree.
   [Parameter(Mandatory = $true)][string]$PayloadDir,
   # Isolated CosyVoice Python venv added to the default payload.
   [Parameter(Mandatory = $true)][string]$CosyVoiceVenvDir,
@@ -12,9 +13,8 @@ param(
   [Parameter(Mandatory = $true)][string]$OutputDir,
   # Desktop semantic version this offline installer corresponds to.
   [Parameter(Mandatory = $true)][string]$AppVersion,
-  # Directory holding the wetext ModelScope cache (pengzhendong/wetext + .msc/.mdl/.mv)
-  # that CosyVoice's text-normalizer needs offline.
-  [Parameter(Mandatory = $true)][string]$WetextDir,
+  # Validate every thin-installer/default-payload/CosyVoice input without invoking ISCC.
+  [switch]$ValidateInputsOnly,
   # Resume only the guarded cleanup, artifact verification, and manifest write after ISCC
   # already reported success but a prior wrapper was interrupted before finalization.
   [switch]$FinalizeExistingArtifacts,
@@ -26,6 +26,10 @@ param(
 )
 
 $ErrorActionPreference = "Stop"
+
+if ($ValidateInputsOnly -and $FinalizeExistingArtifacts) {
+  throw "Use either -ValidateInputsOnly or -FinalizeExistingArtifacts, not both."
+}
 
 function Find-Iscc {
   param([string]$Explicit)
@@ -79,6 +83,33 @@ if (-not (Test-Path -LiteralPath $CosyVoiceVenvDir -PathType Container)) {
 if (-not (Test-Path -LiteralPath $VoiceBackendsDir -PathType Container)) {
   throw "Voice backends not found: $VoiceBackendsDir"
 }
+$cosyRequiredFiles = @(
+  (Join-Path $CosyVoiceVenvDir 'Scripts\python.exe'),
+  (Join-Path $VoiceBackendsDir 'cosyvoice\voxvulgi_cosyvoice_render.py'),
+  (Join-Path $VoiceBackendsDir 'cosyvoice\cosyvoice\cli\cosyvoice.py'),
+  (Join-Path $VoiceBackendsDir 'cosyvoice\third_party\Matcha-TTS\matcha\__init__.py'),
+  (Join-Path $VoiceBackendsDir 'cosyvoice\pretrained_models\CosyVoice2-0.5B\cosyvoice2.yaml'),
+  (Join-Path $VoiceBackendsDir 'cosyvoice\pretrained_models\CosyVoice2-0.5B\llm.pt'),
+  (Join-Path $VoiceBackendsDir 'cosyvoice\pretrained_models\CosyVoice2-0.5B\flow.pt'),
+  (Join-Path $VoiceBackendsDir 'cosyvoice\pretrained_models\CosyVoice2-0.5B\hift.pt'),
+  (Join-Path $VoiceBackendsDir 'cosyvoice\pretrained_models\CosyVoice2-0.5B\CosyVoice-BlankEN\model.safetensors'),
+  (Join-Path $VoiceBackendsDir 'cosyvoice\wetext\en\tn\tagger.fst'),
+  (Join-Path $VoiceBackendsDir 'cosyvoice\wetext\en\tn\verbalizer.fst'),
+  (Join-Path $VoiceBackendsDir 'cosyvoice\wetext\zh\tn\tagger.fst'),
+  (Join-Path $VoiceBackendsDir 'cosyvoice\wetext\zh\tn\verbalizer.fst')
+)
+foreach ($path in $cosyRequiredFiles) {
+  $item = Get-Item -LiteralPath $path -Force -ErrorAction SilentlyContinue
+  if (-not $item -or $item.PSIsContainer -or $item.Length -le 0 -or $item.LinkType) {
+    throw "CosyVoice full-offline input is missing, empty, or still linked: $path"
+  }
+}
+$canonicalCosyWrapper = Join-Path $repoRoot 'product\engine\resources\tooling\voxvulgi_cosyvoice_render.py'
+$stagedCosyWrapper = Join-Path $VoiceBackendsDir 'cosyvoice\voxvulgi_cosyvoice_render.py'
+if ((Get-FileHash -Algorithm SHA256 -LiteralPath $canonicalCosyWrapper).Hash -ne
+    (Get-FileHash -Algorithm SHA256 -LiteralPath $stagedCosyWrapper).Hash) {
+  throw "CosyVoice staged wrapper does not match the governed repository wrapper: $stagedCosyWrapper"
+}
 $kok = Join-Path $PayloadDir 'cache\huggingface\hub\models--hexgrad--Kokoro-82M'
 $sha = (Get-Content -LiteralPath (Join-Path $kok 'refs\main') -ErrorAction SilentlyContinue | Select-Object -First 1)
 if ($sha) { $sha = $sha.Trim() }
@@ -91,15 +122,15 @@ foreach ($f in 'config.json', 'kokoro-v1_0.pth', 'voices\af_heart.pt') {
   }
 }
 
-# CosyVoice offline (WP-0265): the wetext ModelScope cache must ship (with its .msc index),
-# and the installer-owned wetext.py overlay must force local cache resolution, or CosyVoice
-# tries to download the normalizer from modelscope.cn at render time and fails offline.
-if (-not (Test-Path -LiteralPath (Join-Path $WetextDir '.msc'))) {
-  throw "wetext cache missing/incomplete (no .msc index) at $WetextDir. CosyVoice would fetch it online."
-}
-$patchedWetextPy = Join-Path $repoRoot 'product\desktop\src-tauri\installer\patches\wetext_offline.py'
-if (-not (Test-Path -LiteralPath $patchedWetextPy) -or -not (Select-String -LiteralPath $patchedWetextPy -Pattern 'local_files_only=True' -Quiet)) {
-  throw "Installer wetext.py overlay is missing or does not force local cache resolution: $patchedWetextPy"
+if ($ValidateInputsOnly) {
+  Write-Host "FULL-OFFLINE INSTALLER INPUTS VALID"
+  Write-Host "App installer: $SetupExe"
+  Write-Host "Default payload: $PayloadDir"
+  Write-Host "CosyVoice venv: $CosyVoiceVenvDir"
+  Write-Host "CosyVoice backend: $VoiceBackendsDir"
+  Write-Host "Kokoro triplet: $sha"
+  Write-Host "CosyVoice venv, model, wrapper, and app-local wetext graph: verified"
+  return
 }
 
 $iscc = Find-Iscc -Explicit $IsccPath
@@ -115,7 +146,6 @@ $junctionTargets = [ordered]@{
   p = (Resolve-Path -LiteralPath $PayloadDir).Path
   c = (Resolve-Path -LiteralPath $CosyVoiceVenvDir).Path
   v = (Resolve-Path -LiteralPath $VoiceBackendsDir).Path
-  w = (Resolve-Path -LiteralPath $WetextDir).Path
 }
 $baseName = "VoxVulgi_{0}_x64_offline_full_setup" -f $AppVersion
 if ($FinalizeExistingArtifacts) {
@@ -168,7 +198,6 @@ try {
     $compilePayloadDir = Join-Path $junctionRoot 'p'
     $compileCosyVoiceDir = Join-Path $junctionRoot 'c'
     $compileVoiceBackendsDir = Join-Path $junctionRoot 'v'
-    $compileWetextDir = Join-Path $junctionRoot 'w'
     Get-ChildItem -LiteralPath $OutputDir -File -ErrorAction Stop | Where-Object {
       $_.Name -eq "$baseName.exe" -or
       $_.Name -eq "$baseName.artifacts.json" -or
@@ -186,6 +215,7 @@ try {
     Write-Host "OutputDir:  $OutputDir"
     Write-Host "AppVersion: $AppVersion"
     Write-Host "Kokoro triplet verified as real files under snapshot $sha"
+    Write-Host "CosyVoice venv, model, wrapper, and app-local wetext graph verified."
     Write-Host ""
     Write-Host "Compiling (this is large: multi-GB payload -> setup.exe plus required .bin slices; expect many minutes)..."
 
@@ -195,7 +225,6 @@ try {
       "/DCosyVoiceVenvDir=$compileCosyVoiceDir" `
       "/DVoiceBackendsDir=$compileVoiceBackendsDir" `
       "/DSetupExe=$SetupExe" `
-      "/DWetextDir=$compileWetextDir" `
       "/DOutputDir=$OutputDir" `
       $iss
     if ($LASTEXITCODE -ne 0) { throw "ISCC failed with exit code $LASTEXITCODE" }

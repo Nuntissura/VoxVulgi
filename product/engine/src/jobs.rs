@@ -3,8 +3,8 @@ use crate::{
     asr, cmd, config, db, ffmpeg, image_batch, library, persistence, provider_metadata,
     root_rebind, speakers, subscriptions, subtitle_tracks, subtitles, tools, translate,
     video_libraries,
-    voice_backend_adapters, voice_cast_packs, voice_plans, voice_reference_candidates,
-    voice_templates, youtube_protection, EngineError, Result,
+    voice_backend_adapters, voice_backends, voice_cast_packs, voice_plans,
+    voice_reference_candidates, voice_templates, youtube_protection, EngineError, Result,
 };
 use regex::Regex;
 use rusqlite::{params, OptionalExtension, TransactionBehavior};
@@ -2467,7 +2467,7 @@ pub fn enqueue_localization_batch_v1(
             queue_export_pack: request.queue_export_pack,
             queue_qc: request.queue_qc,
             variant_label: None,
-            tts_backend_id: Some(default_dub_backend_id(paths)),
+            tts_backend_id: None,
             speaker_overrides: Vec::new(),
             speaker_count: DiarizationSpeakerCountRequest::default(),
         };
@@ -2907,14 +2907,21 @@ fn queue_dub_or_voice_setup_for_localization(
     paths: &AppPaths,
     item: &library::LibraryItem,
     track: &subtitle_tracks::SubtitleTrackRow,
-    pipeline: LocalizationPipelineOptions,
+    mut pipeline: LocalizationPipelineOptions,
     batch_id: Option<String>,
     source_track_id: Option<String>,
     translated_track_id: Option<String>,
     mut notes: Vec<String>,
 ) -> Result<LocalizationContinuationOutcome> {
-    let pack = tools::tts_voice_preserving_local_v1_pack_status(paths);
-    if !pack.installed {
+    let dub_backend_id = resolve_managed_dub_backend_id(paths, &item.id, Some(&pipeline))?;
+    pipeline.tts_backend_id = Some(dub_backend_id.clone());
+    let backend_ready = if dub_backend_id == "cosyvoice" {
+        tools::cosyvoice_pack_status(paths).installed
+    } else {
+        tools::tts_voice_preserving_local_v1_pack_status(paths).installed
+            && tools::tts_neural_local_v1_pack_status(paths).installed
+    };
+    if !backend_ready {
         return queue_voice_setup_for_localization(
             paths,
             item,
@@ -2943,7 +2950,9 @@ fn queue_dub_or_voice_setup_for_localization(
         Some(item.id.clone()),
         batch_id,
     )?;
-    notes.push("VoxVulgi queued the dubbing pipeline.".to_string());
+    notes.push(format!(
+        "VoxVulgi queued the dubbing pipeline with {dub_backend_id}."
+    ));
     Ok(LocalizationContinuationOutcome {
         stage: "dub".to_string(),
         source_track_id,
@@ -3192,7 +3201,7 @@ pub fn enqueue_localization_run_v1(
         queue_export_pack: request.queue_export_pack,
         queue_qc: request.queue_qc,
         variant_label: None,
-        tts_backend_id: Some(default_dub_backend_id(paths)),
+        tts_backend_id: None,
         speaker_overrides: Vec::new(),
         speaker_count: request.speaker_count.clone(),
     };
@@ -3399,7 +3408,7 @@ pub fn enqueue_voice_ab_preview_v1(
                 queue_export_pack: request.queue_export_pack,
                 queue_qc: request.queue_qc,
                 variant_label: Some(variant_label),
-                tts_backend_id: Some(default_dub_backend_id(paths)),
+                tts_backend_id: None,
                 speaker_overrides: vec![override_value],
                 speaker_count: DiarizationSpeakerCountRequest::default(),
             }),
@@ -8577,11 +8586,9 @@ fn run_cosyvoice_dub_render(
     cmd.arg("--model-dir").arg(&model_parent);
     cmd.arg("--backend").arg("cosyvoice");
     cmd.env("PYTHONNOUSERSITE", "1");
-    // The CosyVoice model itself is loaded from a local dir (offline-by-design), and the
-    // Qwen LLM base loads from the local snapshot, so HF/transformers stay offline.
-    // ModelScope is intentionally NOT forced offline: the wetext text-frontend fetches
-    // small normalizer assets on first use and caches them; forcing offline before that
-    // cache is warmed would break the render. Install warmup pre-warms this cache.
+    // The model, Qwen base, and wetext normalizer graph are all resolved from the
+    // managed app-local pack. The wrapper intercepts wetext's otherwise-networked
+    // ModelScope lookup and refuses any unexpected repository lookup.
     cmd.env("HF_HUB_OFFLINE", "1");
     cmd.env("TRANSFORMERS_OFFLINE", "1");
 
@@ -13839,6 +13846,8 @@ if __name__ == "__main__":
                 return Ok(());
             }
 
+            let dub_backend_id =
+                resolve_managed_dub_backend_id(paths, &p.item_id, p.pipeline.as_ref())?;
             log_line(
                 paths,
                 job_id,
@@ -13847,16 +13856,9 @@ if __name__ == "__main__":
                 serde_json::json!({
                     "item_id": &p.item_id,
                     "source_track_id": &p.source_track_id,
-                    "backend": "voice_preserving_local_v1"
+                    "backend": &dub_backend_id
                 }),
             )?;
-
-            let dub_backend_id = canonical_tts_backend_id(
-                p.pipeline
-                    .as_ref()
-                    .and_then(|pl| pl.tts_backend_id.as_deref())
-                    .unwrap_or("openvoice_v2"),
-            );
             if dub_backend_id == "cosyvoice" {
                 let cosy = tools::cosyvoice_pack_status(paths);
                 if !cosy.installed {
@@ -13902,15 +13904,17 @@ if __name__ == "__main__":
             let doc = subtitle_tracks::load_document(paths, &p.source_track_id)?;
             let item = library::get_item_by_id(paths, &p.item_id)?;
 
-            let pipeline = p.pipeline.clone().unwrap_or_default();
+            let mut pipeline = p.pipeline.clone().unwrap_or_default();
+            pipeline.tts_backend_id = Some(dub_backend_id.clone());
             let mut speaker_settings_by_key = speaker_render_settings_by_key(paths, &item.id)?;
             apply_speaker_overrides(&mut speaker_settings_by_key, &pipeline.speaker_overrides);
 
             let item_dir = paths.derived_item_dir(&item.id);
             let variant_label = normalize_variant_label(pipeline.variant_label.as_deref());
+            let backend_dir_name = tts_backend_dir_name(&dub_backend_id);
             let out_dir = tts_variant_dir(
                 &item_dir,
-                "dub_voice_preserving_v1",
+                &backend_dir_name,
                 variant_label.as_deref(),
             );
             let segments_dir = out_dir.join("segments");
@@ -14670,7 +14674,7 @@ if __name__ == "__main__":
 
             let manifest = TtsManifest {
                 schema_version: 1,
-                backend: "voice_preserving_local_v1".to_string(),
+                backend: dub_backend_id.clone(),
                 item_id: item.id.clone(),
                 track_id: source_track.id.clone(),
                 voice_clone_outcome: clone_summary.outcome,
@@ -26906,24 +26910,6 @@ struct LoadedTtsManifestCandidate {
     meta: TtsManifestMeta,
 }
 
-/// The voice-clone backend a NEW localization dub should use by default. Honors the
-/// operator override (`config/dub_backend_id.txt`); otherwise prefers CosyVoice 2 when
-/// its pack is installed (genuine cross-lingual timbre preservation) and falls back to
-/// the Kokoro+OpenVoice baseline. Swappable like the ASR model selection.
-fn default_dub_backend_id(paths: &AppPaths) -> String {
-    if let Ok(Some(id)) = paths.dub_backend_id_override() {
-        let canonical = canonical_tts_backend_id(&id);
-        if !canonical.is_empty() {
-            return canonical;
-        }
-    }
-    if tools::cosyvoice_pack_status(paths).installed {
-        "cosyvoice".to_string()
-    } else {
-        "openvoice_v2".to_string()
-    }
-}
-
 fn canonical_tts_backend_id(raw: &str) -> String {
     match raw.trim().to_ascii_lowercase().as_str() {
         "openvoice_v2" | "voice_preserving_local_v1" | "dub_voice_preserving_v1" => {
@@ -26931,6 +26917,7 @@ fn canonical_tts_backend_id(raw: &str) -> String {
         }
         "tts_neural_local_v1" | "kokoro" => "tts_neural_local_v1".to_string(),
         "pyttsx3_v1" | "tts_preview_pyttsx3_v1" => "pyttsx3_v1".to_string(),
+        "cosyvoice" | "cosyvoice2" | "cosyvoice_2" => "cosyvoice".to_string(),
         other => other.to_string(),
     }
 }
@@ -26961,6 +26948,48 @@ fn normalize_backend_id(raw: Option<&str>) -> Option<String> {
     raw.map(|value| value.trim())
         .filter(|value| !value.is_empty())
         .map(canonical_tts_backend_id)
+}
+
+fn canonical_managed_dub_backend_id(raw: &str) -> Option<String> {
+    match canonical_tts_backend_id(raw).as_str() {
+        "openvoice_v2" => Some("openvoice_v2".to_string()),
+        "cosyvoice" => Some("cosyvoice".to_string()),
+        _ => None,
+    }
+}
+
+fn resolve_managed_dub_backend_id(
+    paths: &AppPaths,
+    item_id: &str,
+    pipeline: Option<&LocalizationPipelineOptions>,
+) -> Result<String> {
+    if let Some(raw) = pipeline.and_then(|value| value.tts_backend_id.as_deref()) {
+        return canonical_managed_dub_backend_id(raw).ok_or_else(|| {
+            EngineError::InstallFailed(format!(
+                "unsupported managed dub backend `{}`; choose openvoice_v2 or cosyvoice",
+                raw.trim()
+            ))
+        });
+    }
+
+    if let Some(plan) = voice_plans::get_item_voice_plan(paths, item_id)? {
+        if let Some(id) = plan
+            .preferred_backend_id
+            .as_deref()
+            .and_then(canonical_managed_dub_backend_id)
+        {
+            return Ok(id);
+        }
+        if let Some(id) = plan
+            .fallback_backend_id
+            .as_deref()
+            .and_then(canonical_managed_dub_backend_id)
+        {
+            return Ok(id);
+        }
+    }
+
+    Ok(voice_backends::managed_default_backend_id(paths))
 }
 
 fn list_tts_manifest_candidate_refs(item_dir: &Path) -> Vec<TtsManifestCandidateRef> {
@@ -28957,6 +28986,78 @@ mod tests {
 
     fn seed_item_only(paths: &AppPaths, item_id: &str, title: &str) {
         seed_item_with_media(paths, item_id, title, &format!("D:/media/{item_id}.mp4"));
+    }
+
+    #[test]
+    fn managed_dub_resolution_honors_item_plan_and_explicit_pipeline() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let paths = AppPaths::new(dir.path().join("app"));
+        seed_item_only(&paths, "item-plan", "Item plan");
+        voice_plans::upsert_item_voice_plan(
+            &paths,
+            "item-plan",
+            voice_plans::ItemVoicePlanUpsert {
+                goal: Some("expressive".to_string()),
+                preferred_backend_id: Some("cosyvoice".to_string()),
+                fallback_backend_id: Some("openvoice_v2".to_string()),
+                selected_candidate_id: None,
+                selected_variant_label: None,
+                notes: None,
+            },
+        )
+        .expect("save item plan");
+
+        assert_eq!(
+            resolve_managed_dub_backend_id(&paths, "item-plan", None).expect("plan backend"),
+            "cosyvoice"
+        );
+
+        let explicit = LocalizationPipelineOptions {
+            tts_backend_id: Some("openvoice_v2".to_string()),
+            ..Default::default()
+        };
+        assert_eq!(
+            resolve_managed_dub_backend_id(&paths, "item-plan", Some(&explicit))
+                .expect("explicit backend"),
+            "openvoice_v2"
+        );
+    }
+
+    #[test]
+    fn managed_dub_resolution_uses_managed_fallback_and_rejects_bad_explicit_id() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let paths = AppPaths::new(dir.path().join("app"));
+        seed_item_only(&paths, "item-fallback", "Item fallback");
+        voice_plans::upsert_item_voice_plan(
+            &paths,
+            "item-fallback",
+            voice_plans::ItemVoicePlanUpsert {
+                goal: Some("identity".to_string()),
+                preferred_backend_id: Some("seed_vc".to_string()),
+                fallback_backend_id: Some("openvoice_v2".to_string()),
+                selected_candidate_id: None,
+                selected_variant_label: None,
+                notes: None,
+            },
+        )
+        .expect("save fallback plan");
+        assert_eq!(
+            resolve_managed_dub_backend_id(&paths, "item-fallback", None)
+                .expect("managed fallback"),
+            "openvoice_v2"
+        );
+
+        let unsupported = LocalizationPipelineOptions {
+            tts_backend_id: Some("seed_vc".to_string()),
+            ..Default::default()
+        };
+        let error = resolve_managed_dub_backend_id(
+            &paths,
+            "item-fallback",
+            Some(&unsupported),
+        )
+        .expect_err("unsupported explicit backend must fail closed");
+        assert!(error.to_string().contains("unsupported managed dub backend"));
     }
 
     fn seed_item_with_media(paths: &AppPaths, item_id: &str, title: &str, media_path: &str) {

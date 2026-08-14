@@ -4905,6 +4905,12 @@ pub fn phase2_packs_install_plan() -> Vec<Phase2PackPlanItem> {
             supported: true,
             estimated_bytes: None,
         },
+        Phase2PackPlanItem {
+            id: "voice_clone_cosyvoice_v1".to_string(),
+            title: "Voice-preserving dub (CosyVoice 2)".to_string(),
+            supported: true,
+            estimated_bytes: None,
+        },
     ]
 }
 
@@ -4920,6 +4926,7 @@ pub fn phase2_pack_step_satisfied(paths: &AppPaths, step_id: &str) -> bool {
         "tts_voice_preserving_local_v1" => {
             tts_voice_preserving_local_v1_pack_status(paths).installed
         }
+        "voice_clone_cosyvoice_v1" => cosyvoice_pack_status(paths).installed,
         _ => false,
     }
 }
@@ -6681,25 +6688,48 @@ pub struct CosyVoicePackStatus {
     pub model_present: bool,
     pub matcha_present: bool,
     pub render_script_present: bool,
+    pub render_script_current: bool,
+    pub wetext_assets_present: bool,
+}
+
+fn cosyvoice_wetext_assets_complete(model_dir: &std::path::Path) -> bool {
+    [
+        "en/tn/tagger.fst",
+        "en/tn/verbalizer.fst",
+        "zh/tn/tagger.fst",
+        "zh/tn/verbalizer.fst",
+    ]
+    .iter()
+    .all(|relative| file_is_nonempty(&model_dir.join(relative)))
+}
+
+fn file_is_nonempty(path: &std::path::Path) -> bool {
+    std::fs::metadata(path)
+        .map(|metadata| metadata.is_file() && metadata.len() > 0)
+        .unwrap_or(false)
 }
 
 /// Readiness for the CosyVoice 2 cross-lingual clone backend. Applies the same
 /// honest-gate lesson as the Kokoro fix: verify the isolated venv python and the
 /// concrete local model files the offline render actually loads are present, rather
 /// than trusting a marker. CosyVoice is offline-by-design (loads from a local
-/// `model_dir`), so a complete on-disk model + the isolated venv == runnable.
+/// `model_dir`). The wetext frontend is a separate ModelScope asset graph, so its
+/// exact app-local FST inputs are part of readiness too; an external user cache does
+/// not satisfy the managed offline contract.
 pub fn cosyvoice_pack_status(paths: &AppPaths) -> CosyVoicePackStatus {
-    let venv_python_present = venv_python_path(&paths.python_cosyvoice_venv_dir()).exists();
+    let venv_python_present =
+        file_is_nonempty(&venv_python_path(&paths.python_cosyvoice_venv_dir()));
 
     let model_dir = paths.cosyvoice_model_parent_dir().join("CosyVoice2-0.5B");
-    let model_present = model_dir.join("cosyvoice2.yaml").is_file()
-        && model_dir.join("llm.pt").is_file()
-        && model_dir.join("flow.pt").is_file()
-        && model_dir.join("hift.pt").is_file()
-        && model_dir
-            .join("CosyVoice-BlankEN")
-            .join("model.safetensors")
-            .is_file();
+    let model_present = file_is_nonempty(&model_dir.join("cosyvoice2.yaml"))
+        && file_is_nonempty(&model_dir.join("llm.pt"))
+        && file_is_nonempty(&model_dir.join("flow.pt"))
+        && file_is_nonempty(&model_dir.join("hift.pt"))
+        && file_is_nonempty(
+            &model_dir
+                .join("CosyVoice-BlankEN")
+                .join("model.safetensors"),
+        );
 
     let backend_dir = paths.cosyvoice_backend_dir();
     let matcha_present = backend_dir
@@ -6707,19 +6737,36 @@ pub fn cosyvoice_pack_status(paths: &AppPaths) -> CosyVoicePackStatus {
         .join("Matcha-TTS")
         .join("matcha")
         .is_dir();
-    let render_script_present = backend_dir.join("voxvulgi_cosyvoice_render.py").is_file();
+    let render_script_path = backend_dir.join("voxvulgi_cosyvoice_render.py");
+    let render_script_present = file_is_nonempty(&render_script_path);
+    let render_script_current = std::fs::read(&render_script_path)
+        .map(|bytes| bytes == COSYVOICE_RENDER_WRAPPER.as_bytes())
+        .unwrap_or(false);
+    let wetext_assets_present = cosyvoice_wetext_assets_complete(&backend_dir.join("wetext"));
 
-    let installed = venv_python_present && model_present && matcha_present && render_script_present;
+    let installed = venv_python_present
+        && model_present
+        && matcha_present
+        && render_script_present
+        && render_script_current
+        && wetext_assets_present;
     let status_detail = if installed {
-        "CosyVoice 2 voice cloning is ready (isolated venv + local model present).".to_string()
+        "CosyVoice 2 voice cloning is ready (isolated venv + model + app-local wetext assets)."
+            .to_string()
     } else if !venv_python_present {
         "CosyVoice isolated Python environment is not installed.".to_string()
     } else if !model_present {
         "CosyVoice2-0.5B model files are missing from the local model directory.".to_string()
     } else if !matcha_present {
         "CosyVoice dependency Matcha-TTS is missing (third_party/Matcha-TTS).".to_string()
-    } else {
+    } else if !render_script_present {
         "CosyVoice render wrapper script is missing.".to_string()
+    } else if !render_script_current {
+        "CosyVoice render wrapper is stale for this VoxVulgi build; repair the managed pack."
+            .to_string()
+    } else {
+        "CosyVoice wetext normalizer assets are missing from the managed app-local pack."
+            .to_string()
     };
 
     CosyVoicePackStatus {
@@ -6729,6 +6776,8 @@ pub fn cosyvoice_pack_status(paths: &AppPaths) -> CosyVoicePackStatus {
         model_present,
         matcha_present,
         render_script_present,
+        render_script_current,
+        wetext_assets_present,
     }
 }
 
@@ -6767,6 +6816,15 @@ fn cosyvoice_model_download_code(model_dir: &std::path::Path) -> String {
     )
 }
 
+fn cosyvoice_wetext_download_code(model_dir: &std::path::Path) -> String {
+    format!(
+        "from modelscope import snapshot_download\n\
+         snapshot_download('pengzhendong/wetext', local_dir=r'{}')\n\
+         print('cosyvoice_wetext_downloaded')\n",
+        py_path(model_dir)
+    )
+}
+
 /// WP-0262: install-time warmup ceiling. The CosyVoice class import
 /// (`from cosyvoice.cli.cosyvoice import ...`) has been observed to take >150 s on a
 /// cold venv; the render wrapper's `--warmup` mode enforces a bounded, instrumented
@@ -6796,7 +6854,8 @@ fn cosyvoice_warmup_args(
 
 /// Provision the isolated CosyVoice 2 voice-clone pack: write the engine-pinned render
 /// wrapper, create the second venv, install the pinned deps (validated recipe), download
-/// the model if absent, warm the model + wetext cache, and verify with the honest gate.
+/// the model and app-local wetext assets if absent, warm the model, and verify with the
+/// honest gate.
 /// The CosyVoice repo code + Matcha-TTS ship via the offline payload (too large to embed,
 /// too fragile to git-clone at runtime); the venv + 4.86 GB model are downloaded here.
 pub fn install_voice_clone_cosyvoice_v1_pack(paths: &AppPaths) -> Result<CosyVoicePackStatus> {
@@ -6920,7 +6979,23 @@ pub fn install_voice_clone_cosyvoice_v1_pack(paths: &AppPaths) -> Result<CosyVoi
         )?;
     }
 
-    // 4) Warm the model + wetext cache (verifies inference works offline-from-local-dir).
+    // 4) Download the exact text-normalizer graph into the managed backend directory.
+    //    The render wrapper resolves this directory directly and refuses unexpected
+    //    ModelScope lookups, so runtime readiness never depends on a user-profile cache.
+    let wetext_dir = backend_dir.join("wetext");
+    if !cosyvoice_wetext_assets_complete(&wetext_dir) {
+        std::fs::create_dir_all(&wetext_dir)?;
+        let code = cosyvoice_wetext_download_code(&wetext_dir);
+        run_python_checked_with_timeout(
+            paths,
+            &venv_python,
+            &["-c", &code],
+            "CosyVoice wetext asset download failed",
+            COSYVOICE_INSTALL_TIMEOUT_SECS,
+        )?;
+    }
+
+    // 5) Warm the model (verifies inference works through the offline local-asset path).
     //    WP-0262: routed through the render wrapper's bounded/instrumented `--warmup`
     //    mode so a slow/hung CosyVoice class import fails LOUDLY with the stall location
     //    instead of silently exceeding the timeout.
@@ -6934,7 +7009,7 @@ pub fn install_voice_clone_cosyvoice_v1_pack(paths: &AppPaths) -> Result<CosyVoi
         COSYVOICE_WARMUP_TIMEOUT_SECS,
     )?;
 
-    // 5) Honest gate.
+    // 6) Honest gate.
     let status = cosyvoice_pack_status(paths);
     if !status.installed {
         return Err(EngineError::InstallFailed(format!(
@@ -7811,6 +7886,74 @@ fn run_python_checked_with_retries(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn phase2_plan_includes_managed_cosyvoice_pack() {
+        let plan = phase2_packs_install_plan();
+        assert!(plan
+            .iter()
+            .any(|item| item.id == "voice_clone_cosyvoice_v1" && item.supported));
+    }
+
+    #[test]
+    fn cosyvoice_readiness_requires_app_local_nonempty_wetext_assets() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let paths = AppPaths::new(dir.path().join("app"));
+        let python = venv_python_path(&paths.python_cosyvoice_venv_dir());
+        std::fs::create_dir_all(python.parent().expect("python parent")).expect("python dir");
+        std::fs::write(&python, b"python").expect("python fixture");
+
+        let backend = paths.cosyvoice_backend_dir();
+        std::fs::create_dir_all(
+            backend
+                .join("third_party")
+                .join("Matcha-TTS")
+                .join("matcha"),
+        )
+        .expect("matcha fixture");
+        std::fs::write(
+            backend.join("voxvulgi_cosyvoice_render.py"),
+            COSYVOICE_RENDER_WRAPPER,
+        )
+        .expect("wrapper fixture");
+        let model = backend.join("pretrained_models").join("CosyVoice2-0.5B");
+        for relative in [
+            "cosyvoice2.yaml",
+            "llm.pt",
+            "flow.pt",
+            "hift.pt",
+            "CosyVoice-BlankEN/model.safetensors",
+        ] {
+            let path = model.join(relative);
+            std::fs::create_dir_all(path.parent().expect("model parent")).expect("model dir");
+            std::fs::write(path, b"model").expect("model fixture");
+        }
+
+        let incomplete = cosyvoice_pack_status(&paths);
+        assert!(!incomplete.installed);
+        assert!(!incomplete.wetext_assets_present);
+
+        for relative in [
+            "en/tn/tagger.fst",
+            "en/tn/verbalizer.fst",
+            "zh/tn/tagger.fst",
+            "zh/tn/verbalizer.fst",
+        ] {
+            let path = backend.join("wetext").join(relative);
+            std::fs::create_dir_all(path.parent().expect("wetext parent")).expect("wetext dir");
+            std::fs::write(path, b"fst").expect("wetext fixture");
+        }
+        let complete = cosyvoice_pack_status(&paths);
+        assert!(complete.installed);
+        assert!(complete.wetext_assets_present);
+
+        std::fs::write(backend.join("voxvulgi_cosyvoice_render.py"), b"stale wrapper")
+            .expect("stale wrapper fixture");
+        let stale = cosyvoice_pack_status(&paths);
+        assert!(!stale.installed);
+        assert!(stale.render_script_present);
+        assert!(!stale.render_script_current);
+    }
 
     static PROVIDER_INTEGRITY_TEST_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
