@@ -1653,28 +1653,60 @@ fn provider_lock_lifecycle_packages_are_exact(lock: &[u8]) -> bool {
     lifecycle == ["@swc/core@1.15.47", "canvas@3.2.3"]
 }
 
-fn installed_provider_lifecycle_packages_are_exact(server_dir: &Path) -> bool {
-    [("canvas", "3.2.3"), ("@swc/core", "1.15.47")]
-        .into_iter()
-        .all(|(name, expected)| {
-            let package_path = name
-                .split('/')
-                .fold(server_dir.join("node_modules"), |path, part| {
-                    path.join(part)
-                })
-                .join("package.json");
-            std::fs::read(package_path)
-                .ok()
-                .and_then(|bytes| serde_json::from_slice::<serde_json::Value>(&bytes).ok())
-                .and_then(|package| {
-                    package
-                        .get("version")
-                        .and_then(serde_json::Value::as_str)
-                        .map(str::to_string)
-                })
-                .as_deref()
-                == Some(expected)
+fn installed_provider_package_version(server_dir: &Path, name: &str) -> Option<String> {
+    let package_path = name
+        .split('/')
+        .fold(server_dir.join("node_modules"), |path, part| {
+            path.join(part)
         })
+        .join("package.json");
+    std::fs::read(package_path)
+        .ok()
+        .and_then(|bytes| serde_json::from_slice::<serde_json::Value>(&bytes).ok())
+        .and_then(|package| {
+            package
+                .get("version")
+                .and_then(serde_json::Value::as_str)
+                .map(str::to_string)
+        })
+}
+
+fn installed_provider_build_lifecycle_packages_are_exact(server_dir: &Path) -> bool {
+    installed_provider_package_version(server_dir, "canvas").as_deref() == Some("3.2.3")
+        && installed_provider_package_version(server_dir, "@swc/core").as_deref()
+            == Some("1.15.47")
+}
+
+fn installed_provider_runtime_lifecycle_packages_are_exact(server_dir: &Path) -> bool {
+    let swc_dir = server_dir.join("node_modules").join("@swc").join("core");
+    installed_provider_package_version(server_dir, "canvas").as_deref() == Some("3.2.3")
+        && !swc_dir.exists()
+}
+
+fn remove_provider_build_only_artifacts(server_dir: &Path) -> Result<()> {
+    let npm_cache = server_dir.join(".npm_cache");
+    if npm_cache.exists() {
+        std::fs::remove_dir_all(&npm_cache).map_err(|error| {
+            EngineError::InstallFailed(format!(
+                "provider npm build cache cleanup failed before application sealing: {error}"
+            ))
+        })?;
+    }
+    let typescript_build_info = server_dir.join("tsconfig.tsbuildinfo");
+    if typescript_build_info.exists() {
+        std::fs::remove_file(&typescript_build_info).map_err(|error| {
+            EngineError::InstallFailed(format!(
+                "provider TypeScript build-info cleanup failed before application sealing: {error}"
+            ))
+        })?;
+    }
+    if npm_cache.exists() || typescript_build_info.exists() {
+        return Err(EngineError::InstallFailed(
+            "provider build-only artifacts remained after cleanup; application tree was not sealed"
+                .to_string(),
+        ));
+    }
+    Ok(())
 }
 
 #[cfg(windows)]
@@ -2985,7 +3017,7 @@ fn authenticate_published_provider_payload_against(
             )
         })?;
     if !provider_lifecycle_allowlist_is_exact(&package)
-        || !installed_provider_lifecycle_packages_are_exact(&server_dir)
+        || !installed_provider_runtime_lifecycle_packages_are_exact(&server_dir)
     {
         return Err(EngineError::InstallFailed(
             "published provider lifecycle-package identities are not the reviewed set".to_string(),
@@ -3553,7 +3585,7 @@ pub fn install_youtube_po_provider(paths: &AppPaths) -> Result<YoutubePoProvider
         run_provider_npm(&node_stage, &server_stage, &provider_npm_ci_args())?,
         "provider reproducible npm install",
     )?;
-    if !installed_provider_lifecycle_packages_are_exact(&server_stage) {
+    if !installed_provider_build_lifecycle_packages_are_exact(&server_stage) {
         return Err(EngineError::InstallFailed(
             "installed provider lifecycle-package identities do not match the reviewed lock"
                 .to_string(),
@@ -3625,6 +3657,10 @@ pub fn install_youtube_po_provider(paths: &AppPaths) -> Result<YoutubePoProvider
             "installed provider production audit reported {installed_vulnerability_total} vulnerabilities"
         )));
     }
+    // npm's cache indexes/logs and TypeScript's incremental-build index contain run-specific
+    // timestamps, staging paths, and ambient parent-workspace declarations. They are build inputs,
+    // not runtime dependencies, and would make the sealed application tree location-dependent.
+    remove_provider_build_only_artifacts(&server_stage)?;
     let installed_node_modules_tree = authenticate_provider_node_modules_tree(
         &server_stage.join("node_modules"),
         &provider_pin.node_modules_tree_sha256_hex,
@@ -7864,6 +7900,79 @@ mod tests {
     }
 
     #[test]
+    fn provider_lifecycle_packages_distinguish_build_and_pruned_runtime_sets() {
+        let base = std::env::temp_dir().join(format!(
+            "voxvulgi_provider_lifecycle_sets_{}_{}",
+            std::process::id(),
+            uuid::Uuid::new_v4()
+        ));
+        let server = base.join("server");
+        for (name, version) in [("canvas", "3.2.3"), ("@swc/core", "1.15.47")] {
+            let package = name
+                .split('/')
+                .fold(server.join("node_modules"), |path, part| path.join(part))
+                .join("package.json");
+            std::fs::create_dir_all(package.parent().unwrap()).unwrap();
+            std::fs::write(
+                package,
+                serde_json::to_vec(&serde_json::json!({"version": version})).unwrap(),
+            )
+            .unwrap();
+        }
+        assert!(installed_provider_build_lifecycle_packages_are_exact(
+            &server
+        ));
+        assert!(!installed_provider_runtime_lifecycle_packages_are_exact(
+            &server
+        ));
+
+        std::fs::remove_dir_all(server.join("node_modules").join("@swc").join("core"))
+            .unwrap();
+        assert!(!installed_provider_build_lifecycle_packages_are_exact(
+            &server
+        ));
+        assert!(installed_provider_runtime_lifecycle_packages_are_exact(
+            &server
+        ));
+
+        std::fs::write(
+            server
+                .join("node_modules")
+                .join("canvas")
+                .join("package.json"),
+            br#"{"version":"3.2.2"}"#,
+        )
+        .unwrap();
+        assert!(!installed_provider_runtime_lifecycle_packages_are_exact(
+            &server
+        ));
+        let _ = std::fs::remove_dir_all(base);
+    }
+
+    #[test]
+    fn provider_sealing_removes_location_dependent_build_only_artifacts() {
+        let base = std::env::temp_dir().join(format!(
+            "voxvulgi_provider_build_artifacts_{}_{}",
+            std::process::id(),
+            uuid::Uuid::new_v4()
+        ));
+        let server = base.join("server");
+        std::fs::create_dir_all(server.join(".npm_cache").join("logs")).unwrap();
+        std::fs::write(server.join(".npm_cache").join("logs").join("run.log"), b"run")
+            .unwrap();
+        std::fs::write(
+            server.join("tsconfig.tsbuildinfo"),
+            br#"{"fileNames":["../../ambient/node_modules/@types/react/index.d.ts"]}"#,
+        )
+        .unwrap();
+
+        remove_provider_build_only_artifacts(&server).unwrap();
+        assert!(!server.join(".npm_cache").exists());
+        assert!(!server.join("tsconfig.tsbuildinfo").exists());
+        let _ = std::fs::remove_dir_all(base);
+    }
+
+    #[test]
     fn provider_plugin_tree_rejects_same_size_tamper_with_intact_archive_marker() {
         let base = std::env::temp_dir().join(format!(
             "voxvulgi_plugin_tamper_{}_{}",
@@ -7959,7 +8068,7 @@ mod tests {
             .unwrap(),
         )
         .unwrap();
-        for (name, version) in [("canvas", "3.2.3"), ("@swc/core", "1.15.47")] {
+        for (name, version) in [("canvas", "3.2.3")] {
             let package = name
                 .split('/')
                 .fold(server_dir.join("node_modules"), |path, part| {
@@ -9991,6 +10100,14 @@ mod tests {
         );
         let runtime = ensure_youtube_po_provider(&paths).expect("localhost provider runtime");
         assert!(runtime.healthy);
+        assert!(!paths
+            .youtube_po_provider_server_dir()
+            .join("tsconfig.tsbuildinfo")
+            .exists());
+        assert!(!paths
+            .youtube_po_provider_server_dir()
+            .join(".npm_cache")
+            .exists());
         shutdown_youtube_po_provider();
         if std::env::var_os("VOXVULGI_KEEP_PROVIDER_PROBE").is_none() {
             let _ = std::fs::remove_dir_all(root);
@@ -10009,6 +10126,13 @@ mod tests {
             return;
         };
         let paths = AppPaths::new(root);
+        let verified = verify_youtube_po_provider_node_modules(&paths)
+            .expect("fresh process must establish authoritative node_modules trust");
+        assert!(
+            verified.installed,
+            "authoritative fresh-process verification must make the exact provider ready: {:?}",
+            verified.readiness_error
+        );
         let before = youtube_po_provider_install_status(&paths);
         assert!(
             before.installed,

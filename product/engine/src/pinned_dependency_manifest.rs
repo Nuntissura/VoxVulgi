@@ -219,7 +219,7 @@ mod tests {
             manifest
                 .youtube_po_provider
                 .application_complete_tree_sha256_hex,
-            "728F821DBCE39DF5BB28A73359637E3002922C13D0FF588BCABA9FE489191963"
+            "28A699B7B70B8D5B5F8B1ADB2848BBFBF60F90319D4F9CE0643EE3303957D684"
         );
         assert!(manifest
             .diarization
