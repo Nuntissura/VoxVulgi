@@ -2996,6 +2996,15 @@ fn queue_localization_continuation_from_track(
         });
     }
 
+    let preset_voice_notes = if output_mode == "dub"
+        && track.kind == "translated"
+        && normalize_lang_tag(Some(&track.lang)).as_deref() == Some("eng")
+    {
+        apply_item_pipeline_preset_voice_defaults(paths, &item.id, &track_doc)?
+    } else {
+        Vec::new()
+    };
+
     match decide_localization_next_stage(paths, &item.id, track)? {
         LocalizationNextStageDecision::Translate => {
             let params_json = serde_json::to_string(&TranslateLocalParams {
@@ -3065,7 +3074,7 @@ fn queue_localization_continuation_from_track(
             })
         }
         LocalizationNextStageDecision::VoicePlanBlocked { missing_speakers } => {
-            let mut notes = Vec::new();
+            let mut notes = preset_voice_notes;
             // WP-0262: when the auto dubbing pipeline exhausts its automatic attempt to build a
             // per-speaker voice reference and still cannot proceed, this is a terminal blocked
             // state (nothing was queued). Flag it so the job consumers surface a VISIBLE terminal
@@ -3131,6 +3140,13 @@ fn queue_localization_continuation_from_track(
             })
         }
         LocalizationNextStageDecision::Dub => {
+            let mut notes = preset_voice_notes;
+            notes.extend([
+                "Translated English track and speaker voice plan are ready for dubbing."
+                    .to_string(),
+                "Mix will use a separated background when available, otherwise it will fall back to the source-audio review path."
+                    .to_string(),
+            ]);
             queue_dub_or_voice_setup_for_localization(
                 paths,
                 item,
@@ -3139,12 +3155,7 @@ fn queue_localization_continuation_from_track(
                 batch_id,
                 source_track_id,
                 Some(track.id.clone()),
-                vec![
-                    "Translated English track and speaker voice plan are ready for dubbing."
-                        .to_string(),
-                    "Mix will use a separated background when available, otherwise it will fall back to the source-audio review path."
-                        .to_string(),
-                ],
+                notes,
             )
         }
     }
@@ -27646,6 +27657,77 @@ fn select_localization_batch_track(
         .into_iter()
         .filter(|track| track.kind == "source")
         .max_by_key(|track| track.version))
+}
+
+fn apply_item_pipeline_preset_voice_defaults(
+    paths: &AppPaths,
+    item_id: &str,
+    track_doc: &subtitles::SubtitleDocument,
+) -> Result<Vec<String>> {
+    let Some(applied) = config::load_item_localization_pipeline_preset(paths, item_id)? else {
+        return Ok(Vec::new());
+    };
+    if applied.voice_defaults_applied
+        || (applied.preset.default_voice_template_id.is_none()
+            && applied.preset.default_voice_cast_pack_id.is_none())
+    {
+        return Ok(Vec::new());
+    }
+    let current_speakers = track_doc
+        .segments
+        .iter()
+        .filter_map(|segment| segment.speaker.as_deref())
+        .map(str::trim)
+        .filter(|speaker| !speaker.is_empty())
+        .map(str::to_string)
+        .collect::<HashSet<_>>();
+    if current_speakers.is_empty() {
+        return Ok(Vec::new());
+    }
+
+    let mut notes = Vec::new();
+    if let Some(template_id) = applied.preset.default_voice_template_id.as_deref() {
+        let mappings = auto_match_template_speakers(paths, template_id, item_id, &current_speakers)?;
+        if mappings.is_empty() {
+            notes.push(format!(
+                "Pipeline preset '{}' selected voice template {template_id}, but no speakers auto-matched.",
+                applied.preset.name
+            ));
+        } else {
+            let count = mappings.len();
+            voice_templates::apply_voice_template_to_item(
+                paths,
+                item_id,
+                template_id,
+                &mappings,
+                applied.preset.default_voice_cast_pack_id.is_none(),
+            )?;
+            notes.push(format!(
+                "Pipeline preset '{}' applied voice template {template_id} to {count} speaker(s).",
+                applied.preset.name
+            ));
+        }
+    }
+    if let Some(pack_id) = applied.preset.default_voice_cast_pack_id.as_deref() {
+        let mappings = auto_match_cast_pack_roles(paths, pack_id, item_id, &current_speakers)?;
+        if mappings.is_empty() {
+            notes.push(format!(
+                "Pipeline preset '{}' selected voice cast pack {pack_id}, but no roles auto-matched.",
+                applied.preset.name
+            ));
+        } else {
+            let count = mappings.len();
+            voice_cast_packs::apply_voice_cast_pack_to_item(
+                paths, item_id, pack_id, &mappings, true,
+            )?;
+            notes.push(format!(
+                "Pipeline preset '{}' applied voice cast pack {pack_id} to {count} speaker(s).",
+                applied.preset.name
+            ));
+        }
+    }
+    config::mark_item_localization_pipeline_voice_defaults_applied(paths, item_id)?;
+    Ok(notes)
 }
 
 fn latest_source_track(

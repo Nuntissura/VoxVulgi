@@ -9096,6 +9096,73 @@ fn config_batch_on_import_set(
 }
 
 #[tauri::command]
+fn localization_pipeline_presets_get(
+    state: State<'_, AppState>,
+) -> Result<config::LocalizationPipelinePresetCatalog, String> {
+    config::load_localization_pipeline_presets(&state.paths).map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+fn localization_pipeline_presets_save(
+    state: State<'_, AppState>,
+    preset: config::LocalizationPipelinePreset,
+) -> Result<config::LocalizationPipelinePresetCatalog, String> {
+    config::save_localization_pipeline_preset(&state.paths, preset).map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+fn localization_pipeline_presets_delete(
+    state: State<'_, AppState>,
+    preset_id: String,
+) -> Result<config::LocalizationPipelinePresetCatalog, String> {
+    config::delete_localization_pipeline_preset(&state.paths, &preset_id)
+        .map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+fn localization_pipeline_preset_apply(
+    state: State<'_, AppState>,
+    preset_id: String,
+    item_id: Option<String>,
+) -> Result<config::LocalizationPipelinePreset, String> {
+    let preset = config::localization_pipeline_preset_by_id(&state.paths, &preset_id)
+        .map_err(|e| e.to_string())?;
+    if let Some(item_id) = item_id.as_deref() {
+        let style = match preset.translation_style.as_str() {
+            "formal" => translate::TranslationStyle::Formal,
+            "informal" => translate::TranslationStyle::Informal,
+            "custom" => translate::TranslationStyle::Custom,
+            _ => translate::TranslationStyle::Neutral,
+        };
+        let honorific_mode = match preset.honorific_mode.as_str() {
+            "translate" => translate::HonorificMode::Translate,
+            "drop" => translate::HonorificMode::Drop,
+            _ => translate::HonorificMode::Preserve,
+        };
+        translate::translation_style_save(
+            &state.paths,
+            item_id,
+            translate::TranslationStyleSettings {
+                schema_version: 1,
+                style,
+                honorific_mode,
+                custom_instruction: preset.custom_translation_instruction.clone(),
+            },
+        )
+        .map_err(|e| e.to_string())?;
+        config::apply_localization_pipeline_preset_to_item(
+            &state.paths,
+            item_id,
+            preset.clone(),
+        )
+        .map_err(|e| e.to_string())?;
+    }
+    config::save_batch_on_import_rules(&state.paths, &preset.batch_rules)
+        .map_err(|e| e.to_string())?;
+    Ok(preset)
+}
+
+#[tauri::command]
 fn root_rebind_dry_run(
     state: State<'_, AppState>,
     from_root: String,
@@ -14350,6 +14417,10 @@ pub fn run() {
             downloads_feature_root_use_default,
             config_batch_on_import_get,
             config_batch_on_import_set,
+            localization_pipeline_presets_get,
+            localization_pipeline_presets_save,
+            localization_pipeline_presets_delete,
+            localization_pipeline_preset_apply,
             root_rebind_dry_run,
             root_rebind_prepare,
             root_rebind_apply,

@@ -125,6 +125,10 @@ impl AppPaths {
         self.derived_item_dir(item_id).join("translation_style.json")
     }
 
+    pub fn item_localization_pipeline_preset_path(&self, item_id: &str) -> PathBuf {
+        self.derived_item_dir(item_id).join("localization_pipeline_preset.json")
+    }
+
     pub fn voice_backend_adapters_path(&self) -> PathBuf {
         self.config_dir().join("voice_backend_adapters.json")
     }
@@ -630,6 +634,10 @@ impl AppPaths {
 
     pub fn batch_on_import_rules_path(&self) -> PathBuf {
         self.config_dir().join("batch_on_import_rules.json")
+    }
+
+    pub fn localization_pipeline_presets_path(&self) -> PathBuf {
+        self.config_dir().join("localization_pipeline_presets.json")
     }
 
     pub fn safe_mode_config_path(&self) -> PathBuf {

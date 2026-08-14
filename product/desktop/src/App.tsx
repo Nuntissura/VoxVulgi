@@ -219,6 +219,39 @@ type ShellAppInfo = {
 
 type AsrLang = "auto" | "ja" | "ko";
 type LocalizationOutputChoice = "none" | "en" | "multiple";
+type TranslationStyle = "neutral" | "formal" | "informal" | "custom";
+type HonorificMode = "preserve" | "translate" | "drop";
+
+type BatchOnImportRules = {
+  auto_asr: boolean;
+  auto_translate: boolean;
+  auto_separate: boolean;
+  auto_diarize: boolean;
+  auto_dub_preview: boolean;
+};
+
+type LocalizationPipelinePreset = {
+  id: string;
+  name: string;
+  is_builtin: boolean;
+  asr_lang: AsrLang;
+  batch_rules: BatchOnImportRules;
+  translation_style: TranslationStyle;
+  honorific_mode: HonorificMode;
+  custom_translation_instruction: string | null;
+  default_voice_template_id: string | null;
+  default_voice_cast_pack_id: string | null;
+};
+
+type LocalizationPipelinePresetCatalog = {
+  schema_version: number;
+  presets: LocalizationPipelinePreset[];
+};
+
+type VoicePresetOption = {
+  id: string;
+  name: string;
+};
 
 type StartupPhase = {
   id: string;
@@ -381,6 +414,7 @@ const LOCALIZATION_HOME_LEGACY_KEY = "voxvulgi.v1.localization.legacy_home";
 const LOCALIZATION_SUBTITLE_OUTPUT_KEY = "voxvulgi.v1.localization_setup.subtitle_output";
 const LOCALIZATION_DUB_OUTPUT_KEY = "voxvulgi.v1.localization_setup.dub_output";
 const LOCALIZATION_INCLUDE_SOURCE_COPY_KEY = "voxvulgi.v1.editor.export_include_source_copy";
+const LOCALIZATION_PIPELINE_PRESET_KEY = "voxvulgi.v1.localization.pipeline_preset_id";
 const SHELL_MODE_TOLERANCE_PX = 20;
 const INSTAGRAM_SUBSCRIPTION_HEARTBEAT_INTERVAL_MS = 300_000;
 const INSTAGRAM_SUBSCRIPTION_HEARTBEAT_INITIAL_DELAY_MS = 60_000;
@@ -965,13 +999,24 @@ function LocalizationStudioHome({
   });
   const { status: downloadDir } = useSharedDownloadDirStatus();
   const localizationRoot = featureRootStatus(downloadDir, "localization");
-  const [batchRules, setBatchRules] = useState<{
-    auto_asr: boolean;
-    auto_translate: boolean;
-    auto_separate: boolean;
-    auto_diarize: boolean;
-    auto_dub_preview: boolean;
-  } | null>(null);
+  const [batchRules, setBatchRules] = useState<BatchOnImportRules | null>(null);
+  const [pipelinePresetCatalog, setPipelinePresetCatalog] =
+    useState<LocalizationPipelinePresetCatalog | null>(null);
+  const [activePipelinePresetId, setActivePipelinePresetId] = useState(
+    () => safeLocalStorageGet(LOCALIZATION_PIPELINE_PRESET_KEY) ?? "",
+  );
+  const [pipelinePresetBusy, setPipelinePresetBusy] = useState(false);
+  const [pipelinePresetName, setPipelinePresetName] = useState("");
+  const [pipelinePresetStyle, setPipelinePresetStyle] = useState<TranslationStyle>("neutral");
+  const [pipelinePresetHonorificMode, setPipelinePresetHonorificMode] =
+    useState<HonorificMode>("preserve");
+  const [pipelinePresetCustomInstruction, setPipelinePresetCustomInstruction] = useState("");
+  const [pipelinePresetVoiceTemplateId, setPipelinePresetVoiceTemplateId] = useState("");
+  const [pipelinePresetVoiceCastPackId, setPipelinePresetVoiceCastPackId] = useState("");
+  const [pipelinePresetVoiceTemplates, setPipelinePresetVoiceTemplates] =
+    useState<VoicePresetOption[]>([]);
+  const [pipelinePresetVoiceCastPacks, setPipelinePresetVoiceCastPacks] =
+    useState<VoicePresetOption[]>([]);
   const [selectedWorkbenchItemId, setSelectedWorkbenchItemId] = useState<string | null>(null);
   const [workbenchCleared, setWorkbenchCleared] = useState(false);
   const [subtitleOutput, setSubtitleOutput] = useState<LocalizationOutputChoice>(() => {
@@ -1147,10 +1192,36 @@ function LocalizationStudioHome({
   );
 
   useEffect(() => {
-    invoke<any>("config_batch_on_import_get")
+    invoke<BatchOnImportRules>("config_batch_on_import_get")
       .then((rules) => setBatchRules(rules))
       .catch(() => {});
   }, []);
+
+  useEffect(() => {
+    if (!pageVisible) return;
+    Promise.all([
+      invoke<LocalizationPipelinePresetCatalog>("localization_pipeline_presets_get"),
+      invoke<VoicePresetOption[]>("voice_templates_list"),
+      invoke<VoicePresetOption[]>("voice_cast_packs_list"),
+    ])
+      .then(([catalog, templates, castPacks]) => {
+        setPipelinePresetCatalog(catalog);
+        setPipelinePresetVoiceTemplates(templates);
+        setPipelinePresetVoiceCastPacks(castPacks);
+        const activePreset = catalog.presets.find(
+          (preset) => preset.id === activePipelinePresetId,
+        );
+        if (activePreset) {
+          loadPipelinePresetDraft(activePreset);
+        } else if (activePipelinePresetId) {
+          setActivePipelinePresetId("");
+          safeLocalStorageSet(LOCALIZATION_PIPELINE_PRESET_KEY, "");
+        }
+      })
+      .catch((loadError) => {
+        setError(`Pipeline presets unavailable: ${String(loadError)}`);
+      });
+  }, [activePipelinePresetId, pageVisible]);
 
   const refreshRecentItems = useCallback(async () => {
     setRecentItemsBusy(true);
@@ -1396,6 +1467,16 @@ function LocalizationStudioHome({
     setError(null);
     setNotice(null);
     try {
+      if (activePipelinePresetId) {
+        const applied = await invoke<LocalizationPipelinePreset>(
+          "localization_pipeline_preset_apply",
+          {
+            presetId: activePipelinePresetId,
+            itemId,
+          },
+        );
+        broadcastPipelinePresetStyle(applied, itemId);
+      }
       const outputMode = dubOutput === "en" ? "dub" : "subtitles";
       const summary = await invoke<LocalizationRunQueueSummary>("jobs_enqueue_localization_run_v1", {
         request: {
@@ -1627,7 +1708,7 @@ function LocalizationStudioHome({
       : voiceSetupHasRepair
         ? "Repair voice cloning"
         : "Set up voice cloning";
-  const uiBusy = busy || localizationRunBusy || voicePackBusy;
+  const uiBusy = busy || localizationRunBusy || voicePackBusy || pipelinePresetBusy;
   const localizationRootDir = localizationRoot?.current_dir ?? localizationRoot?.default_dir ?? "";
   const currentExportDir = localizationExportDirForItem(localizationRootDir, currentHomeItem);
   const currentSourceCopyPath = localizationSourceCopyPath(currentExportDir, currentHomeItem);
@@ -1645,6 +1726,162 @@ function LocalizationStudioHome({
       return Boolean(status?.preview_video_path || status?.state === "export_ready");
     })
     .slice(0, 8);
+  const activePipelinePreset = pipelinePresetCatalog?.presets.find(
+    (preset) => preset.id === activePipelinePresetId,
+  ) ?? null;
+
+  function loadPipelinePresetDraft(preset: LocalizationPipelinePreset) {
+    setPipelinePresetName(preset.name);
+    setPipelinePresetStyle(preset.translation_style);
+    setPipelinePresetHonorificMode(preset.honorific_mode);
+    setPipelinePresetCustomInstruction(preset.custom_translation_instruction ?? "");
+    setPipelinePresetVoiceTemplateId(preset.default_voice_template_id ?? "");
+    setPipelinePresetVoiceCastPackId(preset.default_voice_cast_pack_id ?? "");
+  }
+
+  function broadcastPipelinePresetStyle(
+    preset: LocalizationPipelinePreset,
+    itemId: string | null,
+  ) {
+    if (!itemId) return;
+    window.dispatchEvent(
+      new CustomEvent("voxvulgi:translation-style-updated", {
+        detail: {
+          itemId,
+          style: preset.translation_style,
+          honorificMode: preset.honorific_mode,
+          customInstruction: preset.custom_translation_instruction ?? "",
+        },
+      }),
+    );
+  }
+
+  async function applyPipelinePreset(
+    presetId: string,
+    itemId?: string | null,
+    presetOverride?: LocalizationPipelinePreset,
+  ) {
+    const preset =
+      presetOverride ??
+      pipelinePresetCatalog?.presets.find((candidate) => candidate.id === presetId);
+    if (!preset) {
+      setError("The selected pipeline preset is unavailable. Refresh presets and try again.");
+      return;
+    }
+    setPipelinePresetBusy(true);
+    setError(null);
+    try {
+      const targetItemId = itemId ?? currentHomeItem?.id ?? null;
+      const applied = await invoke<LocalizationPipelinePreset>(
+        "localization_pipeline_preset_apply",
+        { presetId, itemId: targetItemId },
+      );
+      setActivePipelinePresetId(applied.id);
+      safeLocalStorageSet(LOCALIZATION_PIPELINE_PRESET_KEY, applied.id);
+      setAsrLang(applied.asr_lang);
+      setBatchRules(applied.batch_rules);
+      safeLocalStorageSet("voxvulgi.v1.editor.translation_style", applied.translation_style);
+      safeLocalStorageSet("voxvulgi.v1.editor.honorific_mode", applied.honorific_mode);
+      loadPipelinePresetDraft(applied);
+      broadcastPipelinePresetStyle(applied, targetItemId);
+      setNotice(
+        `Applied ${applied.name}: ${applied.asr_lang === "auto" ? "auto-detect" : applied.asr_lang.toUpperCase()} source, ${applied.translation_style} English, ${applied.honorific_mode} honorifics.`,
+      );
+    } catch (applyError) {
+      setError(`Could not apply pipeline preset: ${String(applyError)}`);
+    } finally {
+      setPipelinePresetBusy(false);
+    }
+  }
+
+  async function savePipelinePreset(updateExisting: boolean) {
+    const name = pipelinePresetName.trim();
+    if (!name) {
+      setError("Enter a name for the custom pipeline preset.");
+      return;
+    }
+    if (pipelinePresetStyle === "custom" && !pipelinePresetCustomInstruction.trim()) {
+      setError("Enter a custom translation instruction before saving this preset.");
+      return;
+    }
+    if (!batchRules) {
+      setError("Pipeline settings are still loading.");
+      return;
+    }
+    const active = pipelinePresetCatalog?.presets.find(
+      (preset) => preset.id === activePipelinePresetId,
+    );
+    if (updateExisting && (!active || active.is_builtin)) {
+      setError("Choose a custom preset before updating it.");
+      return;
+    }
+    setPipelinePresetBusy(true);
+    setError(null);
+    try {
+      const existingIds = new Set(pipelinePresetCatalog?.presets.map((preset) => preset.id) ?? []);
+      const catalog = await invoke<LocalizationPipelinePresetCatalog>(
+        "localization_pipeline_presets_save",
+        {
+          preset: {
+            id: updateExisting ? active?.id ?? "" : "",
+            name,
+            is_builtin: false,
+            asr_lang: asrLang,
+            batch_rules: batchRules,
+            translation_style: pipelinePresetStyle,
+            honorific_mode: pipelinePresetHonorificMode,
+            custom_translation_instruction: pipelinePresetCustomInstruction || null,
+            default_voice_template_id: pipelinePresetVoiceTemplateId || null,
+            default_voice_cast_pack_id: pipelinePresetVoiceCastPackId || null,
+          } satisfies LocalizationPipelinePreset,
+        },
+      );
+      setPipelinePresetCatalog(catalog);
+      const saved = updateExisting
+        ? catalog.presets.find((preset) => preset.id === active?.id)
+        : catalog.presets.find((preset) => !preset.is_builtin && !existingIds.has(preset.id));
+      if (!saved) throw new Error("Saved preset was not returned by the catalog.");
+      await applyPipelinePreset(saved.id, currentHomeItem?.id ?? null, saved);
+      setNotice(`${updateExisting ? "Updated" : "Saved"} custom preset ${saved.name}.`);
+    } catch (saveError) {
+      setError(`Could not save pipeline preset: ${String(saveError)}`);
+    } finally {
+      setPipelinePresetBusy(false);
+    }
+  }
+
+  async function deletePipelinePreset() {
+    const active = pipelinePresetCatalog?.presets.find(
+      (preset) => preset.id === activePipelinePresetId,
+    );
+    if (!active || active.is_builtin) {
+      setError("Choose a custom preset before deleting it.");
+      return;
+    }
+    const approved = await confirm(`Delete custom pipeline preset "${active.name}"?`, {
+      title: "Delete pipeline preset",
+      kind: "warning",
+    });
+    if (!approved) return;
+    setPipelinePresetBusy(true);
+    setError(null);
+    try {
+      const catalog = await invoke<LocalizationPipelinePresetCatalog>(
+        "localization_pipeline_presets_delete",
+        { presetId: active.id },
+      );
+      setPipelinePresetCatalog(catalog);
+      setActivePipelinePresetId("");
+      safeLocalStorageSet(LOCALIZATION_PIPELINE_PRESET_KEY, "");
+      setPipelinePresetName("");
+      setNotice(`Deleted custom preset ${active.name}. Existing item settings were preserved.`);
+    } catch (deleteError) {
+      setError(`Could not delete pipeline preset: ${String(deleteError)}`);
+    } finally {
+      setPipelinePresetBusy(false);
+    }
+  }
+
   const setupFirstHome = safeLocalStorageGet(LOCALIZATION_HOME_LEGACY_KEY) !== "1";
 
   if (setupFirstHome) {
@@ -1798,6 +2035,179 @@ function LocalizationStudioHome({
           </div>
 
           <div className="loc-setup-grid">
+            <div style={{ gridColumn: "1 / -1", display: "grid", gap: 8 }}>
+              <label>
+                <span>Pipeline preset</span>
+                <select
+                  value={activePipelinePresetId}
+                  disabled={uiBusy || pipelinePresetBusy || !pipelinePresetCatalog}
+                  onChange={(event) => {
+                    const presetId = event.currentTarget.value;
+                    if (!presetId) {
+                      setActivePipelinePresetId("");
+                      safeLocalStorageSet(LOCALIZATION_PIPELINE_PRESET_KEY, "");
+                      return;
+                    }
+                    void applyPipelinePreset(presetId);
+                  }}
+                >
+                  <option value="">Choose a preset...</option>
+                  {pipelinePresetCatalog?.presets.map((preset) => (
+                    <option key={preset.id} value={preset.id}>
+                      {preset.is_builtin ? "Built in" : "Custom"}: {preset.name}
+                    </option>
+                  ))}
+                </select>
+              </label>
+              {activePipelinePreset ? (
+                <div className="loc-setup-hint">
+                  {activePipelinePreset.asr_lang === "auto"
+                    ? "Auto-detect source"
+                    : `${activePipelinePreset.asr_lang.toUpperCase()} source`}
+                  {` · ${activePipelinePreset.translation_style} English · ${activePipelinePreset.honorific_mode} honorifics · `}
+                  {activePipelinePreset.batch_rules.auto_translate
+                    ? "automatic translation enabled"
+                    : "automatic translation off"}
+                </div>
+              ) : null}
+              <details>
+                <summary>Save or edit a custom preset</summary>
+                <div style={{ display: "grid", gap: 8, marginTop: 8 }}>
+                  <label>
+                    <span>Preset name</span>
+                    <input
+                      type="text"
+                      value={pipelinePresetName}
+                      maxLength={80}
+                      disabled={uiBusy || pipelinePresetBusy}
+                      onChange={(event) => setPipelinePresetName(event.currentTarget.value)}
+                      placeholder="My localization preset"
+                    />
+                  </label>
+                  <div className="row" style={{ flexWrap: "wrap" }}>
+                    <label>
+                      <span>Translation tone</span>
+                      <select
+                        value={pipelinePresetStyle}
+                        disabled={uiBusy || pipelinePresetBusy}
+                        onChange={(event) =>
+                          setPipelinePresetStyle(event.currentTarget.value as TranslationStyle)
+                        }
+                      >
+                        <option value="neutral">Neutral</option>
+                        <option value="formal">Formal</option>
+                        <option value="informal">Informal</option>
+                        <option value="custom">Custom</option>
+                      </select>
+                    </label>
+                    <label>
+                      <span>Honorifics</span>
+                      <select
+                        value={pipelinePresetHonorificMode}
+                        disabled={uiBusy || pipelinePresetBusy}
+                        onChange={(event) =>
+                          setPipelinePresetHonorificMode(event.currentTarget.value as HonorificMode)
+                        }
+                      >
+                        <option value="preserve">Preserve</option>
+                        <option value="translate">Translate</option>
+                        <option value="drop">Drop</option>
+                      </select>
+                    </label>
+                  </div>
+                  {pipelinePresetStyle === "custom" ? (
+                    <label>
+                      <span>Custom translation instruction</span>
+                      <input
+                        type="text"
+                        value={pipelinePresetCustomInstruction}
+                        maxLength={256}
+                        disabled={uiBusy || pipelinePresetBusy}
+                        onChange={(event) =>
+                          setPipelinePresetCustomInstruction(event.currentTarget.value)
+                        }
+                        placeholder="Describe tone and punctuation"
+                      />
+                    </label>
+                  ) : null}
+                  <div className="row" style={{ flexWrap: "wrap" }}>
+                    <label>
+                      <span>Default voice template</span>
+                      <select
+                        value={pipelinePresetVoiceTemplateId}
+                        disabled={uiBusy || pipelinePresetBusy}
+                        onChange={(event) =>
+                          setPipelinePresetVoiceTemplateId(event.currentTarget.value)
+                        }
+                      >
+                        <option value="">None</option>
+                        {pipelinePresetVoiceTemplates.map((template) => (
+                          <option key={template.id} value={template.id}>{template.name}</option>
+                        ))}
+                      </select>
+                    </label>
+                    <label>
+                      <span>Default voice cast pack</span>
+                      <select
+                        value={pipelinePresetVoiceCastPackId}
+                        disabled={uiBusy || pipelinePresetBusy}
+                        onChange={(event) =>
+                          setPipelinePresetVoiceCastPackId(event.currentTarget.value)
+                        }
+                      >
+                        <option value="">None</option>
+                        {pipelinePresetVoiceCastPacks.map((pack) => (
+                          <option key={pack.id} value={pack.id}>{pack.name}</option>
+                        ))}
+                      </select>
+                    </label>
+                  </div>
+                  <div className="loc-setup-hint">
+                    Saving captures the current source language and global auto-processing rules.
+                    Voice defaults are auto-matched after speaker labels exist.
+                  </div>
+                  <div className="loc-setup-actions">
+                    <button
+                      type="button"
+                      disabled={
+                        uiBusy ||
+                        pipelinePresetBusy ||
+                        !pipelinePresetName.trim() ||
+                        (pipelinePresetStyle === "custom" &&
+                          !pipelinePresetCustomInstruction.trim())
+                      }
+                      onClick={() => void savePipelinePreset(false)}
+                    >
+                      Save as new
+                    </button>
+                    <button
+                      type="button"
+                      disabled={
+                        uiBusy ||
+                        pipelinePresetBusy ||
+                        !activePipelinePreset ||
+                        activePipelinePreset.is_builtin
+                      }
+                      onClick={() => void savePipelinePreset(true)}
+                    >
+                      Update custom preset
+                    </button>
+                    <button
+                      type="button"
+                      disabled={
+                        uiBusy ||
+                        pipelinePresetBusy ||
+                        !activePipelinePreset ||
+                        activePipelinePreset.is_builtin
+                      }
+                      onClick={() => void deletePipelinePreset()}
+                    >
+                      Delete custom preset
+                    </button>
+                  </div>
+                </div>
+              </details>
+            </div>
             <label>
               <span>Source language</span>
               <select

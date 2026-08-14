@@ -6,6 +6,7 @@ use std::cell::RefCell;
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::{Mutex, OnceLock};
+use uuid::Uuid;
 
 const DEFAULT_YT_DLP_CONCURRENT_FRAGMENTS: u32 = 4;
 const DEFAULT_YT_DLP_FRAGMENT_RETRIES: u32 = 3;
@@ -19,14 +20,430 @@ const DEFAULT_DOWNLOAD_FORMAT_PREFERENCE: &str = "bv*+ba/b";
 const LEGACY_MP4_DOWNLOAD_FORMAT_PREFERENCE: &str = "bv*[ext=mp4]+ba[ext=m4a]/b[ext=mp4]/bv*+ba/b";
 static DOWNLOAD_PRESETS_CONFIG_WRITE_LOCK: Mutex<()> = Mutex::new(());
 static FEATURE_STORAGE_ROOTS_WRITE_LOCK: Mutex<()> = Mutex::new(());
+static LOCALIZATION_PIPELINE_PRESETS_WRITE_LOCK: Mutex<()> = Mutex::new(());
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct BatchOnImportRules {
     pub auto_asr: bool,
     pub auto_translate: bool,
     pub auto_separate: bool,
     pub auto_diarize: bool,
     pub auto_dub_preview: bool,
+}
+
+const LOCALIZATION_PIPELINE_PRESETS_SCHEMA_VERSION: u32 = 1;
+const MAX_LOCALIZATION_PRESET_NAME_BYTES: usize = 160;
+const MAX_LOCALIZATION_PRESET_INSTRUCTION_BYTES: usize = 1_024;
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct LocalizationPipelinePreset {
+    pub id: String,
+    pub name: String,
+    pub is_builtin: bool,
+    pub asr_lang: String,
+    pub batch_rules: BatchOnImportRules,
+    pub translation_style: String,
+    pub honorific_mode: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub custom_translation_instruction: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub default_voice_template_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub default_voice_cast_pack_id: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct LocalizationPipelinePresetCatalog {
+    pub schema_version: u32,
+    pub presets: Vec<LocalizationPipelinePreset>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ItemLocalizationPipelinePreset {
+    pub schema_version: u32,
+    pub preset: LocalizationPipelinePreset,
+    pub voice_defaults_applied: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct LocalizationPipelinePresetFile {
+    schema_version: u32,
+    presets: Vec<LocalizationPipelinePreset>,
+}
+
+fn localization_pipeline_builtin_presets() -> Vec<LocalizationPipelinePreset> {
+    vec![
+        LocalizationPipelinePreset {
+            id: "builtin-japanese-anime".to_string(),
+            name: "Japanese Anime".to_string(),
+            is_builtin: true,
+            asr_lang: "ja".to_string(),
+            batch_rules: BatchOnImportRules {
+                auto_asr: true,
+                auto_translate: true,
+                auto_separate: false,
+                auto_diarize: true,
+                auto_dub_preview: false,
+            },
+            translation_style: "informal".to_string(),
+            honorific_mode: "preserve".to_string(),
+            custom_translation_instruction: None,
+            default_voice_template_id: None,
+            default_voice_cast_pack_id: None,
+        },
+        LocalizationPipelinePreset {
+            id: "builtin-korean-variety".to_string(),
+            name: "Korean Variety".to_string(),
+            is_builtin: true,
+            asr_lang: "ko".to_string(),
+            batch_rules: BatchOnImportRules {
+                auto_asr: true,
+                auto_translate: true,
+                auto_separate: false,
+                auto_diarize: true,
+                auto_dub_preview: false,
+            },
+            translation_style: "informal".to_string(),
+            honorific_mode: "translate".to_string(),
+            custom_translation_instruction: None,
+            default_voice_template_id: None,
+            default_voice_cast_pack_id: None,
+        },
+        LocalizationPipelinePreset {
+            id: "builtin-quick-subtitles-only".to_string(),
+            name: "Quick Subtitles Only".to_string(),
+            is_builtin: true,
+            asr_lang: "auto".to_string(),
+            batch_rules: BatchOnImportRules {
+                auto_asr: true,
+                auto_translate: false,
+                auto_separate: false,
+                auto_diarize: false,
+                auto_dub_preview: false,
+            },
+            translation_style: "neutral".to_string(),
+            honorific_mode: "preserve".to_string(),
+            custom_translation_instruction: None,
+            default_voice_template_id: None,
+            default_voice_cast_pack_id: None,
+        },
+    ]
+}
+
+fn normalize_localization_preset_optional(
+    value: Option<String>,
+    field: &str,
+) -> Result<Option<String>> {
+    let value = value
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty());
+    if let Some(value) = value.as_deref() {
+        if value.len() > MAX_LOCALIZATION_PRESET_INSTRUCTION_BYTES
+            || value.chars().any(char::is_control)
+        {
+            return Err(EngineError::InstallFailed(format!(
+                "localization preset {field} is invalid"
+            )));
+        }
+    }
+    Ok(value)
+}
+
+fn normalize_localization_pipeline_preset(
+    mut preset: LocalizationPipelinePreset,
+) -> Result<LocalizationPipelinePreset> {
+    preset.id = preset.id.trim().to_string();
+    preset.name = preset.name.trim().to_string();
+    if preset.id.is_empty()
+        || preset.id.len() > MAX_LOCALIZATION_PRESET_NAME_BYTES
+        || preset.id.contains('/')
+        || preset.id.contains('\\')
+        || preset.id.chars().any(char::is_control)
+    {
+        return Err(EngineError::InstallFailed(
+            "localization preset id is invalid".to_string(),
+        ));
+    }
+    if preset.name.is_empty()
+        || preset.name.len() > MAX_LOCALIZATION_PRESET_NAME_BYTES
+        || preset.name.chars().any(char::is_control)
+    {
+        return Err(EngineError::InstallFailed(format!(
+            "localization preset name must be 1-{MAX_LOCALIZATION_PRESET_NAME_BYTES} UTF-8 bytes without control characters"
+        )));
+    }
+    preset.asr_lang = preset.asr_lang.trim().to_ascii_lowercase();
+    if !matches!(preset.asr_lang.as_str(), "auto" | "ja" | "ko") {
+        return Err(EngineError::InstallFailed(
+            "localization preset asr_lang must be auto, ja, or ko".to_string(),
+        ));
+    }
+    preset.translation_style = preset.translation_style.trim().to_ascii_lowercase();
+    if !matches!(
+        preset.translation_style.as_str(),
+        "neutral" | "formal" | "informal" | "custom"
+    ) {
+        return Err(EngineError::InstallFailed(
+            "localization preset translation_style is invalid".to_string(),
+        ));
+    }
+    preset.honorific_mode = preset.honorific_mode.trim().to_ascii_lowercase();
+    if !matches!(
+        preset.honorific_mode.as_str(),
+        "preserve" | "translate" | "drop"
+    ) {
+        return Err(EngineError::InstallFailed(
+            "localization preset honorific_mode is invalid".to_string(),
+        ));
+    }
+    preset.custom_translation_instruction = normalize_localization_preset_optional(
+        preset.custom_translation_instruction,
+        "custom translation instruction",
+    )?;
+    if preset.translation_style == "custom" && preset.custom_translation_instruction.is_none() {
+        return Err(EngineError::InstallFailed(
+            "custom translation style requires a custom instruction".to_string(),
+        ));
+    }
+    preset.default_voice_template_id = normalize_localization_preset_optional(
+        preset.default_voice_template_id,
+        "default voice template id",
+    )?;
+    preset.default_voice_cast_pack_id = normalize_localization_preset_optional(
+        preset.default_voice_cast_pack_id,
+        "default voice cast pack id",
+    )?;
+    Ok(preset)
+}
+
+fn load_custom_localization_pipeline_presets(
+    paths: &AppPaths,
+) -> Result<Vec<LocalizationPipelinePreset>> {
+    let path = paths.localization_pipeline_presets_path();
+    if !path.exists() {
+        return Ok(Vec::new());
+    }
+    let file: LocalizationPipelinePresetFile = serde_json::from_slice(&std::fs::read(&path)?)
+        .map_err(|error| {
+            EngineError::InstallFailed(format!(
+                "failed to parse localization pipeline presets at {}: {error}",
+                path.to_string_lossy()
+            ))
+        })?;
+    if file.schema_version != LOCALIZATION_PIPELINE_PRESETS_SCHEMA_VERSION {
+        return Err(EngineError::InstallFailed(format!(
+            "unsupported localization pipeline preset schema_version: {}",
+            file.schema_version
+        )));
+    }
+    let built_in_ids = localization_pipeline_builtin_presets()
+        .into_iter()
+        .map(|preset| preset.id)
+        .collect::<std::collections::HashSet<_>>();
+    let mut by_id = std::collections::BTreeMap::new();
+    for mut preset in file.presets {
+        preset.is_builtin = false;
+        let preset = normalize_localization_pipeline_preset(preset)?;
+        if built_in_ids.contains(&preset.id) || !preset.id.starts_with("custom-") {
+            return Err(EngineError::InstallFailed(format!(
+                "custom localization preset id is reserved or invalid: {}",
+                preset.id
+            )));
+        }
+        by_id.insert(preset.id.clone(), preset);
+    }
+    Ok(by_id.into_values().collect())
+}
+
+fn save_custom_localization_pipeline_presets(
+    paths: &AppPaths,
+    presets: Vec<LocalizationPipelinePreset>,
+) -> Result<()> {
+    let path = paths.localization_pipeline_presets_path();
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    let file = LocalizationPipelinePresetFile {
+        schema_version: LOCALIZATION_PIPELINE_PRESETS_SCHEMA_VERSION,
+        presets,
+    };
+    persistence::atomic_write_text(
+        &path,
+        &format!("{}\n", serde_json::to_string_pretty(&file)?),
+    )?;
+    Ok(())
+}
+
+pub fn load_localization_pipeline_presets(
+    paths: &AppPaths,
+) -> Result<LocalizationPipelinePresetCatalog> {
+    let mut presets = localization_pipeline_builtin_presets();
+    presets.extend(load_custom_localization_pipeline_presets(paths)?);
+    Ok(LocalizationPipelinePresetCatalog {
+        schema_version: LOCALIZATION_PIPELINE_PRESETS_SCHEMA_VERSION,
+        presets,
+    })
+}
+
+pub fn save_localization_pipeline_preset(
+    paths: &AppPaths,
+    mut preset: LocalizationPipelinePreset,
+) -> Result<LocalizationPipelinePresetCatalog> {
+    let _guard = LOCALIZATION_PIPELINE_PRESETS_WRITE_LOCK
+        .lock()
+        .map_err(|_| EngineError::InstallFailed("localization preset writer lock is poisoned".to_string()))?;
+    if preset.id.trim().is_empty() {
+        preset.id = format!("custom-{}", Uuid::new_v4());
+    }
+    preset.is_builtin = false;
+    let preset = normalize_localization_pipeline_preset(preset)?;
+    if !preset.id.starts_with("custom-") {
+        return Err(EngineError::InstallFailed(
+            "built-in localization presets cannot be changed".to_string(),
+        ));
+    }
+    let mut presets = load_custom_localization_pipeline_presets(paths)?;
+    if let Some(existing) = presets.iter_mut().find(|existing| existing.id == preset.id) {
+        *existing = preset;
+    } else {
+        presets.push(preset);
+    }
+    presets.sort_by(|left, right| left.name.cmp(&right.name).then_with(|| left.id.cmp(&right.id)));
+    save_custom_localization_pipeline_presets(paths, presets)?;
+    load_localization_pipeline_presets(paths)
+}
+
+pub fn delete_localization_pipeline_preset(
+    paths: &AppPaths,
+    preset_id: &str,
+) -> Result<LocalizationPipelinePresetCatalog> {
+    let _guard = LOCALIZATION_PIPELINE_PRESETS_WRITE_LOCK
+        .lock()
+        .map_err(|_| EngineError::InstallFailed("localization preset writer lock is poisoned".to_string()))?;
+    let preset_id = preset_id.trim();
+    if !preset_id.starts_with("custom-") {
+        return Err(EngineError::InstallFailed(
+            "built-in localization presets cannot be deleted".to_string(),
+        ));
+    }
+    let mut presets = load_custom_localization_pipeline_presets(paths)?;
+    let before = presets.len();
+    presets.retain(|preset| preset.id != preset_id);
+    if presets.len() == before {
+        return Err(EngineError::InstallFailed(format!(
+            "localization preset not found: {preset_id}"
+        )));
+    }
+    save_custom_localization_pipeline_presets(paths, presets)?;
+    load_localization_pipeline_presets(paths)
+}
+
+fn validate_localization_preset_item_id(item_id: &str) -> Result<&str> {
+    let item_id = item_id.trim();
+    if item_id.is_empty()
+        || item_id == "."
+        || item_id == ".."
+        || item_id.contains('/')
+        || item_id.contains('\\')
+    {
+        return Err(EngineError::InstallFailed(
+            "invalid localization preset item id".to_string(),
+        ));
+    }
+    Ok(item_id)
+}
+
+pub fn localization_pipeline_preset_by_id(
+    paths: &AppPaths,
+    preset_id: &str,
+) -> Result<LocalizationPipelinePreset> {
+    let preset_id = preset_id.trim();
+    load_localization_pipeline_presets(paths)?
+        .presets
+        .into_iter()
+        .find(|preset| preset.id == preset_id)
+        .ok_or_else(|| {
+            EngineError::InstallFailed(format!(
+                "localization pipeline preset not found: {preset_id}"
+            ))
+        })
+}
+
+pub fn apply_localization_pipeline_preset_to_item(
+    paths: &AppPaths,
+    item_id: &str,
+    preset: LocalizationPipelinePreset,
+) -> Result<ItemLocalizationPipelinePreset> {
+    let _guard = LOCALIZATION_PIPELINE_PRESETS_WRITE_LOCK
+        .lock()
+        .map_err(|_| EngineError::InstallFailed("localization preset writer lock is poisoned".to_string()))?;
+    let item_id = validate_localization_preset_item_id(item_id)?;
+    let preset = normalize_localization_pipeline_preset(preset)?;
+    let applied = ItemLocalizationPipelinePreset {
+        schema_version: LOCALIZATION_PIPELINE_PRESETS_SCHEMA_VERSION,
+        preset,
+        voice_defaults_applied: false,
+    };
+    let path = paths.item_localization_pipeline_preset_path(item_id);
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    persistence::atomic_write_text(
+        &path,
+        &format!("{}\n", serde_json::to_string_pretty(&applied)?),
+    )?;
+    Ok(applied)
+}
+
+pub fn load_item_localization_pipeline_preset(
+    paths: &AppPaths,
+    item_id: &str,
+) -> Result<Option<ItemLocalizationPipelinePreset>> {
+    let path = paths.item_localization_pipeline_preset_path(
+        validate_localization_preset_item_id(item_id)?,
+    );
+    if !path.exists() {
+        return Ok(None);
+    }
+    let applied: ItemLocalizationPipelinePreset = serde_json::from_slice(&std::fs::read(&path)?)
+        .map_err(|error| {
+            EngineError::InstallFailed(format!(
+                "failed to parse item localization pipeline preset at {}: {error}",
+                path.to_string_lossy()
+            ))
+        })?;
+    if applied.schema_version != LOCALIZATION_PIPELINE_PRESETS_SCHEMA_VERSION {
+        return Err(EngineError::InstallFailed(format!(
+            "unsupported item localization pipeline preset schema_version: {}",
+            applied.schema_version
+        )));
+    }
+    Ok(Some(ItemLocalizationPipelinePreset {
+        schema_version: applied.schema_version,
+        preset: normalize_localization_pipeline_preset(applied.preset)?,
+        voice_defaults_applied: applied.voice_defaults_applied,
+    }))
+}
+
+pub fn mark_item_localization_pipeline_voice_defaults_applied(
+    paths: &AppPaths,
+    item_id: &str,
+) -> Result<Option<ItemLocalizationPipelinePreset>> {
+    let _guard = LOCALIZATION_PIPELINE_PRESETS_WRITE_LOCK
+        .lock()
+        .map_err(|_| EngineError::InstallFailed("localization preset writer lock is poisoned".to_string()))?;
+    let Some(mut applied) = load_item_localization_pipeline_preset(paths, item_id)? else {
+        return Ok(None);
+    };
+    applied.voice_defaults_applied = true;
+    let path = paths.item_localization_pipeline_preset_path(
+        validate_localization_preset_item_id(item_id)?,
+    );
+    persistence::atomic_write_text(
+        &path,
+        &format!("{}\n", serde_json::to_string_pretty(&applied)?),
+    )?;
+    Ok(Some(applied))
 }
 
 impl Default for BatchOnImportRules {
@@ -1303,5 +1720,131 @@ mod tests {
                 .as_deref(),
             Some(r"E:\current")
         );
+    }
+
+    #[test]
+    fn localization_pipeline_presets_include_three_immutable_builtins() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let paths = AppPaths::new(dir.path().join("app"));
+        let catalog = load_localization_pipeline_presets(&paths).expect("catalog");
+        assert_eq!(catalog.schema_version, 1);
+        assert_eq!(catalog.presets.len(), 3);
+        assert!(catalog.presets.iter().all(|preset| preset.is_builtin));
+        assert_eq!(catalog.presets[0].name, "Japanese Anime");
+        assert_eq!(catalog.presets[0].asr_lang, "ja");
+        assert!(catalog.presets[0].batch_rules.auto_translate);
+        assert!(catalog.presets[0].batch_rules.auto_diarize);
+        assert_eq!(catalog.presets[2].name, "Quick Subtitles Only");
+        assert!(catalog.presets[2].batch_rules.auto_asr);
+        assert!(!catalog.presets[2].batch_rules.auto_translate);
+    }
+
+    #[test]
+    fn localization_pipeline_custom_preset_crud_is_atomic_and_preserves_builtins() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let paths = AppPaths::new(dir.path().join("app"));
+        paths.ensure_dirs().expect("dirs");
+        let catalog = save_localization_pipeline_preset(
+            &paths,
+            LocalizationPipelinePreset {
+                id: String::new(),
+                name: " My show ".to_string(),
+                is_builtin: true,
+                asr_lang: "ko".to_string(),
+                batch_rules: BatchOnImportRules {
+                    auto_asr: true,
+                    auto_translate: true,
+                    auto_separate: false,
+                    auto_diarize: true,
+                    auto_dub_preview: true,
+                },
+                translation_style: "formal".to_string(),
+                honorific_mode: "drop".to_string(),
+                custom_translation_instruction: None,
+                default_voice_template_id: Some(" template-1 ".to_string()),
+                default_voice_cast_pack_id: None,
+            },
+        )
+        .expect("create custom preset");
+        assert_eq!(catalog.presets.len(), 4);
+        let created = catalog
+            .presets
+            .iter()
+            .find(|preset| !preset.is_builtin)
+            .expect("custom preset")
+            .clone();
+        assert!(created.id.starts_with("custom-"));
+        assert_eq!(created.name, "My show");
+        assert_eq!(created.default_voice_template_id.as_deref(), Some("template-1"));
+
+        let applied = apply_localization_pipeline_preset_to_item(
+            &paths,
+            "item-1",
+            created.clone(),
+        )
+        .expect("apply to item");
+        assert!(!applied.voice_defaults_applied);
+        assert_eq!(
+            load_item_localization_pipeline_preset(&paths, "item-1")
+                .expect("load applied")
+                .expect("applied preset")
+                .preset
+                .id,
+            created.id
+        );
+        assert!(
+            mark_item_localization_pipeline_voice_defaults_applied(&paths, "item-1")
+                .expect("mark applied")
+                .expect("marked preset")
+                .voice_defaults_applied
+        );
+
+        let mut updated = created.clone();
+        updated.name = "My edited show".to_string();
+        let catalog = save_localization_pipeline_preset(&paths, updated).expect("update");
+        assert_eq!(catalog.presets.len(), 4);
+        assert!(catalog.presets.iter().any(|preset| preset.name == "My edited show"));
+
+        let catalog = delete_localization_pipeline_preset(&paths, &created.id).expect("delete");
+        assert_eq!(catalog.presets.len(), 3);
+        assert!(catalog.presets.iter().all(|preset| preset.is_builtin));
+    }
+
+    #[test]
+    fn localization_pipeline_presets_reject_reserved_and_unsafe_values() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let paths = AppPaths::new(dir.path().join("app"));
+        let built_in = localization_pipeline_builtin_presets()
+            .into_iter()
+            .next()
+            .expect("built in");
+        let error = save_localization_pipeline_preset(&paths, built_in)
+            .expect_err("built in overwrite must fail");
+        assert!(error.to_string().contains("cannot be changed"));
+        let error = delete_localization_pipeline_preset(&paths, "builtin-japanese-anime")
+            .expect_err("built in deletion must fail");
+        assert!(error.to_string().contains("cannot be deleted"));
+
+        let error = apply_localization_pipeline_preset_to_item(
+            &paths,
+            "../outside",
+            localization_pipeline_builtin_presets()[0].clone(),
+        )
+        .expect_err("item traversal must fail");
+        assert!(error.to_string().contains("invalid localization preset item id"));
+
+        let mut unsafe_preset = localization_pipeline_builtin_presets()[0].clone();
+        unsafe_preset.id = String::new();
+        unsafe_preset.name = "bad\0name".to_string();
+        let error = save_localization_pipeline_preset(&paths, unsafe_preset)
+            .expect_err("control character must fail");
+        assert!(error.to_string().contains("without control characters"));
+
+        let mut incomplete_custom = localization_pipeline_builtin_presets()[0].clone();
+        incomplete_custom.id = String::new();
+        incomplete_custom.translation_style = "custom".to_string();
+        let error = save_localization_pipeline_preset(&paths, incomplete_custom)
+            .expect_err("custom style without instruction must fail");
+        assert!(error.to_string().contains("requires a custom instruction"));
     }
 }

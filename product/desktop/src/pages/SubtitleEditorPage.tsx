@@ -1397,6 +1397,7 @@ export function SubtitleEditorPage({
   const [translationStyleLoadedItemId, setTranslationStyleLoadedItemId] = useState<string | null>(
     null,
   );
+  const translationStyleLoadRevision = useRef(0);
   const [glossaryBundle, setGlossaryBundle] = useState<GlossaryBundle>({
     global_entries: [],
     item_entries: [],
@@ -1714,6 +1715,7 @@ export function SubtitleEditorPage({
 
   useEffect(() => {
     let canceled = false;
+    const loadRevision = ++translationStyleLoadRevision.current;
     const storedStyle = safeLocalStorageGet("voxvulgi.v1.editor.translation_style");
     const fallbackStyle: TranslationStyle =
       storedStyle === "formal" ||
@@ -1732,7 +1734,7 @@ export function SubtitleEditorPage({
     setCustomTranslationInstruction("");
     invoke<TranslationStyleSettings | null>("translation_style_get", { itemId })
       .then((settings) => {
-        if (canceled) return;
+        if (canceled || translationStyleLoadRevision.current !== loadRevision) return;
         if (settings) {
           setTranslationStyle(settings.style);
           setHonorificMode(settings.honorific_mode);
@@ -1741,10 +1743,48 @@ export function SubtitleEditorPage({
         setTranslationStyleLoadedItemId(itemId);
       })
       .catch((error) => {
-        if (!canceled) setError(`Translation style unavailable: ${String(error)}`);
+        if (!canceled && translationStyleLoadRevision.current === loadRevision) {
+          setError(`Translation style unavailable: ${String(error)}`);
+        }
       });
     return () => {
       canceled = true;
+    };
+  }, [itemId]);
+
+  useEffect(() => {
+    const handlePipelinePresetStyle = (event: Event) => {
+      const detail = (event as CustomEvent<{
+        itemId?: string;
+        style?: TranslationStyle;
+        honorificMode?: HonorificMode;
+        customInstruction?: string;
+      }>).detail;
+      if (!detail || detail.itemId !== itemId) return;
+      if (
+        detail.style !== "neutral" &&
+        detail.style !== "formal" &&
+        detail.style !== "informal" &&
+        detail.style !== "custom"
+      ) {
+        return;
+      }
+      if (
+        detail.honorificMode !== "preserve" &&
+        detail.honorificMode !== "translate" &&
+        detail.honorificMode !== "drop"
+      ) {
+        return;
+      }
+      translationStyleLoadRevision.current += 1;
+      setTranslationStyle(detail.style);
+      setHonorificMode(detail.honorificMode);
+      setCustomTranslationInstruction(detail.customInstruction ?? "");
+      setTranslationStyleLoadedItemId(itemId);
+    };
+    window.addEventListener("voxvulgi:translation-style-updated", handlePipelinePresetStyle);
+    return () => {
+      window.removeEventListener("voxvulgi:translation-style-updated", handlePipelinePresetStyle);
     };
   }, [itemId]);
 
