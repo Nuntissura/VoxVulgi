@@ -1146,3 +1146,11 @@ This changelog tracks desktop installer builds produced by `governance/scripts/b
 - Artifacts:
   - `product/desktop/build_target/Current/release/bundle/nsis/VoxVulgi_0.1.136_x64-setup.exe`
 - Notes: v0.1.136 release candidate: root-rebind backup integrity hardening and serialized offline-installer staging.
+
+## 0.1.137 - 2026-08-14T10:23:42Z
+- Work Packets: `WP-0254`, `WP-0265`, `WP-0298`, `WP-0299`, `WP-0300`, `WP-0301`, `WP-0306`
+- Commit: `f23531e`
+- Offline Bundle ID: `offline_full_win64_20260814_082842`
+- Artifacts:
+  - `product/desktop/build_target/Current/release/bundle/nsis/VoxVulgi_0.1.137_x64-setup.exe`
+- Notes: v0.1.137 release candidate: guarded crash-orphan recovery unblocks exact root-rebind execution without starting background jobs.
