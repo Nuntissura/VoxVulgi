@@ -34,6 +34,11 @@ import {
 } from "../lib/pathOpener";
 import { safeLocalStorageGet, safeLocalStorageSet } from "../lib/persist";
 import { featureRootStatus, useSharedDownloadDirStatus } from "../lib/sharedDownloadDir";
+import {
+  LocalizationHelpAllToggle,
+  LocalizationHelpButton,
+  type LocalizationHelpContent,
+} from "../components/LocalizationHelp";
 
 type LibraryItem = {
   id: string;
@@ -994,12 +999,12 @@ function isEnglishLocalizationTrack(track: SubtitleTrackRow | null): boolean {
 }
 
 // ---------------------------------------------------------------------------
-// Built-in Manual Ã¢â‚¬â€ in-context help for each Localization Studio section (WP-0172)
+// Built-in Manual — in-context help for each Localization Studio section (WP-0172)
 // ---------------------------------------------------------------------------
 
-const SECTION_HELP: Record<string, { what: string; when: string; steps: string[]; concepts?: Record<string, string> }> = {
+const SECTION_HELP: Record<string, LocalizationHelpContent> = {
   "loc-library": {
-    what: "Browse all outputs for the current item Ã¢â‚¬â€ source media, working files, and exported deliverables in one place.",
+    what: "Browse all outputs for the current item — source media, working files, and exported deliverables in one place.",
     when: "After any job completes to find your results, or to open/reveal exported files.",
     steps: ["Select an item in Localization Studio", "Check the output table rows for each stage", "Click Open/Reveal to access files on disk"],
   },
@@ -1008,6 +1013,12 @@ const SECTION_HELP: Record<string, { what: string; when: string; steps: string[]
     when: "Anytime you start, continue, or inspect a localization run. This is the panel to keep open while a run is in flight.",
     steps: ["Press Start / continue localization run", "Watch each stage row update from Needs attention to Running to Done", "Click Open controls on a stage when you need to adjust something specific", "Open the Advanced section for comparison reports, voice engines, batch runs, A/B, quality checks, and saved files"],
     concepts: { "Done": "This stage already has its expected output for the current item.", "Needs attention": "The stage is missing input or hasn't been run yet.", "Running": "A job for this stage is currently active.", "Failed": "The most recent attempt at this stage failed; open the controls to inspect or rerun." },
+  },
+  "loc-translate": {
+    what: "Turn the source captions into an English track while applying the selected tone, polite-name-ending choice, and glossary.",
+    when: "After captions exist and before speaker labelling, voice planning, or dubbing.",
+    steps: ["Choose the English tone", "Choose how polite name endings should be handled", "Review the glossary if names or special terms matter", "Click Translate to English"],
+    concepts: { "Glossary": "Saved source-to-English term mappings that keep names and special words consistent.", "Polite name endings": "Honorifics such as Japanese -san or Korean -nim." },
   },
   "loc-run": {
     what: "The Workflow panel: clear run controls plus a step-by-step list, each step with its own pickers and Run button, covering speech-to-text (ASR), Translate, speaker labelling (diarize), Voice plan, Dub, Mix, and Combine audio and video (mux).",
@@ -1094,13 +1105,24 @@ const SECTION_HELP: Record<string, { what: string; when: string; steps: string[]
   "loc-glossary": {
     what: "Define custom term mappings so names, places, and domain terms translate consistently.",
     when: "Before running Translate to English. Terms added here apply to all future translations.",
-    steps: ["Add source terms (Japanese/Korean) with their English translations", "Run Translate Ã¢â‚¬â€ glossary terms are automatically applied to the output", "Export/import as CSV to share glossaries across items or machines"],
-    concepts: { "Term mapping": "A pair: source text and its desired English translation.", "Longest match first": "If you have both 'Ã¦ÂÂ±Ã¤ÂºÂ¬Ã©Æ’Â½' and 'Ã¦ÂÂ±Ã¤ÂºÂ¬', the longer match is applied first to avoid partial replacements." },
+    steps: ["Add source terms (Japanese/Korean) with their English translations", "Run Translate — glossary terms are automatically applied to the output", "Export/import as CSV to share glossaries across items or machines"],
+    concepts: { "Term mapping": "A pair: source text and its desired English translation.", "Longest match first": "If both a longer phrase and part of that phrase are saved, the longer phrase is applied first to avoid partial replacements." },
   },
   "loc-artifacts": {
     what: "All derived files (audio stems, manifests, reports, exports) in one table. Play, open, or rerun any artifact.",
     when: "To find specific working files, replay audio, or re-run a failed stage.",
     steps: ["Browse the artifacts table", "Click Play to preview audio", "Click Open or Reveal to find files on disk", "Click Rerun to re-execute a specific job"],
+  },
+  "loc-preview": {
+    what: "Play the source video or an available combined preview so you can judge timing, voices, subtitles, and the final mix.",
+    when: "After a mix or combined-video stage finishes, and again before exporting deliverables.",
+    steps: ["Choose the available video source", "Play the preview", "Check voice timing, subtitle timing, and background volume", "Return to the relevant stage if something needs adjustment"],
+  },
+  "loc-segments": {
+    what: "Review and edit individual subtitle lines, their timing, text, and assigned speaker.",
+    when: "After captions or translation, or whenever a line has incorrect text, timing, or speaker assignment.",
+    steps: ["Select one or more lines", "Correct text, timing, or speaker assignment", "Use bulk speaker tools only when several lines need the same change", "Save a new track version"],
+    concepts: { "Segment": "One timed subtitle line.", "Speaker assignment": "The speaker label attached to a subtitle line." },
   },
 };
 
@@ -1165,80 +1187,8 @@ const LEGACY_ANCHOR_TO_STAGE: Record<string, WorkspaceStageId> = {
 
 function SectionHelp({ sectionId }: { sectionId: string }) {
   const help = SECTION_HELP[sectionId];
-  const [open, setOpen] = useState(() => {
-    return safeLocalStorageGet("voxvulgi.v1.loc.help_all") === "1";
-  });
   if (!help) return null;
-  return (
-    <>
-      <button
-        type="button"
-        onClick={() => setOpen(!open)}
-        title={open ? "Hide help" : "Show help"}
-        style={{
-          display: "inline-flex",
-          alignItems: "center",
-          justifyContent: "center",
-          width: 22,
-          height: 22,
-          borderRadius: "50%",
-          border: "1px solid rgba(100,120,140,0.4)",
-          background: open ? "rgba(59,81,105,0.15)" : "transparent",
-          color: "#4b5563",
-          fontSize: 13,
-          fontWeight: 700,
-          cursor: "pointer",
-          marginLeft: 8,
-          verticalAlign: "middle",
-          flexShrink: 0,
-        }}
-      >
-        ?
-      </button>
-      {open ? (
-        <div
-          style={{
-            marginTop: 8,
-            padding: "10px 14px",
-            borderRadius: 8,
-            background: "rgba(59,81,105,0.08)",
-            border: "1px solid rgba(100,120,140,0.2)",
-            fontSize: 13,
-            lineHeight: 1.5,
-          }}
-        >
-          <div style={{ marginBottom: 6 }}>
-            <strong>What this does:</strong> {help.what}
-          </div>
-          <div style={{ marginBottom: 6 }}>
-            <strong>When to use it:</strong> {help.when}
-          </div>
-          {help.steps.length > 0 ? (
-            <div style={{ marginBottom: help.concepts ? 6 : 0 }}>
-              <strong>Steps:</strong>
-              <ol style={{ margin: "4px 0 0 0", paddingLeft: 20 }}>
-                {help.steps.map((step, i) => (
-                  <li key={i}>{step}</li>
-                ))}
-              </ol>
-            </div>
-          ) : null}
-          {help.concepts ? (
-            <div>
-              <strong>Key terms:</strong>
-              <ul style={{ margin: "4px 0 0 0", paddingLeft: 20 }}>
-                {Object.entries(help.concepts).map(([term, def]) => (
-                  <li key={term}>
-                    <strong>{term}</strong> Ã¢â‚¬â€ {def}
-                  </li>
-                ))}
-              </ul>
-            </div>
-          ) : null}
-        </div>
-      ) : null}
-    </>
-  );
+  return <LocalizationHelpButton helpId={sectionId} content={help} />;
 }
 
 export function SubtitleEditorPage({
@@ -2444,7 +2394,7 @@ export function SubtitleEditorPage({
       setSegmentCloneMap({});
       return;
     }
-    // The artifact path is the manifest JSON Ã¢â‚¬â€ but we need the actual manifest file path
+    // The artifact path is the manifest JSON — but we need the actual manifest file path
     // The artifact.path points to the manifest. Load its per-segment data.
     invoke<Array<{ index: number; voice_clone_outcome: string | null; voice_clone_error: string | null }>>(
       "tts_manifest_clone_segments",
@@ -2460,7 +2410,7 @@ export function SubtitleEditorPage({
       .catch(() => setSegmentCloneMap({}));
   }, [activeVoiceCloneArtifact?.path]);
 
-  // WP-0185: Clone outcome notification Ã¢â‚¬â€ show notice when a new clone result appears
+  // WP-0185: Clone outcome notification — show notice when a new clone result appears
   const prevCloneOutcomeRef = useRef<string | null>(null);
   useEffect(() => {
     if (!activeVoiceCloneTruth) return;
@@ -3508,22 +3458,22 @@ export function SubtitleEditorPage({
       // Other shortcuts skip when focused on input/textarea/select
       if (tag === "INPUT" || tag === "TEXTAREA" || tag === "SELECT") return;
 
-      // Ctrl+Enter Ã¢â‚¬â€ Start / continue localization run
+      // Ctrl+Enter — Start / continue localization run
       if (ctrl && e.key === "Enter") {
         e.preventDefault();
         enqueueLocalizationRun();
         return;
       }
-      // Ctrl+Shift+E Ã¢â‚¬â€ Export selected outputs
+      // Ctrl+Shift+E — Export selected outputs
       if (ctrl && e.shiftKey && e.key.toLowerCase() === "e") {
         e.preventDefault();
         exportSelectedOutputs();
         return;
       }
-      // Ctrl+Shift+R Ã¢â‚¬â€ Refresh readiness
+      // Ctrl+Shift+R — Refresh readiness
       // Ctrl+Shift+R was previously bound to "Refresh readiness" against the now-retired
       // FFmpeg/Whisper/pack readiness rows. Browser refresh fallback is intentional here.
-      // Ctrl+1..8 Ã¢â‚¬â€ Select workspace stage in the new master-detail layout (WP-0211)
+      // Ctrl+1..8 — Select workspace stage in the new master-detail layout (WP-0211)
       if (ctrl && !e.shiftKey && e.key >= "1" && e.key <= "8") {
         e.preventDefault();
         const idx = parseInt(e.key) - 1;
@@ -6198,7 +6148,7 @@ export function SubtitleEditorPage({
 
   return (
     <section ref={rootSectionRef} className="loc-workspace">
-      {/* WP-0211: editor renders as one panel Ã¢â‚¬â€ header strip + left rail + right pane.
+      {/* WP-0211: editor renders as one panel — header strip + left rail + right pane.
           Each top-level "card" carries data-stage; CSS hides those whose stage is not selected. */}
       <header className="loc-workspace-header">
         <div className="loc-workspace-header-title">
@@ -6206,6 +6156,10 @@ export function SubtitleEditorPage({
           <div className="loc-workspace-header-item-title">{item?.title ?? "-"}</div>
         </div>
         <div className="loc-workspace-header-actions">
+          <div style={{ display: "inline-flex", alignItems: "center", flexWrap: "wrap", fontSize: 12 }}>
+            First dub guide <SectionHelp sectionId="loc-first-dub" />
+          </div>
+          <LocalizationHelpAllToggle />
           <button type="button" disabled={busy || !item?.media_path} onClick={openSourceFile}>
             Open source file
           </button>
@@ -6237,7 +6191,9 @@ export function SubtitleEditorPage({
 
       <div className="loc-workspace-body">
         <aside className="loc-workspace-rail">
-          <div className="loc-workspace-rail-eyebrow">Workflow</div>
+          <div className="loc-workspace-rail-eyebrow">
+            Workflow <SectionHelp sectionId="loc-workflow" />
+          </div>
           <ul className="loc-workspace-rail-stages">
             {WORKSPACE_STAGES.map((stage, idx) => {
               const data = stage.runStageId
@@ -6300,6 +6256,9 @@ export function SubtitleEditorPage({
         <main className="loc-workspace-content" data-selected-stage={selectedStage}>
           {/* Stage actions strip — primary Run + minimal options for the selected stage. */}
           <div className="loc-workspace-stage-actions">
+            <div style={{ width: "100%", fontSize: 12, fontWeight: 600 }}>
+              Stage controls <SectionHelp sectionId="loc-run" />
+            </div>
             {selectedStage === "captions" ? (
               <>
                 <select
@@ -6324,6 +6283,9 @@ export function SubtitleEditorPage({
             ) : null}
             {selectedStage === "translate" ? (
               <>
+                <div style={{ display: "inline-flex", alignItems: "center", flexWrap: "wrap", fontSize: 12 }}>
+                  Translation help <SectionHelp sectionId="loc-translate" />
+                </div>
                 <select
                   value={translationStyle}
                   disabled={busy}
@@ -7162,7 +7124,7 @@ export function SubtitleEditorPage({
             }
             onClick={exportMuxPreview}
           >
-            Export previewÃ¢â‚¬Â¦
+            Export preview…
           </button>
           <button type="button" disabled={busy} onClick={enqueueExportPack}>
             Export pack (zip)
@@ -7198,7 +7160,7 @@ export function SubtitleEditorPage({
         </div>
         <div className="row" style={{ flexWrap: "wrap", gap: 8 }}>
           <input
-            placeholder="Source term (e.g. Ã¦ÂÂ±Ã¤ÂºÂ¬)"
+            placeholder="Source term (e.g. 東京)"
             value={glossaryNewSource}
             onChange={(e) => setGlossaryNewSource(e.target.value)}
             style={{ width: 200 }}
@@ -7287,7 +7249,7 @@ export function SubtitleEditorPage({
           </div>
         ) : (
           <div style={{ color: "#4b5563", marginTop: 8, fontSize: 13 }}>
-            No glossary terms yet. Add terms above Ã¢â‚¬â€ they will be applied to future translations.
+            No glossary terms yet. Add terms above — they will be applied to future translations.
           </div>
         )}
       </div>
@@ -7391,6 +7353,9 @@ export function SubtitleEditorPage({
           <summary style={{ cursor: "pointer", color: "#4b5563", fontSize: 13 }}>
             Advanced audio/video (most people can leave these alone)
           </summary>
+          <div style={{ marginTop: 8, fontSize: 12 }}>
+            About these controls <SectionHelp sectionId="loc-advanced" />
+          </div>
 
         <div className="row" style={{ marginTop: 10, flexWrap: "wrap" }}>
           <div style={{ fontSize: 12, opacity: 0.85 }}>Voice-over sound</div>
@@ -7911,7 +7876,7 @@ export function SubtitleEditorPage({
                             pickSpeakerVoiceProfiles(speakerKey).catch(() => undefined);
                           }}
                         >
-                          ChooseÃ¢â‚¬Â¦
+                          Choose…
                         </button>
                         <button
                           type="button"
@@ -8607,7 +8572,9 @@ export function SubtitleEditorPage({
 
             <div style={{ marginTop: 16 }}>
               <div className="row" style={{ alignItems: "center", gap: 10, flexWrap: "wrap" }}>
-                <div style={{ fontSize: 12, opacity: 0.85 }}>Reusable cast packs</div>
+                <div style={{ fontSize: 12, opacity: 0.85 }}>
+                  Reusable cast packs <SectionHelp sectionId="loc-cast-packs" />
+                </div>
                 <button
                   type="button"
                   disabled={
@@ -9265,7 +9232,9 @@ export function SubtitleEditorPage({
 
               <div id="loc-backends" style={{ display: "flex", flexDirection: "column", gap: 8 }}>
                 <div className="row" style={{ alignItems: "center", gap: 10, flexWrap: "wrap" }}>
-                  <div style={{ fontSize: 12, opacity: 0.85 }}>Voice backend strategy</div>
+                  <div style={{ fontSize: 12, opacity: 0.85 }}>
+                    Voice engine strategy <SectionHelp sectionId="loc-backends" />
+                  </div>
                   <select
                     value={voiceBackendGoal}
                     disabled={busy}
@@ -10627,7 +10596,7 @@ export function SubtitleEditorPage({
       </div>
 
       <div className="card loc-stage-card" data-stage="mix" id="loc-preview">
-        <h2>Preview</h2>
+        <h2>Preview <SectionHelp sectionId="loc-preview" /></h2>
         <div className="row" style={{ marginTop: 0, flexWrap: "wrap", alignItems: "center" }}>
           <label style={{ display: "flex", alignItems: "center", gap: 8 }}>
             <span>Video source</span>
@@ -10669,7 +10638,7 @@ export function SubtitleEditorPage({
       </div>
 
       <div className="card loc-stage-card" data-stage="captions" id="loc-segments">
-        <h2>Segments</h2>
+        <h2>Segments <SectionHelp sectionId="loc-segments" /></h2>
 
         {doc ? (
           <>
@@ -10700,7 +10669,7 @@ export function SubtitleEditorPage({
                   onChange={(e) => setBulkSpeakerKey(e.currentTarget.value)}
                 >
                   <option value="">(none)</option>
-                  <option value="__new__">New speakerÃ¢â‚¬Â¦</option>
+                  <option value="__new__">New speaker…</option>
                   {speakersInTrack.map((k) => (
                     <option key={k} value={k}>
                       {k}
@@ -10742,20 +10711,20 @@ export function SubtitleEditorPage({
                 disabled={busy}
                 onChange={(e) => setMergeFromSpeakerKey(e.currentTarget.value)}
               >
-                <option value="">FromÃ¢â‚¬Â¦</option>
+                <option value="">From…</option>
                 {speakersInTrack.map((k) => (
                   <option key={`from-${k}`} value={k}>
                     {k}
                   </option>
                 ))}
               </select>
-              <div style={{ opacity: 0.7 }}>Ã¢â€ â€™</div>
+              <div style={{ opacity: 0.7 }}>→</div>
               <select
                 value={mergeToSpeakerKey}
                 disabled={busy}
                 onChange={(e) => setMergeToSpeakerKey(e.currentTarget.value)}
               >
-                <option value="">ToÃ¢â‚¬Â¦</option>
+                <option value="">To…</option>
                 {speakersInTrack.map((k) => (
                   <option key={`to-${k}`} value={k}>
                     {k}
@@ -11009,7 +10978,7 @@ export function SubtitleEditorPage({
                           }}
                           title="-250ms"
                         >
-                          Ã¢â€”â‚¬
+                          ◀
                         </button>
                         <button
                           type="button"
@@ -11023,7 +10992,7 @@ export function SubtitleEditorPage({
                           }}
                           title="+250ms"
                         >
-                          Ã¢â€“Â¶
+                          ▶
                         </button>
                       </div>
                     </td>
@@ -11035,7 +11004,7 @@ export function SubtitleEditorPage({
           </>
         ) : (
           <div style={{ opacity: busy ? 0.7 : 1 }}>
-            {busy ? "LoadingÃ¢â‚¬Â¦" : "No subtitle document loaded."}
+            {busy ? "Loading…" : "No subtitle document loaded."}
           </div>
         )}
       </div>

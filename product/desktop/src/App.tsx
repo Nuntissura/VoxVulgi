@@ -42,6 +42,11 @@ import {
   type AgentUiActionRequest,
   type AgentUiAuditRequest,
 } from "./lib/agentUiAudit";
+import {
+  LocalizationHelpAllToggle,
+  LocalizationHelpButton,
+  type LocalizationHelpContent,
+} from "./components/LocalizationHelp";
 
 // ---------------------------------------------------------------------------
 // Visual debugger console buffer (WP-0209)
@@ -402,6 +407,40 @@ const LOCALIZATION_HOME_STAGES = [
     detail: "Inspect outputs, QC, artifacts, and export paths without leaving Localization Studio.",
   },
 ] as const;
+
+const LOCALIZATION_HOME_HELP = {
+  studio: {
+    what: "Orient yourself before opening or starting a localization item.",
+    when: "Whenever you enter Localization Studio and need to see current work, active runs, or ready previews.",
+    steps: ["Review the summary", "Continue the current item or import new media", "Use the workflow and output cards to jump to the exact stage you need"],
+  },
+  current: {
+    what: "Resume the most relevant localization item and jump directly to its run, outputs, or advanced tools.",
+    when: "When work already exists and you want to continue instead of importing the source again.",
+    steps: ["Check the current status", "Open the item", "Choose run controls, outputs, or advanced tools"],
+  },
+  import: {
+    what: "Add a local media file to the Localization Studio workspace without automatically starting processing.",
+    when: "When the source file is not already listed in current or recent work.",
+    steps: ["Select a local media file", "Review the detected source language and speaker choices", "Start subtitles or the full dubbed workflow when ready"],
+  },
+  workflow: {
+    what: "Explain the ordered stages from captions through review and export.",
+    when: "Before a first run, or whenever you are unsure which stage should happen next.",
+    steps: ["Read the stages from top to bottom", "Open the current item", "Run or repair the first stage that needs attention"],
+  },
+  outputs: {
+    what: "Show where source media, working previews, and finished deliverables are available.",
+    when: "After a stage finishes or when you need to play, reveal, or export a result.",
+    steps: ["Open the current item", "Review Preview and Outputs", "Export or reveal the finished deliverable"],
+    concepts: { "Working preview": "An intermediate file used to check the result before export.", "Deliverable": "A finished subtitle, audio, or combined MKV file intended for use outside the workspace." },
+  },
+  recent: {
+    what: "List recently used localization items with their current stage and next action.",
+    when: "When the item you need is not selected as the current item.",
+    steps: ["Find the item", "Check its status", "Open it directly into the editor, outputs, or advanced tools"],
+  },
+} as const satisfies Record<string, LocalizationHelpContent>;
 
 function localizationJobTypeLabel(jobType: string | null | undefined): string {
   switch (jobType) {
@@ -2036,7 +2075,11 @@ function LocalizationStudioHome({
       {compact ? (
         <div className="card loc-home-card">
           <div className="loc-home-eyebrow">Current Localization</div>
-          <h2 style={{ marginTop: 0 }}>Continue current item</h2>
+          <h2 style={{ marginTop: 0 }}>
+            Continue current item
+            <LocalizationHelpButton helpId="loc-home-current" content={LOCALIZATION_HOME_HELP.current} />
+          </h2>
+          <LocalizationHelpAllToggle />
           <div className="loc-home-support">
             Keep the current item, outputs, and advanced tools obvious while the editor stays open
             below.
@@ -2126,7 +2169,11 @@ function LocalizationStudioHome({
             <div className="loc-home-eyebrow">Main Workflow</div>
             <div className="loc-home-hero-top">
               <div>
-                <h2 style={{ marginTop: 0, marginBottom: 8 }}>Localization Studio</h2>
+                <h2 style={{ marginTop: 0, marginBottom: 8 }}>
+                  Localization Studio
+                  <LocalizationHelpButton helpId="loc-home-studio" content={LOCALIZATION_HOME_HELP.studio} />
+                </h2>
+                <LocalizationHelpAllToggle />
                 <div className="loc-home-support">
                   The main source-to-output workspace for captions, translation, voice planning,
                   dubbing, mix/mux, and deliverable review. Import is only the first step, not the
@@ -2193,7 +2240,10 @@ function LocalizationStudioHome({
           <div className="loc-home-layout">
             <div className="card loc-home-card">
               <div className="loc-home-eyebrow">Current Item</div>
-              <h2 style={{ marginTop: 0 }}>Continue localization</h2>
+              <h2 style={{ marginTop: 0 }}>
+                Continue localization
+                <LocalizationHelpButton helpId="loc-home-current" content={LOCALIZATION_HOME_HELP.current} />
+              </h2>
               {currentHomeItem ? (
                 <div className="loc-home-item-card">
                   <div className="loc-home-item-header">
@@ -2293,7 +2343,10 @@ function LocalizationStudioHome({
 
             <div className="card loc-home-card">
               <div className="loc-home-eyebrow">Start New Work</div>
-              <h2 style={{ marginTop: 0 }}>Import and review</h2>
+              <h2 style={{ marginTop: 0 }}>
+                Import and review
+                <LocalizationHelpButton helpId="loc-home-import" content={LOCALIZATION_HOME_HELP.import} />
+              </h2>
               <div className="loc-home-support">
                 Import only adds media to the Localization workspace. VoxVulgi will wait for your
                 explicit start command before ASR, translation, or speaker-label jobs begin.
@@ -2433,7 +2486,10 @@ function LocalizationStudioHome({
 
             <div className="card loc-home-card">
               <div className="loc-home-eyebrow">Workflow</div>
-              <h2 style={{ marginTop: 0 }}>What happens here</h2>
+              <h2 style={{ marginTop: 0 }}>
+                What happens here
+                <LocalizationHelpButton helpId="loc-home-workflow" content={LOCALIZATION_HOME_HELP.workflow} />
+              </h2>
               <div className="loc-home-support">
                 Every step below is shown so you can see exactly what's happening — nothing is
                 hidden.
@@ -2468,7 +2524,10 @@ function LocalizationStudioHome({
 
             <div className="card loc-home-card">
               <div className="loc-home-eyebrow">Outputs</div>
-              <h2 style={{ marginTop: 0 }}>Preview and deliverables</h2>
+              <h2 style={{ marginTop: 0 }}>
+                Preview and deliverables
+                <LocalizationHelpButton helpId="loc-home-outputs" content={LOCALIZATION_HOME_HELP.outputs} />
+              </h2>
               <div className="loc-home-support">
                 Source media, working artifacts, and deliverables should stay obvious from the
                 first Localization screen.
@@ -2522,7 +2581,10 @@ function LocalizationStudioHome({
             >
               <div>
                 <div className="loc-home-eyebrow">Recent Work</div>
-                <h2 style={{ marginTop: 0, marginBottom: 6 }}>Recent localization items</h2>
+                <h2 style={{ marginTop: 0, marginBottom: 6 }}>
+                  Recent localization items
+                  <LocalizationHelpButton helpId="loc-home-recent" content={LOCALIZATION_HOME_HELP.recent} />
+                </h2>
                 <div className="loc-home-support">
                   Open items directly into the editor, run contract, outputs library, or advanced
                   tools without bouncing through another window first.
