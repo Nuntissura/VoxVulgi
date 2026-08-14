@@ -15,6 +15,12 @@ param(
   # Directory holding the wetext ModelScope cache (pengzhendong/wetext + .msc/.mdl/.mv)
   # that CosyVoice's text-normalizer needs offline.
   [Parameter(Mandatory = $true)][string]$WetextDir,
+  # Resume only the guarded cleanup, artifact verification, and manifest write after ISCC
+  # already reported success but a prior wrapper was interrupted before finalization.
+  [switch]$FinalizeExistingArtifacts,
+  # Required with -FinalizeExistingArtifacts. The log tail must contain both ISCC's success
+  # marker and the exact versioned setup path being finalized.
+  [string]$SuccessfulCompileLog,
   # Optional explicit ISCC.exe path; auto-discovered when omitted.
   [string]$IsccPath
 )
@@ -33,6 +39,21 @@ function Find-Iscc {
   $cmd = Get-Command ISCC.exe -ErrorAction SilentlyContinue
   if ($cmd) { return $cmd.Source }
   throw "ISCC.exe (Inno Setup 6 compiler) not found. Install Inno Setup 6 (winget install JRSoftware.InnoSetup) or pass -IsccPath."
+}
+
+function Remove-InstallerJunctionOnly {
+  param([Parameter(Mandatory = $true)][string]$Path)
+  $item = Get-Item -LiteralPath $Path -Force -ErrorAction Stop
+  if (-not $item.PSIsContainer -or -not ($item.Attributes -band [System.IO.FileAttributes]::ReparsePoint) -or $item.LinkType -ne 'Junction') {
+    throw "Refusing link-only cleanup for non-junction installer staging entry: $Path"
+  }
+  # Windows PowerShell 5.1's Remove-Item prompts for -Recurse on a junction whose target is
+  # non-empty. Never recurse into these validated payload roots. Directory.Delete removes only
+  # the reparse-point directory; the target and all target content remain untouched.
+  [System.IO.Directory]::Delete($item.FullName)
+  if (Test-Path -LiteralPath $Path) {
+    throw "Installer staging junction cleanup did not remove the link: $Path"
+  }
 }
 
 $repoRoot = (Resolve-Path (Join-Path $PSScriptRoot '..\..')).Path
@@ -96,6 +117,18 @@ $junctionTargets = [ordered]@{
   v = (Resolve-Path -LiteralPath $VoiceBackendsDir).Path
   w = (Resolve-Path -LiteralPath $WetextDir).Path
 }
+$baseName = "VoxVulgi_{0}_x64_offline_full_setup" -f $AppVersion
+if ($FinalizeExistingArtifacts) {
+  if (-not $SuccessfulCompileLog -or -not (Test-Path -LiteralPath $SuccessfulCompileLog -PathType Leaf)) {
+    throw "-FinalizeExistingArtifacts requires -SuccessfulCompileLog pointing to the completed ISCC stdout log."
+  }
+  $expectedCompiledSetup = [System.IO.Path]::GetFullPath((Join-Path $OutputDir "$baseName.exe"))
+  $compileLogTail = Get-Content -LiteralPath $SuccessfulCompileLog -Tail 20 -ErrorAction Stop
+  if (-not ($compileLogTail | Select-String -SimpleMatch 'Successful compile (') -or
+      -not ($compileLogTail | Select-String -SimpleMatch $expectedCompiledSetup)) {
+    throw "Finalize refused: compile log tail does not prove successful ISCC output at $expectedCompiledSetup"
+  }
+}
 $buildMutex = [System.Threading.Mutex]::new($false, 'Local\VoxVulgiOfflineInstallerBuild')
 $buildMutexAcquired = $false
 try {
@@ -121,55 +154,58 @@ try {
       if (-not ($_.Attributes -band [System.IO.FileAttributes]::ReparsePoint)) {
         throw "Refusing to clean non-junction installer staging entry: $($_.FullName)"
       }
-      Remove-Item -LiteralPath $_.FullName -Force
+      Remove-InstallerJunctionOnly -Path $_.FullName
     }
   } else {
     New-Item -ItemType Directory -Path $junctionRoot | Out-Null
   }
-  foreach ($entry in $junctionTargets.GetEnumerator()) {
-    New-Item -ItemType Junction -Path (Join-Path $junctionRoot $entry.Key) -Target $entry.Value | Out-Null
-  }
-  $compilePayloadDir = Join-Path $junctionRoot 'p'
-  $compileCosyVoiceDir = Join-Path $junctionRoot 'c'
-  $compileVoiceBackendsDir = Join-Path $junctionRoot 'v'
-  $compileWetextDir = Join-Path $junctionRoot 'w'
-  $baseName = "VoxVulgi_{0}_x64_offline_full_setup" -f $AppVersion
-  Get-ChildItem -LiteralPath $OutputDir -File -ErrorAction Stop | Where-Object {
-    $_.Name -eq "$baseName.exe" -or
-    $_.Name -eq "$baseName.artifacts.json" -or
-    $_.Name -like "$baseName-*.bin"
-  } | ForEach-Object {
-    Remove-Item -LiteralPath $_.FullName -Force
-  }
+  if ($FinalizeExistingArtifacts) {
+    Write-Host "Finalizing existing ISCC artifacts without recompiling: $baseName"
+  } else {
+    foreach ($entry in $junctionTargets.GetEnumerator()) {
+      New-Item -ItemType Junction -Path (Join-Path $junctionRoot $entry.Key) -Target $entry.Value | Out-Null
+    }
+    $compilePayloadDir = Join-Path $junctionRoot 'p'
+    $compileCosyVoiceDir = Join-Path $junctionRoot 'c'
+    $compileVoiceBackendsDir = Join-Path $junctionRoot 'v'
+    $compileWetextDir = Join-Path $junctionRoot 'w'
+    Get-ChildItem -LiteralPath $OutputDir -File -ErrorAction Stop | Where-Object {
+      $_.Name -eq "$baseName.exe" -or
+      $_.Name -eq "$baseName.artifacts.json" -or
+      $_.Name -like "$baseName-*.bin"
+    } | ForEach-Object {
+      Remove-Item -LiteralPath $_.FullName -Force
+    }
 
-  Write-Host "ISCC:       $iscc"
-  Write-Host "ISS:        $iss"
-  Write-Host "PayloadDir: $PayloadDir"
-  Write-Host "CosyVoice:  $CosyVoiceVenvDir"
-  Write-Host "Backends:   $VoiceBackendsDir"
-  Write-Host "SetupExe:   $SetupExe"
-  Write-Host "OutputDir:  $OutputDir"
-  Write-Host "AppVersion: $AppVersion"
-  Write-Host "Kokoro triplet verified as real files under snapshot $sha"
-  Write-Host ""
-  Write-Host "Compiling (this is large: multi-GB payload -> setup.exe plus required .bin slices; expect many minutes)..."
+    Write-Host "ISCC:       $iscc"
+    Write-Host "ISS:        $iss"
+    Write-Host "PayloadDir: $PayloadDir"
+    Write-Host "CosyVoice:  $CosyVoiceVenvDir"
+    Write-Host "Backends:   $VoiceBackendsDir"
+    Write-Host "SetupExe:   $SetupExe"
+    Write-Host "OutputDir:  $OutputDir"
+    Write-Host "AppVersion: $AppVersion"
+    Write-Host "Kokoro triplet verified as real files under snapshot $sha"
+    Write-Host ""
+    Write-Host "Compiling (this is large: multi-GB payload -> setup.exe plus required .bin slices; expect many minutes)..."
 
-  & $iscc `
-    "/DAppVersion=$AppVersion" `
-    "/DPayloadDir=$compilePayloadDir" `
-    "/DCosyVoiceVenvDir=$compileCosyVoiceDir" `
-    "/DVoiceBackendsDir=$compileVoiceBackendsDir" `
-    "/DSetupExe=$SetupExe" `
-    "/DWetextDir=$compileWetextDir" `
-    "/DOutputDir=$OutputDir" `
-    $iss
-  if ($LASTEXITCODE -ne 0) { throw "ISCC failed with exit code $LASTEXITCODE" }
+    & $iscc `
+      "/DAppVersion=$AppVersion" `
+      "/DPayloadDir=$compilePayloadDir" `
+      "/DCosyVoiceVenvDir=$compileCosyVoiceDir" `
+      "/DVoiceBackendsDir=$compileVoiceBackendsDir" `
+      "/DSetupExe=$SetupExe" `
+      "/DWetextDir=$compileWetextDir" `
+      "/DOutputDir=$OutputDir" `
+      $iss
+    if ($LASTEXITCODE -ne 0) { throw "ISCC failed with exit code $LASTEXITCODE" }
+  }
 } finally {
   if ($buildMutexAcquired) {
     foreach ($entry in $junctionTargets.GetEnumerator()) {
       $junction = Join-Path $junctionRoot $entry.Key
       if (Test-Path -LiteralPath $junction) {
-        Remove-Item -LiteralPath $junction -Force
+        Remove-InstallerJunctionOnly -Path $junction
       }
     }
     if ((Test-Path -LiteralPath $junctionRoot) -and -not (Get-ChildItem -LiteralPath $junctionRoot -Force)) {
