@@ -1,0 +1,41 @@
+{
+  "wp": "WP-0167",
+  "status": "DONE",
+  "verified_at": "2026-08-14T15:49:00+02:00",
+  "app_version": "0.1.139",
+  "agent_headless": true,
+  "ui_audit": {
+    "total_candidates": 119,
+    "returned_elements": 119,
+    "truncated": false,
+    "missing_accessible_name_count": 0,
+    "summary_tiles": 5,
+    "all_roles_button": true,
+    "all_named": true,
+    "all_safe_click": true
+  },
+  "tile_scroll_receipts": [
+    {"test_id": "diagnostics-summary-build", "target_heading": "Build", "scroll_top": 827, "target_in_viewport": true, "target_y": 156},
+    {"test_id": "diagnostics-summary-voice", "target_heading": "Voice cloning packages (one-click)", "scroll_top": 39528, "target_in_viewport": true, "target_y": 156},
+    {"test_id": "diagnostics-summary-ffmpeg", "target_heading": "Tools", "scroll_top": 31428, "target_in_viewport": true, "target_y": 156},
+    {"test_id": "diagnostics-summary-storage", "target_heading": "Storage", "scroll_top": 44259, "target_in_viewport": true, "target_y": 156},
+    {"test_id": "diagnostics-summary-failures", "target_heading": "Recent failures", "scroll_top": 46803, "target_in_viewport": true, "target_y": 156}
+  ],
+  "build": {
+    "log": "product/desktop/build_target/logs/build_desktop_target_20260814-152500_0_1_139.log",
+    "offline_bundle_id": "offline_full_win64_20260814_082842",
+    "desktop_exe_sha256": "FCC25230B12303029EE20F2D8F22B601322ACB07AFFEEAD6BF1C1A62670523F7",
+    "nsis_sha256": "51FCCE032BEBD8D850ED5A65D58FFC2D6D332B4C18E7CA359CAF9D6A77560D60"
+  },
+  "snapshots": [
+    {"path": "governance/snapshots/WP-0167_build_0_1_139/diagnostics_summary_top_1786715223728.png", "sha256": "04F373985F85C1FEA4ADC1CC177D1161414D50D4700B733DC2143F081EDDD293"},
+    {"path": "governance/snapshots/WP-0167_build_0_1_139/diagnostics_storage_after_tile_click_1786715227129.png", "sha256": "FFFC68BD99340A3ECAE49EF10667A357050FE1C4F598B29A39557770EC180267"}
+  ],
+  "shutdown": {
+    "tauri_close_resolved": true,
+    "pid": 57824,
+    "process_alive_after_close": false,
+    "json_sidecar_exists_after_close": false,
+    "port_sidecar_exists_after_close": false
+  }
+}

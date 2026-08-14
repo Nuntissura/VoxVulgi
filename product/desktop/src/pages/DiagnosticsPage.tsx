@@ -2522,32 +2522,32 @@ export function DiagnosticsPage({ visible = true }: { visible?: boolean }) {
       {notice ? <div className="card">{notice}</div> : null}
 
       <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(180px, 1fr))", gap: 10, marginBottom: 16 }}>
-        <div className="card" style={{ margin: 0, textAlign: "center", cursor: "pointer" }} onClick={() => document.getElementById("diag-build")?.scrollIntoView({ behavior: "smooth" })}>
+        <button type="button" className="card diag-summary-tile" data-testid="diagnostics-summary-build" data-agent-safe-action="true" aria-label="App version — go to Build details" style={{ margin: 0, textAlign: "center", cursor: "pointer" }} onClick={() => document.getElementById("diag-build")?.scrollIntoView({ behavior: "smooth" })}>
           <div style={{ fontSize: 12, textTransform: "uppercase", opacity: 0.6, marginBottom: 4 }}>App version</div>
           <div style={{ fontWeight: 700, fontSize: 18 }}>{info?.app_version ?? "..."}</div>
-        </div>
-        <div className="card" style={{ margin: 0, textAlign: "center", cursor: "pointer" }} onClick={() => document.getElementById("diag-phase2")?.scrollIntoView({ behavior: "smooth" })}>
+        </button>
+        <button type="button" className="card diag-summary-tile" data-testid="diagnostics-summary-voice" data-agent-safe-action="true" aria-label="Voice packages — go to Voice cloning package details" style={{ margin: 0, textAlign: "center", cursor: "pointer" }} onClick={() => document.getElementById("diag-phase2")?.scrollIntoView({ behavior: "smooth" })}>
           <div style={{ fontSize: 12, textTransform: "uppercase", opacity: 0.6, marginBottom: 4 }}>Voice packages</div>
           <div style={{ fontWeight: 700, fontSize: 18, color: phase2HasActive ? "#92400e" : phase2Steps.length > 0 && phase2Steps.every((s: any) => s?.status === "succeeded") ? "#166534" : undefined }}>
             {phase2SummaryLabel}
           </div>
-        </div>
-        <div className="card" style={{ margin: 0, textAlign: "center", cursor: "pointer" }} onClick={() => document.getElementById("diag-tools")?.scrollIntoView({ behavior: "smooth" })}>
+        </button>
+        <button type="button" className="card diag-summary-tile" data-testid="diagnostics-summary-ffmpeg" data-agent-safe-action="true" aria-label="FFmpeg — go to Tools details" style={{ margin: 0, textAlign: "center", cursor: "pointer" }} onClick={() => document.getElementById("diag-tools")?.scrollIntoView({ behavior: "smooth" })}>
           <div style={{ fontSize: 12, textTransform: "uppercase", opacity: 0.6, marginBottom: 4 }}>FFmpeg</div>
           <div style={{ fontWeight: 700, fontSize: 18, color: ffmpegSummaryLabel === "Ready" ? "#166534" : ffmpegSummaryLabel === "Missing" ? "#dc2626" : undefined }}>
             {ffmpegSummaryLabel}
           </div>
-        </div>
-        <div className="card" style={{ margin: 0, textAlign: "center", cursor: "pointer" }} onClick={() => document.getElementById("diag-storage")?.scrollIntoView({ behavior: "smooth" })}>
+        </button>
+        <button type="button" className="card diag-summary-tile" data-testid="diagnostics-summary-storage" data-agent-safe-action="true" aria-label="Storage — go to Storage details" style={{ margin: 0, textAlign: "center", cursor: "pointer" }} onClick={() => document.getElementById("diag-storage")?.scrollIntoView({ behavior: "smooth" })}>
           <div style={{ fontSize: 12, textTransform: "uppercase", opacity: 0.6, marginBottom: 4 }}>Storage</div>
           <div style={{ fontWeight: 700, fontSize: 18 }}>{storageSummaryLabel}</div>
-        </div>
-        <div className="card" style={{ margin: 0, textAlign: "center", cursor: "pointer" }} onClick={() => document.getElementById("diag-failures")?.scrollIntoView({ behavior: "smooth" })}>
+        </button>
+        <button type="button" className="card diag-summary-tile" data-testid="diagnostics-summary-failures" data-agent-safe-action="true" aria-label="Recent failures — go to Recent failures details" style={{ margin: 0, textAlign: "center", cursor: "pointer" }} onClick={() => document.getElementById("diag-failures")?.scrollIntoView({ behavior: "smooth" })}>
           <div style={{ fontSize: 12, textTransform: "uppercase", opacity: 0.6, marginBottom: 4 }}>Recent failures</div>
           <div style={{ fontWeight: 700, fontSize: 18, color: recentFailures.length > 0 ? "#dc2626" : "#166534" }}>
             {recentFailures.length}
           </div>
-        </div>
+        </button>
       </div>
 
       <div className="card">

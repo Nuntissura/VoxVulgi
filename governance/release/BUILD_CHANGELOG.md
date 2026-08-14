@@ -1162,3 +1162,11 @@ This changelog tracks desktop installer builds produced by `governance/scripts/b
 - Artifacts:
   - `product/desktop/build_target/Current/release/bundle/nsis/VoxVulgi_0.1.138_x64-setup.exe`
 - Notes: Add authoritative runtime fields to visual debugger dumps; re-prove bridge PID sidecar lifecycle and WP-0298 headless diagnostics on the resulting artifact.
+
+## 0.1.139 - 2026-08-14T13:45:26Z
+- Work Packets: `WP-0167`
+- Commit: `96317e8`
+- Offline Bundle ID: `offline_full_win64_20260814_082842`
+- Artifacts:
+  - `product/desktop/build_target/Current/release/bundle/nsis/VoxVulgi_0.1.139_x64-setup.exe`
+- Notes: Make Diagnostics summary tiles semantic, accessible, and safe for headless scroll verification while preserving existing live state.

@@ -969,6 +969,12 @@ code {
     inset 0 -1px 0 rgba(116, 126, 137, 0.42);
 }
 
+.diag-summary-tile {
+  width: 100%;
+  color: inherit;
+  font: inherit;
+}
+
 .card::before {
   content: "";
   position: absolute;
