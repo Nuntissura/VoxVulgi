@@ -3,7 +3,7 @@
 ## Metadata
 - ID: WP-0289
 - Owner: assistant (implementation) + operator (install + acceptance run)
-- Status: BACKLOG
+- Status: BLOCKED
 - Created: 2026-08-01
 - Depends on: WP-0287 (research basis), WP-0288 (frozen per-stage defaults + backup registry)
 - Refinement: `WP-0289_REVISED_STACK_FIRST_DUBBED_DELIVERABLE_THROUGH_INSTALLED_APP_v1_REFINEMENT.md`

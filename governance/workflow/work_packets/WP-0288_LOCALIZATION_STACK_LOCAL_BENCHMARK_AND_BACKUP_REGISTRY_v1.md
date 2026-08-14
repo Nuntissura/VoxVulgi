@@ -3,7 +3,7 @@
 ## Metadata
 - ID: WP-0288
 - Owner: assistant (execution) + operator (listening/judgement calls on voice quality)
-- Status: IN_PROGRESS
+- Status: BLOCKED
 - Created: 2026-08-01
 - Depends on: WP-0287 (research basis: `governance/spec/LOCALIZATION_STACK_LANDSCAPE_2026_07.md`)
 - Blocks: WP-0289 (implementation freezes its defaults from this packet's results)

@@ -49,3 +49,4 @@ Out of scope:
 ## Status updates
 
 - 2026-04-26: Created during the bridge/visual debugger investigation. Implementation immediately follows.
+- 2026-08-14: Current packaged-app bridge verification on v0.1.133 confirmed a valid live PID/port sidecar and exactly one dump plus one snapshot for one request each. A close-window message to the agent-headless process did not terminate it within 10 seconds, so graceful-exit sidecar removal remains unproven; the packet stays `IN_PROGRESS`. Evidence is recorded under WP-0307.

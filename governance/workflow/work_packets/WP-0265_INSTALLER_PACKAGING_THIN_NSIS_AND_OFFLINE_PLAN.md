@@ -2,7 +2,7 @@
 
 ## Status
 
-IN_PROGRESS (operator-requested 2026-07-08; thin build 0.1.91 shipped; full-quality single-exe OFFLINE installer built + component-verified offline this session, pending final clean-machine install proof)
+BLOCKED (thin build 0.1.91 shipped; full-quality single-exe OFFLINE installer built + component-verified; pending final clean-machine install proof)
 
 ## Owner
 

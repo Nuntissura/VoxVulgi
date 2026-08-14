@@ -63,3 +63,4 @@ Out of scope (explicitly deferred to later WPs if needed):
 ## Status updates
 
 - 2026-04-26: Created and implementation started.
+- 2026-08-14: Current packaged-app bridge verification on v0.1.133 produced exactly one dump and one snapshot, but the dump contained only `timestamp_ms`, `url`, `viewport`, `content_scroll_top`, `localstorage_voxvulgi`, `mounted_section_ids`, and `console_buffer`. Required `app_version`, `current_page`, `editor_item_id`, and `safe_mode` fields were absent, so the packet remains `IN_PROGRESS`. Evidence is recorded under WP-0307.

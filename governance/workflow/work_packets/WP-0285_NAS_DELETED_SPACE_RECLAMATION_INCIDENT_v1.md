@@ -9,7 +9,7 @@ updated_at: 2026-07-30
 # WP-0285 — NAS deleted-space reclamation incident and evidence handoff
 
 - Owner: Codex
-- Status: IN_PROGRESS — OPERATOR REVIEW
+- Status: BLOCKED — OPERATOR REVIEW
 - Created: 2026-07-29
 - Dependencies: `WP-0277`
 - Task-board row: `WP-0285`

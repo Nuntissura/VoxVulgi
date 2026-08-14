@@ -3,7 +3,7 @@
 ## Metadata
 - ID: WP-0145
 - Owner: Codex
-- Status: IN_PROGRESS
+- Status: BLOCKED
 - Created: 2026-03-12
 - Target milestone: Post-0.1.6 smoke regression recovery
 
