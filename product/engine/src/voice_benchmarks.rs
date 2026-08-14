@@ -1653,6 +1653,7 @@ mod tests {
     fn discover_manifest_candidates_reads_base_and_variant_manifests() {
         let dir = tempfile::tempdir().expect("tempdir");
         let paths = AppPaths::new(dir.path().to_path_buf());
+        db::ensure_schema(&paths).expect("canonical absence fixture schema");
         let item_dir = paths.derived_item_dir("item-1");
         let base_dir = item_dir.join("tts_preview").join("dub_voice_preserving_v1");
         let variant_dir = base_dir.join("variants").join("alt_a");

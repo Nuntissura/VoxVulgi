@@ -3263,9 +3263,15 @@ CREATE TABLE IF NOT EXISTS job (
     #[test]
     fn v39_preserves_observations_and_accepts_distinct_slow_state() {
         let conn = Connection::open_in_memory().expect("open");
-        apply_base_schema_v1(&conn).expect("base");
+        for step in MIGRATION_STEPS.iter().filter(|step| step.version <= 38) {
+            (step.apply)(&conn).expect("build complete v38 fixture");
+            conn.pragma_update(None, "user_version", step.version)
+                .expect("advance fixture version");
+        }
         conn.execute_batch(
             r#"
+DROP INDEX IF EXISTS idx_media_availability_refresh;
+DROP TABLE media_availability_observation;
 CREATE TABLE media_availability_observation (
   path TEXT PRIMARY KEY,
   state TEXT NOT NULL CHECK(state IN ('present','missing','unreachable')),

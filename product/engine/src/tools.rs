@@ -2468,57 +2468,6 @@ fn load_provider_installed_identity(paths: &AppPaths) -> Result<Option<ProviderI
     }
 }
 
-fn invalidate_provider_installed_identity(paths: &AppPaths, operation: &str) -> Result<()> {
-    if !matches!(operation, "invalidate" | "uninstall") {
-        return Err(EngineError::InstallFailed(
-            "provider identity invalidation operation is invalid".to_string(),
-        ));
-    }
-    let mut conn = crate::db::open(paths)?;
-    crate::db::migrate(&conn)?;
-    let tx = conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
-    let identity = match tx.query_row(
-        "SELECT lineage_attempt_id,commit_nonce FROM provider_installed_identity WHERE singleton=1",
-        [],
-        |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)),
-    ) {
-        Ok(value) => Some(value),
-        Err(rusqlite::Error::QueryReturnedNoRows) => None,
-        Err(error) => return Err(error.into()),
-    };
-    let Some((attempt_id, commit_nonce)) = identity else {
-        return Ok(());
-    };
-    tx.execute(
-        "INSERT INTO provider_installed_identity_mutation_guard(
-           singleton,lineage_attempt_id,commit_nonce,operation,created_at_ms
-         ) VALUES(1,?1,?2,?3,?4)",
-        rusqlite::params![attempt_id, commit_nonce, operation, now_ms()],
-    )?;
-    let deleted_identity = tx.execute(
-        "DELETE FROM provider_installed_identity
-         WHERE singleton=1 AND lineage_attempt_id=?1 AND commit_nonce=?2",
-        rusqlite::params![attempt_id, commit_nonce],
-    )?;
-    let deleted_lineage = tx.execute(
-        "DELETE FROM provider_install_lineage
-         WHERE attempt_id=?1 AND commit_nonce=?2 AND phase='committed'",
-        rusqlite::params![attempt_id, commit_nonce],
-    )?;
-    if deleted_identity != 1 || deleted_lineage != 1 {
-        return Err(EngineError::InstallFailed(
-            "provider governed invalidation lost its exact identity lineage".to_string(),
-        ));
-    }
-    tx.execute(
-        "DELETE FROM provider_installed_identity_mutation_guard WHERE singleton=1",
-        [],
-    )?;
-    tx.commit()?;
-    clear_provider_node_modules_process_attestation(&paths.youtube_po_provider_server_dir());
-    Ok(())
-}
-
 fn managed_provider_replacement_archive_root(paths: &AppPaths, attempt_id: &str) -> Result<PathBuf> {
     if !valid_provider_attempt_id(attempt_id) {
         return Err(EngineError::InstallFailed(
@@ -8374,10 +8323,6 @@ mod tests {
             1
         );
         drop(conn);
-        invalidate_provider_installed_identity(&paths, "uninstall").unwrap();
-        assert!(load_provider_installed_identity(&paths).unwrap().is_none());
-        commit_adopted_provider_identity(&paths, independently_verified).unwrap();
-        assert!(load_provider_installed_identity(&paths).unwrap().is_some());
         std::fs::write(
             paths.youtube_po_provider_dir().join("tampered_extra"),
             b"tampered",

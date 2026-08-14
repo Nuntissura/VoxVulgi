@@ -61,6 +61,7 @@ fn replace_file(src: &Path, dst: &Path) -> std::io::Result<()> {
 #[cfg(windows)]
 fn replace_file(src: &Path, dst: &Path) -> std::io::Result<()> {
     use std::ffi::OsStr;
+    use std::io::{Error, ErrorKind};
     use std::os::windows::ffi::OsStrExt;
     use windows_sys::Win32::Storage::FileSystem::{
         MoveFileExW, MOVEFILE_REPLACE_EXISTING, MOVEFILE_WRITE_THROUGH,
@@ -70,6 +71,27 @@ fn replace_file(src: &Path, dst: &Path) -> std::io::Result<()> {
         value.encode_wide().chain(std::iter::once(0)).collect()
     }
 
+    fn verbatim_sibling(path: &Path) -> std::io::Result<PathBuf> {
+        let parent = path.parent().ok_or_else(|| {
+            Error::new(
+                ErrorKind::InvalidInput,
+                format!("cannot replace path without parent: {}", path.display()),
+            )
+        })?;
+        let file_name = path.file_name().ok_or_else(|| {
+            Error::new(
+                ErrorKind::InvalidInput,
+                format!("cannot replace path without file name: {}", path.display()),
+            )
+        })?;
+        Ok(std::fs::canonicalize(parent)?.join(file_name))
+    }
+
+    // Rust's filesystem calls accept extended-length Windows paths, but this helper invokes
+    // MoveFileExW directly. Resolve the existing parent first so both sibling paths carry the
+    // verbatim `\\?\` prefix and do not fall back to the legacy MAX_PATH boundary.
+    let src = verbatim_sibling(src)?;
+    let dst = verbatim_sibling(dst)?;
     let src_wide = wide(src.as_os_str());
     let dst_wide = wide(dst.as_os_str());
     let ok = unsafe {
@@ -133,5 +155,23 @@ mod tests {
             .map(|entry| entry.file_name().to_string_lossy().to_string())
             .collect();
         assert_eq!(entries, vec!["config.txt".to_string()]);
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn atomic_write_text_supports_extended_length_windows_paths() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let mut parent = dir.path().to_path_buf();
+        for index in 0..6 {
+            parent.push(format!("extended_length_segment_{index:02}_abcdefghij"));
+        }
+        std::fs::create_dir_all(&parent).expect("long parent");
+        let path = parent.join("atomic_receipt.json");
+        assert!(path.to_string_lossy().encode_utf16().count() >= 260);
+
+        atomic_write_text(&path, "first\n").expect("initial long-path write");
+        atomic_write_text(&path, "second\n").expect("replacement long-path write");
+
+        assert_eq!(std::fs::read_to_string(path).expect("read"), "second\n");
     }
 }
