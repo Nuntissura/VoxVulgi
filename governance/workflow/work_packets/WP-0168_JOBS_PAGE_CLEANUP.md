@@ -3,7 +3,7 @@
 ## Metadata
 - ID: WP-0168
 - Owner: Codex
-- Status: REVIEW
+- Status: DONE
 - Created: 2026-04-08
 - Target milestone: UX Polish
 
@@ -36,3 +36,4 @@ Out of scope:
 ## Test / verification plan
 - Visual snapshot of Jobs page with jobs in various states.
 - Verify developer toggle hides test controls.
+- 2026-08-14: DONE on governed v0.1.138. Settled visual inspection and a complete 222-element semantic audit proved the default developer-control hiding, source-title presentation, primary/More action split, and readable queue state; cleanup preview and confirmation staging were verified directly in the current handler. Proof: `product/desktop/build_target/tool_artifacts/wp_runs/WP-0168/20260814_final/`.

@@ -1,0 +1,26 @@
+{
+  "wp": "WP-0168",
+  "status": "DONE",
+  "verified_at": "2026-08-14T14:16:00Z",
+  "app_version": "0.1.138",
+  "ui_audit": {
+    "total_candidates": 222,
+    "returned_elements": 222,
+    "truncated": false,
+    "missing_accessible_name_count": 0,
+    "run_test_job_visible_by_default": false,
+    "developer_disclosure_present": true,
+    "source_titles_present": true,
+    "primary_actions_present": true,
+    "more_disclosures_present": true
+  },
+  "cleanup_code_inspection": {
+    "preview_before_mutation": true,
+    "terminal_log_artifact_cache_confirmation": true,
+    "managed_output_confirmation": true,
+    "external_output_confirmation": true,
+    "live_cleanup_executed": false
+  },
+  "snapshot": "governance/snapshots/WP-0171_build_0_1_138/jobs_confirmed_1786712911289.png",
+  "snapshot_sha256": "1BC1D1FA2F7749EE8110EFC7B6B3C1C94ECF733ED2495E630AADB8224E1D54B8"
+}
