@@ -1,0 +1,18 @@
+{
+  "wp": "WP-0171",
+  "status": "DONE",
+  "verified_at": "2026-08-14T14:08:35Z",
+  "app": {"version": "0.1.138", "pid": 61372, "bridge_port": 54220, "agent_headless": true, "priority": "BelowNormal"},
+  "routes": [
+    {"requested": "localization", "observed": "localization", "snapshot": "localization_1786712845786.png", "sha256": "862EE245104E4D0AF165CC1B24C18953B04A7A88F9F6FCE2C292304178BE74B9"},
+    {"requested": "video_ingest", "observed": "video_ingest", "snapshot": "video_ingest_1786712847910.png", "sha256": "65ADAC12D22D45C0C7FBCC49BC826DCE0B5567597767DB33516E895E3DF603AD"},
+    {"requested": "instagram_archive", "observed": "instagram_archive", "snapshot": "instagram_archive_1786712848581.png", "sha256": "BDC093C6DB00F589FBF4EB765238184BEBF130DC294820508DEC29C87EE332AF"},
+    {"requested": "image_archive", "observed": "image_archive", "snapshot": "image_archive_1786712849302.png", "sha256": "B68F19769583E5E38C9FA137B1E858A79E126D3237F916A0EDC49AA2B1BD6459"},
+    {"requested": "media_library", "observed": "media_library", "snapshot": "media_library_1786712851911.png", "sha256": "3881CCCA5118C23AEAFFB9EA737357EF31185CD9781B8A8C27108E0B9FE0D84B"},
+    {"requested": "jobs", "observed": "jobs", "snapshot": "jobs_confirmed_1786712911289.png", "sha256": "1BC1D1FA2F7749EE8110EFC7B6B3C1C94ECF733ED2495E630AADB8224E1D54B8"},
+    {"requested": "diagnostics", "observed": "diagnostics", "snapshot": "diagnostics_1786712854077.png", "sha256": "13F90B9A2E13AD51456F4F0075868181E90B41811FBA34A9798FECA4563CFAC6"},
+    {"requested": "options", "observed": "options", "snapshot": "options_confirmed_1786712868616.png", "sha256": "3BD04FDFF88B07F6ABDF49C96827521FC73F645CF81B35CF1BDA6A3DA0809B6E"}
+  ],
+  "focus": {"app_pid": 61372, "foreground_pid": 8292, "app_owned_foreground": false},
+  "exit": {"tauri_window_close_resolved": true, "pid_alive_after_three_seconds": false, "agent_bridge_json_exists": false, "agent_bridge_port_txt_exists": false}
+}

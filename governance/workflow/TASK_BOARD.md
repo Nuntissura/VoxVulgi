@@ -185,7 +185,7 @@ This is the single source of truth for work status.
 | WP-0168 | Jobs Page Cleanup | REVIEW | Codex | Test job behind Developer tools toggle, secondary actions in More… dropdown, tree indentation, paused state explanation. |
 | WP-0169 | Options Page Consolidation | REVIEW | Codex | 4 feature-root cards replaced with single table (Feature/Path/Status/Actions), auth UX improved with help text and clear button. |
 | WP-0170 | Media Library Search and Filters | REVIEW | Codex | Added Source filter (YouTube/Instagram/Local) and Sort by (Date/Title) to existing search+type+view+group controls. |
-| WP-0171 | Headless Agent Bridge | REVIEW | Codex | Localhost HTTP server with /agent/navigate, /agent/snapshot, /agent/state, /agent/health; port file discovery; frontend event listeners; AGENTS.md documented. |
+| WP-0171 | Headless Agent Bridge | DONE | Codex | Governed v0.1.138 headless proof navigated and state-confirmed all eight routes, directly inspected their settled snapshots, confirmed the app did not own foreground focus, and verified graceful sidecar cleanup. Proof: `product/desktop/build_target/tool_artifacts/wp_runs/WP-0171/20260814_final/`. |
 | WP-0172 | Localization Studio Built-in Manual | REVIEW | Codex | In-context (?) help on 18 section headers with What/When/Steps/Concepts; "Show all help" toggle for learning mode. |
 | WP-0173 | Localization Studio Keyboard Shortcuts | REVIEW | Codex | Ctrl+Enter run, Ctrl+Shift+E export, Ctrl+Shift+R refresh, Ctrl+1..5 section jumps; visible reference in Workflow Map. |
 | WP-0174 | Batch-on-Import Discoverability | REVIEW | Codex | Auto-processing toggles surfaced in Localization Studio Import card with immediate save; Source language label improved. |

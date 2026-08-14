@@ -3,7 +3,7 @@
 ## Metadata
 - ID: WP-0171
 - Owner: Codex
-- Status: REVIEW
+- Status: DONE
 - Created: 2026-04-08
 - Target milestone: Tooling
 
@@ -40,3 +40,4 @@ Out of scope:
 - From a terminal, use `curl` to navigate to each page and capture snapshots while the operator uses another application in the foreground.
 - Verify no focus stealing occurs during the entire sequence.
 - Verify port file is created on startup and removed on exit.
+- 2026-08-14: DONE on governed v0.1.138. All eight documented routes were navigated and state-confirmed headlessly, settled screenshots were directly inspected, the app did not own foreground focus, and exact Tauri closure removed both bridge sidecars. Proof: `product/desktop/build_target/tool_artifacts/wp_runs/WP-0171/20260814_final/`.
