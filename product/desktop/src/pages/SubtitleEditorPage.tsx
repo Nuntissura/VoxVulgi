@@ -3453,6 +3453,14 @@ export function SubtitleEditorPage({
     refreshTracks,
   ]);
 
+  const activeLocalizationRunStage = useMemo(
+    () =>
+      localizationRunStages.find(
+        (stage) => stage.detail.startsWith("Running ") || stage.detail.startsWith("Preparing "),
+      ) ?? null,
+    [localizationRunStages],
+  );
+
 
   function logDiagnosticsEvent(
     event: string,
@@ -11091,46 +11099,39 @@ export function SubtitleEditorPage({
         </main>
       </div>
       {/* Sticky quick-actions bar (WP-0178) */}
-      <div
-        style={{
-          position: "sticky",
-          bottom: 0,
-          zIndex: 100,
-          background: "linear-gradient(180deg, rgba(220,227,235,0.95) 0%, rgba(201,210,220,0.98) 100%)",
-          borderTop: "1px solid rgba(100,120,140,0.3)",
-          padding: "8px 16px",
-          display: "flex",
-          alignItems: "center",
-          gap: 12,
-          flexWrap: "wrap",
-          backdropFilter: "blur(8px)",
-        }}
-      >
-        <div style={{ fontSize: 13, fontWeight: 600, flex: 1, minWidth: 120, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
-          {item?.title ?? "No item"}
+      {item ? (
+        <div className="loc-workspace-quick-actions" data-testid="localization-quick-actions">
+          <div className="loc-workspace-quick-actions-title" title={item.title}>
+            {item.title}
+          </div>
+          <div className="loc-workspace-quick-actions-status" role="status" aria-live="polite">
+            {localizationRunBusy
+              ? "Starting localization..."
+              : activeLocalizationRunStage
+                ? `${activeLocalizationRunStage.title}: ${activeLocalizationRunStage.detail}`
+                : dirty
+                  ? "Idle · unsaved subtitle changes"
+                  : "Idle"}
+          </div>
+          <button
+            type="button"
+            disabled={busy || localizationRunBusy}
+            onClick={enqueueLocalizationRun}
+          >
+            Start / continue
+          </button>
+          <button type="button" disabled={busy || !doc} onClick={exportSelectedOutputs}>
+            Export
+          </button>
+          <button
+            type="button"
+            disabled={busy || !outputs?.derived_item_dir}
+            onClick={openOutputsFolder}
+          >
+            Open outputs
+          </button>
         </div>
-        <div style={{ fontSize: 12, color: "#4b5563" }}>
-          {localizationRunBusy ? "Running..." : dirty ? "Unsaved changes" : "Ready"}
-        </div>
-        <button type="button" disabled={busy || localizationRunBusy} onClick={enqueueLocalizationRun} style={{ fontSize: 13 }}>
-          Run
-        </button>
-        <button type="button" disabled={busy} onClick={exportSelectedOutputs} style={{ fontSize: 13 }}>
-          Export
-        </button>
-        <button
-          type="button"
-          disabled={busy || !localizationRootStatus?.current_dir}
-          onClick={() => {
-            if (localizationRootStatus?.current_dir) {
-              void openPathBestEffort(localizationRootStatus.current_dir).catch(() => undefined);
-            }
-          }}
-          style={{ fontSize: 13 }}
-        >
-          Open outputs
-        </button>
-      </div>
+      ) : null}
     </section>
   );
 }

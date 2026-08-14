@@ -2546,6 +2546,41 @@ img {
   border-top: 1px solid var(--panel-border);
 }
 
+.loc-workspace-quick-actions {
+  position: sticky;
+  bottom: 0;
+  z-index: 100;
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  flex-wrap: wrap;
+  padding: 8px 16px;
+  background: linear-gradient(180deg, rgba(220, 227, 235, 0.96), rgba(201, 210, 220, 0.99));
+  border-top: 1px solid rgba(100, 120, 140, 0.3);
+  box-shadow: 0 -8px 18px rgba(31, 41, 55, 0.12);
+  backdrop-filter: blur(8px);
+}
+
+.loc-workspace-quick-actions-title {
+  flex: 1;
+  min-width: 120px;
+  overflow: hidden;
+  color: var(--ink);
+  font-size: 13px;
+  font-weight: 600;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.loc-workspace-quick-actions-status {
+  color: var(--ink-soft);
+  font-size: 12px;
+}
+
+.loc-workspace-quick-actions button {
+  font-size: 13px;
+}
+
 @media (max-width: 1100px) {
   .loc-workspace-body {
     grid-template-columns: 1fr;
