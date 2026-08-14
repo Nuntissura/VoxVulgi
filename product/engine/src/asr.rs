@@ -59,6 +59,7 @@ pub fn transcribe_whisper_wav_16k_mono_with_stats(
                 .as_ref()
                 .map(|s| s.as_ptr())
                 .unwrap_or(std::ptr::null()),
+            std::ptr::null(),
             threads,
             false,
         )
@@ -91,7 +92,7 @@ pub fn translate_whisper_wav_16k_mono_to_en(
     wav_path: &Path,
     lang: Option<&str>,
 ) -> Result<SubtitleDocument> {
-    Ok(translate_whisper_wav_16k_mono_to_en_with_stats(paths, model_id, wav_path, lang)?.doc)
+    Ok(translate_whisper_wav_16k_mono_to_en_with_stats(paths, model_id, wav_path, lang, None)?.doc)
 }
 
 pub fn translate_whisper_wav_16k_mono_to_en_with_stats(
@@ -99,6 +100,7 @@ pub fn translate_whisper_wav_16k_mono_to_en_with_stats(
     model_id: &str,
     wav_path: &Path,
     lang: Option<&str>,
+    initial_prompt: Option<&str>,
 ) -> Result<WhisperTranscriptResult> {
     let model_path = resolve_whisper_model_path(paths, model_id)?;
     let audio = load_wav_16k_mono_f32(wav_path)?;
@@ -114,6 +116,12 @@ pub fn translate_whisper_wav_16k_mono_to_en_with_stats(
         .map(|v| CString::new(v.as_bytes()))
         .transpose()
         .map_err(|_| EngineError::InstallFailed("language contains NUL byte".to_string()))?;
+    let initial_prompt_c = initial_prompt
+        .map(|v| CString::new(v.as_bytes()))
+        .transpose()
+        .map_err(|_| {
+            EngineError::InstallFailed("translation prompt contains NUL byte".to_string())
+        })?;
 
     let out_ptr = unsafe {
         ytf_whisper_transcribe_json(
@@ -121,6 +129,10 @@ pub fn translate_whisper_wav_16k_mono_to_en_with_stats(
             audio.as_ptr(),
             audio.len() as i32,
             language_c
+                .as_ref()
+                .map(|s| s.as_ptr())
+                .unwrap_or(std::ptr::null()),
+            initial_prompt_c
                 .as_ref()
                 .map(|s| s.as_ptr())
                 .unwrap_or(std::ptr::null()),
@@ -340,6 +352,7 @@ extern "C" {
         samples: *const f32,
         n_samples: i32,
         language: *const c_char,
+        initial_prompt: *const c_char,
         n_threads: i32,
         translate: bool,
     ) -> *mut c_char;

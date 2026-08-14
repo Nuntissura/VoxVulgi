@@ -2,15 +2,52 @@ use crate::asr;
 use crate::paths::AppPaths;
 use crate::subtitles::{SubtitleDocument, SubtitleSegment, SUBTITLE_JSON_SCHEMA_VERSION};
 use crate::{EngineError, Result};
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 use std::path::Path;
+
+const GLOSSARY_SCHEMA_VERSION: u32 = 1;
+const MAX_GLOSSARY_ENTRIES: usize = 5_000;
+const MAX_GLOSSARY_TERM_BYTES: usize = 1_024;
+const MAX_GLOSSARY_NOTE_BYTES: usize = 4_096;
+const MAX_WHISPER_GLOSSARY_PROMPT_CHARS: usize = 480;
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct GlossaryEntry {
+    pub source: String,
+    pub target: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub context: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub notes: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct GlossaryDocument {
+    pub schema_version: u32,
+    pub entries: Vec<GlossaryEntry>,
+}
+
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+pub struct GlossaryBundle {
+    pub global_entries: Vec<GlossaryEntry>,
+    pub item_entries: Vec<GlossaryEntry>,
+    pub effective_entries: Vec<GlossaryEntry>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(untagged)]
+enum GlossaryFile {
+    Document(GlossaryDocument),
+    Legacy(BTreeMap<String, String>),
+}
 
 #[derive(Debug, Clone)]
 pub struct TranslateOptions {
     pub max_line_chars: usize,
     pub max_lines: usize,
     pub max_cps: f64,
+    pub glossary_entries: Option<Vec<GlossaryEntry>>,
 }
 
 impl Default for TranslateOptions {
@@ -19,6 +56,7 @@ impl Default for TranslateOptions {
             max_line_chars: 42,
             max_lines: 2,
             max_cps: 17.0,
+            glossary_entries: None,
         }
     }
 }
@@ -39,6 +77,7 @@ pub struct TranslateReport {
     pub source_lang: Option<String>,
     pub glossary_path: String,
     pub glossary_entries: usize,
+    pub glossary_prompt_entries: usize,
     pub source_segment_count: usize,
     pub translated_raw_segment_count: usize,
     pub translated_usable_segment_count: usize,
@@ -68,8 +107,14 @@ pub fn translate_doc_whisper_to_en(
 
     let glossary_path = paths.glossary_path();
     ensure_default_glossary(&glossary_path)?;
-    let glossary_map = load_glossary(&glossary_path)?;
-    let glossary_entries_sorted = glossary_entries_sorted(&glossary_map);
+    let glossary_entries = match options.glossary_entries.as_ref() {
+        Some(entries) => normalize_entries(entries.clone())?,
+        None => load_glossary_entries(&glossary_path)?,
+    };
+    let glossary_entries_sorted = glossary_entries_sorted(&glossary_entries);
+    let glossary_prompt_entries = glossary_entries_for_source(&glossary_entries, source_doc);
+    let (glossary_prompt, glossary_prompt_entry_count) =
+        build_glossary_prompt(&glossary_prompt_entries);
 
     let source_lang = match source_doc.lang.as_str() {
         "ja" | "ko" => Some(source_doc.lang.clone()),
@@ -82,6 +127,7 @@ pub fn translate_doc_whisper_to_en(
         model_id,
         wav_path,
         source_lang.as_deref(),
+        glossary_prompt.as_deref(),
     )?;
 
     // Align Whisper segments onto the source segment windows to keep timing stable.
@@ -119,7 +165,8 @@ pub fn translate_doc_whisper_to_en(
         model_id: model_id.to_string(),
         source_lang,
         glossary_path: glossary_path.to_string_lossy().to_string(),
-        glossary_entries: glossary_map.len(),
+        glossary_entries: glossary_entries.len(),
+        glossary_prompt_entries: glossary_prompt_entry_count,
         source_segment_count: source_doc.segments.len(),
         translated_raw_segment_count: translated_raw.stats.raw_segment_count,
         translated_usable_segment_count: translated_raw.stats.usable_segment_count,
@@ -137,26 +184,169 @@ fn ensure_default_glossary(path: &Path) -> Result<()> {
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent)?;
     }
-    std::fs::write(path, "{\n}\n")?;
+    let document = GlossaryDocument {
+        schema_version: GLOSSARY_SCHEMA_VERSION,
+        entries: Vec::new(),
+    };
+    crate::persistence::atomic_write_text(
+        path,
+        &format!("{}\n", serde_json::to_string_pretty(&document)?),
+    )?;
     Ok(())
 }
 
-fn load_glossary(path: &Path) -> Result<BTreeMap<String, String>> {
+fn load_glossary_entries(path: &Path) -> Result<Vec<GlossaryEntry>> {
+    if !path.exists() {
+        return Ok(Vec::new());
+    }
     let bytes = std::fs::read(path)?;
-    let map: BTreeMap<String, String> = serde_json::from_slice(&bytes).map_err(|e| {
+    let file: GlossaryFile = serde_json::from_slice(&bytes).map_err(|e| {
         EngineError::InstallFailed(format!(
             "failed to parse glossary json at {}: {e}",
             path.to_string_lossy()
         ))
     })?;
-    Ok(map)
+    let entries = match file {
+        GlossaryFile::Document(document) => {
+            if document.schema_version != GLOSSARY_SCHEMA_VERSION {
+                return Err(EngineError::InstallFailed(format!(
+                    "unsupported glossary schema_version {} at {}",
+                    document.schema_version,
+                    path.to_string_lossy()
+                )));
+            }
+            document.entries
+        }
+        GlossaryFile::Legacy(map) => map
+            .into_iter()
+            .map(|(source, target)| GlossaryEntry {
+                source,
+                target,
+                context: None,
+                notes: None,
+            })
+            .collect(),
+    };
+    normalize_entries(entries)
 }
 
-fn glossary_entries_sorted(map: &BTreeMap<String, String>) -> Vec<(String, String)> {
-    let mut entries: Vec<(String, String)> =
-        map.iter().map(|(k, v)| (k.clone(), v.clone())).collect();
+fn normalize_optional(value: Option<String>) -> Option<String> {
+    value
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty())
+}
+
+fn normalize_entries(entries: Vec<GlossaryEntry>) -> Result<Vec<GlossaryEntry>> {
+    if entries.len() > MAX_GLOSSARY_ENTRIES {
+        return Err(EngineError::InstallFailed(format!(
+            "glossary contains {} entries; maximum is {MAX_GLOSSARY_ENTRIES}",
+            entries.len()
+        )));
+    }
+    let mut by_source = BTreeMap::new();
+    for entry in entries {
+        let source = entry.source.trim().to_string();
+        let target = entry.target.trim().to_string();
+        if source.is_empty() || target.is_empty() {
+            return Err(EngineError::InstallFailed(
+                "glossary source and target must not be empty".to_string(),
+            ));
+        }
+        let context = normalize_optional(entry.context);
+        let notes = normalize_optional(entry.notes);
+        if source.chars().any(char::is_control)
+            || target.chars().any(char::is_control)
+            || context
+                .as_deref()
+                .is_some_and(|value| value.chars().any(char::is_control))
+        {
+            return Err(EngineError::InstallFailed(
+                "glossary source, target, and context must not contain control characters"
+                    .to_string(),
+            ));
+        }
+        if source.len() > MAX_GLOSSARY_TERM_BYTES || target.len() > MAX_GLOSSARY_TERM_BYTES {
+            return Err(EngineError::InstallFailed(format!(
+                "glossary source and target must each be at most {MAX_GLOSSARY_TERM_BYTES} UTF-8 bytes"
+            )));
+        }
+        if context.as_ref().map(String::len).unwrap_or(0) > MAX_GLOSSARY_NOTE_BYTES
+            || notes.as_ref().map(String::len).unwrap_or(0) > MAX_GLOSSARY_NOTE_BYTES
+        {
+            return Err(EngineError::InstallFailed(format!(
+                "glossary context and notes must each be at most {MAX_GLOSSARY_NOTE_BYTES} UTF-8 bytes"
+            )));
+        }
+        by_source.insert(
+            source.clone(),
+            GlossaryEntry {
+                source,
+                target,
+                context,
+                notes,
+            },
+        );
+    }
+    Ok(by_source.into_values().collect())
+}
+
+fn glossary_entries_sorted(entries: &[GlossaryEntry]) -> Vec<(String, String)> {
+    let mut entries: Vec<(String, String)> = entries
+        .iter()
+        .map(|entry| (entry.source.clone(), entry.target.clone()))
+        .collect();
     entries.sort_by(|(a, _), (b, _)| b.len().cmp(&a.len()).then_with(|| a.cmp(b)));
     entries
+}
+
+fn glossary_entries_for_source(
+    entries: &[GlossaryEntry],
+    source_doc: &SubtitleDocument,
+) -> Vec<GlossaryEntry> {
+    let source_text = source_doc
+        .segments
+        .iter()
+        .map(|segment| segment.text.as_str())
+        .collect::<Vec<_>>()
+        .join("\n");
+    let mut matched: Vec<(usize, usize, GlossaryEntry)> = entries
+        .iter()
+        .filter_map(|entry| {
+            source_text
+                .find(&entry.source)
+                .map(|position| (position, usize::MAX - entry.source.len(), entry.clone()))
+        })
+        .collect();
+    matched.sort_by_key(|(position, inverse_length, _)| (*position, *inverse_length));
+    matched.into_iter().map(|(_, _, entry)| entry).collect()
+}
+
+fn build_glossary_prompt(entries: &[GlossaryEntry]) -> (Option<String>, usize) {
+    if entries.is_empty() {
+        return (None, 0);
+    }
+    let mut prompt = String::from(
+        "Preferred exact English terminology for this translation. Use each target when its source term is spoken: ",
+    );
+    let mut included = 0;
+    for entry in entries {
+        let context = entry
+            .context
+            .as_deref()
+            .map(|value| format!(" ({value})"))
+            .unwrap_or_default();
+        let candidate = format!("{} = {}{}; ", entry.source, entry.target, context);
+        if prompt.chars().count() + candidate.chars().count() > MAX_WHISPER_GLOSSARY_PROMPT_CHARS {
+            break;
+        }
+        prompt.push_str(&candidate);
+        included += 1;
+    }
+    if included == 0 {
+        (None, 0)
+    } else {
+        (Some(prompt.trim().to_string()), included)
+    }
 }
 
 fn apply_glossary(text: &str, entries: &[(String, String)]) -> String {
@@ -174,51 +364,194 @@ fn apply_glossary(text: &str, entries: &[(String, String)]) -> String {
 // Public glossary API (WP-0177)
 // ---------------------------------------------------------------------------
 
-pub fn glossary_load(paths: &AppPaths) -> Result<BTreeMap<String, String>> {
-    let path = paths.glossary_path();
-    ensure_default_glossary(&path)?;
-    load_glossary(&path)
+fn validate_item_id(item_id: &str) -> Result<&str> {
+    let item_id = item_id.trim();
+    if item_id.is_empty()
+        || item_id == "."
+        || item_id == ".."
+        || item_id.contains('/')
+        || item_id.contains('\\')
+    {
+        return Err(EngineError::InstallFailed(
+            "invalid glossary item id".to_string(),
+        ));
+    }
+    Ok(item_id)
 }
 
-pub fn glossary_save(paths: &AppPaths, entries: &BTreeMap<String, String>) -> Result<()> {
-    let path = paths.glossary_path();
+fn glossary_path_for_scope(
+    paths: &AppPaths,
+    scope: &str,
+    item_id: Option<&str>,
+) -> Result<std::path::PathBuf> {
+    match scope {
+        "global" => Ok(paths.glossary_path()),
+        "item" => Ok(
+            paths.item_glossary_path(validate_item_id(item_id.ok_or_else(|| {
+                EngineError::InstallFailed("item glossary requires item_id".to_string())
+            })?)?),
+        ),
+        _ => Err(EngineError::InstallFailed(format!(
+            "unsupported glossary scope: {scope}"
+        ))),
+    }
+}
+
+fn save_glossary_document(path: &Path, entries: Vec<GlossaryEntry>) -> Result<Vec<GlossaryEntry>> {
+    let entries = normalize_entries(entries)?;
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent)?;
     }
-    let json = serde_json::to_string_pretty(entries)?;
-    std::fs::write(&path, json)?;
+    let document = GlossaryDocument {
+        schema_version: GLOSSARY_SCHEMA_VERSION,
+        entries: entries.clone(),
+    };
+    crate::persistence::atomic_write_text(
+        path,
+        &format!("{}\n", serde_json::to_string_pretty(&document)?),
+    )?;
+    Ok(entries)
+}
+
+pub fn glossary_bundle(paths: &AppPaths, item_id: Option<&str>) -> Result<GlossaryBundle> {
+    let path = paths.glossary_path();
+    ensure_default_glossary(&path)?;
+    let global_entries = load_glossary_entries(&path)?;
+    let item_entries = match item_id {
+        Some(item_id) => {
+            load_glossary_entries(&paths.item_glossary_path(validate_item_id(item_id)?))?
+        }
+        None => Vec::new(),
+    };
+    let mut effective = BTreeMap::new();
+    for entry in global_entries.iter().chain(item_entries.iter()) {
+        effective.insert(entry.source.clone(), entry.clone());
+    }
+    Ok(GlossaryBundle {
+        global_entries,
+        item_entries,
+        effective_entries: effective.into_values().collect(),
+    })
+}
+
+pub fn glossary_save_scoped(
+    paths: &AppPaths,
+    scope: &str,
+    item_id: Option<&str>,
+    entries: Vec<GlossaryEntry>,
+) -> Result<GlossaryBundle> {
+    let path = glossary_path_for_scope(paths, scope, item_id)?;
+    save_glossary_document(&path, entries)?;
+    glossary_bundle(paths, item_id)
+}
+
+pub fn glossary_load(paths: &AppPaths) -> Result<BTreeMap<String, String>> {
+    Ok(glossary_bundle(paths, None)?
+        .global_entries
+        .into_iter()
+        .map(|entry| (entry.source, entry.target))
+        .collect())
+}
+
+pub fn glossary_save(paths: &AppPaths, entries: &BTreeMap<String, String>) -> Result<()> {
+    let entries = entries
+        .iter()
+        .map(|(source, target)| GlossaryEntry {
+            source: source.clone(),
+            target: target.clone(),
+            context: None,
+            notes: None,
+        })
+        .collect();
+    save_glossary_document(&paths.glossary_path(), entries)?;
     Ok(())
 }
 
 pub fn glossary_export_csv(paths: &AppPaths, out_path: &Path) -> Result<usize> {
-    let entries = glossary_load(paths)?;
+    glossary_export_scoped(paths, "global", None, out_path)
+}
+
+pub fn glossary_export_scoped(
+    paths: &AppPaths,
+    scope: &str,
+    item_id: Option<&str>,
+    out_path: &Path,
+) -> Result<usize> {
+    let path = glossary_path_for_scope(paths, scope, item_id)?;
+    let entries = load_glossary_entries(&path)?;
+    if out_path
+        .extension()
+        .and_then(|value| value.to_str())
+        .is_some_and(|value| value.eq_ignore_ascii_case("json"))
+    {
+        let document = GlossaryDocument {
+            schema_version: GLOSSARY_SCHEMA_VERSION,
+            entries,
+        };
+        crate::persistence::atomic_write_text(
+            out_path,
+            &format!("{}\n", serde_json::to_string_pretty(&document)?),
+        )?;
+        return Ok(document.entries.len());
+    }
     let mut wtr = csv::Writer::from_path(out_path)?;
-    wtr.write_record(["source", "target"])?;
-    for (k, v) in &entries {
-        wtr.write_record([k.as_str(), v.as_str()])?;
+    wtr.write_record(["source", "target", "context", "notes"])?;
+    for entry in &entries {
+        wtr.write_record([
+            entry.source.as_str(),
+            entry.target.as_str(),
+            entry.context.as_deref().unwrap_or(""),
+            entry.notes.as_deref().unwrap_or(""),
+        ])?;
     }
     wtr.flush()?;
     Ok(entries.len())
 }
 
 pub fn glossary_import_csv(paths: &AppPaths, csv_path: &Path) -> Result<usize> {
-    let mut existing = glossary_load(paths)?;
-    let mut rdr = csv::ReaderBuilder::new()
-        .has_headers(true)
-        .from_path(csv_path)?;
-    let mut count = 0usize;
-    for result in rdr.records() {
-        let record = result?;
-        if record.len() >= 2 {
-            let source = record[0].trim().to_string();
-            let target = record[1].trim().to_string();
-            if !source.is_empty() {
-                existing.insert(source, target);
-                count += 1;
+    glossary_import_scoped(paths, "global", None, csv_path)
+}
+
+pub fn glossary_import_scoped(
+    paths: &AppPaths,
+    scope: &str,
+    item_id: Option<&str>,
+    import_path: &Path,
+) -> Result<usize> {
+    let scope_path = glossary_path_for_scope(paths, scope, item_id)?;
+    let mut by_source: BTreeMap<String, GlossaryEntry> = load_glossary_entries(&scope_path)?
+        .into_iter()
+        .map(|entry| (entry.source.clone(), entry))
+        .collect();
+    let imported = if import_path
+        .extension()
+        .and_then(|value| value.to_str())
+        .is_some_and(|value| value.eq_ignore_ascii_case("json"))
+    {
+        load_glossary_entries(import_path)?
+    } else {
+        let mut rdr = csv::ReaderBuilder::new()
+            .has_headers(true)
+            .from_path(import_path)?;
+        let mut entries = Vec::new();
+        for result in rdr.records() {
+            let record = result?;
+            if record.len() >= 2 {
+                entries.push(GlossaryEntry {
+                    source: record[0].to_string(),
+                    target: record[1].to_string(),
+                    context: record.get(2).map(str::to_string),
+                    notes: record.get(3).map(str::to_string),
+                });
             }
         }
+        normalize_entries(entries)?
+    };
+    let count = imported.len();
+    for entry in imported {
+        by_source.insert(entry.source.clone(), entry);
     }
-    glossary_save(paths, &existing)?;
+    save_glossary_document(&scope_path, by_source.into_values().collect())?;
     Ok(count)
 }
 
@@ -424,11 +757,129 @@ mod tests {
 
     #[test]
     fn glossary_replacements_are_deterministic_longest_first() {
-        let mut map = BTreeMap::new();
-        map.insert("foo".to_string(), "X".to_string());
-        map.insert("foobar".to_string(), "Y".to_string());
-        let entries = glossary_entries_sorted(&map);
+        let entries = glossary_entries_sorted(&[
+            GlossaryEntry {
+                source: "foo".to_string(),
+                target: "X".to_string(),
+                context: None,
+                notes: None,
+            },
+            GlossaryEntry {
+                source: "foobar".to_string(),
+                target: "Y".to_string(),
+                context: None,
+                notes: None,
+            },
+        ]);
         assert_eq!(apply_glossary("foobar foo", &entries), "Y X");
+    }
+
+    #[test]
+    fn glossary_prompt_only_contains_terms_present_in_source() {
+        let source = SubtitleDocument {
+            schema_version: SUBTITLE_JSON_SCHEMA_VERSION,
+            kind: "source".to_string(),
+            lang: "ja".to_string(),
+            segments: vec![SubtitleSegment {
+                index: 0,
+                start_ms: 0,
+                end_ms: 1_000,
+                text: "東京の先生".to_string(),
+                speaker: None,
+            }],
+        };
+        let entries = vec![
+            GlossaryEntry {
+                source: "東京".to_string(),
+                target: "Tokyo".to_string(),
+                context: Some("place name".to_string()),
+                notes: None,
+            },
+            GlossaryEntry {
+                source: "大阪".to_string(),
+                target: "Osaka".to_string(),
+                context: None,
+                notes: None,
+            },
+        ];
+        let relevant = glossary_entries_for_source(&entries, &source);
+        let (prompt, prompt_entry_count) = build_glossary_prompt(&relevant);
+        let prompt = prompt.expect("prompt");
+        assert_eq!(relevant.len(), 1);
+        assert_eq!(prompt_entry_count, 1);
+        assert!(prompt.contains("東京 = Tokyo (place name)"));
+        assert!(!prompt.contains("Osaka"));
+    }
+
+    #[test]
+    fn item_glossary_overrides_legacy_global_entry() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let paths = AppPaths::new(dir.path().join("app"));
+        paths.ensure_dirs().expect("dirs");
+        crate::persistence::atomic_write_text(
+            &paths.glossary_path(),
+            "{\"先生\":\"Teacher\",\"東京\":\"Tokyo\"}\n",
+        )
+        .expect("legacy global glossary");
+
+        glossary_save_scoped(
+            &paths,
+            "item",
+            Some("item-1"),
+            vec![GlossaryEntry {
+                source: "先生".to_string(),
+                target: "Sensei".to_string(),
+                context: Some("honorific".to_string()),
+                notes: None,
+            }],
+        )
+        .expect("item glossary");
+
+        let bundle = glossary_bundle(&paths, Some("item-1")).expect("bundle");
+        assert_eq!(bundle.global_entries.len(), 2);
+        assert_eq!(bundle.item_entries.len(), 1);
+        assert_eq!(bundle.effective_entries.len(), 2);
+        assert_eq!(
+            bundle
+                .effective_entries
+                .iter()
+                .find(|entry| entry.source == "先生")
+                .map(|entry| entry.target.as_str()),
+            Some("Sensei")
+        );
+    }
+
+    #[test]
+    fn item_glossary_rejects_path_traversal() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let paths = AppPaths::new(dir.path().join("app"));
+        paths.ensure_dirs().expect("dirs");
+        let error = glossary_save_scoped(&paths, "item", Some("../outside"), Vec::new())
+            .expect_err("path traversal must fail");
+        assert!(error.to_string().contains("invalid glossary item id"));
+    }
+
+    #[test]
+    fn glossary_rejects_empty_target_and_control_context() {
+        let empty_target = normalize_entries(vec![GlossaryEntry {
+            source: "東京".to_string(),
+            target: " ".to_string(),
+            context: None,
+            notes: None,
+        }])
+        .expect_err("empty target must fail");
+        assert!(empty_target.to_string().contains("must not be empty"));
+
+        let control_context = normalize_entries(vec![GlossaryEntry {
+            source: "東京".to_string(),
+            target: "Tokyo".to_string(),
+            context: Some("place\0name".to_string()),
+            notes: None,
+        }])
+        .expect_err("control context must fail");
+        assert!(control_context
+            .to_string()
+            .contains("must not contain control characters"));
     }
 
     #[test]

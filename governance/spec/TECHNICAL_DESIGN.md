@@ -297,7 +297,9 @@ Inputs:
 Phase 1 implementation (confirmed):
 
 - Backend: `translate_local` job uses Whisper.cpp **translate mode** on extracted audio and then aligns output text back onto the source segment windows (stable timings, same segment count).
-- Glossary: `config/glossary.json` (JSON string->string map). Applied deterministically (longest-key-first).
+- Glossary: versioned JSON documents with `source`, `target`, optional `context`, and optional `notes`. `config/glossary.json` is the global base; `derived/items/<item_id>/glossary.json` contains per-item overrides. Legacy JSON string-to-string maps remain readable and migrate on the next save.
+- Translation jobs snapshot the effective global-plus-item glossary when queued. Only terms present in the source subtitle document are serialized into a bounded Whisper initial prompt, which is carried across decode windows; deterministic longest-key-first replacement remains a compatibility fallback when source terms survive in the translated output.
+- Glossary import/export supports UTF-8 CSV (`source,target,context,notes`) and versioned JSON. Writes use the engine atomic-persistence helper.
 - QC: wraps lines (default 42 chars) and emits warnings (default 17 CPS, >2 lines) into job artifacts.
 
 Translation constraints:

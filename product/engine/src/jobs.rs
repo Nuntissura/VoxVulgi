@@ -867,6 +867,8 @@ struct TranslateLocalParams {
     source_track_id: String,
     model_id: String,
     #[serde(default)]
+    glossary_entries: Option<Vec<translate::GlossaryEntry>>,
+    #[serde(default)]
     batch_on_import: bool,
     #[serde(default)]
     pipeline: Option<LocalizationPipelineOptions>,
@@ -2053,10 +2055,12 @@ pub fn enqueue_translate_local(
     source_track_id: String,
 ) -> Result<JobRow> {
     let model_id = paths.effective_asr_model_id();
+    let glossary_entries = translate::glossary_bundle(paths, Some(&item_id))?.effective_entries;
     let params_json = serde_json::to_string(&TranslateLocalParams {
         item_id: item_id.clone(),
         source_track_id,
         model_id,
+        glossary_entries: Some(glossary_entries),
         batch_on_import: false,
         pipeline: None,
     })?;
@@ -2993,6 +2997,9 @@ fn queue_localization_continuation_from_track(
                 item_id: item.id.clone(),
                 source_track_id: track.id.clone(),
                 model_id: paths.effective_asr_model_id(),
+                glossary_entries: Some(
+                    translate::glossary_bundle(paths, Some(&item.id))?.effective_entries,
+                ),
                 batch_on_import: false,
                 pipeline: Some(LocalizationPipelineOptions {
                     source_track_id: Some(track.id.clone()),
@@ -11682,6 +11689,10 @@ INSERT INTO subtitle_track (
                             item_id: item.id.clone(),
                             source_track_id: track_id.clone(),
                             model_id: paths.effective_asr_model_id(),
+                            glossary_entries: Some(
+                                translate::glossary_bundle(paths, Some(&item.id))?
+                                    .effective_entries,
+                            ),
                             batch_on_import: true,
                             pipeline: None,
                         })?;
@@ -11839,14 +11850,25 @@ INSERT INTO subtitle_track (
                 job_id,
                 "info",
                 "translate_whisper_begin",
-                serde_json::json!({ "model_id": &p.model_id, "audio_path": &audio_path }),
+                serde_json::json!({
+                    "model_id": &p.model_id,
+                    "audio_path": &audio_path,
+                    "glossary_entries": p.glossary_entries.as_ref().map(Vec::len).unwrap_or(0),
+                }),
             )?;
+            let glossary_entries = match p.glossary_entries.clone() {
+                Some(entries) => entries,
+                None => translate::glossary_bundle(paths, Some(&p.item_id))?.effective_entries,
+            };
             let result = translate::translate_doc_whisper_to_en(
                 paths,
                 &source_doc,
                 &audio_path,
                 &p.model_id,
-                translate::TranslateOptions::default(),
+                translate::TranslateOptions {
+                    glossary_entries: Some(glossary_entries),
+                    ..translate::TranslateOptions::default()
+                },
             )?;
             set_progress(paths, job_id, 0.85)?;
 

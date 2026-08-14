@@ -3285,3 +3285,17 @@ tbody tr.is-selected {
   .jobs-findbar label:first-child { min-width: min(360px, 100%) !important; }
   .jobs-findbar input[type="search"] { min-width: 220px !important; width: 100%; }
 }
+.loc-glossary-source-preview {
+  margin-top: 6px;
+  color: var(--muted, #4b5563);
+  font-size: 12px;
+  line-height: 1.45;
+  white-space: pre-wrap;
+}
+
+.loc-glossary-match {
+  border-radius: 3px;
+  background: #fef08a;
+  color: #713f12;
+  padding: 0 2px;
+}

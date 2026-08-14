@@ -72,6 +72,21 @@ type SubtitleDocument = {
   segments: SubtitleSegment[];
 };
 
+type GlossaryEntry = {
+  source: string;
+  target: string;
+  context: string | null;
+  notes: string | null;
+};
+
+type GlossaryBundle = {
+  global_entries: GlossaryEntry[];
+  item_entries: GlossaryEntry[];
+  effective_entries: GlossaryEntry[];
+};
+
+type GlossaryScope = "global" | "item";
+
 type JobStatus = "queued" | "running" | "succeeded" | "failed" | "canceled";
 
 type JobRow = {
@@ -1191,6 +1206,40 @@ function SectionHelp({ sectionId }: { sectionId: string }) {
   return <LocalizationHelpButton helpId={sectionId} content={help} />;
 }
 
+function buildGlossaryHighlightPattern(entries: GlossaryEntry[]): RegExp | null {
+  const escaped: string[] = [];
+  let patternChars = 0;
+  for (const source of entries
+    .map((entry) => entry.source.trim())
+    .filter(Boolean)
+    .sort((a, b) => b.length - a.length || a.localeCompare(b))) {
+    const value = source.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+    if (patternChars + value.length > 32_000) break;
+    escaped.push(value);
+    patternChars += value.length;
+  }
+  return escaped.length ? new RegExp(`(${escaped.join("|")})`, "gu") : null;
+}
+
+function glossaryHighlightedText(
+  text: string,
+  pattern: RegExp | null,
+  targets: Map<string, string>,
+) {
+  if (!pattern) return text;
+  pattern.lastIndex = 0;
+  return text.split(pattern).map((part, index) => {
+    const target = targets.get(part);
+    return target ? (
+      <mark key={`${index}-${part}`} className="loc-glossary-match" title={`Glossary: ${target}`}>
+        {part}
+      </mark>
+    ) : (
+      part
+    );
+  });
+}
+
 export function SubtitleEditorPage({
   itemId,
   visible = true,
@@ -1334,9 +1383,17 @@ export function SubtitleEditorPage({
     if (raw === "translate" || raw === "drop") return raw;
     return "preserve";
   });
-  const [glossaryEntries, setGlossaryEntries] = useState<Record<string, string>>({});
+  const [glossaryBundle, setGlossaryBundle] = useState<GlossaryBundle>({
+    global_entries: [],
+    item_entries: [],
+    effective_entries: [],
+  });
+  const [glossaryLoadedItemId, setGlossaryLoadedItemId] = useState<string | null>(null);
+  const [glossaryScope, setGlossaryScope] = useState<GlossaryScope>("item");
   const [glossaryNewSource, setGlossaryNewSource] = useState("");
   const [glossaryNewTarget, setGlossaryNewTarget] = useState("");
+  const [glossaryNewContext, setGlossaryNewContext] = useState("");
+  const [glossaryNewNotes, setGlossaryNewNotes] = useState("");
   const [bilingualEnabled, setBilingualEnabled] = useState(() => {
     const raw = safeLocalStorageGet("voxvulgi.v1.editor.bilingual_enabled");
     return raw === null ? true : raw === "1";
@@ -1642,10 +1699,48 @@ export function SubtitleEditorPage({
   }, [honorificMode]);
 
   useEffect(() => {
-    invoke<Record<string, string>>("glossary_get")
-      .then((entries) => setGlossaryEntries(entries ?? {}))
-      .catch(() => {});
-  }, []);
+    let canceled = false;
+    setGlossaryLoadedItemId(null);
+    setGlossaryBundle({ global_entries: [], item_entries: [], effective_entries: [] });
+    invoke<GlossaryBundle>("glossary_get", { itemId })
+      .then((bundle) => {
+        if (canceled) return;
+        setGlossaryBundle(bundle);
+        setGlossaryLoadedItemId(itemId);
+      })
+      .catch((error) => {
+        if (!canceled) setError(`Glossary unavailable: ${String(error)}`);
+      });
+    return () => {
+      canceled = true;
+    };
+  }, [itemId]);
+
+  const glossaryReady = glossaryLoadedItemId === itemId;
+  const glossaryScopedEntries =
+    !glossaryReady
+      ? []
+      : glossaryScope === "global"
+        ? glossaryBundle.global_entries
+        : glossaryBundle.item_entries;
+  const glossaryTargets = useMemo(
+    () => new Map(glossaryBundle.effective_entries.map((entry) => [entry.source, entry.target])),
+    [glossaryBundle.effective_entries],
+  );
+  const glossaryHighlightPattern = useMemo(
+    () => buildGlossaryHighlightPattern(glossaryBundle.effective_entries),
+    [glossaryBundle.effective_entries],
+  );
+
+  async function saveGlossaryEntries(scope: GlossaryScope, entries: GlossaryEntry[]) {
+    if (!glossaryReady) throw new Error("Glossary is still loading for this item.");
+    const bundle = await invoke<GlossaryBundle>("glossary_set", {
+      scope,
+      itemId,
+      entries,
+    });
+    setGlossaryBundle(bundle);
+  }
 
   useEffect(() => {
     safeLocalStorageSet("voxvulgi.v1.editor.bilingual_enabled", bilingualEnabled ? "1" : "0");
@@ -7226,88 +7321,198 @@ export function SubtitleEditorPage({
       <div className="card loc-stage-card" data-stage="translate" id="loc-glossary">
         <h2>Glossary <SectionHelp sectionId="loc-glossary" /></h2>
         <div style={{ color: "#4b5563", marginBottom: 8 }}>
-          Define term mappings applied during translation. Add source terms (Japanese/Korean) and
-          their English translations. Longer terms are matched first to avoid partial replacements.
+          Define exact English terms for names, places, and specialist language. Global terms form
+          the base; terms for this item override a global term with the same source text. Matching
+          source text is highlighted in the subtitle editor and queued translations receive a
+          snapshot of the effective glossary.
+        </div>
+        <div className="row" style={{ flexWrap: "wrap", gap: 8, alignItems: "center" }}>
+          <label>
+            Edit glossary{" "}
+            <select
+              value={glossaryScope}
+              disabled={busy || !glossaryReady}
+              onChange={(event) => setGlossaryScope(event.currentTarget.value as GlossaryScope)}
+            >
+              <option value="item">This item</option>
+              <option value="global">Global base</option>
+            </select>
+          </label>
+          <span className="muted">
+            {glossaryReady
+              ? `${glossaryBundle.effective_entries.length} effective term${glossaryBundle.effective_entries.length === 1 ? "" : "s"}`
+              : "Loading glossary…"}
+          </span>
         </div>
         <div className="row" style={{ flexWrap: "wrap", gap: 8 }}>
           <input
             placeholder="Source term (e.g. 東京)"
+            disabled={busy || !glossaryReady}
             value={glossaryNewSource}
             onChange={(e) => setGlossaryNewSource(e.target.value)}
             style={{ width: 200 }}
           />
           <input
             placeholder="English translation (e.g. Tokyo)"
+            disabled={busy || !glossaryReady}
             value={glossaryNewTarget}
             onChange={(e) => setGlossaryNewTarget(e.target.value)}
             style={{ width: 200 }}
           />
+          <input
+            placeholder="Context (optional)"
+            disabled={busy || !glossaryReady}
+            value={glossaryNewContext}
+            onChange={(e) => setGlossaryNewContext(e.target.value)}
+            style={{ width: 200 }}
+          />
+          <input
+            placeholder="Notes (optional)"
+            disabled={busy || !glossaryReady}
+            value={glossaryNewNotes}
+            onChange={(e) => setGlossaryNewNotes(e.target.value)}
+            style={{ width: 200 }}
+          />
           <button
             type="button"
-            disabled={busy || !glossaryNewSource.trim()}
+            disabled={busy || !glossaryReady || !glossaryNewSource.trim() || !glossaryNewTarget.trim()}
             onClick={async () => {
-              const next = { ...glossaryEntries, [glossaryNewSource.trim()]: glossaryNewTarget.trim() };
-              await invoke("glossary_set", { entries: next }).catch((e) => setError(String(e)));
-              setGlossaryEntries(next);
-              setGlossaryNewSource("");
-              setGlossaryNewTarget("");
+              const entry: GlossaryEntry = {
+                source: glossaryNewSource.trim(),
+                target: glossaryNewTarget.trim(),
+                context: glossaryNewContext.trim() || null,
+                notes: glossaryNewNotes.trim() || null,
+              };
+              try {
+                await saveGlossaryEntries(glossaryScope, [...glossaryScopedEntries, entry]);
+                setGlossaryNewSource("");
+                setGlossaryNewTarget("");
+                setGlossaryNewContext("");
+                setGlossaryNewNotes("");
+                setNotice(`Saved ${glossaryScope === "global" ? "global" : "item"} glossary term.`);
+              } catch (error) {
+                setError(String(error));
+              }
             }}
           >
             Add term
           </button>
           <button
             type="button"
-            disabled={busy}
+            disabled={busy || !glossaryReady}
             onClick={async () => {
-              const path = await save({ title: "Export glossary as CSV", filters: [{ name: "CSV", extensions: ["csv"] }] });
+              const path = await save({
+                title: `Export ${glossaryScope} glossary`,
+                defaultPath: `voxvulgi_${glossaryScope}_glossary.json`,
+                filters: [
+                  { name: "Glossary JSON", extensions: ["json"] },
+                  { name: "Glossary CSV", extensions: ["csv"] },
+                ],
+              });
               if (!path) return;
-              await invoke("glossary_export_csv", { path }).catch((e) => setError(String(e)));
-              setNotice("Glossary exported.");
+              try {
+                const count = await invoke<number>("glossary_export", {
+                  scope: glossaryScope,
+                  itemId,
+                  path,
+                });
+                setNotice(`Exported ${count} glossary term${count === 1 ? "" : "s"}.`);
+              } catch (error) {
+                setError(String(error));
+              }
             }}
           >
-            Export CSV
+            Export JSON/CSV
           </button>
           <button
             type="button"
-            disabled={busy}
+            disabled={busy || !glossaryReady}
             onClick={async () => {
-              const selected = await open({ title: "Import glossary CSV", filters: [{ name: "CSV", extensions: ["csv"] }] });
+              const selected = await open({
+                title: `Import into ${glossaryScope} glossary`,
+                filters: [{ name: "Glossary", extensions: ["json", "csv"] }],
+              });
               if (!selected || typeof selected !== "string") return;
-              const count = await invoke<number>("glossary_import_csv", { path: selected });
-              const refreshed = await invoke<Record<string, string>>("glossary_get");
-              setGlossaryEntries(refreshed ?? {});
-              setNotice(`Imported ${count} glossary term${count === 1 ? "" : "s"}.`);
+              try {
+                const count = await invoke<number>("glossary_import", {
+                  scope: glossaryScope,
+                  itemId,
+                  path: selected,
+                });
+                const refreshed = await invoke<GlossaryBundle>("glossary_get", { itemId });
+                setGlossaryBundle(refreshed);
+                setNotice(`Imported ${count} glossary term${count === 1 ? "" : "s"}.`);
+              } catch (error) {
+                setError(String(error));
+              }
             }}
           >
-            Import CSV
+            Import JSON/CSV
           </button>
         </div>
-        {Object.keys(glossaryEntries).length > 0 ? (
+        {glossaryScopedEntries.length > 0 ? (
           <div className="table-wrap" style={{ marginTop: 10, maxHeight: 240, overflowY: "auto" }}>
             <table>
               <thead>
                 <tr>
                   <th>Source</th>
                   <th>English</th>
+                  <th>Context</th>
+                  <th>Notes</th>
                   <th>Actions</th>
                 </tr>
               </thead>
               <tbody>
-                {Object.entries(glossaryEntries)
-                  .sort(([a], [b]) => a.localeCompare(b))
-                  .map(([source, target]) => (
-                    <tr key={source}>
-                      <td>{source}</td>
-                      <td>{target}</td>
+                {glossaryScopedEntries.map((entry, index) => (
+                    <tr key={`${glossaryScope}-${index}`}>
+                      {(["source", "target", "context", "notes"] as const).map((field) => (
+                        <td key={field}>
+                          <input
+                            aria-label={`${field} for glossary term ${entry.source}`}
+                            disabled={busy || !glossaryReady}
+                            value={entry[field] ?? ""}
+                            onChange={(event) => {
+                              const next = [...glossaryScopedEntries];
+                              next[index] = {
+                                ...entry,
+                                [field]: field === "source" || field === "target"
+                                  ? event.currentTarget.value
+                                  : event.currentTarget.value || null,
+                              };
+                              setGlossaryBundle((current) => ({
+                                ...current,
+                                ...(glossaryScope === "global"
+                                  ? { global_entries: next }
+                                  : { item_entries: next }),
+                              }));
+                            }}
+                          />
+                        </td>
+                      ))}
                       <td>
                         <button
                           type="button"
-                          disabled={busy}
+                          disabled={busy || !glossaryReady || !entry.source.trim() || !entry.target.trim()}
+                          onClick={() =>
+                            saveGlossaryEntries(glossaryScope, glossaryScopedEntries)
+                              .then(() => setNotice("Glossary term updated."))
+                              .catch((error) => setError(String(error)))
+                          }
+                        >
+                          Save
+                        </button>
+                        <button
+                          type="button"
+                          disabled={busy || !glossaryReady}
                           onClick={async () => {
-                            const next = { ...glossaryEntries };
-                            delete next[source];
-                            await invoke("glossary_set", { entries: next }).catch((e) => setError(String(e)));
-                            setGlossaryEntries(next);
+                            try {
+                              await saveGlossaryEntries(
+                                glossaryScope,
+                                glossaryScopedEntries.filter((_, rowIndex) => rowIndex !== index),
+                              );
+                            } catch (error) {
+                              setError(String(error));
+                            }
                           }}
                         >
                           Remove
@@ -7320,7 +7525,7 @@ export function SubtitleEditorPage({
           </div>
         ) : (
           <div style={{ color: "#4b5563", marginTop: 8, fontSize: 13 }}>
-            No glossary terms yet. Add terms above — they will be applied to future translations.
+            No {glossaryScope === "global" ? "global" : "item-specific"} glossary terms yet.
           </div>
         )}
       </div>
@@ -10998,13 +11203,28 @@ export function SubtitleEditorPage({
                           lineHeight: "20px",
                         }}
                       />
+                      {glossaryBundle.effective_entries.some(
+                        (entry) => entry.source && seg.text.includes(entry.source),
+                      ) ? (
+                        <div className="loc-glossary-source-preview" aria-label="Glossary matches">
+                          {glossaryHighlightedText(
+                            seg.text,
+                            glossaryHighlightPattern,
+                            glossaryTargets,
+                          )}
+                        </div>
+                      ) : null}
                     </td>
                     {bilingualDoc ? (
                       <td style={{ minWidth: 320, opacity: 0.85 }}>
                         <div style={{ whiteSpace: "pre-wrap" }}>
-                          {pairTextByWindow.get(`${seg.start_ms}:${seg.end_ms}`) ??
-                            bilingualDoc.segments?.[i]?.text ??
-                            ""}
+                          {glossaryHighlightedText(
+                            pairTextByWindow.get(`${seg.start_ms}:${seg.end_ms}`) ??
+                              bilingualDoc.segments?.[i]?.text ??
+                              "",
+                            glossaryHighlightPattern,
+                            glossaryTargets,
+                          )}
                         </div>
                       </td>
                     ) : null}

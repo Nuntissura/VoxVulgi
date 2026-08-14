@@ -58,6 +58,7 @@ char *ytf_whisper_transcribe_json(const char *model_path,
                                  const float *samples,
                                  int n_samples,
                                  const char *language,
+                                 const char *initial_prompt,
                                  int n_threads,
                                  bool translate) {
     g_last_error.clear();
@@ -87,6 +88,8 @@ char *ytf_whisper_transcribe_json(const char *model_path,
     wparams.print_timestamps = false;
     wparams.token_timestamps = false;
     wparams.no_timestamps = false;
+    wparams.initial_prompt = initial_prompt;
+    wparams.carry_initial_prompt = initial_prompt && initial_prompt[0] != '\0';
 
     if (!language || language[0] == '\0' || std::strcmp(language, "auto") == 0) {
         wparams.language = "auto";

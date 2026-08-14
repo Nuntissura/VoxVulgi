@@ -13685,16 +13685,52 @@ fn tts_manifest_clone_segments(path: String) -> Result<Vec<TtsManifestSegmentClo
 #[tauri::command]
 fn glossary_get(
     state: State<'_, AppState>,
-) -> Result<std::collections::BTreeMap<String, String>, String> {
-    translate::glossary_load(&state.paths).map_err(|e| e.to_string())
+    item_id: Option<String>,
+) -> Result<translate::GlossaryBundle, String> {
+    translate::glossary_bundle(&state.paths, item_id.as_deref()).map_err(|e| e.to_string())
 }
 
 #[tauri::command]
 fn glossary_set(
     state: State<'_, AppState>,
-    entries: std::collections::BTreeMap<String, String>,
-) -> Result<(), String> {
-    translate::glossary_save(&state.paths, &entries).map_err(|e| e.to_string())
+    scope: String,
+    item_id: Option<String>,
+    entries: Vec<translate::GlossaryEntry>,
+) -> Result<translate::GlossaryBundle, String> {
+    translate::glossary_save_scoped(&state.paths, &scope, item_id.as_deref(), entries)
+        .map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+fn glossary_export(
+    state: State<'_, AppState>,
+    scope: String,
+    item_id: Option<String>,
+    path: String,
+) -> Result<usize, String> {
+    translate::glossary_export_scoped(
+        &state.paths,
+        &scope,
+        item_id.as_deref(),
+        &std::path::PathBuf::from(path),
+    )
+    .map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+fn glossary_import(
+    state: State<'_, AppState>,
+    scope: String,
+    item_id: Option<String>,
+    path: String,
+) -> Result<usize, String> {
+    translate::glossary_import_scoped(
+        &state.paths,
+        &scope,
+        item_id.as_deref(),
+        &std::path::PathBuf::from(path),
+    )
+    .map_err(|e| e.to_string())
 }
 
 #[tauri::command]
@@ -14567,6 +14603,8 @@ pub fn run() {
             tts_manifest_clone_segments,
             glossary_get,
             glossary_set,
+            glossary_export,
+            glossary_import,
             glossary_export_csv,
             glossary_import_csv,
             agent_report_state,
