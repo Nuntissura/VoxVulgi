@@ -196,7 +196,7 @@ This is the single source of truth for work status.
 | WP-0179 | Translation Style Settings | REVIEW | Codex | Style selector (Neutral/Formal/Informal) + honorific handling (keep/translate/drop) in Track card; persists in localStorage. |
 | WP-0180 | Bilingual Subtitle View | DONE | Codex | Already implemented: bilingual checkbox + auto-pair/manual track selection + paired text column in segment table. |
 | WP-0181 | Pipeline Presets | REVIEW | Codex | Source-complete: 3 packet-defined immutable built-ins; atomic custom CRUD; one-click ASR, batch, per-item translation style, and deferred voice defaults. Source gates pass; governed packaged/headless proof remains. |
-| WP-0182 | Per-Segment Audio Preview | REVIEW | Codex | Play/stop button on each segment row; seeks mix dub WAV to segment start, auto-stops at end; visual indicator on playing segment. |
+| WP-0182 | Per-Segment Audio Preview | REVIEW | Codex | Source-complete: per-row Play/Stop uses the mix WAV, confirms actual playback, stops by media time, reports missing/error state, and cleans up on every lifecycle exit. Source gates pass; governed packaged/headless proof remains. |
 | WP-0183 | CosyVoice 2 Backend Integration | REVIEW | Codex | Repo cloned, render wrapper written (cross_lingual inference), adapter template registered. Needs model weights download + PyTorch deps. |
 | WP-0184 | Fish Speech 1.5 Backend Integration | REVIEW | Codex | Repo cloned, render wrapper written (API server client), adapter template registered. Needs model weights + API server running. |
 | WP-0185 | Clone Outcome Notification | REVIEW | Codex | Auto-notification when clone outcome changes: success=notice, fallback=error with segment counts and guidance. |

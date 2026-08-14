@@ -3,6 +3,7 @@ import { convertFileSrc, invoke } from "@tauri-apps/api/core";
 import { confirm, open, save } from "@tauri-apps/plugin-dialog";
 import { usePageActivity, usePollingLoop } from "../lib/activity";
 import { diagnosticsTrace } from "../lib/diagnosticsTrace";
+import { segmentAudioRange, segmentAudioReachedEnd } from "../lib/segmentAudioRange";
 import {
   buildDiarizationSpeakerCountRequest,
   clampDiarizationSpeakerCount,
@@ -1352,36 +1353,84 @@ export function SubtitleEditorPage({
   const [segmentCloneMap, setSegmentCloneMap] = useState<Record<number, { outcome: string | null; error: string | null }>>({});
   const segmentAudioRef = useRef<HTMLAudioElement | null>(null);
   const segmentAudioTimer = useRef<number | null>(null);
+  const [loadingSegmentIndex, setLoadingSegmentIndex] = useState<number | null>(null);
   const [playingSegmentIndex, setPlayingSegmentIndex] = useState<number | null>(null);
 
-  function playSegmentAudio(segIndex: number, startMs: number, endMs: number) {
-    const mixPath = outputs?.mix_dub_preview_v1_wav_path;
-    if (!mixPath || !outputs?.mix_dub_preview_v1_wav_exists) return;
-    // Stop any currently playing segment
-    stopSegmentAudio();
-    const audio = new Audio(convertFileSrc(mixPath));
-    segmentAudioRef.current = audio;
-    setPlayingSegmentIndex(segIndex);
-    audio.currentTime = startMs / 1000;
-    audio.play().catch(() => {});
-    // Stop at segment end
-    const durationMs = endMs - startMs;
-    segmentAudioTimer.current = window.setTimeout(() => {
-      stopSegmentAudio();
-    }, durationMs + 100);
-  }
-
-  function stopSegmentAudio() {
-    if (segmentAudioRef.current) {
-      segmentAudioRef.current.pause();
-      segmentAudioRef.current = null;
+  const stopSegmentAudio = useCallback((updatePlayingState = true) => {
+    const audio = segmentAudioRef.current;
+    segmentAudioRef.current = null;
+    if (audio) {
+      audio.onended = null;
+      audio.onerror = null;
+      audio.onpause = null;
+      audio.ontimeupdate = null;
+      audio.pause();
+      audio.removeAttribute("src");
+      audio.load();
     }
     if (segmentAudioTimer.current != null) {
-      window.clearTimeout(segmentAudioTimer.current);
+      window.clearInterval(segmentAudioTimer.current);
       segmentAudioTimer.current = null;
     }
-    setPlayingSegmentIndex(null);
+    if (updatePlayingState) {
+      setLoadingSegmentIndex(null);
+      setPlayingSegmentIndex(null);
+    }
+  }, []);
+
+  async function playSegmentAudio(segIndex: number, startMs: number, endMs: number) {
+    const mixPath = outputs?.mix_dub_preview_v1_wav_path;
+    if (!mixPath || !outputs?.mix_dub_preview_v1_wav_exists) {
+      setError("Dub audio is not available yet. Run Mix dub before previewing a segment.");
+      return;
+    }
+    const range = segmentAudioRange(startMs, endMs);
+    if (!range) {
+      setError("This segment has invalid or empty timing and cannot be previewed.");
+      return;
+    }
+    stopSegmentAudio();
+    const audio = new Audio(convertFileSrc(mixPath));
+    audio.preload = "auto";
+    segmentAudioRef.current = audio;
+    const stopIfCurrent = () => {
+      if (segmentAudioRef.current === audio) stopSegmentAudio();
+    };
+    audio.onended = stopIfCurrent;
+    audio.onpause = stopIfCurrent;
+    audio.ontimeupdate = () => {
+      if (segmentAudioReachedEnd(audio.currentTime, range.endSeconds)) stopIfCurrent();
+    };
+    audio.onerror = () => {
+      if (segmentAudioRef.current !== audio) return;
+      stopSegmentAudio();
+      setError("This segment could not be played from the current dub audio file.");
+    };
+    try {
+      setError(null);
+      setLoadingSegmentIndex(segIndex);
+      audio.currentTime = range.startSeconds;
+      await audio.play();
+      if (segmentAudioRef.current !== audio) {
+        audio.pause();
+        return;
+      }
+      setLoadingSegmentIndex(null);
+      setPlayingSegmentIndex(segIndex);
+      segmentAudioTimer.current = window.setInterval(() => {
+        if (segmentAudioReachedEnd(audio.currentTime, range.endSeconds)) stopIfCurrent();
+      }, 100);
+    } catch (playError) {
+      if (segmentAudioRef.current !== audio) return;
+      stopSegmentAudio();
+      setError(`This segment could not be played: ${String(playError)}`);
+    }
   }
+
+  useEffect(() => {
+    stopSegmentAudio();
+    return () => stopSegmentAudio(false);
+  }, [itemId, stopSegmentAudio]);
 
   const [translationStyle, setTranslationStyle] = useState<TranslationStyle>(() => {
     const raw = safeLocalStorageGet("voxvulgi.v1.editor.translation_style");
@@ -11189,7 +11238,15 @@ export function SubtitleEditorPage({
                 </thead>
                 <tbody>
                   {doc.segments.map((seg, i) => (
-                    <tr key={`${seg.index}-${i}`}>
+                    <tr
+                      key={`${seg.index}-${i}`}
+                      data-audio-playing={playingSegmentIndex === i ? "true" : undefined}
+                      style={
+                        playingSegmentIndex === i
+                          ? { background: "rgba(59, 130, 246, 0.13)" }
+                          : undefined
+                      }
+                    >
                       <td>
                         <code>{i + 1}</code>
                         {segmentCloneMap[i] ? (
@@ -11370,16 +11427,37 @@ export function SubtitleEditorPage({
                           type="button"
                           disabled={!outputs?.mix_dub_preview_v1_wav_exists}
                           onClick={() => {
-                            if (playingSegmentIndex === i) {
+                            if (playingSegmentIndex === i || loadingSegmentIndex === i) {
                               stopSegmentAudio();
                             } else {
-                              playSegmentAudio(i, seg.start_ms, seg.end_ms);
+                              void playSegmentAudio(i, seg.start_ms, seg.end_ms);
                             }
                           }}
-                          title={playingSegmentIndex === i ? "Stop" : "Play dubbed audio for this segment"}
-                          style={{ minWidth: 28, padding: "6px 8px" }}
+                          aria-pressed={playingSegmentIndex === i}
+                          aria-busy={loadingSegmentIndex === i}
+                          aria-label={
+                            playingSegmentIndex === i
+                              ? `Stop dubbed audio for segment ${i + 1}`
+                              : loadingSegmentIndex === i
+                                ? `Cancel loading dubbed audio for segment ${i + 1}`
+                              : `Play dubbed audio for segment ${i + 1}`
+                          }
+                          title={
+                            !outputs?.mix_dub_preview_v1_wav_exists
+                              ? "Run Mix dub before previewing this segment"
+                              : playingSegmentIndex === i
+                                ? "Stop dubbed audio"
+                                : loadingSegmentIndex === i
+                                  ? "Cancel loading dubbed audio"
+                                : "Play dubbed audio for this segment"
+                          }
+                          style={{ minWidth: 54, padding: "6px 8px" }}
                         >
-                          {playingSegmentIndex === i ? "\u25A0" : "\u25B6"}
+                          {playingSegmentIndex === i
+                            ? "Stop"
+                            : loadingSegmentIndex === i
+                              ? "Loading…"
+                              : "Play"}
                         </button>
                         <button
                           type="button"
