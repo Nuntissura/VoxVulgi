@@ -1,0 +1,33 @@
+{
+  "wp": "WP-0210",
+  "status": "DONE",
+  "verified_at": "2026-08-14T13:59:00Z",
+  "app_version": "0.1.138",
+  "sidecar_live_observation": {
+    "pid": 55532,
+    "port": 65335,
+    "pid_alive_before_health_probe": true,
+    "health": "ok"
+  },
+  "single_capture_observation": {
+    "folder_initial_file_count": 0,
+    "snapshot_requests": 1,
+    "dump_requests": 1,
+    "png_files_created": 1,
+    "json_files_created": 1,
+    "folder_final_file_count": 2
+  },
+  "graceful_exit_observation": {
+    "command": "window.__TAURI_INTERNALS__.invoke('window_close')",
+    "command_result": null,
+    "pid_alive_after_three_seconds": false,
+    "agent_bridge_json_exists_after_exit": false,
+    "agent_bridge_port_txt_exists_after_exit": false
+  },
+  "hard_kill_observation": {
+    "session_owned_pid": 53740,
+    "stale_json_remained": true,
+    "stale_port_file_remained": true,
+    "stale_identity_was_verified_before_test_cleanup": true
+  }
+}

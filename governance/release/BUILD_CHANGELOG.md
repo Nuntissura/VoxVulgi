@@ -1154,3 +1154,11 @@ This changelog tracks desktop installer builds produced by `governance/scripts/b
 - Artifacts:
   - `product/desktop/build_target/Current/release/bundle/nsis/VoxVulgi_0.1.137_x64-setup.exe`
 - Notes: v0.1.137 release candidate: guarded crash-orphan recovery unblocks exact root-rebind execution without starting background jobs.
+
+## 0.1.138 - 2026-08-14T12:55:59Z
+- Work Packets: `WP-0209`, `WP-0210`, `WP-0298`
+- Commit: `4d89682`
+- Offline Bundle ID: `offline_full_win64_20260814_082842`
+- Artifacts:
+  - `product/desktop/build_target/Current/release/bundle/nsis/VoxVulgi_0.1.138_x64-setup.exe`
+- Notes: Add authoritative runtime fields to visual debugger dumps; re-prove bridge PID sidecar lifecycle and WP-0298 headless diagnostics on the resulting artifact.

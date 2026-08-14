@@ -3,7 +3,7 @@
 ## Metadata
 - ID: WP-0210
 - Owner: Codex
-- Status: IN_PROGRESS
+- Status: DONE
 - Created: 2026-04-26
 - Target milestone: Localization operator usability / agent debuggability
 - Builds on: WP-0163, WP-0171, WP-0209
@@ -50,3 +50,4 @@ Out of scope:
 
 - 2026-04-26: Created during the bridge/visual debugger investigation. Implementation immediately follows.
 - 2026-08-14: Current packaged-app bridge verification on v0.1.133 confirmed a valid live PID/port sidecar and exactly one dump plus one snapshot for one request each. A close-window message to the agent-headless process did not terminate it within 10 seconds, so graceful-exit sidecar removal remains unproven; the packet stays `IN_PROGRESS`. Evidence is recorded under WP-0307.
+- 2026-08-14: DONE on governed v0.1.138. The live JSON sidecar matched the running PID before the health probe; one request created one PNG and one dump; the documented stale-sidecar hard-kill behavior was observed; and invoking the app's exact Tauri `window_close` command terminated the hidden process and removed both sidecars. Proof: `product/desktop/build_target/tool_artifacts/wp_runs/WP-0210/20260814_final/`.

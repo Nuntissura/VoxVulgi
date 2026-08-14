@@ -3,7 +3,7 @@
 ## Metadata
 - ID: WP-0209
 - Owner: Codex
-- Status: IN_PROGRESS
+- Status: DONE
 - Created: 2026-04-26
 - Target milestone: Localization operator usability / agent debuggability
 - Builds on: WP-0163, WP-0171
@@ -64,3 +64,4 @@ Out of scope (explicitly deferred to later WPs if needed):
 
 - 2026-04-26: Created and implementation started.
 - 2026-08-14: Current packaged-app bridge verification on v0.1.133 produced exactly one dump and one snapshot, but the dump contained only `timestamp_ms`, `url`, `viewport`, `content_scroll_top`, `localstorage_voxvulgi`, `mounted_section_ids`, and `console_buffer`. Required `app_version`, `current_page`, `editor_item_id`, and `safe_mode` fields were absent, so the packet remains `IN_PROGRESS`. Evidence is recorded under WP-0307.
+- 2026-08-14: DONE on governed v0.1.138. Rust-boundary enrichment now supplies authoritative `app_version`, `current_page`, `editor_item_id`, and `safe_mode`; the focused Rust test passed, the headless bridge created exactly one PNG and one JSON dump, all required dump keys were parsed from the saved file, and the paired image was directly inspected. Proof: `product/desktop/build_target/tool_artifacts/wp_runs/WP-0209/20260814_final/`.

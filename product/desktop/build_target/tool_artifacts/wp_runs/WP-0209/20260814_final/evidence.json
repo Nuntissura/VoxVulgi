@@ -1,0 +1,42 @@
+{
+  "wp": "WP-0209",
+  "status": "DONE",
+  "verified_at": "2026-08-14T13:57:43Z",
+  "app": {
+    "version": "0.1.138",
+    "agent_headless": true,
+    "bridge_health": "ok"
+  },
+  "capture": {
+    "folder_initial_file_count": 0,
+    "folder_final_file_count": 2,
+    "snapshot": "governance/snapshots/WP-0209_build_0_1_138/runtime_state_1786712263595.png",
+    "snapshot_sha256": "3881CCCA5118C23AEAFFB9EA737357EF31185CD9781B8A8C27108E0B9FE0D84B",
+    "dump": "governance/snapshots/WP-0209_build_0_1_138/runtime_state_1786712263626.dump.json",
+    "dump_sha256": "59E659EE167EE0E225313968E237FCA788CC760AD05F642C165D06EF545C4F77"
+  },
+  "dump_observation": {
+    "app_version": "0.1.138",
+    "current_page": "media_library",
+    "editor_item_id": null,
+    "safe_mode": false,
+    "required_keys_present": [
+      "timestamp_ms",
+      "app_version",
+      "viewport",
+      "content_scroll_top",
+      "current_page",
+      "editor_item_id",
+      "safe_mode",
+      "url",
+      "localstorage_voxvulgi",
+      "mounted_section_ids",
+      "console_buffer"
+    ]
+  },
+  "build": {
+    "log": "product/desktop/build_target/logs/build_desktop_target_20260814-143555_0_1_138.log",
+    "log_sha256": "B881C54FA6193CBBC79630955A179D99EB607F4AFA7B3CF81757E1E6A91ED39C",
+    "desktop_exe_sha256": "B74ECA6547E5D0DB3D8FBD5A2634CDDF364491EF06C0FA7A3012F41E4DE98EC9"
+  }
+}
