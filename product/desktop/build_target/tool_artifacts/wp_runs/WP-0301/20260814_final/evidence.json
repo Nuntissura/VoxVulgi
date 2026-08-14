@@ -1,0 +1,95 @@
+{
+  "schema_version": 1,
+  "wp": "WP-0301",
+  "status": "DONE",
+  "verified_at": "2026-08-14",
+  "app": {
+    "version": "0.1.137",
+    "artifact": "product/desktop/build_target/Current/release/desktop.exe",
+    "build_commit": "9d4c9b9",
+    "build_log": "product/desktop/build_target/logs/build_desktop_target_20260814-121923_0_1_137.log",
+    "agent_headless": true
+  },
+  "registry": {
+    "module_count": 9,
+    "setting_count": 28,
+    "validation_errors": 0,
+    "future_unavailable_module": "tiktok_archiver"
+  },
+  "automated_checks": [
+    {
+      "command": "npm.cmd run test:contracts",
+      "cwd": "product/desktop",
+      "passed": 187,
+      "failed": 0
+    },
+    {
+      "command": "npx.cmd tsc --noEmit",
+      "cwd": "product/desktop",
+      "status": "PASS"
+    },
+    {
+      "command": "cargo test --manifest-path product/desktop/src-tauri/Cargo.toml options_ -- --nocapture",
+      "cwd": ".",
+      "passed": 1,
+      "failed": 0,
+      "filtered_out": 42
+    }
+  ],
+  "ui_checks": {
+    "wide": {
+      "viewport": [1440, 1000],
+      "returned_elements": 59,
+      "missing_accessible_names": 0,
+      "truncated": false,
+      "snapshot": "governance/snapshots/WP-0301_build_0_1_137/options_wide_1786703465054.png",
+      "dump": "governance/snapshots/WP-0301_build_0_1_137/options_wide_1786703465066.dump.json"
+    },
+    "supported_boundary": {
+      "viewport": [800, 600],
+      "returned_elements": 33,
+      "missing_accessible_names": 0,
+      "truncated": false,
+      "horizontal_overflow": false,
+      "document_widths": [800, 800],
+      "content_widths": [760, 760],
+      "options_widths": [756, 756],
+      "snapshot": "governance/snapshots/WP-0301_build_0_1_137/options_narrow_800x600_1786707926188.png",
+      "dump": "governance/snapshots/WP-0301_build_0_1_137/options_narrow_800x600_1786707926209.dump.json"
+    },
+    "compact": {
+      "viewport": [640, 600],
+      "module_selector": "Diagnostics",
+      "visible_tabs": 0,
+      "returned_elements": 9,
+      "missing_accessible_names": 0,
+      "truncated": false,
+      "snapshot": "governance/snapshots/WP-0301_build_0_1_137/options_compact_640x600_1786707994620.png",
+      "dump": "governance/snapshots/WP-0301_build_0_1_137/options_compact_640x600_1786707994669.dump.json"
+    },
+    "restart": {
+      "selected_before_close": "Diagnostics",
+      "selected_after_relaunch": "Diagnostics",
+      "same_app_version": true,
+      "snapshot": "governance/snapshots/WP-0301_build_0_1_137/options_restart_persisted_640x600_1786708067035.png",
+      "dump": "governance/snapshots/WP-0301_build_0_1_137/options_restart_persisted_640x600_1786708067043.dump.json"
+    },
+    "keyboard": {
+      "viewport": [800, 600],
+      "start": "Diagnostics",
+      "key": "ArrowDown",
+      "selected_after": "General",
+      "focused_element_after": "options-module-general-tab",
+      "snapshot": "governance/snapshots/WP-0301_build_0_1_137/options_keyboard_wrap_800x600_1786708174423.png"
+    }
+  },
+  "data_safety": {
+    "module_reset_mutation_executed_against_operator_data": false,
+    "reset_allowlist_and_rollback_contracts_passed": true,
+    "product_data_deleted": false
+  },
+  "adversarial_review": {
+    "status": "PASS",
+    "unresolved_findings": []
+  }
+}
