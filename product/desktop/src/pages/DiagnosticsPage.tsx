@@ -786,7 +786,7 @@ function formatModelDelivery(delivery: ModelInventoryItem["delivery"]): string {
     case "manual_install":
       return "Manual install";
     case "bundled_resource":
-      return "Bundled resource";
+      return "Included resource";
     default:
       return delivery;
   }
@@ -1478,7 +1478,7 @@ export function DiagnosticsPage({ visible = true }: { visible?: boolean }) {
         name: "Installer setup",
         state:
           startup?.offline_bundle_state === "ready"
-            ? "bundled resources installed into app data"
+            ? "included resources installed into app data"
             : startup?.offline_bundle_state === "skipped_safe_mode"
               ? "skipped because Safe Mode is enabled"
               : startup?.offline_bundle_state === "error"
@@ -1489,17 +1489,17 @@ export function DiagnosticsPage({ visible = true }: { visible?: boolean }) {
         name: "yt-dlp",
         state: ytdlp?.available
           ? ytdlp.bundled_installed
-            ? "bundled and available now"
-            : "available from local runtime path"
-          : "not available",
+            ? "included and ready now"
+            : "ready from local runtime path"
+          : "not ready",
       },
       {
         name: "JS runtime for yt-dlp",
         state: jsRuntime?.available
           ? jsRuntime.bundled_deno_installed
-            ? "bundled and available now"
-            : `available from ${jsRuntime.preferred_runtime || "local"} runtime path`
-          : "not available",
+            ? "included and ready now"
+            : `ready from ${jsRuntime.preferred_runtime || "local"} runtime path`
+          : "not ready",
       },
       {
         name: "Portable Python",
@@ -1656,7 +1656,7 @@ export function DiagnosticsPage({ visible = true }: { visible?: boolean }) {
   async function installJsRuntime() {
     setBusy(true);
     setError(null);
-    setNotice("Installing bundled Deno JavaScript runtime for yt-dlp.");
+    setNotice("Installing the included Deno JavaScript runtime for yt-dlp.");
     try {
       await invoke<JsRuntimeToolsStatus>("tools_js_runtime_install");
       await refresh();
@@ -3148,7 +3148,7 @@ export function DiagnosticsPage({ visible = true }: { visible?: boolean }) {
 
         <div className="kv">
           <div className="k">yt-dlp</div>
-          <div className="v">{ytdlp?.available ? "available" : "not available"}</div>
+          <div className="v">{ytdlp?.available ? "Ready" : "Not ready"}</div>
         </div>
         <div className="kv">
           <div className="k">yt-dlp version</div>
@@ -3159,23 +3159,23 @@ export function DiagnosticsPage({ visible = true }: { visible?: boolean }) {
           <div className="v">{ytdlp?.ytdlp_path ?? "-"}</div>
         </div>
         <div className="kv">
-          <div className="k">yt-dlp bundled</div>
+          <div className="k">Included yt-dlp</div>
           <div className="v">{ytdlp?.bundled_installed ? "installed" : "not installed"}</div>
         </div>
         <div className="kv">
-          <div className="k">yt-dlp bundled path</div>
+          <div className="k">Included yt-dlp path</div>
           <div className="v">{ytdlp?.bundled_path ?? "-"}</div>
         </div>
         <div className="kv">
           <div className="k">Downloader privacy</div>
           <div className="v">
             yt-dlp downloads only when you click Install. Browser cookies are opt-in in Library.
-            Install the bundled Deno runtime for current YouTube extraction support.
+            Install the included Deno runtime for current YouTube extraction support.
           </div>
         </div>
         <div className="kv">
           <div className="k">JS runtime for yt-dlp</div>
-          <div className="v">{jsRuntime?.available ? "available" : "not available"}</div>
+          <div className="v">{jsRuntime?.available ? "Ready" : "Not ready"}</div>
         </div>
         <div className="kv">
           <div className="k">Preferred runtime</div>
@@ -3190,23 +3190,23 @@ export function DiagnosticsPage({ visible = true }: { visible?: boolean }) {
           <div className="v">{jsRuntime?.preferred_path ?? "-"}</div>
         </div>
         <div className="kv">
-          <div className="k">Bundled Deno</div>
+          <div className="k">Included Deno</div>
           <div className="v">
             {jsRuntime?.bundled_deno_installed ? "installed" : "not installed"}
           </div>
         </div>
         <div className="kv">
-          <div className="k">Bundled Deno path</div>
+          <div className="k">Included Deno path</div>
           <div className="v">{jsRuntime?.bundled_deno_path ?? "-"}</div>
         </div>
         <div className="kv">
-          <div className="k">Bundled Deno version</div>
+          <div className="k">Included Deno version</div>
           <div className="v">{jsRuntime?.bundled_deno_version ?? "-"}</div>
         </div>
 
         <div className="kv">
           <div className="k">Python (voice cloning)</div>
-          <div className="v">{python?.base_available ? "available" : "not available"}</div>
+          <div className="v">{python?.base_available ? "Ready" : "Not ready"}</div>
         </div>
         <div className="kv">
           <div className="k">Python version</div>

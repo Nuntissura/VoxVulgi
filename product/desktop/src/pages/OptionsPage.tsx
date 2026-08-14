@@ -1151,7 +1151,7 @@ export function OptionsPage() {
   }): Promise<YoutubeAuthStatusReceipt> {
     const expected = authRevisionRef.current;
     if (!authRevisionHydrated || !expected) {
-      throw new Error("YouTube credential status is not hydrated; reload Options before changing sign-in.");
+      throw new Error("YouTube sign-in status has not loaded; reload Options before changing sign-in.");
     }
     try {
       const saved = await invoke<YoutubeAuthStatusReceipt>("config_youtube_auth_set", {
@@ -1649,7 +1649,7 @@ export function OptionsPage() {
   ): Promise<InstagramAuthStatusReceipt> {
     const expected = instagramAuthRevisionRef.current;
     if (igAuthHydrationState !== "ready" || !expected) {
-      throw new Error("Instagram credential status is not hydrated; reload Options before changing sign-in.");
+      throw new Error("Instagram sign-in status has not loaded; reload Options before changing sign-in.");
     }
     try {
       const saved = await invoke<InstagramAuthStatusReceipt>("config_instagram_auth_set", {
@@ -2837,7 +2837,12 @@ export function OptionsPage() {
           <div className="v options-path-value">{status?.current_dir || "-"}</div>
         </div>
         <div className="kv">
-          <div className="k">Status</div>
+          <div
+            className="k"
+            title="Custom uses a folder selected for this module. Uses main folder inherits the shared storage root."
+          >
+            Status
+          </div>
           <div className="v">
             {dirLoading && !downloadDir ? "checking..." : status?.exists ? "Ready" : "Missing"}
             {status?.override_dir ? " (custom)" : " (uses main folder)"}

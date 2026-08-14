@@ -6942,7 +6942,7 @@ export function SubtitleEditorPage({
             }}
           >
             <div style={{ fontWeight: 700 }}>
-              Dub truth: {activeVoiceCloneTruth.label}
+              Clone status: {activeVoiceCloneTruth.label}
             </div>
             <div style={{ fontSize: 12 }}>
               {activeVoiceCloneTruth.detail || "No segment-level counts were reported."}

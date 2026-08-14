@@ -4796,6 +4796,11 @@ export function LibraryPage({ mode = "all", visible = true }: LibraryPageProps) 
           Download speed, retries, throttling, and request pacing are owned by Options → Video Archiver.
           Changing a preset here preserves those Options-managed runtime values.
         </p>
+        <p className="muted">
+          Source format chooses which video and audio streams to request. Quality limits resolution
+          when needed, while Subtitles controls whether available captions are embedded in the MKV.
+          Path and filename templates decide the folders and names created for this preset.
+        </p>
         <div className="row">
           <button type="button" disabled={busy} onClick={savePreset}>
             {presetEditId ? "Update preset" : "Save preset"}
@@ -6627,6 +6632,11 @@ export function LibraryPage({ mode = "all", visible = true }: LibraryPageProps) 
               <span>Allow other websites</span>
             </label>
           </div>
+          <p className="muted">
+            Also open linked posts visits individual posts or threads found on each page. Allow other
+            websites permits those links to leave the website you pasted; leave it off to keep the
+            crawl on the original site.
+          </p>
           <div className="row">
             <label style={{ display: "flex", alignItems: "center", gap: 8, flex: 1 }}>
               <span>Skip words</span>

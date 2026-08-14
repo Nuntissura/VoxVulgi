@@ -387,11 +387,11 @@ const LOCALIZATION_HOME_STAGES = [
   },
   {
     title: "Captions and translation",
-    detail: "Run ASR, then produce the English track that later dubbing and benchmarking use.",
+    detail: "Run speech recognition, then produce the English track that later dubbing and benchmarking use.",
   },
   {
-    title: "Speakers and references",
-    detail: "Label speakers, generate missing reference candidates, and confirm voice-plan readiness.",
+    title: "Speakers and voice samples",
+    detail: "Label speakers, generate missing voice samples, and confirm that each saved voice is ready.",
   },
   {
     title: "Dub, mix, and mux",
@@ -2059,7 +2059,7 @@ function LocalizationStudioHome({
               Open Options
             </button>
             <label style={{ display: "flex", alignItems: "center", gap: 8 }}>
-              <span>ASR lang</span>
+              <span>Source language</span>
               <select
                 value={asrLang}
                 disabled={busy}
