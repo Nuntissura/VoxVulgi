@@ -15,6 +15,8 @@ pub struct PinnedDependencyManifest {
     pub yt_dlp_windows: YtDlpWindowsPin,
     pub portable_python_windows: PortablePythonWindowsPin,
     pub deno_windows: DenoWindowsPin,
+    pub node_windows: NodeWindowsPin,
+    pub youtube_po_provider: YoutubePoProviderPin,
     pub spleeter: SpleeterPins,
     pub demucs: SingleSpecPin,
     pub diarization: PythonPackageSet,
@@ -48,6 +50,42 @@ pub struct DenoWindowsPin {
     pub file_bytes: u64,
     pub source_label: String,
 }
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct NodeWindowsPin {
+    pub version: String,
+    pub npm_version: String,
+    pub node_exe_sha256_hex: String,
+    pub npm_cmd_sha256_hex: String,
+    pub complete_tree_sha256_hex: String,
+    pub url: String,
+    pub sha256_hex: String,
+    pub file_bytes: u64,
+    pub source_label: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct YoutubePoProviderPin {
+    pub version: String,
+    pub plugin_url: String,
+    pub plugin_sha256_hex: String,
+    pub plugin_file_bytes: u64,
+    pub plugin_tree_sha256_hex: String,
+    pub plugin_files_sha256: BTreeMap<String, String>,
+    pub source_commit: String,
+    pub source_url: String,
+    pub source_sha256_hex: String,
+    pub source_file_bytes: u64,
+    pub derived_lock_resource: String,
+    pub derived_lock_sha256_hex: String,
+    pub node_modules_tree_sha256_hex: String,
+    pub server_entrypoint_sha256_hex: String,
+    pub application_complete_tree_sha256_hex: String,
+    pub source_label: String,
+}
+
+pub const YOUTUBE_PO_PROVIDER_DERIVED_LOCK: &str =
+    include_str!("../resources/tooling/youtube_po_provider_1_3_1.package-lock.json");
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SpleeterPins {
@@ -150,14 +188,39 @@ mod tests {
     #[test]
     fn manifest_parses_and_contains_expected_sections() {
         let manifest = manifest();
-        assert_eq!(manifest.schema_version, 1);
+        assert_eq!(manifest.schema_version, 2);
         assert_eq!(
             manifest.allow_unpinned_fallback_env,
             "VOXVULGI_ALLOW_UNPINNED_FALLBACK"
         );
-        assert_eq!(manifest.yt_dlp_windows.version, "2026.03.17");
+        assert_eq!(manifest.yt_dlp_windows.version, "2026.07.04");
+        assert_eq!(
+            manifest.yt_dlp_windows.sha256_hex,
+            "52FE3C26DCF71FBDC85B528589020BB0B8E383155CFA81B64DD447BBE35E24B8"
+        );
         assert_eq!(manifest.portable_python_windows.version, "3.11.9");
         assert_eq!(manifest.deno_windows.version, "2.7.5");
+        assert_eq!(manifest.node_windows.version, "24.19.0");
+        assert_eq!(manifest.node_windows.npm_version, "11.17.0");
+        assert_eq!(
+            manifest.node_windows.complete_tree_sha256_hex,
+            "2D0906A746B7AB1280DDCF6B3C884068FDE9C00FB647BC31DDD1EB82BBC50FBB"
+        );
+        assert_eq!(manifest.youtube_po_provider.version, "1.3.1");
+        assert_eq!(
+            manifest.youtube_po_provider.derived_lock_sha256_hex,
+            "1716EE78267544F03D64AC1CCBB365C718B9CC667BD965406311076AE849F8B4"
+        );
+        assert_eq!(
+            manifest.youtube_po_provider.node_modules_tree_sha256_hex,
+            "28ED8B72BE8F8AFF827B94ABDF3722F0A1DEE1B3CEAA575ADB561A9AFD22A486"
+        );
+        assert_eq!(
+            manifest
+                .youtube_po_provider
+                .application_complete_tree_sha256_hex,
+            "728F821DBCE39DF5BB28A73359637E3002922C13D0FF588BCABA9FE489191963"
+        );
         assert!(manifest
             .diarization
             .pinned

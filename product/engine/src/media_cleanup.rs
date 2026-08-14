@@ -1,5 +1,5 @@
 use crate::paths::AppPaths;
-use crate::{db, EngineError, Result};
+use crate::{db, library, root_rebind, EngineError, Result};
 use rusqlite::{params, OptionalExtension};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
@@ -11,6 +11,11 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use uuid::Uuid;
 
 const HASH_WINDOW_BYTES: usize = 64 * 1024;
+
+#[cfg(test)]
+thread_local! {
+    static FORCE_CLEANUP_APPLY_COMPENSATION_FAILURE: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct MediaCleanupRun {
@@ -152,6 +157,23 @@ pub fn get_run(paths: &AppPaths, run_id: &str) -> Result<Option<MediaCleanupRun>
     get_run_conn(&conn, run_id)
 }
 
+/// Canonical restart identity for cleanup work. The SQLite run row, not a browser-local
+/// projection, owns recovery after a frontend restart or failed localStorage write.
+pub fn latest_run(paths: &AppPaths) -> Result<Option<MediaCleanupRun>> {
+    let conn = db::open_readonly(paths)?;
+    let run_id = conn
+        .query_row(
+            "SELECT id FROM media_cleanup_run ORDER BY created_at_ms DESC, id DESC LIMIT 1",
+            [],
+            |row| row.get::<_, String>(0),
+        )
+        .optional()?;
+    match run_id {
+        Some(run_id) => get_run_conn(&conn, &run_id),
+        None => Ok(None),
+    }
+}
+
 pub fn advance_inventory(
     paths: &AppPaths,
     run_id: &str,
@@ -178,7 +200,7 @@ pub fn advance_inventory(
         });
     }
     let mut queue: Vec<String> = serde_json::from_str(&row.0)?;
-    let library_by_path = library_identity_by_normalized_path(&conn)?;
+    let library_by_path = library_identity_by_normalized_path(paths, &conn)?;
     let mut processed_files = 0_usize;
     let mut bytes_scanned = 0_u64;
 
@@ -516,7 +538,14 @@ pub fn apply_approved_groups(paths: &AppPaths, run_id: &str) -> Result<MediaClea
             .iter()
             .filter(|member| member.path != group.keeper_path)
         {
-            match apply_one_action(&conn, run_id, &group, member, Path::new(&quarantine_root)) {
+            match apply_one_action(
+                paths,
+                &conn,
+                run_id,
+                &group,
+                member,
+                Path::new(&quarantine_root),
+            ) {
                 Ok(bytes) => {
                     summary.applied_actions += 1;
                     summary.bytes_quarantined = summary.bytes_quarantined.saturating_add(bytes);
@@ -611,8 +640,8 @@ ORDER BY created_at_ms DESC
                     |row| row.get::<_, String>(0),
                 )?;
                 if current_path != original_library_path
-                    && !paths_equivalent(&current_path, original_library_path)
-                    && !paths_equivalent(&current_path, &keeper_path)
+                    && !paths_equivalent_with_aliases(paths, &current_path, original_library_path)
+                    && !paths_equivalent_with_aliases(paths, &current_path, &keeper_path)
                 {
                     return Err(EngineError::InstallFailed(format!(
                         "rollback refused to overwrite a library path changed after cleanup: item={source_item}; current={current_path}"
@@ -692,18 +721,79 @@ ORDER BY created_at_ms DESC
                         action.0
                     )));
                 }
+                if let Some((current_path, original_path)) = source_library_path.as_ref() {
+                    library::persist_media_path_observation_rewrite_invalidation(
+                        &tx,
+                        current_path,
+                        original_path,
+                    )?;
+                }
+                library::persist_media_path_observation_rewrite_invalidation(
+                    &tx,
+                    &quarantine.to_string_lossy(),
+                    &source.to_string_lossy(),
+                )?;
                 tx.commit()?;
+                if let Some((current_path, original_path)) = source_library_path.as_ref() {
+                    library::invalidate_media_path_observation_rewrite_memory(
+                        current_path,
+                        original_path,
+                    );
+                }
+                library::invalidate_media_path_observation_rewrite_memory(
+                    &quarantine.to_string_lossy(),
+                    &source.to_string_lossy(),
+                );
                 Ok(())
             })();
             if let Err(database_error) = database_result {
+                let mut compensation_error = None;
                 if quarantine_exists && source.exists() && !quarantine.exists() {
-                    if let Err(compensation_error) =
+                    if let Err(error) =
                         move_verified(&source, &quarantine, action.6, &action.7)
                     {
-                        return Err(EngineError::InstallFailed(format!(
-                            "rollback database update failed ({database_error}); restoring the quarantine copy also failed ({compensation_error})"
-                        )));
+                        compensation_error = Some(error);
                     }
+                }
+                // The metadata transaction rolled back, but the file may have crossed either
+                // filesystem boundary. Persist invalidation independently before returning the
+                // attention result so a restart cannot trust the pre-rollback observation.
+                let invalidation_result = (|| -> Result<()> {
+                    let tx = conn.unchecked_transaction()?;
+                    if let Some((current_path, original_path)) = source_library_path.as_ref() {
+                        library::persist_media_path_observation_rewrite_invalidation(
+                            &tx,
+                            current_path,
+                            original_path,
+                        )?;
+                    }
+                    library::persist_media_path_observation_rewrite_invalidation(
+                        &tx,
+                        &quarantine.to_string_lossy(),
+                        &source.to_string_lossy(),
+                    )?;
+                    tx.commit()?;
+                    if let Some((current_path, original_path)) = source_library_path.as_ref() {
+                        library::invalidate_media_path_observation_rewrite_memory(
+                            current_path,
+                            original_path,
+                        );
+                    }
+                    library::invalidate_media_path_observation_rewrite_memory(
+                        &quarantine.to_string_lossy(),
+                        &source.to_string_lossy(),
+                    );
+                    Ok(())
+                })();
+                if let Err(invalidation_error) = invalidation_result {
+                    return Err(EngineError::InstallFailed(format!(
+                        "rollback database update failed ({database_error}); attention-path availability invalidation also failed ({invalidation_error})"
+                    )));
+                }
+                if let Some(compensation_error) = compensation_error {
+                    return Err(EngineError::InstallFailed(format!(
+                        "rollback database update failed ({database_error}); restoring the quarantine copy also failed ({compensation_error})"
+                    )));
                 }
                 return Err(database_error);
             }
@@ -736,6 +826,7 @@ ORDER BY created_at_ms DESC
 }
 
 fn apply_one_action(
+    paths: &AppPaths,
     conn: &rusqlite::Connection,
     run_id: &str,
     group: &MediaCleanupGroup,
@@ -778,7 +869,7 @@ fn apply_one_action(
                 "cleanup source library item is missing: {source_item}"
             ))
         })?;
-        if !paths_equivalent(&current_path, &member.path) {
+        if !paths_equivalent_with_aliases(paths, &current_path, &member.path) {
             return Err(EngineError::InstallFailed(format!(
                 "cleanup source library path changed after inventory: item={source_item}; expected={}; current={current_path}",
                 member.path
@@ -788,19 +879,22 @@ fn apply_one_action(
     } else {
         None
     };
-    if let Some(keeper_item) = group.keeper_library_item_id.as_deref() {
+    let keeper_library_path = if let Some(keeper_item) = group.keeper_library_item_id.as_deref() {
         let current_path = library_item_media_path(conn, keeper_item)?.ok_or_else(|| {
             EngineError::InstallFailed(format!(
                 "cleanup keeper library item is missing: {keeper_item}"
             ))
         })?;
-        if !paths_equivalent(&current_path, &group.keeper_path) {
+        if !paths_equivalent_with_aliases(paths, &current_path, &group.keeper_path) {
             return Err(EngineError::InstallFailed(format!(
                 "cleanup keeper library path changed after approval: item={keeper_item}; expected={}; current={current_path}",
                 group.keeper_path
             )));
         }
-    }
+        Some(current_path)
+    } else {
+        None
+    };
     let action_id = Uuid::new_v4().to_string();
     let extension = source
         .extension()
@@ -916,13 +1010,44 @@ INSERT INTO media_cleanup_action (
                 "cleanup action journal row is missing: {action_id}"
             )));
         }
+        library::persist_media_path_observation_rewrite_invalidation(
+            &tx,
+            source_library_path.as_deref().unwrap_or(&member.path),
+            &group.keeper_path,
+        )?;
+        if let Some(keeper_path) = keeper_library_path.as_deref() {
+            library::persist_media_path_observation_rewrite_invalidation(
+                &tx,
+                &group.keeper_path,
+                keeper_path,
+            )?;
+        }
+        library::persist_media_path_observation_rewrite_invalidation(
+            &tx,
+            &source.to_string_lossy(),
+            &quarantine_path.to_string_lossy(),
+        )?;
         tx.commit()?;
+        library::invalidate_media_path_observation_rewrite_memory(
+            source_library_path.as_deref().unwrap_or(&member.path),
+            &group.keeper_path,
+        );
+        if let Some(keeper_path) = keeper_library_path.as_deref() {
+            library::invalidate_media_path_observation_rewrite_memory(
+                &group.keeper_path,
+                keeper_path,
+            );
+        }
+        library::invalidate_media_path_observation_rewrite_memory(
+            &source.to_string_lossy(),
+            &quarantine_path.to_string_lossy(),
+        );
         Ok(())
     })();
     if let Err(error) = result {
         let moved_to_quarantine = quarantine_path.exists() && !source.exists();
         let recovery_error = if moved_to_quarantine {
-            move_verified(
+            restore_source_after_failed_cleanup_apply(
                 &quarantine_path,
                 &source,
                 i64::try_from(group.size_bytes).unwrap_or(i64::MAX),
@@ -933,13 +1058,58 @@ INSERT INTO media_cleanup_action (
             None
         };
         let still_quarantined = quarantine_path.exists() && !source.exists();
+        let invalidation_error = if still_quarantined {
+            (|| -> Result<()> {
+                let tx = conn.unchecked_transaction()?;
+                library::persist_media_path_observation_rewrite_invalidation(
+                    &tx,
+                    source_library_path.as_deref().unwrap_or(&member.path),
+                    &quarantine_path.to_string_lossy(),
+                )?;
+                if source_library_path
+                    .as_deref()
+                    .is_some_and(|path| !paths_equivalent(path, &member.path))
+                {
+                    library::persist_media_path_observation_rewrite_invalidation(
+                        &tx,
+                        &member.path,
+                        &quarantine_path.to_string_lossy(),
+                    )?;
+                }
+                tx.commit()?;
+                library::invalidate_media_path_observation_rewrite_memory(
+                    source_library_path.as_deref().unwrap_or(&member.path),
+                    &quarantine_path.to_string_lossy(),
+                );
+                if source_library_path
+                    .as_deref()
+                    .is_some_and(|path| !paths_equivalent(path, &member.path))
+                {
+                    library::invalidate_media_path_observation_rewrite_memory(
+                        &member.path,
+                        &quarantine_path.to_string_lossy(),
+                    );
+                }
+                Ok(())
+            })()
+            .err()
+        } else {
+            None
+        };
         let error_text = recovery_error
+            .as_ref()
             .map(|recovery| {
                 format!(
                     "{error}; restoring the source after the database failure also failed: {recovery}"
                 )
             })
             .unwrap_or_else(|| error.to_string());
+        let error_text = invalidation_error
+            .as_ref()
+            .map(|invalidation| {
+                format!("{error_text}; persisting attention-path availability invalidation also failed: {invalidation}")
+            })
+            .unwrap_or(error_text);
         conn.execute(
             "UPDATE media_cleanup_action SET status=?1, error=?2, updated_at_ms=?3 WHERE id=?4",
             params![
@@ -953,9 +1123,27 @@ INSERT INTO media_cleanup_action (
                 action_id
             ],
         )?;
+        if let Some(invalidation_error) = invalidation_error {
+            return Err(invalidation_error);
+        }
         return Err(error);
     }
     Ok(group.size_bytes)
+}
+
+fn restore_source_after_failed_cleanup_apply(
+    quarantine: &Path,
+    source: &Path,
+    expected_size: i64,
+    expected_sha256: &str,
+) -> Result<()> {
+    #[cfg(test)]
+    if FORCE_CLEANUP_APPLY_COMPENSATION_FAILURE.with(|flag| flag.get()) {
+        return Err(EngineError::InstallFailed(
+            "forced cleanup apply compensation failure".to_string(),
+        ));
+    }
+    move_verified(quarantine, source, expected_size, expected_sha256)
 }
 
 fn ensure_cleanup_apply_boundary(conn: &rusqlite::Connection) -> Result<()> {
@@ -1392,6 +1580,7 @@ FROM media_cleanup_run WHERE id=?1
 }
 
 fn library_identity_by_normalized_path(
+    paths: &AppPaths,
     conn: &rusqlite::Connection,
 ) -> Result<HashMap<String, (Option<String>, Option<String>)>> {
     let mut stmt = conn.prepare(
@@ -1409,6 +1598,8 @@ LEFT JOIN media_source_identity i
         let item_id: String = row.get(1)?;
         let media_id: Option<String> = row.get(2)?;
         let mut keys = vec![normalize_path_key(&path)];
+        let resolved = root_rebind::resolve_active_alias_path(paths, Path::new(&path), false)?;
+        keys.push(normalize_path_key(&resolved.to_string_lossy()));
         if let Ok(canonical) = Path::new(&path).canonicalize() {
             keys.push(normalize_path_key(&canonical.to_string_lossy()));
         }
@@ -1458,6 +1649,14 @@ fn paths_equivalent(left: &str, right: &str) -> bool {
     normalize_path_key(&left.to_string_lossy()) == normalize_path_key(&right.to_string_lossy())
 }
 
+fn paths_equivalent_with_aliases(paths: &AppPaths, left: &str, right: &str) -> bool {
+    let left = root_rebind::resolve_active_alias_path(paths, Path::new(left), false)
+        .unwrap_or_else(|_| PathBuf::from(left));
+    let right = root_rebind::resolve_active_alias_path(paths, Path::new(right), false)
+        .unwrap_or_else(|_| PathBuf::from(right));
+    paths_equivalent(&left.to_string_lossy(), &right.to_string_lossy())
+}
+
 fn is_media_file(path: &Path) -> bool {
     matches!(
         path.extension()
@@ -1503,6 +1702,38 @@ fn now_ms() -> i64 {
 mod tests {
     use super::*;
 
+    #[test]
+    fn latest_cleanup_run_is_recovered_from_sqlite_after_restart() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let app_root = dir.path().join("app_data");
+        let paths = AppPaths::new(app_root.clone());
+        db::ensure_schema(&paths).expect("schema");
+        let media_root = dir.path().join("media");
+        std::fs::create_dir_all(&media_root).expect("media root");
+
+        assert!(latest_run(&paths).expect("empty lookup").is_none());
+        let first = create_inventory_run(
+            &paths,
+            vec![media_root.to_string_lossy().to_string()],
+            None,
+        )
+        .expect("first run");
+        std::thread::sleep(std::time::Duration::from_millis(2));
+        let second = create_inventory_run(
+            &paths,
+            vec![media_root.to_string_lossy().to_string()],
+            None,
+        )
+        .expect("second run");
+
+        let restarted_paths = AppPaths::new(app_root);
+        let recovered = latest_run(&restarted_paths)
+            .expect("restart lookup")
+            .expect("latest run");
+        assert_eq!(recovered.id, second.id);
+        assert_ne!(recovered.id, first.id);
+    }
+
     fn advance_to_review(paths: &AppPaths, run_id: &str) {
         loop {
             let run = get_run(paths, run_id).expect("run").expect("exists");
@@ -1529,10 +1760,64 @@ mod tests {
     }
 
     #[test]
+    fn historical_mp4_cleanup_identity_matches_alias_resolved_physical_path() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let paths = AppPaths::new(dir.path().join("app_data"));
+        db::ensure_schema(&paths).expect("schema");
+        let target_root = dir.path().join("archive");
+        std::fs::create_dir_all(&target_root).expect("target root");
+        let physical_mp4 = target_root.join("legacy.mp4");
+        std::fs::write(&physical_mp4, b"historical mp4").expect("historical fixture");
+        let stored_mp4 = r"C:\old_archive\legacy.mp4";
+        let conn = db::open(&paths).expect("db");
+        conn.execute(
+            "INSERT INTO library_item(id,created_at_ms,source_type,source_uri,title,media_path,container) VALUES('legacy-cleanup',1,'local_file',?1,'Legacy cleanup',?1,'mp4')",
+            [stored_mp4],
+        )
+        .expect("historical library row");
+        let aliases = crate::root_rebind::RootAliasesConfig {
+            schema_version: 1,
+            aliases: vec![crate::root_rebind::RootAliasRecord {
+                id: "cleanup-alias".to_string(),
+                from_root: r"C:\old_archive".to_string(),
+                to_root: target_root.to_string_lossy().to_string(),
+                verified_at_ms: 1,
+                status: "active".to_string(),
+                receipt_path: "receipt.json".to_string(),
+            }],
+        };
+        crate::persistence::atomic_write_text(
+            &paths.root_aliases_config_path(),
+            &format!("{}\n", serde_json::to_string_pretty(&aliases).unwrap()),
+        )
+        .expect("alias config");
+
+        let map = library_identity_by_normalized_path(&paths, &conn).expect("identity map");
+        let physical_key = normalize_path_key(&physical_mp4.to_string_lossy());
+        assert_eq!(
+            map.get(&physical_key).and_then(|entry| entry.0.as_deref()),
+            Some("legacy-cleanup")
+        );
+        assert!(paths_equivalent_with_aliases(
+            &paths,
+            stored_mp4,
+            &physical_mp4.to_string_lossy()
+        ));
+    }
+
+    #[test]
     fn inventory_hash_quarantine_and_rollback_are_recoverable() {
         let dir = tempfile::tempdir().expect("tempdir");
         let paths = AppPaths::new(dir.path().join("app_data"));
         db::ensure_schema(&paths).expect("schema");
+        let queue = db::open(&paths).expect("queue state db");
+        queue
+            .execute(
+                "INSERT INTO meta(key,value) VALUES('jobs_queue_paused','1') ON CONFLICT(key) DO UPDATE SET value='1'",
+                [],
+            )
+            .expect("pause queue for cleanup apply boundary");
+        drop(queue);
         let media_root = dir.path().join("media");
         let quarantine = dir.path().join("quarantine");
         std::fs::create_dir_all(&media_root).expect("media root");
@@ -1559,7 +1844,15 @@ mod tests {
             [],
         )
         .expect("identity");
-        let library_map = library_identity_by_normalized_path(&conn).expect("library path map");
+        for media_path in [&duplicate, &keeper] {
+            conn.execute(
+                "INSERT INTO media_availability_observation(path,state,observed_at_ms,source,duration_ms,next_refresh_at_ms,invalidated_at_ms) VALUES(?1,'present',1,'cleanup-fixture',1,9999999999999,NULL)",
+                [media_path.to_string_lossy().to_string()],
+            )
+            .expect("seed availability observation");
+        }
+        let library_map =
+            library_identity_by_normalized_path(&paths, &conn).expect("library path map");
         assert_eq!(
             library_map
                 .get(&normalize_path_key(&duplicate.to_string_lossy()))
@@ -1631,6 +1924,30 @@ mod tests {
             )
             .expect("applied identity");
         assert_eq!(applied_identity_item, "keeper-item");
+        for media_path in [&duplicate, &keeper] {
+            let invalidated_at: Option<i64> = conn
+                .query_row(
+                    "SELECT invalidated_at_ms FROM media_availability_observation WHERE path=?1",
+                    [media_path.to_string_lossy().to_string()],
+                    |row| row.get(0),
+                )
+                .expect("applied observation");
+            assert!(
+                invalidated_at.is_some(),
+                "cleanup apply must invalidate both old and new library paths: {}",
+                media_path.to_string_lossy()
+            );
+            conn.execute(
+                "UPDATE media_availability_observation SET invalidated_at_ms=NULL,next_refresh_at_ms=9999999999999 WHERE path=?1",
+                [media_path.to_string_lossy().to_string()],
+            )
+            .expect("reseed observation before rollback");
+        }
+        conn.execute(
+            "INSERT INTO media_availability_observation(path,state,observed_at_ms,source,duration_ms,next_refresh_at_ms,invalidated_at_ms) VALUES(?1,'present',2,'rollback-fixture',1,9999999999999,NULL) ON CONFLICT(path) DO UPDATE SET invalidated_at_ms=NULL,next_refresh_at_ms=9999999999999",
+            [&applied_library_path],
+        )
+        .expect("seed exact pre-rollback library path");
         let preserved_title: String = conn
             .query_row(
                 "SELECT title FROM library_item WHERE id='duplicate-item'",
@@ -1669,6 +1986,21 @@ mod tests {
             )
             .expect("rolled-back identity");
         assert_eq!(rolled_back_identity_item, "duplicate-item");
+        let duplicate_text = duplicate.to_string_lossy().to_string();
+        for media_path in [applied_library_path.as_str(), duplicate_text.as_str()] {
+            let invalidated_at: Option<i64> = conn
+                .query_row(
+                    "SELECT invalidated_at_ms FROM media_availability_observation WHERE path=?1",
+                    [media_path],
+                    |row| row.get(0),
+                )
+                .expect("rolled-back observation");
+            assert!(
+                invalidated_at.is_some(),
+                "cleanup rollback must invalidate both old and restored library paths: {}",
+                media_path
+            );
+        }
         let rolled_back_file_state: String = conn
             .query_row(
                 "SELECT state FROM media_cleanup_file WHERE run_id=?1 AND path=?2",
@@ -1682,6 +2014,18 @@ mod tests {
         let reapplied = apply_approved_groups(&paths, &run.id).expect("reapply");
         assert_eq!(reapplied.applied_actions, 1);
         let conn = db::open(&paths).expect("rollback failure trigger db");
+        let attention_quarantine_path: String = conn
+            .query_row(
+                "SELECT quarantine_path FROM media_cleanup_action WHERE run_id=?1 AND status='applied' ORDER BY created_at_ms DESC LIMIT 1",
+                [&run.id],
+                |row| row.get(0),
+            )
+            .expect("active quarantine path");
+        conn.execute(
+            "INSERT INTO media_availability_observation(path,state,observed_at_ms,source,duration_ms,next_refresh_at_ms,invalidated_at_ms) VALUES(?1,'present',3,'attention-fixture',1,9999999999999,NULL) ON CONFLICT(path) DO UPDATE SET invalidated_at_ms=NULL,next_refresh_at_ms=9999999999999",
+            [&attention_quarantine_path],
+        )
+        .expect("seed quarantine observation before failed rollback");
         conn.execute_batch(
             r#"
 CREATE TRIGGER force_cleanup_rollback_library_update_failure
@@ -1717,6 +2061,31 @@ LIMIT 1
         assert!(paths_equivalent(&library_path, &keeper.to_string_lossy()));
         assert_eq!(action_status, "attention");
         assert!(Path::new(&quarantine_path).is_file());
+        drop(conn);
+
+        // Restart proof: the independent attention-path transaction must have invalidated every
+        // location whose physical truth may have changed, even though the metadata transaction
+        // rolled back and compensation returned the file to quarantine.
+        let restarted = db::open(&paths).expect("restart observation db");
+        for path in [
+            keeper.to_string_lossy().to_string(),
+            duplicate.to_string_lossy().to_string(),
+            attention_quarantine_path,
+        ] {
+            let invalidated: Option<i64> = restarted
+                .query_row(
+                    "SELECT invalidated_at_ms FROM media_availability_observation WHERE path=?1",
+                    [&path],
+                    |row| row.get(0),
+                )
+                .optional()
+                .expect("attention observation query")
+                .flatten();
+            assert!(
+                invalidated.is_some(),
+                "attention recovery must not leave a restart-stable observation for {path}"
+            );
+        }
     }
 
     #[test]
@@ -1724,6 +2093,13 @@ LIMIT 1
         let dir = tempfile::tempdir().expect("tempdir");
         let paths = AppPaths::new(dir.path().join("app_data"));
         db::ensure_schema(&paths).expect("schema");
+        db::open(&paths)
+            .unwrap()
+            .execute(
+                "INSERT INTO meta(key,value) VALUES('jobs_queue_paused','1') ON CONFLICT(key) DO UPDATE SET value='1'",
+                [],
+            )
+            .expect("pause queue for cleanup boundary");
         let media_root = dir.path().join("media");
         let quarantine = dir.path().join("quarantine");
         std::fs::create_dir_all(&media_root).expect("media root");
@@ -1836,6 +2212,85 @@ END;
             .as_deref()
             .is_some_and(|value| value.contains("forced cleanup metadata failure")));
         assert!(!Path::new(&quarantine_path).exists());
+    }
+
+    #[test]
+    fn apply_database_and_restore_failure_durably_invalidates_attention_paths() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let paths = AppPaths::new(dir.path().join("app_data"));
+        db::ensure_schema(&paths).expect("schema");
+        db::open(&paths)
+            .unwrap()
+            .execute(
+                "INSERT INTO meta(key,value) VALUES('jobs_queue_paused','1') ON CONFLICT(key) DO UPDATE SET value='1'",
+                [],
+            )
+            .expect("pause queue for cleanup boundary");
+        let media_root = dir.path().join("media");
+        let quarantine = dir.path().join("quarantine");
+        std::fs::create_dir_all(&media_root).expect("media root");
+        let keeper = media_root.join("keeper.mkv");
+        let duplicate = media_root.join("duplicate.mkv");
+        std::fs::write(&keeper, b"same-bytes").expect("keeper");
+        std::fs::write(&duplicate, b"same-bytes").expect("duplicate");
+
+        let conn = db::open(&paths).expect("fixture db");
+        conn.execute(
+            "INSERT INTO library_item (id,created_at_ms,source_type,source_uri,title,media_path,origin) VALUES('attention-keeper',1,'local_file',?1,'Keeper',?1,'local_import')",
+            [keeper.to_string_lossy().to_string()],
+        ).unwrap();
+        conn.execute(
+            "INSERT INTO library_item (id,created_at_ms,source_type,source_uri,title,media_path,origin) VALUES('attention-source',2,'local_file',?1,'Source',?1,'local_import')",
+            [duplicate.to_string_lossy().to_string()],
+        ).unwrap();
+        conn.execute(
+            "INSERT INTO media_availability_observation(path,state,observed_at_ms,source,duration_ms,next_refresh_at_ms,invalidated_at_ms) VALUES(?1,'present',1,'fixture',1,9999999999999,NULL)",
+            [duplicate.to_string_lossy().to_string()],
+        ).unwrap();
+        drop(conn);
+
+        let run = create_inventory_run(
+            &paths,
+            vec![media_root.to_string_lossy().to_string()],
+            Some(quarantine.to_string_lossy().to_string()),
+        ).unwrap();
+        advance_to_review(&paths, &run.id);
+        let group = list_groups(&paths, &run.id).unwrap().remove(0);
+        set_group_decision(
+            &paths,
+            &run.id,
+            &group.group_id,
+            "approved",
+            Some(&keeper.to_string_lossy()),
+        ).unwrap();
+        let conn = db::open(&paths).unwrap();
+        conn.execute_batch(
+            "CREATE TRIGGER force_attention_metadata_failure BEFORE UPDATE OF media_path ON library_item WHEN OLD.id='attention-source' BEGIN SELECT RAISE(ABORT,'forced attention metadata failure'); END;",
+        ).unwrap();
+        drop(conn);
+
+        FORCE_CLEANUP_APPLY_COMPENSATION_FAILURE.with(|flag| flag.set(true));
+        let summary = apply_approved_groups(&paths, &run.id).expect("attention summary");
+        FORCE_CLEANUP_APPLY_COMPENSATION_FAILURE.with(|flag| flag.set(false));
+        assert_eq!(summary.failed_actions, 1);
+        assert!(!duplicate.exists(), "forced compensation failure leaves source absent");
+
+        let restarted = db::open(&paths).expect("restart db");
+        let (status, quarantine_path): (String, String) = restarted.query_row(
+            "SELECT status,quarantine_path FROM media_cleanup_action WHERE run_id=?1 ORDER BY created_at_ms DESC LIMIT 1",
+            [&run.id],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        ).unwrap();
+        assert_eq!(status, "attention");
+        assert!(Path::new(&quarantine_path).is_file());
+        for path in [duplicate.to_string_lossy().to_string(), quarantine_path] {
+            let invalidated: Option<i64> = restarted.query_row(
+                "SELECT invalidated_at_ms FROM media_availability_observation WHERE path=?1",
+                [&path],
+                |row| row.get(0),
+            ).expect("durable invalidation row");
+            assert!(invalidated.is_some(), "restart must not trust {path}");
+        }
     }
 
     #[test]

@@ -4,15 +4,15 @@ file_kind: work-packet
 updated_at: 2026-08-09
 ---
 
-<topic id="contract" status="backlog" version="v1" wp="WP-0298" updated_at="2026-08-09">
+<topic id="contract" status="in-progress" version="v1" wp="WP-0298" updated_at="2026-08-09">
 
 # Work Packet: WP-0298 — Causal freeze performance boundary and diagnostic capture
 
 ## Metadata
 
 - ID: WP-0298
-- Owner: —
-- Status: BACKLOG
+- Owner: agent-wp0298
+- Status: IN_PROGRESS
 - Created: 2026-08-09
 - Refinement: `WP-0298_CAUSAL_FREEZE_PERFORMANCE_BOUNDARY_AND_DIAGNOSTIC_CAPTURE_v1_REFINEMENT.md`
 - Board: `../TASK_BOARD.md#wp-0298`
@@ -51,5 +51,6 @@ Make job startup and panel navigation responsive on the exact large local databa
 # Status updates
 
 - 2026-08-09: Created from direct source, live read-only database, trace, existing proof, and current external diagnostic research. No product code, user data, queue state, NAS media, or running process changed.
+- 2026-08-09: Implementation started in the first dependency-safe parallel wave; independent adversarial review is required before any completion claim.
 
 </topic>

@@ -104,7 +104,7 @@ test("Jobs landing view is bounded, current-work-first, and receipt-linked", () 
 
   assert.match(
     refreshBlock,
-    /invoke<JobsOverviewSnapshot>\("jobs_overview",\s*\{\s*view:\s*primaryView,\s*track:\s*selectedTrack,?\s*\}\)/,
+    /invoke<JobsOverviewSnapshot>\("jobs_overview",\s*\{\s*view:\s*primaryView,\s*track:\s*selectedTrack,\s*requestId,\s*spanId:\s*requestId,?\s*\}\)/,
   );
   assert.doesNotMatch(
     refreshBlock,
@@ -426,6 +426,7 @@ test("Jobs page keeps list refresh usable when non-critical queue-control reads 
 
 test("Jobs tracks use persisted scheduler truth rather than a global concurrency guess", () => {
   const jobsSource = readRepoFile("src", "pages", "JobsPage.tsx");
+  const optionsSource = readRepoFile("src", "pages", "OptionsPage.tsx");
   const librarySource = readRepoFile("src", "pages", "LibraryPage.tsx");
   const runtimeSource = readRepoFile("src", "lib", "archiverRuntime.ts");
 
@@ -445,7 +446,12 @@ test("Jobs tracks use persisted scheduler truth rather than a global concurrency
   assert.match(jobsSource, /data-testid="jobs-track-filter"/);
   assert.match(jobsSource, /selected_counts/);
   assert.match(jobsSource, /jobs_track_runtime_get/);
-  assert.match(jobsSource, /jobs_track_runtime_set/);
+  assert.doesNotMatch(
+    jobsSource,
+    /jobs_track_runtime_set/,
+    "Jobs must remain a read-only scheduler projection; Options owns persistent budget writes",
+  );
+  assert.match(optionsSource, /jobs_track_runtime_set/);
   assert.match(
     jobsSource,
     /track\.track === "youtube_recurring"[\s\S]{0,180}Direct transfers/,

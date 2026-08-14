@@ -49,7 +49,7 @@ test("ttsBackendIdsMatch respects alias normalization", () => {
   assert.equal(ttsBackendIdsMatch("kokoro", "openvoice_v2"), false);
 });
 
-test("jobMatchesArtifact differentiates mux containers", () => {
+test("jobMatchesArtifact treats legacy and missing mux requests as engine-forced MKV", () => {
   const muxArtifact = artifact({
     kind: "dub_mux",
     job_type: "mux_dub_preview_v1",
@@ -76,7 +76,18 @@ test("jobMatchesArtifact differentiates mux containers", () => {
       },
       muxArtifact,
     ),
-    false,
+    true,
+  );
+
+  assert.equal(
+    jobMatchesArtifact(
+      {
+        job_type: "mux_dub_preview_v1",
+        params_json: JSON.stringify({}),
+      },
+      muxArtifact,
+    ),
+    true,
   );
 });
 

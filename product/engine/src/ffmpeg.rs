@@ -2,7 +2,22 @@ use crate::cmd;
 use crate::paths::AppPaths;
 use crate::{EngineError, Result};
 use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct SubtitleStreamProbe {
+    pub index: Option<usize>,
+    pub codec_name: Option<String>,
+    pub language: Option<String>,
+    pub title: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct AudioStreamProbe {
+    pub language: Option<String>,
+    pub title: Option<String>,
+}
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct MediaProbe {
@@ -12,6 +27,10 @@ pub struct MediaProbe {
     pub audio_codec: Option<String>,
     pub width: Option<i64>,
     pub height: Option<i64>,
+    pub video_stream_count: usize,
+    pub audio_stream_count: usize,
+    pub audio_streams: Vec<AudioStreamProbe>,
+    pub subtitle_streams: Vec<SubtitleStreamProbe>,
 }
 
 pub fn probe(paths: &AppPaths, input: &Path) -> Result<MediaProbe> {
@@ -54,24 +73,55 @@ pub fn probe(paths: &AppPaths, input: &Path) -> Result<MediaProbe> {
         .and_then(|f| f.duration.as_deref())
         .and_then(parse_seconds_to_ms);
 
-    let (video_codec, width, height) = parsed
-        .streams
-        .as_ref()
-        .and_then(|s| {
-            s.iter()
-                .find(|st| st.codec_type.as_deref() == Some("video"))
-        })
+    let streams = parsed.streams.as_deref().unwrap_or_default();
+    let (video_codec, width, height) = streams
+        .iter()
+        .find(|st| st.codec_type.as_deref() == Some("video"))
         .map(|st| (st.codec_name.clone(), st.width, st.height))
         .unwrap_or((None, None, None));
 
-    let audio_codec = parsed
-        .streams
-        .as_ref()
-        .and_then(|s| {
-            s.iter()
-                .find(|st| st.codec_type.as_deref() == Some("audio"))
-        })
+    let audio_codec = streams
+        .iter()
+        .find(|st| st.codec_type.as_deref() == Some("audio"))
         .and_then(|st| st.codec_name.clone());
+    let video_stream_count = streams
+        .iter()
+        .filter(|st| st.codec_type.as_deref() == Some("video"))
+        .count();
+    let audio_stream_count = streams
+        .iter()
+        .filter(|st| st.codec_type.as_deref() == Some("audio"))
+        .count();
+    let audio_streams = streams
+        .iter()
+        .filter(|st| st.codec_type.as_deref() == Some("audio"))
+        .map(|st| AudioStreamProbe {
+            language: st
+                .tags
+                .as_ref()
+                .and_then(|tags| case_insensitive_tag(tags, "language")),
+            title: st
+                .tags
+                .as_ref()
+                .and_then(|tags| case_insensitive_tag(tags, "title")),
+        })
+        .collect();
+    let subtitle_streams = streams
+        .iter()
+        .filter(|st| st.codec_type.as_deref() == Some("subtitle"))
+        .map(|st| SubtitleStreamProbe {
+            index: st.index,
+            codec_name: st.codec_name.clone(),
+            language: st
+                .tags
+                .as_ref()
+                .and_then(|tags| case_insensitive_tag(tags, "language")),
+            title: st
+                .tags
+                .as_ref()
+                .and_then(|tags| case_insensitive_tag(tags, "title")),
+        })
+        .collect();
 
     Ok(MediaProbe {
         duration_ms,
@@ -80,6 +130,10 @@ pub fn probe(paths: &AppPaths, input: &Path) -> Result<MediaProbe> {
         audio_codec,
         width,
         height,
+        video_stream_count,
+        audio_stream_count,
+        audio_streams,
+        subtitle_streams,
     })
 }
 
@@ -295,10 +349,12 @@ struct FfprobeOutput {
 
 #[derive(Debug, Clone, Deserialize)]
 struct FfprobeStream {
+    index: Option<usize>,
     codec_type: Option<String>,
     codec_name: Option<String>,
     width: Option<i64>,
     height: Option<i64>,
+    tags: Option<HashMap<String, String>>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -309,6 +365,13 @@ struct FfprobeFormat {
 
 fn first_format_name(value: &str) -> String {
     value.split(',').next().unwrap_or(value).trim().to_string()
+}
+
+fn case_insensitive_tag(tags: &HashMap<String, String>, name: &str) -> Option<String> {
+    tags.iter()
+        .find(|(key, _)| key.eq_ignore_ascii_case(name))
+        .map(|(_, value)| value.trim().to_string())
+        .filter(|value| !value.is_empty())
 }
 
 fn parse_seconds_to_ms(value: &str) -> Option<i64> {

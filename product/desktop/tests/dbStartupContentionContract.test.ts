@@ -75,9 +75,15 @@ test("default video library bootstrap is explicit startup work, not hidden list 
   );
   assert.match(
     tauriSource,
-    /db::ensure_schema\(&paths\)\?;\s*video_libraries::ensure_default_video_library\(&paths\)\?;/s,
-    "startup should create the default video library before the UI can refresh Video Archiver",
+    /db::ensure_schema\(&paths\)\?;[\s\S]{0,1800}video_libraries::ensure_default_video_library\(&paths\)\?;/,
+    "startup should reconcile governed storage state and create the default video library before the UI can refresh Video Archiver",
   );
+  const schemaIndex = tauriSource.indexOf("db::ensure_schema(&paths)?;");
+  const defaultLibraryIndex = tauriSource.indexOf(
+    "video_libraries::ensure_default_video_library(&paths)?;",
+    schemaIndex,
+  );
+  assert.ok(schemaIndex >= 0 && defaultLibraryIndex > schemaIndex);
 });
 
 test("Video Archiver startup commands are timed and route DB errors into diagnostics", () => {
@@ -92,7 +98,7 @@ test("Video Archiver startup commands are timed and route DB errors into diagnos
   ]) {
     assert.match(
       tauriSource,
-      new RegExp(`InvokeTimer::start\\(\\s*state\\.paths\\.clone\\(\\),\\s*"${command}"\\s*,?\\s*\\)`),
+      new RegExp(`InvokeTimer::start(?:_with_context)?\\(\\s*state\\.paths\\.clone\\(\\),\\s*"${command}"`),
       `${command} must produce command timing rows in freeze reports`,
     );
     assert.match(
@@ -135,11 +141,13 @@ test("archive stats are non-invasive during routine refresh", () => {
     computeEnd > computeStart ? computeEnd : undefined,
   );
 
-  assert.doesNotMatch(
+  assert.match(
     archiveStats,
-    /db::open|list_youtube_subscription_ids/,
-    "routine archive stats must not open SQLite; badge counts should scan existing app-managed archive state only",
+    /youtube_subscription_archive_rollup/,
+    "routine archive stats must read the persisted archive rollup instead of scanning every archive file",
   );
+  assert.match(archiveStats, /db::open_readonly\(paths\)/);
+  assert.doesNotMatch(archiveStats, /db::open\(paths\)|db::migrate|lock_youtube_archive_mutation|reconcile_archive_merge_journals_locked/);
   assert.doesNotMatch(
     archiveStats,
     /load_youtube_subscription_archive_ids/,
@@ -155,10 +163,20 @@ test("archive stats are non-invasive during routine refresh", () => {
     /youtube_subscription_state_dir|YT_DLP_ARCHIVE_FILENAME/,
     "routine archive stats should count only existing app-managed archive files",
   );
-  assert.match(
+  assert.doesNotMatch(
     archiveStats,
-    /ARCHIVE_STATS_CACHE|ARCHIVE_STATS_CACHE_TTL_SECS/,
-    "repeated visible reads should reuse the bounded archive-stat cache",
+    /queue_youtube_archive_rollup_rebuild|compute_youtube_subscriptions_archive_stats/,
+    "routine archive polls must not schedule or perform canonical repair work",
+  );
+  assert.match(computeArchiveStats, /youtube_subscription_state_dir|YT_DLP_ARCHIVE_FILENAME/, "canonical file scans belong only to the rebuild implementation");
+
+  const activity = functionBlock(subscriptionsSource, "subscription_download_activity");
+  assert.match(activity, /db::open_readonly\(paths\)/);
+  assert.doesNotMatch(activity, /db::open\(paths\)|db::migrate/);
+  assert.doesNotMatch(
+    activity,
+    /queue_subscription_activity_rollup_rebuild|rebuild_subscription_activity_rollup/,
+    "routine activity polls must not schedule or perform projection repair work",
   );
 });
 

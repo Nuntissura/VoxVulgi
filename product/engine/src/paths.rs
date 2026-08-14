@@ -1,5 +1,103 @@
 use crate::persistence;
 use std::path::{Path, PathBuf};
+use std::sync::{mpsc, Arc, Mutex, OnceLock};
+use std::time::Duration;
+
+const BOUNDED_PATH_PROBE_WORKERS: usize = 4;
+const BOUNDED_PATH_PROBE_QUEUE_CAPACITY: usize = 64;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BoundedPathKind {
+    File,
+    Directory,
+    Missing,
+    Unreachable,
+}
+
+struct BoundedPathProbeRequest {
+    path: PathBuf,
+    reply: mpsc::SyncSender<BoundedPathKind>,
+    #[cfg(test)]
+    artificial_delay: Option<Duration>,
+}
+
+static BOUNDED_PATH_PROBE_POOL: OnceLock<mpsc::SyncSender<BoundedPathProbeRequest>> =
+    OnceLock::new();
+#[cfg(test)]
+static BOUNDED_PATH_PROBE_THREADS_STARTED: std::sync::atomic::AtomicUsize =
+    std::sync::atomic::AtomicUsize::new(0);
+
+fn bounded_path_probe_pool() -> &'static mpsc::SyncSender<BoundedPathProbeRequest> {
+    BOUNDED_PATH_PROBE_POOL.get_or_init(|| {
+        let (sender, receiver) =
+            mpsc::sync_channel::<BoundedPathProbeRequest>(BOUNDED_PATH_PROBE_QUEUE_CAPACITY);
+        let receiver = Arc::new(Mutex::new(receiver));
+        for index in 0..BOUNDED_PATH_PROBE_WORKERS {
+            let receiver = Arc::clone(&receiver);
+            std::thread::Builder::new()
+                .name(format!("voxvulgi-path-probe-{index}"))
+                .spawn(move || {
+                    #[cfg(test)]
+                    BOUNDED_PATH_PROBE_THREADS_STARTED
+                        .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                    loop {
+                        let request = receiver
+                            .lock()
+                            .unwrap_or_else(|poisoned| poisoned.into_inner())
+                            .recv();
+                        let Ok(request) = request else {
+                            break;
+                        };
+                        #[cfg(test)]
+                        if let Some(delay) = request.artificial_delay {
+                            std::thread::sleep(delay);
+                        }
+                        let kind = match std::fs::metadata(&request.path) {
+                            Ok(metadata) if metadata.is_dir() => BoundedPathKind::Directory,
+                            Ok(metadata) if metadata.is_file() => BoundedPathKind::File,
+                            Ok(_) => BoundedPathKind::Missing,
+                            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                                BoundedPathKind::Missing
+                            }
+                            Err(_) => BoundedPathKind::Unreachable,
+                        };
+                        let _ = request.reply.try_send(kind);
+                    }
+                })
+                .expect("bounded path probe worker must start");
+        }
+        sender
+    })
+}
+
+fn probe_path_bounded_internal(
+    path: &Path,
+    timeout: Duration,
+    #[cfg(test)] artificial_delay: Option<Duration>,
+) -> BoundedPathKind {
+    let (reply, receiver) = mpsc::sync_channel(1);
+    let request = BoundedPathProbeRequest {
+        path: path.to_path_buf(),
+        reply,
+        #[cfg(test)]
+        artificial_delay,
+    };
+    if bounded_path_probe_pool().try_send(request).is_err() {
+        return BoundedPathKind::Unreachable;
+    }
+    receiver
+        .recv_timeout(timeout)
+        .unwrap_or(BoundedPathKind::Unreachable)
+}
+
+pub fn probe_path_bounded(path: &Path, timeout: Duration) -> BoundedPathKind {
+    probe_path_bounded_internal(
+        path,
+        timeout,
+        #[cfg(test)]
+        None,
+    )
+}
 
 #[derive(Debug, Clone)]
 pub struct AppPaths {
@@ -437,6 +535,44 @@ impl AppPaths {
         path
     }
 
+    pub fn node_runtime_dir(&self) -> PathBuf {
+        self.js_runtime_dir().join("node")
+    }
+
+    pub fn node_exe(&self) -> PathBuf {
+        let mut path = self.node_runtime_dir().join("node");
+        if cfg!(windows) {
+            path.set_extension("exe");
+        }
+        path
+    }
+
+    pub fn node_npm_cmd(&self) -> PathBuf {
+        let mut path = self.node_runtime_dir().join("npm");
+        if cfg!(windows) {
+            path.set_extension("cmd");
+        }
+        path
+    }
+
+    pub fn youtube_po_provider_dir(&self) -> PathBuf {
+        self.tools_dir().join("youtube_po_provider")
+    }
+
+    pub fn youtube_po_provider_plugin_dir(&self) -> PathBuf {
+        self.youtube_po_provider_dir().join("plugin")
+    }
+
+    pub fn youtube_po_provider_server_dir(&self) -> PathBuf {
+        self.youtube_po_provider_dir().join("server")
+    }
+
+    pub fn youtube_po_provider_entrypoint(&self) -> PathBuf {
+        self.youtube_po_provider_server_dir()
+            .join("build")
+            .join("main.js")
+    }
+
     pub fn python_portable_dir(&self) -> PathBuf {
         self.python_toolchain_dir().join("portable")
     }
@@ -498,6 +634,18 @@ impl AppPaths {
 
     pub fn feature_storage_roots_config_path(&self) -> PathBuf {
         self.config_dir().join("feature_storage_roots.json")
+    }
+
+    pub fn root_aliases_config_path(&self) -> PathBuf {
+        self.config_dir().join("root_aliases.json")
+    }
+
+    pub fn root_rebind_receipts_dir(&self) -> PathBuf {
+        self.config_dir().join("root_rebind_receipts")
+    }
+
+    pub fn root_rebind_backups_dir(&self) -> PathBuf {
+        self.config_dir().join("root_rebind_backups")
     }
 
     pub fn youtube_auth_config_path(&self) -> PathBuf {
@@ -609,17 +757,61 @@ pub fn download_root_reachable(dir: &Path, timeout: std::time::Duration) -> bool
     matches!(rx.recv_timeout(timeout), Ok(true))
 }
 
-// WP-0255: bounded `is_dir`. A dropped NAS/UNC share makes a plain `Path::is_dir()` hang on
-// the Windows SMB timeout (tens of seconds); doing that inside a list query (e.g. the video
-// library list, which runs in the page's shared loader) froze the UI during a NAS blip.
-// This runs the stat on a throwaway thread and gives up after `timeout`, returning false
-// rather than blocking the caller. The orphaned probe thread is reaped by the OS once the
-// underlying SMB call finally times out.
+// WP-0255/WP-0306: bounded `is_dir`. A dropped NAS/UNC share makes a plain `Path::is_dir()`
+// hang on the Windows SMB timeout (tens of seconds); doing that inside a list query froze the UI
+// during a NAS blip. All callers share the fixed four-worker executor above: timeouts return
+// false, queue saturation fails closed, and repeated stalls cannot create detached probe threads.
 pub fn path_is_dir_bounded(dir: &Path, timeout: std::time::Duration) -> bool {
-    let probe = dir.to_path_buf();
-    let (tx, rx) = std::sync::mpsc::channel();
-    std::thread::spawn(move || {
-        let _ = tx.send(probe.is_dir());
-    });
-    matches!(rx.recv_timeout(timeout), Ok(true))
+    probe_path_bounded(dir, timeout) == BoundedPathKind::Directory
+}
+
+#[cfg(test)]
+mod bounded_probe_tests {
+    use super::*;
+    use std::sync::atomic::Ordering;
+    use std::time::Instant;
+    static PROBE_TEST_LOCK: Mutex<()> = Mutex::new(());
+
+    #[test]
+    fn stalled_path_probes_are_latency_bounded_and_never_grow_the_worker_pool() {
+        let _serial = PROBE_TEST_LOCK.lock().unwrap();
+        let dir = tempfile::tempdir().expect("tempdir");
+        let timeout = Duration::from_millis(20);
+        for index in 0..24 {
+            let started = Instant::now();
+            let observed = probe_path_bounded_internal(
+                &dir.path().join(format!("stalled-{index}")),
+                timeout,
+                Some(Duration::from_millis(150)),
+            );
+            assert_eq!(observed, BoundedPathKind::Unreachable);
+            assert!(started.elapsed() < Duration::from_millis(100));
+        }
+        assert_eq!(
+            BOUNDED_PATH_PROBE_THREADS_STARTED.load(Ordering::SeqCst),
+            BOUNDED_PATH_PROBE_WORKERS,
+            "timeouts and queue saturation must not spawn detached replacement threads"
+        );
+        std::thread::sleep(Duration::from_secs(1));
+    }
+
+    #[test]
+    fn bounded_path_probe_distinguishes_files_directories_and_missing_paths() {
+        let _serial = PROBE_TEST_LOCK.lock().unwrap();
+        let dir = tempfile::tempdir().expect("tempdir");
+        let file = dir.path().join("file.mp4");
+        std::fs::write(&file, b"legacy").expect("file");
+        assert_eq!(
+            probe_path_bounded(dir.path(), Duration::from_secs(1)),
+            BoundedPathKind::Directory
+        );
+        assert_eq!(
+            probe_path_bounded(&file, Duration::from_secs(1)),
+            BoundedPathKind::File
+        );
+        assert_eq!(
+            probe_path_bounded(&dir.path().join("missing"), Duration::from_secs(1)),
+            BoundedPathKind::Missing
+        );
+    }
 }

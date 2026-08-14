@@ -1,0 +1,27 @@
+[
+  {
+    "input": "curl --header \"Authorization: Bearer frontend-secret\" https://example.invalid/resource",
+    "secrets": ["frontend-secret"],
+    "preserve": ["--header", "https://example.invalid"]
+  },
+  {
+    "input": "curl --header='authorization: Basic quoted-secret' https://example.invalid/resource",
+    "secrets": ["quoted-secret"],
+    "preserve": ["--header", "https://example.invalid"]
+  },
+  {
+    "input": "Proxy-Authorization: Bearer proxy-secret action=read",
+    "secrets": ["proxy-secret"],
+    "preserve": ["action=read"]
+  },
+  {
+    "input": "proxy-authorization : Basic proxy-basic-secret next=value",
+    "secrets": ["proxy-basic-secret"],
+    "preserve": ["next=value"]
+  },
+  {
+    "input": "tool --header \"Proxy-Authorization:Basic compact-secret\" --mode safe",
+    "secrets": ["compact-secret"],
+    "preserve": ["--mode", "safe"]
+  }
+]

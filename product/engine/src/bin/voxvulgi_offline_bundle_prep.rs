@@ -110,6 +110,35 @@ fn run() -> Result<()> {
         } else {
             println!("Deno JS runtime already installed (bundled).");
         }
+
+        // A fresh prep process has no in-memory launch attestation. Verify the installed bytes
+        // authoritatively before deciding whether the pinned offline payload can be reused.
+        let po_provider = match tools::verify_youtube_po_provider_node_modules(&paths) {
+            Ok(status) => status,
+            Err(error) => {
+                let status = tools::youtube_po_provider_install_status(&paths);
+                println!(
+                    "existing YouTube PO provider is {}: {error}",
+                    status.node_modules_integrity_state
+                );
+                status
+            }
+        };
+        if !po_provider.installed {
+            println!("installing pinned localhost YouTube PO provider...");
+            let next = tools::install_youtube_po_provider(&paths)?;
+            if !next.installed || !next.security_audit_passed {
+                return Err(EngineError::InstallFailed(
+                    "YouTube PO provider install did not pass pinned readiness and security gates"
+                        .to_string(),
+                ));
+            }
+        } else {
+            println!("YouTube PO provider already installed and verified.");
+        }
+        // Audit-only carrier for offline hydration. Runtime adoption authenticates the copied
+        // complete trees against roots embedded in the executable and never trusts this JSON.
+        tools::write_youtube_po_provider_portable_attestation(&paths)?;
     }
 
     // Phase 2: Portable Python + venv + packs.

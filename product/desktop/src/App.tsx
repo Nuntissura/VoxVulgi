@@ -15,7 +15,11 @@ import { confirm, open } from "@tauri-apps/plugin-dialog";
 import html2canvas from "html2canvas";
 import "./App.css";
 import { useDesktopActivity, usePageActivity, usePollingLoop } from "./lib/activity";
-import { diagnosticsTrace } from "./lib/diagnosticsTrace";
+import {
+  diagnosticsTrace,
+  installPerformanceDiagnostics,
+  setDiagnosticsTracePage,
+} from "./lib/diagnosticsTrace";
 import {
   buildDiarizationSpeakerCountRequest,
   clampDiarizationSpeakerCount,
@@ -287,6 +291,8 @@ type HomeItemOutputs = {
   mix_dub_preview_v1_wav_exists: boolean;
   mux_dub_preview_v1_mp4_path: string;
   mux_dub_preview_v1_mp4_exists: boolean;
+  mux_dub_preview_v1_mkv_path: string;
+  mux_dub_preview_v1_mkv_exists: boolean;
   export_pack_v1_zip_path?: string;
   export_pack_v1_zip_exists?: boolean;
   terminal_state?: string;
@@ -308,7 +314,7 @@ type RecentLocalizationItemStatus = {
   running: boolean;
   active_job_id: string | null;
   working_dir: string;
-  preview_mp4_path: string | null;
+  preview_video_path: string | null;
   stage_label: string | null;
   progress_pct: number | null;
   last_error: string | null;
@@ -389,7 +395,7 @@ const LOCALIZATION_HOME_STAGES = [
   },
   {
     title: "Dub, mix, and mux",
-    detail: "Render the dub, preserve background audio, and produce the preview MP4 deliverable.",
+    detail: "Render the dub, preserve background audio, and produce the preview MKV deliverable.",
   },
   {
     title: "Review and export",
@@ -414,7 +420,7 @@ function localizationJobTypeLabel(jobType: string | null | undefined): string {
     case "mix_dub_preview_v1":
       return "Mix dub";
     case "mux_dub_preview_v1":
-      return "Mux preview MP4";
+      return "Mux preview MKV";
     case "export_pack_v1":
       return "Export pack";
     case "qc_report_v1":
@@ -597,13 +603,6 @@ function stemFromMediaPath(path: string): string {
   return dot > 0 ? name.slice(0, dot) : name;
 }
 
-function extensionFromMediaPath(path: string): string {
-  const name = fileNameFromPath(path);
-  const dot = name.lastIndexOf(".");
-  const ext = dot > 0 ? name.slice(dot + 1).trim() : "";
-  return ext || "mp4";
-}
-
 function localizationOutputStem(item: HomeLibraryItem | null | undefined): string {
   if (!item) return "voxvulgi-output";
   return sanitizeOutputStem(stemFromMediaPath(item.media_path) || item.title || "voxvulgi-output");
@@ -617,7 +616,7 @@ function localizationExportDirForItem(root: string | null | undefined, item: Hom
 
 function localizationSourceCopyPath(exportDir: string, item: HomeLibraryItem | null | undefined): string {
   if (!exportDir || !item) return "";
-  return joinPath(exportDir, `${localizationOutputStem(item)}.source.${extensionFromMediaPath(item.media_path)}`);
+  return joinPath(exportDir, `${localizationOutputStem(item)}.source.mkv`);
 }
 
 function localizationSubtitlePath(exportDir: string, item: HomeLibraryItem | null | undefined): string {
@@ -627,7 +626,7 @@ function localizationSubtitlePath(exportDir: string, item: HomeLibraryItem | nul
 
 function localizationDubPath(exportDir: string, item: HomeLibraryItem | null | undefined): string {
   if (!exportDir || !item) return "";
-  return joinPath(exportDir, `${localizationOutputStem(item)}.dub-en.mp4`);
+  return joinPath(exportDir, `${localizationOutputStem(item)}.dub-en.mkv`);
 }
 
 function localizationActualSubtitlePath(outputs: HomeItemOutputs | null | undefined): string {
@@ -642,13 +641,17 @@ function localizationActualDubPath(
   outputs: HomeItemOutputs | null | undefined,
   status: RecentLocalizationItemStatus | null | undefined,
 ): string {
+  if (outputs?.mux_dub_preview_v1_mkv_exists && outputs.mux_dub_preview_v1_mkv_path.trim()) {
+    return outputs.mux_dub_preview_v1_mkv_path;
+  }
   if (outputs?.mux_dub_preview_v1_mp4_exists && outputs.mux_dub_preview_v1_mp4_path.trim()) {
+    // Historical compatibility only. New managed muxes always produce MKV.
     return outputs.mux_dub_preview_v1_mp4_path;
   }
   if (outputs?.mix_dub_preview_v1_wav_exists && outputs.mix_dub_preview_v1_wav_path.trim()) {
     return outputs.mix_dub_preview_v1_wav_path;
   }
-  return status?.preview_mp4_path?.trim() || "";
+  return status?.preview_video_path?.trim() || "";
 }
 
 function localizationActualWorkFolder(
@@ -693,7 +696,7 @@ function localizationHomeStateLabel(status: RecentLocalizationItemStatus | null 
   if (!status) return "Loading";
   if (status.running) return "Running";
   if (status.state === "export_ready") return "Export ready";
-  if (status.state === "preview_ready" || status.preview_mp4_path) return "Preview ready";
+  if (status.state === "preview_ready" || status.preview_video_path) return "Preview ready";
   if (status.state === "dub_needs_separation") return "Needs separation";
   if (status.state === "dub_audio_ready") return "Dub audio ready";
   if (status.state === "speaker_labels_ready") return "Speakers ready";
@@ -708,7 +711,7 @@ function localizationHomeStateTone(
   status: RecentLocalizationItemStatus | null | undefined,
 ): "running" | "ready" | "pending" {
   if (status?.running) return "running";
-  if (status?.preview_mp4_path || status?.state === "export_ready") return "ready";
+  if (status?.preview_video_path || status?.state === "export_ready") return "ready";
   return "pending";
 }
 
@@ -749,8 +752,12 @@ function summarizeRecentLocalizationItem(
     jobs.find((job) => job.status === "queued") ??
     null;
   if (outputs?.terminal_state && outputs.terminal_summary) {
-    const previewPath = outputs.deliverable_exists && outputs.mux_dub_preview_v1_mp4_exists
-      ? outputs.mux_dub_preview_v1_mp4_path
+    const previewPath = outputs.deliverable_exists
+      ? outputs.mux_dub_preview_v1_mkv_exists
+        ? outputs.mux_dub_preview_v1_mkv_path
+        : outputs.mux_dub_preview_v1_mp4_exists
+          ? outputs.mux_dub_preview_v1_mp4_path
+          : null
       : null;
     return {
       item_id: "",
@@ -760,7 +767,7 @@ function summarizeRecentLocalizationItem(
       running: outputs.terminal_state === "running",
       active_job_id: runningJob?.id ?? null,
       working_dir: outputs.derived_item_dir,
-      preview_mp4_path: previewPath,
+      preview_video_path: previewPath,
       stage_label: outputs.terminal_stage_label ?? null,
       progress_pct: outputs.terminal_progress ?? null,
       last_error: outputs.terminal_error ?? null,
@@ -774,17 +781,33 @@ function summarizeRecentLocalizationItem(
     jobs.find((job) => job.status === "succeeded" || job.status === "canceled") ??
     jobs[0] ??
     null;
+  if (outputs?.mux_dub_preview_v1_mkv_exists) {
+    return {
+      item_id: "",
+      state: "preview_ready",
+      summary: "Preview MKV ready",
+      detail: outputs.mux_dub_preview_v1_mkv_path,
+      running: false,
+      active_job_id: null,
+      working_dir: outputs.derived_item_dir,
+      preview_video_path: outputs.mux_dub_preview_v1_mkv_path,
+      stage_label: "Mux preview MKV",
+      progress_pct: 1,
+      last_error: null,
+      failed_jobs_count: failedJobsCount,
+    };
+  }
   if (outputs?.mux_dub_preview_v1_mp4_exists) {
     return {
       item_id: "",
       state: "preview_ready",
-      summary: "Preview MP4 ready",
+      summary: "Legacy preview MP4 ready",
       detail: outputs.mux_dub_preview_v1_mp4_path,
       running: false,
       active_job_id: null,
       working_dir: outputs.derived_item_dir,
-      preview_mp4_path: outputs.mux_dub_preview_v1_mp4_path,
-      stage_label: "Mux preview MP4",
+      preview_video_path: outputs.mux_dub_preview_v1_mp4_path,
+      stage_label: "Legacy mux preview MP4",
       progress_pct: 1,
       last_error: null,
       failed_jobs_count: failedJobsCount,
@@ -801,7 +824,7 @@ function summarizeRecentLocalizationItem(
       running: true,
       active_job_id: runningJob.id ?? null,
       working_dir: outputs?.derived_item_dir ?? "",
-      preview_mp4_path: null,
+      preview_video_path: null,
       stage_label: label,
       progress_pct: runningJob.progress ?? 0,
       last_error: null,
@@ -818,7 +841,7 @@ function summarizeRecentLocalizationItem(
       running: false,
       active_job_id: null,
       working_dir: outputs?.derived_item_dir ?? "",
-      preview_mp4_path: null,
+      preview_video_path: null,
       stage_label: label,
       progress_pct: typeof failedJob.progress === "number" ? failedJob.progress : null,
       last_error: failedJob.error ?? "No error detail recorded.",
@@ -836,7 +859,7 @@ function summarizeRecentLocalizationItem(
       running: false,
       active_job_id: null,
       working_dir: outputs?.derived_item_dir ?? "",
-      preview_mp4_path: null,
+      preview_video_path: null,
       stage_label: label,
       progress_pct: latestJob.status === "succeeded" ? 1 : null,
       last_error: null,
@@ -851,7 +874,7 @@ function summarizeRecentLocalizationItem(
     running: false,
     active_job_id: null,
     working_dir: outputs?.derived_item_dir ?? "",
-    preview_mp4_path: null,
+    preview_video_path: null,
     stage_label: "Ready to start",
     progress_pct: null,
     last_error: null,
@@ -1149,7 +1172,7 @@ function LocalizationStudioHome({
             running: false,
             active_job_id: null,
             working_dir: "",
-            preview_mp4_path: null,
+            preview_video_path: null,
             stage_label: null,
             progress_pct: null,
             last_error: null,
@@ -1499,18 +1522,18 @@ function LocalizationStudioHome({
     : currentEditorItem ?? selectedWorkbenchItem ?? prioritizedRecentItems[0] ?? null;
   const currentHomeStatus = currentHomeItem ? recentItemStatuses[currentHomeItem.id] ?? null : null;
   const latestPreviewItem =
-    prioritizedRecentItems.find((item) => Boolean(recentItemStatuses[item.id]?.preview_mp4_path)) ??
+    prioritizedRecentItems.find((item) => Boolean(recentItemStatuses[item.id]?.preview_video_path)) ??
     null;
   const latestPreviewStatus = latestPreviewItem
     ? recentItemStatuses[latestPreviewItem.id] ?? null
     : null;
   const runningCount = prioritizedRecentItems.filter((item) => recentItemStatuses[item.id]?.running).length;
   const previewReadyCount = prioritizedRecentItems.filter(
-    (item) => Boolean(recentItemStatuses[item.id]?.preview_mp4_path),
+    (item) => Boolean(recentItemStatuses[item.id]?.preview_video_path),
   ).length;
   const needsNextStepCount = prioritizedRecentItems.filter((item) => {
     const status = recentItemStatuses[item.id];
-    return Boolean(status) && !status.running && !status.preview_mp4_path;
+    return Boolean(status) && !status.running && !status.preview_video_path;
   }).length;
   const voiceSetupIsReady = voiceSetupReady(voiceSetupStatus);
   const voiceSetupHasRepair = Boolean(
@@ -1542,13 +1565,13 @@ function LocalizationStudioHome({
   const currentProgressPct =
     typeof currentHomeStatus?.progress_pct === "number"
       ? Math.max(0, Math.min(100, Math.round(currentHomeStatus.progress_pct * 100)))
-      : currentHomeStatus?.preview_mp4_path
+      : currentHomeStatus?.preview_video_path
         ? 100
         : 0;
   const successfulHomeItems = prioritizedRecentItems
     .filter((item) => {
       const status = recentItemStatuses[item.id];
-      return Boolean(status?.preview_mp4_path || status?.state === "export_ready");
+      return Boolean(status?.preview_video_path || status?.state === "export_ready");
     })
     .slice(0, 8);
   const setupFirstHome = safeLocalStorageGet(LOCALIZATION_HOME_LEGACY_KEY) !== "1";
@@ -2249,14 +2272,14 @@ function LocalizationStudioHome({
                     </button>
                     <button
                       type="button"
-                      disabled={uiBusy || !currentHomeStatus?.preview_mp4_path}
+                      disabled={uiBusy || !currentHomeStatus?.preview_video_path}
                       onClick={() => {
-                        openPathBestEffort(currentHomeStatus?.preview_mp4_path ?? "").catch(
+                        openPathBestEffort(currentHomeStatus?.preview_video_path ?? "").catch(
                           () => undefined,
                         );
                       }}
                     >
-                      Open preview MP4
+                      Open preview video
                     </button>
                   </div>
                 </div>
@@ -2347,32 +2370,9 @@ function LocalizationStudioHome({
               <label style={{ display: "flex", alignItems: "center", gap: 8 }}>
                 <span>Pipeline preset</span>
                 <select
-                  disabled={uiBusy}
+                  disabled
                   value=""
-                  onChange={(e) => {
-                    const v = e.currentTarget.value;
-                    if (v === "ja_anime") {
-                      setAsrLang("ja");
-                      const rules = { auto_asr: true, auto_translate: true, auto_separate: false, auto_diarize: true, auto_dub_preview: false };
-                      setBatchRules(rules);
-                      invoke("config_batch_on_import_set", { rules }).catch(() => {});
-                    } else if (v === "ko_variety") {
-                      setAsrLang("ko");
-                      const rules = { auto_asr: true, auto_translate: true, auto_separate: false, auto_diarize: true, auto_dub_preview: false };
-                      setBatchRules(rules);
-                      invoke("config_batch_on_import_set", { rules }).catch(() => {});
-                    } else if (v === "subtitles_only") {
-                      setAsrLang("auto");
-                      const rules = { auto_asr: true, auto_translate: false, auto_separate: false, auto_diarize: false, auto_dub_preview: false };
-                      setBatchRules(rules);
-                      invoke("config_batch_on_import_set", { rules }).catch(() => {});
-                    } else if (v === "full_dub") {
-                      const rules = { auto_asr: true, auto_translate: true, auto_separate: true, auto_diarize: true, auto_dub_preview: true };
-                      setBatchRules(rules);
-                      invoke("config_batch_on_import_set", { rules }).catch(() => {});
-                    }
-                    e.currentTarget.value = "";
-                  }}
+                  onChange={() => undefined}
                 >
                   <option value="">Apply a preset...</option>
                   <option value="ja_anime">Japanese anime — subtitles + speaker labels</option>
@@ -2382,7 +2382,7 @@ function LocalizationStudioHome({
                 </select>
               </label>
               <div style={{ fontSize: 13, color: "#4b5563" }}>
-                Presets only update defaults. They do not start localization jobs on import.
+                Pipeline and batch-on-import defaults are managed in Options → Diagnostics.
               </div>
               <label style={{ display: "flex", alignItems: "center", gap: 8 }}>
                 <span>Source language</span>
@@ -2421,19 +2421,8 @@ function LocalizationStudioHome({
                       <input
                         type="checkbox"
                         checked={(batchRules as any)?.[key] ?? false}
-                        disabled={uiBusy}
-                        onChange={(e) => {
-                          const next = {
-                            auto_asr: batchRules?.auto_asr ?? false,
-                            auto_translate: batchRules?.auto_translate ?? false,
-                            auto_separate: batchRules?.auto_separate ?? false,
-                            auto_diarize: batchRules?.auto_diarize ?? false,
-                            auto_dub_preview: batchRules?.auto_dub_preview ?? false,
-                            [key]: e.target.checked,
-                          };
-                          setBatchRules(next);
-                          invoke("config_batch_on_import_set", { rules: next }).catch(() => {});
-                        }}
+                        disabled
+                        onChange={() => undefined}
                       />
                       <span>{label}</span>
                     </label>
@@ -2486,11 +2475,11 @@ function LocalizationStudioHome({
               </div>
               <div className="kv" style={{ marginTop: 10 }}>
                 <div className="k">Latest preview-ready item</div>
-                <div className="v">{latestPreviewItem?.title ?? "No preview MP4 yet"}</div>
+                <div className="v">{latestPreviewItem?.title ?? "No preview MKV yet"}</div>
               </div>
               <div className="kv">
-                <div className="k">Latest preview MP4</div>
-                <div className="v">{latestPreviewStatus?.preview_mp4_path ?? "-"}</div>
+                <div className="k">Latest preview MKV</div>
+                <div className="v">{latestPreviewStatus?.preview_video_path ?? "-"}</div>
               </div>
               <div className="kv">
                 <div className="k">Latest working folder</div>
@@ -2499,9 +2488,9 @@ function LocalizationStudioHome({
               <div className="row">
                 <button
                   type="button"
-                  disabled={uiBusy || !latestPreviewStatus?.preview_mp4_path}
+                  disabled={uiBusy || !latestPreviewStatus?.preview_video_path}
                   onClick={() => {
-                    openPathBestEffort(latestPreviewStatus?.preview_mp4_path ?? "").catch(
+                    openPathBestEffort(latestPreviewStatus?.preview_video_path ?? "").catch(
                       () => undefined,
                     );
                   }}
@@ -2627,14 +2616,14 @@ function LocalizationStudioHome({
                         </button>
                         <button
                           type="button"
-                          disabled={uiBusy || !status?.preview_mp4_path}
+                          disabled={uiBusy || !status?.preview_video_path}
                           onClick={() => {
-                            openPathBestEffort(status?.preview_mp4_path ?? "").catch(
+                            openPathBestEffort(status?.preview_video_path ?? "").catch(
                               () => undefined,
                             );
                           }}
                         >
-                          Preview MP4
+                          Preview video
                         </button>
                         <button
                           type="button"
@@ -2687,6 +2676,7 @@ function App() {
   const [shellWindowMode, setShellWindowMode] = useState<ShellWindowMode>("floating");
   const [appInfo, setAppInfo] = useState<ShellAppInfo | null>(null);
   const panelTransitionSequenceRef = useRef(0);
+  const panelTransitionActivationRef = useRef<Promise<void>>(Promise.resolve());
   const desktopActivity = useDesktopActivity();
 
   const refreshShellWindowMode = useCallback(async () => {
@@ -2733,6 +2723,7 @@ function App() {
   // through switchPage, e.g. agent-bridge navigate emissions).
   useEffect(() => {
     setFreezeDetectorPage(page);
+    setDiagnosticsTracePage(page);
   }, [page]);
 
   useEffect(() => {
@@ -2741,6 +2732,7 @@ function App() {
     // failure is swallowed inside the installer with a console warning so
     // the app never depends on the detector for boot.
     void installFreezeDetector();
+    installPerformanceDiagnostics();
     const handleKeyDown = async (e: KeyboardEvent) => {
       if (e.shiftKey && (e.ctrlKey || e.metaKey) && e.key.toLowerCase() === "s") {
         e.preventDefault();
@@ -3140,41 +3132,111 @@ function App() {
     }
   }
 
-  function switchPage(next: AppPage, details?: Record<string, unknown>) {
+  function switchPage(
+    next: AppPage,
+    details?: Record<string, unknown>,
+    beforeCommit?: () => void,
+  ) {
     const transitionId = ++panelTransitionSequenceRef.current;
     const startedAt = performance.now();
-    setVisitedPages((prev) => (prev[next] ? prev : { ...prev, [next]: true }));
-    setPage(next);
-    // WP-0221: keep freeze-detector context aware of the current page so
-    // freeze records identify which surface was active at the freeze moment.
-    setFreezeDetectorPage(next);
-    void diagnosticsTrace("panel_switch", {
-      page: next,
-      transition_id: transitionId,
-      ...(details ?? {}),
-    });
-    window.requestAnimationFrame(() => {
-      window.requestAnimationFrame(() => {
-        void diagnosticsTrace("panel_switch_rendered", {
+    const panelSpanId = `panel-${transitionId}`;
+    const parentSpanId = typeof details?.span_id === "string" ? details.span_id : null;
+    const previousActivation = panelTransitionActivationRef.current;
+    const activation = previousActivation
+      .catch(() => undefined)
+      .then(async () => {
+        // A newer click can supersede a queued transition before it mutates capture state.
+        if (panelTransitionSequenceRef.current !== transitionId) return;
+        let receipt: {
+          incident_id: string | null;
+          panel_span_id: string;
+          parent_span_id: string | null;
+          capture_mode: string;
+          activated_armed_capture: boolean;
+        };
+        try {
+          receipt = await invoke("diagnostics_capture_panel_transition", {
+            page: next,
+            transitionId,
+            spanId: panelSpanId,
+            parentSpanId,
+          });
+        } catch (error) {
+          void diagnosticsTrace("panel_switch_activation_failed", {
+            page: next,
+            transition_id: transitionId,
+            span_id: panelSpanId,
+            parent_span_id: parentSpanId,
+            error: String(error),
+          }, "error");
+          return;
+        }
+        if (panelTransitionSequenceRef.current !== transitionId) {
+          if (receipt.activated_armed_capture && receipt.incident_id) {
+            try {
+              await invoke("diagnostics_capture_panel_transition_cancel", {
+                incidentId: receipt.incident_id,
+                spanId: receipt.panel_span_id,
+              });
+            } catch (error) {
+              void diagnosticsTrace("panel_switch_activation_cancel_failed", {
+                page: next,
+                transition_id: transitionId,
+                span_id: panelSpanId,
+                incident_id: receipt.incident_id,
+                error: String(error),
+              }, "error");
+            }
+          }
+          return;
+        }
+        beforeCommit?.();
+        setVisitedPages((prev) => (prev[next] ? prev : { ...prev, [next]: true }));
+        setPage(next);
+        // Capture activation is persisted before any newly mounted page can dispatch work.
+        setFreezeDetectorPage(next);
+        setDiagnosticsTracePage(next);
+        void diagnosticsTrace("panel_switch", {
+          ...(details ?? {}),
           page: next,
           transition_id: transitionId,
-          elapsed_ms: Math.round(performance.now() - startedAt),
-          superseded: panelTransitionSequenceRef.current !== transitionId,
+          span_id: panelSpanId,
+          parent_span_id: parentSpanId,
+          incident_id: receipt.incident_id,
+          capture_mode: receipt.capture_mode,
+        });
+        window.requestAnimationFrame(() => {
+          window.requestAnimationFrame(() => {
+            void diagnosticsTrace("panel_switch_rendered", {
+              page: next,
+              transition_id: transitionId,
+              span_id: panelSpanId,
+              parent_span_id: parentSpanId,
+              incident_id: receipt.incident_id,
+              elapsed_ms: Math.round(performance.now() - startedAt),
+              superseded: panelTransitionSequenceRef.current !== transitionId,
+              mounted_table_rows: document.querySelectorAll("table tbody tr").length,
+              mounted_controls: document.querySelectorAll("button, input, select, textarea").length,
+              viewport_width: window.innerWidth,
+              viewport_height: window.innerHeight,
+            });
+          });
         });
       });
-    });
+    panelTransitionActivationRef.current = activation;
   }
 
   function openLocalizationItem(itemId: string, sectionId: LocalizationSectionId | null = null) {
-    setEditorItemId(itemId);
-    setLocalizationNavRequest({
-      itemId,
-      sectionId,
-      nonce: Date.now(),
-    });
     switchPage("localization", {
       item_id: itemId,
       section_id: sectionId ?? "editor",
+    }, () => {
+      setEditorItemId(itemId);
+      setLocalizationNavRequest({
+        itemId,
+        sectionId,
+        nonce: Date.now(),
+      });
     });
   }
 

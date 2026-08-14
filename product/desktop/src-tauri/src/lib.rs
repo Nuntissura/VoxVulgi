@@ -4,6 +4,7 @@ use raw_window_handle::{HasWindowHandle, RawWindowHandle};
 use sha2::{Digest, Sha256};
 use std::sync::{
     atomic::{AtomicBool, AtomicU64, Ordering},
+    mpsc::{sync_channel, SyncSender, TrySendError},
     Arc, Mutex, OnceLock,
 };
 use std::time::{Duration, Instant};
@@ -34,8 +35,30 @@ static AGENT_APP_HANDLE: OnceLock<tauri::AppHandle> = OnceLock::new();
 static AGENT_BRIDGE_STATE: OnceLock<Arc<Mutex<AgentBridgeInner>>> = OnceLock::new();
 static AGENT_BRIDGE_FILES_DIR: OnceLock<std::path::PathBuf> = OnceLock::new();
 static DIAGNOSTICS_TRACE_WRITE_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+static YOUTUBE_AUTH_OPERATION_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+static YOUTUBE_PROTECTION_MUTATION_GENERATIONS: OnceLock<
+    Mutex<std::collections::HashMap<String, u64>>,
+> = OnceLock::new();
+static YOUTUBE_PROTECTION_MUTATION_LOCKS: OnceLock<
+    Mutex<std::collections::HashMap<String, Arc<Mutex<()>>>>,
+> = OnceLock::new();
+static DIAGNOSTICS_TRACE_QUEUE: OnceLock<SyncSender<DiagnosticsTraceWriteRequest>> =
+    OnceLock::new();
+static DIAGNOSTICS_TRACE_DROPPED_PENDING: AtomicU64 = AtomicU64::new(0);
+static DIAGNOSTICS_TRACE_DROPPED_TOTAL: AtomicU64 = AtomicU64::new(0);
+static DIAGNOSTICS_TRACE_ASYNC_WRITE_FAILURES_TOTAL: AtomicU64 = AtomicU64::new(0);
+static DIAGNOSTICS_TRACE_QUEUE_REJECTIONS_TOTAL: AtomicU64 = AtomicU64::new(0);
+static DIAGNOSTICS_TRACE_ROTATIONS_TOTAL: AtomicU64 = AtomicU64::new(0);
+static DIAGNOSTICS_TRACE_COMPRESSED_TOTAL: AtomicU64 = AtomicU64::new(0);
+static DIAGNOSTICS_ID_SEQUENCE: AtomicU64 = AtomicU64::new(1);
+static DIAGNOSTICS_CAPTURE_STATE: OnceLock<Mutex<DiagnosticsCaptureStatus>> = OnceLock::new();
+#[cfg(test)]
+static DIAGNOSTICS_CAPTURE_TEST_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
 static AGENT_UI_REQUEST_SEQUENCE: AtomicU64 = AtomicU64::new(1);
 static JOBS_BATCH_OPERATION_SEQUENCE: AtomicU64 = AtomicU64::new(1);
+static YOUTUBE_RETENTION_WORKER_RUNNING: AtomicBool = AtomicBool::new(false);
+static YOUTUBE_RETENTION_WORKER_CANCELLED: AtomicBool = AtomicBool::new(false);
+static YOUTUBE_RETENTION_WORKER_WAKE: OnceLock<(Mutex<()>, std::sync::Condvar)> = OnceLock::new();
 static JOBS_BATCH_OPERATIONS: OnceLock<
     Mutex<std::collections::HashMap<String, JobsBatchOperationSnapshot>>,
 > = OnceLock::new();
@@ -43,6 +66,59 @@ static JOBS_BATCH_OPERATIONS: OnceLock<
 // without relying on Tauri IPC (which routes through the WebView main thread we
 // are trying to observe).
 static AGENT_BRIDGE_PORT: OnceLock<u16> = OnceLock::new();
+
+fn run_youtube_protection_mutation<T, F>(
+    operation: &str,
+    mutation_generation: u64,
+    action: F,
+) -> Result<T, String>
+where
+    F: FnOnce() -> Result<T, String>,
+{
+    if mutation_generation == 0 {
+        return Err("YouTube protection mutation generation must be non-zero".to_string());
+    }
+    {
+        let mut generations = YOUTUBE_PROTECTION_MUTATION_GENERATIONS
+            .get_or_init(|| Mutex::new(std::collections::HashMap::new()))
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let latest = generations.entry(operation.to_string()).or_insert(0);
+        if mutation_generation < *latest {
+            return Err(format!(
+                "stale YouTube protection mutation generation {mutation_generation}; latest is {latest}"
+            ));
+        }
+        *latest = mutation_generation;
+    }
+    let operation_lock = {
+        let mut locks = YOUTUBE_PROTECTION_MUTATION_LOCKS
+            .get_or_init(|| Mutex::new(std::collections::HashMap::new()))
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        Arc::clone(
+            locks
+                .entry(operation.to_string())
+                .or_insert_with(|| Arc::new(Mutex::new(()))),
+        )
+    };
+    let _operation_guard = operation_lock
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let latest = YOUTUBE_PROTECTION_MUTATION_GENERATIONS
+        .get_or_init(|| Mutex::new(std::collections::HashMap::new()))
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .get(operation)
+        .copied()
+        .unwrap_or(0);
+    if latest != mutation_generation {
+        return Err(format!(
+            "stale YouTube protection mutation generation {mutation_generation}; latest is {latest}"
+        ));
+    }
+    action()
+}
 
 #[derive(Debug, Default)]
 struct AgentBridgeInner {
@@ -1195,8 +1271,8 @@ fn agent_handle_freeze_dump(body: &str) -> (&'static str, String) {
 use voxvulgi_engine::models::ModelStore;
 use voxvulgi_engine::paths::AppPaths;
 use voxvulgi_engine::{
-    config, db, diagnostics, instagram_subscriptions, jobs, library, media_cleanup, speakers,
-    subscriptions, subtitle_tracks, subtitles, tools, translate, video_libraries,
+    config, db, diagnostics, instagram_subscriptions, jobs, library, media_cleanup, root_rebind,
+    speakers, subscriptions, subtitle_tracks, subtitles, tools, translate, video_libraries,
     voice_backend_adapters, voice_backends, voice_benchmarks, voice_cast_packs, voice_cleanup,
     voice_library, voice_plans, voice_reference_candidates, voice_reference_curation,
     voice_templates,
@@ -1492,6 +1568,13 @@ struct DiagnosticsTraceDirStatus {
     default_dir: String,
     exists: bool,
     using_default: bool,
+    retained_age_ms: i64,
+    rotation_count: u64,
+    compressed_files: u64,
+    aggregate_path: String,
+    sampling_mode: String,
+    queue_capacity: usize,
+    dropped_events_total: u64,
 }
 
 #[derive(Debug, Clone, serde::Serialize)]
@@ -1612,6 +1695,68 @@ struct DiagnosticsTraceEntry {
     level: String,
     details: serde_json::Value,
     process: Option<DiagnosticsProcessSnapshot>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    incident_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    span_id: Option<String>,
+}
+
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+struct DiagnosticsCaptureStatus {
+    mode: String,
+    armed_trigger: Option<String>,
+    incident_id: Option<String>,
+    armed_at_ms: Option<i64>,
+    started_at_ms: Option<i64>,
+    expires_at_ms: Option<i64>,
+    max_trace_bytes: u64,
+    trace_bytes: u64,
+    dropped_events: u64,
+    artifact_dir: Option<String>,
+    #[serde(default)]
+    root_span_id: Option<String>,
+}
+
+impl Default for DiagnosticsCaptureStatus {
+    fn default() -> Self {
+        Self {
+            mode: "normal".to_string(),
+            armed_trigger: None,
+            incident_id: None,
+            armed_at_ms: None,
+            started_at_ms: None,
+            expires_at_ms: None,
+            max_trace_bytes: DIAGNOSTICS_TRACE_NORMAL_MAX_BYTES,
+            trace_bytes: 0,
+            dropped_events: 0,
+            artifact_dir: None,
+            root_span_id: None,
+        }
+    }
+}
+
+struct DiagnosticsTraceWriteRequest {
+    paths: AppPaths,
+    event: String,
+    details: serde_json::Value,
+    level: String,
+}
+
+#[derive(Debug, Clone, serde::Serialize)]
+struct DiagnosticsTraceEnqueueReceipt {
+    accepted: bool,
+    dropped_events_total: u64,
+    async_write_failures_total: u64,
+    pending_loss_events: u64,
+}
+
+#[derive(Debug, Clone, serde::Serialize)]
+struct DiagnosticsPanelTransitionReceipt {
+    incident_id: Option<String>,
+    panel_span_id: String,
+    parent_span_id: Option<String>,
+    capture_mode: String,
+    activated_armed_capture: bool,
 }
 
 #[derive(Debug, Clone, serde::Serialize)]
@@ -1920,6 +2065,813 @@ fn diagnostics_trace_file_path(paths: &AppPaths) -> Result<std::path::PathBuf, S
     Ok(dir.join("diagnostics_trace.jsonl"))
 }
 
+const DIAGNOSTICS_TRACE_NORMAL_MAX_BYTES: u64 = 32 * 1024 * 1024;
+const DIAGNOSTICS_TRACE_INCIDENT_MAX_BYTES: u64 = 64 * 1024 * 1024;
+const DIAGNOSTICS_TRACE_RETAINED_FILES: usize = 5;
+const DIAGNOSTICS_TRACE_RETAINED_AGE_MS: i64 = 24 * 60 * 60 * 1000;
+const DIAGNOSTICS_TRACE_QUEUE_CAPACITY: usize = 2048;
+const DIAGNOSTICS_INCIDENT_DURATION_MS: i64 = 10 * 60 * 1000;
+const DIAGNOSTICS_TRACE_MAX_ROW_BYTES: usize = 256 * 1024;
+const DIAGNOSTICS_TRACE_TAIL_READ_BYTES: u64 = 4 * 1024 * 1024;
+const DIAGNOSTICS_INCIDENT_RETAINED_COUNT: usize = 12;
+const DIAGNOSTICS_INCIDENT_RETAINED_AGE_MS: i64 = 14 * 24 * 60 * 60 * 1000;
+
+fn redact_diagnostics_value(value: serde_json::Value) -> serde_json::Value {
+    fn sensitive_key(key: &str) -> bool {
+        let k = key.to_ascii_lowercase();
+        [
+            "password",
+            "passwd",
+            "token",
+            "secret",
+            "cookie",
+            "authorization",
+            "api_key",
+            "apikey",
+            "proxy",
+            "path",
+            "file",
+            "dir",
+            "root",
+            "url",
+            "command_line",
+        ]
+        .iter()
+        .any(|part| k.contains(part))
+    }
+    fn redact_text(input: String) -> String {
+        fn redact_url_userinfo(token: &str) -> String {
+            let Some(scheme) = token.find("://") else {
+                return token.to_string();
+            };
+            let authority_start = scheme + 3;
+            let authority_end = token[authority_start..]
+                .find(['/', '?', '#'])
+                .map(|v| authority_start + v)
+                .unwrap_or(token.len());
+            let Some(at_rel) = token[authority_start..authority_end].rfind('@') else {
+                return token.to_string();
+            };
+            format!(
+                "{}<redacted>@{}",
+                &token[..authority_start],
+                &token[authority_start + at_rel + 1..]
+            )
+        }
+        fn tokenize_quoted(input: &str) -> Vec<String> {
+            let mut tokens = Vec::new();
+            let mut current = String::new();
+            let mut quote = None;
+            for character in input.chars() {
+                if let Some(active_quote) = quote {
+                    current.push(character);
+                    if character == active_quote {
+                        quote = None;
+                    }
+                } else if matches!(character, '\'' | '"') {
+                    quote = Some(character);
+                    current.push(character);
+                } else if character.is_whitespace() {
+                    if !current.is_empty() {
+                        tokens.push(std::mem::take(&mut current));
+                    }
+                } else {
+                    current.push(character);
+                }
+            }
+            if !current.is_empty() {
+                tokens.push(current);
+            }
+            tokens
+        }
+        fn sensitive_name(value: &str) -> bool {
+            matches!(
+                value
+                    .trim()
+                    .trim_start_matches('-')
+                    .trim_end_matches(':')
+                    .trim_matches(['\'', '"'])
+                    .to_ascii_lowercase()
+                    .as_str(),
+                "password"
+                    | "passwd"
+                    | "token"
+                    | "secret"
+                    | "key"
+                    | "api-key"
+                    | "api_key"
+                    | "apikey"
+                    | "cookies"
+                    | "cookie"
+                    | "proxy"
+                    | "authorization"
+            )
+        }
+        fn authorization_name(value: &str) -> bool {
+            matches!(value
+                .trim()
+                .trim_start_matches('-')
+                .trim_end_matches(':')
+                .trim_matches(['\'', '"'])
+                .to_ascii_lowercase()
+                .as_str(), "authorization" | "proxy-authorization")
+        }
+        fn authorization_scheme(value: &str) -> bool {
+            matches!(
+                value
+                    .trim()
+                    .trim_matches(['\'', '"'])
+                    .trim_end_matches([':', '='])
+                    .to_ascii_lowercase()
+                    .as_str(),
+                "bearer" | "basic"
+            )
+        }
+        static QUOTED_HEADER_AUTH_RE: OnceLock<regex::Regex> = OnceLock::new();
+        static AUTH_TUPLE_RE: OnceLock<regex::Regex> = OnceLock::new();
+        let quoted_header_auth_re = QUOTED_HEADER_AUTH_RE.get_or_init(|| regex::Regex::new(
+            r#"(?i)(--header(?:=|\s+))(["'])(\s*(?:proxy-)?authorization\s*:)\s*[^"']*(["'])"#,
+        ).expect("valid quoted header redaction regex"));
+        let input = quoted_header_auth_re
+            .replace_all(&input, "$1$2$3 <redacted>$4")
+            .to_string();
+        let auth_tuple_re = AUTH_TUPLE_RE.get_or_init(|| regex::Regex::new(
+            r#"(?i)\b((?:proxy-)?authorization)\b\s*[:=]\s*(?:bearer|basic)\s+(?:"[^"]*"|'[^']*'|[^\s,;:=]+)"#,
+        ).expect("valid authorization tuple regex"));
+        let input = auth_tuple_re.replace_all(&input, "$1: <redacted>").to_string();
+        let mut out = Vec::new();
+        let mut redact_next = false;
+        // 0 = none, 1 = authorization value or scheme, 2 = credential after a scheme.
+        let mut authorization_state = 0_u8;
+        for token in tokenize_quoted(&input) {
+            if authorization_state != 0 {
+                if matches!(token.as_str(), "=" | ":") {
+                    out.push(token);
+                    continue;
+                }
+                let value = token.trim_start_matches([':', '=']);
+                let prefix_bytes = token.len() - value.len();
+                if value.is_empty() {
+                    out.push(token);
+                    continue;
+                }
+                let was_scheme = authorization_state == 1 && authorization_scheme(value);
+                out.push(format!("{}<redacted>", &token[..prefix_bytes]));
+                authorization_state = if was_scheme { 2 } else { 0 };
+                continue;
+            }
+            if redact_next {
+                if matches!(token.as_str(), "=" | ":") {
+                    out.push(token);
+                    continue;
+                }
+                out.push("<redacted>".to_string());
+                redact_next = false;
+                continue;
+            }
+            let lower = token.to_ascii_lowercase();
+            if lower == "bearer" {
+                out.push(token.to_string());
+                redact_next = true;
+                continue;
+            }
+            if authorization_name(&token) {
+                out.push(token.to_string());
+                authorization_state = 1;
+                continue;
+            }
+            if sensitive_name(&token) {
+                out.push(token.to_string());
+                redact_next = true;
+                continue;
+            }
+            if let Some((name, value)) = token.split_once('=') {
+                if sensitive_name(name) {
+                    out.push(format!("{name}=<redacted>"));
+                    if authorization_name(name) {
+                        authorization_state = if value.is_empty() {
+                            1
+                        } else if authorization_scheme(value) {
+                            2
+                        } else {
+                            0
+                        };
+                    } else {
+                        redact_next = value.is_empty();
+                    }
+                    continue;
+                }
+            }
+            if let Some((name, value)) = token.split_once(':') {
+                if sensitive_name(name) {
+                    out.push(format!("{name}:<redacted>"));
+                    if authorization_name(name) {
+                        authorization_state = if value.is_empty() {
+                            1
+                        } else if authorization_scheme(value) {
+                            2
+                        } else {
+                            0
+                        };
+                    } else {
+                        redact_next = value.is_empty();
+                    }
+                    continue;
+                }
+            }
+            if lower.starts_with("authorization:") {
+                out.push("authorization:<redacted>".to_string());
+                continue;
+            }
+            if token.contains(":\\")
+                || token.starts_with("\\\\")
+                || token.contains("/Users/")
+                || token.contains("/home/")
+            {
+                out.push("<redacted_path>".to_string());
+                continue;
+            }
+            out.push(redact_url_userinfo(&token));
+        }
+        out.join(" ")
+    }
+    match value {
+        serde_json::Value::Object(map) => serde_json::Value::Object(
+            map.into_iter()
+                .map(|(key, value)| {
+                    let value = if sensitive_key(&key) {
+                        serde_json::Value::String("<redacted>".into())
+                    } else {
+                        redact_diagnostics_value(value)
+                    };
+                    (key, value)
+                })
+                .collect(),
+        ),
+        serde_json::Value::Array(values) => {
+            serde_json::Value::Array(values.into_iter().map(redact_diagnostics_value).collect())
+        }
+        serde_json::Value::String(value) => serde_json::Value::String(redact_text(value)),
+        other => other,
+    }
+}
+
+fn diagnostics_capture_state_file(paths: &AppPaths) -> Result<std::path::PathBuf, String> {
+    let dir = paths
+        .effective_diagnostics_trace_dir()
+        .map_err(|e| e.to_string())?;
+    std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
+    Ok(dir.join("capture_state.json"))
+}
+
+fn diagnostics_capture_state() -> &'static Mutex<DiagnosticsCaptureStatus> {
+    DIAGNOSTICS_CAPTURE_STATE.get_or_init(|| Mutex::new(DiagnosticsCaptureStatus::default()))
+}
+
+fn ensure_diagnostics_trace_mutation_allowed(paths: &AppPaths) -> Result<(), String> {
+    let status = load_diagnostics_capture_state(paths);
+    if status.mode != "normal" || status.armed_trigger.is_some() {
+        return Err(format!(
+            "diagnostics trace folder is pinned while capture is {}",
+            if status.mode == "incident" {
+                "active"
+            } else {
+                "armed"
+            }
+        ));
+    }
+    Ok(())
+}
+
+fn diagnostics_unique_id(prefix: &str) -> String {
+    format!(
+        "{prefix}-{}-{}-{}",
+        now_epoch_ms_i64(),
+        std::process::id(),
+        DIAGNOSTICS_ID_SEQUENCE.fetch_add(1, Ordering::Relaxed)
+    )
+}
+
+fn write_json_atomic(path: &std::path::Path, value: &impl serde::Serialize) -> Result<(), String> {
+    let bytes = serde_json::to_vec_pretty(value).map_err(|e| e.to_string())?;
+    voxvulgi_engine::persistence::atomic_write_bytes(path, &bytes).map_err(|e| e.to_string())
+}
+
+fn persist_diagnostics_capture_state(
+    paths: &AppPaths,
+    status: &DiagnosticsCaptureStatus,
+) -> Result<(), String> {
+    write_json_atomic(&diagnostics_capture_state_file(paths)?, status)
+}
+
+fn load_diagnostics_capture_state(paths: &AppPaths) -> DiagnosticsCaptureStatus {
+    let loaded = diagnostics_capture_state_file(paths)
+        .ok()
+        .and_then(|path| std::fs::read_to_string(path).ok())
+        .and_then(|raw| serde_json::from_str::<DiagnosticsCaptureStatus>(&raw).ok())
+        .unwrap_or_default();
+    let mut state = diagnostics_capture_state()
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    *state = loaded.clone();
+    loaded
+}
+
+fn finalize_diagnostics_incident_manifest(
+    status: &DiagnosticsCaptureStatus,
+    outcome: &str,
+) -> Result<(), String> {
+    let Some(artifact_dir) = status.artifact_dir.as_deref() else {
+        return Ok(());
+    };
+    let incident_dir = std::path::PathBuf::from(artifact_dir);
+    let manifest = serde_json::json!({
+        "wp": "WP-0298",
+        "incident_id": status.incident_id,
+        "status": outcome,
+        "trace_path": incident_dir.join("trace.jsonl").to_string_lossy(),
+        "started_at_ms": status.started_at_ms,
+        "finished_at_ms": now_epoch_ms_i64(),
+        "capture": status,
+    });
+    write_json_atomic(&incident_dir.join("manifest.json"), &manifest)
+}
+
+fn rotate_diagnostics_trace_if_needed(
+    path: &std::path::Path,
+    max_bytes: u64,
+    incoming_bytes: u64,
+) -> Result<(), String> {
+    #[derive(Debug, Default, serde::Serialize, serde::Deserialize)]
+    struct RotationState {
+        current_started_at_ms: i64,
+        last_rotation_at_ms: Option<i64>,
+        rotation_count: u64,
+        compressed_files: u64,
+        last_rotation_reason: Option<String>,
+    }
+    let state_path = path.with_file_name("diagnostics_trace.rotation_state.json");
+    let state_was_missing = !state_path.exists();
+    let mut state = std::fs::read_to_string(&state_path)
+        .ok()
+        .and_then(|raw| serde_json::from_str::<RotationState>(&raw).ok())
+        .unwrap_or_default();
+    let now = now_epoch_ms_i64();
+    if state.current_started_at_ms <= 0 {
+        state.current_started_at_ms = std::fs::metadata(path)
+            .ok()
+            .and_then(|meta| meta.created().or_else(|_| meta.modified()).ok())
+            .and_then(|time| time.duration_since(std::time::UNIX_EPOCH).ok())
+            .map(|duration| duration.as_millis() as i64)
+            .unwrap_or(now);
+    }
+    let bytes = std::fs::metadata(path).map(|meta| meta.len()).unwrap_or(0);
+    let size_due = bytes.saturating_add(incoming_bytes) > max_bytes;
+    let age_due = bytes > 0
+        && now.saturating_sub(state.current_started_at_ms) >= DIAGNOSTICS_TRACE_RETAINED_AGE_MS;
+    if !size_due && !age_due {
+        // Persist the generation start once, not on every accepted trace row. Rewriting this
+        // small state file for every event used to turn diagnostics into its own I/O hotspot.
+        if state_was_missing {
+            write_json_atomic(
+                &state_path,
+                &serde_json::to_value(&state).map_err(|e| e.to_string())?,
+            )?;
+        }
+        return Ok(());
+    }
+    reconcile_diagnostics_trace_rotation(path)?;
+    let generation_id = diagnostics_unique_id("tracegen");
+    let journal_path = path.with_file_name("diagnostics_trace.rotation_journal.json");
+    write_json_atomic(
+        &journal_path,
+        &serde_json::json!({
+            "schema_version": 1,
+            "generation_id": generation_id,
+            "stage": "prepared",
+            "created_at_ms": now,
+        }),
+    )?;
+    reconcile_diagnostics_trace_rotation(path)?;
+    state.current_started_at_ms = now;
+    state.last_rotation_at_ms = Some(now);
+    state.rotation_count = state.rotation_count.saturating_add(1);
+    state.compressed_files = count_compressed_trace_files(path) as u64;
+    state.last_rotation_reason = Some(if size_due { "size" } else { "age" }.to_string());
+    DIAGNOSTICS_TRACE_ROTATIONS_TOTAL.store(state.rotation_count, Ordering::Relaxed);
+    DIAGNOSTICS_TRACE_COMPRESSED_TOTAL.store(state.compressed_files, Ordering::Relaxed);
+    write_json_atomic(
+        &state_path,
+        &serde_json::to_value(&state).map_err(|e| e.to_string())?,
+    )?;
+    Ok(())
+}
+
+fn reconcile_diagnostics_trace_rotation(path: &std::path::Path) -> Result<(), String> {
+    let journal_path = path.with_file_name("diagnostics_trace.rotation_journal.json");
+    let legacy_pending = path.with_file_name("diagnostics_trace.rotation_pending.jsonl");
+    if legacy_pending.exists() && !journal_path.exists() {
+        let generation_id = diagnostics_unique_id("legacy-tracegen");
+        let generation_path = trace_generation_path(path, &generation_id, "jsonl");
+        std::fs::rename(&legacy_pending, &generation_path).map_err(|e| e.to_string())?;
+    }
+
+    if journal_path.exists() {
+        let journal: serde_json::Value = serde_json::from_str(
+            &std::fs::read_to_string(&journal_path).map_err(|e| e.to_string())?,
+        )
+        .map_err(|e| e.to_string())?;
+        let generation_id = journal
+            .get("generation_id")
+            .and_then(|value| value.as_str())
+            .filter(|value| !value.is_empty())
+            .ok_or_else(|| "diagnostics rotation journal has no generation id".to_string())?;
+        let generation_path = trace_generation_path(path, generation_id, "jsonl");
+        if !generation_path.exists() && path.exists() {
+            std::fs::rename(path, &generation_path).map_err(|e| e.to_string())?;
+        }
+        finalize_trace_generation(path, generation_id)?;
+        std::fs::remove_file(&journal_path).map_err(|e| e.to_string())?;
+    }
+
+    // Migrate every historical numbered generation once. Keeping legacy ZIPs beside immutable
+    // generations would let the retained set grow to twice the advertised bound, so ZIPs are
+    // renamed into the same immutable namespace before the single global prune below.
+    for index in 1..=DIAGNOSTICS_TRACE_RETAINED_FILES {
+        let legacy = path.with_file_name(format!("diagnostics_trace.{index}.jsonl"));
+        if legacy.exists() {
+            let generation_id = diagnostics_unique_id(&format!("legacy-{index}"));
+            std::fs::rename(&legacy, trace_generation_path(path, &generation_id, "jsonl"))
+                .map_err(|e| e.to_string())?;
+        }
+        let legacy_zip = path.with_file_name(format!("diagnostics_trace.{index}.zip"));
+        if legacy_zip.exists() {
+            let generation_id = diagnostics_unique_id(&format!("legacy-zip-{index}"));
+            std::fs::rename(&legacy_zip, trace_generation_path(path, &generation_id, "zip"))
+                .map_err(|e| e.to_string())?;
+        }
+    }
+
+    // A crash may occur after the active file was renamed but before its journal was durable.
+    // Immutable generation names make those orphans safe to discover and finish exactly once.
+    for generation_path in trace_generation_files(path, "jsonl")? {
+        if let Some(generation_id) = trace_generation_id(&generation_path, "jsonl") {
+            finalize_trace_generation(path, &generation_id)?;
+        }
+    }
+    prune_trace_generations(path)
+}
+
+fn trace_generation_path(path: &std::path::Path, generation_id: &str, extension: &str) -> std::path::PathBuf {
+    path.with_file_name(format!("diagnostics_trace.generation.{generation_id}.{extension}"))
+}
+
+fn trace_generation_id(path: &std::path::Path, extension: &str) -> Option<String> {
+    let name = path.file_name()?.to_str()?;
+    name.strip_prefix("diagnostics_trace.generation.")?
+        .strip_suffix(&format!(".{extension}"))
+        .map(str::to_string)
+}
+
+fn trace_generation_files(path: &std::path::Path, extension: &str) -> Result<Vec<std::path::PathBuf>, String> {
+    let Some(parent) = path.parent() else { return Ok(Vec::new()); };
+    let mut files = std::fs::read_dir(parent)
+        .map_err(|e| e.to_string())?
+        .filter_map(Result::ok)
+        .map(|entry| entry.path())
+        .filter(|candidate| trace_generation_id(candidate, extension).is_some())
+        .collect::<Vec<_>>();
+    files.sort_by_key(|candidate| {
+        candidate.metadata().ok().and_then(|meta| meta.modified().ok())
+    });
+    Ok(files)
+}
+
+fn finalize_trace_generation(path: &std::path::Path, generation_id: &str) -> Result<(), String> {
+    let source = trace_generation_path(path, generation_id, "jsonl");
+    let destination = trace_generation_path(path, generation_id, "zip");
+    if source.exists() {
+        merge_rotated_trace_aggregate(path, &source, generation_id)?;
+        if !destination.exists() {
+            compress_trace_jsonl(&source, &destination)?;
+        } else {
+            std::fs::remove_file(&source).map_err(|e| e.to_string())?;
+        }
+    }
+    Ok(())
+}
+
+fn prune_trace_generations(path: &std::path::Path) -> Result<(), String> {
+    let mut generations = trace_generation_files(path, "zip")?;
+    generations.sort_by_key(|candidate| {
+        std::cmp::Reverse(candidate.metadata().ok().and_then(|meta| meta.modified().ok()))
+    });
+    for old in generations.into_iter().skip(DIAGNOSTICS_TRACE_RETAINED_FILES) {
+        std::fs::remove_file(old).map_err(|e| e.to_string())?;
+    }
+    Ok(())
+}
+
+fn count_compressed_trace_files(path: &std::path::Path) -> usize {
+    let immutable = trace_generation_files(path, "zip")
+        .map(|files| files.len())
+        .unwrap_or(0);
+    immutable
+        + (1..=DIAGNOSTICS_TRACE_RETAINED_FILES)
+            .filter(|index| {
+                path.with_file_name(format!("diagnostics_trace.{index}.zip"))
+                    .exists()
+            })
+            .count()
+}
+
+fn compress_trace_jsonl(
+    source: &std::path::Path,
+    destination: &std::path::Path,
+) -> Result<(), String> {
+    use std::io::{Read as _, Write as _};
+    let temp = destination.with_extension("zip.tmp");
+    let output = std::fs::File::create(&temp).map_err(|e| e.to_string())?;
+    let mut archive = zip::ZipWriter::new(output);
+    archive
+        .start_file(
+            "diagnostics_trace.jsonl",
+            zip::write::FileOptions::default().compression_method(zip::CompressionMethod::Deflated),
+        )
+        .map_err(|e| e.to_string())?;
+    let mut input = std::fs::File::open(source).map_err(|e| e.to_string())?;
+    let mut buffer = [0_u8; 64 * 1024];
+    loop {
+        let read = input.read(&mut buffer).map_err(|e| e.to_string())?;
+        if read == 0 {
+            break;
+        }
+        archive
+            .write_all(&buffer[..read])
+            .map_err(|e| e.to_string())?;
+    }
+    archive.finish().map_err(|e| e.to_string())?;
+    std::fs::rename(&temp, destination).map_err(|e| e.to_string())?;
+    std::fs::remove_file(source).map_err(|e| e.to_string())
+}
+
+fn merge_rotated_trace_aggregate(
+    trace_path: &std::path::Path,
+    source: &std::path::Path,
+    generation_id: &str,
+) -> Result<(), String> {
+    use std::io::BufRead as _;
+    let aggregate_path = trace_path.with_file_name("diagnostics_trace.aggregate.json");
+    let mut aggregate = std::fs::read_to_string(&aggregate_path)
+        .ok()
+        .and_then(|raw| serde_json::from_str::<serde_json::Value>(&raw).ok())
+        .unwrap_or_else(
+            || serde_json::json!({"schema_version":1,"events":{},"rows_total":0,"updated_at_ms":0,"merged_generations":[]}),
+        );
+    let merged = aggregate
+        .get("merged_generations")
+        .and_then(|value| value.as_array())
+        .map(|values| values.iter().any(|value| value.as_str() == Some(generation_id)))
+        .unwrap_or(false);
+    if merged {
+        return Ok(());
+    }
+    let events = aggregate["events"]
+        .as_object_mut()
+        .ok_or_else(|| "diagnostics aggregate events is not an object".to_string())?;
+    let reader = std::io::BufReader::new(std::fs::File::open(source).map_err(|e| e.to_string())?);
+    let mut added = 0_u64;
+    for line in reader.lines() {
+        let line = line.map_err(|e| e.to_string())?;
+        let Ok(row) = serde_json::from_str::<DiagnosticsTraceEntry>(&line) else {
+            continue;
+        };
+        let count = events
+            .get(&row.event)
+            .and_then(|value| value.as_u64())
+            .unwrap_or(0);
+        events.insert(row.event, serde_json::json!(count.saturating_add(1)));
+        added = added.saturating_add(1);
+    }
+    aggregate["rows_total"] = serde_json::json!(aggregate["rows_total"]
+        .as_u64()
+        .unwrap_or(0)
+        .saturating_add(added));
+    aggregate["updated_at_ms"] = serde_json::json!(now_epoch_ms_i64());
+    if !aggregate["merged_generations"].is_array() {
+        aggregate["merged_generations"] = serde_json::json!([]);
+    }
+    aggregate["merged_generations"]
+        .as_array_mut()
+        .expect("merged generation array")
+        .push(serde_json::json!(generation_id));
+    if let Some(generations) = aggregate["merged_generations"].as_array_mut() {
+        const AGGREGATE_GENERATION_RECEIPT_CAPACITY: usize = 64;
+        if generations.len() > AGGREGATE_GENERATION_RECEIPT_CAPACITY {
+            generations.drain(..generations.len() - AGGREGATE_GENERATION_RECEIPT_CAPACITY);
+        }
+    }
+    write_json_atomic(&aggregate_path, &aggregate)
+}
+
+fn prune_diagnostics_incidents(paths: &AppPaths, active: Option<&str>) -> Result<(), String> {
+    let root = paths
+        .effective_diagnostics_trace_dir()
+        .map_err(|e| e.to_string())?
+        .join("incidents");
+    if !root.exists() {
+        return Ok(());
+    }
+    let now = now_epoch_ms_i64();
+    let mut dirs = std::fs::read_dir(&root)
+        .map_err(|e| e.to_string())?
+        .filter_map(Result::ok)
+        .filter(|entry| entry.path().is_dir())
+        .collect::<Vec<_>>();
+    dirs.sort_by_key(|entry| {
+        std::cmp::Reverse(entry.metadata().ok().and_then(|m| m.modified().ok()))
+    });
+    let active_present = active.is_some_and(|id| {
+        dirs.iter()
+            .any(|entry| entry.file_name().to_string_lossy() == id)
+    });
+    let nonactive_capacity =
+        DIAGNOSTICS_INCIDENT_RETAINED_COUNT.saturating_sub(usize::from(active_present));
+    let mut retained_nonactive = 0usize;
+    for entry in dirs {
+        let name = entry.file_name().to_string_lossy().to_string();
+        if active == Some(name.as_str()) {
+            continue;
+        }
+        let modified_ms = entry
+            .metadata()
+            .ok()
+            .and_then(|m| m.modified().ok())
+            .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+            .map(|d| d.as_millis() as i64)
+            .unwrap_or(0);
+        let expired = now.saturating_sub(modified_ms) > DIAGNOSTICS_INCIDENT_RETAINED_AGE_MS;
+        if expired || retained_nonactive >= nonactive_capacity {
+            std::fs::remove_dir_all(entry.path()).map_err(|e| e.to_string())?;
+        } else {
+            retained_nonactive += 1;
+        }
+    }
+    Ok(())
+}
+
+fn diagnostics_capture_envelope(
+    paths: &AppPaths,
+    event: &str,
+    details: &serde_json::Value,
+) -> (Option<String>, Option<String>, u64, bool) {
+    let now = now_epoch_ms_i64();
+    let mut state = diagnostics_capture_state()
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    if state.expires_at_ms.is_some_and(|expires| expires <= now) {
+        let previous = state.clone();
+        state.mode = "normal".to_string();
+        state.armed_trigger = None;
+        state.incident_id = None;
+        state.started_at_ms = None;
+        state.expires_at_ms = None;
+        state.max_trace_bytes = DIAGNOSTICS_TRACE_NORMAL_MAX_BYTES;
+        state.artifact_dir = None;
+        state.root_span_id = None;
+        if finalize_diagnostics_incident_manifest(&previous, "completed_expired").is_err() {
+            record_diagnostics_persistence_failure();
+        }
+        if persist_diagnostics_capture_state(paths, &state).is_err() {
+            record_diagnostics_persistence_failure();
+        }
+    }
+    let should_trigger = match state.armed_trigger.as_deref() {
+        Some("panel_switch") => event == "panel_switch",
+        Some("job_start") => matches!(event, "job_started" | "job_track_dispatched"),
+        _ => false,
+    };
+    if should_trigger {
+        let incident_id = state
+            .incident_id
+            .clone()
+            .unwrap_or_else(|| diagnostics_unique_id("incident"));
+        let trace_dir = paths.effective_diagnostics_trace_dir().ok();
+        state.mode = "incident".to_string();
+        state.armed_trigger = None;
+        state.incident_id = Some(incident_id.clone());
+        state.started_at_ms = Some(now);
+        state.expires_at_ms = Some(now + DIAGNOSTICS_INCIDENT_DURATION_MS);
+        state.max_trace_bytes = DIAGNOSTICS_TRACE_INCIDENT_MAX_BYTES;
+        state.artifact_dir = trace_dir.map(|dir| {
+            dir.join("incidents")
+                .join(&incident_id)
+                .to_string_lossy()
+                .to_string()
+        });
+        state.root_span_id = details
+            .get("span_id")
+            .and_then(|value| value.as_str())
+            .map(str::to_string)
+            .or_else(|| {
+                details
+                    .get("transition_id")
+                    .map(|value| format!("panel-{value}"))
+            });
+        if persist_diagnostics_capture_state(paths, &state).is_err() {
+            record_diagnostics_persistence_failure();
+        }
+    }
+    let span_id = details
+        .get("span_id")
+        .and_then(|value| value.as_str())
+        .map(str::to_string)
+        .or_else(|| {
+            details
+                .get("transition_id")
+                .map(|value| format!("panel-{value}"))
+        })
+        .or_else(|| {
+            details
+                .get("invocation_id")
+                .map(|value| format!("invoke-{value}"))
+        });
+    let incident_id = (state.mode == "incident")
+        .then(|| state.incident_id.clone())
+        .flatten();
+    (incident_id, span_id, state.max_trace_bytes, should_trigger)
+}
+
+fn activate_panel_capture_before_navigation(
+    paths: &AppPaths,
+    page: &str,
+    transition_id: u64,
+    panel_span_id: &str,
+    parent_span_id: Option<&str>,
+) -> Result<DiagnosticsPanelTransitionReceipt, String> {
+    let page = page.trim();
+    let panel_span_id = panel_span_id.trim();
+    if page.is_empty() || panel_span_id.is_empty() {
+        return Err("panel transition page and span_id are required".to_string());
+    }
+    let _write_guard = DIAGNOSTICS_TRACE_WRITE_LOCK
+        .get_or_init(|| Mutex::new(()))
+        .lock()
+        .map_err(|_| "diagnostics trace write lock is poisoned".to_string())?;
+    let details = serde_json::json!({
+        "page": page,
+        "transition_id": transition_id,
+        "span_id": panel_span_id,
+        "parent_span_id": parent_span_id,
+    });
+    let (incident_id, _, _, activated_armed_capture) =
+        diagnostics_capture_envelope(paths, "panel_switch", &details);
+    let capture_mode = diagnostics_capture_state()
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .mode
+        .clone();
+    Ok(DiagnosticsPanelTransitionReceipt {
+        incident_id,
+        panel_span_id: panel_span_id.to_string(),
+        parent_span_id: parent_span_id.map(str::to_string),
+        capture_mode,
+        activated_armed_capture,
+    })
+}
+
+fn cancel_superseded_panel_capture(
+    paths: &AppPaths,
+    incident_id: &str,
+    panel_span_id: &str,
+) -> Result<bool, String> {
+    let _write_guard = DIAGNOSTICS_TRACE_WRITE_LOCK
+        .get_or_init(|| Mutex::new(()))
+        .lock()
+        .map_err(|_| "diagnostics trace write lock is poisoned".to_string())?;
+    let mut state = diagnostics_capture_state()
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    if state.mode != "incident"
+        || state.armed_trigger.is_some()
+        || state.incident_id.as_deref() != Some(incident_id)
+        || state.root_span_id.as_deref() != Some(panel_span_id)
+    {
+        return Ok(false);
+    }
+    let now = now_epoch_ms_i64();
+    state.mode = "normal".to_string();
+    state.armed_trigger = Some("panel_switch".to_string());
+    state.armed_at_ms = Some(now);
+    state.started_at_ms = None;
+    state.expires_at_ms = Some(now + DIAGNOSTICS_INCIDENT_DURATION_MS);
+    state.max_trace_bytes = DIAGNOSTICS_TRACE_INCIDENT_MAX_BYTES;
+    state.artifact_dir = None;
+    state.root_span_id = None;
+    persist_diagnostics_capture_state(paths, &state)?;
+    Ok(true)
+}
+
 fn capture_process_snapshot() -> Option<DiagnosticsProcessSnapshot> {
     let pid = sysinfo::get_current_pid().ok()?;
     let mut system = System::new();
@@ -1939,7 +2891,7 @@ fn capture_process_snapshot() -> Option<DiagnosticsProcessSnapshot> {
 fn append_diagnostics_trace_row(
     paths: &AppPaths,
     event: String,
-    details: serde_json::Value,
+    mut details: serde_json::Value,
     level: String,
 ) -> Result<String, String> {
     let _write_guard = DIAGNOSTICS_TRACE_WRITE_LOCK
@@ -1947,12 +2899,22 @@ fn append_diagnostics_trace_row(
         .lock()
         .map_err(|_| "diagnostics trace write lock is poisoned".to_string())?;
     let path = diagnostics_trace_file_path(paths)?;
-    let mut file = std::fs::OpenOptions::new()
-        .create(true)
-        .append(true)
-        .open(&path)
-        .map_err(|e| e.to_string())?;
-
+    let (incident_id, span_id, max_trace_bytes, _) =
+        diagnostics_capture_envelope(paths, &event, &details);
+    if incident_id.is_some() {
+        let root_span_id = diagnostics_capture_state()
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .root_span_id
+            .clone();
+        if let (Some(root_span_id), Some(object)) = (root_span_id, details.as_object_mut()) {
+            if span_id.as_deref() != Some(root_span_id.as_str()) {
+                object
+                    .entry("parent_span_id".to_string())
+                    .or_insert(serde_json::Value::String(root_span_id));
+            }
+        }
+    }
     let include_process_snapshot = matches!(
         event.as_str(),
         "runtime_sample"
@@ -1963,25 +2925,160 @@ fn append_diagnostics_trace_row(
             | "database_locked"
             | "database_busy"
     );
-    let row = DiagnosticsTraceEntry {
+    let mut row = DiagnosticsTraceEntry {
         ts_ms: now_epoch_ms_i64(),
         event,
         level,
-        details,
+        details: redact_diagnostics_value(details),
         process: include_process_snapshot
             .then(capture_process_snapshot)
             .flatten(),
+        incident_id: incident_id.clone(),
+        span_id,
     };
 
+    let mut line = serde_json::to_string(&row).map_err(|e| e.to_string())?;
+    if line.len().saturating_add(1) > DIAGNOSTICS_TRACE_MAX_ROW_BYTES {
+        let original_bytes = line.len().saturating_add(1);
+        row.details = serde_json::json!({
+            "reason": "trace_row_too_large",
+            "original_event": row.event,
+            "original_bytes": original_bytes,
+            "max_row_bytes": DIAGNOSTICS_TRACE_MAX_ROW_BYTES,
+        });
+        row.event = "diagnostics_event_truncated".to_string();
+        row.level = "warn".to_string();
+        line = serde_json::to_string(&row).map_err(|e| e.to_string())?;
+        record_diagnostics_loss(None);
+    }
+    let line_bytes = line.len().saturating_add(1) as u64;
+    rotate_diagnostics_trace_if_needed(&path, max_trace_bytes, line_bytes)?;
+    let mut file = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(&path)
+        .map_err(|e| e.to_string())?;
+
     use std::io::Write as _;
-    writeln!(
-        file,
-        "{}",
-        serde_json::to_string(&row).map_err(|e| e.to_string())?
-    )
-    .map_err(|e| e.to_string())?;
+    writeln!(file, "{line}").map_err(|e| e.to_string())?;
+
+    // Clone once. Re-locking DIAGNOSTICS_CAPTURE_STATE in this branch used to
+    // self-deadlock an armed capture on its first triggering event.
+    let capture_snapshot = diagnostics_capture_state()
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .clone();
+    if let (Some(incident_id), Some(artifact_dir)) =
+        (incident_id, capture_snapshot.artifact_dir.clone())
+    {
+        let incident_dir = std::path::PathBuf::from(artifact_dir);
+        std::fs::create_dir_all(&incident_dir).map_err(|e| e.to_string())?;
+        let incident_path = incident_dir.join("trace.jsonl");
+        let incident_bytes = std::fs::metadata(&incident_path)
+            .map(|meta| meta.len())
+            .unwrap_or(0);
+        if incident_bytes.saturating_add(line_bytes) <= DIAGNOSTICS_TRACE_INCIDENT_MAX_BYTES {
+            let mut incident_file = std::fs::OpenOptions::new()
+                .create(true)
+                .append(true)
+                .open(&incident_path)
+                .map_err(|e| e.to_string())?;
+            writeln!(incident_file, "{line}").map_err(|e| e.to_string())?;
+        } else {
+            record_diagnostics_loss(None);
+        }
+        let manifest_path = incident_dir.join("manifest.json");
+        if !manifest_path.exists() {
+            let manifest = serde_json::json!({
+                "wp": "WP-0298",
+                "incident_id": incident_id,
+                "status": "capturing",
+                "trace_path": incident_path.to_string_lossy(),
+                "updated_at_ms": now_epoch_ms_i64(),
+                "capture": capture_snapshot,
+            });
+            if write_json_atomic(&manifest_path, &manifest).is_err() {
+                record_diagnostics_persistence_failure();
+            }
+            if prune_diagnostics_incidents(paths, Some(&incident_id)).is_err() {
+                record_diagnostics_persistence_failure();
+            }
+        }
+    }
+
+    if let Ok(bytes) = std::fs::metadata(&path).map(|meta| meta.len()) {
+        let mut state = diagnostics_capture_state()
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        state.trace_bytes = bytes;
+        state.dropped_events = DIAGNOSTICS_TRACE_DROPPED_TOTAL.load(Ordering::Relaxed);
+    }
 
     Ok(path.to_string_lossy().to_string())
+}
+
+fn record_diagnostics_loss(category_total: Option<&AtomicU64>) {
+    DIAGNOSTICS_TRACE_DROPPED_PENDING.fetch_add(1, Ordering::Relaxed);
+    DIAGNOSTICS_TRACE_DROPPED_TOTAL.fetch_add(1, Ordering::Relaxed);
+    if let Some(counter) = category_total {
+        counter.fetch_add(1, Ordering::Relaxed);
+    }
+}
+
+fn record_diagnostics_persistence_failure() {
+    record_diagnostics_loss(Some(&DIAGNOSTICS_TRACE_ASYNC_WRITE_FAILURES_TOTAL));
+}
+
+fn flush_pending_diagnostics_loss_receipt(paths: &AppPaths) {
+    let pending = DIAGNOSTICS_TRACE_DROPPED_PENDING.load(Ordering::Acquire);
+    if pending == 0 {
+        return;
+    }
+    match append_diagnostics_trace_row(
+        paths,
+        "diagnostics_events_dropped".to_string(),
+        serde_json::json!({
+            "dropped_events": pending,
+            "dropped_events_total": DIAGNOSTICS_TRACE_DROPPED_TOTAL.load(Ordering::Relaxed),
+            "async_write_failures_total": DIAGNOSTICS_TRACE_ASYNC_WRITE_FAILURES_TOTAL.load(Ordering::Relaxed),
+            "queue_rejections_total": DIAGNOSTICS_TRACE_QUEUE_REJECTIONS_TOTAL.load(Ordering::Relaxed),
+            "queue_capacity": DIAGNOSTICS_TRACE_QUEUE_CAPACITY,
+        }),
+        "warn".to_string(),
+    ) {
+        Ok(_) => {
+            DIAGNOSTICS_TRACE_DROPPED_PENDING.fetch_sub(pending, Ordering::AcqRel);
+        }
+        Err(_) => {
+            record_diagnostics_persistence_failure();
+        }
+    }
+}
+
+fn diagnostics_trace_queue() -> &'static SyncSender<DiagnosticsTraceWriteRequest> {
+    DIAGNOSTICS_TRACE_QUEUE.get_or_init(|| {
+        let (sender, receiver) =
+            sync_channel::<DiagnosticsTraceWriteRequest>(DIAGNOSTICS_TRACE_QUEUE_CAPACITY);
+        std::thread::Builder::new()
+            .name("voxvulgi-diagnostics-writer".to_string())
+            .spawn(move || {
+                while let Ok(request) = receiver.recv() {
+                    flush_pending_diagnostics_loss_receipt(&request.paths);
+                    if append_diagnostics_trace_row(
+                        &request.paths,
+                        request.event,
+                        request.details,
+                        request.level,
+                    )
+                    .is_err()
+                    {
+                        record_diagnostics_persistence_failure();
+                    }
+                }
+            })
+            .unwrap_or_else(|error| panic!("diagnostics writer thread failed to start: {error}"));
+        sender
+    })
 }
 
 fn append_diagnostics_trace_row_best_effort(
@@ -1989,8 +3086,27 @@ fn append_diagnostics_trace_row_best_effort(
     event: &str,
     details: serde_json::Value,
     level: &str,
-) {
-    let _ = append_diagnostics_trace_row(paths, event.to_string(), details, level.to_string());
+) -> DiagnosticsTraceEnqueueReceipt {
+    let request = DiagnosticsTraceWriteRequest {
+        paths: paths.clone(),
+        event: event.to_string(),
+        details,
+        level: level.to_string(),
+    };
+    let accepted = match diagnostics_trace_queue().try_send(request) {
+        Ok(()) => true,
+        Err(TrySendError::Full(_)) | Err(TrySendError::Disconnected(_)) => {
+            record_diagnostics_loss(Some(&DIAGNOSTICS_TRACE_QUEUE_REJECTIONS_TOTAL));
+            false
+        }
+    };
+    DiagnosticsTraceEnqueueReceipt {
+        accepted,
+        dropped_events_total: DIAGNOSTICS_TRACE_DROPPED_TOTAL.load(Ordering::Relaxed),
+        async_write_failures_total: DIAGNOSTICS_TRACE_ASYNC_WRITE_FAILURES_TOTAL
+            .load(Ordering::Relaxed),
+        pending_loss_events: DIAGNOSTICS_TRACE_DROPPED_PENDING.load(Ordering::Relaxed),
+    }
 }
 
 fn trace_database_command_error(
@@ -2038,12 +3154,49 @@ struct InvokeTimer {
     invocation_id: u64,
     started: std::time::Instant,
     started_at_ms: i64,
+    request_id: Option<String>,
+    span_id: Option<String>,
+}
+
+#[derive(Clone)]
+struct InvokePhaseRecorder {
+    paths: AppPaths,
+    name: &'static str,
+    invocation_id: u64,
+    request_id: Option<String>,
+    span_id: Option<String>,
+}
+
+impl InvokePhaseRecorder {
+    fn phase(&self, phase: &'static str, elapsed: Duration) {
+        let _ = append_diagnostics_trace_row_best_effort(
+            &self.paths,
+            "command_phase",
+            serde_json::json!({
+                "cmd": self.name,
+                "invocation_id": self.invocation_id,
+                "span_id": self.span_id,
+                "request_id": self.request_id,
+                "phase": phase,
+                "elapsed_ms": elapsed.as_millis() as u64,
+            }),
+            "info",
+        );
+    }
 }
 
 static INVOKE_SEQUENCE: AtomicU64 = AtomicU64::new(1);
 
 impl InvokeTimer {
     fn start(paths: AppPaths, name: &'static str) -> Self {
+        Self::start_with_context(paths, name, None, None)
+    }
+    fn start_with_context(
+        paths: AppPaths,
+        name: &'static str,
+        request_id: Option<String>,
+        span_id: Option<String>,
+    ) -> Self {
         let invocation_id = INVOKE_SEQUENCE.fetch_add(1, Ordering::Relaxed);
         let started_at_ms = now_epoch_ms_i64();
         append_diagnostics_trace_row_best_effort(
@@ -2053,6 +3206,8 @@ impl InvokeTimer {
                 "cmd": name,
                 "invocation_id": invocation_id,
                 "started_at_ms": started_at_ms,
+                "request_id": request_id,
+                "span_id": span_id,
             }),
             "info",
         );
@@ -2062,6 +3217,22 @@ impl InvokeTimer {
             invocation_id,
             started: std::time::Instant::now(),
             started_at_ms,
+            request_id,
+            span_id,
+        }
+    }
+
+    fn phase(&self, phase: &'static str, elapsed: Duration) {
+        self.phase_recorder().phase(phase, elapsed);
+    }
+
+    fn phase_recorder(&self) -> InvokePhaseRecorder {
+        InvokePhaseRecorder {
+            paths: self.paths.clone(),
+            name: self.name,
+            invocation_id: self.invocation_id,
+            request_id: self.request_id.clone(),
+            span_id: self.span_id.clone(),
         }
     }
 }
@@ -2077,6 +3248,8 @@ impl Drop for InvokeTimer {
                 "invocation_id": self.invocation_id,
                 "started_at_ms": self.started_at_ms,
                 "elapsed_ms": elapsed_ms,
+                "request_id": self.request_id,
+                "span_id": self.span_id,
             }),
             "info",
         );
@@ -2089,6 +3262,8 @@ impl Drop for InvokeTimer {
                     "invocation_id": self.invocation_id,
                     "started_at_ms": self.started_at_ms,
                     "elapsed_ms": elapsed_ms,
+                    "request_id": self.request_id,
+                    "span_id": self.span_id,
                 }),
                 "warn",
             );
@@ -2133,17 +3308,105 @@ fn read_recent_diagnostics_trace_entries(
     limit: usize,
 ) -> Result<Vec<DiagnosticsTraceEntry>, String> {
     let path = diagnostics_trace_file_path(paths)?;
-    if !path.exists() {
-        return Ok(Vec::new());
-    }
+    let _guard = DIAGNOSTICS_TRACE_WRITE_LOCK
+        .get_or_init(|| Mutex::new(()))
+        .lock()
+        .map_err(|_| "diagnostics trace write lock is poisoned".to_string())?;
+    reconcile_diagnostics_trace_rotation(&path)?;
 
-    let file = std::fs::File::open(&path).map_err(|e| e.to_string())?;
-    let reader = std::io::BufReader::new(file);
-    use std::io::BufRead as _;
-    let mut entries: Vec<DiagnosticsTraceEntry> = reader
+    use std::collections::VecDeque;
+    use std::io::{Read as _, Seek as _, SeekFrom};
+    let mut bytes = Vec::new();
+    for zip_path in trace_generation_files(&path, "zip")? {
+        let file = std::fs::File::open(&zip_path).map_err(|e| e.to_string())?;
+        let mut archive = zip::ZipArchive::new(file).map_err(|e| e.to_string())?;
+        let mut entry = archive.by_index(0).map_err(|e| e.to_string())?;
+        let entry_was_truncated = entry.size() > DIAGNOSTICS_TRACE_TAIL_READ_BYTES;
+        let mut ring = VecDeque::with_capacity(DIAGNOSTICS_TRACE_TAIL_READ_BYTES as usize);
+        let mut chunk = [0_u8; 64 * 1024];
+        loop {
+            let read = entry.read(&mut chunk).map_err(|e| e.to_string())?;
+            if read == 0 { break; }
+            for byte in &chunk[..read] {
+                if ring.len() == DIAGNOSTICS_TRACE_TAIL_READ_BYTES as usize { ring.pop_front(); }
+                ring.push_back(*byte);
+            }
+        }
+        let mut candidate_bytes = Vec::from(ring);
+        if entry_was_truncated {
+            if let Some(pos) = candidate_bytes.iter().position(|byte| *byte == b'\n') {
+                candidate_bytes.drain(..=pos);
+            }
+        }
+        bytes.extend(candidate_bytes);
+        if bytes.len() as u64 > DIAGNOSTICS_TRACE_TAIL_READ_BYTES {
+            let excess = bytes.len() - DIAGNOSTICS_TRACE_TAIL_READ_BYTES as usize;
+            bytes.drain(..excess);
+            if let Some(pos) = bytes.iter().position(|byte| *byte == b'\n') { bytes.drain(..=pos); }
+        }
+    }
+    for index in (0..=DIAGNOSTICS_TRACE_RETAINED_FILES).rev() {
+        let jsonl = if index == 0 {
+            path.clone()
+        } else {
+            path.with_file_name(format!("diagnostics_trace.{index}.jsonl"))
+        };
+        let zip_path = path.with_file_name(format!("diagnostics_trace.{index}.zip"));
+        let mut candidate_bytes = Vec::new();
+        if jsonl.exists() {
+            let mut file = std::fs::File::open(&jsonl).map_err(|e| e.to_string())?;
+            let length = file.metadata().map_err(|e| e.to_string())?.len();
+            let start = length.saturating_sub(DIAGNOSTICS_TRACE_TAIL_READ_BYTES);
+            file.seek(SeekFrom::Start(start))
+                .map_err(|e| e.to_string())?;
+            file.take(DIAGNOSTICS_TRACE_TAIL_READ_BYTES)
+                .read_to_end(&mut candidate_bytes)
+                .map_err(|e| e.to_string())?;
+            if start > 0 {
+                if let Some(pos) = candidate_bytes.iter().position(|byte| *byte == b'\n') {
+                    candidate_bytes.drain(..=pos);
+                }
+            }
+        } else if index > 0 && zip_path.exists() {
+            let file = std::fs::File::open(&zip_path).map_err(|e| e.to_string())?;
+            let mut archive = zip::ZipArchive::new(file).map_err(|e| e.to_string())?;
+            let mut entry = archive.by_index(0).map_err(|e| e.to_string())?;
+            let entry_was_truncated = entry.size() > DIAGNOSTICS_TRACE_TAIL_READ_BYTES;
+            let mut ring = VecDeque::with_capacity(DIAGNOSTICS_TRACE_TAIL_READ_BYTES as usize);
+            let mut chunk = [0_u8; 64 * 1024];
+            loop {
+                let read = entry.read(&mut chunk).map_err(|e| e.to_string())?;
+                if read == 0 {
+                    break;
+                }
+                for byte in &chunk[..read] {
+                    if ring.len() == DIAGNOSTICS_TRACE_TAIL_READ_BYTES as usize {
+                        ring.pop_front();
+                    }
+                    ring.push_back(*byte);
+                }
+            }
+            candidate_bytes.extend(ring);
+            if entry_was_truncated {
+                if let Some(pos) = candidate_bytes.iter().position(|byte| *byte == b'\n') {
+                    candidate_bytes.drain(..=pos);
+                }
+            }
+        }
+        bytes.extend(candidate_bytes);
+        if bytes.len() as u64 > DIAGNOSTICS_TRACE_TAIL_READ_BYTES {
+            let excess = bytes.len() - DIAGNOSTICS_TRACE_TAIL_READ_BYTES as usize;
+            bytes.drain(..excess);
+            if let Some(pos) = bytes.iter().position(|byte| *byte == b'\n') {
+                bytes.drain(..=pos);
+            }
+        }
+    }
+    let text = String::from_utf8_lossy(&bytes);
+    let mut entries: Vec<DiagnosticsTraceEntry> = text
         .lines()
-        .map_while(|line| line.ok())
-        .filter_map(|line| serde_json::from_str::<DiagnosticsTraceEntry>(&line).ok())
+        .filter(|line| line.len() <= DIAGNOSTICS_TRACE_MAX_ROW_BYTES)
+        .filter_map(|line| serde_json::from_str::<DiagnosticsTraceEntry>(line).ok())
         .collect();
 
     if entries.len() > limit {
@@ -2763,7 +4026,1109 @@ fn apply_offline_bundle_if_present(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::atomic::AtomicU64;
     use voxvulgi_engine::{config, db, paths::AppPaths};
+
+    fn retention_receipt(has_more: bool) -> voxvulgi_engine::youtube_protection::DownloaderRetentionDrainReceipt {
+        voxvulgi_engine::youtube_protection::DownloaderRetentionDrainReceipt {
+            batches: 1,
+            deleted: 100,
+            complete: !has_more,
+            has_more,
+            cutoff_ms: 1,
+            elapsed_ms: 1,
+            budget_exhausted: has_more,
+        }
+    }
+
+    #[test]
+    fn retention_worker_reschedules_finite_rounds_until_durable_completion() {
+        let mut drains = 0_u64;
+        let mut persistence = Vec::new();
+        let mut waits = Vec::new();
+        let complete = run_youtube_retention_worker_loop(
+            || {
+                drains = drains.saturating_add(1);
+                Ok(retention_receipt(drains <= 5))
+            },
+            |pending, failures| {
+                persistence.push((pending, failures));
+                true
+            },
+            || false,
+            |duration| {
+                waits.push(duration);
+                false
+            },
+            YoutubeRetentionWorkerPolicy {
+                max_cycles_per_round: 2,
+                max_failures_per_round: 2,
+                inter_batch_delay: Duration::from_millis(1),
+                failure_retry_delay: Duration::from_millis(2),
+                round_backoff: Duration::from_millis(3),
+            },
+        );
+        assert!(complete);
+        assert_eq!(drains, 6, "backlog must continue beyond one finite round");
+        assert_eq!(persistence.last(), Some(&(false, 0)));
+        assert!(
+            waits.iter().filter(|duration| **duration == Duration::from_millis(3)).count() >= 2,
+            "each exhausted finite round must yield before rescheduling"
+        );
+    }
+
+    #[test]
+    fn retention_worker_cancellation_preserves_pending_continuation() {
+        let mut drains = 0_u64;
+        let mut persistence = Vec::new();
+        let cancelled = run_youtube_retention_worker_loop(
+            || {
+                drains = drains.saturating_add(1);
+                Ok(retention_receipt(true))
+            },
+            |pending, failures| {
+                persistence.push((pending, failures));
+                true
+            },
+            || false,
+            |_| true,
+            YoutubeRetentionWorkerPolicy {
+                max_cycles_per_round: 16,
+                max_failures_per_round: 3,
+                inter_batch_delay: Duration::from_millis(1),
+                failure_retry_delay: Duration::from_millis(1),
+                round_backoff: Duration::from_millis(1),
+            },
+        );
+        assert!(!cancelled);
+        assert_eq!(drains, 1, "cancellation must bound work immediately");
+        assert_eq!(persistence.last(), Some(&(true, 0)));
+        assert!(!persistence.iter().any(|(pending, _)| !pending));
+    }
+
+    #[test]
+    fn offline_startup_ready_requires_verified_provider_and_redacts_failure() {
+        assert_eq!(
+            offline_provider_verification_startup_outcome(Ok(())),
+            ("ready", None)
+        );
+        let (phase, error) = offline_provider_verification_startup_outcome(Err(
+            "provider verification failed Authorization: Bearer fake-secret token=also-secret"
+                .to_string(),
+        ));
+        let error = error.expect("redacted startup error");
+        assert_eq!(phase, "error");
+        assert!(!error.contains("fake-secret"));
+        assert!(!error.contains("also-secret"));
+        assert!(error.contains("provider verification failed"));
+    }
+
+    #[test]
+    fn youtube_protection_mutation_generation_serializes_overlap_and_rejects_stale_intent() {
+        let operation = format!(
+            "test-mutation-{}-{}",
+            std::process::id(),
+            DIAGNOSTICS_ID_SEQUENCE.fetch_add(1, Ordering::Relaxed)
+        );
+        let final_value = Arc::new(AtomicU64::new(0));
+        let (entered_tx, entered_rx) = std::sync::mpsc::channel();
+        let (release_tx, release_rx) = std::sync::mpsc::channel();
+
+        let old_operation = operation.clone();
+        let old_value = Arc::clone(&final_value);
+        let old = std::thread::spawn(move || {
+            run_youtube_protection_mutation(&old_operation, 1, || {
+                entered_tx.send(()).unwrap();
+                release_rx.recv().unwrap();
+                old_value.store(1, Ordering::SeqCst);
+                Ok(())
+            })
+        });
+        entered_rx.recv().unwrap();
+
+        let new_operation = operation.clone();
+        let new_value = Arc::clone(&final_value);
+        let newer = std::thread::spawn(move || {
+            run_youtube_protection_mutation(&new_operation, 2, || {
+                new_value.store(2, Ordering::SeqCst);
+                Ok(())
+            })
+        });
+        for _ in 0..500 {
+            let registered = YOUTUBE_PROTECTION_MUTATION_GENERATIONS
+                .get()
+                .and_then(|generations| generations.lock().ok()?.get(&operation).copied())
+                == Some(2);
+            if registered {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(1));
+        }
+        assert_eq!(
+            YOUTUBE_PROTECTION_MUTATION_GENERATIONS
+                .get()
+                .unwrap()
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .get(&operation)
+                .copied(),
+            Some(2),
+            "newer intent must register before the older writer is released"
+        );
+        assert!(run_youtube_protection_mutation(&operation, 1, || Ok(())).is_err());
+        release_tx.send(()).unwrap();
+        old.join().unwrap().unwrap();
+        newer.join().unwrap().unwrap();
+        assert_eq!(final_value.load(Ordering::SeqCst), 2);
+
+        // A bounded history reset may continue multiple batches under the same
+        // authoritative generation, while a different operation remains independent.
+        run_youtube_protection_mutation(&operation, 2, || Ok(())).unwrap();
+        let independent = format!("{operation}-other");
+        run_youtube_protection_mutation(&independent, 1, || Ok(())).unwrap();
+        assert!(run_youtube_protection_mutation(&independent, 0, || Ok(())).is_err());
+    }
+
+    #[test]
+    fn catalog_mutations_preserve_options_owned_downloader_fields_on_new_default() {
+        let mut current = config::DownloadPresetsConfig::default();
+        let current_default = current.presets.first_mut().expect("current default");
+        current_default.yt_dlp_concurrent_fragments = 7;
+        current_default.yt_dlp_limit_rate = Some("7M".to_string());
+        current_default.yt_dlp_throttled_rate = Some("77K".to_string());
+        current_default.yt_dlp_file_access_retries = 17;
+        current_default.yt_dlp_retries = 27;
+        current_default.yt_dlp_fragment_retries = 37;
+        current_default.yt_dlp_sleep_interval = 47;
+        current_default.yt_dlp_sleep_requests = 57;
+
+        let mut next = config::DownloadPresetsConfig::default();
+        let mut candidate = next.presets[0].clone();
+        candidate.id = "new-default".to_string();
+        candidate.yt_dlp_concurrent_fragments = 1;
+        candidate.yt_dlp_limit_rate = Some("1M".to_string());
+        candidate.yt_dlp_throttled_rate = Some("1K".to_string());
+        candidate.yt_dlp_file_access_retries = 1;
+        candidate.yt_dlp_retries = 1;
+        candidate.yt_dlp_fragment_retries = 1;
+        candidate.yt_dlp_sleep_interval = 1;
+        candidate.yt_dlp_sleep_requests = 1;
+        next.default_preset_id = Some(candidate.id.clone());
+        next.presets.push(candidate);
+
+        let protected = preserve_options_owned_downloader_fields(&current, next);
+        let selected = protected
+            .presets
+            .iter()
+            .find(|preset| Some(&preset.id) == protected.default_preset_id.as_ref())
+            .expect("protected default");
+        assert_eq!(selected.yt_dlp_concurrent_fragments, 7);
+        assert_eq!(selected.yt_dlp_limit_rate.as_deref(), Some("7M"));
+        assert_eq!(selected.yt_dlp_throttled_rate.as_deref(), Some("77K"));
+        assert_eq!(selected.yt_dlp_file_access_retries, 17);
+        assert_eq!(selected.yt_dlp_retries, 27);
+        assert_eq!(selected.yt_dlp_fragment_retries, 37);
+        assert_eq!(selected.yt_dlp_sleep_interval, 47);
+        assert_eq!(selected.yt_dlp_sleep_requests, 57);
+    }
+
+    fn options_safety_fixture() -> config::DownloadPresetsConfig {
+        let mut current = config::DownloadPresetsConfig::default();
+        let preset = current.presets.first_mut().expect("default preset");
+        preset.yt_dlp_concurrent_fragments = 7;
+        preset.yt_dlp_limit_rate = Some("7M".to_string());
+        preset.yt_dlp_throttled_rate = Some("77K".to_string());
+        preset.yt_dlp_file_access_retries = 17;
+        preset.yt_dlp_retries = 27;
+        preset.yt_dlp_fragment_retries = 37;
+        preset.yt_dlp_sleep_interval = 47;
+        preset.yt_dlp_sleep_requests = 57;
+        current
+    }
+
+    fn assert_options_safety_fields(preset: &config::DownloadPreset) {
+        assert_eq!(preset.yt_dlp_concurrent_fragments, 7);
+        assert_eq!(preset.yt_dlp_limit_rate.as_deref(), Some("7M"));
+        assert_eq!(preset.yt_dlp_throttled_rate.as_deref(), Some("77K"));
+        assert_eq!(preset.yt_dlp_file_access_retries, 17);
+        assert_eq!(preset.yt_dlp_retries, 27);
+        assert_eq!(preset.yt_dlp_fragment_retries, 37);
+        assert_eq!(preset.yt_dlp_sleep_interval, 47);
+        assert_eq!(preset.yt_dlp_sleep_requests, 57);
+    }
+
+    #[test]
+    fn downloader_safety_survives_invalid_default_id() {
+        let current = options_safety_fixture();
+        let mut next = config::DownloadPresetsConfig::default();
+        next.default_preset_id = Some("missing-default".to_string());
+        let protected = preserve_options_owned_downloader_fields(&current, next);
+        let selected = protected
+            .default_preset_id
+            .as_ref()
+            .and_then(|id| protected.presets.iter().find(|preset| &preset.id == id))
+            .expect("valid repaired default");
+        assert_options_safety_fields(selected);
+    }
+
+    #[test]
+    fn downloader_safety_survives_empty_catalog_and_final_preset_deletion() {
+        let current = options_safety_fixture();
+        let protected = preserve_options_owned_downloader_fields(
+            &current,
+            config::DownloadPresetsConfig {
+                default_preset_id: None,
+                presets: Vec::new(),
+            },
+        );
+        assert_eq!(
+            protected.presets.len(),
+            1,
+            "deleting the final preset must recreate a usable catalog"
+        );
+        assert_options_safety_fields(&protected.presets[0]);
+    }
+
+    #[test]
+    fn downloader_safety_survives_json_import_shape() {
+        let current = options_safety_fixture();
+        let imported: config::DownloadPresetsConfig = serde_json::from_value(serde_json::json!({
+            "default_preset_id": "imported",
+            "presets": [{
+                "id": "imported",
+                "title": "Imported",
+                "path_template": "{channel}",
+                "filename_template": "{title}_{id}",
+                "format_preference": null,
+                "quality_preference": "best",
+                "subtitle_mode": "auto"
+            }]
+        }))
+        .expect("legacy import payload");
+        let protected = preserve_options_owned_downloader_fields(&current, imported);
+        assert_options_safety_fields(&protected.presets[0]);
+    }
+
+    #[test]
+    fn diagnostics_trace_rotation_is_size_and_count_bounded() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let trace = dir.path().join("diagnostics_trace.jsonl");
+        std::fs::write(&trace, b"current").expect("write trace");
+        std::fs::write(trace.with_file_name("diagnostics_trace.1.jsonl"), b"old1").unwrap();
+        std::fs::write(trace.with_file_name("diagnostics_trace.2.jsonl"), b"old2").unwrap();
+
+        rotate_diagnostics_trace_if_needed(&trace, 4, 1).expect("rotate");
+
+        assert!(!trace.exists());
+        let mut contents = trace_generation_files(&trace, "zip")
+            .unwrap()
+            .into_iter()
+            .map(|path| {
+                let file = std::fs::File::open(path).unwrap();
+                let mut zip = zip::ZipArchive::new(file).unwrap();
+                let mut bytes = Vec::new();
+                std::io::Read::read_to_end(&mut zip.by_index(0).unwrap(), &mut bytes).unwrap();
+                bytes
+            })
+            .collect::<Vec<_>>();
+        contents.sort();
+        assert_eq!(contents, vec![b"current".to_vec(), b"old1".to_vec(), b"old2".to_vec()]);
+        assert!(dir.path().join("diagnostics_trace.aggregate.json").exists());
+    }
+
+    #[test]
+    fn armed_panel_capture_writes_correlated_incident_artifacts() {
+        let _capture_test_guard = DIAGNOSTICS_CAPTURE_TEST_LOCK
+            .get_or_init(|| Mutex::new(()))
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let dir = tempfile::tempdir().expect("tempdir");
+        let paths = AppPaths::new(dir.path().to_path_buf());
+        paths.ensure_dirs().expect("ensure dirs");
+        let armed = DiagnosticsCaptureStatus {
+            mode: "normal".to_string(),
+            armed_trigger: Some("panel_switch".to_string()),
+            incident_id: Some("incident-test".to_string()),
+            armed_at_ms: Some(now_epoch_ms_i64()),
+            started_at_ms: None,
+            expires_at_ms: Some(now_epoch_ms_i64() + DIAGNOSTICS_INCIDENT_DURATION_MS),
+            max_trace_bytes: DIAGNOSTICS_TRACE_INCIDENT_MAX_BYTES,
+            trace_bytes: 0,
+            dropped_events: 0,
+            artifact_dir: None,
+            root_span_id: None,
+        };
+        persist_diagnostics_capture_state(&paths, &armed).expect("persist armed state");
+        *diagnostics_capture_state()
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner()) = armed;
+
+        append_diagnostics_trace_row(
+            &paths,
+            "panel_switch".to_string(),
+            serde_json::json!({ "transition_id": 7, "page": "jobs" }),
+            "info".to_string(),
+        )
+        .expect("append panel trace");
+
+        let rows = read_recent_diagnostics_trace_entries(&paths, 10).expect("read trace");
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].incident_id.as_deref(), Some("incident-test"));
+        assert_eq!(rows[0].span_id.as_deref(), Some("panel-7"));
+        let status = load_diagnostics_capture_state(&paths);
+        assert_eq!(status.mode, "incident");
+        assert!(status.armed_trigger.is_none());
+        let artifact_dir = std::path::PathBuf::from(status.artifact_dir.expect("artifact dir"));
+        assert!(artifact_dir.join("trace.jsonl").is_file());
+        assert!(artifact_dir.join("manifest.json").is_file());
+        *diagnostics_capture_state()
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner()) = DiagnosticsCaptureStatus::default();
+    }
+
+    #[test]
+    fn panel_activation_precedes_first_destination_command_and_preserves_parent_span() {
+        let _capture_test_guard = DIAGNOSTICS_CAPTURE_TEST_LOCK
+            .get_or_init(|| Mutex::new(()))
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let dir = tempfile::tempdir().expect("tempdir");
+        let paths = AppPaths::new(dir.path().to_path_buf());
+        paths.ensure_dirs().expect("ensure dirs");
+        let armed = DiagnosticsCaptureStatus {
+            mode: "normal".to_string(),
+            armed_trigger: Some("panel_switch".to_string()),
+            incident_id: Some("incident-race".to_string()),
+            armed_at_ms: Some(now_epoch_ms_i64()),
+            expires_at_ms: Some(now_epoch_ms_i64() + DIAGNOSTICS_INCIDENT_DURATION_MS),
+            ..DiagnosticsCaptureStatus::default()
+        };
+        persist_diagnostics_capture_state(&paths, &armed).expect("persist armed state");
+        *diagnostics_capture_state()
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner()) = armed;
+
+        let activation = activate_panel_capture_before_navigation(
+            &paths,
+            "jobs",
+            41,
+            "panel-41",
+            Some("operator-click-7"),
+        )
+        .expect("activate panel capture");
+        assert_eq!(activation.incident_id.as_deref(), Some("incident-race"));
+        assert_eq!(activation.panel_span_id, "panel-41");
+        assert_eq!(activation.parent_span_id.as_deref(), Some("operator-click-7"));
+        assert_eq!(activation.capture_mode, "incident");
+        assert!(activation.activated_armed_capture);
+        assert_eq!(load_diagnostics_capture_state(&paths).mode, "incident");
+
+        // Counterexample order: a newly mounted page command arrives before the asynchronous
+        // frontend panel row drains. Activation must already make it a child of the panel span.
+        append_diagnostics_trace_row(
+            &paths,
+            "command_phase".to_string(),
+            serde_json::json!({
+                "cmd": "jobs_overview",
+                "phase": "db_open",
+                "request_id": "jobs-request-1",
+                "span_id": "jobs-span-1",
+            }),
+            "info".to_string(),
+        )
+        .expect("first destination command trace");
+        let rows = read_recent_diagnostics_trace_entries(&paths, 5).expect("read trace");
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].incident_id.as_deref(), Some("incident-race"));
+        assert_eq!(rows[0].span_id.as_deref(), Some("jobs-span-1"));
+        assert_eq!(rows[0].details["parent_span_id"], "panel-41");
+        *diagnostics_capture_state()
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner()) = DiagnosticsCaptureStatus::default();
+    }
+
+    #[test]
+    fn superseded_panel_activation_rearms_before_the_next_transition_claims_root() {
+        let _capture_test_guard = DIAGNOSTICS_CAPTURE_TEST_LOCK
+            .get_or_init(|| Mutex::new(()))
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let dir = tempfile::tempdir().expect("tempdir");
+        let paths = AppPaths::new(dir.path().to_path_buf());
+        paths.ensure_dirs().expect("ensure dirs");
+        let armed = DiagnosticsCaptureStatus {
+            mode: "normal".to_string(),
+            armed_trigger: Some("panel_switch".to_string()),
+            incident_id: Some("incident-supersession".to_string()),
+            armed_at_ms: Some(now_epoch_ms_i64()),
+            expires_at_ms: Some(now_epoch_ms_i64() + DIAGNOSTICS_INCIDENT_DURATION_MS),
+            max_trace_bytes: DIAGNOSTICS_TRACE_INCIDENT_MAX_BYTES,
+            ..DiagnosticsCaptureStatus::default()
+        };
+        persist_diagnostics_capture_state(&paths, &armed).expect("persist armed state");
+        *diagnostics_capture_state()
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner()) = armed;
+
+        let first = activate_panel_capture_before_navigation(
+            &paths,
+            "jobs",
+            51,
+            "panel-51",
+            Some("operator-click-a"),
+        )
+        .expect("activate superseded panel");
+        assert!(first.activated_armed_capture);
+        assert!(cancel_superseded_panel_capture(
+            &paths,
+            first.incident_id.as_deref().expect("incident"),
+            &first.panel_span_id,
+        )
+        .expect("cancel superseded activation"));
+        let rearmed = load_diagnostics_capture_state(&paths);
+        assert_eq!(rearmed.mode, "normal");
+        assert_eq!(rearmed.armed_trigger.as_deref(), Some("panel_switch"));
+        assert!(rearmed.root_span_id.is_none());
+
+        let second = activate_panel_capture_before_navigation(
+            &paths,
+            "media_library",
+            52,
+            "panel-52",
+            Some("operator-click-b"),
+        )
+        .expect("activate winning panel");
+        assert_eq!(second.incident_id.as_deref(), Some("incident-supersession"));
+        assert!(second.activated_armed_capture);
+        let active = load_diagnostics_capture_state(&paths);
+        assert_eq!(active.mode, "incident");
+        assert_eq!(active.root_span_id.as_deref(), Some("panel-52"));
+        assert!(!cancel_superseded_panel_capture(
+            &paths,
+            "incident-supersession",
+            "panel-51",
+        )
+        .expect("stale cancel must be refused"));
+        assert_eq!(
+            load_diagnostics_capture_state(&paths).root_span_id.as_deref(),
+            Some("panel-52")
+        );
+        *diagnostics_capture_state()
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner()) = DiagnosticsCaptureStatus::default();
+    }
+
+    #[test]
+    fn active_or_armed_capture_pins_trace_folder_mutation() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let paths = AppPaths::new(dir.path().to_path_buf());
+        paths.ensure_dirs().expect("ensure dirs");
+        for (mode, trigger) in [
+            ("normal", Some("job_start".to_string())),
+            ("incident", None),
+        ] {
+            let status = DiagnosticsCaptureStatus {
+                mode: mode.to_string(),
+                armed_trigger: trigger,
+                incident_id: Some("pin-test".to_string()),
+                expires_at_ms: Some(now_epoch_ms_i64() + 60_000),
+                ..DiagnosticsCaptureStatus::default()
+            };
+            persist_diagnostics_capture_state(&paths, &status).expect("persist capture state");
+            assert!(ensure_diagnostics_trace_mutation_allowed(&paths).is_err());
+        }
+        let normal = DiagnosticsCaptureStatus::default();
+        persist_diagnostics_capture_state(&paths, &normal).expect("persist normal state");
+        assert!(ensure_diagnostics_trace_mutation_allowed(&paths).is_ok());
+    }
+
+    #[test]
+    fn oversized_rows_are_replaced_and_tail_reads_stay_bounded() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let paths = AppPaths::new(dir.path().to_path_buf());
+        paths.ensure_dirs().expect("ensure dirs");
+        persist_diagnostics_capture_state(&paths, &DiagnosticsCaptureStatus::default())
+            .expect("normal capture state");
+        *diagnostics_capture_state()
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner()) = DiagnosticsCaptureStatus::default();
+        append_diagnostics_trace_row(
+            &paths,
+            "oversized".to_string(),
+            serde_json::json!({ "payload": "x".repeat(DIAGNOSTICS_TRACE_MAX_ROW_BYTES * 2) }),
+            "info".to_string(),
+        )
+        .expect("append bounded replacement");
+        let trace = diagnostics_trace_file_path(&paths).expect("trace path");
+        assert!(std::fs::metadata(trace).expect("trace metadata").len() < 8 * 1024);
+        let rows = read_recent_diagnostics_trace_entries(&paths, 5).expect("tail rows");
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].event, "diagnostics_event_truncated");
+    }
+
+    #[test]
+    fn diagnostics_sink_recursively_redacts_secrets_paths_and_urls() {
+        let value = redact_diagnostics_value(serde_json::json!({
+            "nested": { "authorization": "Bearer abc", "error": "--password hunter2 --cookies C:\\private\\cookies.txt --proxy http://user:pass@proxy.invalid --api-key=abcdef --secret hidden --key keyvalue https://alice:pw@example.invalid/a" },
+            "media_path": "Z:\\private\\video.mkv", "source_url": "https://user:pass@example.invalid/x"
+        }));
+        let text = value.to_string();
+        assert!(!text.contains("hunter2"));
+        assert!(!text.contains("Bearer abc"));
+        assert!(!text.contains("Z:\\\\private"));
+        assert!(!text.contains("user:pass"));
+        for secret in ["cookies.txt", "abcdef", "hidden", "keyvalue", "alice:pw"] {
+            assert!(!text.contains(secret), "leaked {secret}");
+        }
+        assert!(text.contains("<redacted>"));
+    }
+
+    #[test]
+    fn diagnostics_sink_persists_redacted_bare_and_quoted_key_value_text() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let paths = AppPaths::new(dir.path().to_path_buf());
+        paths.ensure_dirs().expect("ensure dirs");
+        let normal = DiagnosticsCaptureStatus::default();
+        persist_diagnostics_capture_state(&paths, &normal).expect("persist normal state");
+        *diagnostics_capture_state()
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner()) = normal;
+
+        append_diagnostics_trace_row(
+            &paths,
+            "redaction_sink_probe".to_string(),
+            serde_json::json!({
+                "message": "password=alpha token = \"bravo two\" apikey='charlie three' api_key delta secret = \"echo five\" key=\"foxtrot six\" \"password\" = \"golf seven\" --token 'hotel eight'",
+                "nested": { "api_key": "india-nine" }
+            }),
+            "warn".to_string(),
+        )
+        .expect("persist redacted sink row");
+
+        let trace_path = diagnostics_trace_file_path(&paths).expect("trace path");
+        let persisted = std::fs::read_to_string(trace_path).expect("read persisted trace");
+        for secret in [
+            "alpha",
+            "bravo two",
+            "charlie three",
+            "delta",
+            "echo five",
+            "foxtrot six",
+            "golf seven",
+            "hotel eight",
+            "india-nine",
+        ] {
+            assert!(!persisted.contains(secret), "sink leaked {secret}");
+        }
+        assert!(persisted.contains("<redacted>"));
+    }
+
+    #[test]
+    fn diagnostics_sink_persists_redacted_spaced_and_combined_colon_forms() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let paths = AppPaths::new(dir.path().to_path_buf());
+        paths.ensure_dirs().expect("ensure dirs");
+        let normal = DiagnosticsCaptureStatus::default();
+        persist_diagnostics_capture_state(&paths, &normal).expect("persist normal state");
+        *diagnostics_capture_state()
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner()) = normal;
+
+        append_diagnostics_trace_row(
+            &paths,
+            "colon_redaction_sink_probe".to_string(),
+            serde_json::json!({
+                "message": "password : \"colon alpha\" token:colon-bravo api_key : 'colon charlie' apikey:colon-delta secret : colon-echo action:read"
+            }),
+            "warn".to_string(),
+        )
+        .expect("persist colon-redacted sink row");
+
+        let trace_path = diagnostics_trace_file_path(&paths).expect("trace path");
+        let persisted = std::fs::read_to_string(trace_path).expect("read persisted trace");
+        for secret in [
+            "colon alpha",
+            "colon-bravo",
+            "colon charlie",
+            "colon-delta",
+            "colon-echo",
+        ] {
+            assert!(!persisted.contains(secret), "sink leaked {secret}");
+        }
+        assert!(persisted.contains("action:read"));
+        assert!(persisted.contains("<redacted>"));
+    }
+
+    #[test]
+    fn diagnostics_sink_persists_complete_authorization_redaction() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let paths = AppPaths::new(dir.path().to_path_buf());
+        paths.ensure_dirs().expect("ensure dirs");
+        let normal = DiagnosticsCaptureStatus::default();
+        persist_diagnostics_capture_state(&paths, &normal).expect("persist normal state");
+        *diagnostics_capture_state()
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner()) = normal;
+
+        append_diagnostics_trace_row(
+            &paths,
+            "authorization_redaction_sink_probe".to_string(),
+            serde_json::json!({
+                "messages": [
+                    "Authorization: Bearer bearer-alpha action:read",
+                    "authorization : basic basic-bravo action:read",
+                    "AUTHORIZATION:Basic compact-charlie action:read",
+                    "Authorization:Bearer adjacent-delta action:read",
+                    "Authorization : bEaReR : malformed-echo action:read",
+                    "Authorization :Bearer attached-foxtrot action:read",
+                    "Authorization =Basic equals-golf action:read",
+                    "Authorization:",
+                    "authorization :",
+                    "AUTHORIZATION:Bearer"
+                ]
+            }),
+            "warn".to_string(),
+        )
+        .expect("persist authorization-redacted sink row");
+
+        let trace_path = diagnostics_trace_file_path(&paths).expect("trace path");
+        let persisted = std::fs::read_to_string(trace_path).expect("read persisted trace");
+        for secret in [
+            "bearer-alpha",
+            "basic-bravo",
+            "compact-charlie",
+            "adjacent-delta",
+            "malformed-echo",
+            "attached-foxtrot",
+            "equals-golf",
+        ] {
+            assert!(!persisted.contains(secret), "sink leaked {secret}");
+        }
+        assert!(!persisted.to_ascii_lowercase().contains("bearer"));
+        assert!(!persisted.to_ascii_lowercase().contains("basic"));
+        assert_eq!(persisted.matches("action:read").count(), 7);
+        assert!(persisted.contains("<redacted>"));
+    }
+
+    #[test]
+    fn diagnostics_sink_matches_shared_proxy_and_quoted_header_redaction_vectors() {
+        #[derive(serde::Deserialize)]
+        struct Vector {
+            input: String,
+            secrets: Vec<String>,
+            preserve: Vec<String>,
+        }
+        let vectors: Vec<Vector> = serde_json::from_str(include_str!(
+            "../../../diagnostics/redaction_adversarial_vectors.json"
+        ))
+        .expect("shared redaction vectors");
+        for vector in vectors {
+            let redacted = redact_diagnostics_value(serde_json::json!({ "message": vector.input }));
+            let text = redacted.to_string();
+            for secret in vector.secrets {
+                assert!(!text.to_ascii_lowercase().contains(&secret.to_ascii_lowercase()), "secret leaked: {text}");
+            }
+            for context in vector.preserve {
+                assert!(text.to_ascii_lowercase().contains(&context.to_ascii_lowercase()), "context lost: {text}");
+            }
+            assert!(text.contains("<redacted>"));
+        }
+    }
+
+    #[test]
+    fn accepted_async_write_failure_is_counted_and_emitted_after_recovery() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let paths = AppPaths::new(dir.path().to_path_buf());
+        paths.ensure_dirs().expect("ensure dirs");
+        let normal = DiagnosticsCaptureStatus::default();
+        persist_diagnostics_capture_state(&paths, &normal).expect("persist normal state");
+        *diagnostics_capture_state()
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner()) = normal;
+        let trace_dir = paths
+            .effective_diagnostics_trace_dir()
+            .expect("effective trace dir");
+        if trace_dir.exists() {
+            std::fs::remove_dir_all(&trace_dir).expect("remove temporary trace dir");
+        }
+        std::fs::write(&trace_dir, b"failure injection").expect("block trace directory");
+        let failure_baseline = DIAGNOSTICS_TRACE_ASYNC_WRITE_FAILURES_TOTAL.load(Ordering::Acquire);
+
+        let accepted = append_diagnostics_trace_row_best_effort(
+            &paths,
+            "accepted_before_disk_failure",
+            serde_json::json!({ "probe": true }),
+            "info",
+        );
+        assert!(
+            accepted.accepted,
+            "failure must occur after accepted enqueue"
+        );
+        for _ in 0..200 {
+            if DIAGNOSTICS_TRACE_ASYNC_WRITE_FAILURES_TOTAL.load(Ordering::Acquire)
+                > failure_baseline
+            {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        assert!(
+            DIAGNOSTICS_TRACE_ASYNC_WRITE_FAILURES_TOTAL.load(Ordering::Acquire) > failure_baseline,
+            "writer failure was not counted"
+        );
+
+        std::fs::remove_file(&trace_dir).expect("remove failure injection file");
+        std::fs::create_dir_all(&trace_dir).expect("recover trace directory");
+        let recovery_receipt = append_diagnostics_trace_row_best_effort(
+            &paths,
+            "write_after_disk_recovery",
+            serde_json::json!({ "probe": true }),
+            "info",
+        );
+        assert!(recovery_receipt.accepted);
+        assert!(recovery_receipt.dropped_events_total > accepted.dropped_events_total);
+        assert!(recovery_receipt.async_write_failures_total > failure_baseline);
+        assert!(recovery_receipt.pending_loss_events > 0);
+
+        let rows = (0..200)
+            .find_map(|_| {
+                let rows = read_recent_diagnostics_trace_entries(&paths, 20).ok()?;
+                let loss_visible = rows.iter().any(|row| {
+                    row.event == "diagnostics_events_dropped"
+                        && row
+                            .details
+                            .get("async_write_failures_total")
+                            .and_then(|value| value.as_u64())
+                            .is_some_and(|total| total > failure_baseline)
+                });
+                let recovery_visible = rows
+                    .iter()
+                    .any(|row| row.event == "write_after_disk_recovery");
+                if loss_visible && recovery_visible {
+                    Some(rows)
+                } else {
+                    std::thread::sleep(Duration::from_millis(10));
+                    None
+                }
+            })
+            .expect("bounded loss event and recovered write");
+        assert_eq!(
+            rows.iter()
+                .filter(|row| row.event == "diagnostics_events_dropped")
+                .count(),
+            1,
+            "recovery must coalesce pending loss into one bounded event"
+        );
+    }
+
+    #[test]
+    fn concurrent_same_request_phases_keep_distinct_matching_invocation_ids() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let paths = AppPaths::new(dir.path().to_path_buf());
+        paths.ensure_dirs().expect("ensure dirs");
+        let normal = DiagnosticsCaptureStatus::default();
+        persist_diagnostics_capture_state(&paths, &normal).expect("persist normal state");
+        *diagnostics_capture_state()
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner()) = normal;
+        let barrier = std::sync::Arc::new(std::sync::Barrier::new(2));
+
+        let handles: Vec<_> = (0..2)
+            .map(|_| {
+                let paths = paths.clone();
+                let barrier = barrier.clone();
+                std::thread::spawn(move || {
+                    barrier.wait();
+                    let timer = InvokeTimer::start_with_context(
+                        paths,
+                        "concurrent_phase_probe",
+                        Some("shared-request".to_string()),
+                        Some("shared-span".to_string()),
+                    );
+                    let invocation_id = timer.invocation_id;
+                    timer.phase("db_storage_observation", Duration::from_millis(1));
+                    drop(timer);
+                    invocation_id
+                })
+            })
+            .collect();
+        let invocation_ids: Vec<u64> = handles
+            .into_iter()
+            .map(|handle| handle.join().expect("phase thread"))
+            .collect();
+        assert_ne!(invocation_ids[0], invocation_ids[1]);
+
+        let rows = (0..200)
+            .find_map(|_| {
+                let rows = read_recent_diagnostics_trace_entries(&paths, 20).ok()?;
+                let matched = rows
+                    .iter()
+                    .filter(|row| {
+                        row.details.get("cmd").and_then(|value| value.as_str())
+                            == Some("concurrent_phase_probe")
+                    })
+                    .count();
+                if matched >= 6 {
+                    Some(rows)
+                } else {
+                    std::thread::sleep(Duration::from_millis(10));
+                    None
+                }
+            })
+            .expect("queued start, phase, and completion rows");
+        for invocation_id in invocation_ids {
+            let correlated: Vec<_> = rows
+                .iter()
+                .filter(|row| {
+                    row.details
+                        .get("invocation_id")
+                        .and_then(|value| value.as_u64())
+                        == Some(invocation_id)
+                })
+                .collect();
+            assert_eq!(correlated.len(), 3, "one start/phase/completion chain");
+            for event in ["command_started", "command_phase", "command_completed"] {
+                assert!(
+                    correlated.iter().any(|row| row.event == event),
+                    "missing {event}"
+                );
+            }
+            for row in correlated {
+                assert_eq!(
+                    row.details
+                        .get("request_id")
+                        .and_then(|value| value.as_str()),
+                    Some("shared-request")
+                );
+                assert_eq!(
+                    row.details.get("span_id").and_then(|value| value.as_str()),
+                    Some("shared-span")
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn interrupted_rotation_is_reconciled_and_tail_spans_rotated_files() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let paths = AppPaths::new(dir.path().to_path_buf());
+        paths.ensure_dirs().expect("dirs");
+        let trace = diagnostics_trace_file_path(&paths).expect("trace");
+        let old = serde_json::to_string(&DiagnosticsTraceEntry {
+            ts_ms: 1,
+            event: "old".into(),
+            level: "info".into(),
+            details: serde_json::json!({}),
+            process: None,
+            incident_id: None,
+            span_id: None,
+        })
+        .unwrap();
+        let pending = serde_json::to_string(&DiagnosticsTraceEntry {
+            ts_ms: 2,
+            event: "pending".into(),
+            level: "info".into(),
+            details: serde_json::json!({}),
+            process: None,
+            incident_id: None,
+            span_id: None,
+        })
+        .unwrap();
+        let current = serde_json::to_string(&DiagnosticsTraceEntry {
+            ts_ms: 3,
+            event: "current".into(),
+            level: "info".into(),
+            details: serde_json::json!({}),
+            process: None,
+            incident_id: None,
+            span_id: None,
+        })
+        .unwrap();
+        std::fs::write(
+            trace.with_file_name("diagnostics_trace.1.jsonl"),
+            format!("{old}\n"),
+        )
+        .unwrap();
+        std::fs::write(
+            trace.with_file_name("diagnostics_trace.rotation_pending.jsonl"),
+            format!("{pending}\n"),
+        )
+        .unwrap();
+        std::fs::write(&trace, format!("{current}\n")).unwrap();
+        let rows = read_recent_diagnostics_trace_entries(&paths, 10).expect("tail");
+        assert_eq!(
+            rows.iter().map(|r| r.event.as_str()).collect::<Vec<_>>(),
+            vec!["old", "pending", "current"]
+        );
+        assert!(!trace
+            .with_file_name("diagnostics_trace.rotation_pending.jsonl")
+            .exists());
+        let mut archived = trace_generation_files(&trace, "zip")
+            .unwrap()
+            .into_iter()
+            .map(|path| {
+                let file = std::fs::File::open(path).unwrap();
+                let mut zip = zip::ZipArchive::new(file).unwrap();
+                let mut text = String::new();
+                std::io::Read::read_to_string(&mut zip.by_index(0).unwrap(), &mut text).unwrap();
+                text
+            })
+            .collect::<Vec<_>>();
+        archived.sort();
+        assert_eq!(archived, vec![format!("{old}\n"), format!("{pending}\n")]);
+    }
+
+    #[test]
+    fn immutable_rotation_reconciliation_is_idempotent_at_every_persistence_boundary() {
+        for boundary in ["prepared", "captured", "aggregated", "compressed", "orphan"] {
+            let dir = tempfile::tempdir().expect("tempdir");
+            let trace = dir.path().join("diagnostics_trace.jsonl");
+            let generation_id = format!("fixture-{boundary}");
+            let source = trace_generation_path(&trace, &generation_id, "jsonl");
+            let zip = trace_generation_path(&trace, &generation_id, "zip");
+            let row = serde_json::to_string(&DiagnosticsTraceEntry {
+                ts_ms: 1,
+                event: format!("boundary_{boundary}"),
+                level: "info".into(),
+                details: serde_json::json!({}),
+                process: None,
+                incident_id: None,
+                span_id: None,
+            })
+            .unwrap();
+            if boundary == "prepared" {
+                std::fs::write(&trace, format!("{row}\n")).unwrap();
+            } else {
+                std::fs::write(&source, format!("{row}\n")).unwrap();
+            }
+            if boundary != "orphan" {
+                write_json_atomic(
+                    &trace.with_file_name("diagnostics_trace.rotation_journal.json"),
+                    &serde_json::json!({"schema_version":1,"generation_id":generation_id,"stage":boundary}),
+                )
+                .unwrap();
+            }
+            if matches!(boundary, "aggregated" | "compressed") {
+                merge_rotated_trace_aggregate(&trace, &source, &generation_id).unwrap();
+            }
+            if boundary == "compressed" {
+                compress_trace_jsonl(&source, &zip).unwrap();
+            }
+
+            reconcile_diagnostics_trace_rotation(&trace).expect("first recovery");
+            reconcile_diagnostics_trace_rotation(&trace).expect("idempotent recovery");
+            assert!(!trace.with_file_name("diagnostics_trace.rotation_journal.json").exists());
+            assert!(!source.exists());
+            assert!(zip.exists());
+            let aggregate: serde_json::Value = serde_json::from_str(
+                &std::fs::read_to_string(trace.with_file_name("diagnostics_trace.aggregate.json")).unwrap(),
+            )
+            .unwrap();
+            assert_eq!(aggregate["rows_total"].as_u64(), Some(1), "boundary {boundary}");
+            assert_eq!(aggregate["merged_generations"].as_array().unwrap().len(), 1);
+        }
+    }
+
+    #[test]
+    fn rotation_reconciliation_enforces_one_global_generation_bound_across_legacy_and_immutable() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let trace = dir.path().join("diagnostics_trace.jsonl");
+        for index in 1..=4 {
+            let source = dir.path().join(format!("legacy-source-{index}.jsonl"));
+            std::fs::write(&source, format!("{{\"event\":\"legacy-{index}\"}}\n")).unwrap();
+            compress_trace_jsonl(
+                &source,
+                &trace.with_file_name(format!("diagnostics_trace.{index}.zip")),
+            )
+            .unwrap();
+        }
+        for index in 1..=3 {
+            let source = trace_generation_path(&trace, &format!("immutable-{index}"), "jsonl");
+            std::fs::write(&source, format!("{{\"event\":\"immutable-{index}\"}}\n")).unwrap();
+            compress_trace_jsonl(
+                &source,
+                &trace_generation_path(&trace, &format!("immutable-{index}"), "zip"),
+            )
+            .unwrap();
+        }
+
+        reconcile_diagnostics_trace_rotation(&trace).expect("reconcile mixed generations");
+
+        assert_eq!(trace_generation_files(&trace, "zip").unwrap().len(), DIAGNOSTICS_TRACE_RETAINED_FILES);
+        assert_eq!(count_compressed_trace_files(&trace), DIAGNOSTICS_TRACE_RETAINED_FILES);
+        for index in 1..=DIAGNOSTICS_TRACE_RETAINED_FILES {
+            assert!(!trace.with_file_name(format!("diagnostics_trace.{index}.zip")).exists());
+        }
+    }
+
+    #[test]
+    fn diagnostics_trace_rotates_by_age_and_exposes_compaction_state() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let paths = AppPaths::new(dir.path().to_path_buf());
+        paths.ensure_dirs().expect("dirs");
+        let trace = diagnostics_trace_file_path(&paths).expect("trace");
+        std::fs::write(&trace, b"{\"event\":\"aged\"}\n").unwrap();
+        let state_path = trace.with_file_name("diagnostics_trace.rotation_state.json");
+        write_json_atomic(
+            &state_path,
+            &serde_json::json!({
+                "current_started_at_ms": now_epoch_ms_i64() - DIAGNOSTICS_TRACE_RETAINED_AGE_MS - 1,
+                "last_rotation_at_ms": null,
+                "rotation_count": 0,
+                "compressed_files": 0,
+                "last_rotation_reason": null
+            }),
+        )
+        .unwrap();
+        rotate_diagnostics_trace_if_needed(&trace, u64::MAX, 1).expect("age rotation");
+        assert_eq!(trace_generation_files(&trace, "zip").unwrap().len(), 1);
+        let status = build_diagnostics_trace_dir_status(&paths).expect("status");
+        assert_eq!(status.retained_age_ms, DIAGNOSTICS_TRACE_RETAINED_AGE_MS);
+        assert_eq!(status.rotation_count, 1);
+        assert_eq!(status.sampling_mode, "bounded_queue_no_sampling");
+        assert_eq!(status.queue_capacity, DIAGNOSTICS_TRACE_QUEUE_CAPACITY);
+    }
+
+    #[test]
+    fn diagnostics_trace_does_not_rewrite_rotation_state_for_each_row() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let trace = dir.path().join("diagnostics_trace.jsonl");
+        std::fs::write(&trace, b"{\"event\":\"current\"}\n").unwrap();
+        let state_path = trace.with_file_name("diagnostics_trace.rotation_state.json");
+        let persisted = serde_json::json!({
+            "current_started_at_ms": now_epoch_ms_i64(),
+            "last_rotation_at_ms": null,
+            "rotation_count": 17,
+            "compressed_files": 2,
+            "last_rotation_reason": "sentinel"
+        });
+        write_json_atomic(&state_path, &persisted).unwrap();
+        let before = std::fs::read(&state_path).unwrap();
+        rotate_diagnostics_trace_if_needed(&trace, u64::MAX, 1).expect("no rotation");
+        assert_eq!(
+            std::fs::read(&state_path).unwrap(),
+            before,
+            "normal appends must not add an atomic state-file rewrite"
+        );
+    }
+
+    #[test]
+    fn incident_retention_is_globally_count_bounded_and_keeps_active() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let paths = AppPaths::new(dir.path().to_path_buf());
+        let incidents = paths
+            .effective_diagnostics_trace_dir()
+            .unwrap()
+            .join("incidents");
+        for i in 0..20 {
+            std::fs::create_dir_all(incidents.join(format!("incident-{i:02}"))).unwrap();
+        }
+        prune_diagnostics_incidents(&paths, Some("incident-00")).expect("prune");
+        assert!(incidents.join("incident-00").exists());
+        assert!(
+            std::fs::read_dir(incidents).unwrap().count() <= DIAGNOSTICS_INCIDENT_RETAINED_COUNT
+        );
+    }
 
     #[test]
     fn jobs_batch_operation_receipts_are_age_and_count_bounded() {
@@ -3095,10 +5460,13 @@ mod tests {
         std::fs::write(&existing, "ok").expect("write existing");
         let missing = dir.path().join("missing.txt");
 
-        let rows = shell_paths_status(vec![
-            existing.to_string_lossy().to_string(),
-            missing.to_string_lossy().to_string(),
-        ])
+        let rows = shell_paths_status_impl(
+            None,
+            vec![
+                existing.to_string_lossy().to_string(),
+                missing.to_string_lossy().to_string(),
+            ],
+        )
         .expect("status rows");
 
         assert_eq!(rows.len(), 2);
@@ -3218,6 +5586,121 @@ mod tests {
             )
             .expect("copy markdown proof");
         }
+    }
+
+    #[test]
+    fn localization_consumer_falls_back_only_for_canonical_absence_not_lineage_failure() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let paths = AppPaths::new(dir.path().join("app"));
+        paths.ensure_dirs().expect("dirs");
+        db::ensure_schema(&paths).expect("schema");
+        let item_id = "consumer-lineage-item";
+        let generation_id = format!("localization-preview-{}", "a".repeat(64));
+        let dub_dir = paths.derived_item_dir(item_id).join("dub_preview");
+        std::fs::create_dir_all(&dub_dir).expect("dub dir");
+        let legacy_fixed = dub_dir.join("mux_dub_preview_v1.mkv");
+        std::fs::write(&legacy_fixed, b"unverified-fixed-path-bytes").expect("legacy fixed");
+        let immutable_path = dub_dir.join(format!("mux_dub_preview_v1.gen-{}.mkv", "a".repeat(64)));
+        let conn = db::open(&paths).expect("db");
+        conn.execute(
+            "INSERT INTO library_item(id,created_at_ms,source_type,source_uri,title,media_path) VALUES(?1,1,'local_file','file://source','Source','source.mp4')",
+            [item_id],
+        )
+        .expect("item");
+        conn.execute(
+            "INSERT INTO job(id,item_id,type,status,progress,params_json,created_at_ms,logs_path) VALUES('mux-consumer',?1,'mux_dub_preview_v1','succeeded',1,'{}',1,'mux.log')",
+            [item_id],
+        )
+        .expect("job");
+        conn.execute(
+            "INSERT INTO localization_preview_publication(generation_id,item_id,variant_key,input_fingerprint_sha256,input_fingerprint_json,artifact_path,artifact_bytes,artifact_sha256,staging_path,source_job_id,phase,created_at_ms,updated_at_ms) VALUES(?1,?2,'','fingerprint','{}',?3,1,'deadbeef',?4,'mux-consumer','committed',1,1)",
+            rusqlite::params![
+                generation_id,
+                item_id,
+                immutable_path.to_string_lossy(),
+                dub_dir.join("missing-staging.mkv").to_string_lossy()
+            ],
+        )
+        .expect("publication");
+        conn.execute(
+            "INSERT INTO localization_preview_active(item_id,variant_key,generation_id,source_job_created_at_ms,source_job_id,updated_at_ms) VALUES(?1,'',?2,1,'mux-consumer',1)",
+            rusqlite::params![item_id, generation_id],
+        )
+        .expect("active");
+        drop(conn);
+
+        let error = localization_preview_consumer_path(&paths, item_id, None, legacy_fixed.clone())
+            .expect_err("missing committed immutable bytes must not fall back");
+        assert!(error.contains("immutable-lineage verification"), "{error}");
+
+        let absent_fixed = dub_dir.join("legacy-without-active.mkv");
+        assert_eq!(
+            localization_preview_consumer_path(
+                &paths,
+                "item-with-no-active-publication",
+                None,
+                absent_fixed.clone(),
+            )
+            .expect("canonical absence permits legacy routing"),
+            absent_fixed
+        );
+
+        let published_item = "consumer-published-item";
+        let published_generation = format!("localization-preview-{}", "c".repeat(64));
+        let published_dir = paths.derived_item_dir(published_item).join("dub_preview");
+        std::fs::create_dir_all(&published_dir).expect("published dir");
+        let published_fixed = published_dir.join("mux_dub_preview_v1.mkv");
+        std::fs::write(&published_fixed, b"legacy-must-not-mask-published-active")
+            .expect("published fixed fallback");
+        let conn = db::open(&paths).expect("published db");
+        conn.execute(
+            "INSERT INTO library_item(id,created_at_ms,source_type,source_uri,title,media_path)
+             VALUES(?1,1,'local_file','file://published','Published','source.mp4')",
+            [published_item],
+        )
+        .expect("published item");
+        conn.execute(
+            "INSERT INTO job(id,item_id,type,status,progress,params_json,created_at_ms,logs_path)
+             VALUES('mux-published-consumer',?1,'mux_dub_preview_v1','succeeded',1,'{}',1,'mux.log')",
+            [published_item],
+        )
+        .expect("published job");
+        conn.execute(
+            "INSERT INTO localization_preview_publication(
+               generation_id,item_id,variant_key,input_fingerprint_sha256,input_fingerprint_json,
+               artifact_path,artifact_bytes,artifact_sha256,staging_path,source_job_id,phase,
+               created_at_ms,updated_at_ms
+             ) VALUES(?1,?2,'','published-fingerprint','{}',?3,1,'published-hash',?4,
+                      'mux-published-consumer','published',1,1)",
+            rusqlite::params![
+                published_generation,
+                published_item,
+                published_dir.join(format!("mux_dub_preview_v1.gen-{}.mkv", "c".repeat(64))).to_string_lossy(),
+                published_dir.join("published-stage.mkv").to_string_lossy(),
+            ],
+        )
+        .expect("published publication");
+        conn.execute_batch(
+            "DROP TRIGGER trg_localization_preview_active_committed_insert;
+             DROP TRIGGER trg_localization_preview_active_committed_update;",
+        )
+        .expect("simulate upgraded pre-v44 active pointer");
+        conn.execute(
+            "INSERT INTO localization_preview_active(
+               item_id,variant_key,generation_id,source_job_created_at_ms,source_job_id,updated_at_ms
+             ) VALUES(?1,'',?2,1,'mux-published-consumer',1)",
+            rusqlite::params![published_item, published_generation],
+        )
+        .expect("published active pointer");
+        drop(conn);
+        let error = localization_preview_consumer_path(
+            &paths,
+            published_item,
+            None,
+            published_fixed,
+        )
+        .expect_err("published active lineage must not route to fixed legacy bytes");
+        assert!(error.contains("non-committed publication phase published"), "{error}");
     }
 }
 
@@ -3453,18 +5936,34 @@ fn shell_reveal_target(path: &std::path::Path) -> Result<(), String> {
     }
 }
 
-#[tauri::command]
-fn shell_paths_status(paths: Vec<String>) -> Result<Vec<ShellPathStatus>, String> {
-    let mut rows = Vec::with_capacity(paths.len());
-    for path in paths {
+fn resolve_shell_alias(
+    paths: Option<&AppPaths>,
+    path: std::path::PathBuf,
+) -> Result<std::path::PathBuf, String> {
+    let Some(paths) = paths else {
+        return Ok(path);
+    };
+    root_rebind::resolve_active_alias_path(paths, &path, false).map_err(|error| error.to_string())
+}
+
+fn shell_paths_status_impl(
+    app_paths: Option<&AppPaths>,
+    requested_paths: Vec<String>,
+) -> Result<Vec<ShellPathStatus>, String> {
+    let mut rows = Vec::with_capacity(requested_paths.len());
+    for path in requested_paths {
         let normalized = normalize_shell_path(path, "Path")?;
-        let meta = std::fs::metadata(&normalized);
-        let (exists, is_dir) = match meta {
-            Ok(value) => (true, value.is_dir()),
-            Err(_) => (false, false),
-        };
+        let resolved = resolve_shell_alias(app_paths, normalized)?;
+        let (exists, is_dir) =
+            match voxvulgi_engine::paths::probe_path_bounded(&resolved, Duration::from_millis(300))
+            {
+                voxvulgi_engine::paths::BoundedPathKind::Directory => (true, true),
+                voxvulgi_engine::paths::BoundedPathKind::File => (true, false),
+                voxvulgi_engine::paths::BoundedPathKind::Missing
+                | voxvulgi_engine::paths::BoundedPathKind::Unreachable => (false, false),
+            };
         rows.push(ShellPathStatus {
-            path: normalized.to_string_lossy().to_string(),
+            path: resolved.to_string_lossy().to_string(),
             exists,
             is_dir,
         });
@@ -3473,8 +5972,23 @@ fn shell_paths_status(paths: Vec<String>) -> Result<Vec<ShellPathStatus>, String
 }
 
 #[tauri::command]
-fn shell_open_path(path: String) -> Result<ShellPathResult, String> {
-    let normalized = normalize_existing_shell_path(path, "Path")?;
+fn shell_paths_status(
+    state: State<'_, AppState>,
+    paths: Vec<String>,
+) -> Result<Vec<ShellPathStatus>, String> {
+    shell_paths_status_impl(Some(&state.paths), paths)
+}
+
+#[tauri::command]
+fn shell_open_path(state: State<'_, AppState>, path: String) -> Result<ShellPathResult, String> {
+    let normalized = normalize_shell_path(path, "Path")?;
+    let normalized = resolve_shell_alias(Some(&state.paths), normalized)?;
+    if !normalized.exists() {
+        return Err(format!(
+            "Path does not exist: {}",
+            normalized.to_string_lossy()
+        ));
+    }
     shell_open_target(&normalized)?;
     Ok(ShellPathResult {
         path: normalized.to_string_lossy().to_string(),
@@ -3483,8 +5997,15 @@ fn shell_open_path(path: String) -> Result<ShellPathResult, String> {
 }
 
 #[tauri::command]
-fn shell_reveal_path(path: String) -> Result<ShellPathResult, String> {
-    let normalized = normalize_existing_shell_path(path, "Path")?;
+fn shell_reveal_path(state: State<'_, AppState>, path: String) -> Result<ShellPathResult, String> {
+    let normalized = normalize_shell_path(path, "Path")?;
+    let normalized = resolve_shell_alias(Some(&state.paths), normalized)?;
+    if !normalized.exists() {
+        return Err(format!(
+            "Path does not exist: {}",
+            normalized.to_string_lossy()
+        ));
+    }
     shell_reveal_target(&normalized)?;
     Ok(ShellPathResult {
         path: normalized.to_string_lossy().to_string(),
@@ -3493,8 +6014,18 @@ fn shell_reveal_path(path: String) -> Result<ShellPathResult, String> {
 }
 
 #[tauri::command]
-fn shell_open_parent_dir(path: String) -> Result<ShellPathResult, String> {
-    let normalized = normalize_existing_shell_path(path, "Path")?;
+fn shell_open_parent_dir(
+    state: State<'_, AppState>,
+    path: String,
+) -> Result<ShellPathResult, String> {
+    let normalized = normalize_shell_path(path, "Path")?;
+    let normalized = resolve_shell_alias(Some(&state.paths), normalized)?;
+    if !normalized.exists() {
+        return Err(format!(
+            "Path does not exist: {}",
+            normalized.to_string_lossy()
+        ));
+    }
     let target = if normalized.is_dir() {
         normalized
     } else {
@@ -3519,12 +6050,32 @@ fn build_diagnostics_trace_dir_status(
         .map_err(|e| e.to_string())?;
     let current_dir = override_dir.clone().unwrap_or_else(|| default_dir.clone());
     let exists = current_dir.exists() && current_dir.is_dir();
+    let rotation_state =
+        std::fs::read_to_string(current_dir.join("diagnostics_trace.rotation_state.json"))
+            .ok()
+            .and_then(|raw| serde_json::from_str::<serde_json::Value>(&raw).ok())
+            .unwrap_or_default();
+    let persisted_rotation_count = rotation_state
+        .get("rotation_count")
+        .and_then(|value| value.as_u64())
+        .unwrap_or_else(|| DIAGNOSTICS_TRACE_ROTATIONS_TOTAL.load(Ordering::Relaxed));
 
     Ok(DiagnosticsTraceDirStatus {
         current_dir: current_dir.to_string_lossy().to_string(),
         default_dir: default_dir.to_string_lossy().to_string(),
         exists,
         using_default: override_dir.is_none(),
+        retained_age_ms: DIAGNOSTICS_TRACE_RETAINED_AGE_MS,
+        rotation_count: persisted_rotation_count,
+        compressed_files: count_compressed_trace_files(&current_dir.join("diagnostics_trace.jsonl"))
+            as u64,
+        aggregate_path: current_dir
+            .join("diagnostics_trace.aggregate.json")
+            .to_string_lossy()
+            .to_string(),
+        sampling_mode: "bounded_queue_no_sampling".to_string(),
+        queue_capacity: DIAGNOSTICS_TRACE_QUEUE_CAPACITY,
+        dropped_events_total: DIAGNOSTICS_TRACE_DROPPED_TOTAL.load(Ordering::Relaxed),
     })
 }
 
@@ -4319,10 +6870,11 @@ fn localization_terminal_outcome(
 
     let deliverable = if export_pack_exists {
         Some(("Export pack ready", export_pack_path))
-    } else if mux_mp4_exists {
-        Some(("Preview MP4 ready", mux_mp4_path))
     } else if mux_mkv_exists {
         Some(("Preview MKV ready", mux_mkv_path))
+    } else if mux_mp4_exists {
+        // Historical compatibility only. New mux jobs and exports are MKV-only.
+        Some(("Legacy preview MP4 ready", mux_mp4_path))
     } else {
         None
     };
@@ -4439,6 +6991,23 @@ fn localization_terminal_outcome(
     )
 }
 
+fn localization_preview_consumer_path(
+    paths: &AppPaths,
+    item_id: &str,
+    variant_label: Option<&str>,
+    legacy_fixed_path: std::path::PathBuf,
+) -> Result<std::path::PathBuf, String> {
+    match jobs::localization_preview_consumer_outcome(paths, item_id, variant_label) {
+        jobs::LocalizationPreviewConsumerOutcome::Active(path) => Ok(path),
+        // Only the canonical absence of an active publication authorizes compatibility with
+        // fixed-path MKVs produced by older builds. Integrity/path/hash failures are not absence.
+        jobs::LocalizationPreviewConsumerOutcome::CanonicalAbsence => Ok(legacy_fixed_path),
+        jobs::LocalizationPreviewConsumerOutcome::LineageFailure(error) => Err(format!(
+            "Active localization preview failed immutable-lineage verification: {error}"
+        )),
+    }
+}
+
 fn build_item_outputs(paths: &AppPaths, item_id: &str) -> Result<ItemOutputs, String> {
     let item_id = item_id.trim().to_string();
     if item_id.is_empty() {
@@ -4450,7 +7019,12 @@ fn build_item_outputs(paths: &AppPaths, item_id: &str) -> Result<ItemOutputs, St
     let dub_preview_dir = item_dir.join("dub_preview");
     let mix_path = dub_preview_dir.join("mix_dub_preview_v1.wav");
     let mux_mp4_path = dub_preview_dir.join("mux_dub_preview_v1.mp4");
-    let mux_mkv_path = dub_preview_dir.join("mux_dub_preview_v1.mkv");
+    let mux_mkv_path = localization_preview_consumer_path(
+        paths,
+        &item_id,
+        None,
+        dub_preview_dir.join("mux_dub_preview_v1.mkv"),
+    )?;
     let export_pack_path = item_dir.join("exports").join("export_pack_v1.zip");
     let tracks = subtitle_tracks::list_tracks(paths, &item_id).unwrap_or_default();
     let source_summary =
@@ -4489,10 +7063,12 @@ fn build_item_outputs(paths: &AppPaths, item_id: &str) -> Result<ItemOutputs, St
     );
     let recent_jobs = item_jobs.iter().take(40).cloned().collect();
 
+    let resolved_source_media = library::resolve_media_path(paths, &item.media_path)
+        .unwrap_or_else(|_| std::path::PathBuf::from(&item.media_path));
     Ok(ItemOutputs {
         item_id,
-        source_media_path: item.media_path.clone(),
-        source_media_exists: std::path::Path::new(&item.media_path).exists(),
+        source_media_path: resolved_source_media.to_string_lossy().to_string(),
+        source_media_exists: resolved_source_media.is_file(),
         derived_item_dir: item_dir.to_string_lossy().to_string(),
         dub_preview_dir: dub_preview_dir.to_string_lossy().to_string(),
         source_track_count: source_summary.track_count,
@@ -4670,12 +7246,20 @@ fn build_localization_home_item_outputs(
     item_id: &str,
     tracks: &[subtitle_tracks::SubtitleTrackRow],
     item_jobs: &[jobs::JobRow],
-) -> ItemOutputs {
+) -> Result<ItemOutputs, String> {
+    let source_media = library::get_item_by_id(paths, item_id)
+        .ok()
+        .and_then(|item| library::resolve_media_path(paths, &item.media_path).ok());
     let item_dir = paths.derived_item_dir(item_id);
     let dub_preview_dir = item_dir.join("dub_preview");
     let mix_path = dub_preview_dir.join("mix_dub_preview_v1.wav");
     let mux_mp4_path = dub_preview_dir.join("mux_dub_preview_v1.mp4");
-    let mux_mkv_path = dub_preview_dir.join("mux_dub_preview_v1.mkv");
+    let mux_mkv_path = localization_preview_consumer_path(
+        paths,
+        item_id,
+        None,
+        dub_preview_dir.join("mux_dub_preview_v1.mkv"),
+    )?;
     let export_pack_path = item_dir.join("exports").join("export_pack_v1.zip");
     let source_summary =
         summarize_tracks_for_outputs(paths, tracks, |track| track.kind == "source");
@@ -4712,10 +7296,13 @@ fn build_localization_home_item_outputs(
         &item_dir,
     );
 
-    ItemOutputs {
+    Ok(ItemOutputs {
         item_id: item_id.to_string(),
-        source_media_path: String::new(),
-        source_media_exists: false,
+        source_media_path: source_media
+            .as_ref()
+            .map(|path| path.to_string_lossy().to_string())
+            .unwrap_or_default(),
+        source_media_exists: source_media.as_ref().is_some_and(|path| path.is_file()),
         derived_item_dir: item_dir.to_string_lossy().to_string(),
         dub_preview_dir: dub_preview_dir.to_string_lossy().to_string(),
         source_track_count: source_summary.track_count,
@@ -4742,7 +7329,7 @@ fn build_localization_home_item_outputs(
         deliverable_path,
         deliverable_exists,
         recent_jobs: item_jobs.iter().take(40).cloned().collect(),
-    }
+    })
 }
 
 #[tauri::command]
@@ -4801,7 +7388,7 @@ async fn localization_home_item_outputs(
                     .unwrap_or(&[]);
                 build_localization_home_item_outputs(&paths, item_id, tracks, jobs)
             })
-            .collect();
+            .collect::<Result<Vec<_>, String>>()?;
         Ok(outputs)
     })
     .await
@@ -4885,7 +7472,7 @@ async fn item_outputs_many(
                     .unwrap_or(&[]);
                 build_localization_home_item_outputs(&paths, item_id, tracks, jobs)
             })
-            .collect();
+            .collect::<Result<Vec<_>, String>>()?;
         Ok::<Vec<ItemOutputs>, String>(outputs)
     })
     .await
@@ -5380,7 +7967,7 @@ fn item_artifacts_list_v1(
     );
     push(
         "dub_mux_mp4",
-        "Mux dub preview (MP4)",
+        "Legacy mux dub preview (MP4)",
         "Dub preview",
         ArtifactKind::DubMux,
         Some("mux_dub_preview_v1"),
@@ -5402,7 +7989,12 @@ fn item_artifacts_list_v1(
         Some("mkv"),
         None,
         Some(ArtifactRerunKind::MuxDubPreviewV1),
-        item_dir.join("dub_preview").join("mux_dub_preview_v1.mkv"),
+        localization_preview_consumer_path(
+            &state.paths,
+            &item_id,
+            None,
+            item_dir.join("dub_preview").join("mux_dub_preview_v1.mkv"),
+        )?,
     );
     let alternate_dir = item_dir.join("dub_preview").join("alternates");
     if let Ok(entries) = std::fs::read_dir(&alternate_dir) {
@@ -5442,7 +8034,7 @@ fn item_artifacts_list_v1(
             );
             push(
                 &format!("dub_mux_mp4_variant_{label}"),
-                &format!("Mux dub preview MP4 ({label})"),
+                &format!("Legacy mux dub preview MP4 ({label})"),
                 "Dub alternates",
                 ArtifactKind::DubMux,
                 Some("mux_dub_preview_v1"),
@@ -5464,7 +8056,12 @@ fn item_artifacts_list_v1(
                 Some("mkv"),
                 None,
                 Some(ArtifactRerunKind::MuxDubPreviewV1),
-                path.join("mux_dub_preview_v1.mkv"),
+                localization_preview_consumer_path(
+                    &state.paths,
+                    &item_id,
+                    Some(label),
+                    path.join("mux_dub_preview_v1.mkv"),
+                )?,
             );
         }
     }
@@ -5715,46 +8312,28 @@ async fn item_export_mux_preview_mp4(
 
     tauri::async_runtime::spawn_blocking(move || {
         let dub_dir = paths.derived_item_dir(&item_id).join("dub_preview");
-        let src_mp4 = dub_dir.join("mux_dub_preview_v1.mp4");
-        let src_mkv = dub_dir.join("mux_dub_preview_v1.mkv");
+        let src_mkv = localization_preview_consumer_path(
+            &paths,
+            &item_id,
+            None,
+            dub_dir.join("mux_dub_preview_v1.mkv"),
+        )?;
         let out_ext = std::path::Path::new(&out_path)
             .extension()
             .and_then(|e| e.to_str())
             .unwrap_or("")
             .to_lowercase();
 
-        let src = match out_ext.as_str() {
-            "mp4" => {
-                if src_mp4.exists() {
-                    src_mp4
-                } else if src_mkv.exists() {
-                    return Err(
-                        "muxed preview exists only as MKV; choose a .mkv export path".to_string(),
-                    );
-                } else {
-                    return Err("muxed preview not found".to_string());
-                }
-            }
-            "mkv" => {
-                if src_mkv.exists() {
-                    src_mkv
-                } else if src_mp4.exists() {
-                    return Err(
-                        "muxed preview exists only as MP4; choose a .mp4 export path".to_string(),
-                    );
-                } else {
-                    return Err("muxed preview not found".to_string());
-                }
-            }
-            _ => {
-                if src_mp4.exists() {
-                    src_mp4
-                } else if src_mkv.exists() {
-                    src_mkv
-                } else {
-                    return Err("muxed preview not found".to_string());
-                }
-            }
+        if out_ext != "mkv" {
+            return Err("managed video exports must use an .mkv destination".to_string());
+        }
+        let legacy_mp4 = dub_dir.join("mux_dub_preview_v1.mp4");
+        let src = if src_mkv.is_file() {
+            src_mkv
+        } else if legacy_mp4.is_file() {
+            legacy_mp4
+        } else {
+            return Err("No playable muxed preview source was found".to_string());
         };
 
         let dst = std::path::PathBuf::from(&out_path);
@@ -5763,7 +8342,7 @@ async fn item_export_mux_preview_mp4(
                 std::fs::create_dir_all(parent).map_err(|e| e.to_string())?;
             }
         }
-        std::fs::copy(&src, &dst).map_err(|e| e.to_string())?;
+        jobs::export_managed_video_as_mkv(&paths, &src, &dst).map_err(|e| e.to_string())?;
         let bytes = std::fs::metadata(&dst).map(|m| m.len()).unwrap_or(0);
         Ok(ExportedFile {
             out_path: dst.to_string_lossy().to_string(),
@@ -5796,17 +8375,25 @@ async fn item_export_source_media(
 
     tauri::async_runtime::spawn_blocking(move || {
         let item = library::get_item_by_id(&paths, &item_id).map_err(|e| e.to_string())?;
-        let src = std::path::PathBuf::from(&item.media_path);
+        let src =
+            library::resolve_media_path(&paths, &item.media_path).map_err(|e| e.to_string())?;
         if !src.is_file() {
             return Err(format!("source media not found: {}", item.media_path));
         }
         let dst = std::path::PathBuf::from(&out_path);
+        let out_ext = dst
+            .extension()
+            .and_then(|value| value.to_str())
+            .unwrap_or("");
+        if !out_ext.eq_ignore_ascii_case("mkv") {
+            return Err("managed source-video exports must use an .mkv destination".to_string());
+        }
         if let Some(parent) = dst.parent() {
             if !parent.as_os_str().is_empty() {
                 std::fs::create_dir_all(parent).map_err(|e| e.to_string())?;
             }
         }
-        std::fs::copy(&src, &dst).map_err(|e| e.to_string())?;
+        jobs::export_managed_video_as_mkv(&paths, &src, &dst).map_err(|e| e.to_string())?;
         let bytes = std::fs::metadata(&dst).map(|m| m.len()).unwrap_or(0);
         Ok(ExportedFile {
             out_path: dst.to_string_lossy().to_string(),
@@ -6168,14 +8755,12 @@ fn downloads_feature_root_set(
     }
 
     let normalized = dir.canonicalize().unwrap_or(dir);
-    let mut roots =
-        config::load_feature_storage_roots_config(&state.paths).map_err(|e| e.to_string())?;
-    set_feature_root_override(
-        &mut roots,
-        &feature,
-        Some(normalized.to_string_lossy().to_string()),
-    )?;
-    config::save_feature_storage_roots_config(&state.paths, &roots).map_err(|e| e.to_string())?;
+    let normalized = normalized.to_string_lossy().to_string();
+    config::update_feature_storage_roots_config(&state.paths, |roots| {
+        set_feature_root_override(roots, &feature, Some(normalized.clone()))
+            .map_err(voxvulgi_engine::EngineError::InstallFailed)
+    })
+    .map_err(|e| e.to_string())?;
     build_download_dir_status(&state.paths)
 }
 
@@ -6189,10 +8774,11 @@ fn downloads_feature_root_use_default(
     if feature.is_empty() {
         return Err("feature is empty".to_string());
     }
-    let mut roots =
-        config::load_feature_storage_roots_config(&state.paths).map_err(|e| e.to_string())?;
-    set_feature_root_override(&mut roots, &feature, None)?;
-    config::save_feature_storage_roots_config(&state.paths, &roots).map_err(|e| e.to_string())?;
+    config::update_feature_storage_roots_config(&state.paths, |roots| {
+        set_feature_root_override(roots, &feature, None)
+            .map_err(voxvulgi_engine::EngineError::InstallFailed)
+    })
+    .map_err(|e| e.to_string())?;
 
     if create_if_missing {
         let status = build_download_dir_status(&state.paths)?;
@@ -6216,11 +8802,147 @@ fn diagnostics_trace_dir_status(
 }
 
 #[tauri::command]
+fn diagnostics_capture_status(
+    state: State<'_, AppState>,
+) -> Result<DiagnosticsCaptureStatus, String> {
+    let _write_guard = DIAGNOSTICS_TRACE_WRITE_LOCK
+        .get_or_init(|| Mutex::new(()))
+        .lock()
+        .map_err(|_| "diagnostics trace write lock is poisoned".to_string())?;
+    let mut status = load_diagnostics_capture_state(&state.paths);
+    let now = now_epoch_ms_i64();
+    if status.expires_at_ms.is_some_and(|expires| expires <= now) {
+        let _ = finalize_diagnostics_incident_manifest(&status, "completed_expired");
+        status = DiagnosticsCaptureStatus::default();
+        persist_diagnostics_capture_state(&state.paths, &status)?;
+        *diagnostics_capture_state()
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner()) = status.clone();
+    }
+    status.trace_bytes = diagnostics_trace_file_path(&state.paths)
+        .ok()
+        .and_then(|path| std::fs::metadata(path).ok())
+        .map(|meta| meta.len())
+        .unwrap_or(0);
+    status.dropped_events = DIAGNOSTICS_TRACE_DROPPED_TOTAL.load(Ordering::Relaxed);
+    Ok(status)
+}
+
+#[tauri::command]
+async fn diagnostics_capture_panel_transition(
+    state: State<'_, AppState>,
+    page: String,
+    transition_id: u64,
+    span_id: String,
+    parent_span_id: Option<String>,
+) -> Result<DiagnosticsPanelTransitionReceipt, String> {
+    let paths = state.paths.clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        activate_panel_capture_before_navigation(
+            &paths,
+            &page,
+            transition_id,
+            &span_id,
+            parent_span_id.as_deref(),
+        )
+    })
+    .await
+    .map_err(|error| error.to_string())?
+}
+
+#[tauri::command]
+fn diagnostics_capture_panel_transition_cancel(
+    state: State<'_, AppState>,
+    incident_id: String,
+    span_id: String,
+) -> Result<bool, String> {
+    cancel_superseded_panel_capture(&state.paths, incident_id.trim(), span_id.trim())
+}
+
+#[tauri::command]
+fn diagnostics_capture_arm(
+    state: State<'_, AppState>,
+    trigger: String,
+) -> Result<DiagnosticsCaptureStatus, String> {
+    let _write_guard = DIAGNOSTICS_TRACE_WRITE_LOCK
+        .get_or_init(|| Mutex::new(()))
+        .lock()
+        .map_err(|_| "diagnostics trace write lock is poisoned".to_string())?;
+    let trigger = trigger.trim();
+    if !matches!(trigger, "panel_switch" | "job_start") {
+        return Err("capture trigger must be panel_switch or job_start".to_string());
+    }
+    let now = now_epoch_ms_i64();
+    let incident_id = diagnostics_unique_id("incident");
+    let status = DiagnosticsCaptureStatus {
+        mode: "normal".to_string(),
+        armed_trigger: Some(trigger.to_string()),
+        incident_id: Some(incident_id),
+        armed_at_ms: Some(now),
+        started_at_ms: None,
+        expires_at_ms: Some(now + DIAGNOSTICS_INCIDENT_DURATION_MS),
+        max_trace_bytes: DIAGNOSTICS_TRACE_INCIDENT_MAX_BYTES,
+        trace_bytes: diagnostics_trace_file_path(&state.paths)
+            .ok()
+            .and_then(|path| std::fs::metadata(path).ok())
+            .map(|meta| meta.len())
+            .unwrap_or(0),
+        dropped_events: DIAGNOSTICS_TRACE_DROPPED_TOTAL.load(Ordering::Relaxed),
+        artifact_dir: None,
+        root_span_id: None,
+    };
+    persist_diagnostics_capture_state(&state.paths, &status)?;
+    *diagnostics_capture_state()
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner()) = status.clone();
+    append_diagnostics_trace_row_best_effort(
+        &state.paths,
+        "diagnostics_capture_armed",
+        serde_json::json!({
+            "trigger": trigger,
+            "incident_id": status.incident_id,
+            "expires_at_ms": status.expires_at_ms,
+        }),
+        "info",
+    );
+    Ok(status)
+}
+
+#[tauri::command]
+fn diagnostics_capture_disarm(
+    state: State<'_, AppState>,
+) -> Result<DiagnosticsCaptureStatus, String> {
+    let _write_guard = DIAGNOSTICS_TRACE_WRITE_LOCK
+        .get_or_init(|| Mutex::new(()))
+        .lock()
+        .map_err(|_| "diagnostics trace write lock is poisoned".to_string())?;
+    let previous = load_diagnostics_capture_state(&state.paths);
+    let _ = finalize_diagnostics_incident_manifest(&previous, "completed_disarmed");
+    let status = DiagnosticsCaptureStatus::default();
+    persist_diagnostics_capture_state(&state.paths, &status)?;
+    *diagnostics_capture_state()
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner()) = status.clone();
+    append_diagnostics_trace_row_best_effort(
+        &state.paths,
+        "diagnostics_capture_disarmed",
+        serde_json::json!({ "incident_id": previous.incident_id }),
+        "info",
+    );
+    Ok(status)
+}
+
+#[tauri::command]
 fn diagnostics_trace_dir_set(
     state: State<'_, AppState>,
     path: String,
     create_if_missing: bool,
 ) -> Result<DiagnosticsTraceDirStatus, String> {
+    let _write_guard = DIAGNOSTICS_TRACE_WRITE_LOCK
+        .get_or_init(|| Mutex::new(()))
+        .lock()
+        .map_err(|_| "diagnostics trace write lock is poisoned".to_string())?;
+    ensure_diagnostics_trace_mutation_allowed(&state.paths)?;
     let mut dir = std::path::PathBuf::from(path.trim());
     if dir.as_os_str().is_empty() {
         return Err("folder path is empty".to_string());
@@ -6255,6 +8977,11 @@ fn diagnostics_trace_dir_use_default(
     state: State<'_, AppState>,
     create_if_missing: bool,
 ) -> Result<DiagnosticsTraceDirStatus, String> {
+    let _write_guard = DIAGNOSTICS_TRACE_WRITE_LOCK
+        .get_or_init(|| Mutex::new(()))
+        .lock()
+        .map_err(|_| "diagnostics trace write lock is poisoned".to_string())?;
+    ensure_diagnostics_trace_mutation_allowed(&state.paths)?;
     let default_dir = state.paths.default_diagnostics_trace_dir();
     if create_if_missing {
         std::fs::create_dir_all(&default_dir).map_err(|e| e.to_string())?;
@@ -6284,6 +9011,11 @@ async fn diagnostics_trace_clear(
 ) -> Result<DiagnosticsTraceClearSummary, String> {
     let paths = state.paths.clone();
     tauri::async_runtime::spawn_blocking(move || {
+        let _write_guard = DIAGNOSTICS_TRACE_WRITE_LOCK
+            .get_or_init(|| Mutex::new(()))
+            .lock()
+            .map_err(|_| "diagnostics trace write lock is poisoned".to_string())?;
+        ensure_diagnostics_trace_mutation_allowed(&paths)?;
         let dir = paths
             .effective_diagnostics_trace_dir()
             .map_err(|e| e.to_string())?;
@@ -6299,23 +9031,18 @@ async fn diagnostics_trace_write_event(
     event: String,
     details: Option<serde_json::Value>,
     level: Option<String>,
-) -> Result<String, String> {
+) -> Result<DiagnosticsTraceEnqueueReceipt, String> {
     let event = event.trim().to_string();
     if event.is_empty() {
         return Err("event is empty".to_string());
     }
 
-    let paths = state.paths.clone();
-    tauri::async_runtime::spawn_blocking(move || {
-        append_diagnostics_trace_row(
-            &paths,
-            event,
-            details.unwrap_or(serde_json::Value::Null),
-            level.unwrap_or_else(|| "info".to_string()),
-        )
-    })
-    .await
-    .map_err(|e| e.to_string())?
+    Ok(append_diagnostics_trace_row_best_effort(
+        &state.paths,
+        &event,
+        details.unwrap_or(serde_json::Value::Null),
+        level.as_deref().unwrap_or("info"),
+    ))
 }
 
 #[tauri::command]
@@ -6348,32 +9075,201 @@ fn config_batch_on_import_set(
 }
 
 #[tauri::command]
-fn config_youtube_auth_get(
+fn root_rebind_dry_run(
     state: State<'_, AppState>,
-) -> Result<config::YoutubeAuthConfig, String> {
-    config::load_youtube_auth_config(&state.paths).map_err(|e| e.to_string())
+    from_root: String,
+) -> Result<root_rebind::RootRebindTaskStatus, String> {
+    let paths = state.paths.clone();
+    let from_root = from_root.trim().to_string();
+    root_rebind::submit_root_rebind_task("dry_run", move || {
+        root_rebind::root_rebind_dry_run(&paths, &from_root)
+    })
+    .map_err(|error| error.to_string())
+}
+
+#[tauri::command]
+fn root_rebind_prepare(
+    state: State<'_, AppState>,
+    from_root: String,
+    to_root: String,
+    evidence: Vec<root_rebind::RootIdentityEvidence>,
+) -> Result<root_rebind::RootRebindTaskStatus, String> {
+    let paths = state.paths.clone();
+    let from_root = from_root.trim().to_string();
+    let to_root = to_root.trim().to_string();
+    root_rebind::submit_root_rebind_task_cancellable("prepare", move |cancellation| {
+        root_rebind::prepare_root_rebind_cancellable(
+            &paths,
+            &from_root,
+            std::path::Path::new(&to_root),
+            &evidence,
+            &cancellation,
+        )
+    })
+    .map_err(|error| error.to_string())
+}
+
+#[tauri::command]
+fn root_rebind_apply(
+    state: State<'_, AppState>,
+    receipt_id: String,
+    confirmation: String,
+) -> Result<root_rebind::RootRebindTaskStatus, String> {
+    let receipt_id = receipt_id.trim().to_string();
+    if confirmation.trim() != format!("APPLY:{receipt_id}") {
+        return Err(format!(
+            "root rebind apply requires confirmation APPLY:{receipt_id}"
+        ));
+    }
+    let paths = state.paths.clone();
+    root_rebind::submit_root_rebind_task_cancellable("apply", move |cancellation| {
+        root_rebind::apply_prepared_root_rebind_cancellable(
+            &paths,
+            &receipt_id,
+            None,
+            &cancellation,
+        )
+    })
+    .map_err(|error| error.to_string())
+}
+
+#[tauri::command]
+fn root_rebind_status(
+    state: State<'_, AppState>,
+    receipt_id: Option<String>,
+) -> Result<Vec<root_rebind::RootRebindReceipt>, String> {
+    if let Some(receipt_id) = receipt_id
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+    {
+        return root_rebind::root_rebind_receipt_status(&state.paths, receipt_id)
+            .map(|receipt| vec![receipt])
+            .map_err(|error| error.to_string());
+    }
+    root_rebind::list_root_rebind_receipts(&state.paths).map_err(|error| error.to_string())
+}
+
+#[tauri::command]
+fn root_rebind_rollback(
+    state: State<'_, AppState>,
+    receipt_id: String,
+    confirmation: String,
+) -> Result<root_rebind::RootRebindTaskStatus, String> {
+    let receipt_id = receipt_id.trim().to_string();
+    if confirmation.trim() != format!("ROLLBACK:{receipt_id}") {
+        return Err(format!(
+            "root rebind rollback requires confirmation ROLLBACK:{receipt_id}"
+        ));
+    }
+    let paths = state.paths.clone();
+    root_rebind::submit_root_rebind_task("rollback", move || {
+        root_rebind::rollback_root_rebind(&paths, &receipt_id)
+    })
+    .map_err(|error| error.to_string())
+}
+
+#[tauri::command]
+fn root_rebind_recover(
+    state: State<'_, AppState>,
+) -> Result<root_rebind::RootRebindTaskStatus, String> {
+    let paths = state.paths.clone();
+    root_rebind::submit_root_rebind_task("recover", move || {
+        root_rebind::reconcile_incomplete_root_rebinds(&paths)
+    })
+    .map_err(|error| error.to_string())
+}
+
+#[tauri::command]
+fn root_rebind_task_status(
+    task_id: String,
+    wait_timeout_ms: Option<u64>,
+) -> Result<root_rebind::RootRebindTaskStatus, String> {
+    root_rebind::root_rebind_task_status(task_id.trim(), wait_timeout_ms)
+        .map_err(|error| error.to_string())
+}
+
+#[tauri::command]
+fn root_rebind_task_cancel(
+    task_id: String,
+) -> Result<root_rebind::RootRebindTaskStatus, String> {
+    root_rebind::cancel_root_rebind_task(task_id.trim()).map_err(|error| error.to_string())
+}
+
+#[derive(Debug, serde::Serialize)]
+struct YoutubeAuthStatus {
+    manual_cookie_configured: bool,
+    browser_cookie_source: Option<String>,
+    last_verified_at_ms: Option<i64>,
+    reconnect_required_at_ms: Option<i64>,
+    credential_generation: u64,
+    credential_fingerprint: String,
+    cleanup_warning: Option<String>,
+}
+
+fn youtube_auth_status(
+    paths: &AppPaths,
+    config_value: &config::YoutubeAuthConfig,
+) -> Result<YoutubeAuthStatus, String> {
+    let revision = config::youtube_auth_revision(paths)
+        .map_err(|error| jobs::redact_auth_credential_locators(&error.to_string()))?;
+    Ok(YoutubeAuthStatus {
+        manual_cookie_configured: config_value
+            .netscape_cookie_json
+            .as_deref()
+            .is_some_and(|value| !value.trim().is_empty()),
+        browser_cookie_source: config_value.browser_cookie_source.clone(),
+        last_verified_at_ms: config_value.last_verified_at_ms,
+        reconnect_required_at_ms: config_value.reconnect_required_at_ms,
+        credential_generation: revision.credential_generation,
+        credential_fingerprint: revision.credential_fingerprint,
+        cleanup_warning: None,
+    })
+}
+
+#[tauri::command]
+fn config_youtube_auth_get(state: State<'_, AppState>) -> Result<YoutubeAuthStatus, String> {
+    let config_value = config::load_youtube_auth_config(&state.paths)
+        .map_err(|e| jobs::redact_auth_credential_locators(&e.to_string()))?;
+    youtube_auth_status(&state.paths, &config_value)
 }
 
 #[tauri::command]
 fn config_youtube_auth_set(
     state: State<'_, AppState>,
     config_value: config::YoutubeAuthConfig,
-) -> Result<config::YoutubeAuthConfig, String> {
+    expected_credential_generation: Option<u64>,
+    expected_credential_fingerprint: Option<String>,
+) -> Result<YoutubeAuthStatus, String> {
+    let _operation_guard = YOUTUBE_AUTH_OPERATION_LOCK
+        .get_or_init(|| Mutex::new(()))
+        .lock()
+        .map_err(|_| "youtube auth operation lock is poisoned".to_string())?;
     let config_value = config::YoutubeAuthConfig {
         netscape_cookie_json: jobs::normalize_youtube_auth_cookie_for_storage(
             config_value.netscape_cookie_json,
         )
-        .map_err(|e| e.to_string())?,
+        .map_err(|e| jobs::redact_auth_credential_locators(&e.to_string()))?,
         browser_cookie_source: jobs::normalize_browser_cookie_source(
             config_value.browser_cookie_source.as_deref(),
         )
-        .map_err(|e| e.to_string())?,
+        .map_err(|e| jobs::redact_auth_credential_locators(&e.to_string()))?,
         last_verified_at_ms: None,
         reconnect_required_at_ms: None,
     };
-    config::save_youtube_auth_config(&state.paths, &config_value).map_err(|e| e.to_string())?;
-    jobs::clear_youtube_auth_block(&state.paths).map_err(|e| e.to_string())?;
-    Ok(config_value)
+    // The engine commits the credential CAS before clearing only the previous credential's
+    // circuit. A stale writer therefore has zero runtime side effects and cannot clear a hold
+    // belonging to the winning credential.
+    let saved = jobs::replace_youtube_auth_config_and_clear_previous_block(
+        &state.paths,
+        config_value,
+        expected_credential_generation,
+        expected_credential_fingerprint.as_deref(),
+    )
+    .map_err(|e| jobs::redact_auth_credential_locators(&e.to_string()))?;
+    let mut status = youtube_auth_status(&state.paths, &saved.config)?;
+    status.cleanup_warning = saved.cleanup_warning;
+    Ok(status)
 }
 
 const YOUTUBE_SIGN_IN_URL: &str = "https://www.youtube.com/";
@@ -6486,7 +9382,12 @@ fn config_youtube_auth_preflight(
     state: State<'_, AppState>,
     url: Option<String>,
 ) -> Result<jobs::YoutubeAuthPreflightResult, String> {
-    jobs::youtube_auth_preflight(&state.paths, url).map_err(|e| e.to_string())
+    let _operation_guard = YOUTUBE_AUTH_OPERATION_LOCK
+        .get_or_init(|| Mutex::new(()))
+        .lock()
+        .map_err(|_| "youtube auth operation lock is poisoned".to_string())?;
+    jobs::youtube_auth_preflight(&state.paths, url)
+        .map_err(|e| jobs::redact_auth_credential_locators(&e.to_string()))
 }
 
 // ---- WP-0263: global Instagram auth in Options (mirrors config_youtube_auth_*) ----
@@ -6505,6 +9406,9 @@ struct InstagramAuthConfigInput {
 #[derive(Debug, Clone, serde::Serialize)]
 struct InstagramAuthConfigStatus {
     configured: bool,
+    credential_generation: u64,
+    credential_fingerprint: String,
+    cleanup_warning: Option<String>,
 }
 
 /// Whether a global Instagram cookie is configured. Mirrors `config_youtube_auth_get`, but
@@ -6513,8 +9417,13 @@ struct InstagramAuthConfigStatus {
 fn config_instagram_auth_get(
     state: State<'_, AppState>,
 ) -> Result<InstagramAuthConfigStatus, String> {
+    let revision = jobs::instagram_auth_revision(&state.paths)
+        .map_err(|e| jobs::redact_auth_credential_locators(&e.to_string()))?;
     Ok(InstagramAuthConfigStatus {
-        configured: jobs::get_global_instagram_auth_configured(&state.paths),
+        configured: revision.configured,
+        credential_generation: revision.credential_generation,
+        credential_fingerprint: revision.credential_fingerprint,
+        cleanup_warning: revision.cleanup_warning,
     })
 }
 
@@ -6525,11 +9434,21 @@ fn config_instagram_auth_get(
 fn config_instagram_auth_set(
     state: State<'_, AppState>,
     config_value: InstagramAuthConfigInput,
+    expected_credential_generation: Option<u64>,
+    expected_credential_fingerprint: Option<String>,
 ) -> Result<InstagramAuthConfigStatus, String> {
-    jobs::set_global_instagram_auth_cookie(&state.paths, config_value.cookie)
-        .map_err(|e| e.to_string())?;
+    let revision = jobs::replace_global_instagram_auth_cookie(
+        &state.paths,
+        config_value.cookie,
+        expected_credential_generation,
+        expected_credential_fingerprint.as_deref(),
+    )
+        .map_err(|e| jobs::redact_auth_credential_locators(&e.to_string()))?;
     Ok(InstagramAuthConfigStatus {
-        configured: jobs::get_global_instagram_auth_configured(&state.paths),
+        configured: revision.configured,
+        credential_generation: revision.credential_generation,
+        credential_fingerprint: revision.credential_fingerprint,
+        cleanup_warning: revision.cleanup_warning,
     })
 }
 
@@ -6539,7 +9458,8 @@ fn config_instagram_auth_preflight(
     state: State<'_, AppState>,
     url: Option<String>,
 ) -> Result<jobs::InstagramAuthPreflightResult, String> {
-    jobs::instagram_auth_preflight(&state.paths, url).map_err(|e| e.to_string())
+    jobs::instagram_auth_preflight(&state.paths, url)
+        .map_err(|e| jobs::redact_auth_credential_locators(&e.to_string()))
 }
 
 #[tauri::command]
@@ -7990,12 +10910,23 @@ async fn library_query(
     single_video_only: Option<bool>,
     sort_by: Option<String>,
     direction: Option<String>,
+    request_id: Option<String>,
+    span_id: Option<String>,
 ) -> Result<library::LibraryPage, String> {
-    let _timer = InvokeTimer::start(state.paths.clone(), "library_query");
+    let timer = InvokeTimer::start_with_context(
+        state.paths.clone(),
+        "library_query",
+        request_id.clone(),
+        span_id.clone(),
+    );
+    let phase_recorder = timer.phase_recorder();
     let paths = state.paths.clone();
     let trace_paths = paths.clone();
+    let queued_at = Instant::now();
     let result = tauri::async_runtime::spawn_blocking(move || {
-        library::query_items_page(
+        phase_recorder.phase("dispatch_queue_wait", queued_at.elapsed());
+        let db_started = Instant::now();
+        let result = library::query_items_page(
             &paths,
             limit,
             offset,
@@ -8007,10 +10938,15 @@ async fn library_query(
             sort_by.as_deref(),
             direction.as_deref(),
         )
-        .map_err(|e| e.to_string())
+        .map_err(|e| e.to_string());
+        phase_recorder.phase("db_open_prepare_step_map", db_started.elapsed());
+        result
     })
     .await
     .map_err(|e| e.to_string())?;
+    let serialization_started = Instant::now();
+    let _ = serde_json::to_vec(&result);
+    timer.phase("serialization", serialization_started.elapsed());
     result.map_err(|e| trace_database_command_error(&trace_paths, "library_query", e))
 }
 
@@ -8588,15 +11524,32 @@ fn youtube_subscriptions_seed_archive_scan(
 #[tauri::command]
 async fn youtube_subscriptions_archive_stats(
     state: State<'_, AppState>,
+    request_id: Option<String>,
+    span_id: Option<String>,
 ) -> Result<std::collections::HashMap<String, usize>, String> {
-    let _timer = InvokeTimer::start(state.paths.clone(), "youtube_subscriptions_archive_stats");
+    let timer = InvokeTimer::start_with_context(
+        state.paths.clone(),
+        "youtube_subscriptions_archive_stats",
+        request_id,
+        span_id,
+    );
+    let phase_recorder = timer.phase_recorder();
     let paths = state.paths.clone();
     let trace_paths = paths.clone();
+    let queued_at = Instant::now();
     let result = tauri::async_runtime::spawn_blocking(move || {
-        subscriptions::youtube_subscriptions_archive_stats(&paths).map_err(|e| e.to_string())
+        phase_recorder.phase("dispatch_queue_wait", queued_at.elapsed());
+        let storage_started = Instant::now();
+        let result =
+            subscriptions::youtube_subscriptions_archive_stats(&paths).map_err(|e| e.to_string());
+        phase_recorder.phase("db_storage", storage_started.elapsed());
+        result
     })
     .await
     .map_err(|e| e.to_string())?;
+    let serialization_started = Instant::now();
+    let _ = serde_json::to_vec(&result);
+    timer.phase("serialization", serialization_started.elapsed());
     result.map_err(|e| {
         trace_database_command_error(&trace_paths, "youtube_subscriptions_archive_stats", e)
     })
@@ -8648,18 +11601,61 @@ async fn youtube_subscriptions_activity(
 #[tauri::command]
 async fn subscription_download_activity(
     state: State<'_, AppState>,
+    request_id: Option<String>,
+    span_id: Option<String>,
 ) -> Result<Vec<subscriptions::SubscriptionDownloadActivityRow>, String> {
-    let _timer = InvokeTimer::start(state.paths.clone(), "subscription_download_activity");
+    let timer = InvokeTimer::start_with_context(
+        state.paths.clone(),
+        "subscription_download_activity",
+        request_id,
+        span_id,
+    );
+    let phase_recorder = timer.phase_recorder();
     let paths = state.paths.clone();
     let trace_paths = paths.clone();
+    let queued_at = Instant::now();
     let result = tauri::async_runtime::spawn_blocking(move || {
-        subscriptions::subscription_download_activity(&paths).map_err(|e| e.to_string())
+        phase_recorder.phase("dispatch_queue_wait", queued_at.elapsed());
+        let db_started = Instant::now();
+        let result =
+            subscriptions::subscription_download_activity(&paths).map_err(|e| e.to_string());
+        phase_recorder.phase("db_open_prepare_step_map", db_started.elapsed());
+        result
     })
     .await
     .map_err(|e| e.to_string())?;
+    let serialization_started = Instant::now();
+    let _ = serde_json::to_vec(&result);
+    timer.phase("serialization", serialization_started.elapsed());
     result.map_err(|e| {
         trace_database_command_error(&trace_paths, "subscription_download_activity", e)
     })
+}
+
+#[tauri::command]
+async fn subscription_projections_rebuild(
+    state: State<'_, AppState>,
+) -> Result<serde_json::Value, String> {
+    let timer = InvokeTimer::start(state.paths.clone(), "subscription_projections_rebuild");
+    let phase_recorder = timer.phase_recorder();
+    let paths = state.paths.clone();
+    let queued_at = Instant::now();
+    let result = tauri::async_runtime::spawn_blocking(move || {
+        phase_recorder.phase("dispatch_queue_wait", queued_at.elapsed());
+        let archive = subscriptions::rebuild_youtube_subscription_archive_rollups(&paths)
+            .map_err(|error| error.to_string())?;
+        let activity = subscriptions::rebuild_subscription_activity_rollup(&paths)
+            .map_err(|error| error.to_string())?;
+        Ok::<_, String>(serde_json::json!({
+            "archive_subscription_count": archive.len(),
+            "activity_subscription_count": activity.len(),
+            "reconciled_at_ms": now_epoch_ms_i64(),
+        }))
+    })
+    .await
+    .map_err(|error| error.to_string())?;
+    timer.phase("rebuild_reconciliation", timer.started.elapsed());
+    result
 }
 
 // WP-0257/WP-0284: READ-ONLY per-subscription detail projections. Available and
@@ -8809,12 +11805,72 @@ fn download_presets_get(
 }
 
 #[tauri::command]
-fn download_presets_set(
+fn download_presets_default_safety_patch(
+    state: State<'_, AppState>,
+    expected_default_preset_id: String,
+    patch: config::DownloadPresetSafetyPatch,
+) -> Result<config::DownloadPresetsConfig, String> {
+    config::patch_default_download_preset_safety_fields(
+        &state.paths,
+        &expected_default_preset_id,
+        &patch,
+    )
+    .map_err(|e| e.to_string())
+}
+
+fn preserve_options_owned_downloader_fields(
+    current: &config::DownloadPresetsConfig,
+    mut next: config::DownloadPresetsConfig,
+) -> config::DownloadPresetsConfig {
+    let current_default = current
+        .default_preset_id
+        .as_ref()
+        .and_then(|id| current.presets.iter().find(|preset| &preset.id == id))
+        .or_else(|| current.presets.first());
+    if next.presets.is_empty() {
+        next = config::DownloadPresetsConfig::default();
+    }
+    let next_default_id = next
+        .default_preset_id
+        .clone()
+        .filter(|id| next.presets.iter().any(|preset| preset.id == *id))
+        .or_else(|| next.presets.first().map(|preset| preset.id.clone()));
+    let Some(current_default) = current_default else {
+        return next;
+    };
+    let Some(next_default_id) = next_default_id else {
+        return next;
+    };
+    next.default_preset_id = Some(next_default_id.clone());
+    if let Some(next_default) = next
+        .presets
+        .iter_mut()
+        .find(|preset| preset.id == next_default_id)
+    {
+        next_default.yt_dlp_concurrent_fragments = current_default.yt_dlp_concurrent_fragments;
+        next_default.yt_dlp_limit_rate = current_default.yt_dlp_limit_rate.clone();
+        next_default.yt_dlp_throttled_rate = current_default.yt_dlp_throttled_rate.clone();
+        next_default.yt_dlp_file_access_retries = current_default.yt_dlp_file_access_retries;
+        next_default.yt_dlp_retries = current_default.yt_dlp_retries;
+        next_default.yt_dlp_fragment_retries = current_default.yt_dlp_fragment_retries;
+        next_default.yt_dlp_sleep_interval = current_default.yt_dlp_sleep_interval;
+        next_default.yt_dlp_sleep_requests = current_default.yt_dlp_sleep_requests;
+    }
+    next
+}
+
+#[tauri::command]
+fn download_presets_catalog_set(
     state: State<'_, AppState>,
     config_value: config::DownloadPresetsConfig,
 ) -> Result<config::DownloadPresetsConfig, String> {
-    config::save_download_presets_config(&state.paths, &config_value).map_err(|e| e.to_string())?;
-    config::load_download_presets_config(&state.paths).map_err(|e| e.to_string())
+    config::update_download_presets_config(&state.paths, |current| {
+        Ok(preserve_options_owned_downloader_fields(
+            &current,
+            config_value,
+        ))
+    })
+    .map_err(|e| e.to_string())
 }
 
 #[tauri::command]
@@ -8840,8 +11896,10 @@ fn download_presets_import_json(
     let bytes = std::fs::read(std::path::PathBuf::from(in_path)).map_err(|e| e.to_string())?;
     let parsed: config::DownloadPresetsConfig =
         serde_json::from_slice(&bytes).map_err(|e| e.to_string())?;
-    config::save_download_presets_config(&state.paths, &parsed).map_err(|e| e.to_string())?;
-    config::load_download_presets_config(&state.paths).map_err(|e| e.to_string())
+    config::update_download_presets_config(&state.paths, |current| {
+        Ok(preserve_options_owned_downloader_fields(&current, parsed))
+    })
+    .map_err(|e| e.to_string())
 }
 
 #[tauri::command]
@@ -8922,16 +11980,28 @@ async fn jobs_overview(
     state: State<'_, AppState>,
     view: Option<String>,
     track: Option<String>,
+    request_id: Option<String>,
+    span_id: Option<String>,
 ) -> Result<jobs::JobsOverviewSnapshot, String> {
-    let _timer = InvokeTimer::start(state.paths.clone(), "jobs_overview");
+    let timer =
+        InvokeTimer::start_with_context(state.paths.clone(), "jobs_overview", request_id, span_id);
+    let phase_recorder = timer.phase_recorder();
     let paths = state.paths.clone();
     let trace_paths = paths.clone();
+    let queued_at = Instant::now();
     let result = tauri::async_runtime::spawn_blocking(move || {
-        jobs::jobs_overview_snapshot(&paths, view.as_deref(), track.as_deref())
-            .map_err(|e| e.to_string())
+        phase_recorder.phase("dispatch_queue_wait", queued_at.elapsed());
+        let db_started = Instant::now();
+        let result = jobs::jobs_overview_snapshot(&paths, view.as_deref(), track.as_deref())
+            .map_err(|e| e.to_string());
+        phase_recorder.phase("db_open_prepare_step_map", db_started.elapsed());
+        result
     })
     .await
     .map_err(|e| e.to_string())?;
+    let serialization_started = Instant::now();
+    let _ = serde_json::to_vec(&result);
+    timer.phase("serialization", serialization_started.elapsed());
     result.map_err(|e| trace_database_command_error(&trace_paths, "jobs_overview", e))
 }
 
@@ -9063,14 +12133,47 @@ fn jobs_enqueue_download_batch(
 async fn library_download_preflight(
     state: State<'_, AppState>,
     urls: Vec<String>,
+    request_id: Option<String>,
+    span_id: Option<String>,
 ) -> Result<Vec<library::DownloadPreflightRow>, String> {
-    let _timer = InvokeTimer::start(state.paths.clone(), "library_download_preflight");
+    let causal_request_id = request_id.clone();
+    let causal_span_id = span_id.clone();
+    let (causal_incident_id, _, _, _) = diagnostics_capture_envelope(
+        &state.paths,
+        "media_path_probe_context",
+        &serde_json::json!({
+            "request_id": causal_request_id.clone(),
+            "span_id": causal_span_id.clone(),
+        }),
+    );
+    let timer = InvokeTimer::start_with_context(
+        state.paths.clone(),
+        "library_download_preflight",
+        request_id,
+        span_id,
+    );
+    let phase_recorder = timer.phase_recorder();
     let paths = state.paths.clone();
-    tauri::async_runtime::spawn_blocking(move || {
-        library::preflight_download_urls(&paths, &urls).map_err(|e| e.to_string())
+    let queued_at = Instant::now();
+    let result = tauri::async_runtime::spawn_blocking(move || {
+        phase_recorder.phase("dispatch_queue_wait", queued_at.elapsed());
+        let db_storage_started = Instant::now();
+        let causal = library::MediaProbeCausalEnvelope {
+            request_id: causal_request_id,
+            span_id: causal_span_id,
+            incident_id: causal_incident_id,
+        };
+        let result = library::preflight_download_urls_with_causal(&paths, &urls, Some(&causal))
+            .map_err(|e| e.to_string());
+        phase_recorder.phase("db_storage_observation", db_storage_started.elapsed());
+        result
     })
     .await
-    .map_err(|e| e.to_string())?
+    .map_err(|e| e.to_string())?;
+    let serialization_started = Instant::now();
+    let _ = serde_json::to_vec(&result);
+    timer.phase("serialization", serialization_started.elapsed());
+    result
 }
 
 #[tauri::command]
@@ -9556,6 +12659,13 @@ fn media_cleanup_get(
 }
 
 #[tauri::command]
+fn media_cleanup_latest(
+    state: State<'_, AppState>,
+) -> Result<Option<media_cleanup::MediaCleanupRun>, String> {
+    media_cleanup::latest_run(&state.paths).map_err(|e| e.to_string())
+}
+
+#[tauri::command]
 fn media_cleanup_create(
     state: State<'_, AppState>,
     roots: Vec<String>,
@@ -9711,8 +12821,169 @@ fn antibot_pacing_get(state: State<'_, AppState>) -> Result<jobs::AntiBotPacingS
 fn antibot_pacing_set(
     state: State<'_, AppState>,
     settings: jobs::AntiBotPacingSettings,
+    mutation_generation: u64,
 ) -> Result<jobs::AntiBotPacingSettings, String> {
-    jobs::set_antibot_pacing(&state.paths, settings).map_err(|e| e.to_string())
+    run_youtube_protection_mutation("pacing", mutation_generation, || {
+        jobs::set_antibot_pacing_with_generation(&state.paths, settings, mutation_generation)
+            .map_err(|e| e.to_string())
+    })
+}
+
+#[tauri::command]
+async fn youtube_protection_status_get(
+    state: State<'_, AppState>,
+    operation: Option<String>,
+    request_id: Option<String>,
+    span_id: Option<String>,
+) -> Result<jobs::YoutubeProtectionStatus, String> {
+    let timer = InvokeTimer::start_with_context(state.paths.clone(), "youtube_protection_status_get", request_id, span_id);
+    timer.phase("blocking_dispatch", Duration::ZERO);
+    let recorder = timer.phase_recorder();
+    let paths = state.paths.clone();
+    let result = tauri::async_runtime::spawn_blocking(move || {
+        let started = std::time::Instant::now();
+        let result = jobs::get_youtube_protection_status(&paths, operation.as_deref())
+            .map_err(|error| error.to_string());
+        recorder.phase("policy_db_and_provider_health", started.elapsed());
+        result
+    }).await.map_err(|error| error.to_string())?;
+    result
+}
+
+#[tauri::command]
+async fn youtube_protection_return_to_baseline(
+    state: State<'_, AppState>,
+    operation: Option<String>,
+    request_id: Option<String>,
+    span_id: Option<String>,
+) -> Result<jobs::YoutubeProtectionStatus, String> {
+    let timer = InvokeTimer::start_with_context(state.paths.clone(), "youtube_protection_return_to_baseline", request_id, span_id);
+    let recorder = timer.phase_recorder();
+    let paths = state.paths.clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        let started = std::time::Instant::now();
+        let result = jobs::return_youtube_protection_to_baseline(&paths, operation.as_deref()).map_err(|error| error.to_string());
+        recorder.phase("policy_mutation", started.elapsed());
+        result
+    }).await.map_err(|error| error.to_string())?
+}
+
+#[tauri::command]
+async fn youtube_protection_history_get(
+    state: State<'_, AppState>,
+    operation: Option<String>,
+    limit: Option<usize>,
+    request_id: Option<String>,
+    span_id: Option<String>,
+) -> Result<voxvulgi_engine::youtube_protection::DownloaderPolicyHistory, String> {
+    let timer = InvokeTimer::start_with_context(state.paths.clone(), "youtube_protection_history_get", request_id, span_id);
+    let recorder = timer.phase_recorder();
+    let paths = state.paths.clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        let started = std::time::Instant::now();
+        let result = jobs::get_youtube_protection_history(&paths, operation.as_deref(), limit.unwrap_or(100)).map_err(|error| error.to_string());
+        recorder.phase("policy_history_page", started.elapsed());
+        result
+    }).await.map_err(|error| error.to_string())?
+}
+
+#[tauri::command]
+async fn youtube_protection_history_replay(
+    state: State<'_, AppState>,
+    operation: Option<String>,
+    limit: Option<usize>,
+    request_id: Option<String>,
+    span_id: Option<String>,
+) -> Result<voxvulgi_engine::youtube_protection::DownloaderPolicyReplayReceipt, String> {
+    let timer = InvokeTimer::start_with_context(state.paths.clone(), "youtube_protection_history_replay", request_id, span_id);
+    let recorder = timer.phase_recorder();
+    let paths = state.paths.clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        let started = std::time::Instant::now();
+        let result = jobs::replay_youtube_protection_history(&paths, operation.as_deref(), limit.unwrap_or(500)).map_err(|error| error.to_string());
+        recorder.phase("policy_replay", started.elapsed());
+        result
+    }).await.map_err(|error| error.to_string())?
+}
+
+#[tauri::command]
+async fn youtube_protection_tuning_get(
+    state: State<'_, AppState>,
+    request_id: Option<String>,
+    span_id: Option<String>,
+) -> Result<voxvulgi_engine::youtube_protection::YoutubeProtectionTuning, String> {
+    let _timer = InvokeTimer::start_with_context(state.paths.clone(), "youtube_protection_tuning_get", request_id, span_id);
+    let paths = state.paths.clone();
+    tauri::async_runtime::spawn_blocking(move || jobs::get_youtube_protection_tuning(&paths).map_err(|e| e.to_string()))
+        .await.map_err(|e| e.to_string())?
+}
+
+#[tauri::command]
+async fn youtube_protection_tuning_set(
+    state: State<'_, AppState>,
+    tuning: voxvulgi_engine::youtube_protection::YoutubeProtectionTuning,
+    mutation_generation: u64,
+    request_id: Option<String>,
+    span_id: Option<String>,
+) -> Result<voxvulgi_engine::youtube_protection::YoutubeProtectionTuning, String> {
+    let _timer = InvokeTimer::start_with_context(state.paths.clone(), "youtube_protection_tuning_set", request_id, span_id);
+    let paths = state.paths.clone();
+    tauri::async_runtime::spawn_blocking(move || run_youtube_protection_mutation("tuning", mutation_generation, || jobs::set_youtube_protection_tuning_with_generation(&paths, tuning, mutation_generation).map_err(|e| e.to_string())))
+        .await.map_err(|e| e.to_string())?
+}
+
+#[tauri::command]
+async fn youtube_protection_tuning_reset(
+    state: State<'_, AppState>,
+    mutation_generation: u64,
+    request_id: Option<String>,
+    span_id: Option<String>,
+) -> Result<voxvulgi_engine::youtube_protection::YoutubeProtectionTuning, String> {
+    let _timer = InvokeTimer::start_with_context(state.paths.clone(), "youtube_protection_tuning_reset", request_id, span_id);
+    let paths = state.paths.clone();
+    tauri::async_runtime::spawn_blocking(move || run_youtube_protection_mutation("tuning", mutation_generation, || jobs::reset_youtube_protection_tuning_with_generation(&paths, mutation_generation).map_err(|e| e.to_string())))
+        .await.map_err(|e| e.to_string())?
+}
+
+#[tauri::command]
+async fn youtube_protection_history_export(
+    state: State<'_, AppState>,
+    operation: Option<String>,
+    request_id: Option<String>,
+    span_id: Option<String>,
+) -> Result<jobs::YoutubeProtectionHistoryExportReceipt, String> {
+    let timer = InvokeTimer::start_with_context(state.paths.clone(), "youtube_protection_history_export", request_id, span_id);
+    let recorder = timer.phase_recorder();
+    let paths = state.paths.clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        let started = std::time::Instant::now();
+        let result = jobs::export_youtube_protection_history(&paths, operation.as_deref()).map_err(|e| e.to_string());
+        recorder.phase("policy_export_stream", started.elapsed());
+        result
+    }).await.map_err(|e| e.to_string())?
+}
+
+#[tauri::command]
+async fn youtube_protection_history_reset(
+    state: State<'_, AppState>,
+    operation: Option<String>,
+    mutation_generation: u64,
+    request_id: Option<String>,
+    span_id: Option<String>,
+) -> Result<voxvulgi_engine::youtube_protection::DownloaderHistoryResetReceipt, String> {
+    let timer = InvokeTimer::start_with_context(state.paths.clone(), "youtube_protection_history_reset", request_id, span_id);
+    let recorder = timer.phase_recorder();
+    let paths = state.paths.clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        let started = std::time::Instant::now();
+        // Download and enumeration batches are one operator reset intent. A newer first batch
+        // invalidates every older continuation, including the other policy sub-operation.
+        let result = run_youtube_protection_mutation("history_reset", mutation_generation, || {
+            jobs::reset_youtube_protection_history_with_generation(&paths, operation.as_deref(), mutation_generation).map_err(|e| e.to_string())
+        });
+        recorder.phase("policy_reset_batch", started.elapsed());
+        result
+    }).await.map_err(|e| e.to_string())?
 }
 
 #[tauri::command]
@@ -10285,6 +13556,206 @@ fn agent_ui_request_complete(payload: String) {
     }
 }
 
+#[derive(Clone, Copy)]
+struct YoutubeRetentionWorkerPolicy {
+    max_cycles_per_round: u64,
+    max_failures_per_round: u32,
+    inter_batch_delay: Duration,
+    failure_retry_delay: Duration,
+    round_backoff: Duration,
+}
+
+fn run_youtube_retention_worker_loop<D, P, C, W>(
+    mut drain: D,
+    mut persist: P,
+    mut is_cancelled: C,
+    mut wait: W,
+    policy: YoutubeRetentionWorkerPolicy,
+) -> bool
+where
+    D: FnMut() -> Result<voxvulgi_engine::youtube_protection::DownloaderRetentionDrainReceipt, String>,
+    P: FnMut(bool, u32) -> bool,
+    C: FnMut() -> bool,
+    W: FnMut(Duration) -> bool,
+{
+    let mut consecutive_failures = 0_u32;
+    loop {
+        if is_cancelled() {
+            let _persisted = persist(true, consecutive_failures);
+            return false;
+        }
+        let mut cycles_this_round = 0_u64;
+        while cycles_this_round < policy.max_cycles_per_round {
+            if is_cancelled() {
+                let _persisted = persist(true, consecutive_failures);
+                return false;
+            }
+            cycles_this_round = cycles_this_round.saturating_add(1);
+            match drain() {
+                Ok(receipt) if receipt.has_more => {
+                    consecutive_failures = 0;
+                    let _persisted = persist(true, 0);
+                    if cycles_this_round < policy.max_cycles_per_round
+                        && wait(policy.inter_batch_delay)
+                    {
+                        let _persisted = persist(true, 0);
+                        return false;
+                    }
+                }
+                Ok(_) => {
+                    if persist(false, 0) {
+                        return true;
+                    }
+                    // A completed delete pass is not durable completion until the continuation
+                    // row is cleared. Back off and retry the projection instead of silently
+                    // abandoning a pending startup continuation.
+                    break;
+                }
+                Err(_) => {
+                    consecutive_failures = consecutive_failures.saturating_add(1);
+                    let _persisted = persist(true, consecutive_failures);
+                    if consecutive_failures >= policy.max_failures_per_round {
+                        break;
+                    }
+                    if wait(policy.failure_retry_delay) {
+                        let _persisted = persist(true, consecutive_failures);
+                        return false;
+                    }
+                }
+            }
+        }
+        // Each finite round yields before rescheduling itself. This keeps the singleton worker
+        // live until durable completion without a startup hot loop or unbounded thread spawn.
+        let _persisted = persist(true, consecutive_failures);
+        if wait(policy.round_backoff) {
+            let _persisted = persist(true, consecutive_failures);
+            return false;
+        }
+    }
+}
+
+fn spawn_youtube_retention_worker(paths: AppPaths) {
+    if YOUTUBE_RETENTION_WORKER_RUNNING
+        .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
+        .is_err()
+    {
+        return;
+    }
+    YOUTUBE_RETENTION_WORKER_CANCELLED.store(false, Ordering::Release);
+    let spawn = std::thread::Builder::new()
+        .name("youtube-retention-worker".to_string())
+        .spawn(move || {
+            struct RunningGuard;
+            impl Drop for RunningGuard {
+                fn drop(&mut self) {
+                    YOUTUBE_RETENTION_WORKER_RUNNING.store(false, Ordering::Release);
+                }
+            }
+            let _running = RunningGuard;
+            let mut cycle = 0_u64;
+            let _completed = run_youtube_retention_worker_loop(
+                || {
+                    cycle = cycle.saturating_add(1);
+                    let receipt = voxvulgi_engine::youtube_protection::drain_expired_outcomes(
+                        &paths,
+                        now_epoch_ms_i64(),
+                        100,
+                        8,
+                        2_000,
+                    )
+                    .map_err(|error| error.to_string());
+                    append_diagnostics_trace_row_best_effort(
+                        &paths,
+                        "youtube_protection_retention_drain",
+                        match &receipt {
+                            Ok(receipt) => serde_json::json!({
+                                "cycle": cycle,
+                                "batches": receipt.batches,
+                                "deleted": receipt.deleted,
+                                "complete": receipt.complete,
+                                "has_more": receipt.has_more,
+                                "elapsed_ms": receipt.elapsed_ms,
+                                "budget_exhausted": receipt.budget_exhausted,
+                            }),
+                            Err(error) => serde_json::json!({ "cycle": cycle, "error": error }),
+                        },
+                        if receipt.is_ok() { "info" } else { "warn" },
+                    );
+                    receipt
+                },
+                |pending, failures| {
+                    match voxvulgi_engine::youtube_protection::persist_retention_continuation(
+                        &paths, pending, failures,
+                    ) {
+                        Ok(_) => true,
+                        Err(error) => {
+                            append_diagnostics_trace_row_best_effort(
+                                &paths,
+                                "youtube_protection_retention_continuation_failed",
+                                serde_json::json!({
+                                    "pending": pending,
+                                    "consecutive_failures": failures,
+                                    "error": error.to_string(),
+                                }),
+                                "warn",
+                            );
+                            false
+                        }
+                    }
+                },
+                || YOUTUBE_RETENTION_WORKER_CANCELLED.load(Ordering::Acquire),
+                wait_for_youtube_retention_cancel,
+                YoutubeRetentionWorkerPolicy {
+                    max_cycles_per_round: 16,
+                    max_failures_per_round: 3,
+                    inter_batch_delay: Duration::from_secs(2),
+                    failure_retry_delay: Duration::from_secs(30),
+                    round_backoff: Duration::from_secs(30),
+                },
+            );
+        });
+    if spawn.is_err() {
+        YOUTUBE_RETENTION_WORKER_RUNNING.store(false, Ordering::Release);
+    }
+}
+
+fn wait_for_youtube_retention_cancel(timeout: Duration) -> bool {
+    if YOUTUBE_RETENTION_WORKER_CANCELLED.load(Ordering::Acquire) {
+        return true;
+    }
+    let (lock, wake) = YOUTUBE_RETENTION_WORKER_WAKE
+        .get_or_init(|| (Mutex::new(()), std::sync::Condvar::new()));
+    let guard = lock
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let _ = wake.wait_timeout_while(guard, timeout, |_| {
+        !YOUTUBE_RETENTION_WORKER_CANCELLED.load(Ordering::Acquire)
+    });
+    YOUTUBE_RETENTION_WORKER_CANCELLED.load(Ordering::Acquire)
+}
+
+fn cancel_youtube_retention_worker() {
+    YOUTUBE_RETENTION_WORKER_CANCELLED.store(true, Ordering::Release);
+    if let Some((_, wake)) = YOUTUBE_RETENTION_WORKER_WAKE.get() {
+        wake.notify_all();
+    }
+}
+
+fn offline_provider_verification_startup_outcome(
+    verification: Result<(), String>,
+) -> (&'static str, Option<String>) {
+    match verification {
+        Ok(()) => ("ready", None),
+        Err(error) => {
+            let redacted = redact_diagnostics_value(serde_json::Value::String(error))
+                .as_str()
+                .unwrap_or("provider integrity verification failed")
+                .to_string();
+            ("error", Some(redacted))
+        }
+    }
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
@@ -10300,11 +13771,20 @@ pub fn run() {
             }
             let base_dir = app.path().app_data_dir()?;
             let paths = AppPaths::new(AppPaths::normalize_base_dir(&base_dir));
+            let _ = voxvulgi_engine::diagnostics::install_trace_sink(Arc::new(
+                |paths, event, level, details| {
+                    let _ = append_diagnostics_trace_row_best_effort(paths, event, details, level);
+                },
+            ));
             let startup = Arc::new(Mutex::new(StartupTracker::new()));
             let _ = AGENT_APP_HANDLE.set(app.handle().clone());
             spawn_agent_bridge(&AppPaths::normalize_base_dir(&base_dir));
             set_startup_phase(&startup, &paths, "app_dirs", "running", None);
             paths.ensure_dirs()?;
+            // WP-0298: restore an armed/active bounded incident capture before any
+            // panel or job event can arrive. Expired state is normalized lazily by
+            // diagnostics_capture_status/the trace envelope.
+            let _ = load_diagnostics_capture_state(&paths);
             set_startup_phase(&startup, &paths, "app_dirs", "ready", None);
             let cli_safe_mode = cli_args.iter().any(|value| value.trim() == "--safe-mode");
             let persisted_safe_mode = config::load_safe_mode_config(&paths)
@@ -10335,12 +13815,50 @@ pub fn run() {
                     let result = apply_offline_bundle_if_present(&paths_for_bundle, &resource_dir);
                     match result {
                         Ok(()) => {
+                            // Full production dependency-tree authentication is intentionally
+                            // performed only on this background hydration boundary. Hot Options
+                            // status polling reads the current-process attestation and never
+                            // treats a persisted receipt as executable trust.
+                            let provider_integrity =
+                                voxvulgi_engine::tools::verify_youtube_po_provider_node_modules(
+                                    &paths_for_bundle,
+                                );
+                            let provider_integrity_ready = matches!(
+                                &provider_integrity,
+                                Ok(status) if status.installed
+                            );
+                            append_diagnostics_trace_row_best_effort(
+                                &paths_for_bundle,
+                                "youtube_provider_integrity_verified",
+                                match &provider_integrity {
+                                    Ok(status) => serde_json::json!({
+                                        "installed": status.installed,
+                                        "tree_sha256_hex": status.node_modules_tree_sha256_hex,
+                                        "verified_at_ms": status.node_modules_verified_at_ms,
+                                    }),
+                                    Err(error) => serde_json::json!({
+                                        "installed": false,
+                                        "error": error.to_string(),
+                                    }),
+                                },
+                                if provider_integrity_ready { "info" } else { "warn" },
+                            );
+                            let verification = match &provider_integrity {
+                                Ok(status) if status.installed => Ok(()),
+                                Ok(status) => Err(status.readiness_error.clone().unwrap_or_else(|| {
+                                    "provider integrity verification did not establish executable readiness"
+                                        .to_string()
+                                })),
+                                Err(error) => Err(error.to_string()),
+                            };
+                            let (phase, error) =
+                                offline_provider_verification_startup_outcome(verification);
                             set_startup_phase(
                                 &startup_for_thread,
                                 &paths_for_bundle,
                                 "offline_bundle",
-                                "ready",
-                                None,
+                                phase,
+                                error,
                             );
                         }
                         Err(error) => {
@@ -10377,6 +13895,73 @@ pub fn run() {
             db::ensure_schema(&paths)?;
             video_libraries::ensure_default_video_library(&paths)?;
             set_startup_phase(&startup, &paths, "db_schema", "ready", None);
+            if runtime_background_work {
+                let archive_reconcile_paths = paths.clone();
+                std::thread::Builder::new()
+                    .name("youtube-archive-reconcile".to_string())
+                    .spawn(move || {
+                        let outcome = subscriptions::reconcile_youtube_archive_merge_journals(
+                            &archive_reconcile_paths,
+                        );
+                        append_diagnostics_trace_row_best_effort(
+                            &archive_reconcile_paths,
+                            "youtube_archive_startup_reconcile",
+                            match &outcome {
+                                Ok(recovered) => serde_json::json!({ "recovered": recovered }),
+                                Err(error) => serde_json::json!({ "error": error.to_string() }),
+                            },
+                            if outcome.is_ok() { "info" } else { "warn" },
+                        );
+                    })
+                    .map_err(std::io::Error::other)?;
+                spawn_youtube_retention_worker(paths.clone());
+            }
+            // Root rebind recovery can canonicalize and hash files on disconnected storage.
+            // Queue it only after schema readiness on the same fixed bounded executor used by
+            // the command surface; startup never waits on a NAS probe and headless mode remains
+            // mutation-free.
+            if runtime_background_work {
+                let reconcile_paths = paths.clone();
+                match root_rebind::submit_root_rebind_task("startup_recover", move || {
+                    let outcome = root_rebind::reconcile_incomplete_root_rebinds(&reconcile_paths);
+                    match &outcome {
+                        Ok(receipts) if !receipts.is_empty() => {
+                            append_diagnostics_trace_row_best_effort(
+                                &reconcile_paths,
+                                "root_rebind_startup_reconciled",
+                                serde_json::json!({
+                                    "receipt_ids": receipts.iter().map(|receipt| receipt.id.clone()).collect::<Vec<_>>(),
+                                    "receipt_count": receipts.len(),
+                                }),
+                                "info",
+                            );
+                        }
+                        Ok(_) => {}
+                        Err(error) => {
+                            append_diagnostics_trace_row_best_effort(
+                                &reconcile_paths,
+                                "root_rebind_startup_reconcile_failed",
+                                serde_json::json!({ "error": error.to_string() }),
+                                "warn",
+                            );
+                        }
+                    }
+                    outcome
+                }) {
+                    Ok(ticket) => append_diagnostics_trace_row_best_effort(
+                        &paths,
+                        "root_rebind_startup_reconcile_queued",
+                        serde_json::json!({ "task_id": ticket.task_id, "state": ticket.state }),
+                        "info",
+                    ),
+                    Err(error) => append_diagnostics_trace_row_best_effort(
+                        &paths,
+                        "root_rebind_startup_reconcile_queue_failed",
+                        serde_json::json!({ "error": error.to_string() }),
+                        "warn",
+                    ),
+                };
+            }
             // WP-0253 Item 2d: if the configured download root (e.g. a NAS share) is
             // reachable again, move any local-fallback downloads back onto it (copy ->
             // verify -> relink -> delete-after-verify). Background thread; no-op when the
@@ -10512,6 +14097,11 @@ pub fn run() {
             item_export_mux_preview_mp4,
             item_qc_report_v1_load,
             diagnostics_trace_clear,
+            diagnostics_capture_status,
+            diagnostics_capture_panel_transition,
+            diagnostics_capture_panel_transition_cancel,
+            diagnostics_capture_arm,
+            diagnostics_capture_disarm,
             diagnostics_trace_dir_set,
             diagnostics_trace_dir_status,
             diagnostics_trace_dir_use_default,
@@ -10529,6 +14119,14 @@ pub fn run() {
             downloads_feature_root_use_default,
             config_batch_on_import_get,
             config_batch_on_import_set,
+            root_rebind_dry_run,
+            root_rebind_prepare,
+            root_rebind_apply,
+            root_rebind_status,
+            root_rebind_rollback,
+            root_rebind_recover,
+            root_rebind_task_status,
+            root_rebind_task_cancel,
             config_youtube_auth_get,
             youtube_auth_open_sign_in,
             config_youtube_auth_preflight,
@@ -10542,7 +14140,8 @@ pub fn run() {
             download_presets_export_json,
             download_presets_get,
             download_presets_import_json,
-            download_presets_set,
+            download_presets_catalog_set,
+            download_presets_default_safety_patch,
             library_get,
             library_list,
             library_query,
@@ -10591,6 +14190,7 @@ pub fn run() {
             youtube_subscriptions_active_refresh_ids,
             youtube_subscriptions_activity,
             subscription_download_activity,
+            subscription_projections_rebuild,
             youtube_subscription_videos,
             instagram_subscriptions_list,
             instagram_subscriptions_upsert,
@@ -10647,6 +14247,7 @@ pub fn run() {
             jobs_queue_control_set,
             youtube_queue_identity_reconcile,
             media_cleanup_get,
+            media_cleanup_latest,
             media_cleanup_create,
             media_cleanup_inventory_advance,
             media_cleanup_hash_advance,
@@ -10663,6 +14264,15 @@ pub fn run() {
             jobs_track_runtime_set,
             antibot_pacing_get,
             antibot_pacing_set,
+            youtube_protection_status_get,
+            youtube_protection_return_to_baseline,
+            youtube_protection_history_get,
+            youtube_protection_history_replay,
+            youtube_protection_tuning_get,
+            youtube_protection_tuning_set,
+            youtube_protection_tuning_reset,
+            youtube_protection_history_export,
+            youtube_protection_history_reset,
             jobs_export_unresolved_batch,
             jobs_repair_batch,
             jobs_retry,
@@ -10787,6 +14397,7 @@ pub fn run() {
         .expect("error while building tauri application")
         .run(|_app_handle, event| {
             if let tauri::RunEvent::Exit = event {
+                cancel_youtube_retention_worker();
                 signal_watcher_stop();
                 cleanup_agent_bridge_files();
             }

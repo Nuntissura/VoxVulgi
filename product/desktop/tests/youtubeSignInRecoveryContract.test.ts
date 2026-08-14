@@ -26,11 +26,13 @@ test("YouTube Options leads with browser sign-in and exact recovery steps", () =
 
 test("YouTube connection truth persists verification and reconnect timestamps", () => {
   const optionsSource = readRepoFile("src", "pages", "OptionsPage.tsx");
+  const authStatusSource = readRepoFile("src", "lib", "youtubeAuthStatus.ts");
   const configSource = readRepoFile("..", "engine", "src", "config.rs");
   const jobsSource = readRepoFile("..", "engine", "src", "jobs.rs");
 
-  assert.match(optionsSource, /last_verified_at_ms\?: number \| null/);
-  assert.match(optionsSource, /reconnect_required_at_ms\?: number \| null/);
+  assert.match(authStatusSource, /last_verified_at_ms\?: number \| null/);
+  assert.match(authStatusSource, /reconnect_required_at_ms\?: number \| null/);
+  assert.match(optionsSource, /applyYoutubeAuthStatusReceipt\(saved\)/);
   assert.match(configSource, /pub last_verified_at_ms: Option<i64>/);
   assert.match(configSource, /pub reconnect_required_at_ms: Option<i64>/);
   assert.match(jobsSource, /mark_youtube_auth_verified\(paths, checked_at_ms\)/);

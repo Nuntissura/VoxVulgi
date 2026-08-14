@@ -1,9 +1,9 @@
 use crate::paths::AppPaths;
 use crate::{
-    asr, cmd, config, db, ffmpeg, image_batch, library, persistence, speakers, subscriptions,
-    subtitle_tracks, subtitles, tools, translate, video_libraries, voice_backend_adapters,
-    voice_cast_packs, voice_plans, voice_reference_candidates, voice_templates, EngineError,
-    Result,
+    asr, cmd, config, db, ffmpeg, image_batch, library, persistence, root_rebind, speakers,
+    subscriptions, subtitle_tracks, subtitles, tools, translate, video_libraries,
+    voice_backend_adapters, voice_cast_packs, voice_plans, voice_reference_candidates,
+    voice_templates, youtube_protection, EngineError, Result,
 };
 use regex::Regex;
 use rusqlite::{params, OptionalExtension, TransactionBehavior};
@@ -35,6 +35,8 @@ const DEFAULT_VIDEO_OUTPUT_SUBDIR: &str = "video";
 const DEFAULT_INSTAGRAM_OUTPUT_SUBDIR: &str = "instagram";
 const DEFAULT_IMAGES_OUTPUT_SUBDIR: &str = "images";
 const DEFAULT_LOCALIZATION_OUTPUT_SUBDIR: &str = "localization";
+const MANAGED_VIDEO_CONTAINER: &str = "mkv";
+const MANAGED_VIDEO_EXTENSION: &str = "mkv";
 const EMBED_CRAWL_MAX_PAGES: usize = 8;
 const EMBED_CRAWL_MAX_CANDIDATES: usize = 40;
 const EMBED_FETCH_MAX_BODY_BYTES: u64 = 2 * 1024 * 1024;
@@ -92,6 +94,8 @@ const META_KEY_ENUM_SLEEP_REQUESTS: &str = "antibot_enumeration_sleep_requests";
 const META_KEY_UPDATE_ALL_BATCH: &str = "antibot_update_all_batch_size";
 const META_KEY_RECURRING_DOWNLOAD_MIN_SLEEP: &str = "antibot_recurring_download_min_sleep_secs";
 const META_KEY_RECURRING_DOWNLOAD_MAX_SLEEP: &str = "antibot_recurring_download_max_sleep_secs";
+const META_KEY_ADAPTIVE_PROTECTION_ENABLED: &str = "antibot_adaptive_protection_enabled";
+static ANTIBOT_PACING_WRITE_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
 const DEFAULT_RECURRING_MIN_INTERVAL_SECS: u64 = 60;
 const MAX_RECURRING_MIN_INTERVAL_SECS: u64 = 3600;
 const DEFAULT_RECURRING_JITTER_SECS: u64 = 60;
@@ -126,7 +130,6 @@ const YT_DLP_RATE_LIMIT_RETRIES: u32 = 2;
 const YT_DLP_RATE_LIMIT_MIN_DELAY_SECS: u64 = 20;
 const YT_DLP_RATE_LIMIT_MAX_DELAY_SECS: u64 = 60;
 const EXTERNAL_CMD_POLL_INTERVAL_MS: u64 = 200;
-const YT_DLP_BOOTSTRAP_TIMEOUT_SECS: u64 = 180;
 const EXPERIMENTAL_VOICE_BACKEND_TIMEOUT_SECS: u64 = 7200;
 // Spleeter loads only up to 600s of audio (separate_to_file duration default)
 // and, with multiprocess disabled, runs single-process TF inference. 30 min is
@@ -151,11 +154,6 @@ const JOB_WATCHDOG_SCAN_INTERVAL_SECS: u64 = 30;
 const JOB_STALL_WARN_SECS: u64 = 600;
 const JOB_STALL_FAIL_SECS: u64 = 7200;
 const DIARIZATION_SPEAKER_COUNT_MAX: u32 = 16;
-#[cfg(windows)]
-const YT_DLP_WINDOWS_DOWNLOAD_URL: &str =
-    "https://github.com/yt-dlp/yt-dlp/releases/latest/download/yt-dlp.exe";
-
-static YT_DLP_BOOTSTRAP_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
 // WP-0270: the runner owns the live shared-YouTube-gate state, while UI/bridge/diagnostics
 // readers need the same state without touching the scheduler thread. Key this small in-process
 // registry by the app data root so tests and multiple app roots cannot leak gate state between
@@ -191,6 +189,8 @@ pub struct InstagramAuthPreflightResult {
     pub title: Option<String>,
     pub message: String,
     pub checked_at_ms: i64,
+    pub credential_generation: u64,
+    pub credential_fingerprint: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -284,6 +284,7 @@ pub struct YoutubeQueueIdentityReconcileSummary {
     pub present_jobs: usize,
     pub missing_jobs: usize,
     pub unreachable_jobs: usize,
+    pub slow_jobs: usize,
     pub canceled_jobs: usize,
     pub has_more: bool,
     pub next_cursor: Option<String>,
@@ -1534,6 +1535,8 @@ struct DownloadDirectUrlParams {
     #[serde(default)]
     yt_dlp_concurrent_fragments: u32,
     #[serde(default)]
+    yt_dlp_limit_rate: Option<String>,
+    #[serde(default)]
     yt_dlp_throttled_rate: Option<String>,
     #[serde(default)]
     yt_dlp_file_access_retries: u32,
@@ -2625,7 +2628,8 @@ fn decide_localization_next_stage(
         return Ok(LocalizationNextStageDecision::Translate);
     }
 
-    if track.kind == "translated" && normalize_lang_tag(Some(&track.lang)) == Some("eng") {
+    if track.kind == "translated" && normalize_lang_tag(Some(&track.lang)).as_deref() == Some("eng")
+    {
         let speakers = track_speaker_keys(paths, &track.id)?;
         if speakers.is_empty() {
             return Ok(LocalizationNextStageDecision::Diarize);
@@ -2932,12 +2936,13 @@ fn queue_localization_continuation_from_track(
     } else {
         latest_source_track(paths, &item.id)?.map(|value| value.id)
     };
-    let translated_track_id =
-        if track.kind == "translated" && normalize_lang_tag(Some(&track.lang)) == Some("eng") {
-            Some(track.id.clone())
-        } else {
-            latest_translated_english_track(paths, &item.id)?.map(|value| value.id)
-        };
+    let translated_track_id = if track.kind == "translated"
+        && normalize_lang_tag(Some(&track.lang)).as_deref() == Some("eng")
+    {
+        Some(track.id.clone())
+    } else {
+        latest_translated_english_track(paths, &item.id)?.map(|value| value.id)
+    };
     let track_doc = subtitle_tracks::load_document(paths, &track.id)?;
     let track_stats = subtitle_document_segment_stats(&track_doc);
     if track_stats.usable_segment_count == 0 {
@@ -2947,7 +2952,7 @@ fn queue_localization_continuation_from_track(
     let output_mode = localization_output_mode(pipeline.output_mode.as_deref())?;
     if output_mode == "subtitles"
         && track.kind == "translated"
-        && normalize_lang_tag(Some(&track.lang)) == Some("eng")
+        && normalize_lang_tag(Some(&track.lang)).as_deref() == Some("eng")
     {
         return Ok(LocalizationContinuationOutcome {
             stage: "subtitles".to_string(),
@@ -3673,10 +3678,18 @@ pub fn youtube_auth_preflight(
             )
         };
     let js_runtime_available =
-        append_yt_dlp_runtime_args(paths, &mut args, &url, auth_cookie_present);
+        match append_yt_dlp_runtime_args(paths, &mut args, &url, auth_cookie_present) {
+            Ok(value) => value,
+            Err(error) => {
+                if let Some(cookie_file) = cookie_file.as_ref() {
+                    let _ = std::fs::remove_file(cookie_file);
+                }
+                return Err(error);
+            }
+        };
     // Deliberately do not use run_yt_dlp_with_browser_cookie_retry here. A public URL could
     // succeed on its guest retry and falsely declare the selected browser session connected.
-    let output_res = run_yt_dlp(paths, &args, None, 90);
+    let output_res = run_yt_dlp(paths, &args, None, 90, None);
     if let Some(cookie_file) = cookie_file {
         let _ = std::fs::remove_file(cookie_file);
     }
@@ -3709,9 +3722,10 @@ pub fn youtube_auth_preflight(
                 auth_cookie_present,
                 js_runtime_available,
             );
+            let raw_error = err.to_string();
             let checked_at_ms = now_ms();
             config::mark_youtube_auth_reconnect_required(paths, checked_at_ms)?;
-            if is_youtube_saved_cookie_rejection(&url, &err.to_string()) {
+            if is_youtube_saved_cookie_rejection(&url, &raw_error) {
                 record_youtube_auth_block(
                     paths,
                     auth_key,
@@ -3724,7 +3738,7 @@ pub fn youtube_auth_preflight(
                 ok: false,
                 url,
                 title: None,
-                message: err.to_string(),
+                message: redact_auth_credential_locators(&raw_error),
                 checked_at_ms,
             })
         }
@@ -3741,6 +3755,26 @@ pub fn instagram_auth_preflight(
     paths: &AppPaths,
     url: Option<String>,
 ) -> Result<InstagramAuthPreflightResult> {
+    instagram_auth_preflight_with_snapshot_hook(paths, url, |_| Ok(()))
+}
+
+fn finalize_instagram_auth_preflight(
+    paths: &AppPaths,
+    auth_revision: &InstagramAuthRevision,
+    result: InstagramAuthPreflightResult,
+) -> Result<InstagramAuthPreflightResult> {
+    ensure_instagram_preflight_revision_current(paths, auth_revision)?;
+    Ok(result)
+}
+
+fn instagram_auth_preflight_with_snapshot_hook<F>(
+    paths: &AppPaths,
+    url: Option<String>,
+    after_snapshot: F,
+) -> Result<InstagramAuthPreflightResult>
+where
+    F: FnOnce(&InstagramAuthRevision) -> Result<()>,
+{
     let url = normalize_direct_url(
         url.as_deref()
             .unwrap_or(DEFAULT_INSTAGRAM_AUTH_PREFLIGHT_URL),
@@ -3751,22 +3785,27 @@ pub fn instagram_auth_preflight(
         ));
     }
 
-    // WP-0263 precedence: explicit not applicable here (Options test uses the global cookie);
-    // resolve the global Instagram cookie. No cookie -> honest "no saved cookies" result.
-    let Some(auth_cookie) = resolve_global_instagram_auth_cookie(paths) else {
-        return Ok(InstagramAuthPreflightResult {
+    // Resolve the credential and its durable revision under one lock. Every result is bound to
+    // this exact revision, and network-backed results are rejected if another writer commits
+    // before the request completes.
+    let (auth_revision, auth_cookie) = instagram_auth_snapshot(paths)?;
+    after_snapshot(&auth_revision)?;
+    let Some(auth_cookie) = auth_cookie else {
+        return finalize_instagram_auth_preflight(paths, &auth_revision, InstagramAuthPreflightResult {
             ok: false,
             url,
             title: None,
             message: "No saved global Instagram cookies were found. Paste your Instagram cookie in Options first.".to_string(),
             checked_at_ms: now_ms(),
+            credential_generation: auth_revision.credential_generation,
+            credential_fingerprint: auth_revision.credential_fingerprint.clone(),
         });
     };
 
     let username = match instagram_username_from_url(&url) {
         Some(name) => name,
         None => {
-            return Ok(InstagramAuthPreflightResult {
+            return finalize_instagram_auth_preflight(paths, &auth_revision, InstagramAuthPreflightResult {
                 ok: false,
                 url,
                 title: None,
@@ -3774,6 +3813,8 @@ pub fn instagram_auth_preflight(
                     "Instagram auth preflight expects a profile URL (instagram.com/<username>/)."
                         .to_string(),
                 checked_at_ms: now_ms(),
+                credential_generation: auth_revision.credential_generation,
+                credential_fingerprint: auth_revision.credential_fingerprint.clone(),
             });
         }
     };
@@ -3781,7 +3822,11 @@ pub fn instagram_auth_preflight(
     let profile_info_url =
         format!("https://i.instagram.com/api/v1/users/web_profile_info/?username={username}");
 
-    match download_instagram_json(&profile_info_url, Some(&auth_cookie), Some(&profile_page_url)) {
+    let result = match download_instagram_json(
+        &profile_info_url,
+        Some(&auth_cookie),
+        Some(&profile_page_url),
+    ) {
         Ok(payload) => {
             let full_name = payload
                 .get("data")
@@ -3790,7 +3835,7 @@ pub fn instagram_auth_preflight(
                 .and_then(|v| v.as_str())
                 .filter(|v| !v.trim().is_empty())
                 .map(str::to_string);
-            Ok(InstagramAuthPreflightResult {
+            InstagramAuthPreflightResult {
                 ok: true,
                 url,
                 title: full_name.clone(),
@@ -3798,18 +3843,24 @@ pub fn instagram_auth_preflight(
                     .map(|value| format!("Instagram accepted the saved cookies for: {value}"))
                     .unwrap_or_else(|| "Instagram accepted the saved cookies.".to_string()),
                 checked_at_ms: now_ms(),
-            })
+                credential_generation: auth_revision.credential_generation,
+                credential_fingerprint: auth_revision.credential_fingerprint.clone(),
+            }
         }
-        Err(err) => Ok(InstagramAuthPreflightResult {
+        Err(err) => InstagramAuthPreflightResult {
             ok: false,
             url,
             title: None,
             message: format!(
-                "Instagram rejected the saved cookies (or the session expired). Re-authenticate Instagram in Options. Detail: {err}"
+                "Instagram rejected the saved cookies (or the session expired). Re-authenticate Instagram in Options. Detail: {}",
+                redact_auth_credential_locators(&err.to_string())
             ),
             checked_at_ms: now_ms(),
-        }),
-    }
+            credential_generation: auth_revision.credential_generation,
+            credential_fingerprint: auth_revision.credential_fingerprint.clone(),
+        },
+    };
+    finalize_instagram_auth_preflight(paths, &auth_revision, result)
 }
 
 fn youtube_auth_block_path(paths: &AppPaths) -> PathBuf {
@@ -3928,6 +3979,59 @@ fn clear_youtube_auth_block_for_key(paths: &AppPaths, auth_key: &str) -> Result<
         clear_youtube_auth_block(paths)?;
     }
     Ok(())
+}
+
+/// Replace the canonical global YouTube credential before reconciling the runtime block that
+/// belonged to the previously saved credential. The replacement CAS is the commit gate: a stale
+/// writer returns before touching the block, and a concurrent block for the new credential is not
+/// removed because cleanup is qualified by the exact previous material key.
+#[derive(Debug, Clone)]
+pub struct YoutubeAuthReplaceReceipt {
+    pub config: config::YoutubeAuthConfig,
+    pub cleanup_warning: Option<String>,
+}
+
+pub fn replace_youtube_auth_config_and_clear_previous_block(
+    paths: &AppPaths,
+    next: config::YoutubeAuthConfig,
+    expected_generation: Option<u64>,
+    expected_fingerprint: Option<&str>,
+) -> Result<YoutubeAuthReplaceReceipt> {
+    replace_youtube_auth_config_with_cleanup(
+        paths,
+        next,
+        expected_generation,
+        expected_fingerprint,
+        clear_youtube_auth_block_for_key,
+    )
+}
+
+fn replace_youtube_auth_config_with_cleanup<F>(
+    paths: &AppPaths,
+    next: config::YoutubeAuthConfig,
+    expected_generation: Option<u64>,
+    expected_fingerprint: Option<&str>,
+    cleanup: F,
+) -> Result<YoutubeAuthReplaceReceipt>
+where
+    F: FnOnce(&AppPaths, &str) -> Result<()>,
+{
+    let previous_auth_key = youtube_auth_material_key(paths, None, false, None)?;
+    let saved = config::replace_youtube_auth_config(
+        paths,
+        next,
+        expected_generation,
+        expected_fingerprint,
+    )?;
+    let cleanup_warning = previous_auth_key.and_then(|previous_auth_key| {
+        cleanup(paths, &previous_auth_key)
+            .err()
+            .map(|error| format!("credentials were committed, but previous auth-block cleanup needs retry: {}", redact_auth_credential_locators(&error.to_string())))
+    });
+    Ok(YoutubeAuthReplaceReceipt {
+        config: saved,
+        cleanup_warning,
+    })
 }
 
 fn active_youtube_auth_block(
@@ -4185,6 +4289,7 @@ fn enqueue_download_targets_batch_with_subscription(
             yt_dlp_retries: preset.yt_dlp_retries,
             yt_dlp_fragment_retries: preset.yt_dlp_fragment_retries,
             yt_dlp_concurrent_fragments: preset.yt_dlp_concurrent_fragments,
+            yt_dlp_limit_rate: preset.yt_dlp_limit_rate.clone(),
             yt_dlp_throttled_rate: preset.yt_dlp_throttled_rate.clone(),
             yt_dlp_file_access_retries: preset.yt_dlp_file_access_retries,
             yt_dlp_sleep_interval: preset.yt_dlp_sleep_interval,
@@ -5367,7 +5472,7 @@ pub fn youtube_queue_identity_reconcile(
             QueueIdentityObservation {
                 library_item_id: library_item_id.clone(),
                 media_path: media_path.clone(),
-                state: library::observe_media_path_fresh(media_path),
+                state: library::observe_media_path_fresh(paths, media_path),
             },
         );
     }
@@ -5376,6 +5481,7 @@ pub fn youtube_queue_identity_reconcile(
     let mut present_jobs = 0_usize;
     let mut missing_jobs = 0_usize;
     let mut unreachable_jobs = 0_usize;
+    let mut slow_jobs = 0_usize;
     let mut linked_candidate_jobs = 0_usize;
     let mut duplicate_identities = 0_usize;
     let mut would_cancel_jobs = 0_usize;
@@ -5443,6 +5549,10 @@ pub fn youtube_queue_identity_reconcile(
                         unreachable_jobs += 1;
                         "storage_unreachable"
                     }
+                    library::MediaPathObservation::Slow => {
+                        slow_jobs += 1;
+                        "storage_slow"
+                    }
                 };
                 if candidates.len() < candidate_limit {
                     candidates.push(YoutubeQueueIdentityReconcileCandidate {
@@ -5492,6 +5602,7 @@ pub fn youtube_queue_identity_reconcile(
         present_jobs,
         missing_jobs,
         unreachable_jobs,
+        slow_jobs,
         canceled_jobs: 0,
         has_more: false,
         next_cursor: None,
@@ -5605,6 +5716,7 @@ pub fn youtube_queue_identity_reconcile(
     tx.commit()?;
     for job_id in canceled_job_ids {
         remove_job_cookie_secret(paths, &job_id);
+        let _ = subscriptions::refresh_subscription_activity_rollup_for_job(paths, &job_id);
     }
     append_engine_diagnostics_trace_row_best_effort(
         paths,
@@ -5621,6 +5733,7 @@ pub fn youtube_queue_identity_reconcile(
             "present_jobs": summary.present_jobs,
             "missing_jobs": summary.missing_jobs,
             "unreachable_jobs": summary.unreachable_jobs,
+            "slow_jobs": summary.slow_jobs,
             "source_memberships_preserved": summary.source_memberships_preserved,
         }),
     );
@@ -5645,7 +5758,7 @@ pub fn youtube_queue_identity_reconcile(
             summary.claim_mismatches += 1;
         }
         if let Some(media_path) = state.and_then(|value| value.media_path.as_deref()) {
-            if library::observe_media_path_fresh(media_path)
+            if library::observe_media_path_fresh(paths, media_path)
                 == library::MediaPathObservation::Present
             {
                 summary.remaining_present_jobs += rows.len();
@@ -5955,6 +6068,7 @@ WHERE batch_id=?3 AND id<>?4 AND status IN (?5, ?6)
 
     remove_job_cookie_secret(paths, job_id);
     let _ = library::release_download_source_claim(paths, job_id, None, None);
+    let _ = subscriptions::refresh_subscription_activity_rollup_for_job(paths, job_id);
     Ok(())
 }
 
@@ -6005,6 +6119,15 @@ pub fn cancel_youtube_subscription_refresh_jobs(
 pub fn cancel_all_jobs(paths: &AppPaths) -> Result<usize> {
     let conn = db::open(paths)?;
     db::migrate(&conn)?;
+    let affected_job_ids = {
+        let mut stmt = conn.prepare("SELECT id FROM job WHERE status IN (?1, ?2)")?;
+        let rows = stmt.query_map(
+            params![JobStatus::Queued.as_str(), JobStatus::Running.as_str()],
+            |row| row.get::<_, String>(0),
+        )?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+        rows
+    };
     let updated = conn.execute(
         "UPDATE job SET status=?1, finished_at_ms=?2 WHERE status IN (?3, ?4)",
         params![
@@ -6027,6 +6150,10 @@ WHERE active_job_id IN (SELECT id FROM job WHERE status='canceled')
 "#,
             [now_ms()],
         )?;
+    }
+    drop(conn);
+    for job_id in affected_job_ids {
+        let _ = subscriptions::refresh_subscription_activity_rollup_for_job(paths, &job_id);
     }
     Ok(updated)
 }
@@ -7909,6 +8036,8 @@ INSERT INTO job (
             track.as_str()
         ],
     )?;
+    drop(conn);
+    let _ = subscriptions::refresh_subscription_activity_rollup_for_job(paths, &id);
 
     Ok(JobRow {
         id,
@@ -8021,7 +8150,7 @@ fn mix_background_audio_source(
     if let Some(background) = separation_background_path_best_effort(paths, &item.id) {
         return Some((background, false));
     }
-    let media_path = PathBuf::from(&item.media_path);
+    let media_path = library::resolve_media_path(paths, &item.media_path).ok()?;
     if media_path.exists() {
         return Some((media_path, true));
     }
@@ -8079,8 +8208,9 @@ fn clear_generated_dub_preview_outputs_for_remix(
     );
     remove_generated_file_if_exists(&dub_dir.join("mix_dub_preview_v1.wav"))?;
     remove_generated_file_if_exists(&dub_dir.join("speech_dub_preview_v1.wav"))?;
-    remove_generated_file_if_exists(&dub_dir.join("mux_dub_preview_v1.mp4"))?;
-    remove_generated_file_if_exists(&dub_dir.join("mux_dub_preview_v1.mkv"))?;
+    // Published MKV generations and historical fixed-path MKV/MP4 previews are immutable
+    // media. A remix creates a new fingerprint-named generation and advances the DB pointer;
+    // it must never delete an earlier final artifact.
     Ok(())
 }
 
@@ -8349,9 +8479,44 @@ fn queue_mix_after_successful_separation(
     Ok(Some(queued))
 }
 
-fn mux_output_exists(paths: &AppPaths, item_id: &str) -> bool {
+fn mux_output_exists(paths: &AppPaths, item_id: &str) -> Result<bool> {
     let dir = paths.derived_item_dir(item_id).join("dub_preview");
-    dir.join("mux_dub_preview_v1.mp4").exists() || dir.join("mux_dub_preview_v1.mkv").exists()
+    match localization_preview_consumer_outcome(paths, item_id, None) {
+        LocalizationPreviewConsumerOutcome::Active(path) => Ok(path.is_file()),
+        LocalizationPreviewConsumerOutcome::CanonicalAbsence => {
+            Ok(dir.join("mux_dub_preview_v1.mkv").is_file()
+                || dir.join("mux_dub_preview_v1.mp4").is_file())
+        }
+        LocalizationPreviewConsumerOutcome::LineageFailure(error) => {
+            Err(EngineError::InstallFailed(format!(
+                "localization preview readiness failed immutable-lineage verification: {error}"
+            )))
+        }
+    }
+}
+
+fn localization_preview_export_artifact(
+    paths: &AppPaths,
+    item_id: &str,
+    variant_label: Option<&str>,
+    dub_dir: &Path,
+) -> Result<Option<PathBuf>> {
+    match localization_preview_consumer_outcome(paths, item_id, variant_label) {
+        LocalizationPreviewConsumerOutcome::Active(path) => Ok(Some(path)),
+        LocalizationPreviewConsumerOutcome::CanonicalAbsence => {
+            let legacy_mkv = dub_dir.join("mux_dub_preview_v1.mkv");
+            if legacy_mkv.is_file() {
+                return Ok(Some(legacy_mkv));
+            }
+            let legacy_mp4 = dub_dir.join("mux_dub_preview_v1.mp4");
+            Ok(legacy_mp4.is_file().then_some(legacy_mp4))
+        }
+        LocalizationPreviewConsumerOutcome::LineageFailure(error) => {
+            Err(EngineError::InstallFailed(format!(
+                "export pack refused localization preview with invalid immutable lineage: {error}"
+            )))
+        }
+    }
 }
 
 /// Tracks, per Running job, the last observed progress value and the instant it
@@ -8555,9 +8720,16 @@ impl YoutubeStartGate {
         }
     }
 
-    fn record_start(&mut self, paths: &AppPaths, job_id: &str, track: JobTrack) -> u64 {
+    fn record_start(
+        &mut self,
+        paths: &AppPaths,
+        job_id: &str,
+        track: JobTrack,
+        adaptive_min_interval_secs: u64,
+    ) -> u64 {
         self.last_start = Some(std::time::Instant::now());
-        self.next_after_secs = recurring_download_sleep_secs(paths, job_id) as u64;
+        self.next_after_secs =
+            (recurring_download_sleep_secs(paths, job_id) as u64).max(adaptive_min_interval_secs);
         self.next_eligible_at_ms = Some(
             now_ms().saturating_add(
                 self.next_after_secs
@@ -8848,14 +9020,90 @@ fn runner_loop(
                         );
                         continue;
                     }
-                    if claim_and_spawn_for_track(
+                    let provider_status = tools::youtube_po_provider_runtime_status(&paths);
+                    if !provider_status.healthy {
+                        let _ = tools::request_youtube_po_provider_start(&paths);
+                        observe_youtube_gate(
+                            &paths,
+                            &runtime_state,
+                            &mut youtube_gate_trace_gate,
+                            "held",
+                            None,
+                            Some("youtube_po_provider_unavailable"),
+                        );
+                        continue;
+                    }
+                    let adaptive_scheduler_policy =
+                        match effective_youtube_scheduler_policy(&paths, &job_id, &params_json) {
+                            Ok(policy) => policy,
+                            Err(_) => {
+                                observe_youtube_gate(
+                                    &paths,
+                                    &runtime_state,
+                                    &mut youtube_gate_trace_gate,
+                                    "held",
+                                    None,
+                                    Some("adaptive_youtube_policy_resolution_failed"),
+                                );
+                                continue;
+                            }
+                        };
+                    if let Some(policy) = adaptive_scheduler_policy.as_ref() {
+                        if !policy.effective.eligible {
+                            observe_youtube_gate(
+                                &paths,
+                                &runtime_state,
+                                &mut youtube_gate_trace_gate,
+                                "held",
+                                policy.next_eligible_probe_at_ms,
+                                Some("adaptive_youtube_cooldown"),
+                            );
+                            continue;
+                        }
+                    }
+                    let adaptive_start_interval_secs = adaptive_scheduler_policy
+                        .as_ref()
+                        .map(|policy| policy.effective.aggregate_start_interval_secs as u64)
+                        .unwrap_or(0);
+                    let canary_reserved = reserve_scheduler_canary(
+                        &paths,
+                        &job_id,
+                        adaptive_scheduler_policy.as_ref(),
+                    )
+                    .unwrap_or(false);
+                    if !canary_reserved {
+                        observe_youtube_gate(
+                            &paths,
+                            &runtime_state,
+                            &mut youtube_gate_trace_gate,
+                            "held",
+                            None,
+                            Some("adaptive_youtube_canary_already_reserved"),
+                        );
+                        continue;
+                    }
+                    let spawned = claim_and_spawn_for_track(
                         &paths,
                         job_id.clone(),
                         type_str,
                         params_json,
                         track,
-                    ) {
-                        youtube_start_gate.record_start(&paths, &job_id, track);
+                    );
+                    if !spawned
+                        && adaptive_scheduler_policy
+                            .as_ref()
+                            .is_some_and(|policy| policy.effective.canary_only)
+                    {
+                        let _ =
+                            youtube_protection::release_cooldown_canary_for_job(&paths, &job_id);
+                    }
+                    if spawned {
+                        youtube_start_gate.record_start(
+                            &paths,
+                            &job_id,
+                            track,
+                            adaptive_start_interval_secs,
+                        );
                         observe_youtube_gate(
                             &paths,
                             &runtime_state,
@@ -8894,14 +9142,85 @@ fn runner_loop(
                     &mut legacy_track_cursors,
                 ) {
                     for (job_id, type_str, params_json) in jobs {
-                        let interval = recurring_dispatch_interval_secs(&paths, &job_id);
-                        if claim_and_spawn_for_track(
+                        let provider_status = tools::youtube_po_provider_runtime_status(&paths);
+                        if !provider_status.healthy {
+                            let _ = tools::request_youtube_po_provider_start(&paths);
+                            observe_youtube_gate(
+                                &paths,
+                                &runtime_state,
+                                &mut youtube_gate_trace_gate,
+                                "held",
+                                None,
+                                Some("youtube_po_provider_unavailable"),
+                            );
+                            continue;
+                        }
+                        let adaptive_scheduler_policy =
+                            match effective_youtube_enumeration_scheduler_policy(
+                                &paths,
+                                &job_id,
+                                &params_json,
+                            ) {
+                                Ok(policy) => policy,
+                                Err(_) => {
+                                    observe_youtube_gate(
+                                        &paths,
+                                        &runtime_state,
+                                        &mut youtube_gate_trace_gate,
+                                        "held",
+                                        None,
+                                        Some(
+                                            "adaptive_youtube_enumeration_policy_resolution_failed",
+                                        ),
+                                    );
+                                    continue;
+                                }
+                            };
+                        if let Some(policy) = adaptive_scheduler_policy.as_ref() {
+                            if !policy.effective.eligible {
+                                observe_youtube_gate(
+                                    &paths,
+                                    &runtime_state,
+                                    &mut youtube_gate_trace_gate,
+                                    "held",
+                                    policy.next_eligible_probe_at_ms,
+                                    Some("adaptive_youtube_enumeration_cooldown"),
+                                );
+                                continue;
+                            }
+                        }
+                        let interval = recurring_dispatch_interval_secs(&paths, &job_id).max(
+                            adaptive_scheduler_policy
+                                .as_ref()
+                                .map(|policy| policy.effective.aggregate_start_interval_secs as u64)
+                                .unwrap_or(0),
+                        );
+                        let canary_reserved = reserve_scheduler_canary(
+                            &paths,
+                            &job_id,
+                            adaptive_scheduler_policy.as_ref(),
+                        )
+                        .unwrap_or(false);
+                        if !canary_reserved {
+                            continue;
+                        }
+                        let spawned = claim_and_spawn_for_track(
                             &paths,
                             job_id.clone(),
                             type_str,
                             params_json,
                             JobTrack::YoutubeRecurring,
-                        ) {
+                        );
+                        if !spawned
+                            && adaptive_scheduler_policy
+                                .as_ref()
+                                .is_some_and(|policy| policy.effective.canary_only)
+                        {
+                            let _ = youtube_protection::release_cooldown_canary_for_job(
+                                &paths, &job_id,
+                            );
+                        }
+                        if spawned {
                             last_recurring_dispatch = Some(std::time::Instant::now());
                             next_recurring_dispatch_after_secs = interval;
                             append_engine_diagnostics_trace_row_best_effort(
@@ -9425,7 +9744,7 @@ fn claim_job_for_track(
             state
                 .media_path
                 .as_ref()
-                .map(|path| library::observe_media_path_fresh(path))
+                .map(|path| library::observe_media_path_fresh(paths, path))
         }
     });
 
@@ -9604,6 +9923,10 @@ fn claim_job_for_track(
             tx.commit()?;
             Ok(DispatchClaimOutcome::DeferredStorage)
         }
+        Some(library::MediaPathObservation::Slow) => {
+            tx.commit()?;
+            Ok(DispatchClaimOutcome::DeferredStorage)
+        }
         Some(library::MediaPathObservation::Missing) | None => {
             let claimed = tx.execute(
                 "UPDATE media_source_identity SET active_job_id=?1, repair_state=CASE WHEN library_item_id IS NULL THEN 'downloading' ELSE 'redownloading' END, updated_at_ms=?2 WHERE service='youtube' AND media_id=?3 AND (active_job_id IS NULL OR active_job_id=?1)",
@@ -9647,23 +9970,42 @@ fn claim_and_spawn_for_track(
         Ok(outcome) => outcome,
         Err(_) => return false,
     };
+    let _ = subscriptions::refresh_subscription_activity_rollup_for_job(paths, &job_id);
     if let DispatchClaimOutcome::Claimed {
         job_type,
         params_json: durable_params_json,
     } = outcome
     {
+        let envelope = JobCausalEnvelope::for_job_start(paths);
+        job_causal_envelopes()
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .insert(job_id.clone(), envelope.clone());
         append_engine_diagnostics_trace_row_best_effort(
             paths,
             "job_track_dispatched",
             "info",
             serde_json::json!({
+                "job_id": job_id,
                 "track": track.as_str(),
                 "job_type": job_type,
+                "incident_id": envelope.incident_id,
+                "span_id": envelope.span_id,
             }),
         );
         let paths_worker = paths.clone();
+        // Construct the guard before handing it to the worker. If OS thread creation panics,
+        // unwinding drops the captured guard and cannot strand this job in the envelope map.
+        let envelope_guard = JobCausalEnvelopeGuard::new(job_id.clone());
         thread::spawn(move || {
-            let result = execute_job(&paths_worker, &job_id, &job_type, &durable_params_json);
+            let _envelope_guard = envelope_guard;
+            let result = execute_job(
+                &paths_worker,
+                &job_id,
+                &job_type,
+                &durable_params_json,
+                &envelope,
+            );
             if let Err(e) = result {
                 let _ = set_failed(&paths_worker, &job_id, &e.to_string());
             }
@@ -9695,12 +10037,98 @@ fn claim_and_spawn_for_track(
     }
 }
 
-fn execute_job(paths: &AppPaths, job_id: &str, type_str: &str, params_json: &str) -> Result<()> {
+#[derive(Debug, Clone)]
+struct JobCausalEnvelope {
+    incident_id: Option<String>,
+    span_id: String,
+}
+
+impl JobCausalEnvelope {
+    fn for_job_start(paths: &AppPaths) -> Self {
+        let now = now_ms();
+        let incident_id = paths
+            .effective_diagnostics_trace_dir()
+            .ok()
+            .map(|dir| dir.join("capture_state.json"))
+            .and_then(|path| std::fs::read_to_string(path).ok())
+            .and_then(|raw| serde_json::from_str::<serde_json::Value>(&raw).ok())
+            .and_then(|state| {
+                let eligible = state.get("mode").and_then(|value| value.as_str())
+                    == Some("incident")
+                    || state.get("armed_trigger").and_then(|value| value.as_str())
+                        == Some("job_start");
+                let unexpired = state
+                    .get("expires_at_ms")
+                    .and_then(|value| value.as_i64())
+                    .is_none_or(|expires| expires > now);
+                (eligible && unexpired)
+                    .then(|| {
+                        state
+                            .get("incident_id")
+                            .and_then(|value| value.as_str())
+                            .map(str::to_string)
+                    })
+                    .flatten()
+            });
+        Self {
+            incident_id,
+            span_id: format!("job-span-{}", Uuid::new_v4().simple()),
+        }
+    }
+
+    fn details(&self) -> serde_json::Value {
+        serde_json::json!({
+            "incident_id": self.incident_id,
+            "span_id": self.span_id,
+        })
+    }
+}
+
+static JOB_CAUSAL_ENVELOPES: OnceLock<Mutex<HashMap<String, JobCausalEnvelope>>> = OnceLock::new();
+
+fn job_causal_envelopes() -> &'static Mutex<HashMap<String, JobCausalEnvelope>> {
+    JOB_CAUSAL_ENVELOPES.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+fn job_incident_id(job_id: &str) -> Option<String> {
+    job_causal_envelopes()
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .get(job_id)
+        .and_then(|envelope| envelope.incident_id.clone())
+}
+
+struct JobCausalEnvelopeGuard {
+    job_id: String,
+}
+
+impl JobCausalEnvelopeGuard {
+    fn new(job_id: String) -> Self {
+        Self { job_id }
+    }
+}
+
+impl Drop for JobCausalEnvelopeGuard {
+    fn drop(&mut self) {
+        job_causal_envelopes()
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .remove(&self.job_id);
+    }
+}
+
+fn execute_job(
+    paths: &AppPaths,
+    job_id: &str,
+    type_str: &str,
+    params_json: &str,
+    envelope: &JobCausalEnvelope,
+) -> Result<()> {
     let artifacts_dir = paths.job_artifacts_dir(job_id);
     std::fs::create_dir_all(&artifacts_dir)?;
 
     if is_canceled(paths, job_id)? {
-        log_line(paths, job_id, "info", "job_canceled", serde_json::json!({}))?;
+        log_line(paths, job_id, "info", "job_canceled", envelope.details())?;
         return Ok(());
     }
 
@@ -9709,8 +10137,23 @@ fn execute_job(paths: &AppPaths, job_id: &str, type_str: &str, params_json: &str
         job_id,
         "info",
         "job_started",
-        serde_json::json!({ "type": type_str }),
+        serde_json::json!({
+            "type": type_str,
+            "incident_id": envelope.incident_id,
+            "span_id": envelope.span_id,
+        }),
     )?;
+    append_engine_diagnostics_trace_row_best_effort(
+        paths,
+        "job_started",
+        "info",
+        serde_json::json!({
+            "job_id": job_id,
+            "job_type": type_str,
+            "incident_id": envelope.incident_id,
+            "span_id": envelope.span_id,
+        }),
+    );
 
     let job_type = JobType::from_str(type_str)
         .ok_or_else(|| EngineError::InstallFailed(format!("unknown job type in db: {type_str}")))?;
@@ -9901,7 +10344,7 @@ fn execute_job(paths: &AppPaths, job_id: &str, type_str: &str, params_json: &str
             // Every YouTube direct download uses the proven recurring-safe profile. The queue
             // track controls admission/fairness; it must not weaken the yt-dlp sleep, fragment,
             // retry, throttle, or auth-circuit behavior for a foreground paste/playlist.
-            let (effective_sleep_interval, effective_concurrent_fragments) =
+            let (mut effective_sleep_interval, mut effective_concurrent_fragments) =
                 effective_direct_download_profile(
                     paths,
                     &url,
@@ -9949,6 +10392,72 @@ fn execute_job(paths: &AppPaths, job_id: &str, type_str: &str, params_json: &str
                 None
             };
             ensure_youtube_auth_not_blocked(paths, youtube_auth_key.as_deref())?;
+            let adaptive_protection_enabled = get_antibot_pacing(paths)
+                .map(|settings| settings.adaptive_protection_enabled)
+                .unwrap_or(true);
+            let youtube_policy_context = if is_youtube_url(&url) {
+                let auth_fingerprint = youtube_auth_key
+                    .clone()
+                    .unwrap_or_else(|| youtube_protection::ANONYMOUS_AUTH_FINGERPRINT.to_string());
+                let _provider = tools::ensure_youtube_po_provider(paths)?;
+                let runtime_epoch = youtube_protection::runtime_epoch_for_paths(paths);
+                let baseline = youtube_protection::DownloaderBaselinePolicy {
+                    concurrent_fragments: effective_concurrent_fragments,
+                    sleep_interval_secs: effective_sleep_interval,
+                    sleep_requests_secs: p.yt_dlp_sleep_requests,
+                    update_tranche_size: 25,
+                    limit_rate: p.yt_dlp_limit_rate.clone(),
+                    throttled_rate: p.yt_dlp_throttled_rate.clone(),
+                };
+                let state = youtube_protection::load_policy_state(
+                    paths,
+                    youtube_protection::PROVIDER_YOUTUBE,
+                    youtube_protection::OPERATION_DOWNLOAD,
+                    &auth_fingerprint,
+                    &runtime_epoch,
+                )?;
+                let tuning = youtube_protection::get_tuning(paths)?;
+                let effective = if adaptive_protection_enabled {
+                    youtube_protection::effective_policy_with_tuning(
+                        &baseline,
+                        &state,
+                        now_ms(),
+                        &tuning,
+                    )
+                } else {
+                    youtube_protection::baseline_effective_policy(&baseline)
+                };
+                if adaptive_protection_enabled && !effective.eligible {
+                    return Err(EngineError::InstallFailed(format!(
+                        "YouTube automatic protection is in {} mode for this session; next controlled probe is at {:?}",
+                        effective.mode.as_str(),
+                        state.next_eligible_probe_at_ms
+                    )));
+                }
+                effective_sleep_interval = effective.sleep_interval_secs;
+                effective_concurrent_fragments = effective.concurrent_fragments;
+                log_line(
+                    paths,
+                    job_id,
+                    "info",
+                    "youtube_effective_policy",
+                    serde_json::json!({
+                        "runtime_epoch": runtime_epoch,
+                        "baseline": baseline,
+                        "effective": effective,
+                        "state_version": state.version,
+                    }),
+                )?;
+                Some((
+                    auth_fingerprint,
+                    runtime_epoch,
+                    baseline,
+                    effective,
+                    adaptive_protection_enabled,
+                ))
+            } else {
+                None
+            };
             if output_dir.is_none() && output_subdir.is_none() {
                 output_dir = Some(default_direct_job_output_dir(
                     paths, provider, &url, job_id,
@@ -9971,6 +10480,43 @@ fn execute_job(paths: &AppPaths, job_id: &str, type_str: &str, params_json: &str
                 }),
             )?;
 
+            if let Some((auth_fingerprint, runtime_epoch, _, effective, adaptive_enabled)) =
+                youtube_policy_context.as_ref()
+            {
+                if *adaptive_enabled {
+                    claim_youtube_controlled_canary(
+                        paths,
+                        job_id,
+                        youtube_protection::OPERATION_DOWNLOAD,
+                        auth_fingerprint,
+                        runtime_epoch,
+                        effective,
+                    )?;
+                }
+                record_youtube_effective_command_receipt(
+                    paths,
+                    job_id,
+                    youtube_protection::OPERATION_DOWNLOAD,
+                    runtime_epoch,
+                    effective,
+                )?;
+            }
+            let _youtube_launch_policy_guard = youtube_policy_context.as_ref().map(
+                |(auth_fingerprint, runtime_epoch, baseline, effective, _)| {
+                    YoutubeLaunchPolicyContextGuard::install(
+                        job_id,
+                        YoutubeLaunchPolicyContext {
+                            operation: youtube_protection::OPERATION_DOWNLOAD.to_string(),
+                            auth_fingerprint: auth_fingerprint.clone(),
+                            runtime_epoch: runtime_epoch.clone(),
+                            baseline: baseline.clone(),
+                            effective: effective.clone(),
+                        },
+                    )
+                },
+            );
+
+            let provider_command_started = std::time::Instant::now();
             let downloaded_path = match download_url_to_library(
                 paths,
                 &url,
@@ -9988,14 +10534,58 @@ fn execute_job(paths: &AppPaths, job_id: &str, type_str: &str, params_json: &str
                 p.yt_dlp_retries,
                 p.yt_dlp_fragment_retries,
                 effective_concurrent_fragments,
+                youtube_policy_context
+                    .as_ref()
+                    .and_then(|(_, _, _, effective, _)| effective.limit_rate.as_deref())
+                    .or(p.yt_dlp_limit_rate.as_deref()),
                 p.yt_dlp_throttled_rate.as_deref(),
                 p.yt_dlp_file_access_retries,
                 effective_sleep_interval,
-                p.yt_dlp_sleep_requests,
+                youtube_policy_context
+                    .as_ref()
+                    .map(|(_, _, _, effective, _)| effective.max_sleep_interval_secs)
+                    .unwrap_or(0),
+                youtube_policy_context
+                    .as_ref()
+                    .map(|(_, _, _, effective, _)| effective.sleep_requests_secs)
+                    .unwrap_or(p.yt_dlp_sleep_requests),
                 p.subtitle_mode.as_deref(),
             ) {
                 Ok(path) => path,
                 Err(err) => {
+                    if let Some((auth_fingerprint, runtime_epoch, baseline, effective, adaptive_enabled)) =
+                        youtube_policy_context.as_ref()
+                    {
+                        let class =
+                            youtube_protection::classify_youtube_outcome(Some(&err.to_string()));
+                        let incident_id = job_incident_id(job_id);
+                        let observation = youtube_protection::RecordDownloaderOutcome {
+                                provider: youtube_protection::PROVIDER_YOUTUBE,
+                                operation: youtube_protection::OPERATION_DOWNLOAD,
+                                canonical_target: &url,
+                                auth_fingerprint,
+                                runtime_epoch,
+                                baseline,
+                                effective,
+                                outcome: class,
+                                error_text: Some(&err.to_string()),
+                                incident_id: incident_id.as_deref(),
+                                lease_owner_job_id: Some(job_id),
+                                duration_ms: Some(
+                                    provider_command_started
+                                        .elapsed()
+                                        .as_millis()
+                                        .min(i64::MAX as u128)
+                                        as i64,
+                                ),
+                                occurred_at_ms: now_ms(),
+                            };
+                        let _ = if *adaptive_enabled {
+                            youtube_protection::record_outcome(paths, observation)
+                        } else {
+                            youtube_protection::record_observation(paths, observation)
+                        };
+                    }
                     if let Some(auth_key) = youtube_auth_key {
                         if is_youtube_saved_cookie_rejection(&url, &err.to_string()) {
                             // WP-0257: corroboration gate (see refresh path) — a single video's
@@ -10015,6 +10605,36 @@ fn execute_job(paths: &AppPaths, job_id: &str, type_str: &str, params_json: &str
                     return Err(err);
                 }
             };
+            if let Some((auth_fingerprint, runtime_epoch, baseline, effective, adaptive_enabled)) =
+                youtube_policy_context.as_ref()
+            {
+                let incident_id = job_incident_id(job_id);
+                let observation = youtube_protection::RecordDownloaderOutcome {
+                        provider: youtube_protection::PROVIDER_YOUTUBE,
+                        operation: youtube_protection::OPERATION_DOWNLOAD,
+                        canonical_target: &url,
+                        auth_fingerprint,
+                        runtime_epoch,
+                        baseline,
+                        effective,
+                        outcome: youtube_protection::DownloaderOutcomeClass::Success,
+                        error_text: None,
+                        incident_id: incident_id.as_deref(),
+                        lease_owner_job_id: Some(job_id),
+                        duration_ms: Some(
+                            provider_command_started
+                                .elapsed()
+                                .as_millis()
+                                .min(i64::MAX as u128) as i64,
+                        ),
+                        occurred_at_ms: now_ms(),
+                    };
+                let _ = if *adaptive_enabled {
+                    youtube_protection::record_outcome(paths, observation)
+                } else {
+                    youtube_protection::record_observation(paths, observation)
+                };
+            }
             set_progress(paths, job_id, 0.70)?;
 
             if is_canceled(paths, job_id)? {
@@ -10047,6 +10667,7 @@ fn execute_job(paths: &AppPaths, job_id: &str, type_str: &str, params_json: &str
                     classification,
                 },
             )?;
+            mark_managed_publication_imported(paths, provider, &url, &downloaded_path)?;
             set_progress(paths, job_id, 1.0)?;
 
             if let Some(sub_id) = subscription_id.as_deref() {
@@ -10126,6 +10747,43 @@ fn execute_job(paths: &AppPaths, job_id: &str, type_str: &str, params_json: &str
                     subscription_browser_cookie_source.as_deref(),
                 )?;
                 ensure_youtube_auth_not_blocked(paths, youtube_auth_key.as_deref())?;
+                let adaptive_protection_enabled = get_antibot_pacing(paths)
+                    .map(|settings| settings.adaptive_protection_enabled)
+                    .unwrap_or(true);
+                let youtube_policy_context = {
+                    let auth_fingerprint = youtube_auth_key.clone().unwrap_or_else(|| {
+                        youtube_protection::ANONYMOUS_AUTH_FINGERPRINT.to_string()
+                    });
+                    let _provider = tools::ensure_youtube_po_provider(paths)?;
+                    let runtime_epoch = youtube_protection::runtime_epoch_for_paths(paths);
+                    let baseline = youtube_protection_baseline(paths)?;
+                    let state = youtube_protection::load_policy_state(
+                        paths,
+                        youtube_protection::PROVIDER_YOUTUBE,
+                        youtube_protection::OPERATION_ENUMERATION,
+                        &auth_fingerprint,
+                        &runtime_epoch,
+                    )?;
+                    let tuning = youtube_protection::get_tuning(paths)?;
+                    let effective = if adaptive_protection_enabled {
+                        youtube_protection::effective_policy_with_tuning(
+                            &baseline,
+                            &state,
+                            now_ms(),
+                            &tuning,
+                        )
+                    } else {
+                        youtube_protection::baseline_effective_policy(&baseline)
+                    };
+                    if adaptive_protection_enabled && !effective.eligible {
+                        return Err(EngineError::InstallFailed(format!(
+                            "YouTube automatic protection is in {} mode for subscription checks; next controlled probe is at {:?}",
+                            effective.mode.as_str(),
+                            state.next_eligible_probe_at_ms
+                        )));
+                    }
+                    Some((auth_fingerprint, runtime_epoch, baseline, effective, adaptive_protection_enabled))
+                };
 
                 let archive_path =
                     subscriptions::ensure_youtube_subscription_archive_state(paths, &sub)?;
@@ -10142,6 +10800,52 @@ fn execute_job(paths: &AppPaths, job_id: &str, type_str: &str, params_json: &str
                         "max_items": max_items,
                     }),
                 )?;
+                if let Some((auth_fingerprint, runtime_epoch, baseline, effective, adaptive_enabled)) =
+                    youtube_policy_context.as_ref()
+                {
+                    log_line(
+                        paths,
+                        job_id,
+                        "info",
+                        "youtube_enumeration_effective_policy",
+                        serde_json::json!({
+                            "runtime_epoch": runtime_epoch,
+                            "baseline": baseline,
+                            "effective": effective,
+                        }),
+                    )?;
+                    if *adaptive_enabled {
+                        claim_youtube_controlled_canary(
+                            paths,
+                            job_id,
+                            youtube_protection::OPERATION_ENUMERATION,
+                            auth_fingerprint,
+                            runtime_epoch,
+                            effective,
+                        )?;
+                    }
+                    record_youtube_effective_command_receipt(
+                        paths,
+                        job_id,
+                        youtube_protection::OPERATION_ENUMERATION,
+                        runtime_epoch,
+                        effective,
+                    )?;
+                }
+                let _youtube_launch_policy_guard = youtube_policy_context.as_ref().map(
+                    |(auth_fingerprint, runtime_epoch, baseline, effective, _)| {
+                        YoutubeLaunchPolicyContextGuard::install(
+                            job_id,
+                            YoutubeLaunchPolicyContext {
+                                operation: youtube_protection::OPERATION_ENUMERATION.to_string(),
+                                auth_fingerprint: auth_fingerprint.clone(),
+                                runtime_epoch: runtime_epoch.clone(),
+                                baseline: baseline.clone(),
+                                effective: effective.clone(),
+                            },
+                        )
+                    },
+                );
                 // WP-0261: mirror subscription progress into the diagnostics trace so an external
                 // monitor (vvwatch / /agent/subscriptions_activity) can see per-subscription work.
                 append_engine_diagnostics_trace_row_best_effort(
@@ -10155,16 +10859,60 @@ fn execute_job(paths: &AppPaths, job_id: &str, type_str: &str, params_json: &str
                     }),
                 );
 
-                let entries = match expand_yt_dlp_entries(
+                let execution_max_items = youtube_policy_context
+                    .as_ref()
+                    .filter(|(_, _, _, effective, adaptive)| *adaptive && effective.canary_only)
+                    .map(|_| 1)
+                    .unwrap_or(max_items);
+                let provider_command_started = std::time::Instant::now();
+                let entries = match expand_yt_dlp_entries_with_sleep(
                     paths,
                     &sub.source_url,
-                    max_items,
+                    execution_max_items,
                     auth_cookie.as_deref(),
                     use_browser_cookies_for_url(&sub.source_url, subscription_use_browser_cookies),
                     subscription_browser_cookie_source.as_deref(),
+                    youtube_policy_context
+                        .as_ref()
+                        .map(|(_, _, _, effective, _)| effective.sleep_requests_secs),
+                    Some(job_id),
                 ) {
                     Ok(value) => value,
                     Err(err) => {
+                        if let Some((auth_fingerprint, runtime_epoch, baseline, effective, adaptive_enabled)) =
+                            youtube_policy_context.as_ref()
+                        {
+                            let error_text = err.to_string();
+                            let incident_id = job_incident_id(job_id);
+                            let observation = youtube_protection::RecordDownloaderOutcome {
+                                    provider: youtube_protection::PROVIDER_YOUTUBE,
+                                    operation: youtube_protection::OPERATION_ENUMERATION,
+                                    canonical_target: &sub.source_url,
+                                    auth_fingerprint,
+                                    runtime_epoch,
+                                    baseline,
+                                    effective,
+                                    outcome: youtube_protection::classify_youtube_outcome(Some(
+                                        &error_text,
+                                    )),
+                                    error_text: Some(&error_text),
+                                    incident_id: incident_id.as_deref(),
+                                    lease_owner_job_id: Some(job_id),
+                                    duration_ms: Some(
+                                        provider_command_started
+                                            .elapsed()
+                                            .as_millis()
+                                            .min(i64::MAX as u128)
+                                            as i64,
+                                    ),
+                                    occurred_at_ms: now_ms(),
+                                };
+                            let _ = if *adaptive_enabled {
+                                youtube_protection::record_outcome(paths, observation)
+                            } else {
+                                youtube_protection::record_observation(paths, observation)
+                            };
+                        }
                         if let Some(auth_key) = youtube_auth_key {
                             if is_youtube_saved_cookie_rejection(&sub.source_url, &err.to_string())
                             {
@@ -10186,6 +10934,36 @@ fn execute_job(paths: &AppPaths, job_id: &str, type_str: &str, params_json: &str
                         return Err(err);
                     }
                 };
+                if let Some((auth_fingerprint, runtime_epoch, baseline, effective, adaptive_enabled)) =
+                    youtube_policy_context.as_ref()
+                {
+                    let incident_id = job_incident_id(job_id);
+                    let observation = youtube_protection::RecordDownloaderOutcome {
+                            provider: youtube_protection::PROVIDER_YOUTUBE,
+                            operation: youtube_protection::OPERATION_ENUMERATION,
+                            canonical_target: &sub.source_url,
+                            auth_fingerprint,
+                            runtime_epoch,
+                            baseline,
+                            effective,
+                            outcome: youtube_protection::DownloaderOutcomeClass::Success,
+                            error_text: None,
+                            incident_id: incident_id.as_deref(),
+                            lease_owner_job_id: Some(job_id),
+                            duration_ms: Some(
+                                provider_command_started
+                                    .elapsed()
+                                    .as_millis()
+                                    .min(i64::MAX as u128) as i64,
+                            ),
+                            occurred_at_ms: now_ms(),
+                        };
+                    let _ = if *adaptive_enabled {
+                        youtube_protection::record_outcome(paths, observation)
+                    } else {
+                        youtube_protection::record_observation(paths, observation)
+                    };
+                }
                 set_progress(paths, job_id, 0.40)?;
 
                 if is_canceled(paths, job_id)? {
@@ -10538,7 +11316,7 @@ fn execute_job(paths: &AppPaths, job_id: &str, type_str: &str, params_json: &str
             )?;
 
             let item = library::get_item_by_id(paths, &p.item_id)?;
-            let media_path = Path::new(&item.media_path);
+            let media_path = library::resolve_media_path(paths, &item.media_path)?;
 
             let asr_dir = paths.derived_item_dir(&item.id).join("asr");
             std::fs::create_dir_all(&asr_dir)?;
@@ -10562,7 +11340,7 @@ fn execute_job(paths: &AppPaths, job_id: &str, type_str: &str, params_json: &str
                     serde_json::json!({ "audio_path": &audio_path }),
                 )?;
             } else {
-                ffmpeg::extract_audio_wav_16k_mono(paths, media_path, &audio_path)?;
+                ffmpeg::extract_audio_wav_16k_mono(paths, &media_path, &audio_path)?;
             }
             set_progress(paths, job_id, 0.25)?;
 
@@ -10788,7 +11566,7 @@ INSERT INTO subtitle_track (
             let source_doc = subtitle_tracks::load_document(paths, &p.source_track_id)?;
 
             let item = library::get_item_by_id(paths, &p.item_id)?;
-            let media_path = Path::new(&item.media_path);
+            let media_path = library::resolve_media_path(paths, &item.media_path)?;
             let source_stats = subtitle_document_segment_stats(&source_doc);
             if source_stats.usable_segment_count == 0 {
                 let message = empty_transcript_error_message(
@@ -10840,7 +11618,7 @@ INSERT INTO subtitle_track (
                     serde_json::json!({ "audio_path": &audio_path }),
                 )?;
             } else {
-                ffmpeg::extract_audio_wav_16k_mono(paths, media_path, &audio_path)?;
+                ffmpeg::extract_audio_wav_16k_mono(paths, &media_path, &audio_path)?;
             }
             set_progress(paths, job_id, 0.25)?;
 
@@ -11139,7 +11917,7 @@ INSERT INTO subtitle_track (
             let source_doc = subtitle_tracks::load_document(paths, &p.source_track_id)?;
 
             let item = library::get_item_by_id(paths, &p.item_id)?;
-            let media_path = Path::new(&item.media_path);
+            let media_path = library::resolve_media_path(paths, &item.media_path)?;
 
             let diarize_dir = paths.derived_item_dir(&item.id).join("diarize");
             std::fs::create_dir_all(&diarize_dir)?;
@@ -11163,7 +11941,7 @@ INSERT INTO subtitle_track (
                     serde_json::json!({ "audio_path": &audio_path }),
                 )?;
             } else {
-                ffmpeg::extract_audio_wav_16k_mono(paths, media_path, &audio_path)?;
+                ffmpeg::extract_audio_wav_16k_mono(paths, &media_path, &audio_path)?;
             }
             set_progress(paths, job_id, 0.25)?;
 
@@ -13800,7 +14578,7 @@ if __name__ == "__main__":
                 } else if p.batch_on_import {
                     let rules = config::load_batch_on_import_rules(paths).unwrap_or_default();
                     if rules.auto_dub_preview
-                        && !mux_output_exists(paths, &item.id)
+                        && !mux_output_exists(paths, &item.id)?
                         && !item_has_active_job(paths, &item.id, JobType::MuxDubPreviewV1.as_str())
                             .unwrap_or(false)
                     {
@@ -14309,7 +15087,7 @@ if __name__ == "__main__":
             } else if p.batch_on_import {
                 let rules = config::load_batch_on_import_rules(paths).unwrap_or_default();
                 if rules.auto_dub_preview
-                    && !mux_output_exists(paths, &item.id)
+                    && !mux_output_exists(paths, &item.id)?
                     && !item_has_active_job(paths, &item.id, JobType::MuxDubPreviewV1.as_str())
                         .unwrap_or(false)
                 {
@@ -14353,7 +15131,11 @@ if __name__ == "__main__":
             )?;
 
             let item = library::get_item_by_id(paths, &p.item_id)?;
-            let media_path = PathBuf::from(&item.media_path);
+            let media_path = root_rebind::resolve_active_alias_path(
+                paths,
+                &PathBuf::from(&item.media_path),
+                false,
+            )?;
             if !media_path.exists() {
                 return Err(EngineError::InstallFailed(
                     "original media path does not exist".to_string(),
@@ -14376,9 +15158,8 @@ if __name__ == "__main__":
             // audio tracks plus embedded subtitle tracks; MP4 silently discards per-track
             // `title` metadata (verified: titles written into an MP4 do not survive the mux, so
             // players fall back to "Track 1 / Track 2") and is limited to `mov_text` subtitles.
-            // This does NOT affect the Video Archiver: single and subscription downloads take
-            // their container from `format_preference` (config.rs) through the yt-dlp path and
-            // never reach this job, so those keep exporting MP4.
+            // WP-0306 extends the same MKV-only managed-output policy to Video Archiver and
+            // direct-provider downloads. Historical MP4 artifacts remain readable everywhere.
             let requested_container = p
                 .output_container
                 .as_deref()
@@ -14396,33 +15177,34 @@ if __name__ == "__main__":
                 }
             }
             let ext = "mkv";
-            let out_path = out_dir.join(format!("mux_dub_preview_v1.{ext}"));
-
-            if out_path.exists() {
-                set_progress(paths, job_id, 1.0)?;
-                log_line(
-                    paths,
-                    job_id,
-                    "info",
-                    "mux_dub_preview_resume_skip_existing",
-                    serde_json::json!({ "out_path": &out_path }),
-                )?;
-                return Ok(());
-            }
+            let attempt_marker = Uuid::new_v4().simple().to_string();
+            let mut attempt_guard = AttemptDirectoryGuard::acquire(&out_dir, &attempt_marker)?;
+            let muxing_path = attempt_guard.path().join("mux_dub_preview_v1.muxing.mkv");
 
             // WP-0289 MT-11: keeping the original audio is now the DEFAULT for the localization
             // artifact. The point of the MKV switch is that the viewer can pick the dub or the
             // original; defaulting this off made the second track unreachable in practice,
             // because every auto-pipeline call site passes `None` here.
             let keep_original_audio = p.keep_original_audio.unwrap_or(true);
-            let dubbed_lang = normalize_lang_tag(p.dubbed_audio_lang.as_deref()).unwrap_or("eng");
-            let original_lang =
-                normalize_lang_tag(p.original_audio_lang.as_deref()).unwrap_or("und");
+            let dubbed_lang = normalize_lang_tag(p.dubbed_audio_lang.as_deref())
+                .unwrap_or_else(|| "eng".to_string());
+            let original_lang = normalize_lang_tag(p.original_audio_lang.as_deref())
+                .unwrap_or_else(|| "und".to_string());
+            if keep_original_audio {
+                let source_probe = ffmpeg::probe(paths, &media_path)?;
+                if source_probe.audio_stream_count == 0 {
+                    return Err(EngineError::InstallFailed(
+                        "keep-original-audio was requested but the source exposes no audio stream"
+                            .to_string(),
+                    ));
+                }
+            }
 
             // WP-0289 MT-11: export the subtitle tracks we already hold as sidecar JSON into SRT
             // and embed them, newest version per kind. Translated first so it is the default.
             let mut subtitle_inputs: Vec<(PathBuf, String, String)> = Vec::new();
-            let track_rows = subtitle_tracks::list_tracks(paths, &item.id).unwrap_or_default();
+            let mut subtitle_fingerprints = Vec::new();
+            let track_rows = subtitle_tracks::list_tracks(paths, &item.id)?;
             let newest_of = |kind: &str| -> Option<subtitle_tracks::SubtitleTrackRow> {
                 track_rows
                     .iter()
@@ -14434,28 +15216,163 @@ if __name__ == "__main__":
                 let Some(track_row) = newest_of(kind) else {
                     continue;
                 };
-                let lang = normalize_lang_tag(Some(&track_row.lang))
-                    .unwrap_or("und")
-                    .to_string();
-                let srt_path = out_dir.join(format!("mux_subs_{kind}_{lang}.srt"));
-                match subtitle_tracks::load_document(paths, &track_row.id).and_then(|doc| {
-                    subtitle_tracks::export_document_srt(&doc, &srt_path)?;
-                    Ok(())
-                }) {
-                    Ok(()) if srt_path.exists() => {
-                        subtitle_inputs.push((srt_path, lang, title.to_string()));
-                    }
-                    Ok(()) => {}
-                    Err(error) => {
-                        log_line(
-                            paths,
-                            job_id,
-                            "warn",
-                            "mux_dub_preview_subtitle_export_failed",
-                            serde_json::json!({ "kind": kind, "error": error.to_string() }),
-                        )?;
-                    }
+                let lang =
+                    normalize_lang_tag(Some(&track_row.lang)).unwrap_or_else(|| "und".to_string());
+                let srt_path = attempt_guard
+                    .path()
+                    .join(format!("mux_subs_{kind}_{lang}.srt"));
+                let doc = subtitle_tracks::load_document(paths, &track_row.id).map_err(|error| {
+                    EngineError::InstallFailed(format!(
+                        "required {kind} subtitle track could not be prepared for MKV embedding: {error}"
+                    ))
+                })?;
+                subtitle_tracks::export_document_srt(&doc, &srt_path).map_err(|error| {
+                    EngineError::InstallFailed(format!(
+                        "required {kind} subtitle track could not be staged for MKV embedding: {error}"
+                    ))
+                })?;
+                if !srt_path.is_file() {
+                    return Err(EngineError::InstallFailed(format!(
+                        "required {kind} subtitle staging file was not created: {}",
+                        srt_path.to_string_lossy()
+                    )));
                 }
+                let doc_bytes = serde_json::to_vec(&doc)?;
+                subtitle_fingerprints.push(MuxSubtitleInputFingerprint {
+                    track_id: track_row.id.clone(),
+                    track_version: track_row.version,
+                    kind: kind.to_string(),
+                    language: lang.clone(),
+                    content_sha256: sha256_bytes_hex(&doc_bytes),
+                });
+                subtitle_inputs.push((srt_path, lang, title.to_string()));
+            }
+
+            let mux_expectations = ManagedMkvExpectations {
+                min_audio_streams: if keep_original_audio { 2 } else { 1 },
+                audio_tracks: {
+                    let mut tracks = vec![StreamExpectation {
+                        language: Some(dubbed_lang.to_string()),
+                        title: Some("English (AI dub - cloned voice)".to_string()),
+                    }];
+                    if keep_original_audio {
+                        tracks.push(StreamExpectation {
+                            language: Some(original_lang.to_string()),
+                            title: Some("Original audio".to_string()),
+                        });
+                    }
+                    tracks
+                },
+                subtitle_tracks: subtitle_inputs
+                    .iter()
+                    .map(|(_, language, title)| StreamExpectation {
+                        language: Some(language.clone()),
+                        title: Some(title.clone()),
+                    })
+                    .collect(),
+            };
+
+            let (source_media_bytes, source_media_modified_ns, source_media_sha256) =
+                full_file_identity(&media_path)?;
+            let input_fingerprint = MuxInputFingerprint {
+                schema_version: 3,
+                source_media_path: media_path.to_string_lossy().to_string(),
+                source_media_bytes,
+                source_media_modified_ns,
+                source_media_sha256,
+                dub_audio_sha256: sha256_file_hex(&dub_audio_path)?,
+                keep_original_audio,
+                dubbed_audio_language: dubbed_lang.clone(),
+                original_audio_language: original_lang.clone(),
+                subtitles: subtitle_fingerprints,
+            };
+            let variant_key = localization_preview_variant_key(variant_label.as_deref());
+            let (generation_id, input_sha256, input_json) =
+                localization_preview_generation(&item.id, &variant_key, &input_fingerprint)?;
+            let out_path = localization_preview_artifact_path(&out_dir, &generation_id)?;
+            let _ = prune_orphan_localization_preview_staging(
+                paths,
+                &out_dir,
+                &item.id,
+                &variant_key,
+                now_ms(),
+            )?;
+            write_localization_preview_staging_marker(
+                attempt_guard.path(),
+                &LocalizationPreviewStagingMarker {
+                    schema_version: 1,
+                    generation_id: generation_id.clone(),
+                    item_id: item.id.clone(),
+                    variant_key: variant_key.clone(),
+                    created_at_ms: now_ms(),
+                },
+            )?;
+            let _output_guard = ManagedOutputGuard::acquire(&out_path)?;
+            let batch_id = job_batch_id(paths, job_id).ok().flatten();
+            let qc_intent = if pipeline.auto_pipeline && pipeline.queue_qc {
+                if let Some(track_id) = pipeline.source_track_id.clone() {
+                    let params_json = serde_json::to_string(&QcReportV1Params {
+                        item_id: item.id.clone(),
+                        track_id,
+                        variant_label: variant_label.clone(),
+                    })?;
+                    Some(LocalizationPreviewContinuationIntent {
+                        job_id: format!("{generation_id}-qc"),
+                        job_type: JobType::QcReportV1.as_str().to_string(),
+                        params_json,
+                        batch_id: batch_id.clone(),
+                    })
+                } else {
+                    None
+                }
+            } else {
+                None
+            };
+            let export_intent = if pipeline.auto_pipeline && pipeline.queue_export_pack {
+                Some(LocalizationPreviewContinuationIntent {
+                    job_id: format!("{generation_id}-export"),
+                    job_type: JobType::ExportPackV1.as_str().to_string(),
+                    params_json: serde_json::to_string(&ExportPackV1Params {
+                        item_id: item.id.clone(),
+                        include_alternates: true,
+                        variant_label: variant_label.clone(),
+                    })?,
+                    batch_id: batch_id.clone(),
+                })
+            } else {
+                None
+            };
+
+            if let Some(existing) =
+                load_localization_preview_publication(paths, &generation_id)?
+            {
+                validate_localization_preview_publication_lineage(
+                    &existing,
+                    &item.id,
+                    &variant_key,
+                    &input_sha256,
+                    &input_json,
+                    &out_path,
+                    qc_intent.as_ref(),
+                    export_intent.as_ref(),
+                )?;
+                if !reconcile_existing_localization_preview_publication(paths, &existing)? {
+                    return Err(EngineError::InstallFailed(
+                        "prepared localization publication lost its trusted staging artifact"
+                            .to_string(),
+                    ));
+                }
+                attempt_guard.cleanup_after_success();
+                let (progress_error, log_error) = run_post_publication_best_effort(
+                    || set_progress(paths, job_id, 1.0),
+                    || log_line(paths, job_id, "info", "mux_dub_preview_resume_skip_existing", serde_json::json!({ "out_path": &out_path, "generation_id": &generation_id })),
+                );
+                if progress_error.is_some() || log_error.is_some() {
+                    crate::diagnostics::emit_trace_event(paths, "mux_dub_preview_post_publication_reporting_failed", "warn", serde_json::json!({ "job_id": job_id, "out_path": &out_path, "progress_error": progress_error, "log_error": log_error, "publication_state": "reconciled" }));
+                }
+                set_succeeded(paths, job_id)?;
+                let _ = log_line(paths, job_id, "info", "job_succeeded", serde_json::json!({ "publication_state": "reconciled", "out_path": &out_path }));
+                return Ok(());
             }
 
             let mut ff = cmd::command(paths.ffmpeg_cmd());
@@ -14487,10 +15404,7 @@ if __name__ == "__main__":
             // Language + human-readable track names. MKV stores `title` per track, so players
             // show "English (AI dub - cloned voice)" instead of "Track 1".
             ff.args(["-metadata:s:a:0", &format!("language={dubbed_lang}")]);
-            ff.args([
-                "-metadata:s:a:0",
-                "title=English (AI dub - cloned voice)",
-            ]);
+            ff.args(["-metadata:s:a:0", "title=English (AI dub - cloned voice)"]);
             ff.args(["-disposition:a:0", "default"]);
             if keep_original_audio {
                 ff.args(["-metadata:s:a:1", &format!("language={original_lang}")]);
@@ -14498,10 +15412,7 @@ if __name__ == "__main__":
                 ff.args(["-disposition:a:1", "0"]);
             }
             for (index, (_, lang, title)) in subtitle_inputs.iter().enumerate() {
-                ff.args([
-                    format!("-metadata:s:s:{index}"),
-                    format!("language={lang}"),
-                ]);
+                ff.args([format!("-metadata:s:s:{index}"), format!("language={lang}")]);
                 ff.args([format!("-metadata:s:s:{index}"), format!("title={title}")]);
                 ff.args([
                     format!("-disposition:s:{index}"),
@@ -14509,7 +15420,7 @@ if __name__ == "__main__":
                 ]);
             }
 
-            ff.arg(&out_path);
+            ff.arg(&muxing_path);
 
             let output = ff.output().map_err(|e| match e.kind() {
                 std::io::ErrorKind::NotFound => EngineError::ExternalToolMissing {
@@ -14526,62 +15437,68 @@ if __name__ == "__main__":
                 });
             }
 
-            set_progress(paths, job_id, 0.95)?;
-            log_line(
+            let mux_probe = validate_managed_mkv_output(paths, &muxing_path, &mux_expectations)?;
+            let artifact_identity = published_file_identity(&muxing_path)?;
+            let publication = prepare_localization_preview_publication(
                 paths,
+                &item.id,
+                &variant_key,
                 job_id,
-                "info",
-                "mux_dub_preview_done",
-                serde_json::json!({
+                &input_fingerprint,
+                &out_path,
+                &artifact_identity,
+                &muxing_path,
+                qc_intent.as_ref(),
+                export_intent.as_ref(),
+            )?;
+            attempt_guard.preserve_for_publication_reconciliation();
+            publish_localization_preview_generation_with_hook(
+                paths,
+                &muxing_path,
+                &publication,
+                |_| Ok(()),
+            )?;
+            attempt_guard.cleanup_after_success();
+            let done_data = serde_json::json!({
                     "out_path": &out_path,
                     "container": ext,
                     "keep_original_audio": keep_original_audio,
                     "dubbed_lang": dubbed_lang,
                     "original_lang": original_lang,
-                    "variant_label": variant_label.clone()
-                }),
-            )?;
-
-            if pipeline.auto_pipeline {
-                let batch_id = job_batch_id(paths, job_id).ok().flatten();
-                if pipeline.queue_qc {
-                    if let Some(track_id) = pipeline.source_track_id.clone() {
-                        if !item_has_active_job(paths, &item.id, JobType::QcReportV1.as_str())
-                            .unwrap_or(false)
-                        {
-                            let params_json = serde_json::to_string(&QcReportV1Params {
-                                item_id: item.id.clone(),
-                                track_id,
-                                variant_label: variant_label.clone(),
-                            })?;
-                            let _ = enqueue_with_type_item_and_batch_id(
-                                paths,
-                                JobType::QcReportV1,
-                                params_json,
-                                Some(item.id.clone()),
-                                batch_id.clone(),
-                            )?;
-                        }
-                    }
-                }
-                if pipeline.queue_export_pack
-                    && !item_has_active_job(paths, &item.id, JobType::ExportPackV1.as_str())
-                        .unwrap_or(false)
-                {
-                    let params_json = serde_json::to_string(&ExportPackV1Params {
-                        item_id: item.id.clone(),
-                        include_alternates: true,
-                        variant_label: variant_label.clone(),
-                    })?;
-                    let _ = enqueue_with_type_item_and_batch_id(
+                    "variant_label": variant_label.clone(),
+                    "video_stream_count": mux_probe.video_stream_count,
+                    "audio_stream_count": mux_probe.audio_stream_count,
+                    "audio_tracks": mux_probe.audio_streams,
+                    "subtitle_stream_count": mux_probe.subtitle_streams.len(),
+                    "subtitle_tracks": mux_probe.subtitle_streams
+                });
+            let (progress_error, log_error) = run_post_publication_best_effort(
+                || set_progress(paths, job_id, 0.95),
+                || {
+                    log_line(
                         paths,
-                        JobType::ExportPackV1,
-                        params_json,
-                        Some(item.id.clone()),
-                        batch_id,
-                    )?;
-                }
+                        job_id,
+                        "info",
+                        "mux_dub_preview_done",
+                        done_data.clone(),
+                    )
+                },
+            );
+            if progress_error.is_some() || log_error.is_some() {
+                crate::diagnostics::emit_trace_event(
+                    paths,
+                    "mux_dub_preview_post_publication_reporting_failed",
+                    "warn",
+                    serde_json::json!({
+                        "job_id": job_id,
+                        "out_path": &out_path,
+                        "progress_error": progress_error,
+                        "log_error": log_error,
+                        "publication_state": "committed",
+                    }),
+                );
             }
+
         }
         JobType::SeparateAudioSpleeter => {
             set_progress(paths, job_id, 0.05)?;
@@ -14609,7 +15526,7 @@ if __name__ == "__main__":
             }
 
             let item = library::get_item_by_id(paths, &p.item_id)?;
-            let media_path = Path::new(&item.media_path);
+            let media_path = library::resolve_media_path(paths, &item.media_path)?;
 
             let sep_dir = paths
                 .derived_item_dir(&item.id)
@@ -14667,7 +15584,7 @@ if __name__ == "__main__":
                     serde_json::json!({ "audio_path": &audio_path }),
                 )?;
             } else {
-                ffmpeg::extract_audio_wav_44k_stereo(paths, media_path, &audio_path)?;
+                ffmpeg::extract_audio_wav_44k_stereo(paths, &media_path, &audio_path)?;
             }
             set_progress(paths, job_id, 0.25)?;
 
@@ -15031,7 +15948,7 @@ if __name__ == "__main__":
             }
 
             let item = library::get_item_by_id(paths, &p.item_id)?;
-            let media_path = Path::new(&item.media_path);
+            let media_path = library::resolve_media_path(paths, &item.media_path)?;
 
             let sep_dir = paths
                 .derived_item_dir(&item.id)
@@ -15089,7 +16006,7 @@ if __name__ == "__main__":
                     serde_json::json!({ "audio_path": &audio_path }),
                 )?;
             } else {
-                ffmpeg::extract_audio_wav_44k_stereo(paths, media_path, &audio_path)?;
+                ffmpeg::extract_audio_wav_44k_stereo(paths, &media_path, &audio_path)?;
             }
             set_progress(paths, job_id, 0.25)?;
 
@@ -15701,7 +16618,7 @@ if __name__ == "__main__":
 
             let mut files: Vec<(PathBuf, String)> = Vec::new();
 
-            let mut push_dub_artifacts = |variant_label: Option<&str>, zip_root: String| {
+            let mut push_dub_artifacts = |variant_label: Option<&str>, zip_root: String| -> Result<()> {
                 let dub_dir = dub_variant_dir(&item_dir, variant_label);
                 let mix_wav = dub_dir.join("mix_dub_preview_v1.wav");
                 if mix_wav.exists() {
@@ -15711,13 +16628,24 @@ if __name__ == "__main__":
                 if speech_stem.exists() {
                     files.push((speech_stem, format!("{zip_root}/speech_dub_preview_v1.wav")));
                 }
-                let mux_mp4 = dub_dir.join("mux_dub_preview_v1.mp4");
-                let mux_mkv = dub_dir.join("mux_dub_preview_v1.mkv");
-                if mux_mp4.exists() {
-                    files.push((mux_mp4, format!("{zip_root}/mux_dub_preview_v1.mp4")));
-                } else if mux_mkv.exists() {
-                    files.push((mux_mkv, format!("{zip_root}/mux_dub_preview_v1.mkv")));
+                if let Some(mux) = localization_preview_export_artifact(
+                    paths,
+                    &item.id,
+                    variant_label,
+                    &dub_dir,
+                )? {
+                    let extension = mux
+                        .extension()
+                        .and_then(|value| value.to_str())
+                        .filter(|value| value.eq_ignore_ascii_case("mp4"))
+                        .map(|_| "mp4")
+                        .unwrap_or("mkv");
+                    files.push((
+                        mux,
+                        format!("{zip_root}/mux_dub_preview_v1.{extension}"),
+                    ));
                 }
+                Ok(())
             };
             push_dub_artifacts(
                 selected_variant.as_deref(),
@@ -15725,7 +16653,7 @@ if __name__ == "__main__":
                     Some(label) => format!("alternates/{label}"),
                     None => "dub_preview".to_string(),
                 },
-            );
+            )?;
             if selected_variant.is_none() && p.include_alternates {
                 let alternates_dir = item_dir.join("dub_preview").join("alternates");
                 if alternates_dir.exists() {
@@ -15739,7 +16667,7 @@ if __name__ == "__main__":
                             else {
                                 continue;
                             };
-                            push_dub_artifacts(Some(label), format!("alternates/{label}"));
+                            push_dub_artifacts(Some(label), format!("alternates/{label}"))?;
                         }
                     }
                 }
@@ -16295,13 +17223,29 @@ ORDER BY created_at_ms ASC
     }
 
     set_succeeded(paths, job_id)?;
-    log_line(
+    let success_log = log_line(
         paths,
         job_id,
         "info",
         "job_succeeded",
         serde_json::json!({}),
-    )?;
+    );
+    if type_str == JobType::MuxDubPreviewV1.as_str() {
+        if let Err(error) = success_log {
+            crate::diagnostics::emit_trace_event(
+                paths,
+                "mux_dub_preview_post_publication_reporting_failed",
+                "warn",
+                serde_json::json!({
+                    "job_id": job_id,
+                    "log_error": error.to_string(),
+                    "publication_state": "committed_and_succeeded",
+                }),
+            );
+        }
+    } else {
+        success_log?;
+    }
     Ok(())
 }
 
@@ -16316,6 +17260,8 @@ fn set_progress(paths: &AppPaths, job_id: &str, progress: f32) -> Result<()> {
             JobStatus::Running.as_str()
         ],
     )?;
+    drop(conn);
+    let _ = subscriptions::refresh_subscription_activity_rollup_for_job(paths, job_id);
     Ok(())
 }
 
@@ -16331,6 +17277,8 @@ fn set_succeeded(paths: &AppPaths, job_id: &str) -> Result<()> {
             JobStatus::Running.as_str()
         ],
     )?;
+    drop(conn);
+    let _ = subscriptions::refresh_subscription_activity_rollup_for_job(paths, job_id);
     Ok(())
 }
 
@@ -16367,6 +17315,8 @@ fn set_failed(paths: &AppPaths, job_id: &str, error: &str) -> Result<()> {
             }
         }
     }
+    drop(conn);
+    let _ = subscriptions::refresh_subscription_activity_rollup_for_job(paths, job_id);
     Ok(())
 }
 
@@ -16567,6 +17517,8 @@ pub fn set_job_track_runtime_settings(
 // WP-0257 (#3/#4): operator-tunable anti-bot pacing settings (Options -> Anti-bot pacing).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AntiBotPacingSettings {
+    #[serde(default = "default_true")]
+    pub adaptive_protection_enabled: bool,
     pub recurring_min_interval_secs: u64,
     pub recurring_jitter_secs: u64,
     pub enumeration_sleep_requests: u32,
@@ -16596,6 +17548,8 @@ fn upsert_meta_conn(conn: &rusqlite::Connection, key: &str, value: &str) -> Resu
 
 fn antibot_pacing_from_conn(conn: &rusqlite::Connection) -> AntiBotPacingSettings {
     AntiBotPacingSettings {
+        adaptive_protection_enabled: meta_u64_conn(conn, META_KEY_ADAPTIVE_PROTECTION_ENABLED, 1)
+            != 0,
         recurring_min_interval_secs: meta_u64_conn(
             conn,
             META_KEY_RECURRING_MIN_INTERVAL_SECS,
@@ -16644,9 +17598,39 @@ pub fn set_antibot_pacing(
     paths: &AppPaths,
     settings: AntiBotPacingSettings,
 ) -> Result<AntiBotPacingSettings> {
-    let conn = db::open(paths)?;
+    set_antibot_pacing_internal(paths, settings, None)
+}
+
+pub fn set_antibot_pacing_with_generation(
+    paths: &AppPaths,
+    settings: AntiBotPacingSettings,
+    mutation_generation: u64,
+) -> Result<AntiBotPacingSettings> {
+    set_antibot_pacing_internal(paths, settings, Some(mutation_generation))
+}
+
+fn set_antibot_pacing_internal(
+    paths: &AppPaths,
+    settings: AntiBotPacingSettings,
+    mutation_generation: Option<u64>,
+) -> Result<AntiBotPacingSettings> {
+    let _write_guard = ANTIBOT_PACING_WRITE_LOCK
+        .get_or_init(|| Mutex::new(()))
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let mut conn = db::open(paths)?;
     db::migrate(&conn)?;
+    let tx = conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+    if let Some(generation) = mutation_generation {
+        youtube_protection::claim_mutation_generation_conn(
+            &tx,
+            "pacing",
+            generation,
+            false,
+        )?;
+    }
     let clamped = AntiBotPacingSettings {
+        adaptive_protection_enabled: settings.adaptive_protection_enabled,
         recurring_min_interval_secs: settings
             .recurring_min_interval_secs
             .min(MAX_RECURRING_MIN_INTERVAL_SECS),
@@ -16668,36 +17652,427 @@ pub fn set_antibot_pacing(
             .min(MAX_RECURRING_DOWNLOAD_SLEEP_SECS),
     };
     upsert_meta_conn(
-        &conn,
+        &tx,
+        META_KEY_ADAPTIVE_PROTECTION_ENABLED,
+        if clamped.adaptive_protection_enabled {
+            "1"
+        } else {
+            "0"
+        },
+    )?;
+    upsert_meta_conn(
+        &tx,
         META_KEY_RECURRING_MIN_INTERVAL_SECS,
         &clamped.recurring_min_interval_secs.to_string(),
     )?;
     upsert_meta_conn(
-        &conn,
+        &tx,
         META_KEY_RECURRING_JITTER_SECS,
         &clamped.recurring_jitter_secs.to_string(),
     )?;
     upsert_meta_conn(
-        &conn,
+        &tx,
         META_KEY_ENUM_SLEEP_REQUESTS,
         &clamped.enumeration_sleep_requests.to_string(),
     )?;
     upsert_meta_conn(
-        &conn,
+        &tx,
         META_KEY_UPDATE_ALL_BATCH,
         &clamped.update_all_batch_size.to_string(),
     )?;
     upsert_meta_conn(
-        &conn,
+        &tx,
         META_KEY_RECURRING_DOWNLOAD_MIN_SLEEP,
         &clamped.recurring_download_min_sleep_secs.to_string(),
     )?;
     upsert_meta_conn(
-        &conn,
+        &tx,
         META_KEY_RECURRING_DOWNLOAD_MAX_SLEEP,
         &clamped.recurring_download_max_sleep_secs.to_string(),
     )?;
+    tx.commit()?;
     Ok(clamped)
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct YoutubeProtectionStatus {
+    pub automatic_protection_enabled: bool,
+    pub runtime_capabilities: youtube_protection::DownloaderRuntimeCapabilities,
+    pub state: youtube_protection::DownloaderPolicySnapshot,
+    pub baseline: youtube_protection::DownloaderBaselinePolicy,
+    pub effective: youtube_protection::DownloaderEffectivePolicy,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct YoutubeProtectionHistoryExportReceipt {
+    pub path: String,
+    pub operation: String,
+    pub outcomes_exported: usize,
+    pub transitions_exported: usize,
+    pub raw_total: u64,
+    pub transition_total: u64,
+    pub full_export: bool,
+}
+
+fn youtube_protection_baseline(
+    paths: &AppPaths,
+) -> Result<youtube_protection::DownloaderBaselinePolicy> {
+    let presets = config::load_download_presets_config(paths)?;
+    let preset = presets
+        .default_preset_id
+        .as_deref()
+        .and_then(|id| presets.presets.iter().find(|preset| preset.id == id))
+        .or_else(|| presets.presets.first())
+        .cloned()
+        .unwrap_or_else(|| {
+            config::DownloadPresetsConfig::default()
+                .presets
+                .into_iter()
+                .next()
+                .expect("default download preset")
+        });
+    let pacing = get_antibot_pacing(paths)?;
+    Ok(youtube_protection::DownloaderBaselinePolicy {
+        concurrent_fragments: preset.yt_dlp_concurrent_fragments.max(1),
+        sleep_interval_secs: preset.yt_dlp_sleep_interval,
+        sleep_requests_secs: preset.yt_dlp_sleep_requests,
+        update_tranche_size: pacing.update_all_batch_size.clamp(1, u32::MAX as usize) as u32,
+        limit_rate: preset.yt_dlp_limit_rate,
+        throttled_rate: preset.yt_dlp_throttled_rate,
+    })
+}
+
+fn current_youtube_protection_auth_fingerprint(paths: &AppPaths) -> Result<String> {
+    Ok(youtube_auth_material_key(paths, None, false, None)?
+        .unwrap_or_else(|| youtube_protection::ANONYMOUS_AUTH_FINGERPRINT.to_string()))
+}
+
+pub fn get_youtube_protection_status(
+    paths: &AppPaths,
+    operation: Option<&str>,
+) -> Result<YoutubeProtectionStatus> {
+    let operation = match operation.map(str::trim) {
+        Some(youtube_protection::OPERATION_ENUMERATION) => {
+            youtube_protection::OPERATION_ENUMERATION
+        }
+        _ => youtube_protection::OPERATION_DOWNLOAD,
+    };
+    let auth_fingerprint = current_youtube_protection_auth_fingerprint(paths)?;
+    let runtime_capabilities = youtube_protection::runtime_capabilities(paths);
+    let runtime_epoch = runtime_capabilities.epoch.clone();
+    let baseline = youtube_protection_baseline(paths)?;
+    let state = youtube_protection::load_policy_state(
+        paths,
+        youtube_protection::PROVIDER_YOUTUBE,
+        operation,
+        &auth_fingerprint,
+        &runtime_epoch,
+    )?;
+    let pacing = get_antibot_pacing(paths)?;
+    let effective = if pacing.adaptive_protection_enabled {
+        let tuning = youtube_protection::get_tuning(paths)?;
+        youtube_protection::effective_policy_with_tuning(&baseline, &state, now_ms(), &tuning)
+    } else {
+        // The status projection must describe the command that will actually run. Turning
+        // adaptation off preserves observation history but executes the persisted baseline.
+        youtube_protection::baseline_effective_policy(&baseline)
+    };
+    Ok(YoutubeProtectionStatus {
+        automatic_protection_enabled: pacing.adaptive_protection_enabled,
+        runtime_capabilities,
+        state,
+        baseline,
+        effective,
+    })
+}
+
+pub fn return_youtube_protection_to_baseline(
+    paths: &AppPaths,
+    operation: Option<&str>,
+) -> Result<YoutubeProtectionStatus> {
+    let operation = match operation.map(str::trim) {
+        Some(youtube_protection::OPERATION_ENUMERATION) => {
+            youtube_protection::OPERATION_ENUMERATION
+        }
+        _ => youtube_protection::OPERATION_DOWNLOAD,
+    };
+    let auth_fingerprint = current_youtube_protection_auth_fingerprint(paths)?;
+    let runtime_epoch = youtube_protection::runtime_epoch_for_paths(paths);
+    youtube_protection::return_to_baseline(
+        paths,
+        youtube_protection::PROVIDER_YOUTUBE,
+        operation,
+        &auth_fingerprint,
+        &runtime_epoch,
+    )?;
+    get_youtube_protection_status(paths, Some(operation))
+}
+
+pub fn youtube_update_all_effective_batch_size(paths: &AppPaths) -> usize {
+    let baseline = get_antibot_pacing(paths)
+        .map(|settings| settings.update_all_batch_size)
+        .unwrap_or(DEFAULT_UPDATE_ALL_BATCH);
+    let adaptive_enabled = get_antibot_pacing(paths)
+        .map(|settings| settings.adaptive_protection_enabled)
+        .unwrap_or(true);
+    if !adaptive_enabled {
+        return baseline;
+    }
+    get_youtube_protection_status(paths, Some(youtube_protection::OPERATION_ENUMERATION))
+        .map(|status| status.effective.update_tranche_size.max(1) as usize)
+        .unwrap_or(baseline)
+}
+
+pub fn get_youtube_protection_history(
+    paths: &AppPaths,
+    operation: Option<&str>,
+    limit: usize,
+) -> Result<youtube_protection::DownloaderPolicyHistory> {
+    let operation = match operation.map(str::trim) {
+        Some(youtube_protection::OPERATION_ENUMERATION) => {
+            youtube_protection::OPERATION_ENUMERATION
+        }
+        _ => youtube_protection::OPERATION_DOWNLOAD,
+    };
+    youtube_protection::policy_history(
+        paths,
+        youtube_protection::PROVIDER_YOUTUBE,
+        operation,
+        &current_youtube_protection_auth_fingerprint(paths)?,
+        &youtube_protection::runtime_epoch_for_paths(paths),
+        limit,
+    )
+}
+
+pub fn replay_youtube_protection_history(
+    paths: &AppPaths,
+    operation: Option<&str>,
+    _limit: usize,
+) -> Result<youtube_protection::DownloaderPolicyReplayReceipt> {
+    let operation = match operation.map(str::trim) {
+        Some(youtube_protection::OPERATION_ENUMERATION) => {
+            youtube_protection::OPERATION_ENUMERATION
+        }
+        _ => youtube_protection::OPERATION_DOWNLOAD,
+    };
+    youtube_protection::replay_policy_history_from_store(
+        paths,
+        youtube_protection::PROVIDER_YOUTUBE,
+        operation,
+        &current_youtube_protection_auth_fingerprint(paths)?,
+        &youtube_protection::runtime_epoch_for_paths(paths),
+    )
+}
+
+pub fn get_youtube_protection_tuning(
+    paths: &AppPaths,
+) -> Result<youtube_protection::YoutubeProtectionTuning> {
+    youtube_protection::get_tuning(paths)
+}
+
+pub fn set_youtube_protection_tuning(
+    paths: &AppPaths,
+    tuning: youtube_protection::YoutubeProtectionTuning,
+) -> Result<youtube_protection::YoutubeProtectionTuning> {
+    youtube_protection::set_tuning(paths, tuning)
+}
+
+pub fn set_youtube_protection_tuning_with_generation(
+    paths: &AppPaths,
+    tuning: youtube_protection::YoutubeProtectionTuning,
+    mutation_generation: u64,
+) -> Result<youtube_protection::YoutubeProtectionTuning> {
+    youtube_protection::set_tuning_with_generation(paths, tuning, mutation_generation)
+}
+
+pub fn reset_youtube_protection_tuning(
+    paths: &AppPaths,
+) -> Result<youtube_protection::YoutubeProtectionTuning> {
+    youtube_protection::reset_tuning(paths)
+}
+
+pub fn reset_youtube_protection_tuning_with_generation(
+    paths: &AppPaths,
+    mutation_generation: u64,
+) -> Result<youtube_protection::YoutubeProtectionTuning> {
+    youtube_protection::reset_tuning_with_generation(paths, mutation_generation)
+}
+
+pub fn export_youtube_protection_history(
+    paths: &AppPaths,
+    operation: Option<&str>,
+) -> Result<YoutubeProtectionHistoryExportReceipt> {
+    let operation = match operation {
+        Some(youtube_protection::OPERATION_ENUMERATION) => {
+            youtube_protection::OPERATION_ENUMERATION
+        }
+        _ => youtube_protection::OPERATION_DOWNLOAD,
+    };
+    let status = get_youtube_protection_status(paths, Some(operation))?;
+    let auth_fingerprint = current_youtube_protection_auth_fingerprint(paths)?;
+    let history_summary = youtube_protection::policy_history(
+        paths,
+        youtube_protection::PROVIDER_YOUTUBE,
+        operation,
+        &auth_fingerprint,
+        &status.state.runtime_epoch,
+        1,
+    )?;
+    let tuning = youtube_protection::get_tuning(paths)?;
+    let export_dir = paths.logs_dir().join("youtube_protection_exports");
+    std::fs::create_dir_all(&export_dir)?;
+    let export_path = export_dir.join(format!(
+        "youtube_protection_{}_{}_{}.json",
+        operation,
+        now_ms(),
+        Uuid::new_v4().simple()
+    ));
+    let staged_path = export_path.with_extension("json.staged");
+    let file = std::fs::OpenOptions::new()
+        .create_new(true)
+        .write(true)
+        .open(&staged_path)?;
+    use std::io::Write as _;
+    let mut file = std::io::BufWriter::new(file);
+    let stream_result: Result<(usize, usize)> = (|| {
+        file.write_all(b"{\"schema_version\":1,\"generated_at_ms\":")?;
+        serde_json::to_writer(&mut file, &now_ms())?;
+        file.write_all(b",\"status\":")?;
+        serde_json::to_writer(&mut file, &status)?;
+        file.write_all(b",\"tuning\":")?;
+        serde_json::to_writer(&mut file, &tuning)?;
+        file.write_all(b",\"history\":{\"outcomes\":[")?;
+        let mut outcome_cursor = None;
+        let mut outcomes_exported = 0_usize;
+        let mut first = true;
+        loop {
+            let page = youtube_protection::policy_outcomes_page(
+                paths,
+                youtube_protection::PROVIDER_YOUTUBE,
+                operation,
+                &auth_fingerprint,
+                &status.state.runtime_epoch,
+                outcome_cursor.as_ref(),
+                1_000,
+            )?;
+            for outcome in &page.outcomes {
+                if !first {
+                    file.write_all(b",")?;
+                }
+                first = false;
+                serde_json::to_writer(&mut file, outcome)?;
+                outcomes_exported = outcomes_exported.saturating_add(1);
+            }
+            if !page.has_more {
+                break;
+            }
+            outcome_cursor = page.next_cursor;
+        }
+        file.write_all(b"],\"transitions\":[")?;
+        let mut transition_cursor = None;
+        let mut transitions_exported = 0_usize;
+        first = true;
+        loop {
+            let page = youtube_protection::policy_transitions_page(
+                paths,
+                youtube_protection::PROVIDER_YOUTUBE,
+                operation,
+                &auth_fingerprint,
+                &status.state.runtime_epoch,
+                transition_cursor.as_ref(),
+                1_000,
+            )?;
+            for transition in &page.transitions {
+                if !first {
+                    file.write_all(b",")?;
+                }
+                first = false;
+                serde_json::to_writer(&mut file, transition)?;
+                transitions_exported = transitions_exported.saturating_add(1);
+            }
+            if !page.has_more {
+                break;
+            }
+            transition_cursor = page.next_cursor;
+        }
+        file.write_all(b"],\"raw_total\":")?;
+        serde_json::to_writer(&mut file, &history_summary.raw_total)?;
+        file.write_all(b",\"transition_total\":")?;
+        serde_json::to_writer(&mut file, &history_summary.transition_total)?;
+        file.write_all(b",\"rollup_event_total\":")?;
+        serde_json::to_writer(&mut file, &history_summary.rollup_event_total)?;
+        file.write_all(b",\"unknown_total\":")?;
+        serde_json::to_writer(&mut file, &history_summary.unknown_total)?;
+        file.write_all(b",\"class_totals\":")?;
+        serde_json::to_writer(&mut file, &history_summary.class_totals)?;
+        file.write_all(b"}}\n")?;
+        file.flush()?;
+        file.get_ref().sync_all()?;
+        Ok((outcomes_exported, transitions_exported))
+    })();
+    let (outcomes_exported, transitions_exported) = match stream_result {
+        Ok(counts) => counts,
+        Err(error) => {
+            drop(file);
+            let _ = std::fs::remove_file(&staged_path);
+            return Err(error);
+        }
+    };
+    drop(file);
+    if let Err(error) = std::fs::rename(&staged_path, &export_path) {
+        let _ = std::fs::remove_file(&staged_path);
+        return Err(error.into());
+    }
+    Ok(YoutubeProtectionHistoryExportReceipt {
+        path: export_path.to_string_lossy().to_string(),
+        operation: operation.to_string(),
+        outcomes_exported,
+        transitions_exported,
+        raw_total: history_summary.raw_total,
+        transition_total: history_summary.transition_total,
+        full_export: outcomes_exported as u64 == history_summary.raw_total
+            && transitions_exported as u64 == history_summary.transition_total,
+    })
+}
+
+pub fn reset_youtube_protection_history(
+    paths: &AppPaths,
+    operation: Option<&str>,
+) -> Result<youtube_protection::DownloaderHistoryResetReceipt> {
+    let operation = match operation {
+        Some(youtube_protection::OPERATION_ENUMERATION) => {
+            youtube_protection::OPERATION_ENUMERATION
+        }
+        _ => youtube_protection::OPERATION_DOWNLOAD,
+    };
+    youtube_protection::reset_policy_history(
+        paths,
+        youtube_protection::PROVIDER_YOUTUBE,
+        operation,
+        &current_youtube_protection_auth_fingerprint(paths)?,
+        &youtube_protection::runtime_epoch_for_paths(paths),
+    )
+}
+
+pub fn reset_youtube_protection_history_with_generation(
+    paths: &AppPaths,
+    operation: Option<&str>,
+    mutation_generation: u64,
+) -> Result<youtube_protection::DownloaderHistoryResetReceipt> {
+    let operation = match operation {
+        Some(youtube_protection::OPERATION_ENUMERATION) => {
+            youtube_protection::OPERATION_ENUMERATION
+        }
+        _ => youtube_protection::OPERATION_DOWNLOAD,
+    };
+    youtube_protection::reset_policy_history_with_generation(
+        paths,
+        youtube_protection::PROVIDER_YOUTUBE,
+        operation,
+        &current_youtube_protection_auth_fingerprint(paths)?,
+        &youtube_protection::runtime_epoch_for_paths(paths),
+        mutation_generation,
+    )
 }
 
 fn bounded_runtime_jitter(max_inclusive: u64, salt: &str) -> u64 {
@@ -16715,6 +18090,7 @@ fn bounded_runtime_jitter(max_inclusive: u64, salt: &str) -> u64 {
 
 fn recurring_dispatch_interval_secs(paths: &AppPaths, salt: &str) -> u64 {
     let pacing = get_antibot_pacing(paths).unwrap_or(AntiBotPacingSettings {
+        adaptive_protection_enabled: true,
         recurring_min_interval_secs: DEFAULT_RECURRING_MIN_INTERVAL_SECS,
         recurring_jitter_secs: DEFAULT_RECURRING_JITTER_SECS,
         enumeration_sleep_requests: DEFAULT_ENUM_SLEEP_REQUESTS,
@@ -16729,6 +18105,7 @@ fn recurring_dispatch_interval_secs(paths: &AppPaths, salt: &str) -> u64 {
 
 fn recurring_download_sleep_secs(paths: &AppPaths, job_id: &str) -> u32 {
     let pacing = get_antibot_pacing(paths).unwrap_or(AntiBotPacingSettings {
+        adaptive_protection_enabled: true,
         recurring_min_interval_secs: DEFAULT_RECURRING_MIN_INTERVAL_SECS,
         recurring_jitter_secs: DEFAULT_RECURRING_JITTER_SECS,
         enumeration_sleep_requests: DEFAULT_ENUM_SLEEP_REQUESTS,
@@ -16764,6 +18141,243 @@ fn effective_direct_download_profile(
     } else {
         (requested_sleep_interval, requested_concurrent_fragments)
     }
+}
+
+/// Resolve the adaptive shared-start floor from the same canonical auth identity and saved
+/// downloader baseline that the worker will use. This runs before spawning the worker so the
+/// existing cross-track gate closes for the effective interval instead of allowing a burst while
+/// each worker independently sleeps. Failures deliberately fall back to the saved gate interval;
+/// the worker remains authoritative and will surface the underlying configuration/auth error.
+#[derive(Debug, Clone)]
+struct YoutubeSchedulerPolicy {
+    effective: youtube_protection::DownloaderEffectivePolicy,
+    next_eligible_probe_at_ms: Option<i64>,
+    operation: &'static str,
+    auth_fingerprint: String,
+    runtime_epoch: String,
+}
+
+fn effective_youtube_scheduler_policy(
+    paths: &AppPaths,
+    job_id: &str,
+    params_json: &str,
+) -> Result<Option<YoutubeSchedulerPolicy>> {
+    let params: DownloadDirectUrlParams = serde_json::from_str(params_json)?;
+    let url = normalize_direct_url(&params.url)?;
+    if !is_youtube_url(&url)
+        || !get_antibot_pacing(paths)
+            .map(|settings| settings.adaptive_protection_enabled)
+            .unwrap_or(true)
+    {
+        return Ok(None);
+    }
+
+    let auth_cookie = resolve_youtube_auth_cookie_for_job(paths, job_id, params.auth_cookie)?;
+    let browser_source = effective_youtube_browser_source(
+        paths,
+        auth_cookie.is_some(),
+        params.use_browser_cookies,
+        params.browser_cookie_source.as_deref(),
+    )?;
+    let auth_fingerprint = youtube_auth_material_key(
+        paths,
+        auth_cookie.as_deref(),
+        browser_source.is_some() && auth_cookie.is_none(),
+        browser_source.as_deref(),
+    )?
+    .unwrap_or_else(|| youtube_protection::ANONYMOUS_AUTH_FINGERPRINT.to_string());
+    let runtime_epoch = youtube_protection::runtime_epoch_for_paths(paths);
+    let (sleep_interval_secs, concurrent_fragments) = effective_direct_download_profile(
+        paths,
+        &url,
+        job_id,
+        params.yt_dlp_sleep_interval,
+        params.yt_dlp_concurrent_fragments,
+    );
+    let baseline = youtube_protection::DownloaderBaselinePolicy {
+        concurrent_fragments,
+        sleep_interval_secs,
+        sleep_requests_secs: params.yt_dlp_sleep_requests,
+        update_tranche_size: 25,
+        limit_rate: params.yt_dlp_limit_rate,
+        throttled_rate: params.yt_dlp_throttled_rate,
+    };
+    let state = youtube_protection::load_policy_state(
+        paths,
+        youtube_protection::PROVIDER_YOUTUBE,
+        youtube_protection::OPERATION_DOWNLOAD,
+        &auth_fingerprint,
+        &runtime_epoch,
+    )?;
+    let tuning = youtube_protection::get_tuning(paths)?;
+    let effective =
+        youtube_protection::effective_policy_with_tuning(&baseline, &state, now_ms(), &tuning);
+    Ok(Some(YoutubeSchedulerPolicy {
+        effective,
+        next_eligible_probe_at_ms: state.next_eligible_probe_at_ms,
+        operation: youtube_protection::OPERATION_DOWNLOAD,
+        auth_fingerprint,
+        runtime_epoch,
+    }))
+}
+
+#[cfg(test)]
+fn effective_youtube_start_interval_secs(
+    paths: &AppPaths,
+    job_id: &str,
+    params_json: &str,
+) -> Result<u64> {
+    Ok(
+        effective_youtube_scheduler_policy(paths, job_id, params_json)?
+            .map(|policy| policy.effective.aggregate_start_interval_secs as u64)
+            .unwrap_or(0),
+    )
+}
+
+fn effective_youtube_enumeration_scheduler_policy(
+    paths: &AppPaths,
+    job_id: &str,
+    params_json: &str,
+) -> Result<Option<YoutubeSchedulerPolicy>> {
+    if !get_antibot_pacing(paths)
+        .map(|settings| settings.adaptive_protection_enabled)
+        .unwrap_or(true)
+    {
+        return Ok(None);
+    }
+    let params: YoutubeSubscriptionRefreshV1Params = serde_json::from_str(params_json)?;
+    let subscription =
+        subscriptions::get_youtube_subscription_by_id(paths, &params.subscription_id)?.ok_or_else(
+            || {
+                EngineError::InstallFailed(format!(
+                    "subscription not found: {}",
+                    params.subscription_id
+                ))
+            },
+        )?;
+    let auth_cookie = resolve_youtube_auth_cookie_for_job(paths, job_id, None)?;
+    let browser_source = effective_youtube_browser_source(
+        paths,
+        auth_cookie.is_some(),
+        subscription.use_browser_cookies,
+        subscription.browser_cookie_source.as_deref(),
+    )?;
+    let auth_fingerprint = youtube_auth_material_key(
+        paths,
+        auth_cookie.as_deref(),
+        browser_source.is_some() && auth_cookie.is_none(),
+        browser_source.as_deref(),
+    )?
+    .unwrap_or_else(|| youtube_protection::ANONYMOUS_AUTH_FINGERPRINT.to_string());
+    let runtime_epoch = youtube_protection::runtime_epoch_for_paths(paths);
+    let baseline = youtube_protection_baseline(paths)?;
+    let state = youtube_protection::load_policy_state(
+        paths,
+        youtube_protection::PROVIDER_YOUTUBE,
+        youtube_protection::OPERATION_ENUMERATION,
+        &auth_fingerprint,
+        &runtime_epoch,
+    )?;
+    let tuning = youtube_protection::get_tuning(paths)?;
+    let effective =
+        youtube_protection::effective_policy_with_tuning(&baseline, &state, now_ms(), &tuning);
+    Ok(Some(YoutubeSchedulerPolicy {
+        effective,
+        next_eligible_probe_at_ms: state.next_eligible_probe_at_ms,
+        operation: youtube_protection::OPERATION_ENUMERATION,
+        auth_fingerprint,
+        runtime_epoch,
+    }))
+}
+
+fn reserve_scheduler_canary(
+    paths: &AppPaths,
+    job_id: &str,
+    policy: Option<&YoutubeSchedulerPolicy>,
+) -> Result<bool> {
+    let Some(policy) = policy.filter(|policy| policy.effective.canary_only) else {
+        return Ok(true);
+    };
+    Ok(youtube_protection::claim_cooldown_canary(
+        paths,
+        youtube_protection::PROVIDER_YOUTUBE,
+        policy.operation,
+        &policy.auth_fingerprint,
+        &policy.runtime_epoch,
+        job_id,
+        now_ms(),
+    )?
+    .is_some())
+}
+
+fn claim_youtube_controlled_canary(
+    paths: &AppPaths,
+    job_id: &str,
+    operation: &str,
+    auth_fingerprint: &str,
+    runtime_epoch: &str,
+    effective: &youtube_protection::DownloaderEffectivePolicy,
+) -> Result<()> {
+    if !effective.canary_only {
+        return Ok(());
+    }
+    if youtube_protection::claim_cooldown_canary(
+        paths,
+        youtube_protection::PROVIDER_YOUTUBE,
+        operation,
+        auth_fingerprint,
+        runtime_epoch,
+        job_id,
+        now_ms(),
+    )?
+    .is_some()
+    {
+        Ok(())
+    } else {
+        Err(EngineError::InstallFailed(format!(
+            "YouTube automatic protection already reserved the single controlled {} probe; no additional request was started",
+            operation
+        )))
+    }
+}
+
+fn record_youtube_effective_command_receipt(
+    paths: &AppPaths,
+    job_id: &str,
+    operation: &str,
+    runtime_epoch: &str,
+    effective: &youtube_protection::DownloaderEffectivePolicy,
+) -> Result<()> {
+    let details = serde_json::json!({
+        "job_id": job_id,
+        "operation": operation,
+        "runtime_epoch": runtime_epoch,
+        "mode": effective.mode.as_str(),
+        "concurrent_fragments": effective.concurrent_fragments,
+        "sleep_interval_secs": effective.sleep_interval_secs,
+        "max_sleep_interval_secs": effective.max_sleep_interval_secs,
+        "sleep_requests_secs": effective.sleep_requests_secs,
+        "aggregate_start_interval_secs": effective.aggregate_start_interval_secs,
+        "update_tranche_size": effective.update_tranche_size,
+        "limit_rate": effective.limit_rate,
+        "throttled_rate": effective.throttled_rate,
+        "eligible": effective.eligible,
+        "canary_only": effective.canary_only,
+    });
+    log_line(
+        paths,
+        job_id,
+        "info",
+        "youtube_effective_command_receipt",
+        details.clone(),
+    )?;
+    append_engine_diagnostics_trace_row_best_effort(
+        paths,
+        "youtube_effective_command_receipt",
+        "info",
+        details,
+    );
+    Ok(())
 }
 
 // WP-0263: Instagram-specific (more passive) enumeration cooldown for the recurring lane.
@@ -17467,17 +19081,15 @@ pub(crate) fn normalize_auth_cookie(value: Option<String>) -> Result<Option<Stri
     if path.exists() && path.is_file() {
         let contents = std::fs::read_to_string(path)?;
         let normalized = normalize_auth_cookie(Some(contents))?;
-        let normalized = normalized.ok_or_else(|| {
-            EngineError::InstallFailed(format!("cookie file was empty: {}", path.to_string_lossy()))
-        })?;
+        let normalized = normalized
+            .ok_or_else(|| EngineError::InstallFailed("cookie file was empty".to_string()))?;
         return Ok(Some(normalized));
     }
 
     if looks_like_cookie_file_path(trimmed) {
-        return Err(EngineError::InstallFailed(format!(
-            "cookie file path does not exist: {}",
-            trimmed
-        )));
+        return Err(EngineError::InstallFailed(
+            "cookie file path does not exist".to_string(),
+        ));
     }
 
     if parse_cookie_header_pairs(trimmed).is_empty() {
@@ -17500,16 +19112,14 @@ pub fn normalize_youtube_auth_cookie_for_storage(value: Option<String>) -> Resul
     if path.exists() && path.is_file() {
         let contents = std::fs::read_to_string(path)?;
         let normalized = normalize_youtube_auth_cookie_for_storage(Some(contents))?;
-        let normalized = normalized.ok_or_else(|| {
-            EngineError::InstallFailed(format!("cookie file was empty: {}", path.to_string_lossy()))
-        })?;
+        let normalized = normalized
+            .ok_or_else(|| EngineError::InstallFailed("cookie file was empty".to_string()))?;
         return Ok(Some(normalized));
     }
     if looks_like_cookie_file_path(trimmed) {
-        return Err(EngineError::InstallFailed(format!(
-            "cookie file path does not exist: {}",
-            trimmed
-        )));
+        return Err(EngineError::InstallFailed(
+            "cookie file path does not exist".to_string(),
+        ));
     }
 
     if let Some(records) = cookie_records_from_structured_input(trimmed) {
@@ -17532,6 +19142,40 @@ pub fn normalize_youtube_auth_cookie_for_storage(value: Option<String>) -> Resul
         "https://www.youtube.com/robots.txt",
         &pairs,
     )?))
+}
+
+/// Auth command errors are operator-visible and copied into capability receipts. Remove local
+/// credential-file locators while retaining the surrounding failure reason. This is deliberately
+/// narrower than diagnostics redaction: auth targets remain visible, credential filesystem paths
+/// do not.
+pub fn redact_auth_credential_locators(message: &str) -> String {
+    static QUOTED_WINDOWS_PATH: OnceLock<Regex> = OnceLock::new();
+    static BARE_WINDOWS_PATH: OnceLock<Regex> = OnceLock::new();
+    static QUOTED_PRIVATE_UNIX_PATH: OnceLock<Regex> = OnceLock::new();
+    static BARE_PRIVATE_UNIX_PATH: OnceLock<Regex> = OnceLock::new();
+
+    let quoted_windows = QUOTED_WINDOWS_PATH.get_or_init(|| {
+        Regex::new(r#"(?i)(?:\"(?:[a-z]:\\|\\\\)[^\"]+\"|'(?:[a-z]:\\|\\\\)[^']+')"#)
+            .expect("quoted auth path regex")
+    });
+    let bare_windows = BARE_WINDOWS_PATH.get_or_init(|| {
+        Regex::new(r#"(?i)(?:[a-z]:\\|\\\\)[^\s\"'<>]+"#).expect("bare auth path regex")
+    });
+    let quoted_unix = QUOTED_PRIVATE_UNIX_PATH.get_or_init(|| {
+        Regex::new(r#"(?:\"/(?:Users|home|tmp|var|private|run)/[^\"]+\"|'/(?:Users|home|tmp|var|private|run)/[^']+')"#)
+            .expect("quoted private auth path regex")
+    });
+    let bare_unix = BARE_PRIVATE_UNIX_PATH.get_or_init(|| {
+        Regex::new(r#"/(?:Users|home|tmp|var|private|run)/[^\s\"'<>]+"#)
+            .expect("bare private auth path regex")
+    });
+
+    let redacted = quoted_windows.replace_all(message, "<credential_locator_redacted>");
+    let redacted = bare_windows.replace_all(&redacted, "<credential_locator_redacted>");
+    let redacted = quoted_unix.replace_all(&redacted, "<credential_locator_redacted>");
+    bare_unix
+        .replace_all(&redacted, "<credential_locator_redacted>")
+        .to_string()
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -17997,6 +19641,131 @@ fn strip_yt_dlp_option_with_value(args: &mut Vec<String>, option: &str) -> bool 
     false
 }
 
+fn strip_all_yt_dlp_options_with_value(args: &mut Vec<String>, option: &str) -> usize {
+    let mut removed = 0_usize;
+    while strip_yt_dlp_option_with_value(args, option) {
+        removed += 1;
+    }
+    removed
+}
+
+/// The final managed-video container is an engine policy, not a saved-preset choice. Remove
+/// any stale/conflicting finalizer before appending the canonical options last, so old queued
+/// jobs and custom presets cannot create a new MP4 artifact.
+fn enforce_managed_video_yt_dlp_options(args: &mut Vec<String>) {
+    strip_all_yt_dlp_options_with_value(args, "--merge-output-format");
+    strip_all_yt_dlp_options_with_value(args, "--remux-video");
+    args.retain(|arg| arg != "--keep-video" && arg != "--no-keep-video");
+    args.push("--merge-output-format".to_string());
+    args.push(MANAGED_VIDEO_CONTAINER.to_string());
+    args.push("--remux-video".to_string());
+    args.push(MANAGED_VIDEO_CONTAINER.to_string());
+    // Successful post-processing must not leave the original MP4/WebM as a second deliverable.
+    args.push("--no-keep-video".to_string());
+}
+
+/// Saved presets choose source quality, never the final managed container. Historical and
+/// custom selectors commonly pin `bv` to MP4 and `ba` to M4A; remove only those container
+/// constraints while preserving the selector's ordering, fallbacks, codec and quality terms.
+fn neutralize_managed_video_format_selector(selector: &str) -> String {
+    fn contains_bare_format_id(selector: &str) -> bool {
+        let chars = selector.chars().collect::<Vec<_>>();
+        let mut bracket_depth = 0_u32;
+        let mut index = 0_usize;
+        while index < chars.len() {
+            match chars[index] {
+                '[' => {
+                    bracket_depth += 1;
+                    index += 1;
+                }
+                ']' => {
+                    bracket_depth = bracket_depth.saturating_sub(1);
+                    index += 1;
+                }
+                character if bracket_depth == 0 && character.is_ascii_digit() => {
+                    let start = index;
+                    while index < chars.len() && chars[index].is_ascii_digit() {
+                        index += 1;
+                    }
+                    let before = start
+                        .checked_sub(1)
+                        .and_then(|value| chars.get(value))
+                        .copied();
+                    let after = chars.get(index).copied();
+                    let boundary_before = before.is_none_or(|value| {
+                        value.is_whitespace() || matches!(value, '+' | '/' | ',' | '(')
+                    });
+                    let boundary_after = after.is_none_or(|value| {
+                        value.is_whitespace() || matches!(value, '+' | '/' | ',' | ')' | '[')
+                    });
+                    if boundary_before && boundary_after {
+                        return true;
+                    }
+                }
+                _ => index += 1,
+            }
+        }
+        false
+    }
+
+    // Numeric yt-dlp format IDs encode a provider-specific container/codec choice (for example
+    // YouTube 137+140 pins MP4 video plus M4A audio). Their meaning is not stable enough to
+    // rewrite component-by-component, so map the whole saved selector back to neutral source
+    // intent. Final resolution still honors the separate quality preference through `-S`.
+    if contains_bare_format_id(selector) {
+        return "bv*+ba/b".to_string();
+    }
+
+    fn pins_forbidden_container(expression: &str) -> bool {
+        let lower = expression.to_ascii_lowercase();
+        for field in ["ext", "container", "vcodec", "acodec", "codec", "format"] {
+            let mut remainder = lower.as_str();
+            while let Some(index) = remainder.find(field) {
+                let after = remainder[index + field.len()..].trim_start();
+                if after.starts_with("!=") || after.starts_with("!~") {
+                    remainder = &after[2..];
+                    continue;
+                }
+                let value = ["~=", "^=", "$=", "*=", "="]
+                    .iter()
+                    .find_map(|operator| after.strip_prefix(operator))
+                    .map(|value| {
+                        value
+                            .split(['|', '&', ',', '/'])
+                            .next()
+                            .unwrap_or(value)
+                            .trim()
+                            .trim_matches(['\'', '"'])
+                    });
+                if value.is_some_and(|value| value.contains("mp4") || value.contains("m4a")) {
+                    return true;
+                }
+                remainder = &after[1.min(after.len())..];
+            }
+        }
+        false
+    }
+
+    let mut output = String::with_capacity(selector.len());
+    let mut cursor = 0;
+    while let Some(open_rel) = selector[cursor..].find('[') {
+        let open = cursor + open_rel;
+        output.push_str(&selector[cursor..open]);
+        let Some(close_rel) = selector[open + 1..].find(']') else {
+            output.push_str(&selector[open..]);
+            return output;
+        };
+        let close = open + 1 + close_rel;
+        let expression = &selector[open + 1..close];
+        if !pins_forbidden_container(expression) {
+            output.push_str(&selector[open..=close]);
+        }
+        cursor = close + 1;
+    }
+    output.push_str(&selector[cursor..]);
+    output
+}
+
 fn yt_dlp_should_retry_without_format(url: &str, err: &EngineError) -> bool {
     let lower = err.to_string().to_ascii_lowercase();
     lower.contains("requested format is not available")
@@ -18006,11 +19775,8 @@ fn yt_dlp_should_retry_without_format(url: &str, err: &EngineError) -> bool {
 }
 
 fn yt_dlp_is_rate_limit_error(message: &str) -> bool {
-    let lower = message.to_ascii_lowercase();
-    lower.contains("http error 429")
-        || lower.contains("429")
-        || lower.contains("too many requests")
-        || lower.contains("rate limit")
+    youtube_protection::classify_youtube_outcome(Some(message))
+        == youtube_protection::DownloaderOutcomeClass::RateLimited
 }
 
 fn yt_dlp_rate_limit_retry_delay_secs(attempt: u32) -> u64 {
@@ -18024,6 +19790,7 @@ fn run_yt_dlp_with_rate_limit_retry(
     job_id: Option<&str>,
     timeout_secs: u64,
     using_browser_cookies: bool,
+    expected_path_root: Option<&Path>,
     url: &str,
     output_res: Result<std::process::Output>,
 ) -> Result<std::process::Output> {
@@ -18051,6 +19818,7 @@ fn run_yt_dlp_with_rate_limit_retry(
             job_id,
             timeout_secs,
             using_browser_cookies,
+            expected_path_root,
         );
     }
 }
@@ -18060,10 +19828,10 @@ fn yt_dlp_is_http_403_error(message: &str) -> bool {
 }
 
 fn run_yt_dlp_with_dependency_refresh_retry(
-    paths: &AppPaths,
-    args: &[String],
-    job_id: Option<&str>,
-    timeout_secs: u64,
+    _paths: &AppPaths,
+    _args: &[String],
+    _job_id: Option<&str>,
+    _timeout_secs: u64,
     url: &str,
     output_res: Result<std::process::Output>,
 ) -> Result<std::process::Output> {
@@ -18072,26 +19840,11 @@ fn run_yt_dlp_with_dependency_refresh_retry(
         Err(err) => err,
     };
 
-    if !is_youtube_url(url) || !yt_dlp_is_http_403_error(&first_err.to_string()) {
-        return Err(first_err);
-    }
-
-    if !cfg!(windows) {
-        return Err(first_err);
-    }
-
-    let lock = YT_DLP_BOOTSTRAP_LOCK.get_or_init(|| Mutex::new(()));
-    let _guard = match lock.lock() {
-        Ok(guard) => guard,
-        Err(poisoned) => poisoned.into_inner(),
-    };
-
-    match tools::install_ytdlp_tools(paths) {
-        Ok(_) => run_yt_dlp(paths, args, job_id, timeout_secs),
-        Err(install_err) => Err(EngineError::InstallFailed(format!(
-            "{first_err}; bundled yt-dlp refresh failed: {install_err}"
-        ))),
-    }
+    let _was_youtube_403 = is_youtube_url(url) && yt_dlp_is_http_403_error(&first_err.to_string());
+    // A healthy, hash-verified pinned runtime is never mutated in response to remote HTTP
+    // evidence. The 403 must reach the adaptive classifier unchanged; readiness repair occurs
+    // before launch when the bundled runtime is actually absent or invalid.
+    Err(first_err)
 }
 
 fn run_yt_dlp_with_browser_cookie_retry(
@@ -18100,8 +19853,9 @@ fn run_yt_dlp_with_browser_cookie_retry(
     job_id: Option<&str>,
     timeout_secs: u64,
     using_browser_cookies: bool,
+    expected_path_root: Option<&Path>,
 ) -> Result<std::process::Output> {
-    match run_yt_dlp(paths, args, job_id, timeout_secs) {
+    match run_yt_dlp(paths, args, job_id, timeout_secs, expected_path_root) {
         Ok(output) => Ok(output),
         Err(first_err) => {
             if !using_browser_cookies {
@@ -18113,7 +19867,7 @@ fn run_yt_dlp_with_browser_cookie_retry(
                 return Err(first_err);
             }
 
-            match run_yt_dlp(paths, &retry_args, job_id, timeout_secs) {
+            match run_yt_dlp(paths, &retry_args, job_id, timeout_secs, expected_path_root) {
                 Ok(output) => Ok(output),
                 Err(second_err) => Err(EngineError::InstallFailed(format!(
                     "{first_err}; retry without browser cookies failed: {second_err}"
@@ -18300,42 +20054,19 @@ fn redact_url_for_log(value: &str) -> String {
     }
 }
 
-// WP-0261: best-effort engine-side diagnostics trace writer. The desktop bridge owns the primary
-// DiagnosticsTraceEntry writer (product/desktop/src-tauri/src/lib.rs), but the engine runs
-// subscription refresh inside the job runner where an external monitor (vvwatch / /agent/*) has no
-// per-subscription visibility. This appends a JSON line shaped exactly like DiagnosticsTraceEntry
-// ({ts_ms, event, level, details, process:null}) to diagnostics_trace.jsonl under the effective
-// trace dir (honoring the operator's trace-dir override). It never panics and never returns an
-// error: diagnostics must not affect job execution.
+// Engine diagnostics have one producer/consumer boundary: the desktop-installed
+// bounded sink. The desktop is the sole writer for trace rotation, capture state,
+// incident traces and manifests.
 fn append_engine_diagnostics_trace_row_best_effort(
     paths: &AppPaths,
     event: &str,
     level: &str,
     details: serde_json::Value,
 ) {
-    let Ok(dir) = paths.effective_diagnostics_trace_dir() else {
-        return;
-    };
-    if std::fs::create_dir_all(&dir).is_err() {
-        return;
-    }
-    let path = dir.join("diagnostics_trace.jsonl");
-    let row = serde_json::json!({
-        "ts_ms": now_ms(),
-        "event": event,
-        "level": level,
-        "details": details,
-        "process": serde_json::Value::Null,
-    });
-    let Ok(line) = serde_json::to_string(&row) else {
-        return;
-    };
-    if let Ok(mut file) = OpenOptions::new().create(true).append(true).open(&path) {
-        let _ = writeln!(file, "{line}");
-    }
+    crate::diagnostics::emit_trace_event(paths, event, level, details);
 }
 
-fn append_youtube_archive_on_success(
+pub(crate) fn append_youtube_archive_on_success(
     paths: &AppPaths,
     subscription_id: &str,
     url: &str,
@@ -18344,17 +20075,10 @@ fn append_youtube_archive_on_success(
         return Ok(());
     };
 
-    let Some(sub) = subscriptions::get_youtube_subscription_by_id(paths, subscription_id)? else {
+    let Some(_sub) = subscriptions::get_youtube_subscription_by_id(paths, subscription_id)? else {
         return Ok(());
     };
-
-    let archive_path = subscriptions::ensure_youtube_subscription_archive_state(paths, &sub)?;
-
-    let mut file = OpenOptions::new()
-        .create(true)
-        .append(true)
-        .open(&archive_path)?;
-    writeln!(file, "youtube {video_id}")?;
+    subscriptions::merge_youtube_archive_member(paths, subscription_id, &video_id)?;
     Ok(())
 }
 
@@ -18605,22 +20329,38 @@ fn append_yt_dlp_runtime_args(
     args: &mut Vec<String>,
     url: &str,
     auth_cookie_present: bool,
-) -> bool {
+) -> Result<bool> {
     if !is_youtube_url(url) {
-        return false;
+        return Ok(false);
     }
+    let provider = tools::ensure_youtube_po_provider(paths)?;
+    let provider_port = provider.port.ok_or_else(|| {
+        EngineError::InstallFailed(
+            "localhost PO provider did not report its bound port".to_string(),
+        )
+    })?;
+    args.push("--plugin-dirs".to_string());
+    args.push(
+        paths
+            .youtube_po_provider_plugin_dir()
+            .to_string_lossy()
+            .to_string(),
+    );
     let js_runtime = tools::preferred_ytdlp_js_runtime_arg(paths);
     if let Some(spec) = js_runtime.as_ref() {
         args.push("--js-runtimes".to_string());
         args.push(spec.clone());
     }
-    let Some(clients) = yt_dlp_youtube_player_clients(auth_cookie_present, js_runtime.is_some())
-    else {
-        return js_runtime.is_some();
-    };
+    let mut extractor_args = vec![format!(
+        "youtubepot-bgutilhttp:base_url=http://127.0.0.1:{provider_port}"
+    )];
+    if let Some(clients) = yt_dlp_youtube_player_clients(auth_cookie_present, js_runtime.is_some())
+    {
+        extractor_args.push(format!("youtube:player_client={clients}"));
+    }
     args.push("--extractor-args".to_string());
-    args.push(format!("youtube:player_client={clients}"));
-    js_runtime.is_some()
+    args.push(extractor_args.join(";"));
+    Ok(js_runtime.is_some())
 }
 
 fn yt_dlp_failure_hint(
@@ -18707,6 +20447,7 @@ fn append_yt_dlp_archive_download_options(
     throttled_rate: &str,
     file_access_retries: u32,
     sleep_interval: u32,
+    max_sleep_interval: u32,
     sleep_requests: u32,
 ) {
     let concurrent_fragments = normalize_positive_u32(
@@ -18731,6 +20472,10 @@ fn append_yt_dlp_archive_download_options(
     if sleep_interval > 0 {
         args.push("--sleep-interval".to_string());
         args.push(sleep_interval.to_string());
+        if max_sleep_interval >= sleep_interval {
+            args.push("--max-sleep-interval".to_string());
+            args.push(max_sleep_interval.to_string());
+        }
     }
     if sleep_requests > 0 {
         args.push("--sleep-requests".to_string());
@@ -18743,6 +20488,11 @@ fn append_yt_dlp_archive_download_options(
         .as_deref()
     {
         Some("auto") | Some("embed") | Some("auto_srt") | Some("auto-srt") => {
+            // Auto means every selected subtitle source: prefer authored subtitles and also
+            // allow automatic captions. --embed-subs removes yt-dlp's temporary subtitle file
+            // after the postprocessor succeeds; the later exact-content check is the final
+            // guard before any surviving sidecar is removed.
+            args.push("--embed-subs".to_string());
             args.push("--write-subs".to_string());
             args.push("--write-auto-subs".to_string());
             args.push("--sub-langs".to_string());
@@ -18751,6 +20501,7 @@ fn append_yt_dlp_archive_download_options(
             args.push("srt".to_string());
         }
         Some("manual") | Some("subs") | Some("srt") | Some("sidecar") => {
+            args.push("--embed-subs".to_string());
             args.push("--write-subs".to_string());
             args.push("--sub-langs".to_string());
             args.push(YT_DLP_ARCHIVE_SUB_LANGS.to_string());
@@ -18758,6 +20509,13 @@ fn append_yt_dlp_archive_download_options(
             args.push("srt".to_string());
         }
         _ => {}
+    }
+}
+
+fn append_yt_dlp_limit_rate_option(args: &mut Vec<String>, limit_rate: Option<&str>) {
+    if let Some(limit_rate) = normalize_non_empty(limit_rate) {
+        args.push("--limit-rate".to_string());
+        args.push(limit_rate);
     }
 }
 
@@ -19048,15 +20806,526 @@ fn ensure_bundled_yt_dlp(paths: &AppPaths) -> Result<Option<PathBuf>> {
     Ok(None)
 }
 
+fn verify_protected_youtube_runtime(paths: &AppPaths, provider_required: bool) -> Result<PathBuf> {
+    let bundled = bundled_yt_dlp_path(paths);
+    let pin = &crate::pinned_dependency_manifest::manifest().yt_dlp_windows;
+    let metadata = std::fs::metadata(&bundled).map_err(|_| {
+        EngineError::InstallFailed(
+            "the exact bundled yt-dlp runtime is missing; protected YouTube work is held"
+                .to_string(),
+        )
+    })?;
+    if metadata.len() != pin.file_bytes {
+        return Err(EngineError::InstallFailed(format!(
+            "the bundled yt-dlp runtime failed its pinned size check; protected YouTube work is held (expected={}, actual={})",
+            pin.file_bytes,
+            metadata.len()
+        )));
+    }
+    let mut file = std::fs::File::open(&bundled)?;
+    let mut hasher = Sha256::new();
+    let mut buffer = [0_u8; 128 * 1024];
+    loop {
+        let read = file.read(&mut buffer)?;
+        if read == 0 {
+            break;
+        }
+        hasher.update(&buffer[..read]);
+    }
+    let actual = hex::encode_upper(hasher.finalize());
+    if !actual.eq_ignore_ascii_case(&pin.sha256_hex) {
+        return Err(EngineError::InstallFailed(
+            "the bundled yt-dlp runtime failed its pinned hash check; protected YouTube work is held"
+                .to_string(),
+        ));
+    }
+    if provider_required {
+        let provider = crate::tools::youtube_po_provider_install_status(paths);
+        if !provider.installed {
+            return Err(EngineError::InstallFailed(
+                provider.readiness_error.unwrap_or_else(|| {
+                    "the exact pinned YouTube PO provider failed integrity validation; protected work is held"
+                        .to_string()
+                }),
+            ));
+        }
+    }
+    Ok(bundled)
+}
+
+fn emit_downloader_causal_event(
+    paths: &AppPaths,
+    job_id: Option<&str>,
+    event: &str,
+    candidate_index: usize,
+    outcome: Option<&str>,
+    exit_code: Option<i32>,
+    duration_ms: Option<i64>,
+) {
+    let Some(mut details) = downloader_causal_details(job_id, candidate_index, outcome, exit_code)
+    else {
+        return;
+    };
+    if let Some(object) = details.as_object_mut() {
+        object.insert("duration_ms".to_string(), serde_json::json!(duration_ms));
+    }
+    append_engine_diagnostics_trace_row_best_effort(
+        paths,
+        event,
+        if outcome.is_some_and(|value| value != "success") {
+            "warn"
+        } else {
+            "info"
+        },
+        details,
+    );
+}
+
+fn downloader_causal_details(
+    job_id: Option<&str>,
+    candidate_index: usize,
+    outcome: Option<&str>,
+    exit_code: Option<i32>,
+) -> Option<serde_json::Value> {
+    let job_id = job_id?;
+    let envelope = job_causal_envelopes()
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .get(job_id)
+        .cloned();
+    let envelope = envelope?;
+    Some(serde_json::json!({
+        "job_id": job_id,
+        "candidate_index": candidate_index,
+        "outcome": outcome,
+        "exit_code": exit_code,
+        "incident_id": envelope.incident_id,
+        "span_id": envelope.span_id,
+    }))
+}
+
+#[derive(Clone)]
+struct YoutubeLaunchPolicyContext {
+    operation: String,
+    auth_fingerprint: String,
+    runtime_epoch: String,
+    baseline: youtube_protection::DownloaderBaselinePolicy,
+    effective: youtube_protection::DownloaderEffectivePolicy,
+}
+
+fn youtube_launch_policy_contexts(
+) -> &'static Mutex<HashMap<String, YoutubeLaunchPolicyContext>> {
+    static CONTEXTS: OnceLock<Mutex<HashMap<String, YoutubeLaunchPolicyContext>>> =
+        OnceLock::new();
+    CONTEXTS.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+struct YoutubeLaunchPolicyContextGuard {
+    job_id: String,
+}
+
+impl YoutubeLaunchPolicyContextGuard {
+    fn install(job_id: &str, context: YoutubeLaunchPolicyContext) -> Self {
+        youtube_launch_policy_contexts()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .insert(job_id.to_string(), context);
+        Self {
+            job_id: job_id.to_string(),
+        }
+    }
+}
+
+impl Drop for YoutubeLaunchPolicyContextGuard {
+    fn drop(&mut self) {
+        youtube_launch_policy_contexts()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .remove(&self.job_id);
+    }
+}
+
+fn redacted_ytdlp_argv(args: &[String]) -> Vec<String> {
+    fn replacement(flag: &str) -> Option<&'static str> {
+        match flag {
+            "--cookies" | "--cookies-from-browser" => Some("<credential-source>"),
+            "--proxy" | "--username" | "--password" | "--video-password"
+            | "--add-header" | "--add-headers" | "--http-header" | "--http-headers"
+            | "--referer" | "--client-certificate"
+            | "--client-certificate-key" | "--client-certificate-password" => {
+                Some("<credential>")
+            }
+            "--paths" | "-P" | "-o" | "--output" | "--download-archive"
+            | "--ffmpeg-location" | "--plugin-dirs" | "--config-locations"
+            | "--batch-file" | "-a" => Some("<local-path>"),
+            "--extractor-args" | "--postprocessor-args" | "--exec" => {
+                Some("<redacted-arguments>")
+            }
+            _ => None,
+        }
+    }
+    let mut redacted = Vec::with_capacity(args.len());
+    let mut redact_next: Option<&'static str> = None;
+    for arg in args {
+        if let Some(replacement) = redact_next.take() {
+            redacted.push(replacement.to_string());
+            continue;
+        }
+        if let Some((flag, _value)) = arg.split_once('=') {
+            if let Some(value_replacement) = replacement(flag) {
+                redacted.push(format!("{flag}={value_replacement}"));
+                continue;
+            }
+        }
+        let replacement = replacement(arg);
+        redacted.push(arg.clone());
+        if let Some(replacement) = replacement {
+            redact_next = Some(replacement);
+            continue;
+        }
+        if arg.starts_with("http://") || arg.starts_with("https://") {
+            let digest = hex::encode(Sha256::digest(arg.as_bytes()));
+            *redacted.last_mut().expect("just pushed") = format!("<source-url:{}>", &digest[..16]);
+        }
+    }
+    redacted
+}
+
+fn reject_forbidden_ytdlp_output_flags(args: &[String]) -> Result<()> {
+    const FORBIDDEN: [&str; 3] = ["--write-link", "--write-url-link", "--write-desktop-link"];
+    if let Some(flag) = args.iter().find(|arg| {
+        FORBIDDEN
+            .iter()
+            .any(|forbidden| arg.as_str() == *forbidden || arg.starts_with(&format!("{forbidden}=")))
+    }) {
+        return Err(EngineError::InstallFailed(format!(
+            "yt-dlp link-output option {flag} is forbidden by the managed download command policy"
+        )));
+    }
+    Ok(())
+}
+
+fn validate_managed_ytdlp_output_basename(value: &str) -> Result<()> {
+    let value = value.trim();
+    let bytes = value.as_bytes();
+    let lower = value.to_ascii_lowercase();
+    let has_windows_prefix = (bytes.len() >= 2
+        && bytes[0].is_ascii_alphabetic()
+        && bytes[1] == b':')
+        || lower.starts_with(r"\\?\")
+        || lower.starts_with(r"\\.\")
+        || lower.starts_with("//?/")
+        || lower.starts_with("//./");
+    if value.is_empty()
+        || value == "."
+        || value == ".."
+        || value.contains('\0')
+        || value.contains('/')
+        || value.contains('\\')
+        || value.contains(':')
+        || value.starts_with('.')
+        || has_windows_prefix
+        || Path::new(value).is_absolute()
+        || Path::new(value).components().any(|component| {
+            matches!(
+                component,
+                std::path::Component::Prefix(_)
+                    | std::path::Component::RootDir
+                    | std::path::Component::ParentDir
+                    | std::path::Component::CurDir
+            )
+        })
+    {
+        return Err(EngineError::InstallFailed(format!(
+            "yt-dlp output template must be an engine-owned attempt basename (rejected {} bytes)",
+            value.len()
+        )));
+    }
+    Ok(())
+}
+
+fn validate_managed_ytdlp_path_root(value: &str, expected_root: &Path) -> Result<()> {
+    let value = value.trim();
+    if value.is_empty() || value.contains('\0') {
+        return Err(EngineError::InstallFailed(
+            "yt-dlp path root is empty or invalid".to_string(),
+        ));
+    }
+    let actual = std::fs::canonicalize(value).map_err(|_| {
+        EngineError::InstallFailed(
+            "yt-dlp path root must be the existing engine-owned attempt directory".to_string(),
+        )
+    })?;
+    let expected = std::fs::canonicalize(expected_root).map_err(|_| {
+        EngineError::InstallFailed(
+            "engine-owned yt-dlp attempt directory is unavailable".to_string(),
+        )
+    })?;
+    if actual != expected {
+        return Err(EngineError::InstallFailed(
+            "yt-dlp path root escaped the engine-owned attempt directory".to_string(),
+        ));
+    }
+    Ok(())
+}
+
+fn validate_managed_ytdlp_output_arguments(
+    args: &[String],
+    expected_path_root: Option<&Path>,
+) -> Result<()> {
+    let mut index = 0usize;
+    let mut path_root_count = 0usize;
+    while index < args.len() {
+        let argument = &args[index];
+        if argument == "--" {
+            break;
+        }
+        if ["--alias", "--config-locations", "--config-location"]
+            .iter()
+            .any(|flag| argument == flag || argument.starts_with(&format!("{flag}=")))
+        {
+            return Err(EngineError::InstallFailed(format!(
+                "yt-dlp argument expansion option {argument} is forbidden by the managed output policy"
+            )));
+        }
+        let abbreviated_long_paths = ["--pat", "--path", "--paths"];
+        let path_root: Option<&str> = if argument == "-P"
+            || abbreviated_long_paths.contains(&argument.as_str())
+        {
+            index += 1;
+            Some(args.get(index).ok_or_else(|| {
+                EngineError::InstallFailed(format!(
+                    "yt-dlp path option {argument} is missing its engine-owned attempt root"
+                ))
+            })?.as_str())
+        } else if let Some(value) = abbreviated_long_paths.iter().find_map(|flag| {
+            argument.strip_prefix(&format!("{flag}="))
+        }) {
+            Some(value)
+        } else if let Some(value) = argument.strip_prefix("-P=") {
+            Some(value)
+        } else if argument.starts_with("-P") && argument.len() > 2 {
+            Some(&argument[2..])
+        } else if argument.starts_with('-')
+            && !argument.starts_with("--")
+            && argument.len() > 2
+            && argument[2..].contains('P')
+        {
+            return Err(EngineError::InstallFailed(
+                "yt-dlp path root hidden in a short-option cluster is forbidden".to_string(),
+            ));
+        } else {
+            None
+        };
+        if let Some(path_root) = path_root {
+            path_root_count += 1;
+            if path_root_count != 1 {
+                return Err(EngineError::InstallFailed(
+                    "repeated or conflicting yt-dlp path roots are forbidden".to_string(),
+                ));
+            }
+            let expected = expected_path_root.ok_or_else(|| {
+                EngineError::InstallFailed(
+                    "caller-supplied yt-dlp path routing is forbidden for this operation"
+                        .to_string(),
+                )
+            })?;
+            validate_managed_ytdlp_path_root(path_root, expected)?;
+        }
+
+        let value: Option<&str> = if path_root.is_some() {
+            None
+        } else if argument == "-o" || argument == "--output" {
+            index += 1;
+            let value = args.get(index).ok_or_else(|| {
+                EngineError::InstallFailed(format!(
+                    "yt-dlp output option {argument} is missing its managed attempt basename"
+                ))
+            })?;
+            Some(value.as_str())
+        } else if let Some(value) = argument.strip_prefix("--output=") {
+            Some(value)
+        } else if let Some(value) = argument.strip_prefix("-o=") {
+            Some(value)
+        } else if argument.starts_with("-o") && argument.len() > 2 {
+            // yt-dlp/OptionParser accepts a compact short-option argument (`-oname`).
+            Some(&argument[2..])
+        } else if argument.starts_with('-')
+            && !argument.starts_with("--")
+            && argument.len() > 2
+            && argument[2..].contains('o')
+        {
+            // Python optparse accepts clusters such as `-qoNAME`, where `o` consumes the
+            // remainder. Engine commands never need ambiguous clusters, so fail closed.
+            return Err(EngineError::InstallFailed(
+                "yt-dlp output template must be an engine-owned attempt basename; output option hidden in a short-option cluster"
+                    .to_string(),
+            ));
+        } else {
+            None
+        };
+        if let Some(value) = value {
+            validate_managed_ytdlp_output_basename(value)?;
+        }
+        index += 1;
+    }
+    if expected_path_root.is_some() && path_root_count != 1 {
+        return Err(EngineError::InstallFailed(
+            "managed yt-dlp download requires exactly one engine-owned path root".to_string(),
+        ));
+    }
+    Ok(())
+}
+
+fn record_youtube_launch_command_receipt(
+    paths: &AppPaths,
+    job_id: Option<&str>,
+    candidate_index: usize,
+    prefix: &[String],
+    args: &[String],
+) {
+    let Some(job_id) = job_id else {
+        return;
+    };
+    if !args.iter().any(|arg| is_youtube_url(arg))
+        && !args.iter().any(|arg| arg.contains("youtubepot-bgutilhttp"))
+    {
+        return;
+    }
+    let identity = youtube_protection::runtime_identity_for_paths(paths);
+    let policy = youtube_launch_policy_contexts()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .get(job_id)
+        .cloned();
+    let mut argv = prefix.to_vec();
+    argv.extend(redacted_ytdlp_argv(args));
+    let argv_digest = serde_json::to_vec(&argv)
+        .ok()
+        .map(|bytes| hex::encode_upper(Sha256::digest(bytes)));
+    let mut details = downloader_causal_details(Some(job_id), candidate_index, None, None)
+        .unwrap_or_else(|| serde_json::json!({"job_id": job_id}));
+    if let Some(object) = details.as_object_mut() {
+        object.insert("event_schema".to_string(), serde_json::json!(1));
+        object.insert(
+            "candidate_provenance".to_string(),
+            serde_json::json!("bundled_pinned"),
+        );
+        object.insert(
+            "attempt_index".to_string(),
+            serde_json::json!(candidate_index),
+        );
+        object.insert(
+            "runtime_epoch".to_string(),
+            serde_json::json!(identity.epoch),
+        );
+        object.insert(
+            "yt_dlp_version".to_string(),
+            serde_json::json!(identity.yt_dlp_version),
+        );
+        object.insert(
+            "yt_dlp_sha256_hex".to_string(),
+            serde_json::json!(identity.yt_dlp_sha256_hex),
+        );
+        object.insert(
+            "provider_version".to_string(),
+            serde_json::json!(identity.provider_version),
+        );
+        object.insert(
+            "node_exe_sha256_hex".to_string(),
+            serde_json::json!(identity.node_exe_sha256_hex),
+        );
+        object.insert(
+            "npm_cmd_sha256_hex".to_string(),
+            serde_json::json!(identity.npm_cmd_sha256_hex),
+        );
+        object.insert(
+            "provider_plugin_sha256_hex".to_string(),
+            serde_json::json!(identity.provider_plugin_sha256_hex),
+        );
+        object.insert(
+            "provider_server_sha256_hex".to_string(),
+            serde_json::json!(identity.provider_server_sha256_hex),
+        );
+        object.insert(
+            "provider_lock_sha256_hex".to_string(),
+            serde_json::json!(identity.provider_lock_sha256_hex),
+        );
+        if let Some(policy) = policy {
+            let baseline_json = serde_json::to_value(&policy.baseline).unwrap_or_default();
+            let effective_json = serde_json::to_value(&policy.effective).unwrap_or_default();
+            object.insert("operation".to_string(), serde_json::json!(policy.operation));
+            object.insert(
+                "auth_fingerprint".to_string(),
+                serde_json::json!(policy.auth_fingerprint),
+            );
+            object.insert(
+                "policy_runtime_epoch".to_string(),
+                serde_json::json!(policy.runtime_epoch),
+            );
+            object.insert(
+                "baseline_policy_id".to_string(),
+                serde_json::json!(hex::encode_upper(Sha256::digest(baseline_json.to_string().as_bytes()))),
+            );
+            object.insert(
+                "effective_policy_id".to_string(),
+                serde_json::json!(hex::encode_upper(Sha256::digest(effective_json.to_string().as_bytes()))),
+            );
+            object.insert("baseline_policy".to_string(), baseline_json);
+            object.insert("effective_policy".to_string(), effective_json);
+        }
+        object.insert("argument_count".to_string(), serde_json::json!(argv.len()));
+        object.insert("redacted_argv".to_string(), serde_json::json!(argv));
+        object.insert(
+            "redacted_argv_sha256".to_string(),
+            serde_json::json!(argv_digest),
+        );
+    }
+    let _ = log_line(
+        paths,
+        job_id,
+        "info",
+        "youtube_ytdlp_command_launch_receipt",
+        details.clone(),
+    );
+    append_engine_diagnostics_trace_row_best_effort(
+        paths,
+        "youtube_ytdlp_command_launch_receipt",
+        "info",
+        details,
+    );
+}
+
 fn run_yt_dlp(
     paths: &AppPaths,
     args: &[String],
     job_id: Option<&str>,
     timeout_secs: u64,
+    expected_path_root: Option<&Path>,
 ) -> Result<std::process::Output> {
+    reject_forbidden_ytdlp_output_flags(args)?;
+    // This check is deliberately before runtime bootstrap, receipts, or process creation.
+    // Saved presets and retry arguments are untrusted at this final execution boundary.
+    validate_managed_ytdlp_output_arguments(args, expected_path_root)?;
+    // yt-dlp otherwise reads portable, user, and system configuration files before launch.
+    // Those files can define another -o/-P or an alias that expands to one, bypassing validation
+    // of the engine-owned argv. The managed execution boundary is intentionally config-isolated.
+    let mut launch_args = Vec::with_capacity(args.len() + 1);
+    launch_args.push("--ignore-config".to_string());
+    launch_args.extend(args.iter().cloned());
     let mut failures: Vec<String> = Vec::new();
     let mut candidates: Vec<(String, Vec<String>)> = Vec::new();
-    match ensure_bundled_yt_dlp(paths) {
+    let protected_youtube = args.iter().any(|arg| is_youtube_url(arg))
+        || args.iter().any(|arg| arg.contains("youtubepot-bgutilhttp"));
+    let provider_required = args
+        .iter()
+        .any(|arg| arg.contains("youtubepot-bgutilhttp"));
+    let bundled_result = if protected_youtube {
+        verify_protected_youtube_runtime(paths, provider_required).map(Some)
+    } else {
+        ensure_bundled_yt_dlp(paths)
+    };
+    match bundled_result {
         Ok(Some(bundled)) if bundled.exists() => {
             candidates.push((bundled.to_string_lossy().to_string(), Vec::new()));
         }
@@ -19065,29 +21334,76 @@ fn run_yt_dlp(
             failures.push(format!("bundled yt-dlp bootstrap failed: {err}"));
         }
     }
-    candidates.push(("yt-dlp".to_string(), Vec::new()));
-    candidates.push((
-        "python".to_string(),
-        vec!["-m".to_string(), "yt_dlp".to_string()],
-    ));
-    candidates.push((
-        "python3".to_string(),
-        vec!["-m".to_string(), "yt_dlp".to_string()],
-    ));
+    if !protected_youtube {
+        candidates.push(("yt-dlp".to_string(), Vec::new()));
+        candidates.push((
+            "python".to_string(),
+            vec!["-m".to_string(), "yt_dlp".to_string()],
+        ));
+        candidates.push((
+            "python3".to_string(),
+            vec!["-m".to_string(), "yt_dlp".to_string()],
+        ));
+    }
 
-    for (program, prefix) in candidates {
+    for (candidate_index, (program, prefix)) in candidates.into_iter().enumerate() {
+        let program_label = if protected_youtube {
+            "bundled_pinned_yt_dlp"
+        } else if program == "python" || program == "python3" {
+            "python_yt_dlp"
+        } else {
+            "yt_dlp"
+        };
         let mut cmd = cmd::command(&program);
-        cmd.args(prefix);
-        cmd.args(args);
+        cmd.args(&prefix);
+        cmd.args(&launch_args);
+        if protected_youtube {
+            record_youtube_launch_command_receipt(
+                paths,
+                job_id,
+                candidate_index,
+                &prefix,
+                &launch_args,
+            );
+        }
+        emit_downloader_causal_event(
+            paths,
+            job_id,
+            "downloader_launch",
+            candidate_index,
+            None,
+            None,
+            None,
+        );
+        let launch_started = std::time::Instant::now();
         match run_command_output_with_control(paths, &mut cmd, job_id, timeout_secs) {
             Ok(output) => {
                 if output.status.success() {
+                    emit_downloader_causal_event(
+                        paths,
+                        job_id,
+                        "downloader_outcome",
+                        candidate_index,
+                        Some("success"),
+                        output.status.code(),
+                        Some(launch_started.elapsed().as_millis().min(i64::MAX as u128) as i64),
+                    );
                     return Ok(output);
                 }
 
+                emit_downloader_causal_event(
+                    paths,
+                    job_id,
+                    "downloader_outcome",
+                    candidate_index,
+                    Some("nonzero_exit"),
+                    output.status.code(),
+                    Some(launch_started.elapsed().as_millis().min(i64::MAX as u128) as i64),
+                );
+
                 let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
                 let failure = format!(
-                    "{program} failed (code={:?}): {}",
+                    "{program_label} failed (code={:?}): {}",
                     output.status.code(),
                     if stderr.is_empty() {
                         "unknown error".to_string()
@@ -19102,23 +21418,68 @@ fn run_yt_dlp(
                 continue;
             }
             Err(CommandRunError::Spawn(e)) if e.kind() == std::io::ErrorKind::NotFound => {
+                emit_downloader_causal_event(
+                    paths,
+                    job_id,
+                    "downloader_outcome",
+                    candidate_index,
+                    Some("not_found"),
+                    None,
+                    Some(launch_started.elapsed().as_millis().min(i64::MAX as u128) as i64),
+                );
                 continue;
             }
             Err(CommandRunError::Spawn(e)) => {
-                failures.push(format!("{program} could not start: {e}"));
+                emit_downloader_causal_event(
+                    paths,
+                    job_id,
+                    "downloader_outcome",
+                    candidate_index,
+                    Some("spawn_failed"),
+                    None,
+                    Some(launch_started.elapsed().as_millis().min(i64::MAX as u128) as i64),
+                );
+                failures.push(format!("{program_label} could not start: {e}"));
                 continue;
             }
             Err(CommandRunError::Wait(e)) => {
-                failures.push(format!("{program} failed while running: {e}"));
+                emit_downloader_causal_event(
+                    paths,
+                    job_id,
+                    "downloader_outcome",
+                    candidate_index,
+                    Some("wait_failed"),
+                    None,
+                    Some(launch_started.elapsed().as_millis().min(i64::MAX as u128) as i64),
+                );
+                failures.push(format!("{program_label} failed while running: {e}"));
                 continue;
             }
             Err(CommandRunError::Canceled) => {
+                emit_downloader_causal_event(
+                    paths,
+                    job_id,
+                    "downloader_outcome",
+                    candidate_index,
+                    Some("canceled"),
+                    None,
+                    Some(launch_started.elapsed().as_millis().min(i64::MAX as u128) as i64),
+                );
                 return Err(EngineError::InstallFailed(
                     "job canceled while running yt-dlp".to_string(),
                 ));
             }
             Err(CommandRunError::TimedOut(limit)) => {
-                failures.push(format!("{program} timed out after {limit}s"));
+                emit_downloader_causal_event(
+                    paths,
+                    job_id,
+                    "downloader_outcome",
+                    candidate_index,
+                    Some("timed_out"),
+                    None,
+                    Some(launch_started.elapsed().as_millis().min(i64::MAX as u128) as i64),
+                );
+                failures.push(format!("{program_label} timed out after {limit}s"));
                 continue;
             }
         }
@@ -19131,9 +21492,13 @@ fn run_yt_dlp(
         )));
     }
 
-    Err(EngineError::InstallFailed(
-        "yt-dlp is required for YouTube and many webpage video links. Install it with `winget install yt-dlp.yt-dlp` or `pip install -U yt-dlp`.".to_string(),
-    ))
+    Err(EngineError::InstallFailed(if protected_youtube {
+        "the exact bundled yt-dlp runtime is required for protected YouTube work; unverified PATH/Python fallbacks are disabled"
+            .to_string()
+    } else {
+        "yt-dlp is required for this webpage video link. Install the pinned VoxVulgi tooling payload."
+            .to_string()
+    }))
 }
 
 fn yt_dlp_failure_should_stop(message: &str) -> bool {
@@ -19183,6 +21548,28 @@ fn expand_yt_dlp_entries(
     use_browser_cookies: bool,
     browser_cookie_source: Option<&str>,
 ) -> Result<Vec<(String, Option<String>)>> {
+    expand_yt_dlp_entries_with_sleep(
+        paths,
+        url,
+        limit,
+        auth_cookie,
+        use_browser_cookies,
+        browser_cookie_source,
+        None,
+        None,
+    )
+}
+
+fn expand_yt_dlp_entries_with_sleep(
+    paths: &AppPaths,
+    url: &str,
+    limit: usize,
+    auth_cookie: Option<&str>,
+    use_browser_cookies: bool,
+    browser_cookie_source: Option<&str>,
+    sleep_requests_override: Option<u32>,
+    job_id: Option<&str>,
+) -> Result<Vec<(String, Option<String>)>> {
     let limit = limit.max(1);
     let mut args = vec![
         "--socket-timeout".to_string(),
@@ -19201,9 +21588,11 @@ fn expand_yt_dlp_entries(
     // WP-0257 (#3): pace API page requests during enumeration to reduce anti-bot exposure.
     // This is the dominant anti-bot surface (a channel/playlist enumeration issues many API
     // page requests). Operator-tunable in Options -> Anti-bot pacing; 0 disables.
-    let sleep_requests = get_antibot_pacing(paths)
-        .map(|s| s.enumeration_sleep_requests)
-        .unwrap_or(DEFAULT_ENUM_SLEEP_REQUESTS);
+    let sleep_requests = sleep_requests_override.unwrap_or_else(|| {
+        get_antibot_pacing(paths)
+            .map(|s| s.enumeration_sleep_requests)
+            .unwrap_or(DEFAULT_ENUM_SLEEP_REQUESTS)
+    });
     if sleep_requests > 0 {
         args.push("--sleep-requests".to_string());
         args.push(sleep_requests.to_string());
@@ -19233,14 +21622,23 @@ fn expand_yt_dlp_entries(
         using_browser_cookies = true;
     }
     let js_runtime_available =
-        append_yt_dlp_runtime_args(paths, &mut args, url, auth_cookie_present);
+        match append_yt_dlp_runtime_args(paths, &mut args, url, auth_cookie_present) {
+            Ok(value) => value,
+            Err(error) => {
+                if let Some(path) = cookie_file_path.as_ref() {
+                    let _ = std::fs::remove_file(path);
+                }
+                return Err(error);
+            }
+        };
 
     let output_res = run_yt_dlp_with_browser_cookie_retry(
         paths,
         &args,
-        None,
+        job_id,
         YT_DLP_EXPAND_TIMEOUT_SECS,
         using_browser_cookies,
+        None,
     );
     if let Some(path) = cookie_file_path {
         let _ = std::fs::remove_file(path);
@@ -19594,9 +21992,11 @@ fn download_url_to_library(
     yt_dlp_retries: u32,
     yt_dlp_fragment_retries: u32,
     yt_dlp_concurrent_fragments: u32,
+    yt_dlp_limit_rate: Option<&str>,
     yt_dlp_throttled_rate: Option<&str>,
     yt_dlp_file_access_retries: u32,
     yt_dlp_sleep_interval: u32,
+    yt_dlp_max_sleep_interval: u32,
     yt_dlp_sleep_requests: u32,
     subtitle_mode: Option<&str>,
 ) -> Result<PathBuf> {
@@ -19605,6 +22005,7 @@ fn download_url_to_library(
             paths,
             url,
             job_id,
+            provider,
             auth_cookie,
             output_dir,
             output_subdir,
@@ -19617,9 +22018,11 @@ fn download_url_to_library(
             yt_dlp_retries,
             yt_dlp_fragment_retries,
             yt_dlp_concurrent_fragments,
+            yt_dlp_limit_rate,
             yt_dlp_throttled_rate,
             yt_dlp_file_access_retries,
             yt_dlp_sleep_interval,
+            yt_dlp_max_sleep_interval,
             yt_dlp_sleep_requests,
             subtitle_mode,
         );
@@ -19639,9 +22042,11 @@ fn download_url_to_library(
         yt_dlp_retries,
         yt_dlp_fragment_retries,
         yt_dlp_concurrent_fragments,
+        yt_dlp_limit_rate,
         yt_dlp_throttled_rate,
         yt_dlp_file_access_retries,
         yt_dlp_sleep_interval,
+        yt_dlp_max_sleep_interval,
         yt_dlp_sleep_requests,
         subtitle_mode,
     ) {
@@ -19655,6 +22060,7 @@ fn download_url_to_library(
                     paths,
                     url,
                     job_id,
+                    provider,
                     auth_cookie,
                     output_dir,
                     output_subdir,
@@ -19667,9 +22073,11 @@ fn download_url_to_library(
                     yt_dlp_retries,
                     yt_dlp_fragment_retries,
                     yt_dlp_concurrent_fragments,
+                    yt_dlp_limit_rate,
                     yt_dlp_throttled_rate,
                     yt_dlp_file_access_retries,
                     yt_dlp_sleep_interval,
+                    yt_dlp_max_sleep_interval,
                     yt_dlp_sleep_requests,
                     subtitle_mode,
                 ) {
@@ -19703,7 +22111,7 @@ fn resolve_downloads_dir_with_override(
         if !custom_dir.is_absolute() {
             custom_dir = std::env::current_dir()?.join(custom_dir);
         }
-        custom_dir
+        root_rebind::resolve_active_alias_path(paths, &custom_dir, true)?
     } else {
         // WP-0253 Item 2d: if the configured download root (e.g. a NAS share) is
         // unreachable, fall back to a stable local folder so downloads don't fail when the
@@ -19711,6 +22119,7 @@ fn resolve_downloads_dir_with_override(
         // timeout. Fallback items live locally (one library, origin-stamped); moving them
         // back to the NAS is an operator-confirmed action, never silent (data preservation).
         let (base_dir, used_fallback) = paths.effective_download_dir_with_fallback()?;
+        let base_dir = root_rebind::resolve_active_alias_path(paths, &base_dir, true)?;
         if !used_fallback {
             if !base_dir.exists() {
                 return Err(EngineError::InstallFailed(format!(
@@ -19823,30 +22232,255 @@ fn convert_download_template_to_ytdlp(value: &str) -> String {
     sanitize_template_literal(&out)
 }
 
+fn managed_ytdlp_template_basename_fragment(value: &str, label: &str) -> Result<String> {
+    let value = value.trim();
+    let bytes = value.as_bytes();
+    let normalized = value.replace('\\', "/");
+    let lower = normalized.to_ascii_lowercase();
+    let rooted_or_prefixed = normalized.starts_with('/')
+        || lower.starts_with("//?/")
+        || lower.starts_with("//./")
+        || (bytes.len() >= 2 && bytes[0].is_ascii_alphabetic() && bytes[1] == b':')
+        || value.contains(':');
+    if value.is_empty()
+        || value.contains('\0')
+        || rooted_or_prefixed
+        || normalized
+            .split('/')
+            .any(|component| component == "." || component == "..")
+    {
+        return Err(EngineError::InstallFailed(format!(
+            "{label} cannot contain a rooted path, device/drive prefix, or dot traversal"
+        )));
+    }
+    // Ordinary grouping separators from legacy presets are flattened. yt-dlp receives only a
+    // basename inside the engine-owned attempt directory; stable publication decides the final
+    // destination after validation.
+    let flattened = normalized
+        .split('/')
+        .filter(|component| !component.is_empty())
+        .map(convert_download_template_to_ytdlp)
+        .collect::<Vec<_>>()
+        .join("_");
+    validate_managed_ytdlp_output_basename(&flattened)?;
+    Ok(flattened)
+}
+
 fn build_yt_dlp_output_template(
     job_id: &str,
     output_path_template: Option<&str>,
     filename_template: Option<&str>,
-) -> String {
-    // WP-0220 follow-up (operator report 2026-05-17): default no longer
-    // prefixes the path with %(extractor)s so single-video YouTube downloads
-    // land in `<library_root>/<channel>/<file>` instead of
-    // `<library_root>/youtube/<channel>/<file>`. Falls back to uploader for
-    // platforms without a `channel` field (Instagram) and finally `misc` if
-    // neither exists, so the segment is never the literal string "NA".
+) -> Result<String> {
+    build_yt_dlp_output_template_for_attempt(job_id, output_path_template, filename_template, None)
+}
+
+fn build_yt_dlp_output_template_for_attempt(
+    job_id: &str,
+    output_path_template: Option<&str>,
+    filename_template: Option<&str>,
+    attempt_marker: Option<&str>,
+) -> Result<String> {
+    // Keep the legacy channel/uploader naming signal, but only as part of the single staging
+    // basename. No saved path template is allowed to choose directories inside or outside the
+    // engine-owned attempt root.
     let path_template = normalize_non_empty(output_path_template)
-        .map(|value| convert_download_template_to_ytdlp(&value))
+        .map(|value| managed_ytdlp_template_basename_fragment(&value, "output path template"))
+        .transpose()?
         .unwrap_or_else(|| "%(channel,uploader|misc)s".to_string());
 
     let mut file_template = normalize_non_empty(filename_template)
-        .map(|value| convert_download_template_to_ytdlp(&value))
+        .map(|value| managed_ytdlp_template_basename_fragment(&value, "filename template"))
+        .transpose()?
         .unwrap_or_else(|| "%(title).80B_%(id)s".to_string());
     if !file_template.contains("%(id)") {
         file_template.push_str("_%(id)s");
     }
 
     let suffix = &job_id[..job_id.len().min(8)];
-    format!("{path_template}/{file_template}_{suffix}.%(ext)s")
+    let attempt_suffix = attempt_marker
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(|value| format!("_vvattempt-{value}"))
+        .unwrap_or_default();
+    let template = format!("{path_template}_{file_template}_{suffix}{attempt_suffix}.%(ext)s");
+    validate_managed_ytdlp_output_basename(&template)?;
+    Ok(template)
+}
+
+fn stable_yt_dlp_relative_output(
+    relative_output: &Path,
+    job_id: &str,
+    attempt_marker: &str,
+) -> Result<PathBuf> {
+    if relative_output.is_absolute()
+        || relative_output
+            .components()
+            .any(|component| matches!(component, std::path::Component::ParentDir))
+    {
+        return Err(EngineError::InstallFailed(
+            "yt-dlp output identity escaped its owned attempt staging root".to_string(),
+        ));
+    }
+    let file_name = relative_output
+        .file_name()
+        .and_then(|value| value.to_str())
+        .ok_or_else(|| {
+            EngineError::InstallFailed(
+                "yt-dlp output did not have a UTF-8 filename for stable publication".to_string(),
+            )
+        })?;
+    let extension = relative_output
+        .extension()
+        .and_then(|value| value.to_str())
+        .ok_or_else(|| {
+            EngineError::InstallFailed(
+                "yt-dlp output did not have an extension for stable publication".to_string(),
+            )
+        })?;
+    let stem = relative_output
+        .file_stem()
+        .and_then(|value| value.to_str())
+        .ok_or_else(|| {
+            EngineError::InstallFailed(
+                "yt-dlp output did not have a filename stem for stable publication".to_string(),
+            )
+        })?;
+    let job_suffix = &job_id[..job_id.len().min(8)];
+    let ownership_suffix = format!("_{job_suffix}_vvattempt-{attempt_marker}");
+    let stable_stem = stem.strip_suffix(&ownership_suffix).ok_or_else(|| {
+        EngineError::InstallFailed(format!(
+            "yt-dlp output filename did not carry the current attempt identity: {file_name}"
+        ))
+    })?;
+    let mut stable = relative_output
+        .parent()
+        .map(Path::to_path_buf)
+        .unwrap_or_default();
+    stable.push(format!("{stable_stem}.{extension}"));
+    Ok(stable)
+}
+
+const MANAGED_PUBLICATION_RECEIPT_SCHEMA_VERSION: u32 = 1;
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct ManagedPublicationReceipt {
+    schema_version: u32,
+    identity: String,
+    provider: String,
+    source_fingerprint: String,
+    source_job_id: String,
+    path: String,
+    state: String,
+    expectations: ManagedMkvExpectations,
+    created_at_ms: i64,
+    updated_at_ms: i64,
+}
+
+fn managed_publication_identity(provider: &str, url: &str) -> (String, String) {
+    let mut hasher = Sha256::new();
+    hasher.update(provider.trim().as_bytes());
+    hasher.update([0]);
+    hasher.update(url.trim().as_bytes());
+    let fingerprint = hex::encode(hasher.finalize());
+    (format!("managed-publication-{fingerprint}"), fingerprint)
+}
+
+fn managed_publication_receipt_path(paths: &AppPaths, identity: &str) -> Result<PathBuf> {
+    let fingerprint = identity
+        .strip_prefix("managed-publication-")
+        .filter(|value| value.len() == 64 && value.bytes().all(|byte| byte.is_ascii_hexdigit()))
+        .ok_or_else(|| {
+            EngineError::InstallFailed("managed publication identity was invalid".to_string())
+        })?;
+    let dir = paths.config_dir().join("managed_output_publications");
+    std::fs::create_dir_all(&dir)?;
+    Ok(dir.join(format!("managed-publication-{fingerprint}.json")))
+}
+
+fn write_managed_publication_receipt(
+    paths: &AppPaths,
+    receipt: &ManagedPublicationReceipt,
+) -> Result<()> {
+    let path = managed_publication_receipt_path(paths, &receipt.identity)?;
+    persistence::atomic_write_text(
+        &path,
+        &format!("{}\n", serde_json::to_string_pretty(receipt)?),
+    )?;
+    Ok(())
+}
+
+fn load_managed_publication_receipt(
+    paths: &AppPaths,
+    provider: &str,
+    url: &str,
+) -> Result<Option<ManagedPublicationReceipt>> {
+    let (identity, source_fingerprint) = managed_publication_identity(provider, url);
+    let path = managed_publication_receipt_path(paths, &identity)?;
+    if !path.is_file() {
+        return Ok(None);
+    }
+    let receipt: ManagedPublicationReceipt = serde_json::from_slice(&std::fs::read(&path)?)?;
+    if receipt.schema_version != MANAGED_PUBLICATION_RECEIPT_SCHEMA_VERSION
+        || receipt.identity != identity
+        || receipt.source_fingerprint != source_fingerprint
+        || receipt.provider != provider
+    {
+        return Err(EngineError::InstallFailed(format!(
+            "managed publication receipt identity mismatch: {}",
+            path.to_string_lossy()
+        )));
+    }
+    Ok(Some(receipt))
+}
+
+fn recover_managed_publication(
+    paths: &AppPaths,
+    provider: &str,
+    url: &str,
+) -> Result<Option<PathBuf>> {
+    let Some(receipt) = load_managed_publication_receipt(paths, provider, url)? else {
+        return Ok(None);
+    };
+    if !matches!(receipt.state.as_str(), "publishing" | "published" | "imported") {
+        return Err(EngineError::InstallFailed(format!(
+            "managed publication receipt has unsupported state: {}",
+            receipt.state
+        )));
+    }
+    let stored = PathBuf::from(&receipt.path);
+    let resolved = root_rebind::resolve_active_alias_path(paths, &stored, false)?;
+    if !resolved.is_file() {
+        // The durable receipt is recovery evidence, not a tombstone. If the operator later
+        // removes or relocates the artifact, a deliberate redownload must be able to replace
+        // this stale projection. Existing bytes are never deleted here.
+        return Ok(None);
+    }
+    validate_managed_mkv_output(paths, &resolved, &receipt.expectations)?;
+    Ok(Some(resolved))
+}
+
+fn mark_managed_publication_imported(
+    paths: &AppPaths,
+    provider: &str,
+    url: &str,
+    imported_path: &Path,
+) -> Result<()> {
+    let Some(mut receipt) = load_managed_publication_receipt(paths, provider, url)? else {
+        return Ok(());
+    };
+    let expected_path = root_rebind::resolve_active_alias_path(
+        paths,
+        Path::new(&receipt.path),
+        false,
+    )?;
+    if expected_path != imported_path {
+        return Err(EngineError::InstallFailed(
+            "managed publication import path did not match its durable receipt".to_string(),
+        ));
+    }
+    receipt.state = "imported".to_string();
+    receipt.updated_at_ms = now_ms();
+    write_managed_publication_receipt(paths, &receipt)
 }
 
 fn resolve_download_preset(
@@ -19884,7 +22518,11 @@ fn default_direct_job_output_dir(
         DEFAULT_VIDEO_OUTPUT_SUBDIR
     };
     let base_dir = if category == DEFAULT_VIDEO_OUTPUT_SUBDIR {
-        video_libraries::selected_video_library_root(paths)?
+        root_rebind::resolve_active_alias_path(
+            paths,
+            &video_libraries::selected_video_library_root(paths)?,
+            true,
+        )?
     } else {
         paths.effective_download_dir()?
     };
@@ -19929,9 +22567,11 @@ fn download_direct_http_url_to_library(
     yt_dlp_retries: u32,
     yt_dlp_fragment_retries: u32,
     yt_dlp_concurrent_fragments: u32,
+    yt_dlp_limit_rate: Option<&str>,
     yt_dlp_throttled_rate: Option<&str>,
     yt_dlp_file_access_retries: u32,
     yt_dlp_sleep_interval: u32,
+    yt_dlp_max_sleep_interval: u32,
     yt_dlp_sleep_requests: u32,
     subtitle_mode: Option<&str>,
 ) -> Result<PathBuf> {
@@ -19978,6 +22618,7 @@ fn download_direct_http_url_to_library(
                 paths,
                 &candidate,
                 job_id,
+                DOWNLOAD_PROVIDER_DIRECT_HTTP,
                 auth_cookie,
                 output_dir,
                 output_subdir,
@@ -19990,9 +22631,11 @@ fn download_direct_http_url_to_library(
                 yt_dlp_retries,
                 yt_dlp_fragment_retries,
                 yt_dlp_concurrent_fragments,
+                yt_dlp_limit_rate,
                 yt_dlp_throttled_rate,
                 yt_dlp_file_access_retries,
                 yt_dlp_sleep_interval,
+                yt_dlp_max_sleep_interval,
                 yt_dlp_sleep_requests,
                 subtitle_mode,
             ) {
@@ -20068,15 +22711,17 @@ fn download_direct_media_asset(
     let content_type = header_string(&response, "content-type");
     let filename = suggested_download_filename(&request_url, job_id);
     let final_path = downloads_dir.join(filename);
+    let output_guard = ManagedOutputGuard::acquire(&final_path)?;
+    let attempt_id = Uuid::new_v4();
     let temp_name = format!(
-        "{}.part",
+        ".{}.{}.part",
         final_path
             .file_name()
             .and_then(|v| v.to_str())
-            .unwrap_or("download.bin")
+            .unwrap_or("download.bin"),
+        attempt_id,
     );
     let temp_path = downloads_dir.join(temp_name);
-    let _ = std::fs::remove_file(&temp_path);
 
     let mut output = std::fs::File::create(&temp_path)?;
     let mut body_reader = response.body_mut().as_reader();
@@ -20136,20 +22781,495 @@ fn download_direct_media_asset(
         )));
     }
 
-    if final_path.exists() {
-        let _ = std::fs::remove_file(&final_path);
-    }
-    std::fs::rename(&temp_path, &final_path)?;
-
-    if let Err(err) = ffmpeg::probe(paths, &final_path) {
-        let _ = std::fs::remove_file(&final_path);
+    let source_probe = ffmpeg::probe(paths, &temp_path).map_err(|err| {
+        EngineError::InstallFailed(format!(
+            "downloaded file from {} is not valid playable media: {err}; staging retained at {}",
+            redact_url_for_log(url),
+            temp_path.to_string_lossy()
+        ))
+    })?;
+    if source_probe.video_stream_count == 0 {
         return Err(EngineError::InstallFailed(format!(
-            "downloaded file from {} is not valid playable media: {err}",
-            redact_url_for_log(url)
+            "downloaded media from {} has no video stream; staging retained at {}",
+            redact_url_for_log(url),
+            temp_path.to_string_lossy()
         )));
     }
 
+    if final_path.exists() {
+        if validate_managed_mkv_output(paths, &final_path, &expectations_from_probe(&source_probe))
+            .is_ok()
+        {
+            // A retry of the same job may encounter its previously validated final artifact.
+            // Reuse it without overwriting managed media.
+            let _ = std::fs::remove_file(&temp_path);
+            return Ok(final_path);
+        }
+        return Err(EngineError::InstallFailed(format!(
+            "managed MKV destination already exists but failed validation: {}; staging retained at {}",
+            final_path.to_string_lossy(),
+            temp_path.to_string_lossy()
+        )));
+    }
+
+    let muxing_path = final_path.with_file_name(format!(
+        ".{}.{}.muxing.mkv",
+        final_path
+            .file_name()
+            .and_then(|value| value.to_str())
+            .unwrap_or("download.mkv"),
+        attempt_id,
+    ));
+    let output = cmd::command(paths.ffmpeg_cmd())
+        .args(["-nostdin", "-y"])
+        .arg("-i")
+        .arg(&temp_path)
+        // Preserve every source video/audio/subtitle stream plus metadata/chapters. Matroska is
+        // the final managed container; stream copy avoids needless quality loss.
+        .args([
+            "-map",
+            "0",
+            "-map_metadata",
+            "0",
+            "-map_chapters",
+            "0",
+            "-c",
+            "copy",
+        ])
+        .arg(&muxing_path)
+        .output()
+        .map_err(|e| match e.kind() {
+            std::io::ErrorKind::NotFound => EngineError::ExternalToolMissing {
+                tool: "ffmpeg".to_string(),
+            },
+            _ => EngineError::Io(e),
+        })?;
+    if !output.status.success() {
+        return Err(EngineError::InstallFailed(format!(
+            "failed to remux direct download to MKV for {}: {}; source staging retained at {}",
+            redact_url_for_log(url),
+            String::from_utf8_lossy(&output.stderr).trim(),
+            temp_path.to_string_lossy()
+        )));
+    }
+    let probe =
+        validate_managed_mkv_output(paths, &muxing_path, &expectations_from_probe(&source_probe))?;
+    std::fs::remove_file(&temp_path)?;
+    output_guard.publish(&muxing_path)?;
+    // Publication is the irreversible success boundary. A diagnostic sink failure after the
+    // atomic move must not report the download as failed and cause a retry/collision against the
+    // already-valid artifact.
+    let _ = log_line(
+        paths,
+        job_id,
+        "info",
+        "direct_http_mkv_remux_validated",
+        serde_json::json!({
+            "path": &final_path,
+            "container": probe.container,
+            "video_stream_count": probe.video_stream_count,
+            "audio_stream_count": probe.audio_stream_count,
+            "subtitle_stream_count": probe.subtitle_streams.len(),
+            "subtitle_tracks": probe.subtitle_streams,
+        }),
+    );
+
     Ok(final_path)
+}
+
+const MANAGED_OUTPUT_LOCK_STALE_AFTER: Duration = Duration::from_secs(30 * 60);
+
+#[derive(Debug, Serialize, Deserialize)]
+struct ManagedOutputLockReceipt {
+    pid: u32,
+    created_at_ms: i64,
+    destination: String,
+}
+
+#[derive(Debug)]
+struct ManagedOutputGuard {
+    destination: PathBuf,
+    lock_path: PathBuf,
+}
+
+fn process_id_is_alive(pid: u32) -> bool {
+    if pid == std::process::id() {
+        return true;
+    }
+    #[cfg(windows)]
+    {
+        use windows_sys::Win32::Foundation::{CloseHandle, STILL_ACTIVE};
+        use windows_sys::Win32::System::Threading::{
+            GetExitCodeProcess, OpenProcess, PROCESS_QUERY_LIMITED_INFORMATION,
+        };
+        let handle = unsafe { OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, 0, pid) };
+        if handle.is_null() {
+            return false;
+        }
+        let mut exit_code = 0_u32;
+        let alive = unsafe { GetExitCodeProcess(handle, &mut exit_code) } != 0
+            && exit_code == STILL_ACTIVE as u32;
+        unsafe { CloseHandle(handle) };
+        return alive;
+    }
+    #[cfg(all(unix, not(target_os = "macos")))]
+    {
+        return Path::new("/proc").join(pid.to_string()).exists();
+    }
+    #[cfg(target_os = "macos")]
+    {
+        return std::process::Command::new("ps")
+            .args(["-p", &pid.to_string()])
+            .status()
+            .is_ok_and(|status| status.success());
+    }
+    #[allow(unreachable_code)]
+    false
+}
+
+fn atomic_publish_no_replace(staging: &Path, destination: &Path) -> Result<()> {
+    let staged = OpenOptions::new().write(true).open(staging)?;
+    staged.sync_all()?;
+    drop(staged);
+    #[cfg(windows)]
+    {
+        use std::os::windows::ffi::OsStrExt;
+        use windows_sys::Win32::Storage::FileSystem::{MoveFileExW, MOVEFILE_WRITE_THROUGH};
+        let source_wide = staging
+            .as_os_str()
+            .encode_wide()
+            .chain(std::iter::once(0))
+            .collect::<Vec<_>>();
+        let destination_wide = destination
+            .as_os_str()
+            .encode_wide()
+            .chain(std::iter::once(0))
+            .collect::<Vec<_>>();
+        let moved = unsafe {
+            MoveFileExW(
+                source_wide.as_ptr(),
+                destination_wide.as_ptr(),
+                MOVEFILE_WRITE_THROUGH,
+            )
+        };
+        if moved == 0 {
+            return Err(EngineError::Io(std::io::Error::last_os_error()));
+        }
+    }
+    #[cfg(not(windows))]
+    {
+        std::fs::hard_link(staging, destination)?;
+        std::fs::remove_file(staging)?;
+    }
+    Ok(())
+}
+
+impl ManagedOutputGuard {
+    fn lock_path(destination: &Path) -> PathBuf {
+        let file_name = destination
+            .file_name()
+            .and_then(|value| value.to_str())
+            .unwrap_or("managed_output");
+        destination.with_file_name(format!(".{file_name}.voxvulgi.lock"))
+    }
+
+    fn acquire(destination: &Path) -> Result<Self> {
+        Self::acquire_at(destination, now_ms(), MANAGED_OUTPUT_LOCK_STALE_AFTER)
+    }
+
+    fn acquire_at(destination: &Path, now_ms_value: i64, stale_after: Duration) -> Result<Self> {
+        let lock_path = Self::lock_path(destination);
+        let recovery_path = lock_path.with_extension("lock.recovering");
+        let receipt = ManagedOutputLockReceipt {
+            pid: std::process::id(),
+            created_at_ms: now_ms_value,
+            destination: destination.to_string_lossy().to_string(),
+        };
+        let encoded = format!("{}\n", serde_json::to_string(&receipt)?);
+        let create = |recovery_owner: bool| -> std::io::Result<()> {
+            if !recovery_owner && recovery_path.exists() {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::WouldBlock,
+                    "stale-lock recovery is in progress",
+                ));
+            }
+            let mut file = OpenOptions::new()
+                .create_new(true)
+                .write(true)
+                .open(&lock_path)?;
+            let written = file
+                .write_all(encoded.as_bytes())
+                .and_then(|_| file.sync_all());
+            if let Err(error) = written {
+                drop(file);
+                let _ = std::fs::remove_file(&lock_path);
+                return Err(error);
+            }
+            Ok(())
+        };
+        if let Err(first_error) = create(false) {
+            let recovery_file = OpenOptions::new()
+                .create_new(true)
+                .write(true)
+                .open(&recovery_path)
+                .map_err(|error| {
+                    EngineError::InstallFailed(format!(
+                        "managed output is already being finalized or recovered ({}): {error}",
+                        lock_path.to_string_lossy()
+                    ))
+                })?;
+            let parsed_stale_dead_owner = std::fs::read_to_string(&lock_path)
+                .ok()
+                .and_then(|text| serde_json::from_str::<ManagedOutputLockReceipt>(&text).ok())
+                .is_some_and(|existing| {
+                    let age_ms = now_ms_value.saturating_sub(existing.created_at_ms);
+                    age_ms >= stale_after.as_millis().min(i64::MAX as u128) as i64
+                        && !process_id_is_alive(existing.pid)
+                        && Path::new(&existing.destination) == destination
+                });
+            // A hard crash can occur after create_new but before the small JSON receipt reaches
+            // disk. Such a lock has no PID to inspect; reclaim it only after the same conservative
+            // age threshold. Fresh malformed locks still fail closed.
+            let stale_unreadable_crash_lock = std::fs::read_to_string(&lock_path)
+                .ok()
+                .and_then(|text| serde_json::from_str::<ManagedOutputLockReceipt>(&text).ok())
+                .is_none()
+                && std::fs::metadata(&lock_path)
+                    .ok()
+                    .and_then(|metadata| metadata.modified().ok())
+                    .and_then(|modified| modified.elapsed().ok())
+                    .is_some_and(|age| age >= stale_after);
+            let stale_dead_owner = parsed_stale_dead_owner || stale_unreadable_crash_lock;
+            if !stale_dead_owner {
+                drop(recovery_file);
+                let _ = std::fs::remove_file(&recovery_path);
+                return Err(EngineError::InstallFailed(format!(
+                    "managed output is already being finalized ({}): {first_error}",
+                    lock_path.to_string_lossy()
+                )));
+            }
+            std::fs::remove_file(&lock_path)?;
+            let recovered = create(true).map_err(|error| {
+                EngineError::InstallFailed(format!(
+                    "managed output stale-lock recovery lost a concurrent race ({}): {error}",
+                    lock_path.to_string_lossy()
+                ))
+            });
+            drop(recovery_file);
+            let _ = std::fs::remove_file(&recovery_path);
+            recovered?;
+        }
+        Ok(Self {
+            destination: destination.to_path_buf(),
+            lock_path,
+        })
+    }
+
+    fn publish(&self, staging: &Path) -> Result<()> {
+        atomic_publish_no_replace(staging, &self.destination).map_err(|error| {
+            EngineError::InstallFailed(format!(
+                "managed output publish refused to replace an existing destination ({}): {error}",
+                self.destination.to_string_lossy()
+            ))
+        })
+    }
+}
+
+impl Drop for ManagedOutputGuard {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_file(&self.lock_path);
+    }
+}
+
+#[derive(Debug)]
+struct AttemptDirectoryGuard {
+    path: PathBuf,
+    retained_failure: Option<AttemptRetentionContext>,
+    cleanup_on_drop: bool,
+}
+
+#[derive(Debug)]
+struct AttemptRetentionContext {
+    paths: AppPaths,
+    job_id: String,
+    marker: String,
+    job_attempt_root: PathBuf,
+    created_at_ms: i64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct AttemptRetentionReceipt {
+    schema_version: u32,
+    job_id: String,
+    marker: String,
+    state: String,
+    created_at_ms: i64,
+    retained_at_ms: Option<i64>,
+    cleanup_after_ms: i64,
+    reason: String,
+}
+
+impl AttemptDirectoryGuard {
+    fn acquire(parent: &Path, marker: &str) -> Result<Self> {
+        let path = parent.join(format!(".vv-attempt-{marker}"));
+        std::fs::create_dir(&path)?;
+        Ok(Self {
+            path,
+            retained_failure: None,
+            cleanup_on_drop: true,
+        })
+    }
+
+    fn acquire_for_yt_dlp(
+        parent: &Path,
+        marker: &str,
+        paths: &AppPaths,
+        job_id: &str,
+    ) -> Result<Self> {
+        const RETENTION_MS: i64 = 7 * 24 * 60 * 60 * 1_000;
+        let safe_job_id = job_id
+            .chars()
+            .filter(|character| character.is_ascii_alphanumeric() || matches!(character, '-' | '_'))
+            .take(96)
+            .collect::<String>();
+        if safe_job_id.is_empty() {
+            return Err(EngineError::InstallFailed(
+                "yt-dlp attempt staging requires a safe job id".to_string(),
+            ));
+        }
+        let job_attempt_root = parent.join(".vv-attempts").join(safe_job_id);
+        std::fs::create_dir_all(&job_attempt_root)?;
+        prune_yt_dlp_attempt_staging(&job_attempt_root, now_ms())?;
+        let path = job_attempt_root.join(marker);
+        std::fs::create_dir(&path)?;
+        let created_at_ms = now_ms();
+        let receipt = AttemptRetentionReceipt {
+            schema_version: 1,
+            job_id: job_id.to_string(),
+            marker: marker.to_string(),
+            state: "active".to_string(),
+            created_at_ms,
+            retained_at_ms: None,
+            cleanup_after_ms: created_at_ms.saturating_add(RETENTION_MS),
+            reason: "yt_dlp_attempt_in_progress".to_string(),
+        };
+        if let Err(error) = write_attempt_retention_receipt(&path, &receipt) {
+            let _ = std::fs::remove_dir_all(&path);
+            return Err(error);
+        }
+        Ok(Self {
+            path,
+            retained_failure: Some(AttemptRetentionContext {
+                paths: paths.clone(),
+                job_id: job_id.to_string(),
+                marker: marker.to_string(),
+                job_attempt_root,
+                created_at_ms,
+            }),
+            cleanup_on_drop: false,
+        })
+    }
+
+    fn path(&self) -> &Path {
+        &self.path
+    }
+
+    fn cleanup_after_success(&mut self) {
+        self.cleanup_on_drop = true;
+        let _ = std::fs::remove_dir_all(&self.path);
+    }
+
+    fn preserve_for_publication_reconciliation(&mut self) {
+        self.cleanup_on_drop = false;
+    }
+}
+
+impl Drop for AttemptDirectoryGuard {
+    fn drop(&mut self) {
+        let canceled = self
+            .retained_failure
+            .as_ref()
+            .is_some_and(|context| is_canceled(&context.paths, &context.job_id).unwrap_or(false));
+        if self.cleanup_on_drop || canceled {
+            let _ = std::fs::remove_dir_all(&self.path);
+            return;
+        }
+        let Some(context) = self.retained_failure.as_ref() else { return; };
+        const RETENTION_MS: i64 = 7 * 24 * 60 * 60 * 1_000;
+        let retained_at_ms = now_ms();
+        let receipt = AttemptRetentionReceipt {
+            schema_version: 1,
+            job_id: context.job_id.clone(),
+            marker: context.marker.clone(),
+            state: "retained_failure".to_string(),
+            created_at_ms: context.created_at_ms,
+            retained_at_ms: Some(retained_at_ms),
+            cleanup_after_ms: retained_at_ms.saturating_add(RETENTION_MS),
+            reason: "yt_dlp_validation_embed_or_publication_failed".to_string(),
+        };
+        let receipt_path = self.path.join("retention_receipt.json");
+        let receipt_written = write_attempt_retention_receipt(&self.path, &receipt).is_ok();
+        let _ = log_line(
+            &context.paths,
+            &context.job_id,
+            "warn",
+            "yt_dlp_attempt_staging_retained",
+            serde_json::json!({
+                "attempt_dir": self.path,
+                "receipt_path": receipt_path,
+                "receipt_written": receipt_written,
+                "cleanup_after_ms": receipt.cleanup_after_ms,
+                "retained_limit_per_job": 3,
+            }),
+        );
+        let _ = prune_yt_dlp_attempt_staging(&context.job_attempt_root, retained_at_ms);
+    }
+}
+
+fn write_attempt_retention_receipt(
+    attempt_dir: &Path,
+    receipt: &AttemptRetentionReceipt,
+) -> Result<()> {
+    let path = attempt_dir.join("retention_receipt.json");
+    persistence::atomic_write_text(
+        &path,
+        &format!("{}\n", serde_json::to_string_pretty(receipt)?),
+    )?;
+    Ok(())
+}
+
+fn prune_yt_dlp_attempt_staging(job_attempt_root: &Path, now_ms: i64) -> Result<()> {
+    const MAX_RETAINED_ATTEMPTS_PER_JOB: usize = 3;
+    if !job_attempt_root.is_dir() {
+        return Ok(());
+    }
+    let mut candidates = Vec::new();
+    for entry in std::fs::read_dir(job_attempt_root)? {
+        let path = entry?.path();
+        if !path.is_dir() {
+            continue;
+        }
+        let receipt_path = path.join("retention_receipt.json");
+        let Ok(bytes) = std::fs::read(&receipt_path) else {
+            continue;
+        };
+        let Ok(receipt) = serde_json::from_slice::<AttemptRetentionReceipt>(&bytes) else {
+            continue;
+        };
+        if receipt.cleanup_after_ms <= now_ms {
+            let _ = std::fs::remove_dir_all(&path);
+            continue;
+        }
+        candidates.push((
+            receipt.retained_at_ms.unwrap_or(receipt.created_at_ms),
+            path,
+        ));
+    }
+    candidates.sort_by(|left, right| right.0.cmp(&left.0));
+    for (_, path) in candidates.into_iter().skip(MAX_RETAINED_ATTEMPTS_PER_JOB) {
+        let _ = std::fs::remove_dir_all(path);
+    }
+    Ok(())
 }
 
 fn discover_embedded_media_urls(
@@ -20554,6 +23674,7 @@ fn download_yt_dlp_url_to_library(
     paths: &AppPaths,
     url: &str,
     job_id: &str,
+    publication_provider: &str,
     auth_cookie: Option<&str>,
     output_dir: Option<&str>,
     output_subdir: Option<&str>,
@@ -20566,9 +23687,11 @@ fn download_yt_dlp_url_to_library(
     yt_dlp_retries: u32,
     yt_dlp_fragment_retries: u32,
     yt_dlp_concurrent_fragments: u32,
+    yt_dlp_limit_rate: Option<&str>,
     yt_dlp_throttled_rate: Option<&str>,
     yt_dlp_file_access_retries: u32,
     yt_dlp_sleep_interval: u32,
+    yt_dlp_max_sleep_interval: u32,
     yt_dlp_sleep_requests: u32,
     subtitle_mode: Option<&str>,
 ) -> Result<PathBuf> {
@@ -20585,9 +23708,33 @@ fn download_yt_dlp_url_to_library(
     );
     let yt_dlp_throttled_rate = normalize_non_empty(yt_dlp_throttled_rate)
         .unwrap_or_else(|| YT_DLP_ARCHIVE_THROTTLED_RATE.to_string());
+    let yt_dlp_limit_rate = normalize_non_empty(yt_dlp_limit_rate);
 
     let downloads_dir = resolve_downloads_dir_with_override(paths, output_dir, output_subdir)?;
-    let template = build_yt_dlp_output_template(job_id, output_path_template, filename_template);
+    let (publication_identity, publication_source_fingerprint) =
+        managed_publication_identity(publication_provider, url);
+    let publication_receipt_path =
+        managed_publication_receipt_path(paths, &publication_identity)?;
+    // Serialize downloads of the same canonical provider target. The durable receipt below
+    // bridges validated publication and transactional library import, so a crash/retry reuses
+    // the already-published artifact instead of creating another attempt-named final file.
+    let _publication_guard = ManagedOutputGuard::acquire(&publication_receipt_path)?;
+    if let Some(recovered) = recover_managed_publication(paths, publication_provider, url)? {
+        return Ok(recovered);
+    }
+    // A fresh, unpredictable marker makes every invocation's yt-dlp outputs uniquely owned.
+    // Cleanup later requires this exact marker, so a same-stem sidecar left by any prior job or
+    // retry can never be mistaken for current-attempt scratch output.
+    let attempt_marker = Uuid::new_v4().simple().to_string();
+    let mut attempt_guard =
+        AttemptDirectoryGuard::acquire_for_yt_dlp(&downloads_dir, &attempt_marker, paths, job_id)?;
+    let attempt_output_dir = attempt_guard.path().to_path_buf();
+    let template = build_yt_dlp_output_template_for_attempt(
+        job_id,
+        output_path_template,
+        filename_template,
+        Some(&attempt_marker),
+    )?;
 
     let mut args = vec![
         "--socket-timeout".to_string(),
@@ -20603,20 +23750,22 @@ fn download_yt_dlp_url_to_library(
         "--progress-template".to_string(),
         "download:VV_PROGRESS:%(progress._percent_str)s".to_string(),
         "--print".to_string(),
+        "before_dl:VV_MEDIA_PRE:%()j".to_string(),
+        "--print".to_string(),
+        "after_move:VV_MEDIA_POST:%()j".to_string(),
+        "--print".to_string(),
         "after_move:filepath".to_string(),
         "-P".to_string(),
-        downloads_dir.to_string_lossy().to_string(),
+        attempt_output_dir.to_string_lossy().to_string(),
         "-o".to_string(),
         template,
         url.to_string(),
     ];
 
-    args.push("--merge-output-format".to_string());
-    args.push("mp4".to_string());
-    args.push("--remux-video".to_string());
-    args.push("mp4".to_string());
-
-    if let Some(format_value) = normalize_non_empty(format_preference) {
+    if let Some(format_value) = normalize_non_empty(format_preference)
+        .map(|value| neutralize_managed_video_format_selector(&value))
+        .filter(|value| !value.trim().is_empty())
+    {
         args.push("-f".to_string());
         args.push(format_value);
     }
@@ -20635,8 +23784,10 @@ fn download_yt_dlp_url_to_library(
         &yt_dlp_throttled_rate,
         yt_dlp_file_access_retries,
         yt_dlp_sleep_interval,
+        yt_dlp_max_sleep_interval,
         yt_dlp_sleep_requests,
     );
+    append_yt_dlp_limit_rate_option(&mut args, yt_dlp_limit_rate.as_deref());
 
     if !is_playlist_candidate_url(url) {
         args.insert(0, "--no-playlist".to_string());
@@ -20672,7 +23823,18 @@ fn download_yt_dlp_url_to_library(
         using_browser_cookies = true;
     }
     let js_runtime_available =
-        append_yt_dlp_runtime_args(paths, &mut args, url, auth_cookie_present);
+        match append_yt_dlp_runtime_args(paths, &mut args, url, auth_cookie_present) {
+            Ok(value) => value,
+            Err(error) => {
+                if let Some(path) = cookie_file_path.as_ref() {
+                    let _ = std::fs::remove_file(path);
+                }
+                return Err(error);
+            }
+        };
+    // Keep this after every caller-/preset-derived option. Retries clone this already-sanitized
+    // command, preserving the same non-bypassable policy.
+    enforce_managed_video_yt_dlp_options(&mut args);
 
     let output_res = run_yt_dlp_with_browser_cookie_retry(
         paths,
@@ -20680,6 +23842,7 @@ fn download_yt_dlp_url_to_library(
         Some(job_id),
         YT_DLP_DOWNLOAD_TIMEOUT_SECS,
         using_browser_cookies,
+        Some(&attempt_output_dir),
     );
     let output_res = match output_res {
         Err(first_err)
@@ -20696,6 +23859,7 @@ fn download_yt_dlp_url_to_library(
                     Some(job_id),
                     YT_DLP_DOWNLOAD_TIMEOUT_SECS,
                     using_browser_cookies,
+                    Some(&attempt_output_dir),
                 ) {
                     Ok(output) => Ok(output),
                     Err(second_err) => Err(EngineError::InstallFailed(format!(
@@ -20720,6 +23884,7 @@ fn download_yt_dlp_url_to_library(
         Some(job_id),
         YT_DLP_DOWNLOAD_TIMEOUT_SECS,
         using_browser_cookies,
+        Some(&attempt_output_dir),
         url,
         output_res,
     );
@@ -20735,10 +23900,32 @@ fn download_yt_dlp_url_to_library(
             js_runtime_available,
         )
     })?;
-    let downloaded = String::from_utf8_lossy(&output.stdout)
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let media_expectations =
+        yt_dlp_managed_media_expectations(&stdout, subtitle_mode).map_err(|error| {
+            let _ = log_line(
+                paths,
+                job_id,
+                "error",
+                "managed_video_track_selection_miss",
+                serde_json::json!({
+                    "url": redact_url_for_log(url),
+                    "error": error.to_string(),
+                    "subtitle_mode": subtitle_mode,
+                }),
+            );
+            error
+        })?;
+    let downloaded = stdout
         .lines()
         .map(str::trim)
-        .filter(|line| !line.is_empty() && !line.contains("VV_PROGRESS:"))
+        .filter(|line| {
+            !line.is_empty()
+                && !line.contains("VV_PROGRESS:")
+                && !line.starts_with("VV_MEDIA_PRE:")
+                && !line.starts_with("VV_MEDIA_POST:")
+                && !line.starts_with("VV_MEDIA_INFO:")
+        })
         .last()
         .map(PathBuf::from)
         .ok_or_else(|| {
@@ -20751,7 +23938,7 @@ fn download_yt_dlp_url_to_library(
     let downloaded = if downloaded.is_absolute() {
         downloaded
     } else {
-        downloads_dir.join(downloaded)
+        attempt_output_dir.join(downloaded)
     };
     let meta = std::fs::metadata(&downloaded).map_err(|_| {
         EngineError::InstallFailed(format!(
@@ -20766,7 +23953,87 @@ fn download_yt_dlp_url_to_library(
         )));
     }
 
-    Ok(downloaded)
+    let probe = validate_managed_mkv_output(paths, &downloaded, &media_expectations.validation)
+        .map_err(|error| {
+            let _ = log_line(
+                paths,
+                job_id,
+                "error",
+                "managed_video_track_selection_miss",
+                serde_json::json!({
+                    "path": &downloaded,
+                    "error": error.to_string(),
+                    "expected_audio_streams": media_expectations.validation.min_audio_streams,
+                    "expected_subtitle_tracks": media_expectations.validation.subtitle_tracks,
+                }),
+            );
+            error
+        })?;
+    let removed_sidecars = remove_proven_embedded_subtitle_sidecars(
+        paths,
+        &downloaded,
+        &probe,
+        Some(&attempt_marker),
+        Some(&attempt_output_dir),
+    )?;
+    let relative_output = downloaded.strip_prefix(&attempt_output_dir).map_err(|_| {
+        EngineError::InstallFailed(format!(
+            "yt-dlp output escaped its owned attempt staging root: {}",
+            downloaded.to_string_lossy()
+        ))
+    })?;
+    let stable_relative_output =
+        stable_yt_dlp_relative_output(relative_output, job_id, &attempt_marker)?;
+    let published = downloads_dir.join(stable_relative_output);
+    if let Some(parent) = published.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    let publication_now = now_ms();
+    let mut publication_receipt = ManagedPublicationReceipt {
+        schema_version: MANAGED_PUBLICATION_RECEIPT_SCHEMA_VERSION,
+        identity: publication_identity,
+        provider: publication_provider.to_string(),
+        source_fingerprint: publication_source_fingerprint,
+        source_job_id: job_id.to_string(),
+        path: published.to_string_lossy().to_string(),
+        state: "publishing".to_string(),
+        expectations: media_expectations.validation.clone(),
+        created_at_ms: publication_now,
+        updated_at_ms: publication_now,
+    };
+    write_managed_publication_receipt(paths, &publication_receipt)?;
+    let output_guard = ManagedOutputGuard::acquire(&published)?;
+    output_guard.publish(&downloaded)?;
+    publication_receipt.state = "published".to_string();
+    publication_receipt.updated_at_ms = now_ms();
+    write_managed_publication_receipt(paths, &publication_receipt)?;
+    attempt_guard.cleanup_after_success();
+    let subtitle_receipt = if media_expectations.subtitle_selection_state == "selected" {
+        "embedded_selected_subtitles"
+    } else {
+        media_expectations.subtitle_selection_state.as_str()
+    };
+    // The validated artifact is already atomically published. Keep receipt logging best-effort
+    // so a diagnostics write failure cannot turn a successful finalization into a false retry.
+    let _ = log_line(
+        paths,
+        job_id,
+        "info",
+        "managed_video_output_validated",
+        serde_json::json!({
+            "path": &published,
+            "container": probe.container,
+            "video_stream_count": probe.video_stream_count,
+            "audio_stream_count": probe.audio_stream_count,
+            "subtitle_stream_count": probe.subtitle_streams.len(),
+            "subtitle_tracks": probe.subtitle_streams,
+            "subtitle_selection_receipt": subtitle_receipt,
+            "selected_subtitle_tracks": media_expectations.validation.subtitle_tracks,
+            "removed_embedded_subtitle_sidecars": removed_sidecars,
+        }),
+    );
+
+    Ok(published)
 }
 
 pub(crate) fn write_auth_cookie_secret_path(path: &Path, cookie_input: &str) -> Result<()> {
@@ -20871,33 +24138,431 @@ fn resolve_youtube_auth_cookie_for_job(
 
 // ----- WP-0263: global Instagram auth (Options-pasted, used for every Instagram op) -----
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct InstagramAuthDiskConfig {
+    #[serde(default)]
+    cookie: Option<String>,
+    #[serde(default)]
+    credential_generation: u64,
+    #[serde(default)]
+    credential_fingerprint: String,
+    #[serde(default)]
+    hold_cleanup_pending: bool,
+    #[serde(default)]
+    cleanup_warning: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct InstagramAuthRevision {
+    pub configured: bool,
+    pub credential_generation: u64,
+    pub credential_fingerprint: String,
+    pub cleanup_warning: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct InstagramAuthMutationReceipt {
+    pub configured: bool,
+    pub credential_generation: u64,
+    pub credential_fingerprint: String,
+    pub cleanup_warning: Option<String>,
+}
+
+static INSTAGRAM_AUTH_WRITER_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+const INSTAGRAM_AUTH_INTERPROCESS_LOCK_TIMEOUT_MS: u32 = 5_000;
+
+fn instagram_auth_writer_lock() -> &'static Mutex<()> {
+    INSTAGRAM_AUTH_WRITER_LOCK.get_or_init(|| Mutex::new(()))
+}
+
+#[cfg(windows)]
+struct InstagramAuthInterprocessGuard {
+    handle: windows_sys::Win32::Foundation::HANDLE,
+}
+
+#[cfg(windows)]
+impl Drop for InstagramAuthInterprocessGuard {
+    fn drop(&mut self) {
+        unsafe {
+            let _ = windows_sys::Win32::System::Threading::ReleaseMutex(self.handle);
+            let _ = windows_sys::Win32::Foundation::CloseHandle(self.handle);
+        }
+    }
+}
+
+#[cfg(windows)]
+fn acquire_instagram_auth_interprocess_lock(
+    paths: &AppPaths,
+    timeout_ms: u32,
+) -> Result<InstagramAuthInterprocessGuard> {
+    use std::os::windows::ffi::OsStrExt;
+    use windows_sys::Win32::Foundation::{WAIT_ABANDONED, WAIT_OBJECT_0, WAIT_TIMEOUT};
+    use windows_sys::Win32::System::Threading::{CreateMutexW, WaitForSingleObject};
+
+    let lock_identity = instagram_auth_credential_fingerprint(Some(
+        &paths
+            .instagram_global_auth_cookie_secret_path()
+            .to_string_lossy()
+            .to_ascii_lowercase(),
+    ));
+    let lock_name = std::ffi::OsStr::new(&format!(
+        "Local\\VoxVulgiInstagramAuth-{}",
+        &lock_identity[..32]
+    ))
+    .encode_wide()
+    .chain(std::iter::once(0))
+    .collect::<Vec<_>>();
+    let handle = unsafe { CreateMutexW(std::ptr::null(), 0, lock_name.as_ptr()) };
+    if handle.is_null() {
+        return Err(EngineError::InstallFailed(format!(
+            "could not create the Instagram credential mutation lock: {}",
+            std::io::Error::last_os_error()
+        )));
+    }
+    let wait = unsafe { WaitForSingleObject(handle, timeout_ms) };
+    if wait == WAIT_OBJECT_0 || wait == WAIT_ABANDONED {
+        return Ok(InstagramAuthInterprocessGuard { handle });
+    }
+    unsafe {
+        let _ = windows_sys::Win32::Foundation::CloseHandle(handle);
+    }
+    if wait == WAIT_TIMEOUT {
+        return Err(EngineError::InstallFailed(
+            "another VoxVulgi process is updating Instagram credentials; retry after it finishes"
+                .to_string(),
+        ));
+    }
+    Err(EngineError::InstallFailed(format!(
+        "could not acquire the Instagram credential mutation lock: {}",
+        std::io::Error::last_os_error()
+    )))
+}
+
+#[cfg(unix)]
+struct InstagramAuthInterprocessGuard {
+    file: std::fs::File,
+}
+
+#[cfg(unix)]
+impl Drop for InstagramAuthInterprocessGuard {
+    fn drop(&mut self) {
+        use std::os::fd::AsRawFd;
+        unsafe extern "C" {
+            fn flock(fd: std::os::raw::c_int, operation: std::os::raw::c_int) -> std::os::raw::c_int;
+        }
+        const LOCK_UN: std::os::raw::c_int = 8;
+        unsafe {
+            let _ = flock(self.file.as_raw_fd(), LOCK_UN);
+        }
+    }
+}
+
+#[cfg(unix)]
+fn acquire_instagram_auth_interprocess_lock(
+    paths: &AppPaths,
+    timeout_ms: u32,
+) -> Result<InstagramAuthInterprocessGuard> {
+    use std::os::fd::AsRawFd;
+    unsafe extern "C" {
+        fn flock(fd: std::os::raw::c_int, operation: std::os::raw::c_int) -> std::os::raw::c_int;
+    }
+    const LOCK_EX: std::os::raw::c_int = 2;
+    const LOCK_NB: std::os::raw::c_int = 4;
+    let lock_path = paths.config_dir().join("instagram_auth.lock");
+    if let Some(parent) = lock_path.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    let file = OpenOptions::new()
+        .create(true)
+        .read(true)
+        .write(true)
+        .open(lock_path)?;
+    let started = std::time::Instant::now();
+    while unsafe { flock(file.as_raw_fd(), LOCK_EX | LOCK_NB) } != 0 {
+        if started.elapsed() >= Duration::from_millis(u64::from(timeout_ms)) {
+            return Err(EngineError::InstallFailed(
+                "another VoxVulgi process is updating Instagram credentials; retry after it finishes"
+                    .to_string(),
+            ));
+        }
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    Ok(InstagramAuthInterprocessGuard { file })
+}
+
+#[cfg(not(any(unix, windows)))]
+struct InstagramAuthInterprocessGuard;
+
+#[cfg(not(any(unix, windows)))]
+fn acquire_instagram_auth_interprocess_lock(
+    _paths: &AppPaths,
+    _timeout_ms: u32,
+) -> Result<InstagramAuthInterprocessGuard> {
+    Err(EngineError::InstallFailed(
+        "Instagram credential mutation is unavailable because this platform has no governed interprocess lock"
+            .to_string(),
+    ))
+}
+
+fn instagram_auth_credential_fingerprint(cookie: Option<&str>) -> String {
+    let mut hasher = Sha256::new();
+    match cookie.map(str::trim).filter(|value| !value.is_empty()) {
+        Some(value) => {
+            hasher.update(b"instagram-cookie\0");
+            hasher.update(value.as_bytes());
+        }
+        None => hasher.update(b"instagram-disconnected\0"),
+    }
+    hex::encode(hasher.finalize())
+}
+
+fn load_instagram_auth_disk_unlocked(paths: &AppPaths) -> Result<InstagramAuthDiskConfig> {
+    let path = paths.instagram_global_auth_cookie_secret_path();
+    if !path.exists() {
+        return Ok(InstagramAuthDiskConfig {
+            cookie: None,
+            credential_generation: 0,
+            credential_fingerprint: instagram_auth_credential_fingerprint(None),
+            hold_cleanup_pending: false,
+            cleanup_warning: None,
+        });
+    }
+    let contents = std::fs::read_to_string(&path)?;
+    if let Ok(mut disk) = serde_json::from_str::<InstagramAuthDiskConfig>(&contents) {
+        disk.cookie = normalize_auth_cookie(disk.cookie)?;
+        disk.credential_fingerprint =
+            instagram_auth_credential_fingerprint(disk.cookie.as_deref());
+        return Ok(disk);
+    }
+    // Backward compatibility: older builds stored the normalized cookie header as plain text.
+    let cookie = normalize_auth_cookie(Some(contents))?;
+    Ok(InstagramAuthDiskConfig {
+        credential_fingerprint: instagram_auth_credential_fingerprint(cookie.as_deref()),
+        credential_generation: 0,
+        cookie,
+        hold_cleanup_pending: false,
+        cleanup_warning: None,
+    })
+}
+
+fn save_instagram_auth_disk_unlocked(
+    paths: &AppPaths,
+    disk: &InstagramAuthDiskConfig,
+) -> Result<()> {
+    let path = paths.instagram_global_auth_cookie_secret_path();
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    let json = serde_json::to_string_pretty(disk)?;
+    persistence::atomic_write_text(&path, &format!("{json}\n"))?;
+    Ok(())
+}
+
+#[derive(Debug)]
+struct InstagramAuthHoldReconcileOutcome {
+    disk: InstagramAuthDiskConfig,
+    cleanup_warning: Option<String>,
+}
+
+fn instagram_auth_revision_from_reconcile_outcome(
+    outcome: InstagramAuthHoldReconcileOutcome,
+) -> InstagramAuthRevision {
+    InstagramAuthRevision {
+        configured: outcome.disk.cookie.is_some(),
+        credential_generation: outcome.disk.credential_generation,
+        credential_fingerprint: outcome.disk.credential_fingerprint,
+        cleanup_warning: outcome
+            .cleanup_warning
+            .filter(|_| outcome.disk.hold_cleanup_pending),
+    }
+}
+
+fn reconcile_instagram_auth_hold_unlocked_with<C, S>(
+    persisted: InstagramAuthDiskConfig,
+    clear_hold: C,
+    save: S,
+) -> InstagramAuthHoldReconcileOutcome
+where
+    C: FnOnce() -> Result<()>,
+    S: FnOnce(&InstagramAuthDiskConfig) -> Result<()>,
+{
+    if !persisted.hold_cleanup_pending {
+        return InstagramAuthHoldReconcileOutcome {
+            disk: persisted,
+            cleanup_warning: None,
+        };
+    }
+
+    match clear_hold() {
+        Ok(()) => {
+            let mut cleared = persisted.clone();
+            cleared.hold_cleanup_pending = false;
+            cleared.cleanup_warning = None;
+            match save(&cleared) {
+                Ok(()) => InstagramAuthHoldReconcileOutcome {
+                    disk: cleared,
+                    cleanup_warning: None,
+                },
+                Err(error) => InstagramAuthHoldReconcileOutcome {
+                    // Persisted truth remains pending. A later hydration will retry the bounded
+                    // cleanup and status write rather than claiming the warning was cleared.
+                    disk: persisted,
+                    cleanup_warning: Some(format!(
+                        "Instagram authentication-hold cleanup succeeded, but its cleared status could not be persisted and will be verified again: {}",
+                        redact_auth_credential_locators(&error.to_string())
+                    )),
+                },
+            }
+        }
+        Err(clear_error) => {
+            let warning = format!(
+                "Instagram credentials were committed, but the previous authentication hold could not be cleared: {}",
+                redact_auth_credential_locators(&clear_error.to_string())
+            );
+            let mut pending = persisted.clone();
+            pending.hold_cleanup_pending = true;
+            pending.cleanup_warning = Some(warning.clone());
+            match save(&pending) {
+                Ok(()) => InstagramAuthHoldReconcileOutcome {
+                    disk: pending,
+                    cleanup_warning: Some(warning),
+                },
+                Err(save_error) => InstagramAuthHoldReconcileOutcome {
+                    disk: persisted,
+                    cleanup_warning: Some(format!(
+                        "{warning} Updated cleanup status could not be persisted and will be retried: {}",
+                        redact_auth_credential_locators(&save_error.to_string())
+                    )),
+                },
+            }
+        }
+    }
+}
+
+fn reconcile_instagram_auth_hold_unlocked(
+    paths: &AppPaths,
+    persisted: InstagramAuthDiskConfig,
+) -> InstagramAuthHoldReconcileOutcome {
+    reconcile_instagram_auth_hold_unlocked_with(
+        persisted,
+        || clear_instagram_auth_block(paths),
+        |disk| save_instagram_auth_disk_unlocked(paths, disk),
+    )
+}
+
 /// Resolve the app-global Instagram auth cookie pasted once in Options.
 /// Returns `None` if unset or empty. Stored as a normalized cookie-header secret file
 /// (mirrors the per-subscription Instagram cookie storage) rather than a JSON config struct,
 /// because the Instagram auth material is a session cookie header, not a browser-extension
 /// cookie JSON array.
 pub(crate) fn resolve_global_instagram_auth_cookie(paths: &AppPaths) -> Option<String> {
-    read_auth_cookie_secret_path(&paths.instagram_global_auth_cookie_secret_path())
+    let _guard = instagram_auth_writer_lock().lock().ok()?;
+    load_instagram_auth_disk_unlocked(paths).ok()?.cookie
 }
 
 /// Persist (or clear, when `value` normalizes to empty) the global Instagram cookie.
 /// Public wrapper for the desktop `config_instagram_auth_set` command. Clearing an Instagram
 /// auth block on save mirrors the YouTube `config_youtube_auth_set` behavior.
-pub fn set_global_instagram_auth_cookie(paths: &AppPaths, value: Option<String>) -> Result<()> {
-    paths.ensure_dirs()?;
-    let secret_path = paths.instagram_global_auth_cookie_secret_path();
-    match normalize_non_empty(value.as_deref()) {
-        Some(raw) => write_auth_cookie_secret_path(&secret_path, &raw)?,
-        None => remove_auth_cookie_secret_path(&secret_path),
+pub fn instagram_auth_revision(paths: &AppPaths) -> Result<InstagramAuthRevision> {
+    let _guard = instagram_auth_writer_lock().lock().map_err(|_| {
+        EngineError::InstallFailed("instagram auth writer lock is poisoned".to_string())
+    })?;
+    let _interprocess_guard = acquire_instagram_auth_interprocess_lock(
+        paths,
+        INSTAGRAM_AUTH_INTERPROCESS_LOCK_TIMEOUT_MS,
+    )?;
+    let disk = load_instagram_auth_disk_unlocked(paths)?;
+    Ok(instagram_auth_revision_from_reconcile_outcome(
+        reconcile_instagram_auth_hold_unlocked(paths, disk),
+    ))
+}
+
+fn instagram_auth_snapshot(
+    paths: &AppPaths,
+) -> Result<(InstagramAuthRevision, Option<String>)> {
+    let _guard = instagram_auth_writer_lock().lock().map_err(|_| {
+        EngineError::InstallFailed("instagram auth writer lock is poisoned".to_string())
+    })?;
+    let _interprocess_guard = acquire_instagram_auth_interprocess_lock(
+        paths,
+        INSTAGRAM_AUTH_INTERPROCESS_LOCK_TIMEOUT_MS,
+    )?;
+    let disk = load_instagram_auth_disk_unlocked(paths)?;
+    let outcome = reconcile_instagram_auth_hold_unlocked(paths, disk);
+    let cookie = outcome.disk.cookie.clone();
+    Ok((
+        instagram_auth_revision_from_reconcile_outcome(outcome),
+        cookie,
+    ))
+}
+
+fn ensure_instagram_preflight_revision_current(
+    paths: &AppPaths,
+    expected: &InstagramAuthRevision,
+) -> Result<()> {
+    if instagram_auth_revision(paths)? != *expected {
+        return Err(EngineError::InstallFailed(
+            "Instagram credential preflight became stale because the saved credentials changed"
+                .to_string(),
+        ));
     }
-    clear_instagram_auth_block(paths)?;
     Ok(())
+}
+
+pub fn replace_global_instagram_auth_cookie(
+    paths: &AppPaths,
+    value: Option<String>,
+    expected_generation: Option<u64>,
+    expected_fingerprint: Option<&str>,
+) -> Result<InstagramAuthMutationReceipt> {
+    paths.ensure_dirs()?;
+    let _guard = instagram_auth_writer_lock().lock().map_err(|_| {
+        EngineError::InstallFailed("instagram auth writer lock is poisoned".to_string())
+    })?;
+    let _interprocess_guard = acquire_instagram_auth_interprocess_lock(
+        paths,
+        INSTAGRAM_AUTH_INTERPROCESS_LOCK_TIMEOUT_MS,
+    )?;
+    let current = load_instagram_auth_disk_unlocked(paths)?;
+    if expected_generation.is_none() || expected_fingerprint.is_none() {
+        return Err(EngineError::InstallFailed(
+            "instagram credential revision is unavailable; reload canonical auth status before mutating credentials"
+                .to_string(),
+        ));
+    }
+    if expected_generation.is_some_and(|expected| expected != current.credential_generation)
+        || expected_fingerprint.is_some_and(|expected| expected != current.credential_fingerprint)
+    {
+        return Err(EngineError::InstallFailed(
+            "instagram credentials changed concurrently; reload the saved credential status before retrying"
+                .to_string(),
+        ));
+    }
+    let cookie = normalize_auth_cookie(value)?;
+    let generic_cleanup_warning = "Instagram credentials were committed, but the previous authentication hold still needs cleanup.".to_string();
+    let next = InstagramAuthDiskConfig {
+        credential_generation: current.credential_generation.saturating_add(1),
+        credential_fingerprint: instagram_auth_credential_fingerprint(cookie.as_deref()),
+        cookie,
+        hold_cleanup_pending: true,
+        cleanup_warning: Some(generic_cleanup_warning.clone()),
+    };
+    save_instagram_auth_disk_unlocked(paths, &next)?;
+    let outcome = reconcile_instagram_auth_hold_unlocked(paths, next);
+    Ok(InstagramAuthMutationReceipt {
+        configured: outcome.disk.cookie.is_some(),
+        credential_generation: outcome.disk.credential_generation,
+        credential_fingerprint: outcome.disk.credential_fingerprint,
+        cleanup_warning: outcome.cleanup_warning,
+    })
 }
 
 /// Report whether a global Instagram cookie is configured (public wrapper for
 /// `config_instagram_auth_get`). We never return the secret itself to the frontend.
 pub fn get_global_instagram_auth_configured(paths: &AppPaths) -> bool {
-    resolve_global_instagram_auth_cookie(paths).is_some()
+    instagram_auth_revision(paths)
+        .map(|revision| revision.configured)
+        .unwrap_or(false)
 }
 
 /// WP-0263 auth precedence for every Instagram operation:
@@ -20968,6 +24633,1599 @@ fn is_probable_media_content_type(content_type: &str) -> bool {
         || ctype.contains("application/ogg")
 }
 
+fn validate_managed_mkv_output(
+    paths: &AppPaths,
+    output_path: &Path,
+    expectations: &ManagedMkvExpectations,
+) -> Result<ffmpeg::MediaProbe> {
+    let extension_is_mkv = output_path
+        .extension()
+        .and_then(|value| value.to_str())
+        .is_some_and(|value| value.eq_ignore_ascii_case(MANAGED_VIDEO_EXTENSION));
+    if !extension_is_mkv {
+        return Err(EngineError::InstallFailed(format!(
+            "managed video output did not finalize as .mkv: {}",
+            output_path.to_string_lossy()
+        )));
+    }
+    let metadata = std::fs::metadata(output_path)?;
+    if !metadata.is_file() || metadata.len() == 0 {
+        return Err(EngineError::InstallFailed(format!(
+            "managed MKV output is missing or empty: {}",
+            output_path.to_string_lossy()
+        )));
+    }
+    let probe = ffmpeg::probe(paths, output_path)?;
+    if probe.container.as_deref() != Some("matroska") {
+        return Err(EngineError::InstallFailed(format!(
+            "managed .mkv output has non-Matroska container {:?}: {}",
+            probe.container,
+            output_path.to_string_lossy()
+        )));
+    }
+    if probe.video_stream_count == 0 {
+        return Err(EngineError::InstallFailed(format!(
+            "managed MKV output has no video stream: {}",
+            output_path.to_string_lossy()
+        )));
+    }
+    if probe.audio_stream_count < expectations.min_audio_streams {
+        return Err(EngineError::InstallFailed(format!(
+            "managed MKV output lost audio streams (expected at least {}, found {}): {}",
+            expectations.min_audio_streams,
+            probe.audio_stream_count,
+            output_path.to_string_lossy()
+        )));
+    }
+    validate_stream_expectations(
+        "audio",
+        &expectations.audio_tracks,
+        &probe
+            .audio_streams
+            .iter()
+            .map(|stream| StreamExpectation {
+                language: stream.language.clone(),
+                title: stream.title.clone(),
+            })
+            .collect::<Vec<_>>(),
+        output_path,
+    )?;
+    if probe.subtitle_streams.len() < expectations.subtitle_tracks.len() {
+        return Err(EngineError::InstallFailed(format!(
+            "managed MKV output lost subtitle streams (expected at least {}, found {}): {}",
+            expectations.subtitle_tracks.len(),
+            probe.subtitle_streams.len(),
+            output_path.to_string_lossy()
+        )));
+    }
+    validate_stream_expectations(
+        "subtitle",
+        &expectations.subtitle_tracks,
+        &probe
+            .subtitle_streams
+            .iter()
+            .map(|stream| StreamExpectation {
+                language: stream.language.clone(),
+                title: stream.title.clone(),
+            })
+            .collect::<Vec<_>>(),
+        output_path,
+    )?;
+    Ok(probe)
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+struct StreamExpectation {
+    language: Option<String>,
+    title: Option<String>,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+struct ManagedMkvExpectations {
+    min_audio_streams: usize,
+    audio_tracks: Vec<StreamExpectation>,
+    subtitle_tracks: Vec<StreamExpectation>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+struct MuxSubtitleInputFingerprint {
+    track_id: String,
+    track_version: i64,
+    kind: String,
+    language: String,
+    content_sha256: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+struct MuxInputFingerprint {
+    schema_version: u32,
+    source_media_path: String,
+    source_media_bytes: u64,
+    source_media_modified_ns: Option<u128>,
+    source_media_sha256: String,
+    dub_audio_sha256: String,
+    keep_original_audio: bool,
+    dubbed_audio_language: String,
+    original_audio_language: String,
+    subtitles: Vec<MuxSubtitleInputFingerprint>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+struct PublishedFileIdentity {
+    bytes: u64,
+    sha256: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct TrustedFileStamp {
+    bytes: u64,
+    file_id: Vec<u8>,
+    change_time: i128,
+}
+
+#[derive(Debug, Clone)]
+struct ActiveArtifactVerification {
+    stamp: TrustedFileStamp,
+    expected_sha256: String,
+}
+
+const ACTIVE_ARTIFACT_VERIFICATION_CACHE_LIMIT: usize = 128;
+static ACTIVE_ARTIFACT_VERIFICATION_CACHE: OnceLock<
+    Mutex<HashMap<PathBuf, ActiveArtifactVerification>>,
+> = OnceLock::new();
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+struct LocalizationPreviewContinuationIntent {
+    job_id: String,
+    job_type: String,
+    params_json: String,
+    batch_id: Option<String>,
+}
+
+#[derive(Debug, Clone)]
+struct LocalizationPreviewPublication {
+    generation_id: String,
+    item_id: String,
+    variant_key: String,
+    input_fingerprint_sha256: String,
+    input_fingerprint_json: String,
+    artifact_path: PathBuf,
+    artifact: PublishedFileIdentity,
+    staging_path: PathBuf,
+    source_job_id: String,
+    phase: String,
+    qc_intent: Option<LocalizationPreviewContinuationIntent>,
+    export_intent: Option<LocalizationPreviewContinuationIntent>,
+    qc_job_id: Option<String>,
+    export_job_id: Option<String>,
+}
+
+fn published_file_identity(path: &Path) -> Result<PublishedFileIdentity> {
+    let metadata = std::fs::metadata(path)?;
+    if !metadata.is_file() {
+        return Err(EngineError::InstallFailed(format!(
+            "managed localization preview is not a file: {}",
+            path.to_string_lossy()
+        )));
+    }
+    Ok(PublishedFileIdentity {
+        bytes: metadata.len(),
+        sha256: sha256_file_hex(path)?,
+    })
+}
+
+#[cfg(windows)]
+fn trusted_file_stamp(path: &Path) -> Result<Option<TrustedFileStamp>> {
+    use std::os::windows::io::AsRawHandle;
+    use windows_sys::Win32::Storage::FileSystem::{
+        GetFileInformationByHandleEx, FileBasicInfo, FileIdInfo, FILE_BASIC_INFO, FILE_ID_INFO,
+    };
+
+    let file = std::fs::File::open(path)?;
+    let metadata = file.metadata()?;
+    let handle = file.as_raw_handle();
+    let mut basic = std::mem::MaybeUninit::<FILE_BASIC_INFO>::zeroed();
+    let basic_ok = unsafe {
+        GetFileInformationByHandleEx(
+            handle,
+            FileBasicInfo,
+            basic.as_mut_ptr().cast(),
+            std::mem::size_of::<FILE_BASIC_INFO>() as u32,
+        )
+    } != 0;
+    let mut id = std::mem::MaybeUninit::<FILE_ID_INFO>::zeroed();
+    let id_ok = unsafe {
+        GetFileInformationByHandleEx(
+            handle,
+            FileIdInfo,
+            id.as_mut_ptr().cast(),
+            std::mem::size_of::<FILE_ID_INFO>() as u32,
+        )
+    } != 0;
+    if !basic_ok || !id_ok {
+        // Some remote filesystems do not expose a stable change-time/file ID. They remain
+        // supported, but cannot use the cache and are fully hashed on each trust boundary.
+        return Ok(None);
+    }
+    let basic = unsafe { basic.assume_init() };
+    let id = unsafe { id.assume_init() };
+    let mut file_id = id.VolumeSerialNumber.to_le_bytes().to_vec();
+    file_id.extend_from_slice(&id.FileId.Identifier);
+    Ok(Some(TrustedFileStamp {
+        bytes: metadata.len(),
+        file_id,
+        change_time: i128::from(basic.ChangeTime),
+    }))
+}
+
+#[cfg(unix)]
+fn trusted_file_stamp(path: &Path) -> Result<Option<TrustedFileStamp>> {
+    use std::os::unix::fs::MetadataExt;
+    let metadata = std::fs::metadata(path)?;
+    let mut file_id = metadata.dev().to_le_bytes().to_vec();
+    file_id.extend_from_slice(&metadata.ino().to_le_bytes());
+    Ok(Some(TrustedFileStamp {
+        bytes: metadata.len(),
+        file_id,
+        change_time: i128::from(metadata.ctime()) * 1_000_000_000
+            + i128::from(metadata.ctime_nsec()),
+    }))
+}
+
+#[cfg(not(any(windows, unix)))]
+fn trusted_file_stamp(_path: &Path) -> Result<Option<TrustedFileStamp>> {
+    Ok(None)
+}
+
+fn verify_active_localization_artifact(
+    artifact_path: &Path,
+    expected_bytes: u64,
+    expected_sha256: &str,
+) -> Result<()> {
+    if !artifact_path.is_file() {
+        return Err(EngineError::InstallFailed(
+            "trusted localization active artifact is missing".to_string(),
+        ));
+    }
+    let before = trusted_file_stamp(artifact_path)?;
+    if before.as_ref().is_some_and(|stamp| stamp.bytes != expected_bytes)
+        || before.is_none() && std::fs::metadata(artifact_path)?.len() != expected_bytes
+    {
+        return Err(EngineError::InstallFailed(
+            "trusted localization active artifact has changed size".to_string(),
+        ));
+    }
+    if let Some(stamp) = before.as_ref() {
+        let cache = ACTIVE_ARTIFACT_VERIFICATION_CACHE.get_or_init(|| Mutex::new(HashMap::new()));
+        if cache.lock().map_err(|_| EngineError::InstallFailed(
+            "localization artifact verification cache lock was poisoned".to_string(),
+        ))?.get(artifact_path).is_some_and(|entry| {
+            entry.stamp == *stamp && entry.expected_sha256 == expected_sha256
+        }) {
+            return Ok(());
+        }
+    }
+
+    let actual = published_file_identity(artifact_path)?;
+    let after = trusted_file_stamp(artifact_path)?;
+    if before != after {
+        return Err(EngineError::InstallFailed(
+            "trusted localization active artifact changed during verification".to_string(),
+        ));
+    }
+    if actual.bytes != expected_bytes || actual.sha256 != expected_sha256 {
+        return Err(EngineError::InstallFailed(
+            "trusted localization active artifact content hash no longer matches its committed lineage"
+                .to_string(),
+        ));
+    }
+    if let Some(stamp) = after {
+        let mut cache = ACTIVE_ARTIFACT_VERIFICATION_CACHE
+            .get_or_init(|| Mutex::new(HashMap::new()))
+            .lock()
+            .map_err(|_| EngineError::InstallFailed(
+                "localization artifact verification cache lock was poisoned".to_string(),
+            ))?;
+        if cache.len() >= ACTIVE_ARTIFACT_VERIFICATION_CACHE_LIMIT
+            && !cache.contains_key(artifact_path)
+        {
+            cache.clear();
+        }
+        cache.insert(
+            artifact_path.to_path_buf(),
+            ActiveArtifactVerification {
+                stamp,
+                expected_sha256: expected_sha256.to_string(),
+            },
+        );
+    }
+    Ok(())
+}
+
+fn localization_preview_variant_key(variant_label: Option<&str>) -> String {
+    normalize_variant_label(variant_label).unwrap_or_default()
+}
+
+fn localization_preview_generation(
+    item_id: &str,
+    variant_key: &str,
+    fingerprint: &MuxInputFingerprint,
+) -> Result<(String, String, String)> {
+    let input_json = serde_json::to_string(fingerprint)?;
+    let input_sha256 = sha256_bytes_hex(input_json.as_bytes());
+    let generation_hash = sha256_bytes_hex(
+        format!("{item_id}\0{variant_key}\0{input_sha256}").as_bytes(),
+    );
+    Ok((
+        format!("localization-preview-{generation_hash}"),
+        input_sha256,
+        input_json,
+    ))
+}
+
+fn localization_preview_artifact_path(out_dir: &Path, generation_id: &str) -> Result<PathBuf> {
+    let hash = generation_id
+        .strip_prefix("localization-preview-")
+        .filter(|value| value.len() == 64 && value.bytes().all(|byte| byte.is_ascii_hexdigit()))
+        .ok_or_else(|| EngineError::InstallFailed("invalid localization preview generation id".to_string()))?;
+    Ok(out_dir.join(format!("mux_dub_preview_v1.gen-{hash}.mkv")))
+}
+
+fn validate_localization_preview_staging_path(out_dir: &Path, staging_path: &Path) -> Result<()> {
+    let Some(attempt_dir) = staging_path.parent() else {
+        return Err(EngineError::InstallFailed(
+            "localization staging path has no attempt directory".to_string(),
+        ));
+    };
+    let attempt_name = attempt_dir
+        .file_name()
+        .and_then(|value| value.to_str())
+        .unwrap_or_default();
+    let marker = attempt_name.strip_prefix(".vv-attempt-").unwrap_or_default();
+    if attempt_dir.parent() != Some(out_dir)
+        || marker.len() != 32
+        || !marker.bytes().all(|byte| byte.is_ascii_hexdigit())
+        || staging_path.file_name().and_then(|value| value.to_str())
+            != Some("mux_dub_preview_v1.muxing.mkv")
+    {
+        return Err(EngineError::InstallFailed(
+            "localization staging path escaped its owned attempt directory".to_string(),
+        ));
+    }
+    Ok(())
+}
+
+const LOCALIZATION_STAGING_MARKER: &str = "localization_preview_staging.json";
+const LOCALIZATION_STAGING_RETENTION_MS: i64 = 7 * 24 * 60 * 60 * 1_000;
+const LOCALIZATION_STAGING_SCAN_LIMIT: usize = 256;
+const LOCALIZATION_STAGING_DELETE_LIMIT: usize = 64;
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct LocalizationPreviewStagingMarker {
+    schema_version: u32,
+    generation_id: String,
+    item_id: String,
+    variant_key: String,
+    created_at_ms: i64,
+}
+
+fn write_localization_preview_staging_marker(
+    attempt_dir: &Path,
+    marker: &LocalizationPreviewStagingMarker,
+) -> Result<()> {
+    persistence::atomic_write_text(
+        &attempt_dir.join(LOCALIZATION_STAGING_MARKER),
+        &serde_json::to_string(marker)?,
+    )?;
+    Ok(())
+}
+
+fn prune_orphan_localization_preview_staging(
+    paths: &AppPaths,
+    out_dir: &Path,
+    item_id: &str,
+    variant_key: &str,
+    current_time_ms: i64,
+) -> Result<usize> {
+    let conn = match db::open_readonly(paths) {
+        Ok(connection) => connection,
+        Err(_) => return Ok(0),
+    };
+    let mut removed = 0usize;
+    let entries = match std::fs::read_dir(out_dir) {
+        Ok(entries) => entries,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(0),
+        Err(error) => return Err(error.into()),
+    };
+    for entry in entries.take(LOCALIZATION_STAGING_SCAN_LIMIT).flatten() {
+        if removed >= LOCALIZATION_STAGING_DELETE_LIMIT {
+            break;
+        }
+        let file_type = match entry.file_type() {
+            Ok(value) => value,
+            Err(_) => continue,
+        };
+        if !file_type.is_dir() || file_type.is_symlink() {
+            continue;
+        }
+        let attempt_dir = entry.path();
+        let attempt_name = entry.file_name();
+        let attempt_name = attempt_name.to_string_lossy();
+        let attempt_id = attempt_name
+            .strip_prefix(".vv-attempt-")
+            .unwrap_or_default();
+        if attempt_id.len() != 32
+            || !attempt_id.bytes().all(|byte| byte.is_ascii_hexdigit())
+            || attempt_dir.parent() != Some(out_dir)
+        {
+            continue;
+        }
+        let marker_path = attempt_dir.join(LOCALIZATION_STAGING_MARKER);
+        let marker = match std::fs::read(&marker_path)
+            .ok()
+            .and_then(|bytes| serde_json::from_slice::<LocalizationPreviewStagingMarker>(&bytes).ok())
+        {
+            Some(value) => value,
+            None => continue,
+        };
+        if marker.schema_version != 1
+            || marker.item_id != item_id
+            || marker.variant_key != variant_key
+            || current_time_ms.saturating_sub(marker.created_at_ms)
+                < LOCALIZATION_STAGING_RETENTION_MS
+            || localization_preview_artifact_path(out_dir, &marker.generation_id).is_err()
+        {
+            continue;
+        }
+        let expected_staging = attempt_dir.join("mux_dub_preview_v1.muxing.mkv");
+        let db_publication = match conn
+            .query_row(
+                "SELECT staging_path,phase FROM localization_preview_publication WHERE generation_id=?1 AND item_id=?2 AND variant_key=?3",
+                params![marker.generation_id, item_id, variant_key],
+                |row| Ok((PathBuf::from(row.get::<_, String>(0)?), row.get::<_, String>(1)?)),
+            )
+            .optional()
+        {
+            Ok(value) => value,
+            Err(_) => continue,
+        };
+        if let Some((owned_staging, phase)) = db_publication {
+            // A prepared/published row may be arbitrarily old while the app is stopped or its
+            // source root is unavailable. Its exact staging artifact is the only crash-recovery
+            // source and must never be aged out. Conflicting lineage also fails closed.
+            if owned_staging != expected_staging || phase != "committed" {
+                continue;
+            }
+        }
+        std::fs::remove_dir_all(&attempt_dir)?;
+        removed += 1;
+    }
+    Ok(removed)
+}
+
+fn continuation_intent_json(
+    value: Option<&LocalizationPreviewContinuationIntent>,
+) -> Result<Option<String>> {
+    value
+        .map(serde_json::to_string)
+        .transpose()
+        .map_err(EngineError::Json)
+}
+
+fn decode_continuation_intent(value: Option<String>) -> Result<Option<LocalizationPreviewContinuationIntent>> {
+    value
+        .map(|json| serde_json::from_str(&json))
+        .transpose()
+        .map_err(EngineError::Json)
+}
+
+fn prepare_localization_preview_publication(
+    paths: &AppPaths,
+    item_id: &str,
+    variant_key: &str,
+    source_job_id: &str,
+    fingerprint: &MuxInputFingerprint,
+    artifact_path: &Path,
+    artifact: &PublishedFileIdentity,
+    staging_path: &Path,
+    qc_intent: Option<&LocalizationPreviewContinuationIntent>,
+    export_intent: Option<&LocalizationPreviewContinuationIntent>,
+) -> Result<LocalizationPreviewPublication> {
+    let (generation_id, input_sha256, input_json) =
+        localization_preview_generation(item_id, variant_key, fingerprint)?;
+    let qc_json = continuation_intent_json(qc_intent)?;
+    let export_json = continuation_intent_json(export_intent)?;
+    let mut conn = db::open(paths)?;
+    db::migrate(&conn)?;
+    let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
+    let source_job: (Option<String>, String) = tx.query_row(
+        "SELECT item_id,type FROM job WHERE id=?1",
+        [source_job_id],
+        |row| Ok((row.get(0)?, row.get(1)?)),
+    )?;
+    if source_job != (Some(item_id.to_string()), JobType::MuxDubPreviewV1.as_str().to_string()) {
+        return Err(EngineError::InstallFailed(
+            "localization publication source job did not match its trusted item/type lineage"
+                .to_string(),
+        ));
+    }
+    tx.execute(
+        "INSERT OR IGNORE INTO localization_preview_publication(generation_id,item_id,variant_key,input_fingerprint_sha256,input_fingerprint_json,artifact_path,artifact_bytes,artifact_sha256,staging_path,source_job_id,phase,qc_intent_json,export_intent_json,created_at_ms,updated_at_ms) VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,'prepared',?11,?12,?13,?13)",
+        params![generation_id, item_id, variant_key, input_sha256, input_json, artifact_path.to_string_lossy(), i64::try_from(artifact.bytes).unwrap_or(i64::MAX), artifact.sha256, staging_path.to_string_lossy(), source_job_id, qc_json, export_json, now_ms()],
+    )?;
+    let row = tx.query_row(
+        "SELECT generation_id,item_id,variant_key,input_fingerprint_sha256,input_fingerprint_json,artifact_path,artifact_bytes,artifact_sha256,staging_path,source_job_id,phase,qc_intent_json,export_intent_json,qc_job_id,export_job_id FROM localization_preview_publication WHERE generation_id=?1",
+        [&generation_id],
+        |row| Ok(LocalizationPreviewPublication {
+            generation_id: row.get(0)?, item_id: row.get(1)?, variant_key: row.get(2)?,
+            input_fingerprint_sha256: row.get(3)?, input_fingerprint_json: row.get(4)?,
+            artifact_path: PathBuf::from(row.get::<_, String>(5)?),
+            artifact: PublishedFileIdentity { bytes: u64::try_from(row.get::<_, i64>(6)?).unwrap_or(0), sha256: row.get(7)? },
+            staging_path: PathBuf::from(row.get::<_, String>(8)?),
+            source_job_id: row.get(9)?, phase: row.get(10)?,
+            qc_intent: decode_continuation_intent(row.get(11)?).map_err(|error| rusqlite::Error::FromSqlConversionFailure(11, rusqlite::types::Type::Text, Box::new(error)))?,
+            export_intent: decode_continuation_intent(row.get(12)?).map_err(|error| rusqlite::Error::FromSqlConversionFailure(12, rusqlite::types::Type::Text, Box::new(error)))?,
+            qc_job_id: row.get(13)?, export_job_id: row.get(14)?,
+        }),
+    )?;
+    let expected_dir = dub_variant_dir(
+        &paths.derived_item_dir(item_id),
+        (!variant_key.is_empty()).then_some(variant_key),
+    );
+    let expected_artifact = localization_preview_artifact_path(&expected_dir, &generation_id)?;
+    validate_localization_preview_staging_path(&expected_dir, staging_path)?;
+    let stored_source_job: (Option<String>, String) = tx.query_row(
+        "SELECT item_id,type FROM job WHERE id=?1",
+        [&row.source_job_id],
+        |db_row| Ok((db_row.get(0)?, db_row.get(1)?)),
+    )?;
+    if row.item_id != item_id
+        || row.variant_key != variant_key
+        || row.input_fingerprint_sha256 != input_sha256
+        || row.input_fingerprint_json != input_json
+        || row.artifact_path != artifact_path
+        || expected_artifact != artifact_path
+        || row.artifact != *artifact
+        || row.staging_path != staging_path
+        || row.qc_intent.as_ref() != qc_intent
+        || row.export_intent.as_ref() != export_intent
+        || stored_source_job
+            != (Some(item_id.to_string()), JobType::MuxDubPreviewV1.as_str().to_string())
+        || !matches!(row.phase.as_str(), "prepared" | "published" | "committed")
+    {
+        return Err(EngineError::InstallFailed(
+            "trusted localization publication lineage conflicted with the requested generation".to_string(),
+        ));
+    }
+    tx.commit()?;
+    Ok(row)
+}
+
+fn load_localization_preview_publication(
+    paths: &AppPaths,
+    generation_id: &str,
+) -> Result<Option<LocalizationPreviewPublication>> {
+    let conn = db::open_readonly(paths)?;
+    conn.query_row(
+        "SELECT generation_id,item_id,variant_key,input_fingerprint_sha256,input_fingerprint_json,artifact_path,artifact_bytes,artifact_sha256,staging_path,source_job_id,phase,qc_intent_json,export_intent_json,qc_job_id,export_job_id FROM localization_preview_publication WHERE generation_id=?1",
+        [generation_id],
+        |row| Ok(LocalizationPreviewPublication {
+            generation_id: row.get(0)?, item_id: row.get(1)?, variant_key: row.get(2)?,
+            input_fingerprint_sha256: row.get(3)?, input_fingerprint_json: row.get(4)?,
+            artifact_path: PathBuf::from(row.get::<_, String>(5)?),
+            artifact: PublishedFileIdentity { bytes: u64::try_from(row.get::<_, i64>(6)?).unwrap_or(0), sha256: row.get(7)? },
+            staging_path: PathBuf::from(row.get::<_, String>(8)?),
+            source_job_id: row.get(9)?, phase: row.get(10)?,
+            qc_intent: decode_continuation_intent(row.get(11)?).map_err(|error| rusqlite::Error::FromSqlConversionFailure(11, rusqlite::types::Type::Text, Box::new(error)))?,
+            export_intent: decode_continuation_intent(row.get(12)?).map_err(|error| rusqlite::Error::FromSqlConversionFailure(12, rusqlite::types::Type::Text, Box::new(error)))?,
+            qc_job_id: row.get(13)?, export_job_id: row.get(14)?,
+        }),
+    )
+    .optional()
+    .map_err(EngineError::Database)
+}
+
+fn validate_localization_preview_publication_lineage(
+    row: &LocalizationPreviewPublication,
+    item_id: &str,
+    variant_key: &str,
+    input_sha256: &str,
+    input_json: &str,
+    artifact_path: &Path,
+    qc_intent: Option<&LocalizationPreviewContinuationIntent>,
+    export_intent: Option<&LocalizationPreviewContinuationIntent>,
+) -> Result<()> {
+    let expected_dir = artifact_path.parent().ok_or_else(|| {
+        EngineError::InstallFailed("localization artifact path has no derived directory".to_string())
+    })?;
+    validate_localization_preview_staging_path(expected_dir, &row.staging_path)?;
+    if row.item_id != item_id
+        || row.variant_key != variant_key
+        || row.input_fingerprint_sha256 != input_sha256
+        || row.input_fingerprint_json != input_json
+        || row.artifact_path != artifact_path
+        || row.qc_intent.as_ref() != qc_intent
+        || row.export_intent.as_ref() != export_intent
+        || !matches!(row.phase.as_str(), "prepared" | "published" | "committed")
+    {
+        return Err(EngineError::InstallFailed(
+            "trusted localization publication lineage did not match the requested generation"
+                .to_string(),
+        ));
+    }
+    Ok(())
+}
+
+fn reconcile_existing_localization_preview_publication(
+    paths: &AppPaths,
+    publication: &LocalizationPreviewPublication,
+) -> Result<bool> {
+    if !publication.artifact_path.is_file() {
+        if publication.phase == "prepared" && publication.staging_path.is_file() {
+            if published_file_identity(&publication.staging_path)? != publication.artifact {
+                return Err(EngineError::InstallFailed(
+                    "retained localization staging bytes did not match trusted database lineage"
+                        .to_string(),
+                ));
+            }
+            publish_localization_preview_generation_with_hook(
+                paths,
+                &publication.staging_path,
+                publication,
+                |_| Ok(()),
+            )?;
+            return Ok(true);
+        }
+        if publication.phase != "prepared" {
+            return Err(EngineError::InstallFailed(
+                "committed localization generation is missing its immutable artifact".to_string(),
+            ));
+        }
+        return Ok(false);
+    }
+    if published_file_identity(&publication.artifact_path)? != publication.artifact {
+        return Err(EngineError::InstallFailed(
+            "immutable localization generation bytes did not match trusted database lineage"
+                .to_string(),
+        ));
+    }
+    mark_localization_preview_published(paths, &publication.generation_id)?;
+    commit_localization_preview_publication(paths, publication)?;
+    Ok(true)
+}
+
+fn mark_localization_preview_published(paths: &AppPaths, generation_id: &str) -> Result<()> {
+    let conn = db::open(paths)?;
+    db::migrate(&conn)?;
+    let changed = conn.execute(
+        "UPDATE localization_preview_publication SET phase='published',updated_at_ms=?1 WHERE generation_id=?2 AND phase='prepared'",
+        params![now_ms(), generation_id],
+    )?;
+    if changed == 0 {
+        let phase: String = conn.query_row(
+            "SELECT phase FROM localization_preview_publication WHERE generation_id=?1",
+            [generation_id],
+            |row| row.get(0),
+        )?;
+        if !matches!(phase.as_str(), "published" | "committed") {
+            return Err(EngineError::InstallFailed("illegal localization publication phase transition".to_string()));
+        }
+    }
+    Ok(())
+}
+
+fn insert_continuation_job_tx(
+    paths: &AppPaths,
+    tx: &rusqlite::Transaction<'_>,
+    item_id: &str,
+    intent: &LocalizationPreviewContinuationIntent,
+) -> Result<()> {
+    let job_type = JobType::from_str(&intent.job_type).ok_or_else(|| {
+        EngineError::InstallFailed("invalid localization continuation job type".to_string())
+    })?;
+    if !matches!(job_type, JobType::QcReportV1 | JobType::ExportPackV1) {
+        return Err(EngineError::InstallFailed("unsupported localization continuation intent".to_string()));
+    }
+    let track = JobTrack::for_type(&job_type);
+    let logs_path = paths
+        .job_logs_dir()
+        .join(format!("{}.jsonl", intent.job_id))
+        .to_string_lossy()
+        .to_string();
+    tx.execute(
+        "INSERT OR IGNORE INTO job(id,item_id,batch_id,type,status,progress,error,params_json,created_at_ms,logs_path,lane,track) VALUES(?1,?2,?3,?4,'queued',0.0,NULL,?5,?6,?7,?8,?9)",
+        params![intent.job_id, item_id, intent.batch_id, intent.job_type, intent.params_json, now_ms(), logs_path, track.legacy_lane().as_str(), track.as_str()],
+    )?;
+    let existing: (Option<String>, Option<String>, String, String) = tx.query_row(
+        "SELECT item_id,batch_id,type,params_json FROM job WHERE id=?1",
+        [&intent.job_id],
+        |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+    )?;
+    if existing != (Some(item_id.to_string()), intent.batch_id.clone(), intent.job_type.clone(), intent.params_json.clone()) {
+        return Err(EngineError::InstallFailed("localization continuation job id collision".to_string()));
+    }
+    Ok(())
+}
+
+fn verify_continuation_job_tx(
+    tx: &rusqlite::Transaction<'_>,
+    item_id: &str,
+    intent: &LocalizationPreviewContinuationIntent,
+) -> Result<()> {
+    let existing: (Option<String>, Option<String>, String, String) = tx.query_row(
+        "SELECT item_id,batch_id,type,params_json FROM job WHERE id=?1",
+        [&intent.job_id],
+        |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+    )?;
+    if existing
+        != (
+            Some(item_id.to_string()),
+            intent.batch_id.clone(),
+            intent.job_type.clone(),
+            intent.params_json.clone(),
+        )
+    {
+        return Err(EngineError::InstallFailed(
+            "localization continuation job did not match its trusted intent".to_string(),
+        ));
+    }
+    Ok(())
+}
+
+fn commit_localization_preview_publication_with_hook<F>(
+    paths: &AppPaths,
+    publication: &LocalizationPreviewPublication,
+    mut hook: F,
+) -> Result<()>
+where
+    F: FnMut(&str) -> Result<()>,
+{
+    if !publication.artifact_path.is_file()
+        || published_file_identity(&publication.artifact_path)? != publication.artifact
+    {
+        return Err(EngineError::InstallFailed(
+            "localization publication cannot commit without exact immutable artifact proof"
+                .to_string(),
+        ));
+    }
+    let mut conn = db::open(paths)?;
+    db::migrate(&conn)?;
+    let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
+    let (phase, source_job_id, source_job_created_at_ms): (String, String, i64) = tx.query_row(
+        "SELECT p.phase,p.source_job_id,j.created_at_ms FROM localization_preview_publication p JOIN job j ON j.id=p.source_job_id WHERE p.generation_id=?1 AND p.item_id=?2 AND j.item_id=?2 AND j.type=?3",
+        params![publication.generation_id, publication.item_id, JobType::MuxDubPreviewV1.as_str()],
+        |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+    )?;
+    if !matches!(phase.as_str(), "published" | "committed") {
+        return Err(EngineError::InstallFailed("localization publication cannot commit before publish proof".to_string()));
+    }
+    hook("before_continuations")?;
+    if let Some(intent) = &publication.qc_intent {
+        insert_continuation_job_tx(paths, &tx, &publication.item_id, intent)?;
+        hook("after_qc_enqueue")?;
+    }
+    if let Some(intent) = &publication.export_intent {
+        insert_continuation_job_tx(paths, &tx, &publication.item_id, intent)?;
+        hook("after_export_enqueue")?;
+    }
+    hook("before_active_pointer")?;
+    if phase == "published" {
+        let changed = tx.execute(
+            "UPDATE localization_preview_publication SET phase='committed',qc_job_id=?1,export_job_id=?2,updated_at_ms=?3 WHERE generation_id=?4 AND phase='published'",
+            params![publication.qc_intent.as_ref().map(|value| &value.job_id), publication.export_intent.as_ref().map(|value| &value.job_id), now_ms(), publication.generation_id],
+        )?;
+        if changed != 1 {
+            return Err(EngineError::InstallFailed(
+                "localization publication commit lost its legal phase transition".to_string(),
+            ));
+        }
+    }
+    tx.execute(
+        "INSERT INTO localization_preview_active(item_id,variant_key,generation_id,source_job_created_at_ms,source_job_id,updated_at_ms) VALUES(?1,?2,?3,?4,?5,?6) ON CONFLICT(item_id,variant_key) DO UPDATE SET generation_id=excluded.generation_id,source_job_created_at_ms=excluded.source_job_created_at_ms,source_job_id=excluded.source_job_id,updated_at_ms=excluded.updated_at_ms WHERE excluded.source_job_created_at_ms > localization_preview_active.source_job_created_at_ms OR (excluded.source_job_created_at_ms = localization_preview_active.source_job_created_at_ms AND excluded.source_job_id >= localization_preview_active.source_job_id)",
+        params![publication.item_id, publication.variant_key, publication.generation_id, source_job_created_at_ms, source_job_id, now_ms()],
+    )?;
+    hook("after_active_pointer")?;
+    hook("after_phase_commit")?;
+    if let Some(intent) = &publication.qc_intent {
+        verify_continuation_job_tx(&tx, &publication.item_id, intent)?;
+    }
+    if let Some(intent) = &publication.export_intent {
+        verify_continuation_job_tx(&tx, &publication.item_id, intent)?;
+    }
+    let committed: (String, Option<String>, Option<String>) = tx.query_row(
+        "SELECT phase,qc_job_id,export_job_id FROM localization_preview_publication WHERE generation_id=?1",
+        [&publication.generation_id],
+        |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+    )?;
+    let expected_qc = publication.qc_intent.as_ref().map(|value| value.job_id.clone());
+    let expected_export = publication.export_intent.as_ref().map(|value| value.job_id.clone());
+    if committed != ("committed".to_string(), expected_qc, expected_export) {
+        return Err(EngineError::InstallFailed(
+            "localization publication continuation proof was incomplete".to_string(),
+        ));
+    }
+    tx.commit()?;
+    Ok(())
+}
+
+fn commit_localization_preview_publication(
+    paths: &AppPaths,
+    publication: &LocalizationPreviewPublication,
+) -> Result<()> {
+    commit_localization_preview_publication_with_hook(paths, publication, |_| Ok(()))
+}
+
+fn publish_localization_preview_generation_with_hook<F>(
+    paths: &AppPaths,
+    staging: &Path,
+    publication: &LocalizationPreviewPublication,
+    mut hook: F,
+) -> Result<()>
+where
+    F: FnMut(&str) -> Result<()>,
+{
+    if staging != publication.staging_path {
+        return Err(EngineError::InstallFailed(
+            "localization publish staging path did not match trusted database lineage"
+                .to_string(),
+        ));
+    }
+    hook("after_prepare")?;
+    if publication.artifact_path.is_file() {
+        if published_file_identity(&publication.artifact_path)? != publication.artifact {
+            return Err(EngineError::InstallFailed("immutable localization generation path contains conflicting bytes".to_string()));
+        }
+    } else if let Err(error) = atomic_publish_no_replace(staging, &publication.artifact_path) {
+        if !publication.artifact_path.is_file()
+            || published_file_identity(&publication.artifact_path)? != publication.artifact
+        {
+            return Err(error);
+        }
+    }
+    hook("after_publish")?;
+    mark_localization_preview_published(paths, &publication.generation_id)?;
+    hook("after_mark_published")?;
+    commit_localization_preview_publication(paths, publication)?;
+    hook("after_commit")?;
+    Ok(())
+}
+
+pub fn active_localization_preview_path(
+    paths: &AppPaths,
+    item_id: &str,
+    variant_label: Option<&str>,
+) -> Result<Option<PathBuf>> {
+    let variant_key = localization_preview_variant_key(variant_label);
+    let mut conn = db::open_readonly(paths)?;
+    let tx = conn.transaction_with_behavior(TransactionBehavior::Deferred)?;
+    let active = tx
+        .query_row(
+            "SELECT generation_id,source_job_id FROM localization_preview_active
+             WHERE item_id=?1 AND variant_key=?2",
+            params![item_id, variant_key],
+            |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)),
+        )
+        .optional()?;
+    let Some((generation_id, source_job_id)) = active else {
+        tx.commit()?;
+        return Ok(None);
+    };
+    let publication = tx
+        .query_row(
+            "SELECT artifact_path,artifact_bytes,artifact_sha256,phase
+             FROM localization_preview_publication
+             WHERE generation_id=?1 AND item_id=?2 AND variant_key=?3 AND source_job_id=?4",
+            params![generation_id, item_id, variant_key, source_job_id],
+            |row| {
+                Ok((
+                    PathBuf::from(row.get::<_, String>(0)?),
+                    row.get::<_, i64>(1)?,
+                    row.get::<_, String>(2)?,
+                    row.get::<_, String>(3)?,
+                ))
+            },
+        )
+        .optional()?;
+    let Some((artifact_path, artifact_bytes, artifact_sha256, phase)) = publication else {
+        return Err(EngineError::InstallFailed(
+            "active localization preview does not resolve to its exact publication lineage"
+                .to_string(),
+        ));
+    };
+    if phase != "committed" {
+        return Err(EngineError::InstallFailed(format!(
+            "active localization preview references non-committed publication phase {phase}"
+        )));
+    }
+    tx.commit()?;
+    let expected_dir = dub_variant_dir(&paths.derived_item_dir(item_id), normalize_variant_label(variant_label).as_deref());
+    if localization_preview_artifact_path(&expected_dir, &generation_id)? != artifact_path {
+        return Err(EngineError::InstallFailed("trusted localization active path escaped its derived directory".to_string()));
+    }
+    verify_active_localization_artifact(
+        &artifact_path,
+        u64::try_from(artifact_bytes).unwrap_or(u64::MAX),
+        &artifact_sha256,
+    )?;
+    Ok(Some(artifact_path))
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum LocalizationPreviewConsumerOutcome {
+    Active(PathBuf),
+    CanonicalAbsence,
+    LineageFailure(String),
+}
+
+pub fn localization_preview_consumer_outcome(
+    paths: &AppPaths,
+    item_id: &str,
+    variant_label: Option<&str>,
+) -> LocalizationPreviewConsumerOutcome {
+    match active_localization_preview_path(paths, item_id, variant_label) {
+        Ok(Some(path)) => LocalizationPreviewConsumerOutcome::Active(path),
+        Ok(None) => LocalizationPreviewConsumerOutcome::CanonicalAbsence,
+        Err(error) => LocalizationPreviewConsumerOutcome::LineageFailure(error.to_string()),
+    }
+}
+
+fn run_post_publication_best_effort<Progress, Log>(
+    mut progress: Progress,
+    mut log: Log,
+) -> (Option<String>, Option<String>)
+where
+    Progress: FnMut() -> Result<()>,
+    Log: FnMut() -> Result<()>,
+{
+    let progress_error = progress().err().map(|error| error.to_string());
+    let log_error = log().err().map(|error| error.to_string());
+    (progress_error, log_error)
+}
+
+fn sha256_file_hex(path: &Path) -> Result<String> {
+    let mut file = std::fs::File::open(path)?;
+    let mut hasher = Sha256::new();
+    let mut buffer = [0_u8; 64 * 1024];
+    loop {
+        let read = file.read(&mut buffer)?;
+        if read == 0 {
+            break;
+        }
+        hasher.update(&buffer[..read]);
+    }
+    Ok(hex::encode(hasher.finalize()))
+}
+
+fn sha256_bytes_hex(bytes: &[u8]) -> String {
+    hex::encode(Sha256::digest(bytes))
+}
+
+fn full_file_identity(path: &Path) -> Result<(u64, Option<u128>, String)> {
+    let metadata = std::fs::metadata(path)?;
+    let bytes = metadata.len();
+    let modified_ns = metadata
+        .modified()
+        .ok()
+        .and_then(|value| value.duration_since(std::time::UNIX_EPOCH).ok())
+        .map(|value| value.as_nanos());
+    Ok((bytes, modified_ns, sha256_file_hex(path)?))
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct YtDlpManagedMediaExpectations {
+    validation: ManagedMkvExpectations,
+    subtitles_requested: bool,
+    subtitle_selection_state: String,
+}
+
+fn yt_dlp_subtitles_requested(subtitle_mode: Option<&str>) -> bool {
+    matches!(
+        normalize_non_empty(subtitle_mode)
+            .as_deref()
+            .map(str::to_ascii_lowercase)
+            .as_deref(),
+        Some("auto")
+            | Some("embed")
+            | Some("auto_srt")
+            | Some("auto-srt")
+            | Some("manual")
+            | Some("subs")
+            | Some("srt")
+            | Some("sidecar")
+    )
+}
+
+fn yt_dlp_managed_media_expectations(
+    stdout: &str,
+    subtitle_mode: Option<&str>,
+) -> Result<YtDlpManagedMediaExpectations> {
+    let parse_last = |marker: &str| -> Result<Option<serde_json::Value>> {
+        let Some(info) = stdout
+            .lines()
+            .filter_map(|line| line.trim().strip_prefix(marker))
+            .last()
+        else {
+            return Ok(None);
+        };
+        serde_json::from_str(info).map(Some).map_err(|error| {
+            EngineError::InstallFailed(format!(
+                "yt-dlp selected-track metadata receipt was invalid JSON ({marker}): {error}"
+            ))
+        })
+    };
+    // Current yt-dlp releases do not promise identical field placement before download and
+    // after post-processing. Keep both receipts: PRE proves the extractor selection and POST
+    // proves the postprocessor's final view. VV_MEDIA_INFO remains accepted for queued jobs
+    // produced by the immediately preceding build.
+    let legacy = parse_last("VV_MEDIA_INFO:")?;
+    let pre = parse_last("VV_MEDIA_PRE:")?.or_else(|| legacy.clone());
+    let post = parse_last("VV_MEDIA_POST:")?.or_else(|| legacy.clone());
+    if pre.is_none() && post.is_none() {
+        return Err(EngineError::InstallFailed(
+            "yt-dlp did not emit the required pre/post selected-track metadata receipts"
+                .to_string(),
+        ));
+    }
+    // PRE is selection intent. Only an explicit video-only PRE selection/source waives audio;
+    // missing codec fields remain unknown and therefore retain the normal audio requirement.
+    // The final ffprobe is still authoritative for what the MKV actually contains.
+    // PRE is the authoritative selection receipt. Prefer its most-specific shape instead of
+    // concatenating requested_downloads and requested_formats, because current yt-dlp versions
+    // may expose the same formats at both levels. Within the selected array, however, preserve
+    // every entry: two audio tracks with identical/missing language metadata are still two
+    // selected streams and must not collapse into one validation expectation.
+    let pre_selected_formats = pre
+        .iter()
+        .flat_map(|value| {
+            if let Some(downloads) = value
+                .get("requested_downloads")
+                .and_then(|entry| entry.as_array())
+                .filter(|entries| !entries.is_empty())
+            {
+                return downloads
+                    .iter()
+                    .flat_map(|download| {
+                        download
+                            .get("requested_formats")
+                            .and_then(|entry| entry.as_array())
+                            .filter(|entries| !entries.is_empty())
+                            .map(|entries| entries.iter().collect::<Vec<_>>())
+                            .unwrap_or_else(|| vec![download])
+                    })
+                    .collect::<Vec<_>>();
+            }
+            if let Some(requested) = value
+                .get("requested_formats")
+                .and_then(|entry| entry.as_array())
+                .filter(|entries| !entries.is_empty())
+            {
+                return requested.iter().collect::<Vec<_>>();
+            }
+            vec![value]
+        })
+        .collect::<Vec<_>>();
+    let pre_explicitly_video_only = !pre_selected_formats.is_empty()
+        && pre_selected_formats.iter().all(|format| {
+            let codec_says_none = format
+                .get("acodec")
+                .and_then(|entry| entry.as_str())
+                .is_some_and(|codec| codec.eq_ignore_ascii_case("none"));
+            let source_audio_extension_says_none = format.get("acodec").is_none()
+                && format
+                    .get("audio_ext")
+                    .and_then(|entry| entry.as_str())
+                    .is_some_and(|extension| extension.eq_ignore_ascii_case("none"))
+                && format
+                    .get("vcodec")
+                    .and_then(|entry| entry.as_str())
+                    .is_some_and(|codec| !codec.eq_ignore_ascii_case("none"));
+            codec_says_none || source_audio_extension_says_none
+        });
+    let mut audio_tracks = Vec::new();
+    for format in pre_selected_formats.iter().filter(|format| {
+        format
+            .get("acodec")
+            .and_then(|entry| entry.as_str())
+            .is_some_and(|codec| !codec.eq_ignore_ascii_case("none"))
+    }) {
+        let expectation = StreamExpectation {
+            language: format
+                .get("language")
+                .and_then(|entry| entry.as_str())
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
+                .map(str::to_string),
+            title: None,
+        };
+        audio_tracks.push(expectation);
+    }
+
+    let subtitles_requested = yt_dlp_subtitles_requested(subtitle_mode);
+    let mut subtitle_tracks = Vec::new();
+    let requested_subtitle_values = [
+        post.as_ref()
+            .and_then(|value| value.get("requested_subtitles")),
+        pre.as_ref()
+            .and_then(|value| value.get("requested_subtitles")),
+    ];
+    let selected_subtitles = requested_subtitle_values.iter().flatten().find(|value| {
+        value
+            .as_object()
+            .is_some_and(|selected| !selected.is_empty())
+    });
+    let saw_explicit_empty_selection = requested_subtitle_values.iter().flatten().any(|value| {
+        value.is_null()
+            || value
+                .as_object()
+                .is_some_and(|selected| selected.is_empty())
+    });
+    if requested_subtitle_values
+        .iter()
+        .flatten()
+        .any(|value| !value.is_null() && !value.is_object())
+    {
+        return Err(EngineError::InstallFailed(
+            "yt-dlp requested_subtitles receipt had an unsupported shape".to_string(),
+        ));
+    }
+    let subtitle_selection_state = if selected_subtitles.is_some() {
+        "selected"
+    } else if saw_explicit_empty_selection {
+        "no_selected_subtitle_available"
+    } else if subtitles_requested {
+        return Err(EngineError::InstallFailed(
+            "yt-dlp selected-track receipt did not state the requested subtitle selection result"
+                .to_string(),
+        ));
+    } else {
+        "not_requested"
+    };
+    if let Some(selected) = selected_subtitles.and_then(|entry| entry.as_object()) {
+        let mut languages = selected.keys().cloned().collect::<Vec<_>>();
+        languages.sort();
+        for language in languages {
+            let metadata = selected.get(&language).and_then(|entry| entry.as_object());
+            subtitle_tracks.push(StreamExpectation {
+                language: Some(language),
+                title: metadata
+                    .and_then(|entry| entry.get("name"))
+                    .and_then(|entry| entry.as_str())
+                    .map(str::trim)
+                    .filter(|title| !title.is_empty())
+                    .map(str::to_string),
+            });
+        }
+    }
+
+    Ok(YtDlpManagedMediaExpectations {
+        validation: ManagedMkvExpectations {
+            min_audio_streams: if pre_explicitly_video_only {
+                0
+            } else {
+                audio_tracks.len().max(1)
+            },
+            audio_tracks,
+            subtitle_tracks,
+        },
+        subtitles_requested,
+        subtitle_selection_state: subtitle_selection_state.to_string(),
+    })
+}
+
+fn metadata_value_matches(expected: &Option<String>, actual: &Option<String>) -> bool {
+    let Some(expected) = expected.as_deref().map(str::trim).filter(|v| !v.is_empty()) else {
+        return true;
+    };
+    let Some(actual) = actual.as_deref().map(str::trim).filter(|v| !v.is_empty()) else {
+        return false;
+    };
+    expected
+        .replace('_', "-")
+        .eq_ignore_ascii_case(&actual.replace('_', "-"))
+}
+
+fn validate_stream_expectations(
+    kind: &str,
+    expected: &[StreamExpectation],
+    actual: &[StreamExpectation],
+    output_path: &Path,
+) -> Result<()> {
+    let mut consumed = vec![false; actual.len()];
+    for wanted in expected {
+        let matched = actual.iter().enumerate().position(|(index, observed)| {
+            !consumed[index]
+                && match (wanted.language.as_deref(), observed.language.as_deref()) {
+                    (Some(wanted), Some(observed)) => subtitle_languages_match(wanted, observed),
+                    (Some(_), None) => false,
+                    (None, _) => true,
+                }
+                && metadata_value_matches(&wanted.title, &observed.title)
+        });
+        let Some(index) = matched else {
+            return Err(EngineError::InstallFailed(format!(
+                "managed MKV output is missing expected {kind} track metadata language={:?} title={:?}: {}",
+                wanted.language,
+                wanted.title,
+                output_path.to_string_lossy()
+            )));
+        };
+        consumed[index] = true;
+    }
+    Ok(())
+}
+
+fn expectations_from_probe(probe: &ffmpeg::MediaProbe) -> ManagedMkvExpectations {
+    let meaningful_language = |language: &Option<String>| {
+        language
+            .as_deref()
+            .map(str::trim)
+            .filter(|value| !value.is_empty() && !value.eq_ignore_ascii_case("und"))
+            .map(str::to_string)
+    };
+    ManagedMkvExpectations {
+        min_audio_streams: probe.audio_stream_count,
+        audio_tracks: probe
+            .audio_streams
+            .iter()
+            .map(|stream| StreamExpectation {
+                language: meaningful_language(&stream.language),
+                title: stream.title.clone(),
+            })
+            .collect(),
+        subtitle_tracks: probe
+            .subtitle_streams
+            .iter()
+            .map(|stream| StreamExpectation {
+                language: meaningful_language(&stream.language),
+                title: stream.title.clone(),
+            })
+            .collect(),
+    }
+}
+
+/// Remux any playable historical/new video source into a newly managed MKV export.
+/// The source is probed rather than trusted by extension, every source stream is mapped, and
+/// the destination is not replaced until the staged MKV passes the same stream/metadata proof.
+pub fn export_managed_video_as_mkv(
+    paths: &AppPaths,
+    source_path: &Path,
+    destination_path: &Path,
+) -> Result<ffmpeg::MediaProbe> {
+    if destination_path
+        .extension()
+        .and_then(|value| value.to_str())
+        .is_none_or(|value| !value.eq_ignore_ascii_case(MANAGED_VIDEO_EXTENSION))
+    {
+        return Err(EngineError::InstallFailed(format!(
+            "managed video export destination must end in .mkv: {}",
+            destination_path.to_string_lossy()
+        )));
+    }
+    let source_probe = ffmpeg::probe(paths, source_path)?;
+    if source_probe.video_stream_count == 0 {
+        return Err(EngineError::InstallFailed(format!(
+            "managed video export source has no video stream: {}",
+            source_path.to_string_lossy()
+        )));
+    }
+    if let Some(parent) = destination_path.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    let output_guard = ManagedOutputGuard::acquire(destination_path)?;
+    let file_name = destination_path
+        .file_name()
+        .and_then(|value| value.to_str())
+        .unwrap_or("managed_export.mkv");
+    let attempt_marker = Uuid::new_v4().simple().to_string();
+    let staging_parent = destination_path.parent().ok_or_else(|| {
+        EngineError::InstallFailed(format!(
+            "managed video export destination has no parent: {}",
+            destination_path.to_string_lossy()
+        ))
+    })?;
+    let attempt_guard = AttemptDirectoryGuard::acquire(staging_parent, &attempt_marker)?;
+    let staging_path = attempt_guard
+        .path()
+        .join(format!("{file_name}.exporting.mkv"));
+
+    let output = cmd::command(paths.ffmpeg_cmd())
+        .args(["-nostdin", "-y"])
+        .arg("-i")
+        .arg(source_path)
+        .args([
+            "-map",
+            "0",
+            "-map_metadata",
+            "0",
+            "-map_chapters",
+            "0",
+            "-c",
+            "copy",
+        ])
+        .arg(&staging_path)
+        .output()
+        .map_err(|error| match error.kind() {
+            std::io::ErrorKind::NotFound => EngineError::ExternalToolMissing {
+                tool: "ffmpeg".to_string(),
+            },
+            _ => EngineError::Io(error),
+        })?;
+    if !output.status.success() {
+        return Err(EngineError::ExternalToolFailed {
+            tool: "ffmpeg".to_string(),
+            code: output.status.code(),
+            stderr: format!(
+                "managed MKV export remux failed; source retained at {}: {}",
+                source_path.to_string_lossy(),
+                String::from_utf8_lossy(&output.stderr).trim()
+            ),
+        });
+    }
+    let validated = validate_managed_mkv_output(
+        paths,
+        &staging_path,
+        &expectations_from_probe(&source_probe),
+    )?;
+
+    output_guard.publish(&staging_path)?;
+    Ok(validated)
+}
+
+fn is_generated_embedded_subtitle_sidecar(path: &Path, video_stem: &str) -> bool {
+    let Some(name) = path.file_name().and_then(|value| value.to_str()) else {
+        return false;
+    };
+    let Some(suffix) = name.strip_prefix(video_stem) else {
+        return false;
+    };
+    if !suffix.starts_with('.') {
+        return false;
+    }
+    path.extension()
+        .and_then(|value| value.to_str())
+        .is_some_and(|extension| {
+            matches!(
+                extension.to_ascii_lowercase().as_str(),
+                "srt" | "vtt" | "ass" | "lrc"
+            )
+        })
+}
+
+fn subtitle_sidecar_language(path: &Path, video_stem: &str) -> Option<String> {
+    let name = path.file_name()?.to_str()?;
+    let suffix = name.strip_prefix(video_stem)?.strip_prefix('.')?;
+    let mut language = suffix.rsplit_once('.')?.0.trim().to_string();
+    loop {
+        let lower = language.to_ascii_lowercase();
+        let matched = [
+            ".forced",
+            "-forced",
+            "_forced",
+            " (forced)",
+            "[forced]",
+            ".sdh",
+            "-sdh",
+            "_sdh",
+            " (sdh)",
+            "[sdh]",
+            ".cc",
+            "-cc",
+            "_cc",
+        ]
+        .into_iter()
+        .find(|qualifier| lower.ends_with(qualifier));
+        let Some(qualifier) = matched else {
+            break;
+        };
+        language.truncate(language.len().saturating_sub(qualifier.len()));
+        language = language.trim_end_matches(['.', '-', '_', ' ']).to_string();
+    }
+    (!language.is_empty()).then_some(language)
+}
+
+fn canonical_language_key(raw: &str) -> String {
+    let normalized = raw.trim().replace('_', "-").to_ascii_lowercase();
+    let mut parts = normalized.split('-').filter(|part| !part.is_empty());
+    let primary = parts.next().unwrap_or("");
+    let primary = match primary {
+        "ar" | "ara" => "ara",
+        "bg" | "bul" => "bul",
+        "cs" | "ces" | "cze" => "ces",
+        "da" | "dan" => "dan",
+        "de" | "deu" | "ger" => "deu",
+        "el" | "ell" | "gre" => "ell",
+        "en" | "eng" => "eng",
+        "es" | "spa" => "spa",
+        "et" | "est" => "est",
+        "fa" | "fas" | "per" => "fas",
+        "fi" | "fin" => "fin",
+        "fr" | "fra" | "fre" => "fra",
+        "he" | "heb" => "heb",
+        "hi" | "hin" => "hin",
+        "hr" | "hrv" => "hrv",
+        "hu" | "hun" => "hun",
+        "id" | "ind" => "ind",
+        "it" | "ita" => "ita",
+        "ja" | "jpn" => "jpn",
+        "ko" | "kor" => "kor",
+        "lt" | "lit" => "lit",
+        "lv" | "lav" => "lav",
+        "ms" | "msa" | "may" => "msa",
+        "nl" | "nld" | "dut" => "nld",
+        "no" | "nor" => "nor",
+        "pl" | "pol" => "pol",
+        "pt" | "por" => "por",
+        "ro" | "ron" | "rum" => "ron",
+        "ru" | "rus" => "rus",
+        "sk" | "slk" | "slo" => "slk",
+        "sl" | "slv" => "slv",
+        "sr" | "srp" => "srp",
+        "sv" | "swe" => "swe",
+        "th" | "tha" => "tha",
+        "tr" | "tur" => "tur",
+        "uk" | "ukr" => "ukr",
+        "vi" | "vie" => "vie",
+        "zh" | "zho" | "chi" => "zho",
+        "und" | "unknown" => "und",
+        other => other,
+    };
+    std::iter::once(primary)
+        .chain(parts)
+        .collect::<Vec<_>>()
+        .join("-")
+}
+
+fn subtitle_languages_match(expected: &str, actual: &str) -> bool {
+    canonical_language_key(expected) == canonical_language_key(actual)
+}
+
+fn normalized_subtitle_payload(
+    paths: &AppPaths,
+    input: &Path,
+    stream_map: &str,
+    output: &Path,
+) -> Result<String> {
+    let result = cmd::command(paths.ffmpeg_cmd())
+        .args(["-nostdin", "-y"])
+        .arg("-i")
+        .arg(input)
+        .args(["-map", stream_map, "-c:s", "srt"])
+        .arg(output)
+        .output()
+        .map_err(|error| match error.kind() {
+            std::io::ErrorKind::NotFound => EngineError::ExternalToolMissing {
+                tool: "ffmpeg".to_string(),
+            },
+            _ => EngineError::Io(error),
+        })?;
+    if !result.status.success() {
+        return Err(EngineError::ExternalToolFailed {
+            tool: "ffmpeg".to_string(),
+            code: result.status.code(),
+            stderr: String::from_utf8_lossy(&result.stderr).trim().to_string(),
+        });
+    }
+    let raw = std::fs::read_to_string(output);
+    let _ = std::fs::remove_file(output);
+    let raw = raw?;
+    Ok(raw
+        .replace("\r\n", "\n")
+        .lines()
+        .map(str::trim_end)
+        .collect::<Vec<_>>()
+        .join("\n")
+        .trim()
+        .to_string())
+}
+
+fn remove_proven_embedded_subtitle_sidecars(
+    paths: &AppPaths,
+    video_path: &Path,
+    probe: &ffmpeg::MediaProbe,
+    attempt_marker: Option<&str>,
+    attempt_root: Option<&Path>,
+) -> Result<usize> {
+    let Some(parent) = video_path.parent() else {
+        return Ok(0);
+    };
+    let Some(stem) = video_path.file_stem().and_then(|value| value.to_str()) else {
+        return Ok(0);
+    };
+    let Some(attempt_marker) = attempt_marker
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+    else {
+        // Historical or caller-supplied files have no current-attempt ownership proof. Even an
+        // exact embedded-content match does not authorize deleting an arbitrary neighboring file.
+        return Ok(0);
+    };
+    let ownership_suffix = format!("_vvattempt-{attempt_marker}");
+    let Some(attempt_root) = attempt_root else {
+        return Ok(0);
+    };
+    let nested_yt_dlp_attempt = attempt_root.file_name().and_then(|value| value.to_str())
+        == Some(attempt_marker)
+        && attempt_root
+            .parent()
+            .and_then(Path::parent)
+            .and_then(Path::file_name)
+            .and_then(|value| value.to_str())
+            == Some(".vv-attempts");
+    let legacy_attempt_root_name = format!(".vv-attempt-{attempt_marker}");
+    let direct_owned_attempt = attempt_root.file_name().and_then(|value| value.to_str())
+        == Some(&legacy_attempt_root_name);
+    if (!nested_yt_dlp_attempt && !direct_owned_attempt)
+        || video_path.strip_prefix(attempt_root).is_err()
+        || !stem.ends_with(&ownership_suffix)
+    {
+        return Ok(0);
+    }
+    let mut proven_paths = Vec::new();
+    for entry in std::fs::read_dir(parent)? {
+        let entry = entry?;
+        let path = entry.path();
+        if !path.is_file() || !is_generated_embedded_subtitle_sidecar(&path, stem) {
+            continue;
+        }
+        let language = subtitle_sidecar_language(&path, stem).ok_or_else(|| {
+            EngineError::InstallFailed(format!(
+                "subtitle sidecar language could not be identified; file retained: {}",
+                path.to_string_lossy()
+            ))
+        })?;
+        let comparison_id = Uuid::new_v4();
+        let sidecar_comparison = parent.join(format!(".subtitle-sidecar-{comparison_id}.srt"));
+        let sidecar_payload = normalized_subtitle_payload(
+            paths,
+            &path,
+            "0:0",
+            &sidecar_comparison,
+        )
+        .map_err(|error| {
+            let _ = std::fs::remove_file(&sidecar_comparison);
+            EngineError::InstallFailed(format!(
+                "subtitle sidecar could not be normalized for exact embedding proof; file retained: {} ({error})",
+                path.to_string_lossy()
+            ))
+        })?;
+        let mut proven = false;
+        for stream in probe.subtitle_streams.iter().filter(|stream| {
+            stream
+                .language
+                .as_deref()
+                .is_some_and(|embedded| subtitle_languages_match(&language, embedded))
+        }) {
+            let Some(index) = stream.index else {
+                continue;
+            };
+            let embedded_comparison =
+                parent.join(format!(".subtitle-embedded-{comparison_id}-{index}.srt"));
+            let embedded_payload = normalized_subtitle_payload(
+                paths,
+                video_path,
+                &format!("0:{index}"),
+                &embedded_comparison,
+            );
+            let _ = std::fs::remove_file(&embedded_comparison);
+            if embedded_payload.is_ok_and(|payload| payload == sidecar_payload) {
+                proven = true;
+                break;
+            }
+        }
+        if !proven {
+            return Err(EngineError::InstallFailed(format!(
+                "subtitle sidecar has no exact content-matching embedded stream; all sidecars retained: {} (language={language})",
+                path.to_string_lossy()
+            )));
+        }
+        proven_paths.push(path);
+    }
+    for path in &proven_paths {
+        std::fs::remove_file(path)?;
+    }
+    Ok(proven_paths.len())
+}
+
 fn looks_like_textual_error_payload(sniff_prefix: &[u8]) -> bool {
     if sniff_prefix.is_empty() {
         return false;
@@ -20993,30 +26251,23 @@ fn suggested_download_filename(url: &str, job_id: &str) -> String {
                 .map(|segment| segment.to_string())
         })
         .filter(|name| !name.trim().is_empty())
-        .unwrap_or_else(|| "download.mp4".to_string());
+        .unwrap_or_else(|| format!("download.{MANAGED_VIDEO_EXTENSION}"));
 
     let mut safe_name = sanitize_filename_component(&raw_name);
     if safe_name.is_empty() {
-        safe_name = "download.mp4".to_string();
+        safe_name = format!("download.{MANAGED_VIDEO_EXTENSION}");
     }
 
     let mut path = PathBuf::from(&safe_name);
-    if path.extension().is_none() {
-        path.set_extension("mp4");
-    }
+    path.set_extension(MANAGED_VIDEO_EXTENSION);
 
     let stem = path
         .file_stem()
         .and_then(|s| s.to_str())
         .filter(|s| !s.is_empty())
         .unwrap_or("download");
-    let ext = path
-        .extension()
-        .and_then(|s| s.to_str())
-        .filter(|s| !s.is_empty())
-        .unwrap_or("mp4");
     let suffix = &job_id[..job_id.len().min(8)];
-    format!("{stem}_{suffix}.{ext}")
+    format!("{stem}_{suffix}.{MANAGED_VIDEO_EXTENSION}")
 }
 
 fn sanitize_filename_component(input: &str) -> String {
@@ -21063,18 +26314,26 @@ fn atempo_chain_for_factor(factor: f32) -> String {
         .join(",")
 }
 
-fn normalize_lang_tag(raw: Option<&str>) -> Option<&'static str> {
+fn normalize_lang_tag(raw: Option<&str>) -> Option<String> {
     let v = raw?.trim().to_lowercase();
     if v.is_empty() {
         return None;
     }
-    match v.as_str() {
-        "en" | "eng" | "english" => Some("eng"),
-        "ja" | "jpn" | "japanese" => Some("jpn"),
-        "ko" | "kor" | "korean" => Some("kor"),
-        "und" | "unknown" => Some("und"),
-        _ => None,
-    }
+    let named = match v.as_str() {
+        "english" => "eng",
+        "japanese" => "jpn",
+        "korean" => "kor",
+        "french" => "fra",
+        "german" => "deu",
+        "spanish" => "spa",
+        "portuguese" => "por",
+        "italian" => "ita",
+        "dutch" => "nld",
+        "chinese" => "zho",
+        "unknown" => "und",
+        _ => return Some(canonical_language_key(&v)),
+    };
+    Some(named.to_string())
 }
 
 fn normalize_variant_label(raw: Option<&str>) -> Option<String> {
@@ -21895,7 +27154,8 @@ fn select_localization_batch_track(
     let translated = tracks
         .iter()
         .filter(|track| {
-            track.kind == "translated" && normalize_lang_tag(Some(&track.lang)) == Some("eng")
+            track.kind == "translated"
+                && normalize_lang_tag(Some(&track.lang)).as_deref() == Some("eng")
         })
         .max_by_key(|track| track.version)
         .cloned();
@@ -21927,7 +27187,8 @@ fn latest_translated_english_track(
     Ok(tracks
         .into_iter()
         .filter(|track| {
-            track.kind == "translated" && normalize_lang_tag(Some(&track.lang)) == Some("eng")
+            track.kind == "translated"
+                && normalize_lang_tag(Some(&track.lang)).as_deref() == Some("eng")
         })
         .max_by_key(|track| track.version))
 }
@@ -22734,7 +27995,295 @@ mod tests {
     use super::*;
     use crate::subtitles::{SubtitleDocument, SubtitleSegment, SUBTITLE_JSON_SCHEMA_VERSION};
     use rusqlite::params;
+    use std::net::TcpListener;
     use std::path::Path;
+
+    #[test]
+    fn ytdlp_launch_receipt_redacts_separated_and_equals_credentials_and_locators() {
+        let raw = vec![
+            "--proxy=http://user:pass@proxy.local".to_string(),
+            "--username".to_string(),
+            "operator@example.test".to_string(),
+            "--password=secret-password".to_string(),
+            "--video-password".to_string(),
+            "video-secret".to_string(),
+            "--add-header=Authorization: Bearer top-secret".to_string(),
+            "--http-header".to_string(),
+            "Cookie: SID=secret".to_string(),
+            "--cookies=C:\\secret\\youtube.cookies".to_string(),
+            "--cookies-from-browser".to_string(),
+            "chrome:Default".to_string(),
+            "--extractor-args=youtube:po_token=secret".to_string(),
+            "--output".to_string(),
+            "Z:\\private\\%(title)s.mkv".to_string(),
+            "https://www.youtube.com/watch?v=secret&id=credential".to_string(),
+        ];
+        let receipt = redacted_ytdlp_argv(&raw);
+        let serialized = serde_json::to_string(&receipt).unwrap();
+        for forbidden in [
+            "user:pass",
+            "operator@example",
+            "secret-password",
+            "video-secret",
+            "top-secret",
+            "SID=secret",
+            "youtube.cookies",
+            "chrome:Default",
+            "po_token=secret",
+            "Z:\\\\private",
+            "watch?v=secret",
+        ] {
+            assert!(!serialized.contains(forbidden), "leaked {forbidden}: {serialized}");
+        }
+        assert!(serialized.contains("<source-url:"));
+        assert!(serialized.contains("<credential>"));
+        assert!(serialized.contains("<local-path>"));
+    }
+
+    #[test]
+    fn managed_command_policy_rejects_all_ytdlp_link_output_flags() {
+        for flag in [
+            "--write-link",
+            "--write-url-link",
+            "--write-desktop-link",
+            "--write-link=true",
+            "--write-url-link=1",
+            "--write-desktop-link=yes",
+        ] {
+            assert!(reject_forbidden_ytdlp_output_flags(&[flag.to_string()]).is_err());
+        }
+        assert!(reject_forbidden_ytdlp_output_flags(&["--write-subs".to_string()]).is_ok());
+    }
+
+    #[test]
+    fn managed_command_policy_rejects_every_output_escape_and_flag_syntax() {
+        let malicious = [
+            vec!["-o", "../../vv_escape/%(id)s.%(ext)s"],
+            vec!["--output", r"..\..\vv_escape\%(id)s.%(ext)s"],
+            vec!["-o=../vv_escape.%(ext)s"],
+            vec![r"--output=\\server\share\%(id)s.%(ext)s"],
+            vec![r"-oC:\vv_escape\%(id)s.%(ext)s"],
+            vec![r"--output=\\?\C:\vv_escape\%(id)s.%(ext)s"],
+            vec![r"--output=\\.\PIPE\vv_escape"],
+            vec!["--output=/var/tmp/vv_escape.%(ext)s"],
+            vec!["--output=video:%(id)s.%(ext)s"],
+            vec!["-o", "C:drive-relative.%(ext)s"],
+            vec!["-qo../../vv_escape/%(id)s.%(ext)s"],
+            vec!["--output=.."],
+            vec!["--output=."],
+        ];
+        for raw in malicious {
+            let args = raw.into_iter().map(str::to_string).collect::<Vec<_>>();
+            let error = validate_managed_ytdlp_output_arguments(&args, None).unwrap_err();
+            assert!(
+                error.to_string().contains("engine-owned attempt basename"),
+                "unexpected rejection for {args:?}: {error}"
+            );
+        }
+        assert!(validate_managed_ytdlp_output_arguments(&[
+            "-o".to_string(),
+            "%(channel)s_%(title).80B_%(id)s.%(ext)s".to_string(),
+        ], None)
+        .is_ok());
+        assert!(validate_managed_ytdlp_output_arguments(&[
+            "--output=%(id)s.%(ext)s".to_string(),
+        ], None)
+        .is_ok());
+        assert!(validate_managed_ytdlp_output_arguments(&["--output".to_string()], None).is_err());
+        for expansion in ["--alias", "--config-locations", "--config-location"] {
+            assert!(validate_managed_ytdlp_output_arguments(&[expansion.to_string()], None).is_err());
+        }
+    }
+
+    #[test]
+    fn managed_command_policy_binds_every_paths_form_to_one_owned_attempt_root() {
+        let dir = tempfile::tempdir().unwrap();
+        let owned = dir.path().join("owned_attempt");
+        let escaped = dir.path().join("escaped_attempt");
+        std::fs::create_dir(&owned).unwrap();
+        std::fs::create_dir(&escaped).unwrap();
+        let owned_text = owned.to_string_lossy().to_string();
+        let escaped_text = escaped.to_string_lossy().to_string();
+        let valid_forms = [
+            vec!["-P".to_string(), owned_text.clone()],
+            vec!["--paths".to_string(), owned_text.clone()],
+            vec!["--path".to_string(), owned_text.clone()],
+            vec!["--pat".to_string(), owned_text.clone()],
+            vec![format!("--paths={owned_text}")],
+            vec![format!("--path={owned_text}")],
+            vec![format!("--pat={owned_text}")],
+            vec![format!("-P={owned_text}")],
+            vec![format!("-P{owned_text}")],
+        ];
+        for mut args in valid_forms {
+            args.extend(["-o".to_string(), "%(id)s.%(ext)s".to_string()]);
+            assert!(
+                validate_managed_ytdlp_output_arguments(&args, Some(&owned)).is_ok(),
+                "owned form rejected: {args:?}"
+            );
+        }
+        for args in [
+            vec!["-P".to_string(), escaped_text.clone()],
+            vec!["--paths".to_string(), escaped_text.clone()],
+            vec!["--path".to_string(), escaped_text.clone()],
+            vec!["--pat".to_string(), escaped_text.clone()],
+            vec![format!("--paths={escaped_text}")],
+            vec![format!("--path={escaped_text}")],
+            vec![format!("--pat={escaped_text}")],
+            vec![format!("-P={escaped_text}")],
+            vec![format!("-P{escaped_text}")],
+            vec![format!("--paths=home:{owned_text}")],
+            vec![format!("--paths=temp:{owned_text}")],
+            vec![format!("-qP{owned_text}")],
+            vec!["--paths".to_string()],
+            vec![
+                "-P".to_string(),
+                owned_text.clone(),
+                "--paths".to_string(),
+                owned_text.clone(),
+            ],
+            vec![
+                "-P".to_string(),
+                owned_text.clone(),
+                format!("--paths={escaped_text}"),
+            ],
+        ] {
+            assert!(
+                validate_managed_ytdlp_output_arguments(&args, Some(&owned)).is_err(),
+                "unsafe/conflicting path form accepted: {args:?}"
+            );
+        }
+        assert!(validate_managed_ytdlp_output_arguments(
+            &["-P".to_string(), owned_text],
+            None,
+        )
+        .is_err());
+        assert!(validate_managed_ytdlp_output_arguments(&[], Some(&owned)).is_err());
+    }
+
+    #[test]
+    fn unsafe_output_is_rejected_before_runtime_bootstrap_or_process_launch() {
+        let dir = tempfile::tempdir().unwrap();
+        let paths = AppPaths::new(dir.path().join("app"));
+        let owned_attempt = dir.path().join("owned_attempt");
+        std::fs::create_dir(&owned_attempt).unwrap();
+        let error = run_yt_dlp(
+            &paths,
+            &[
+                "-P".to_string(),
+                owned_attempt.to_string_lossy().to_string(),
+                "-o".to_string(),
+                "../../vv_escape/%(id)s.%(ext)s".to_string(),
+                "https://example.invalid/video".to_string(),
+            ],
+            None,
+            1,
+            Some(&owned_attempt),
+        )
+        .unwrap_err();
+        assert!(error.to_string().contains("engine-owned attempt basename"));
+        assert!(
+            !paths.tools_dir().exists(),
+            "validation must happen before yt-dlp bootstrap or launch side effects"
+        );
+        assert!(!dir.path().join("vv_escape").exists());
+    }
+
+    #[cfg(windows)]
+    #[test]
+    #[ignore = "mutates PATH only for an exact protected-runtime fallback counterexample"]
+    fn protected_youtube_never_invokes_a_successful_fake_path_ytdlp() {
+        let dir = tempfile::tempdir().unwrap();
+        let paths = AppPaths::new(dir.path().join("app"));
+        paths.ensure_dirs().unwrap();
+        let fake_dir = dir.path().join("fake_path");
+        std::fs::create_dir_all(&fake_dir).unwrap();
+        let marker = dir.path().join("fake_path_invoked.txt");
+        std::fs::write(
+            fake_dir.join("yt-dlp.cmd"),
+            format!("@echo invoked>\"{}\"\r\n@exit /b 0\r\n", marker.display()),
+        )
+        .unwrap();
+        let original_path = std::env::var_os("PATH");
+        let joined = std::env::join_paths(
+            std::iter::once(fake_dir.clone())
+                .chain(original_path.as_ref().into_iter().flat_map(std::env::split_paths)),
+        )
+        .unwrap();
+        unsafe { std::env::set_var("PATH", joined) };
+        let result = run_yt_dlp(
+            &paths,
+            &["https://www.youtube.com/watch?v=dQw4w9WgXcQ".to_string()],
+            None,
+            5,
+            None,
+        );
+        match original_path {
+            Some(value) => unsafe { std::env::set_var("PATH", value) },
+            None => unsafe { std::env::remove_var("PATH") },
+        }
+        assert!(result.is_err());
+        assert!(!marker.exists(), "unverified PATH yt-dlp was invoked");
+    }
+
+    #[test]
+    fn healthy_runtime_403_and_generic_rate_words_do_not_trigger_hidden_retries() {
+        for false_positive in [
+            "HTTP 429 bytes were present in a local filename",
+            "decoder rate limit was configured by the operator",
+            "rate limited metadata field without a remote response status",
+        ] {
+            assert!(!yt_dlp_is_rate_limit_error(false_positive));
+        }
+        assert!(yt_dlp_is_rate_limit_error("ERROR: HTTP Error 429: Too Many Requests"));
+        let dir = tempfile::tempdir().unwrap();
+        let paths = AppPaths::new(dir.path().join("app"));
+        paths.ensure_dirs().unwrap();
+        let error = EngineError::InstallFailed("HTTP Error 403: Forbidden".to_string());
+        let returned = run_yt_dlp_with_dependency_refresh_retry(
+            &paths,
+            &[],
+            None,
+            5,
+            "https://www.youtube.com/watch?v=dQw4w9WgXcQ",
+            Err(error),
+        )
+        .unwrap_err();
+        assert!(returned.to_string().contains("HTTP Error 403"));
+        assert!(!paths.tools_dir().join("yt-dlp").exists());
+    }
+
+    fn run_fixture_ffmpeg(paths: &AppPaths, args: &[&str]) {
+        let output = std::process::Command::new(paths.ffmpeg_cmd())
+            .args(["-nostdin", "-loglevel", "error", "-y"])
+            .args(args)
+            .output()
+            .expect("run fixture ffmpeg");
+        assert!(
+            output.status.success(),
+            "fixture ffmpeg failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+
+    fn serve_bytes_once(bytes: Vec<u8>, path: &str) -> (String, std::thread::JoinHandle<()>) {
+        let listener = TcpListener::bind("127.0.0.1:0").expect("bind fixture server");
+        let address = listener.local_addr().expect("fixture address");
+        let path = path.trim_start_matches('/').to_string();
+        let handle = std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().expect("accept fixture request");
+            let mut request = [0_u8; 4096];
+            let _ = stream.read(&mut request);
+            write!(
+                stream,
+                "HTTP/1.1 200 OK\r\nContent-Type: video/mp4\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                bytes.len()
+            )
+            .expect("write fixture headers");
+            stream.write_all(&bytes).expect("write fixture body");
+        });
+        (format!("http://{address}/{path}"), handle)
+    }
 
     fn seed_item_and_track(paths: &AppPaths) {
         seed_item_and_track_named(paths, "item-1", "track-1", "Item 1");
@@ -23327,8 +28876,8 @@ mod tests {
 
         assert!(gate.ready());
         assert_eq!(gate.candidate_order()[0], JobTrack::YoutubeSingle);
-        let first_delay = gate.record_start(&paths, "foreground-job", JobTrack::YoutubeSingle);
-        assert!((5..=10).contains(&first_delay));
+        let first_delay = gate.record_start(&paths, "foreground-job", JobTrack::YoutubeSingle, 20);
+        assert_eq!(first_delay, 20);
         assert!(
             !gate.ready(),
             "one same-tick start must close the shared gate"
@@ -23341,9 +28890,236 @@ mod tests {
                 .expect("clock supports test interval"),
         );
         assert!(gate.ready());
-        let second_delay = gate.record_start(&paths, "recurring-job", JobTrack::YoutubeRecurring);
+        let second_delay =
+            gate.record_start(&paths, "recurring-job", JobTrack::YoutubeRecurring, 0);
         assert!((5..=10).contains(&second_delay));
         assert_eq!(gate.candidate_order()[0], JobTrack::YoutubeSingle);
+    }
+
+    #[test]
+    fn youtube_start_gate_uses_effective_aggregate_policy_interval() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let paths = AppPaths::new(dir.path().to_path_buf());
+        db::ensure_schema(&paths).expect("schema");
+        let runtime_epoch = youtube_protection::runtime_epoch_for_paths(&paths);
+        let now = now_ms();
+        let conn = db::open(&paths).expect("open");
+        conn.execute(
+            "INSERT INTO downloader_policy_state(provider,operation,auth_fingerprint,runtime_epoch,mode,entered_at_ms,version) VALUES(?1,?2,?3,?4,'conservative',?5,1)",
+            params![
+                youtube_protection::PROVIDER_YOUTUBE,
+                youtube_protection::OPERATION_DOWNLOAD,
+                youtube_protection::ANONYMOUS_AUTH_FINGERPRINT,
+                runtime_epoch,
+                now,
+            ],
+        )
+        .expect("seed conservative policy");
+        let params_json = serde_json::json!({
+            "url": "https://www.youtube.com/watch?v=aggregate123",
+            "provider": DOWNLOAD_PROVIDER_YOUTUBE_YT_DLP,
+            "yt_dlp_concurrent_fragments": 8,
+            "yt_dlp_sleep_interval": 0,
+            "yt_dlp_sleep_requests": 0,
+        })
+        .to_string();
+
+        assert_eq!(
+            effective_youtube_start_interval_secs(&paths, "aggregate-job", &params_json)
+                .expect("effective interval"),
+            20
+        );
+    }
+
+    #[test]
+    fn scheduler_keeps_ineligible_adaptive_cooldown_jobs_queued() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let paths = AppPaths::new(dir.path().to_path_buf());
+        db::ensure_schema(&paths).expect("schema");
+        let runtime_epoch = youtube_protection::runtime_epoch_for_paths(&paths);
+        let now = now_ms();
+        let future_probe = now + 60_000;
+        let conn = db::open(&paths).expect("open");
+        conn.execute(
+            "INSERT INTO downloader_policy_state(provider,operation,auth_fingerprint,runtime_epoch,mode,entered_at_ms,next_eligible_probe_at_ms,version) VALUES(?1,?2,?3,?4,'cooldown',?5,?6,1)",
+            params![
+                youtube_protection::PROVIDER_YOUTUBE,
+                youtube_protection::OPERATION_DOWNLOAD,
+                youtube_protection::ANONYMOUS_AUTH_FINGERPRINT,
+                runtime_epoch,
+                now,
+                future_probe,
+            ],
+        )
+        .expect("seed cooldown policy");
+        let params_json = serde_json::json!({
+            "url": "https://www.youtube.com/watch?v=held123",
+            "provider": DOWNLOAD_PROVIDER_YOUTUBE_YT_DLP,
+        })
+        .to_string();
+
+        let policy = effective_youtube_scheduler_policy(&paths, "held-job", &params_json)
+            .expect("scheduler policy")
+            .expect("youtube policy");
+        assert!(!policy.effective.eligible);
+        assert_eq!(policy.next_eligible_probe_at_ms, Some(future_probe));
+    }
+
+    #[test]
+    fn scheduler_ignores_legacy_runtime_key_but_enforces_exact_production_epoch() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let paths = AppPaths::new(dir.path().to_path_buf());
+        db::ensure_schema(&paths).expect("schema");
+        let production_epoch = youtube_protection::runtime_epoch_for_paths(&paths);
+        let legacy_epoch = youtube_protection::runtime_epoch();
+        assert_ne!(legacy_epoch, production_epoch, "counterexample requires distinct keys");
+        let now = now_ms();
+        let future_probe = now + 60_000;
+        let conn = db::open(&paths).expect("open");
+        let seed = |runtime_epoch: &str| {
+            conn.execute(
+                "INSERT INTO downloader_policy_state(provider,operation,auth_fingerprint,runtime_epoch,mode,entered_at_ms,next_eligible_probe_at_ms,version) VALUES(?1,?2,?3,?4,'cooldown',?5,?6,1)",
+                params![
+                    youtube_protection::PROVIDER_YOUTUBE,
+                    youtube_protection::OPERATION_DOWNLOAD,
+                    youtube_protection::ANONYMOUS_AUTH_FINGERPRINT,
+                    runtime_epoch,
+                    now,
+                    future_probe,
+                ],
+            )
+            .expect("seed policy epoch");
+        };
+        seed(&legacy_epoch);
+        let params_json = serde_json::json!({
+            "url": "https://www.youtube.com/watch?v=epoch-boundary",
+            "provider": DOWNLOAD_PROVIDER_YOUTUBE_YT_DLP,
+        })
+        .to_string();
+        let legacy_only = effective_youtube_scheduler_policy(&paths, "legacy-key-job", &params_json)
+            .expect("legacy scheduler policy")
+            .expect("youtube policy");
+        assert!(legacy_only.effective.eligible);
+        assert_eq!(legacy_only.next_eligible_probe_at_ms, None);
+
+        seed(&production_epoch);
+        let production = effective_youtube_scheduler_policy(&paths, "production-key-job", &params_json)
+            .expect("production scheduler policy")
+            .expect("youtube policy");
+        assert!(!production.effective.eligible);
+        assert_eq!(production.next_eligible_probe_at_ms, Some(future_probe));
+    }
+
+    #[test]
+    fn scheduler_keeps_ineligible_enumeration_cooldown_jobs_queued() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let paths = AppPaths::new(dir.path().to_path_buf());
+        db::ensure_schema(&paths).expect("schema");
+        let subscription = subscriptions::upsert_youtube_subscription(
+            &paths,
+            subscriptions::YoutubeSubscriptionUpsert {
+                id: Some("sub-enumeration-held".to_string()),
+                title: "Held enumeration".to_string(),
+                source_url: "https://www.youtube.com/@held/videos".to_string(),
+                folder_map: None,
+                output_dir_override: None,
+                library_id: None,
+                use_browser_cookies: false,
+                browser_cookie_source: None,
+                auth_session_input: None,
+                clear_auth_session: false,
+                active: true,
+                preset_id: None,
+                group_ids: vec![],
+                refresh_interval_minutes: None,
+            },
+        )
+        .expect("subscription");
+        let runtime_epoch = youtube_protection::runtime_epoch_for_paths(&paths);
+        let now = now_ms();
+        let future_probe = now + 60_000;
+        let conn = db::open(&paths).expect("open");
+        conn.execute(
+            "INSERT INTO downloader_policy_state(provider,operation,auth_fingerprint,runtime_epoch,mode,entered_at_ms,next_eligible_probe_at_ms,version) VALUES(?1,?2,?3,?4,'cooldown',?5,?6,1)",
+            params![
+                youtube_protection::PROVIDER_YOUTUBE,
+                youtube_protection::OPERATION_ENUMERATION,
+                youtube_protection::ANONYMOUS_AUTH_FINGERPRINT,
+                runtime_epoch,
+                now,
+                future_probe,
+            ],
+        )
+        .expect("seed enumeration cooldown");
+        let params_json = serde_json::json!({ "subscription_id": subscription.id }).to_string();
+
+        let policy = effective_youtube_enumeration_scheduler_policy(
+            &paths,
+            "held-enumeration-job",
+            &params_json,
+        )
+        .expect("scheduler policy")
+        .expect("youtube policy");
+        assert!(!policy.effective.eligible);
+        assert_eq!(policy.next_eligible_probe_at_ms, Some(future_probe));
+    }
+
+    #[test]
+    fn job_boundary_claims_exactly_one_controlled_canary_per_operation() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let paths = AppPaths::new(dir.path().to_path_buf());
+        db::ensure_schema(&paths).expect("schema");
+        let runtime_epoch = youtube_protection::runtime_epoch_for_paths(&paths);
+        let now = now_ms();
+        let conn = db::open(&paths).expect("open");
+        conn.execute(
+            "INSERT INTO downloader_policy_state(provider,operation,auth_fingerprint,runtime_epoch,mode,entered_at_ms,next_eligible_probe_at_ms,version) VALUES(?1,?2,?3,?4,'cooldown',?5,?5,1)",
+            params![
+                youtube_protection::PROVIDER_YOUTUBE,
+                youtube_protection::OPERATION_DOWNLOAD,
+                youtube_protection::ANONYMOUS_AUTH_FINGERPRINT,
+                runtime_epoch,
+                now,
+            ],
+        )
+        .expect("seed cooldown policy");
+        let baseline = youtube_protection::DownloaderBaselinePolicy {
+            concurrent_fragments: 4,
+            sleep_interval_secs: 5,
+            sleep_requests_secs: 1,
+            update_tranche_size: 25,
+            limit_rate: None,
+            throttled_rate: Some("100K".to_string()),
+        };
+        let state = youtube_protection::load_policy_state(
+            &paths,
+            youtube_protection::PROVIDER_YOUTUBE,
+            youtube_protection::OPERATION_DOWNLOAD,
+            youtube_protection::ANONYMOUS_AUTH_FINGERPRINT,
+            &runtime_epoch,
+        )
+        .expect("state");
+        let effective = youtube_protection::effective_policy(&baseline, &state, now);
+        assert!(effective.canary_only);
+
+        claim_youtube_controlled_canary(
+            &paths,
+            "job-a",
+            youtube_protection::OPERATION_DOWNLOAD,
+            youtube_protection::ANONYMOUS_AUTH_FINGERPRINT,
+            &runtime_epoch,
+            &effective,
+        )
+        .expect("first canary claim");
+        assert!(claim_youtube_controlled_canary(
+            &paths,
+            "job-b",
+            youtube_protection::OPERATION_DOWNLOAD,
+            youtube_protection::ANONYMOUS_AUTH_FINGERPRINT,
+            &runtime_epoch,
+            &effective,
+        )
+        .is_err());
     }
 
     #[test]
@@ -23869,6 +29645,7 @@ mod tests {
         let saved = set_antibot_pacing(
             &paths,
             AntiBotPacingSettings {
+                adaptive_protection_enabled: false,
                 recurring_min_interval_secs: 999_999,
                 recurring_jitter_secs: 999_999,
                 enumeration_sleep_requests: 999,
@@ -23884,6 +29661,7 @@ mod tests {
         );
         assert_eq!(saved.enumeration_sleep_requests, MAX_ENUM_SLEEP_REQUESTS);
         assert_eq!(saved.update_all_batch_size, 10);
+        assert!(!saved.adaptive_protection_enabled);
         assert_eq!(saved.recurring_jitter_secs, MAX_RECURRING_JITTER_SECS);
         assert_eq!(
             saved.recurring_download_min_sleep_secs,
@@ -23900,6 +29678,47 @@ mod tests {
             MAX_RECURRING_MIN_INTERVAL_SECS
         );
         assert_eq!(reloaded.update_all_batch_size, 10);
+
+        let status = get_youtube_protection_status(
+            &paths,
+            Some(youtube_protection::OPERATION_DOWNLOAD),
+        )
+        .expect("disabled adaptive status");
+        assert!(!status.automatic_protection_enabled);
+        assert_eq!(
+            status.effective.concurrent_fragments,
+            status.baseline.concurrent_fragments.max(1)
+        );
+        assert_eq!(
+            status.effective.sleep_interval_secs,
+            status.baseline.sleep_interval_secs
+        );
+        assert_eq!(
+            status.effective.max_sleep_interval_secs,
+            status.baseline.sleep_interval_secs,
+            "disabled adaptation must project the exact executed baseline, not a stricter normal overlay"
+        );
+        assert_eq!(status.effective.limit_rate, status.baseline.limit_rate);
+        assert_eq!(status.effective.throttled_rate, status.baseline.throttled_rate);
+    }
+
+    #[test]
+    fn antibot_pacing_generation_is_durable_and_rejects_stale_writers() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let paths = AppPaths::new(dir.path().to_path_buf());
+        db::ensure_schema(&paths).expect("schema");
+        let first = get_antibot_pacing(&paths).expect("baseline");
+        set_antibot_pacing_with_generation(&paths, first.clone(), 500)
+            .expect("first generation");
+        let mut stale = first.clone();
+        stale.update_all_batch_size = 1;
+        assert!(set_antibot_pacing_with_generation(&paths, stale, 499).is_err());
+        assert_eq!(
+            get_antibot_pacing(&paths)
+                .expect("canonical after stale writer")
+                .update_all_batch_size,
+            first.update_all_batch_size
+        );
     }
 
     #[test]
@@ -25168,12 +30987,33 @@ EOF
 
     #[test]
     fn normalize_auth_cookie_rejects_missing_cookie_file_path() {
-        let err = normalize_auth_cookie(Some("C:\\missing\\cookies.json".to_string()))
+        let locator = "C:\\Users\\operator\\private auth\\cookies.json";
+        let err = normalize_auth_cookie(Some(locator.to_string()))
             .expect_err("missing cookie path should fail");
         assert!(
             err.to_string().contains("cookie file path does not exist"),
             "unexpected error: {err}"
         );
+        assert!(!err.to_string().contains(locator));
+
+        let youtube_err = normalize_youtube_auth_cookie_for_storage(Some(locator.to_string()))
+            .expect_err("missing YouTube cookie path should fail");
+        assert!(youtube_err
+            .to_string()
+            .contains("cookie file path does not exist"));
+        assert!(!youtube_err.to_string().contains(locator));
+    }
+
+    #[test]
+    fn auth_error_redaction_removes_credential_locators_but_keeps_failure_context() {
+        let message = r#"yt-dlp failed: --cookies "C:\Users\operator\private auth\cookies.txt" and /home/operator/private/session.json were unreadable"#;
+        let redacted = redact_auth_credential_locators(message);
+        assert!(redacted.contains("yt-dlp failed"));
+        assert!(redacted.contains("were unreadable"));
+        assert!(!redacted.contains("operator"));
+        assert!(!redacted.contains("cookies.txt"));
+        assert!(!redacted.contains("session.json"));
+        assert!(redacted.contains("<credential_locator_redacted>"));
     }
 
     #[test]
@@ -25359,6 +31199,64 @@ EOF
             .expect("status running");
         assert_eq!(status_queued, JobStatus::Canceled.as_str());
         assert_eq!(status_running, JobStatus::Canceled.as_str());
+    }
+
+    #[test]
+    fn cancel_events_update_subscription_activity_without_waiting_for_rebuild() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let paths = AppPaths::new(dir.path().to_path_buf());
+        db::ensure_schema(&paths).expect("schema");
+        let params_json = serde_json::json!({
+            "subscription_id": "sub-cancel-events",
+            "url": "https://example.invalid/video"
+        })
+        .to_string();
+        let first = enqueue_with_type_item_and_batch_id(
+            &paths,
+            JobType::DownloadDirectUrl,
+            params_json.clone(),
+            None,
+            Some("subscription-batch".to_string()),
+        )
+        .expect("enqueue first");
+        enqueue_with_type_item_and_batch_id(
+            &paths,
+            JobType::DownloadDirectUrl,
+            params_json,
+            None,
+            Some("subscription-batch".to_string()),
+        )
+        .expect("enqueue second");
+
+        let conn = db::open(&paths).expect("open");
+        let queued: i64 = conn
+            .query_row(
+                "SELECT queued FROM subscription_activity_rollup WHERE subscription_id='sub-cancel-events'",
+                [],
+                |row| row.get(0),
+            )
+            .expect("initial event projection");
+        assert_eq!(queued, 2);
+
+        cancel_job(&paths, &first.id).expect("cancel one");
+        let queued: i64 = conn
+            .query_row(
+                "SELECT queued FROM subscription_activity_rollup WHERE subscription_id='sub-cancel-events'",
+                [],
+                |row| row.get(0),
+            )
+            .expect("post-cancel event projection");
+        assert_eq!(queued, 1);
+
+        cancel_all_jobs(&paths).expect("cancel remaining");
+        let remaining: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM subscription_activity_rollup WHERE subscription_id='sub-cancel-events'",
+                [],
+                |row| row.get(0),
+            )
+            .expect("post-cancel-all event projection");
+        assert_eq!(remaining, 0);
     }
 
     #[test]
@@ -25823,6 +31721,403 @@ EOF
         let retried = retry_job(&paths, &failed.id).expect("retry after clear");
         assert_ne!(retried.id, failed.id);
         assert_eq!(retried.status, JobStatus::Queued);
+    }
+
+    #[test]
+    fn instagram_auth_revision_cas_rejects_stale_save_after_newer_clear() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let paths = AppPaths::new(dir.path().to_path_buf());
+        let initial = instagram_auth_revision(&paths).expect("initial revision");
+        let saved = replace_global_instagram_auth_cookie(
+            &paths,
+            Some("sessionid=replacement".to_string()),
+            Some(initial.credential_generation),
+            Some(&initial.credential_fingerprint),
+        )
+        .expect("save replacement");
+        let cleared = replace_global_instagram_auth_cookie(
+            &paths,
+            None,
+            Some(saved.credential_generation),
+            Some(&saved.credential_fingerprint),
+        )
+        .expect("newer clear");
+        let stale = replace_global_instagram_auth_cookie(
+            &paths,
+            Some("sessionid=stale".to_string()),
+            Some(saved.credential_generation),
+            Some(&saved.credential_fingerprint),
+        )
+        .expect_err("stale save must fail");
+        assert!(stale.to_string().contains("changed concurrently"));
+        let current = instagram_auth_revision(&paths).expect("current revision");
+        assert_eq!(current.credential_generation, cleared.credential_generation);
+        assert_eq!(current.credential_fingerprint, cleared.credential_fingerprint);
+        assert_eq!(current.configured, cleared.configured);
+        assert!(!current.configured);
+        assert!(resolve_global_instagram_auth_cookie(&paths).is_none());
+    }
+
+    #[test]
+    fn instagram_auth_commit_reports_cleanup_warning_without_lying_about_commit() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let paths = AppPaths::new(dir.path().to_path_buf());
+        paths.ensure_dirs().expect("paths");
+        let block_path = instagram_auth_block_path(&paths);
+        std::fs::create_dir_all(&block_path).expect("blocking directory");
+        let initial = instagram_auth_revision(&paths).expect("initial revision");
+
+        let receipt = replace_global_instagram_auth_cookie(
+            &paths,
+            Some("sessionid=committed-secret".to_string()),
+            Some(initial.credential_generation),
+            Some(&initial.credential_fingerprint),
+        )
+        .expect("credential commit remains successful");
+
+        assert!(receipt.configured);
+        assert!(receipt.cleanup_warning.as_deref().is_some_and(|warning| {
+            warning.contains("credentials were committed")
+                && !warning.contains("committed-secret")
+        }));
+        let current = instagram_auth_revision(&paths).expect("committed revision");
+        assert_eq!(current.credential_generation, receipt.credential_generation);
+        assert_eq!(current.credential_fingerprint, receipt.credential_fingerprint);
+        assert!(current.cleanup_warning.is_some(), "warning must survive hydration");
+        std::fs::remove_dir_all(block_path).expect("cleanup blocking directory");
+        let reconciled = replace_global_instagram_auth_cookie(
+            &paths,
+            Some("sessionid=committed-secret".to_string()),
+            Some(current.credential_generation),
+            Some(&current.credential_fingerprint),
+        )
+        .expect("retry reconciles cleanup state");
+        assert!(reconciled.cleanup_warning.is_none());
+        assert!(instagram_auth_revision(&paths)
+            .expect("reloaded revision")
+            .cleanup_warning
+            .is_none());
+    }
+
+    #[test]
+    fn instagram_auth_pending_hold_reconciles_after_restart_without_credential_mutation() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let app_root = dir.path().join("app_state");
+        let paths = AppPaths::new(app_root.clone());
+        paths.ensure_dirs().expect("paths");
+        let block_path = instagram_auth_block_path(&paths);
+        std::fs::create_dir_all(&block_path).expect("blocking directory");
+        let initial = instagram_auth_revision(&paths).expect("initial revision");
+        let committed = replace_global_instagram_auth_cookie(
+            &paths,
+            Some("sessionid=restart-reconcile-secret".to_string()),
+            Some(initial.credential_generation),
+            Some(&initial.credential_fingerprint),
+        )
+        .expect("credential commit");
+        assert!(committed.cleanup_warning.is_some());
+
+        std::fs::remove_dir_all(&block_path).expect("transient blocker removed");
+        let restarted_paths = AppPaths::new(app_root);
+        let reconciled = instagram_auth_revision(&restarted_paths).expect("restart hydration");
+        assert_eq!(reconciled.credential_generation, committed.credential_generation);
+        assert_eq!(reconciled.credential_fingerprint, committed.credential_fingerprint);
+        assert!(reconciled.configured);
+        assert!(
+            reconciled.cleanup_warning.is_none(),
+            "bounded hydration reconciliation must clear the warning after hold cleanup succeeds"
+        );
+        let disk = load_instagram_auth_disk_unlocked(&restarted_paths).expect("persisted status");
+        assert!(!disk.hold_cleanup_pending);
+        assert!(disk.cleanup_warning.is_none());
+    }
+
+    #[test]
+    fn instagram_auth_hold_reconcile_reports_status_persistence_failure_without_clearing_truth() {
+        let persisted = InstagramAuthDiskConfig {
+            cookie: Some("sessionid=never-logged".to_string()),
+            credential_generation: 9,
+            credential_fingerprint: "fingerprint".to_string(),
+            hold_cleanup_pending: true,
+            cleanup_warning: Some("pending cleanup".to_string()),
+        };
+        let outcome = reconcile_instagram_auth_hold_unlocked_with(
+            persisted,
+            || Ok(()),
+            |_| {
+                Err(EngineError::InstallFailed(
+                    "simulated status persistence failure".to_string(),
+                ))
+            },
+        );
+        assert!(
+            outcome.disk.hold_cleanup_pending,
+            "a failed status write must retain persisted pending truth"
+        );
+        let warning = outcome.cleanup_warning.expect("truthful persistence warning");
+        assert!(warning.contains("cleanup succeeded"));
+        assert!(warning.contains("could not be persisted"));
+        assert!(warning.contains("simulated status persistence failure"));
+        assert!(!warning.contains("never-logged"));
+    }
+
+    const INSTAGRAM_AUTH_CROSS_PROCESS_TEST_ROOT: &str =
+        "VOXVULGI_INSTAGRAM_AUTH_CROSS_PROCESS_TEST_ROOT";
+
+    fn replace_instagram_auth_from_fresh_process(paths: &AppPaths) -> Result<()> {
+        let status = std::process::Command::new(std::env::current_exe()?)
+            .arg("--exact")
+            .arg("jobs::tests::instagram_auth_cross_process_writer_child")
+            .arg("--ignored")
+            .env(
+                INSTAGRAM_AUTH_CROSS_PROCESS_TEST_ROOT,
+                paths.base_dir.as_os_str(),
+            )
+            .status()?;
+        if !status.success() {
+            return Err(EngineError::InstallFailed(format!(
+                "cross-process Instagram auth writer exited with {status}"
+            )));
+        }
+        Ok(())
+    }
+
+    #[test]
+    #[ignore = "helper launched by early-result cross-process tests"]
+    fn instagram_auth_cross_process_writer_child() {
+        let Some(root) = std::env::var_os(INSTAGRAM_AUTH_CROSS_PROCESS_TEST_ROOT) else {
+            return;
+        };
+        let paths = AppPaths::new(PathBuf::from(root));
+        let observed = instagram_auth_revision(&paths).expect("child revision");
+        replace_global_instagram_auth_cookie(
+            &paths,
+            Some("sessionid=cross-process-replacement".to_string()),
+            Some(observed.credential_generation),
+            Some(&observed.credential_fingerprint),
+        )
+        .expect("cross-process replacement");
+    }
+
+    #[test]
+    fn instagram_preflight_no_cookie_early_result_rejects_concurrent_replacement() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let paths = AppPaths::new(dir.path().to_path_buf());
+        let error = instagram_auth_preflight_with_snapshot_hook(
+            &paths,
+            Some(DEFAULT_INSTAGRAM_AUTH_PREFLIGHT_URL.to_string()),
+            |_| replace_instagram_auth_from_fresh_process(&paths),
+        )
+        .expect_err("no-cookie result must still reject a replacement after its snapshot");
+        assert!(error.to_string().contains("preflight became stale"));
+    }
+
+    #[test]
+    fn instagram_preflight_invalid_profile_early_result_rejects_concurrent_replacement() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let paths = AppPaths::new(dir.path().to_path_buf());
+        let initial = instagram_auth_revision(&paths).expect("initial revision");
+        replace_global_instagram_auth_cookie(
+            &paths,
+            Some("sessionid=first".to_string()),
+            Some(initial.credential_generation),
+            Some(&initial.credential_fingerprint),
+        )
+        .expect("initial cookie");
+
+        let error = instagram_auth_preflight_with_snapshot_hook(
+            &paths,
+            Some("https://www.instagram.com/".to_string()),
+            |_| replace_instagram_auth_from_fresh_process(&paths),
+        )
+        .expect_err("invalid-profile result must still reject a replacement after its snapshot");
+        assert!(error.to_string().contains("preflight became stale"));
+    }
+
+    #[test]
+    fn instagram_preflight_revision_recheck_rejects_replacement() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let paths = AppPaths::new(dir.path().to_path_buf());
+        let initial = instagram_auth_revision(&paths).expect("initial revision");
+        let saved = replace_global_instagram_auth_cookie(
+            &paths,
+            Some("sessionid=first".to_string()),
+            Some(initial.credential_generation),
+            Some(&initial.credential_fingerprint),
+        )
+        .expect("first save");
+        let observed = instagram_auth_revision(&paths).expect("preflight snapshot");
+        replace_global_instagram_auth_cookie(
+            &paths,
+            Some("sessionid=replacement".to_string()),
+            Some(saved.credential_generation),
+            Some(&saved.credential_fingerprint),
+        )
+        .expect("replacement");
+
+        let error = ensure_instagram_preflight_revision_current(&paths, &observed)
+            .expect_err("stale preflight must be rejected");
+        assert!(error.to_string().contains("preflight became stale"));
+    }
+
+    #[test]
+    fn instagram_auth_interprocess_lock_is_exclusive() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let paths = AppPaths::new(dir.path().to_path_buf());
+        paths.ensure_dirs().expect("paths");
+        let guard = acquire_instagram_auth_interprocess_lock(&paths, 500)
+            .expect("first interprocess lock");
+        let worker_paths = paths.clone();
+        let blocked = std::thread::spawn(move || {
+            acquire_instagram_auth_interprocess_lock(&worker_paths, 100)
+                .map(|_guard| ())
+        })
+        .join()
+        .expect("worker");
+        assert!(blocked.is_err(), "second owner must not enter the mutation boundary");
+        drop(guard);
+        acquire_instagram_auth_interprocess_lock(&paths, 500)
+            .expect("lock must be reusable after release");
+    }
+
+    #[test]
+    fn instagram_auth_concurrent_replacements_have_one_authoritative_winner() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let paths = AppPaths::new(dir.path().to_path_buf());
+        let initial = instagram_auth_revision(&paths).expect("initial revision");
+        let barrier = Arc::new(std::sync::Barrier::new(3));
+        let mut handles = Vec::new();
+        for suffix in ["one", "two"] {
+            let worker_paths = paths.clone();
+            let worker_barrier = barrier.clone();
+            let expected = initial.clone();
+            handles.push(std::thread::spawn(move || {
+                worker_barrier.wait();
+                replace_global_instagram_auth_cookie(
+                    &worker_paths,
+                    Some(format!("sessionid={suffix}")),
+                    Some(expected.credential_generation),
+                    Some(&expected.credential_fingerprint),
+                )
+            }));
+        }
+        barrier.wait();
+        let results = handles
+            .into_iter()
+            .map(|handle| handle.join().expect("worker"))
+            .collect::<Vec<_>>();
+        assert_eq!(results.iter().filter(|result| result.is_ok()).count(), 1);
+        assert_eq!(results.iter().filter(|result| result.is_err()).count(), 1);
+        let current = instagram_auth_revision(&paths).expect("current revision");
+        assert_eq!(current.credential_generation, initial.credential_generation + 1);
+        assert!(current.configured);
+    }
+
+    #[test]
+    fn stale_youtube_auth_replacement_preserves_winning_credential_block() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let paths = AppPaths::new(dir.path().to_path_buf());
+        paths.ensure_dirs().expect("paths");
+
+        let old_cookie = save_test_global_youtube_cookie(&paths, "old-session");
+        let old_key = youtube_auth_material_key_from_cookie(&old_cookie);
+        let old_revision = config::youtube_auth_revision(&paths).expect("old revision");
+        record_youtube_auth_block(
+            &paths,
+            old_key.clone(),
+            "old credential rejected".to_string(),
+            None,
+            None,
+        )
+        .expect("old block");
+
+        let replacement = config::YoutubeAuthConfig {
+            netscape_cookie_json: Some("SID=new-session".to_string()),
+            browser_cookie_source: None,
+            last_verified_at_ms: None,
+            reconnect_required_at_ms: None,
+        };
+        replace_youtube_auth_config_and_clear_previous_block(
+            &paths,
+            replacement,
+            Some(old_revision.credential_generation),
+            Some(&old_revision.credential_fingerprint),
+        )
+        .expect("replacement");
+        assert!(active_youtube_auth_block(&paths, Some(&old_key))
+            .expect("old block state")
+            .is_none());
+
+        let winning_key = youtube_auth_material_key(&paths, None, false, None)
+            .expect("winning key")
+            .expect("configured key");
+        record_youtube_auth_block(
+            &paths,
+            winning_key.clone(),
+            "winning credential rejected".to_string(),
+            None,
+            None,
+        )
+        .expect("winning block");
+
+        let stale = replace_youtube_auth_config_and_clear_previous_block(
+            &paths,
+            config::YoutubeAuthConfig::default(),
+            Some(old_revision.credential_generation),
+            Some(&old_revision.credential_fingerprint),
+        );
+        assert!(stale.is_err(), "stale credential CAS must fail");
+        assert!(
+            active_youtube_auth_block(&paths, Some(&winning_key))
+                .expect("winning block state")
+                .is_some(),
+            "failed stale CAS must not clear the winning credential block"
+        );
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn committed_youtube_auth_replacement_returns_redacted_cleanup_warning() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let paths = AppPaths::new(dir.path().to_path_buf());
+        paths.ensure_dirs().expect("paths");
+        let old_cookie = save_test_global_youtube_cookie(&paths, "old-secret-session");
+        let old_key = youtube_auth_material_key_from_cookie(&old_cookie);
+        let old_revision = config::youtube_auth_revision(&paths).expect("old revision");
+        record_youtube_auth_block(
+            &paths,
+            old_key,
+            "old credential rejected".to_string(),
+            None,
+            None,
+        )
+        .expect("old block");
+        let receipt = replace_youtube_auth_config_with_cleanup(
+            &paths,
+            config::YoutubeAuthConfig {
+                netscape_cookie_json: Some("SID=new-secret-session".to_string()),
+                browser_cookie_source: None,
+                last_verified_at_ms: None,
+                reconnect_required_at_ms: None,
+            },
+            Some(old_revision.credential_generation),
+            Some(&old_revision.credential_fingerprint),
+            |_paths, _previous_auth_key| {
+                Err(EngineError::InstallFailed(
+                    "permission denied opening C:\\Users\\Alice\\cookies.txt".to_string(),
+                ))
+            },
+        )
+        .expect("commit must not be reported as failed");
+        let warning = receipt.cleanup_warning.expect("truthful cleanup warning");
+        assert!(warning.contains("credentials were committed"));
+        assert!(!warning.contains("old-secret-session"));
+        assert!(!warning.contains("C:\\Users\\Alice\\cookies.txt"));
+        assert!(warning.contains("<credential_locator_redacted>"));
+        assert_eq!(receipt.config.netscape_cookie_json.as_deref(), Some("SID=new-secret-session"));
+        let committed_revision = config::youtube_auth_revision(&paths).expect("committed revision");
+        assert!(committed_revision.credential_generation > old_revision.credential_generation);
+        clear_youtube_auth_block(&paths).expect("cleanup fixture");
     }
 
     // WP-0257: one channel's cookie rejection must NOT arm a global block.
@@ -26641,7 +32936,11 @@ EOF
     fn suggested_download_filename_has_suffix_and_extension() {
         let name = suggested_download_filename("https://example.com/video", "12345678-abcd");
         assert!(name.starts_with("video_12345678."));
-        assert!(name.ends_with(".mp4"));
+        assert!(name.ends_with(".mkv"));
+
+        let legacy_source =
+            suggested_download_filename("https://example.com/already.mp4", "12345678-abcd");
+        assert_eq!(legacy_source, "already_12345678.mkv");
     }
 
     #[test]
@@ -26661,11 +32960,81 @@ EOF
             "12345678-1234-1234-1234-123456789abc",
             Some("{provider}/{channel}"),
             Some("{title}"),
-        );
+        )
+        .unwrap();
         assert_eq!(
             template,
-            "%(extractor)s/%(channel)s/%(title).80B_%(id)s_12345678.%(ext)s"
+            "%(extractor)s_%(channel)s_%(title).80B_%(id)s_12345678.%(ext)s"
         );
+    }
+
+    #[test]
+    fn yt_dlp_template_builder_flattens_legacy_grouping_and_rejects_traversal_or_prefixes() {
+        let flattened = build_yt_dlp_output_template(
+            "12345678-1234-1234-1234-123456789abc",
+            Some("{provider}/{channel}"),
+            Some("{playlist}\\{title}"),
+        )
+        .unwrap();
+        assert!(!flattened.contains('/'));
+        assert!(!flattened.contains('\\'));
+        assert_eq!(
+            flattened,
+            "%(extractor)s_%(channel)s_%(playlist)s_%(title).80B_%(id)s_12345678.%(ext)s"
+        );
+
+        for dangerous in [
+            "../{channel}",
+            r"..\{channel}",
+            r"C:\{channel}",
+            r"\\server\share\{channel}",
+            r"\\?\C:\{channel}",
+            "/var/tmp/{channel}",
+        ] {
+            assert!(build_yt_dlp_output_template(
+                "12345678-1234-1234-1234-123456789abc",
+                Some(dangerous),
+                Some("{title}"),
+            )
+            .is_err());
+        }
+    }
+
+    #[test]
+    fn yt_dlp_attempt_template_carries_unambiguous_sidecar_ownership_marker() {
+        let template = build_yt_dlp_output_template_for_attempt(
+            "12345678-1234-1234-1234-123456789abc",
+            Some("{channel}"),
+            Some("{title}"),
+            Some("4f9c2e7a1b3d"),
+        )
+        .unwrap();
+        assert_eq!(
+            template,
+            "%(channel)s_%(title).80B_%(id)s_12345678_vvattempt-4f9c2e7a1b3d.%(ext)s"
+        );
+    }
+
+    #[test]
+    fn yt_dlp_attempt_marker_is_removed_from_stable_final_identity() {
+        let relative = Path::new(
+            "channel/clip_video123_job12345_vvattempt-4f9c2e7a1b3d.mkv",
+        );
+        assert_eq!(
+            stable_yt_dlp_relative_output(
+                relative,
+                "job12345-1234-1234-1234-123456789abc",
+                "4f9c2e7a1b3d"
+            )
+            .unwrap(),
+            PathBuf::from("channel/clip_video123.mkv")
+        );
+        assert!(stable_yt_dlp_relative_output(
+            relative,
+            "job12345-1234-1234-1234-123456789abc",
+            "wrong-attempt"
+        )
+        .is_err());
     }
 
     #[test]
@@ -27036,7 +33405,7 @@ EOF
     }
 
     #[test]
-    fn append_yt_dlp_archive_download_options_adds_fast_retry_and_srt_sidecar_args() {
+    fn append_yt_dlp_archive_download_options_requests_manual_and_auto_subtitles() {
         let mut args = Vec::new();
 
         append_yt_dlp_archive_download_options(
@@ -27045,6 +33414,7 @@ EOF
             4,
             YT_DLP_ARCHIVE_THROTTLED_RATE,
             10,
+            0,
             0,
             0,
         );
@@ -27056,6 +33426,7 @@ EOF
         assert!(args
             .windows(2)
             .any(|pair| pair == ["--file-access-retries", "10"]));
+        assert!(args.iter().any(|value| value == "--embed-subs"));
         assert!(args.iter().any(|value| value == "--write-subs"));
         assert!(args.iter().any(|value| value == "--write-auto-subs"));
         assert!(args
@@ -27077,12 +33448,16 @@ EOF
             YT_DLP_ARCHIVE_THROTTLED_RATE,
             10,
             6,
+            12,
             0,
         );
 
         assert!(args
             .windows(2)
             .any(|pair| pair == ["--sleep-interval", "6"]));
+        assert!(args
+            .windows(2)
+            .any(|pair| pair == ["--max-sleep-interval", "12"]));
         assert!(!args
             .windows(2)
             .any(|pair| pair == ["--sleep-requests", "1"]));
@@ -27099,6 +33474,7 @@ EOF
             YT_DLP_ARCHIVE_THROTTLED_RATE,
             10,
             0,
+            0,
             3,
         );
 
@@ -27108,7 +33484,7 @@ EOF
     }
 
     #[test]
-    fn append_yt_dlp_archive_download_options_can_write_manual_srt_sidecars_without_auto_subs() {
+    fn append_yt_dlp_archive_download_options_embeds_manual_subtitles_without_auto_subs() {
         let mut args = Vec::new();
 
         append_yt_dlp_archive_download_options(
@@ -27119,8 +33495,10 @@ EOF
             10,
             0,
             0,
+            0,
         );
 
+        assert!(args.iter().any(|value| value == "--embed-subs"));
         assert!(args.iter().any(|value| value == "--write-subs"));
         assert!(!args.iter().any(|value| value == "--write-auto-subs"));
         assert!(args
@@ -27132,7 +33510,7 @@ EOF
     fn append_yt_dlp_archive_download_options_uses_custom_presets() {
         let mut args = Vec::new();
 
-        append_yt_dlp_archive_download_options(&mut args, Some("auto"), 8, "256K", 18, 0, 0);
+        append_yt_dlp_archive_download_options(&mut args, Some("auto"), 8, "256K", 18, 0, 0, 0);
 
         assert!(args.windows(2).any(|pair| pair == ["-N", "8"]));
         assert!(args
@@ -27141,6 +33519,1706 @@ EOF
         assert!(args
             .windows(2)
             .any(|pair| pair == ["--file-access-retries", "18"]));
+    }
+
+    #[test]
+    fn maximum_bandwidth_and_slow_transfer_threshold_are_distinct_arguments() {
+        let mut args = Vec::new();
+        append_yt_dlp_archive_download_options(&mut args, Some("none"), 1, "100K", 10, 5, 9, 2);
+        append_yt_dlp_limit_rate_option(&mut args, Some("4M"));
+        assert!(args.windows(2).any(|pair| pair == ["--limit-rate", "4M"]));
+        assert!(args
+            .windows(2)
+            .any(|pair| pair == ["--throttled-rate", "100K"]));
+        assert_ne!(
+            args.iter().position(|value| value == "--limit-rate"),
+            args.iter().position(|value| value == "--throttled-rate")
+        );
+    }
+
+    #[test]
+    fn managed_video_policy_replaces_every_conflicting_finalizer_and_wins_last() {
+        let mut args = vec![
+            "--merge-output-format".to_string(),
+            "mp4".to_string(),
+            "--remux-video".to_string(),
+            "webm".to_string(),
+            "--keep-video".to_string(),
+            "--merge-output-format".to_string(),
+            "mov".to_string(),
+        ];
+
+        enforce_managed_video_yt_dlp_options(&mut args);
+
+        assert!(!args.iter().any(|value| value == "mp4"));
+        assert!(!args.iter().any(|value| value == "webm"));
+        assert!(!args.iter().any(|value| value == "mov"));
+        assert_eq!(
+            &args[args.len() - 5..],
+            [
+                "--merge-output-format",
+                "mkv",
+                "--remux-video",
+                "mkv",
+                "--no-keep-video",
+            ]
+        );
+    }
+
+    #[test]
+    fn managed_video_source_selector_removes_mp4_m4a_constraints_but_keeps_quality_logic() {
+        for (saved, expected) in [
+            (
+                "bv*[ext=mp4]+ba[ext=m4a]/b[ext=mp4]/bv*+ba/b",
+                "bv*+ba/b/bv*+ba/b",
+            ),
+            (
+                "bestvideo[height<=1080][EXT=MP4]+bestaudio[EXT=M4A]/best",
+                "bestvideo[height<=1080]+bestaudio/best",
+            ),
+            (
+                "bestvideo[vcodec^=avc1]+bestaudio[abr<=160]/best",
+                "bestvideo[vcodec^=avc1]+bestaudio[abr<=160]/best",
+            ),
+            (
+                "bestvideo[height<=2160][container=MP4]+bestaudio[ext~=M4A]/best[height<=720]",
+                "bestvideo[height<=2160]+bestaudio/best[height<=720]",
+            ),
+            ("bv[ext=mp4|container=m4a]+ba[acodec~=m4a]/b", "bv+ba/b"),
+            (
+                "bv[ext!=mp4][height<=1080]+ba[abr<=160]/b",
+                "bv[ext!=mp4][height<=1080]+ba[abr<=160]/b",
+            ),
+            ("137+140", "bv*+ba/b"),
+            ("137[height<=1080]+ba/b", "bv*+ba/b"),
+        ] {
+            let effective = neutralize_managed_video_format_selector(saved);
+            assert_eq!(effective, expected);
+            assert!(!effective.to_ascii_lowercase().contains("ext=mp4"));
+            assert!(!effective.to_ascii_lowercase().contains("ext=m4a"));
+        }
+    }
+
+    #[test]
+    fn automatic_remix_preserves_historical_mp4_and_fixed_path_mkv_previews() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let paths = AppPaths::new(dir.path().join("app"));
+        let item_id = "legacy-preview-item";
+        let dub_dir = dub_variant_dir(&paths.derived_item_dir(item_id), None);
+        std::fs::create_dir_all(&dub_dir).expect("dub dir");
+        let legacy = dub_dir.join("mux_dub_preview_v1.mp4");
+        let managed = dub_dir.join("mux_dub_preview_v1.mkv");
+        std::fs::write(&legacy, b"legacy").expect("legacy preview");
+        std::fs::write(&managed, b"managed").expect("managed preview");
+        std::fs::write(dub_dir.join("mix_dub_preview_v1.wav"), b"mix").expect("mix");
+
+        clear_generated_dub_preview_outputs_for_remix(&paths, item_id, None).expect("clear remix");
+
+        assert!(
+            legacy.is_file(),
+            "automatic remix must preserve historical MP4"
+        );
+        assert!(
+            managed.is_file(),
+            "a fixed-path MKV may be an unknown legacy final and must not be overwritten or deleted"
+        );
+        assert!(!dub_dir.join("mix_dub_preview_v1.wav").exists());
+    }
+
+    #[test]
+    fn embedded_sidecar_cleanup_retains_every_sidecar_without_exact_content_proof() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let paths = AppPaths::new(dir.path().join("app"));
+        let marker = "noexactproof";
+        let attempt_guard = AttemptDirectoryGuard::acquire_for_yt_dlp(
+            dir.path(),
+            marker,
+            &paths,
+            "no-exact-proof-job",
+        )
+        .expect("real nested attempt root");
+        let attempt_root = attempt_guard.path().to_path_buf();
+        let video = attempt_root.join(format!("clip_job1234_vvattempt-{marker}.mkv"));
+        let generated_srt = attempt_root.join(format!("clip_job1234_vvattempt-{marker}.en.srt"));
+        let generated_vtt = attempt_root.join(format!("clip_job1234_vvattempt-{marker}.ja.vtt"));
+        let unrelated = dir.path().join("clip.en.srt");
+        std::fs::write(&video, b"mkv").expect("video");
+        std::fs::write(&generated_srt, b"srt").expect("srt");
+        std::fs::write(&generated_vtt, b"vtt").expect("vtt");
+        std::fs::write(&unrelated, b"keep").expect("unrelated");
+
+        let probe = ffmpeg::MediaProbe {
+            duration_ms: None,
+            video_codec: Some("mpeg4".to_string()),
+            audio_codec: Some("aac".to_string()),
+            width: None,
+            height: None,
+            video_stream_count: 1,
+            audio_stream_count: 1,
+            audio_streams: vec![],
+            subtitle_streams: vec![ffmpeg::SubtitleStreamProbe {
+                index: Some(2),
+                codec_name: Some("subrip".to_string()),
+                language: Some("en".to_string()),
+                title: None,
+            }],
+            container: Some("matroska".to_string()),
+        };
+        let result = remove_proven_embedded_subtitle_sidecars(
+            &paths,
+            &video,
+            &probe,
+            Some(marker),
+            Some(&attempt_root),
+        );
+
+        assert!(result.is_err());
+        assert!(generated_srt.exists());
+        assert!(generated_vtt.exists());
+        assert!(unrelated.exists());
+    }
+
+    #[test]
+    fn embedded_sidecar_cleanup_deletes_only_after_exact_extracted_content_matches() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let paths = AppPaths::new(dir.path().join("app"));
+        let marker = "currentattemptfixture";
+        let attempt_root = dir.path().join(format!(".vv-attempt-{marker}"));
+        std::fs::create_dir(&attempt_root).expect("exclusive attempt root");
+        let video = attempt_root.join(format!("clip_exact_vvattempt-{marker}.mkv"));
+        let sidecar = attempt_root.join(format!("clip_exact_vvattempt-{marker}.en.srt"));
+        std::fs::write(&sidecar, "1\n00:00:00,000 --> 00:00:00,800\nproof text\n")
+            .expect("subtitle fixture");
+        let video_text = video.to_string_lossy().to_string();
+        let sidecar_text = sidecar.to_string_lossy().to_string();
+        run_fixture_ffmpeg(
+            &paths,
+            &[
+                "-f",
+                "lavfi",
+                "-i",
+                "color=c=black:s=64x64:d=1",
+                "-f",
+                "lavfi",
+                "-i",
+                "sine=frequency=440:duration=1",
+                "-i",
+                &sidecar_text,
+                "-map",
+                "0:v",
+                "-map",
+                "1:a",
+                "-map",
+                "2:s",
+                "-c:v",
+                "mpeg4",
+                "-c:a",
+                "aac",
+                "-c:s",
+                "srt",
+                "-metadata:s:s:0",
+                "language=en",
+                "-t",
+                "1",
+                &video_text,
+            ],
+        );
+        let probe = ffmpeg::probe(&paths, &video).expect("probe fixture");
+
+        let removed = remove_proven_embedded_subtitle_sidecars(
+            &paths,
+            &video,
+            &probe,
+            Some(marker),
+            Some(&attempt_root),
+        )
+        .expect("exact embedding proof");
+
+        assert_eq!(removed, 1);
+        assert!(!sidecar.exists());
+    }
+
+    #[test]
+    fn embedded_sidecar_cleanup_proves_real_nested_yt_dlp_attempt_layout() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let paths = AppPaths::new(dir.path().join("app"));
+        let marker = "nestedattemptfixture";
+        let mut guard = AttemptDirectoryGuard::acquire_for_yt_dlp(
+            dir.path(),
+            marker,
+            &paths,
+            "nested-layout-job",
+        )
+        .expect("nested attempt root");
+        let video = guard
+            .path()
+            .join(format!("clip_nested_vvattempt-{marker}.mkv"));
+        let sidecar = guard
+            .path()
+            .join(format!("clip_nested_vvattempt-{marker}.en.srt"));
+        std::fs::write(&sidecar, "1\n00:00:00,000 --> 00:00:00,800\nnested proof\n")
+            .expect("subtitle fixture");
+        run_fixture_ffmpeg(
+            &paths,
+            &[
+                "-f",
+                "lavfi",
+                "-i",
+                "color=c=black:s=64x64:d=1",
+                "-i",
+                &sidecar.to_string_lossy(),
+                "-map",
+                "0:v",
+                "-map",
+                "1:s",
+                "-c:v",
+                "mpeg4",
+                "-c:s",
+                "srt",
+                "-metadata:s:s:0",
+                "language=en",
+                "-t",
+                "1",
+                &video.to_string_lossy(),
+            ],
+        );
+        let probe = ffmpeg::probe(&paths, &video).expect("probe fixture");
+        let removed = remove_proven_embedded_subtitle_sidecars(
+            &paths,
+            &video,
+            &probe,
+            Some(marker),
+            Some(guard.path()),
+        )
+        .expect("real nested layout must execute exact proof");
+        assert_eq!(removed, 1);
+        assert!(!sidecar.exists());
+        guard.cleanup_after_success();
+    }
+
+    #[test]
+    fn embedded_sidecar_cleanup_never_deletes_exact_matching_unowned_same_stem_file() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let paths = AppPaths::new(dir.path().join("app"));
+        let video = dir.path().join("historical_same_stem.mkv");
+        let sidecar = dir.path().join("historical_same_stem.en.srt");
+        std::fs::write(&sidecar, "1\n00:00:00,000 --> 00:00:00,800\nkeep me\n")
+            .expect("subtitle fixture");
+        let video_text = video.to_string_lossy().to_string();
+        let sidecar_text = sidecar.to_string_lossy().to_string();
+        run_fixture_ffmpeg(
+            &paths,
+            &[
+                "-f",
+                "lavfi",
+                "-i",
+                "color=c=black:s=64x64:d=1",
+                "-i",
+                &sidecar_text,
+                "-map",
+                "0:v",
+                "-map",
+                "1:s",
+                "-c:v",
+                "mpeg4",
+                "-c:s",
+                "srt",
+                "-metadata:s:s:0",
+                "language=en",
+                "-t",
+                "1",
+                &video_text,
+            ],
+        );
+        let probe = ffmpeg::probe(&paths, &video).expect("probe fixture");
+
+        let fake_attempt_root = dir.path().join(".vv-attempt-currentattemptfixture");
+        std::fs::create_dir(&fake_attempt_root).expect("unrelated attempt root");
+        let removed = remove_proven_embedded_subtitle_sidecars(
+            &paths,
+            &video,
+            &probe,
+            Some("currentattemptfixture"),
+            Some(&fake_attempt_root),
+        )
+        .expect("outside-attempt cleanup is a safe no-op");
+
+        assert_eq!(removed, 0);
+        assert!(
+            sidecar.exists(),
+            "arbitrary same-stem sidecar must be retained"
+        );
+    }
+
+    #[test]
+    fn direct_http_remux_failure_retains_staging_and_retry_finalizes_valid_mkv() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let paths = AppPaths::new(dir.path().join("app"));
+        paths.ensure_dirs().expect("app dirs");
+        let job = enqueue_with_type_item_and_batch_id(
+            &paths,
+            JobType::DownloadDirectUrl,
+            "{}".to_string(),
+            None,
+            None,
+        )
+        .expect("download job");
+        let fixture_subtitle = dir.path().join("fixture.srt");
+        let incompatible_mp4 = dir.path().join("mov_text.mp4");
+        let compatible_mp4 = dir.path().join("compatible.mp4");
+        std::fs::write(
+            &fixture_subtitle,
+            "1\n00:00:00,000 --> 00:00:00,800\nretained staging\n",
+        )
+        .expect("fixture subtitle");
+        let subtitle_text = fixture_subtitle.to_string_lossy().to_string();
+        let incompatible_text = incompatible_mp4.to_string_lossy().to_string();
+        let compatible_text = compatible_mp4.to_string_lossy().to_string();
+        run_fixture_ffmpeg(
+            &paths,
+            &[
+                "-f",
+                "lavfi",
+                "-i",
+                "color=c=black:s=64x64:d=1",
+                "-f",
+                "lavfi",
+                "-i",
+                "sine=frequency=440:duration=1",
+                "-i",
+                &subtitle_text,
+                "-map",
+                "0:v",
+                "-map",
+                "1:a",
+                "-map",
+                "2:s",
+                "-c:v",
+                "mpeg4",
+                "-c:a",
+                "aac",
+                "-c:s",
+                "mov_text",
+                "-t",
+                "1",
+                &incompatible_text,
+            ],
+        );
+        run_fixture_ffmpeg(
+            &paths,
+            &[
+                "-f",
+                "lavfi",
+                "-i",
+                "color=c=black:s=64x64:d=1",
+                "-f",
+                "lavfi",
+                "-i",
+                "sine=frequency=440:duration=1",
+                "-map",
+                "0:v",
+                "-map",
+                "1:a",
+                "-c:v",
+                "mpeg4",
+                "-c:a",
+                "aac",
+                "-t",
+                "1",
+                &compatible_text,
+            ],
+        );
+        let output_dir = dir.path().join("downloads");
+        let output_dir_text = output_dir.to_string_lossy().to_string();
+        let (first_url, first_server) = serve_bytes_once(
+            std::fs::read(&incompatible_mp4).expect("bad fixture"),
+            "clip.mp4",
+        );
+
+        let first = download_direct_media_asset(
+            &paths,
+            &first_url,
+            &job.id,
+            None,
+            Some(&output_dir_text),
+            None,
+        );
+        first_server.join().expect("first fixture server");
+        let error = first.expect_err("mov_text stream-copy to Matroska must fail");
+        assert!(error.to_string().contains("source staging retained"));
+        let final_name = suggested_download_filename(&first_url, &job.id);
+        let final_path = output_dir.join(&final_name);
+        let retained_staging = std::fs::read_dir(&output_dir)
+            .unwrap()
+            .filter_map(|entry| entry.ok().map(|entry| entry.path()))
+            .find(|path| {
+                path.file_name()
+                    .and_then(|value| value.to_str())
+                    .is_some_and(|name| {
+                        name.starts_with(&format!(".{final_name}.")) && name.ends_with(".part")
+                    })
+            })
+            .expect("failed direct-download attempt retains its unique staging file");
+        assert!(retained_staging.is_file());
+        assert!(!final_path.exists());
+
+        let (retry_url, retry_server) = serve_bytes_once(
+            std::fs::read(&compatible_mp4).expect("good fixture"),
+            "clip.mp4",
+        );
+        let completed = download_direct_media_asset(
+            &paths,
+            &retry_url,
+            &job.id,
+            None,
+            Some(&output_dir_text),
+            None,
+        )
+        .expect("retry direct HTTP download");
+        retry_server.join().expect("retry fixture server");
+
+        assert_eq!(completed, final_path);
+        assert!(retained_staging.exists());
+        let retained_parts = std::fs::read_dir(&output_dir)
+            .unwrap()
+            .filter_map(|entry| entry.ok().map(|entry| entry.path()))
+            .filter(|path| {
+                path.file_name()
+                    .and_then(|value| value.to_str())
+                    .is_some_and(|name| name.ends_with(".part"))
+            })
+            .count();
+        assert_eq!(
+            retained_parts, 1,
+            "successful retry removes only its own staging"
+        );
+        let probe = ffmpeg::probe(&paths, &completed).expect("probe completed MKV");
+        assert_eq!(probe.container.as_deref(), Some("matroska"));
+        assert_eq!(probe.video_stream_count, 1);
+        assert_eq!(probe.audio_stream_count, 1);
+    }
+
+    #[test]
+    fn yt_dlp_track_receipt_derives_audio_language_and_selected_subtitle_metadata() {
+        let stdout = r#"VV_MEDIA_INFO:{"requested_downloads":[{"requested_formats":[{"vcodec":"avc1","acodec":"none"},{"vcodec":"none","acodec":"opus","language":"ja"}]}],"requested_subtitles":{"en":{"name":"English"},"ja":{"name":"Japanese"}}}
+C:\archive\clip.mkv"#;
+
+        let receipt = yt_dlp_managed_media_expectations(stdout, Some("auto"))
+            .expect("selected track receipt");
+
+        assert_eq!(receipt.validation.min_audio_streams, 1);
+        assert_eq!(
+            receipt.validation.audio_tracks,
+            vec![StreamExpectation {
+                language: Some("ja".to_string()),
+                title: None,
+            }]
+        );
+        assert_eq!(
+            receipt.validation.subtitle_tracks,
+            vec![
+                StreamExpectation {
+                    language: Some("en".to_string()),
+                    title: Some("English".to_string()),
+                },
+                StreamExpectation {
+                    language: Some("ja".to_string()),
+                    title: Some("Japanese".to_string()),
+                },
+            ]
+        );
+    }
+
+    #[test]
+    fn yt_dlp_multi_audio_cardinality_survives_identical_missing_metadata() {
+        let stdout = r#"VV_MEDIA_PRE:{"requested_formats":[{"format_id":"137","vcodec":"avc1","acodec":"none"},{"format_id":"140","vcodec":"none","acodec":"opus"},{"format_id":"141","vcodec":"none","acodec":"opus"}],"requested_subtitles":null}
+VV_MEDIA_POST:{"requested_formats":[{"format_id":"137","vcodec":"avc1","acodec":"none"},{"format_id":"140","vcodec":"none","acodec":"opus"},{"format_id":"141","vcodec":"none","acodec":"opus"}],"requested_subtitles":null}"#;
+        let receipt = yt_dlp_managed_media_expectations(stdout, Some("auto"))
+            .expect("multi-audio selection receipt");
+        assert_eq!(receipt.validation.min_audio_streams, 2);
+        assert_eq!(receipt.validation.audio_tracks.len(), 2);
+        assert_eq!(receipt.validation.audio_tracks[0], StreamExpectation::default());
+        assert_eq!(receipt.validation.audio_tracks[1], StreamExpectation::default());
+
+        let dir = tempfile::tempdir().expect("tempdir");
+        let paths = AppPaths::new(dir.path().join("app"));
+        let one_audio = dir.path().join("lost_second_audio.mkv");
+        run_fixture_ffmpeg(
+            &paths,
+            &[
+                "-f",
+                "lavfi",
+                "-i",
+                "color=c=black:s=64x64:d=0.2",
+                "-f",
+                "lavfi",
+                "-i",
+                "sine=frequency=440:duration=0.2",
+                "-map",
+                "0:v",
+                "-map",
+                "1:a",
+                "-c:v",
+                "mpeg4",
+                "-c:a",
+                "aac",
+                &one_audio.to_string_lossy(),
+            ],
+        );
+        let error = validate_managed_mkv_output(&paths, &one_audio, &receipt.validation)
+            .expect_err("one surviving audio stream must not satisfy two selected tracks");
+        assert!(error.to_string().contains("expected at least 2"));
+    }
+
+    #[test]
+    fn yt_dlp_real_shape_receipts_allow_missing_codec_and_audio_ext_fields() {
+        // Fixture shape captured from current yt-dlp JSON printing: extractor selection lives
+        // under requested_downloads/requested_formats, while the postprocessed receipt can
+        // clear requested_subtitles after embedding and omit a top-level acodec entirely.
+        let stdout = r#"VV_MEDIA_PRE:{"id":"fixture","requested_downloads":[{"requested_formats":[{"format_id":"137"},{"format_id":"140","language":"fr-FR"}]}],"requested_subtitles":{"fr":{"name":"French"}}}
+VV_MEDIA_POST:{"id":"fixture","requested_subtitles":null}
+C:\archive\fixture.mkv"#;
+
+        let receipt = yt_dlp_managed_media_expectations(stdout, Some("auto"))
+            .expect("current split receipt shape");
+
+        assert_eq!(receipt.validation.min_audio_streams, 1);
+        assert_eq!(receipt.subtitle_selection_state, "selected");
+        assert_eq!(receipt.validation.subtitle_tracks.len(), 1);
+        assert_eq!(
+            receipt.validation.subtitle_tracks[0].language.as_deref(),
+            Some("fr")
+        );
+    }
+
+    #[test]
+    fn yt_dlp_current_null_selection_records_truthful_no_selected_state() {
+        let stdout = r#"VV_MEDIA_PRE:{"id":"fixture","requested_formats":[{"vcodec":"avc1","acodec":"none"},{"vcodec":"none","acodec":"opus"}],"requested_subtitles":null}
+VV_MEDIA_POST:{"id":"fixture","audio_ext":"webm","requested_subtitles":null}"#;
+        let receipt = yt_dlp_managed_media_expectations(stdout, Some("auto"))
+            .expect("explicit null means no selected subtitle was available");
+        assert_eq!(
+            receipt.subtitle_selection_state,
+            "no_selected_subtitle_available"
+        );
+        assert!(receipt.validation.subtitle_tracks.is_empty());
+    }
+
+    #[test]
+    fn yt_dlp_explicit_video_only_pre_selection_allows_video_only_mkv() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let paths = AppPaths::new(dir.path().join("app"));
+        let video_only = dir.path().join("video_only.mkv");
+        run_fixture_ffmpeg(
+            &paths,
+            &[
+                "-f",
+                "lavfi",
+                "-i",
+                "color=c=black:s=64x64:d=0.2",
+                "-c:v",
+                "mpeg4",
+                "-an",
+                &video_only.to_string_lossy(),
+            ],
+        );
+        let stdout = r#"VV_MEDIA_PRE:{"requested_formats":[{"vcodec":"avc1","acodec":"none"}],"requested_subtitles":null}
+VV_MEDIA_POST:{"audio_ext":"none","requested_subtitles":null}"#;
+        let receipt = yt_dlp_managed_media_expectations(stdout, Some("auto"))
+            .expect("receipt is selection intent, not final stream truth");
+        assert_eq!(receipt.validation.min_audio_streams, 0);
+        validate_managed_mkv_output(&paths, &video_only, &receipt.validation)
+            .expect("explicit video-only source remains a valid managed MKV");
+    }
+
+    #[test]
+    fn yt_dlp_audio_bearing_pre_selection_rejects_video_only_mkv() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let paths = AppPaths::new(dir.path().join("app"));
+        let video_only = dir.path().join("missing_selected_audio.mkv");
+        run_fixture_ffmpeg(
+            &paths,
+            &[
+                "-f",
+                "lavfi",
+                "-i",
+                "color=c=black:s=64x64:d=0.2",
+                "-c:v",
+                "mpeg4",
+                "-an",
+                &video_only.to_string_lossy(),
+            ],
+        );
+        let stdout = r#"VV_MEDIA_PRE:{"requested_formats":[{"vcodec":"avc1","acodec":"none"},{"vcodec":"none","acodec":"opus"}],"requested_subtitles":null}
+VV_MEDIA_POST:{"requested_subtitles":null}"#;
+        let receipt = yt_dlp_managed_media_expectations(stdout, Some("auto"))
+            .expect("audio-bearing selection receipt");
+        assert_eq!(receipt.validation.min_audio_streams, 1);
+        let error = validate_managed_mkv_output(&paths, &video_only, &receipt.validation)
+            .expect_err("selected audio may not disappear from the final MKV");
+        assert!(error.to_string().contains("lost audio streams"));
+    }
+
+    #[test]
+    fn subtitle_language_equivalence_covers_bcp47_iso_aliases_and_sidecar_qualifiers() {
+        assert!(subtitle_languages_match("fr", "fre"));
+        assert!(subtitle_languages_match("de", "ger"));
+        assert!(!subtitle_languages_match("fr-CA", "fre"));
+        assert!(!subtitle_languages_match("de-DE", "ger"));
+        assert!(!subtitle_languages_match("zh-Hant", "chi"));
+        assert!(!subtitle_languages_match("pt-BR", "por"));
+        assert!(subtitle_languages_match("zh-Hant", "zho-Hant"));
+        assert!(!subtitle_languages_match("fr", "de"));
+        assert_eq!(
+            subtitle_sidecar_language(Path::new("clip.fr-CA.forced.srt"), "clip").as_deref(),
+            Some("fr-CA")
+        );
+        assert_eq!(
+            subtitle_sidecar_language(Path::new("clip.de.sdh.vtt"), "clip").as_deref(),
+            Some("de")
+        );
+        assert_eq!(
+            subtitle_sidecar_language(Path::new("clip.pt-BR_SDH-forced.srt"), "clip").as_deref(),
+            Some("pt-BR")
+        );
+    }
+
+    #[test]
+    fn managed_output_guard_refuses_concurrent_finalizers_and_releases_cleanly() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let destination = dir.path().join("artifact.mkv");
+        let first = ManagedOutputGuard::acquire(&destination).expect("first finalizer");
+        let second = ManagedOutputGuard::acquire(&destination)
+            .expect_err("concurrent finalizer must be refused");
+        assert!(second.to_string().contains("already being finalized"));
+        drop(first);
+        ManagedOutputGuard::acquire(&destination).expect("lock released after attempt");
+    }
+
+    #[test]
+    fn job_downloader_envelope_preserves_incident_span_and_raii_cleanup() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let paths = AppPaths::new(dir.path().join("app"));
+        paths.ensure_dirs().expect("dirs");
+        let trace_dir = paths.effective_diagnostics_trace_dir().expect("trace dir");
+        std::fs::create_dir_all(&trace_dir).unwrap();
+        std::fs::write(
+            trace_dir.join("capture_state.json"),
+            serde_json::json!({
+                "mode": "normal",
+                "armed_trigger": "job_start",
+                "incident_id": "incident-envelope-fixture",
+                "expires_at_ms": now_ms() + 60_000,
+            })
+            .to_string(),
+        )
+        .unwrap();
+        let envelope = JobCausalEnvelope::for_job_start(&paths);
+        assert_eq!(
+            envelope.incident_id.as_deref(),
+            Some("incident-envelope-fixture")
+        );
+        assert!(envelope.span_id.starts_with("job-span-"));
+
+        let job_id = "job-envelope-fixture".to_string();
+        job_causal_envelopes()
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .insert(job_id.clone(), envelope.clone());
+        {
+            let _guard = JobCausalEnvelopeGuard::new(job_id.clone());
+            assert_eq!(
+                job_causal_envelopes()
+                    .lock()
+                    .unwrap_or_else(|poisoned| poisoned.into_inner())
+                    .get(&job_id)
+                    .and_then(|value| value.incident_id.as_deref()),
+                Some("incident-envelope-fixture")
+            );
+            let outcome = downloader_causal_details(Some(&job_id), 2, Some("timed_out"), None)
+                .expect("downloader outcome envelope");
+            assert_eq!(
+                outcome.get("incident_id").and_then(|value| value.as_str()),
+                Some("incident-envelope-fixture")
+            );
+            assert_eq!(
+                outcome.get("span_id").and_then(|value| value.as_str()),
+                Some(envelope.span_id.as_str())
+            );
+            assert_eq!(
+                outcome.get("outcome").and_then(|value| value.as_str()),
+                Some("timed_out")
+            );
+            assert!(outcome.get("args").is_none());
+            assert!(outcome.get("url").is_none());
+        }
+        assert!(!job_causal_envelopes()
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .contains_key(&job_id));
+    }
+
+    #[test]
+    fn yt_dlp_attempt_failure_is_receipted_and_bounded_while_cancel_and_success_clean() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let paths = AppPaths::new(dir.path().join("app"));
+        db::ensure_schema(&paths).expect("schema");
+        let conn = db::open(&paths).expect("db");
+        for (id, status) in [
+            ("failure-job", "queued"),
+            ("cancel-job", "canceled"),
+            ("success-job", "queued"),
+        ] {
+            conn.execute(
+                "INSERT INTO job(id,type,status,progress,params_json,created_at_ms,logs_path) VALUES(?1,'download_direct_url',?2,0,'{}',1,'test.log')",
+                params![id, status],
+            )
+            .expect("job");
+        }
+        drop(conn);
+
+        for index in 0..5 {
+            let marker = format!("failure-{index}");
+            let guard = AttemptDirectoryGuard::acquire_for_yt_dlp(
+                dir.path(),
+                &marker,
+                &paths,
+                "failure-job",
+            )
+            .expect("attempt");
+            std::fs::write(guard.path().join("sidecar.en.srt"), b"attempt owned").expect("sidecar");
+            drop(guard);
+        }
+        let failure_root = dir.path().join(".vv-attempts").join("failure-job");
+        let retained = std::fs::read_dir(&failure_root)
+            .expect("retained attempts")
+            .map(|entry| entry.expect("entry").path())
+            .filter(|path| path.is_dir())
+            .collect::<Vec<_>>();
+        assert_eq!(retained.len(), 3, "retention is bounded per canonical job");
+        for path in retained {
+            let receipt: AttemptRetentionReceipt = serde_json::from_slice(
+                &std::fs::read(path.join("retention_receipt.json")).expect("receipt bytes"),
+            )
+            .expect("receipt");
+            assert_eq!(receipt.job_id, "failure-job");
+            assert_eq!(receipt.state, "retained_failure");
+            assert!(receipt.retained_at_ms.is_some());
+            assert!(path.join("sidecar.en.srt").is_file());
+        }
+
+        let canceled =
+            AttemptDirectoryGuard::acquire_for_yt_dlp(dir.path(), "cancel", &paths, "cancel-job")
+                .expect("cancel attempt");
+        let canceled_path = canceled.path().to_path_buf();
+        drop(canceled);
+        assert!(!canceled_path.exists(), "cancellation cleans immediately");
+
+        let mut success =
+            AttemptDirectoryGuard::acquire_for_yt_dlp(dir.path(), "success", &paths, "success-job")
+                .expect("success attempt");
+        let success_path = success.path().to_path_buf();
+        success.cleanup_after_success();
+        drop(success);
+        assert!(
+            !success_path.exists(),
+            "proven successful publication cleans immediately"
+        );
+    }
+
+    #[test]
+    fn managed_output_guard_recovers_only_old_dead_owner_locks() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let destination = dir.path().join("crash-restart.mkv");
+        let lock_path = ManagedOutputGuard::lock_path(&destination);
+        let old_dead = ManagedOutputLockReceipt {
+            pid: u32::MAX,
+            created_at_ms: 1_000,
+            destination: destination.to_string_lossy().to_string(),
+        };
+        std::fs::write(&lock_path, serde_json::to_vec(&old_dead).unwrap()).unwrap();
+        let recovered =
+            ManagedOutputGuard::acquire_at(&destination, 10_000, Duration::from_millis(100))
+                .expect("crash restart must reclaim an old dead-owner lock");
+        let staging = dir.path().join("crash-restart.staging.mkv");
+        std::fs::write(&staging, b"validated restart output").unwrap();
+        recovered
+            .publish(&staging)
+            .expect("recovered owner must atomically finish the staged output");
+        assert_eq!(
+            std::fs::read(&destination).unwrap(),
+            b"validated restart output"
+        );
+        assert!(!staging.exists());
+        drop(recovered);
+
+        std::fs::remove_file(&destination).unwrap();
+
+        let live = ManagedOutputLockReceipt {
+            pid: std::process::id(),
+            created_at_ms: 1_000,
+            destination: destination.to_string_lossy().to_string(),
+        };
+        std::fs::write(&lock_path, serde_json::to_vec(&live).unwrap()).unwrap();
+        assert!(
+            ManagedOutputGuard::acquire_at(&destination, 10_000, Duration::from_millis(100))
+                .is_err(),
+            "an old lock is not stale while its owning PID is alive"
+        );
+    }
+
+    #[test]
+    fn publishing_receipt_reconciles_crash_window_without_duplicate_output() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let paths = AppPaths::new(dir.path().join("app"));
+        paths.ensure_dirs().expect("app dirs");
+        let published = dir.path().join("stable_video.mkv");
+        run_fixture_ffmpeg(
+            &paths,
+            &[
+                "-f",
+                "lavfi",
+                "-i",
+                "color=c=black:s=64x64:d=0.2",
+                "-c:v",
+                "mpeg4",
+                "-an",
+                &published.to_string_lossy(),
+            ],
+        );
+        let probe = ffmpeg::probe(&paths, &published).expect("probe fixture");
+        let provider = DOWNLOAD_PROVIDER_YOUTUBE_YT_DLP;
+        let url = "https://www.youtube.com/watch?v=stable-publication";
+        let (identity, source_fingerprint) = managed_publication_identity(provider, url);
+        let receipt = ManagedPublicationReceipt {
+            schema_version: MANAGED_PUBLICATION_RECEIPT_SCHEMA_VERSION,
+            identity,
+            provider: provider.to_string(),
+            source_fingerprint,
+            source_job_id: "first-attempt".to_string(),
+            path: published.to_string_lossy().to_string(),
+            state: "publishing".to_string(),
+            expectations: expectations_from_probe(&probe),
+            created_at_ms: 1,
+            updated_at_ms: 1,
+        };
+        write_managed_publication_receipt(&paths, &receipt).expect("publishing receipt");
+
+        assert_eq!(
+            recover_managed_publication(&paths, provider, url)
+                .expect("recover crash window")
+                .as_deref(),
+            Some(published.as_path())
+        );
+        mark_managed_publication_imported(&paths, provider, url, &published)
+            .expect("mark imported");
+        assert_eq!(
+            load_managed_publication_receipt(&paths, provider, url)
+                .unwrap()
+                .unwrap()
+                .state,
+            "imported"
+        );
+        assert!(
+            recover_managed_publication(&paths, provider, "https://example.invalid/other")
+                .unwrap()
+                .is_none(),
+            "another source identity must never reuse this publication"
+        );
+    }
+
+    #[test]
+    fn stale_lock_recovery_allows_only_one_restart_owner() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let destination = dir.path().join("stale-race.mkv");
+        let lock_path = ManagedOutputGuard::lock_path(&destination);
+        let stale = ManagedOutputLockReceipt {
+            pid: u32::MAX,
+            created_at_ms: 1_000,
+            destination: destination.to_string_lossy().to_string(),
+        };
+        std::fs::write(&lock_path, serde_json::to_vec(&stale).unwrap()).unwrap();
+        let barrier = Arc::new(std::sync::Barrier::new(3));
+        let spawn = || {
+            let barrier = Arc::clone(&barrier);
+            let destination = destination.clone();
+            std::thread::spawn(move || {
+                barrier.wait();
+                ManagedOutputGuard::acquire_at(&destination, 10_000, Duration::from_millis(100))
+            })
+        };
+        let first = spawn();
+        let second = spawn();
+        barrier.wait();
+        let outcomes = [first.join().unwrap(), second.join().unwrap()];
+        assert_eq!(outcomes.iter().filter(|result| result.is_ok()).count(), 1);
+    }
+
+    #[test]
+    fn crash_recovery_refuses_fresh_malformed_lock_but_reclaims_it_after_threshold() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let destination = dir.path().join("interrupted-lock-write.mkv");
+        let lock_path = ManagedOutputGuard::lock_path(&destination);
+        std::fs::write(&lock_path, b"{\"pid\":").unwrap();
+
+        assert!(
+            ManagedOutputGuard::acquire_at(&destination, 10_000, Duration::from_secs(60)).is_err(),
+            "a fresh unreadable lock may still have an active writer"
+        );
+        let recovered = ManagedOutputGuard::acquire_at(&destination, 10_000, Duration::ZERO)
+            .expect("an aged unreadable lock is a recoverable crash remnant");
+        drop(recovered);
+        assert!(!lock_path.exists());
+    }
+
+    #[test]
+    fn atomic_no_replace_publish_allows_exactly_one_concurrent_finalizer() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let destination = dir.path().join("winner.mkv");
+        let first = dir.path().join("first.staging");
+        let second = dir.path().join("second.staging");
+        std::fs::write(&first, b"first").unwrap();
+        std::fs::write(&second, b"second").unwrap();
+        let barrier = Arc::new(std::sync::Barrier::new(3));
+        let spawn = |staging: PathBuf| {
+            let destination = destination.clone();
+            let barrier = Arc::clone(&barrier);
+            std::thread::spawn(move || {
+                barrier.wait();
+                atomic_publish_no_replace(&staging, &destination)
+            })
+        };
+        let first_thread = spawn(first.clone());
+        let second_thread = spawn(second.clone());
+        barrier.wait();
+        let outcomes = [first_thread.join().unwrap(), second_thread.join().unwrap()];
+        assert_eq!(
+            outcomes.iter().filter(|outcome| outcome.is_ok()).count(),
+            1,
+            "concurrent publish outcomes: {outcomes:?}"
+        );
+        assert!(destination.is_file());
+        assert_eq!(
+            usize::from(first.exists()) + usize::from(second.exists()),
+            1
+        );
+
+        let preserved = std::fs::read(&destination).unwrap();
+        let later = dir.path().join("later.staging");
+        std::fs::write(&later, b"must-not-replace").unwrap();
+        assert!(atomic_publish_no_replace(&later, &destination).is_err());
+        assert_eq!(std::fs::read(&destination).unwrap(), preserved);
+        assert_eq!(std::fs::read(&later).unwrap(), b"must-not-replace");
+    }
+
+    #[test]
+    fn localization_mux_fingerprint_changes_for_dub_subtitle_identity_version_and_content() {
+        let baseline = MuxInputFingerprint {
+            schema_version: 3,
+            source_media_path: r"C:\archive\historical.mp4".to_string(),
+            source_media_bytes: 100,
+            source_media_modified_ns: Some(1),
+            source_media_sha256: sha256_bytes_hex(b"source-v1"),
+            dub_audio_sha256: sha256_bytes_hex(b"dub-v1"),
+            keep_original_audio: true,
+            dubbed_audio_language: "eng".to_string(),
+            original_audio_language: "fra".to_string(),
+            subtitles: vec![MuxSubtitleInputFingerprint {
+                track_id: "track-1".to_string(),
+                track_version: 1,
+                kind: "translated".to_string(),
+                language: "eng".to_string(),
+                content_sha256: sha256_bytes_hex(b"subtitle-v1"),
+            }],
+        };
+        for changed in [
+            MuxInputFingerprint {
+                dub_audio_sha256: sha256_bytes_hex(b"dub-v2"),
+                ..baseline.clone()
+            },
+            MuxInputFingerprint {
+                source_media_sha256: sha256_bytes_hex(b"source-v2"),
+                ..baseline.clone()
+            },
+            MuxInputFingerprint {
+                subtitles: vec![MuxSubtitleInputFingerprint {
+                    track_id: "track-2".to_string(),
+                    ..baseline.subtitles[0].clone()
+                }],
+                ..baseline.clone()
+            },
+            MuxInputFingerprint {
+                subtitles: vec![MuxSubtitleInputFingerprint {
+                    track_version: 2,
+                    content_sha256: sha256_bytes_hex(b"subtitle-v2"),
+                    ..baseline.subtitles[0].clone()
+                }],
+                ..baseline.clone()
+            },
+        ] {
+            assert_ne!(baseline, changed);
+        }
+    }
+
+    fn publication_test_fingerprint(label: &str) -> MuxInputFingerprint {
+        MuxInputFingerprint {
+            schema_version: 3,
+            source_media_path: format!(r"C:\archive\source-{label}.mp4"),
+            source_media_bytes: 100,
+            source_media_modified_ns: Some(1),
+            source_media_sha256: sha256_bytes_hex(format!("source-{label}").as_bytes()),
+            dub_audio_sha256: sha256_bytes_hex(format!("dub-{label}").as_bytes()),
+            keep_original_audio: true,
+            dubbed_audio_language: "eng".to_string(),
+            original_audio_language: "fra".to_string(),
+            subtitles: Vec::new(),
+        }
+    }
+
+    struct LocalizationPublicationFixture {
+        _dir: tempfile::TempDir,
+        paths: AppPaths,
+        out_dir: PathBuf,
+        staging: PathBuf,
+        publication: LocalizationPreviewPublication,
+    }
+
+    fn localization_publication_fixture(
+        label: &str,
+        source_job_created_at_ms: i64,
+        with_continuations: bool,
+    ) -> LocalizationPublicationFixture {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let paths = AppPaths::new(dir.path().join("app"));
+        paths.ensure_dirs().expect("app dirs");
+        let item_id = "localization-item";
+        seed_item_only(&paths, item_id, "Localization item");
+        let source_job = enqueue_with_type_item_and_batch_id(
+            &paths,
+            JobType::MuxDubPreviewV1,
+            serde_json::json!({ "item_id": item_id }).to_string(),
+            Some(item_id.to_string()),
+            Some("localization-batch".to_string()),
+        )
+        .expect("source mux job");
+        let conn = db::open(&paths).expect("db");
+        conn.execute(
+            "UPDATE job SET created_at_ms=?1 WHERE id=?2",
+            params![source_job_created_at_ms, source_job.id],
+        )
+        .expect("order source job");
+        drop(conn);
+
+        let fingerprint = publication_test_fingerprint(label);
+        let variant_key = String::new();
+        let (generation_id, _, _) =
+            localization_preview_generation(item_id, &variant_key, &fingerprint)
+                .expect("generation");
+        let out_dir = paths.derived_item_dir(item_id).join("dub_preview");
+        std::fs::create_dir_all(&out_dir).expect("out dir");
+        let attempt_dir = out_dir.join(format!(
+            ".vv-attempt-{}",
+            sha256_bytes_hex(label.as_bytes())[..32].to_string()
+        ));
+        std::fs::create_dir(&attempt_dir).expect("attempt dir");
+        let staging = attempt_dir.join("mux_dub_preview_v1.muxing.mkv");
+        std::fs::write(&staging, format!("validated-mkv-{label}")).expect("staging");
+        let artifact_path = localization_preview_artifact_path(&out_dir, &generation_id)
+            .expect("artifact path");
+        let qc_intent = with_continuations.then(|| LocalizationPreviewContinuationIntent {
+            job_id: format!("{generation_id}-qc"),
+            job_type: JobType::QcReportV1.as_str().to_string(),
+            params_json: serde_json::json!({
+                "item_id": item_id,
+                "track_id": "source-track",
+                "variant_label": null
+            })
+            .to_string(),
+            batch_id: Some("localization-batch".to_string()),
+        });
+        let export_intent = with_continuations.then(|| LocalizationPreviewContinuationIntent {
+            job_id: format!("{generation_id}-export"),
+            job_type: JobType::ExportPackV1.as_str().to_string(),
+            params_json: serde_json::json!({
+                "item_id": item_id,
+                "include_alternates": true,
+                "variant_label": null
+            })
+            .to_string(),
+            batch_id: Some("localization-batch".to_string()),
+        });
+        let publication = prepare_localization_preview_publication(
+            &paths,
+            item_id,
+            &variant_key,
+            &source_job.id,
+            &fingerprint,
+            &artifact_path,
+            &published_file_identity(&staging).expect("staging identity"),
+            &staging,
+            qc_intent.as_ref(),
+            export_intent.as_ref(),
+        )
+        .expect("prepare publication");
+        LocalizationPublicationFixture {
+            _dir: dir,
+            paths,
+            out_dir,
+            staging,
+            publication,
+        }
+    }
+
+    #[test]
+    fn localization_preview_immutable_generation_preserves_unknown_fixed_path_and_receipts() {
+        let fixture = localization_publication_fixture("immutable", 10, true);
+        let fixed = fixture.out_dir.join("mux_dub_preview_v1.mkv");
+        let legacy_manifest = fixture.out_dir.join("mux_dub_preview_v1.inputs.json");
+        let editable_receipt = fixture
+            .out_dir
+            .join("mux_dub_preview_v1.publication.json");
+        std::fs::write(&fixed, b"unknown-legacy-final").unwrap();
+        std::fs::write(&legacy_manifest, b"{\"attacker\":true}").unwrap();
+        std::fs::write(&editable_receipt, b"copied-editable-receipt").unwrap();
+
+        publish_localization_preview_generation_with_hook(
+            &fixture.paths,
+            &fixture.staging,
+            &fixture.publication,
+            |_| Ok(()),
+        )
+        .expect("publish immutable generation");
+
+        assert_eq!(std::fs::read(&fixed).unwrap(), b"unknown-legacy-final");
+        assert_eq!(std::fs::read(&legacy_manifest).unwrap(), b"{\"attacker\":true}");
+        assert_eq!(std::fs::read(&editable_receipt).unwrap(), b"copied-editable-receipt");
+        assert!(fixture.publication.artifact_path.is_file());
+        assert_eq!(
+            active_localization_preview_path(&fixture.paths, "localization-item", None)
+                .unwrap()
+                .as_deref(),
+            Some(fixture.publication.artifact_path.as_path())
+        );
+        let row = load_localization_preview_publication(
+            &fixture.paths,
+            &fixture.publication.generation_id,
+        )
+        .unwrap()
+        .unwrap();
+        assert_eq!(row.phase, "committed");
+        assert_eq!(row.qc_job_id, row.qc_intent.map(|intent| intent.job_id));
+        assert_eq!(row.export_job_id, row.export_intent.map(|intent| intent.job_id));
+
+        let changed_fingerprint = publication_test_fingerprint("changed-input");
+        let changed_job = enqueue_with_type_item_and_batch_id(
+            &fixture.paths,
+            JobType::MuxDubPreviewV1,
+            serde_json::json!({ "item_id": "localization-item" }).to_string(),
+            Some("localization-item".to_string()),
+            None,
+        )
+        .unwrap();
+        let conn = db::open(&fixture.paths).unwrap();
+        conn.execute(
+            "UPDATE job SET created_at_ms=20 WHERE id=?1",
+            [&changed_job.id],
+        )
+        .unwrap();
+        drop(conn);
+        let (changed_generation, _, _) = localization_preview_generation(
+            "localization-item",
+            "",
+            &changed_fingerprint,
+        )
+        .unwrap();
+        let changed_attempt = fixture
+            .out_dir
+            .join(".vv-attempt-bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb");
+        std::fs::create_dir(&changed_attempt).unwrap();
+        let changed_staging = changed_attempt.join("mux_dub_preview_v1.muxing.mkv");
+        std::fs::write(&changed_staging, b"changed-input-generation").unwrap();
+        let changed_path =
+            localization_preview_artifact_path(&fixture.out_dir, &changed_generation).unwrap();
+        let changed = prepare_localization_preview_publication(
+            &fixture.paths,
+            "localization-item",
+            "",
+            &changed_job.id,
+            &changed_fingerprint,
+            &changed_path,
+            &published_file_identity(&changed_staging).unwrap(),
+            &changed_staging,
+            None,
+            None,
+        )
+        .unwrap();
+        publish_localization_preview_generation_with_hook(
+            &fixture.paths,
+            &changed_staging,
+            &changed,
+            |_| Ok(()),
+        )
+        .unwrap();
+        assert_eq!(
+            active_localization_preview_path(&fixture.paths, "localization-item", None)
+                .unwrap()
+                .as_deref(),
+            Some(changed_path.as_path())
+        );
+        assert!(fixture.publication.artifact_path.is_file());
+        commit_localization_preview_publication(&fixture.paths, &fixture.publication)
+            .expect("late retry of older generation");
+        assert_eq!(
+            active_localization_preview_path(&fixture.paths, "localization-item", None)
+                .unwrap()
+                .as_deref(),
+            Some(changed_path.as_path()),
+            "late older retry must not roll back the active pointer"
+        );
+    }
+
+    #[test]
+    fn localization_preview_reconciles_every_publish_phase_without_overwrite() {
+        for crash_phase in ["after_prepare", "after_publish", "after_mark_published", "after_commit"] {
+            let fixture = localization_publication_fixture(crash_phase, 10, true);
+            let error = publish_localization_preview_generation_with_hook(
+                &fixture.paths,
+                &fixture.staging,
+                &fixture.publication,
+                |phase| {
+                    if phase == crash_phase {
+                        Err(EngineError::InstallFailed(format!("crash:{phase}")))
+                    } else {
+                        Ok(())
+                    }
+                },
+            )
+            .expect_err("crash phase must interrupt caller");
+            assert!(error.to_string().contains("crash:"));
+            let stored = load_localization_preview_publication(
+                &fixture.paths,
+                &fixture.publication.generation_id,
+            )
+            .unwrap()
+            .unwrap();
+            assert!(reconcile_existing_localization_preview_publication(&fixture.paths, &stored)
+                .expect("fresh/resume reconciliation"));
+            let committed = load_localization_preview_publication(
+                &fixture.paths,
+                &fixture.publication.generation_id,
+            )
+            .unwrap()
+            .unwrap();
+            assert_eq!(committed.phase, "committed", "phase {crash_phase}");
+            assert!(committed.artifact_path.is_file());
+        }
+    }
+
+    #[test]
+    fn localization_preview_continuation_transaction_rolls_back_and_retries_idempotently() {
+        for crash_phase in [
+            "before_continuations",
+            "after_qc_enqueue",
+            "after_export_enqueue",
+            "before_active_pointer",
+            "after_active_pointer",
+            "after_phase_commit",
+        ] {
+            let fixture = localization_publication_fixture(crash_phase, 10, true);
+            atomic_publish_no_replace(&fixture.staging, &fixture.publication.artifact_path)
+                .expect("publish bytes");
+            mark_localization_preview_published(
+                &fixture.paths,
+                &fixture.publication.generation_id,
+            )
+            .expect("published phase");
+            commit_localization_preview_publication_with_hook(
+                &fixture.paths,
+                &fixture.publication,
+                |phase| {
+                    if phase == crash_phase {
+                        Err(EngineError::InstallFailed(format!("crash:{phase}")))
+                    } else {
+                        Ok(())
+                    }
+                },
+            )
+            .expect_err("transaction crash must surface");
+            let before_retry = load_localization_preview_publication(
+                &fixture.paths,
+                &fixture.publication.generation_id,
+            )
+            .unwrap()
+            .unwrap();
+            assert_eq!(before_retry.phase, "published", "rollback {crash_phase}");
+            commit_localization_preview_publication(&fixture.paths, &before_retry)
+                .expect("idempotent retry");
+            commit_localization_preview_publication(&fixture.paths, &before_retry)
+                .expect("second idempotent retry");
+            assert_eq!(
+                load_localization_preview_publication(
+                    &fixture.paths,
+                    &fixture.publication.generation_id,
+                )
+                .unwrap()
+                .unwrap()
+                .phase,
+                "committed"
+            );
+        }
+    }
+
+    #[test]
+    fn localization_preview_late_race_and_lineage_tamper_never_authorize_replacement() {
+        let fixture = localization_publication_fixture("late-race", 10, false);
+        let error = publish_localization_preview_generation_with_hook(
+            &fixture.paths,
+            &fixture.staging,
+            &fixture.publication,
+            |phase| {
+                if phase == "after_prepare" {
+                    std::fs::write(&fixture.publication.artifact_path, b"late-race-winner")?;
+                }
+                Ok(())
+            },
+        )
+        .expect_err("conflicting late publisher must win without replacement");
+        assert!(error.to_string().contains("conflicting bytes"));
+        assert_eq!(
+            std::fs::read(&fixture.publication.artifact_path).unwrap(),
+            b"late-race-winner"
+        );
+
+        let copied = fixture.out_dir.join(
+            "mux_dub_preview_v1.gen-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa.mkv",
+        );
+        std::fs::copy(&fixture.publication.artifact_path, &copied).unwrap();
+        let conn = db::open(&fixture.paths).unwrap();
+        assert!(conn.execute(
+            "UPDATE localization_preview_publication SET artifact_path=?1 WHERE generation_id=?2",
+            params![copied.to_string_lossy(), fixture.publication.generation_id],
+        ).is_err(), "trusted lineage path must be immutable");
+        assert!(conn.execute(
+            "UPDATE localization_preview_publication SET phase='committed' WHERE generation_id=?1",
+            [&fixture.publication.generation_id],
+        ).is_err(), "prepared must not skip directly to committed");
+    }
+
+    #[test]
+    fn active_localization_preview_rejects_same_size_restored_mtime_tamper_after_cache_hit() {
+        let fixture = localization_publication_fixture("active-tamper", 10, false);
+        reconcile_existing_localization_preview_publication(&fixture.paths, &fixture.publication)
+            .expect("publish fixture");
+        let fixed_mkv = fixture.out_dir.join("mux_dub_preview_v1.mkv");
+        std::fs::write(&fixed_mkv, b"legacy-fallback-must-not-mask-lineage-failure")
+            .expect("fixed fallback");
+        assert_eq!(
+            active_localization_preview_path(&fixture.paths, "localization-item", None)
+                .expect("prime verified identity"),
+            Some(fixture.publication.artifact_path.clone())
+        );
+        let original_mtime = filetime::FileTime::from_last_modification_time(
+            &std::fs::metadata(&fixture.publication.artifact_path).expect("metadata"),
+        );
+        let mut replacement = std::fs::read(&fixture.publication.artifact_path).expect("artifact");
+        replacement[0] ^= 0x01;
+        std::fs::write(&fixture.publication.artifact_path, replacement)
+            .expect("same-size replacement");
+        filetime::set_file_mtime(&fixture.publication.artifact_path, original_mtime)
+            .expect("restore last-write time");
+
+        let error = active_localization_preview_path(&fixture.paths, "localization-item", None)
+            .expect_err("same-size replacement must invalidate the verified cache");
+        assert!(error.to_string().contains("content hash"), "{error}");
+        assert!(
+            mux_output_exists(&fixture.paths, "localization-item").is_err(),
+            "readiness must fail closed rather than select the fixed fallback"
+        );
+        assert!(
+            localization_preview_export_artifact(
+                &fixture.paths,
+                "localization-item",
+                None,
+                &fixture.out_dir,
+            )
+            .is_err(),
+            "export must fail closed rather than select the fixed fallback"
+        );
+    }
+
+    #[test]
+    fn localization_preview_consumers_fallback_only_for_canonical_absence() {
+        let fixture = localization_publication_fixture("consumer-outcome", 10, false);
+        let fixed_mkv = fixture.out_dir.join("mux_dub_preview_v1.mkv");
+        std::fs::write(&fixed_mkv, b"legacy-mkv").expect("legacy fixed artifact");
+
+        assert_eq!(
+            localization_preview_consumer_outcome(
+                &fixture.paths,
+                "localization-item",
+                None,
+            ),
+            LocalizationPreviewConsumerOutcome::CanonicalAbsence
+        );
+        assert!(mux_output_exists(&fixture.paths, "localization-item").unwrap());
+        assert_eq!(
+            localization_preview_export_artifact(
+                &fixture.paths,
+                "localization-item",
+                None,
+                &fixture.out_dir,
+            )
+            .unwrap()
+            .as_deref(),
+            Some(fixed_mkv.as_path())
+        );
+
+        reconcile_existing_localization_preview_publication(&fixture.paths, &fixture.publication)
+            .expect("publish active generation");
+        std::fs::remove_file(&fixture.publication.artifact_path)
+            .expect("simulate missing active bytes");
+        assert!(matches!(
+            localization_preview_consumer_outcome(
+                &fixture.paths,
+                "localization-item",
+                None,
+            ),
+            LocalizationPreviewConsumerOutcome::LineageFailure(_)
+        ));
+        assert!(mux_output_exists(&fixture.paths, "localization-item").is_err());
+        assert!(localization_preview_export_artifact(
+            &fixture.paths,
+            "localization-item",
+            None,
+            &fixture.out_dir,
+        )
+        .is_err());
+    }
+
+    #[test]
+    fn localization_preview_consumers_reject_active_published_lineage() {
+        let fixture = localization_publication_fixture("active-published", 10, false);
+        let fixed_mkv = fixture.out_dir.join("mux_dub_preview_v1.mkv");
+        std::fs::write(&fixed_mkv, b"legacy-fallback-must-not-mask-published-lineage")
+            .unwrap();
+        mark_localization_preview_published(&fixture.paths, &fixture.publication.generation_id)
+            .expect("published phase");
+        let conn = db::open(&fixture.paths).expect("db");
+        conn.execute_batch(
+            "DROP TRIGGER trg_localization_preview_active_committed_insert;
+             DROP TRIGGER trg_localization_preview_active_committed_update;",
+        )
+        .expect("simulate upgraded pre-v44 active pointer");
+        conn.execute(
+            "INSERT INTO localization_preview_active(
+               item_id,variant_key,generation_id,source_job_created_at_ms,source_job_id,updated_at_ms
+             ) VALUES(?1,?2,?3,10,?4,10)",
+            params![
+                fixture.publication.item_id,
+                fixture.publication.variant_key,
+                fixture.publication.generation_id,
+                fixture.publication.source_job_id,
+            ],
+        )
+        .expect("legacy active-to-published state");
+        drop(conn);
+
+        assert!(matches!(
+            localization_preview_consumer_outcome(
+                &fixture.paths,
+                &fixture.publication.item_id,
+                None,
+            ),
+            LocalizationPreviewConsumerOutcome::LineageFailure(error)
+                if error.contains("non-committed publication phase published")
+        ));
+        assert!(mux_output_exists(&fixture.paths, &fixture.publication.item_id).is_err());
+        assert!(
+            localization_preview_export_artifact(
+                &fixture.paths,
+                &fixture.publication.item_id,
+                None,
+                &fixture.out_dir,
+            )
+            .is_err(),
+            "export must not use fixed legacy bytes while an active publication is incomplete"
+        );
+    }
+
+    #[test]
+    fn localization_preview_staging_pruner_is_bounded_and_preserves_unknown_and_final_media() {
+        let fixture = localization_publication_fixture("pruner", 10, false);
+        let old = now_ms() - LOCALIZATION_STAGING_RETENTION_MS - 1;
+        for index in 0..70 {
+            let attempt = fixture.out_dir.join(format!(".vv-attempt-{index:032x}"));
+            std::fs::create_dir(&attempt).unwrap();
+            write_localization_preview_staging_marker(
+                &attempt,
+                &LocalizationPreviewStagingMarker {
+                    schema_version: 1,
+                    generation_id: format!("localization-preview-{index:064x}"),
+                    item_id: "localization-item".to_string(),
+                    variant_key: String::new(),
+                    created_at_ms: old,
+                },
+            )
+            .unwrap();
+        }
+        let unknown = fixture.out_dir.join(".vv-attempt-ffffffffffffffffffffffffffffffff");
+        std::fs::create_dir(&unknown).unwrap();
+        std::fs::write(unknown.join("operator.bin"), b"preserve").unwrap();
+        let fixed_mkv = fixture.out_dir.join("mux_dub_preview_v1.mkv");
+        let fixed_mp4 = fixture.out_dir.join("mux_dub_preview_v1.mp4");
+        std::fs::write(&fixed_mkv, b"historical-mkv").unwrap();
+        std::fs::write(&fixed_mp4, b"historical-mp4").unwrap();
+
+        let removed = prune_orphan_localization_preview_staging(
+            &fixture.paths,
+            &fixture.out_dir,
+            "localization-item",
+            "",
+            now_ms(),
+        )
+        .unwrap();
+        assert_eq!(removed, LOCALIZATION_STAGING_DELETE_LIMIT);
+        assert!(unknown.is_dir());
+        assert_eq!(std::fs::read(&fixed_mkv).unwrap(), b"historical-mkv");
+        assert_eq!(std::fs::read(&fixed_mp4).unwrap(), b"historical-mp4");
+        assert!(fixture.publication.artifact_path.parent().unwrap().is_dir());
+    }
+
+    #[test]
+    fn localization_preview_staging_pruner_preserves_aged_prepared_owner_and_resume() {
+        let fixture = localization_publication_fixture("aged-prepared", 10, false);
+        let attempt_dir = fixture.staging.parent().expect("attempt dir");
+        write_localization_preview_staging_marker(
+            attempt_dir,
+            &LocalizationPreviewStagingMarker {
+                schema_version: 1,
+                generation_id: fixture.publication.generation_id.clone(),
+                item_id: fixture.publication.item_id.clone(),
+                variant_key: fixture.publication.variant_key.clone(),
+                created_at_ms: now_ms() - LOCALIZATION_STAGING_RETENTION_MS - 1,
+            },
+        )
+        .expect("aged owned marker");
+
+        let removed = prune_orphan_localization_preview_staging(
+            &fixture.paths,
+            &fixture.out_dir,
+            &fixture.publication.item_id,
+            &fixture.publication.variant_key,
+            now_ms(),
+        )
+        .expect("prune");
+        assert_eq!(removed, 0);
+        assert!(fixture.staging.is_file(), "prepared recovery source must survive retention");
+
+        reconcile_existing_localization_preview_publication(&fixture.paths, &fixture.publication)
+            .expect("aged prepared publication remains resumable");
+        assert_eq!(
+            load_localization_preview_publication(
+                &fixture.paths,
+                &fixture.publication.generation_id,
+            )
+            .expect("load")
+            .expect("publication")
+            .phase,
+            "committed"
+        );
+        assert!(fixture.publication.artifact_path.is_file());
+    }
+
+    #[test]
+    fn localization_preview_post_publication_reporting_is_best_effort() {
+        let mut progress_calls = 0;
+        let mut log_calls = 0;
+        let (progress_error, log_error) = run_post_publication_best_effort(
+            || {
+                progress_calls += 1;
+                Err(EngineError::InstallFailed(
+                    "injected progress failure".to_string(),
+                ))
+            },
+            || {
+                log_calls += 1;
+                Err(EngineError::InstallFailed(
+                    "injected log failure".to_string(),
+                ))
+            },
+        );
+        assert_eq!(progress_calls, 1);
+        assert_eq!(log_calls, 1, "logging still runs when progress persistence fails");
+        assert!(progress_error.unwrap().contains("progress failure"));
+        assert!(log_error.unwrap().contains("log failure"));
+    }
+
+    #[test]
+    fn localization_source_identity_hashes_whole_file_with_restored_mtime() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let source = dir.path().join("source.mp4");
+        std::fs::write(&source, vec![b'a'; 512 * 1024]).expect("first source");
+        let original_mtime = filetime::FileTime::from_last_modification_time(
+            &std::fs::metadata(&source).expect("original metadata"),
+        );
+        let first = full_file_identity(&source).expect("first identity");
+        let mut bytes = std::fs::read(&source).expect("source bytes");
+        bytes[128 * 1024 + 1] = b'b';
+        std::fs::write(&source, bytes).expect("same-size in-place replacement");
+        filetime::set_file_mtime(&source, original_mtime).expect("restore mtime");
+        let second = full_file_identity(&source).expect("replacement identity");
+        assert_eq!(first.0, second.0, "counterexample preserves file size");
+        assert_eq!(first.1, second.1, "counterexample restores modified time");
+        assert_ne!(
+            first.2, second.2,
+            "whole-file content must invalidate resume"
+        );
+    }
+
+    #[test]
+    fn yt_dlp_requested_subtitle_receipt_distinguishes_none_available_from_selection_miss() {
+        let none_available =
+            r#"VV_MEDIA_INFO:{"requested_downloads":[{"acodec":"opus"}],"requested_subtitles":{}}"#;
+        let receipt = yt_dlp_managed_media_expectations(none_available, Some("auto"))
+            .expect("truthful empty selection receipt");
+        assert!(receipt.subtitles_requested);
+        assert_eq!(
+            receipt.subtitle_selection_state,
+            "no_selected_subtitle_available"
+        );
+        assert!(receipt.validation.subtitle_tracks.is_empty());
+
+        let missing_state = r#"VV_MEDIA_INFO:{"requested_downloads":[{"acodec":"opus"}]}"#;
+        let error = yt_dlp_managed_media_expectations(missing_state, Some("auto"))
+            .expect_err("missing selection state must not succeed");
+        assert!(error
+            .to_string()
+            .contains("did not state the requested subtitle selection result"));
+    }
+
+    #[test]
+    fn exact_stream_metadata_validation_consumes_distinct_tracks() {
+        let expected = vec![
+            StreamExpectation {
+                language: Some("en".to_string()),
+                title: Some("English".to_string()),
+            },
+            StreamExpectation {
+                language: Some("en".to_string()),
+                title: Some("English SDH".to_string()),
+            },
+        ];
+        let one_track = vec![StreamExpectation {
+            language: Some("eng".to_string()),
+            title: Some("English".to_string()),
+        }];
+        assert!(validate_stream_expectations(
+            "subtitle",
+            &expected,
+            &one_track,
+            Path::new("managed.mkv")
+        )
+        .is_err());
     }
 
     #[test]

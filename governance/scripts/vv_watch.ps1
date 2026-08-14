@@ -8,7 +8,9 @@ param(
     [switch]$SelfTest,
     [switch]$Quiet,
     [switch]$NoPathProbe,
-    [switch]$IncludeToolingProbe
+    [switch]$IncludeToolingProbe,
+    [string]$IncidentId,
+    [string]$WprProfilePath
 )
 
 $ErrorActionPreference = "Stop"
@@ -58,8 +60,86 @@ function Redact-CommandLine([string]$CommandLine) {
     $redacted = $CommandLine
     $redacted = [regex]::Replace($redacted, '(?i)(--cookies(?:-from-browser)?\s+)"[^"]*"', '$1"<redacted>"')
     $redacted = [regex]::Replace($redacted, '(?i)(--cookies(?:-from-browser)?\s+)\S+', '$1<redacted>')
+    $redacted = [regex]::Replace($redacted, '(?i)(--header(?:=|\s+))(["''])(\s*(?:proxy-)?authorization\s*:)\s*.*?\2', '$1$2$3 <redacted>$2')
+    $redacted = [regex]::Replace($redacted, '(?i)\b(?:proxy-)?authorization\b\s*[:=]\s*(?:bearer|basic)\s+(?:"[^"]*"|''[^'']*''|[^\s,;:=]+)', 'Authorization: <redacted>')
+    $redacted = [regex]::Replace($redacted, '(?i)(--(?:password|proxy|username|user-data-dir|profile-directory|auth|authorization)(?:=|\s+))(?:"[^"]*"|\S+)', '$1<redacted>')
     $redacted = [regex]::Replace($redacted, '(?i)(token|password|secret|cookie)=([^&\s"]+)', '$1=<redacted>')
+    $redacted = [regex]::Replace($redacted, '(?i)(https?://)[^/@\s:]+:[^/@\s]+@', '$1<redacted>@')
+    $redacted = [regex]::Replace($redacted, '(?i)[A-Z]:\\Users\\[^\s"]+', '<redacted_path>')
+    $redacted = [regex]::Replace($redacted, '(?i)/(?:Users|home)/[^\s"]+', '<redacted_path>')
     return $redacted
+}
+
+function Test-SharedRedactionVectors {
+    $vectorsPath = @(
+        (Join-Path $PSScriptRoot "..\..\product\diagnostics\redaction_adversarial_vectors.json"),
+        (Join-Path $PSScriptRoot "..\..\..\diagnostics\redaction_adversarial_vectors.json")
+    ) | Where-Object { Test-Path -LiteralPath $_ -PathType Leaf } | Select-Object -First 1
+    if ([string]::IsNullOrWhiteSpace([string]$vectorsPath)) {
+        throw "Shared redaction vector file is missing from the repository or shipped watcher layout"
+    }
+    $vectors = Get-Content -LiteralPath $vectorsPath -Raw | ConvertFrom-Json
+    foreach ($vector in $vectors) {
+        $redacted = Redact-CommandLine ([string]$vector.input)
+        foreach ($secret in $vector.secrets) {
+            if ($redacted.IndexOf([string]$secret, [StringComparison]::OrdinalIgnoreCase) -ge 0) {
+                throw "redaction self-test leaked shared secret: $secret"
+            }
+        }
+        foreach ($context in $vector.preserve) {
+            if ($redacted.IndexOf([string]$context, [StringComparison]::OrdinalIgnoreCase) -lt 0) {
+                throw "redaction self-test removed useful context: $context"
+            }
+        }
+        if ($redacted -notmatch '<redacted>') { throw "redaction self-test produced no marker" }
+    }
+}
+
+function Get-ActiveAppIncidentId([string]$AppDir) {
+    try {
+        $traceDir = Get-DiagnosticsTraceDir -AppDir $AppDir
+        $capturePath = Join-Path $traceDir "capture_state.json"
+        if (-not (Test-Path -LiteralPath $capturePath -PathType Leaf)) { return $null }
+        $capture = Get-Content -LiteralPath $capturePath -Raw | ConvertFrom-Json
+        $isPreassignedArmedIncident = $capture.mode -eq "normal" -and -not [string]::IsNullOrWhiteSpace([string]$capture.armed_trigger)
+        if (($capture.mode -eq "incident" -or $isPreassignedArmedIncident) -and -not [string]::IsNullOrWhiteSpace([string]$capture.incident_id)) {
+            return [string]$capture.incident_id
+        }
+    } catch {}
+    return $null
+}
+
+function Adopt-ActiveAppIncident(
+    [string]$AppDir,
+    [hashtable]$Metadata,
+    [string]$RunDir,
+    [ref]$CurrentIncidentId,
+    [ref]$CurrentIncidentSource
+) {
+    if ([string]$CurrentIncidentSource.Value -ne "watch_only_unmatched") { return $false }
+    $activeIncidentId = Get-ActiveAppIncidentId -AppDir $AppDir
+    if ([string]::IsNullOrWhiteSpace([string]$activeIncidentId)) { return $false }
+    $CurrentIncidentId.Value = [string]$activeIncidentId
+    $CurrentIncidentSource.Value = "active_app_capture_after_watch_start"
+    $Metadata.incident_id = [string]$activeIncidentId
+    $Metadata.incident_source = "active_app_capture_after_watch_start"
+    $Metadata.incident_inherited_at_ms = Now-Ms
+    Write-Utf8NoBomFile -Path (Join-Path $RunDir "metadata.json") -Content ((Convert-ToJsonLine $Metadata 8) + "`n")
+    return $true
+}
+
+function Update-SampleIncidentCorrelation([object]$Sample, [string]$AppDir, [string]$IncidentId) {
+    if ($null -eq $Sample) { return }
+    $Sample.incident_id = $IncidentId
+    $processPid = if ($Sample.process -and $Sample.process.root) { $Sample.process.root.pid } else { $null }
+    $processStartedAtMs = if ($Sample.bridge -and $Sample.bridge.file) { $Sample.bridge.file.started_at_ms } else { $null }
+    $Sample.trace = Get-TraceSummary -AppDir $AppDir -CurrentProcessPid $processPid -ProcessStartedAtMs $processStartedAtMs -CorrelationIncidentId $IncidentId
+}
+
+function Write-SampleSnapshot([string]$Path, [object[]]$Samples) {
+    $lines = @($Samples | ForEach-Object { Convert-ToJsonLine $_ 14 })
+    $content = if ($lines.Count -gt 0) { ($lines -join "`n") + "`n" } else { "" }
+    Write-Utf8NoBomFile -Path $Path -Content $content
 }
 
 function Quote-ProcessArg([string]$Value) {
@@ -303,6 +383,7 @@ function Get-ProcessTreeSnapshot($RootProcess) {
         root = $null
         descendants = @()
         heavy_descendants = @()
+        webview_descendants = @()
         descendant_count = 0
         heavy_descendant_count = 0
         error = $null
@@ -334,6 +415,25 @@ function Get-ProcessTreeSnapshot($RootProcess) {
             $_.name -notmatch '(?i)^msedgewebview2\.exe$' -and
             (($_.name + " " + $_.command_line) -match '(?i)yt-dlp|ffmpeg|python(\.exe)?|pip(\.exe)?|kokoro|demucs|VoiceEncoder|torch\.cuda|nvidia-smi|spleeter|huggingface')
         })
+        $webview = @(
+            $processRows |
+                Where-Object { $_.name -match '(?i)^msedgewebview2\.exe$' } |
+                ForEach-Object {
+                    $row = $_
+                    $live = Get-Process -Id $row.pid -ErrorAction SilentlyContinue
+                    [ordered]@{
+                        pid = $row.pid
+                        parent_pid = $row.parent_pid
+                        command_line = $row.command_line
+                        responding = if ($live) { [bool]$live.Responding } else { $null }
+                        cpu_seconds = if ($live) { try { [double]$live.CPU } catch { $null } } else { $null }
+                        working_set_bytes = if ($live) { try { [int64]$live.WorkingSet64 } catch { $null } } else { $null }
+                        private_memory_bytes = if ($live) { try { [int64]$live.PrivateMemorySize64 } catch { $null } } else { $null }
+                        read_operation_count = if ($live) { try { [int64]$live.ReadOperationCount } catch { $null } } else { $null }
+                        write_operation_count = if ($live) { try { [int64]$live.WriteOperationCount } catch { $null } } else { $null }
+                    }
+                }
+        )
 
         $rootStartTime = $null
         $rootCpuSeconds = $null
@@ -360,6 +460,7 @@ function Get-ProcessTreeSnapshot($RootProcess) {
         }
         $snapshot.descendants = $processRows
         $snapshot.heavy_descendants = $heavy
+        $snapshot.webview_descendants = $webview
         $snapshot.descendant_count = $processRows.Count
         $snapshot.heavy_descendant_count = $heavy.Count
     } catch {
@@ -373,6 +474,7 @@ function Get-LightweightProcessSnapshot($RootProcess) {
         root = $null
         descendants = @()
         heavy_descendants = @()
+        webview_descendants = @()
         descendant_count = 0
         heavy_descendant_count = 0
         error = $null
@@ -906,7 +1008,56 @@ function Get-DiagnosticsTraceDir([string]$AppDir) {
     return (Join-Path $AppDir "diagnostics\traces")
 }
 
-function Get-TraceSummary([string]$AppDir, $CurrentProcessPid, $ProcessStartedAtMs) {
+function Get-WprCapability([string]$ProfilePath, [string]$RunDir) {
+    $command = Get-Command wpr.exe -ErrorAction SilentlyContinue
+    $profileExists = -not [string]::IsNullOrWhiteSpace($ProfilePath) -and
+        (Test-Path -LiteralPath $ProfilePath -PathType Leaf)
+    $receiptPath = Join-Path $RunDir "wpr_capability.json"
+    $receipt = [ordered]@{
+        available = ($null -ne $command -and $profileExists)
+        wpr_exe = if ($command) { [string]$command.Source } else { $null }
+        profile_path = if ($profileExists) { [System.IO.Path]::GetFullPath($ProfilePath) } else { $ProfilePath }
+        profile_exists = [bool]$profileExists
+        capture_started = $false
+        reason = if ($null -eq $command) {
+            "wpr.exe is not installed or not on PATH"
+        } elseif (-not $profileExists) {
+            "Provide -WprProfilePath with the Microsoft WebView2 WPR profile to enable an operator-triggered ETW capture"
+        } else {
+            "Capability ready; vvwatch does not auto-start heavyweight ETW capture"
+        }
+        example_start = if ($command -and $profileExists) { "wpr.exe -start `"$ProfilePath`" -filemode" } else { $null }
+        example_stop = if ($command -and $profileExists) { "wpr.exe -stop `"$(Join-Path $RunDir 'webview2_trace.etl')`"" } else { $null }
+    }
+    Write-Utf8NoBomFile -Path $receiptPath -Content ((Convert-ToJsonLine $receipt 8) + "`n")
+    return $receipt
+}
+
+function Get-BoundedDiagnosticsTraceRows([string]$TraceDir, [string]$CorrelationIncidentId, [int]$Limit = 750) {
+    $lines = [Collections.Generic.List[string]]::new()
+    $candidates = [Collections.Generic.List[object]]::new()
+    if (-not [string]::IsNullOrWhiteSpace($CorrelationIncidentId)) {
+        $incidentTrace = Join-Path $TraceDir ("incidents\{0}\trace.jsonl" -f $CorrelationIncidentId)
+        if (Test-Path -LiteralPath $incidentTrace -PathType Leaf) { $candidates.Add([pscustomobject]@{ path=$incidentTrace; zip=$false }) }
+    }
+    $current = Join-Path $TraceDir "diagnostics_trace.jsonl"
+    $generationFiles = @(Get-ChildItem -LiteralPath $TraceDir -File -ErrorAction SilentlyContinue |
+        Where-Object { $_.Name -match '^diagnostics_trace\.(?:generation\..+|[1-5])\.(?:jsonl|zip)$' } |
+        Sort-Object LastWriteTimeUtc -Descending | Select-Object -First 5)
+    foreach ($file in @($generationFiles | Sort-Object LastWriteTimeUtc)) { $candidates.Add([pscustomobject]@{ path=$file.FullName; zip=($file.Extension -eq '.zip') }) }
+    if (Test-Path -LiteralPath $current -PathType Leaf) { $candidates.Add([pscustomobject]@{ path=$current; zip=$false }) }
+    foreach ($candidate in $candidates) {
+        if (-not $candidate.zip) { foreach ($line in @(Get-Content -LiteralPath $candidate.path -Tail $Limit -ErrorAction SilentlyContinue)) { $lines.Add([string]$line) }; continue }
+        try {
+            Add-Type -AssemblyName System.IO.Compression.FileSystem -ErrorAction SilentlyContinue
+            $archive = [IO.Compression.ZipFile]::OpenRead([string]$candidate.path)
+            try { $entry = $archive.Entries | Select-Object -First 1; if ($entry) { $reader = [IO.StreamReader]::new($entry.Open()); try { $ring = [Collections.Generic.Queue[string]]::new(); while (($line = $reader.ReadLine()) -ne $null) { if ($ring.Count -ge $Limit) { $null = $ring.Dequeue() }; $ring.Enqueue($line) }; foreach ($line in $ring) { $lines.Add($line) } } finally { $reader.Dispose() } } } finally { $archive.Dispose() }
+        } catch {}
+    }
+    return @($lines | Where-Object { -not [string]::IsNullOrWhiteSpace($_) } | Select-Object -Last $Limit | ForEach-Object { try { $_ | ConvertFrom-Json } catch { $null } } | Where-Object { $null -ne $_ })
+}
+
+function Get-TraceSummary([string]$AppDir, $CurrentProcessPid, $ProcessStartedAtMs, [string]$CorrelationIncidentId) {
     $traceDir = Get-DiagnosticsTraceDir -AppDir $AppDir
     $report = Join-Path $traceDir "freeze_reports\freeze_report_latest.json"
     $rawTrace = Join-Path $traceDir "diagnostics_trace.jsonl"
@@ -935,6 +1086,12 @@ function Get-TraceSummary([string]$AppDir, $CurrentProcessPid, $ProcessStartedAt
         cleanup_stage_commands = @()
         freeze_or_skew_count = 0
         tools_command_count = 0
+        incident_ids = @()
+        incident_event_count = 0
+        correlation_incident_id = $CorrelationIncidentId
+        correlation_matched = $false
+        frontend_long_task_count = 0
+        frontend_long_task_max_ms = 0
         error = $null
     }
     if (-not $summary.exists) {
@@ -952,15 +1109,8 @@ function Get-TraceSummary([string]$AppDir, $CurrentProcessPid, $ProcessStartedAt
             $summary.current_page = $r.agent_state.current_page
             $traceRows = @($r.recent_trace)
         }
-        if (Test-Path -LiteralPath $rawTrace -PathType Leaf) {
-            $liveRows = @(
-                Get-Content -LiteralPath $rawTrace -Tail 750 |
-                    Where-Object { -not [string]::IsNullOrWhiteSpace($_) } |
-                    ForEach-Object {
-                        try { $_ | ConvertFrom-Json } catch { $null }
-                    } |
-                    Where-Object { $null -ne $_ }
-            )
+        if ((Test-Path -LiteralPath $rawTrace -PathType Leaf) -or (Test-Path -LiteralPath (Join-Path $traceDir "incidents") -PathType Container)) {
+            $liveRows = @(Get-BoundedDiagnosticsTraceRows -TraceDir $traceDir -CorrelationIncidentId $CorrelationIncidentId -Limit 750)
             if ($liveRows.Count -gt 0) {
                 $traceRows = $liveRows
             }
@@ -1042,6 +1192,23 @@ function Get-TraceSummary([string]$AppDir, $CurrentProcessPid, $ProcessStartedAt
         )
         $summary.freeze_or_skew_count = @($traceRows | Where-Object { $_.event -match 'freeze_detected|freeze_recovered|event_loop_skew' }).Count
         $summary.tools_command_count = @($traceRows | Where-Object { $_.details.cmd -match '^tools_' }).Count
+        $incidentRows = @($traceRows | Where-Object {
+            -not [string]::IsNullOrWhiteSpace($CorrelationIncidentId) -and
+            [string]$_.incident_id -eq $CorrelationIncidentId
+        })
+        $summary.incident_ids = @($incidentRows | Select-Object -ExpandProperty incident_id -Unique)
+        $summary.incident_event_count = $incidentRows.Count
+        $summary.correlation_matched = $incidentRows.Count -gt 0
+        $longTasks = @($traceRows | Where-Object { $_.event -eq 'frontend_long_task' })
+        $summary.frontend_long_task_count = $longTasks.Count
+        if ($longTasks.Count -gt 0) {
+            $summary.frontend_long_task_max_ms = [int](
+                $longTasks |
+                    ForEach-Object { [int]$_.details.duration_ms } |
+                    Measure-Object -Maximum |
+                    Select-Object -ExpandProperty Maximum
+            )
+        }
     } catch {
         $summary.error = $_.Exception.Message
     }
@@ -1100,7 +1267,8 @@ function New-Sample(
     [bool]$SkipPathProbe,
     [bool]$HeavyProbe,
     [int]$SampleIndex,
-    [int64]$ScheduledAtMs
+    [int64]$ScheduledAtMs,
+    [string]$CorrelationIncidentId
 ) {
     $sampleSw = [Diagnostics.Stopwatch]::StartNew()
     $probeDurations = [ordered]@{}
@@ -1149,7 +1317,7 @@ function New-Sample(
     $probeDurations.path_probe_ms = [int]$probeSw.ElapsedMilliseconds
 
     $probeSw.Restart()
-    $trace = Get-TraceSummary -AppDir $AppDir -CurrentProcessPid $tree.root.pid -ProcessStartedAtMs $bridge.started_at_ms
+    $trace = Get-TraceSummary -AppDir $AppDir -CurrentProcessPid $tree.root.pid -ProcessStartedAtMs $bridge.started_at_ms -CorrelationIncidentId $CorrelationIncidentId
     $probeSw.Stop()
     $probeDurations.trace_probe_ms = [int]$probeSw.ElapsedMilliseconds
 
@@ -1166,6 +1334,7 @@ function New-Sample(
     $capturedAtMs = Now-Ms
     return [ordered]@{
         ts_ms = $capturedAtMs
+        incident_id = $CorrelationIncidentId
         sample_index = $SampleIndex
         scheduled_at_ms = $ScheduledAtMs
         schedule_lag_ms = [Math]::Max(0, $capturedAtMs - $ScheduledAtMs)
@@ -1247,6 +1416,7 @@ function Write-Summary([string]$RunDir, [object[]]$Samples, [hashtable]$Metadata
     )
     $summary = [ordered]@{
         output_dir = $RunDir
+        incident_id = $Metadata.incident_id
         started_at = $Metadata.started_at
         finished_at = (Get-Date).ToString("o")
         sample_count = $Samples.Count
@@ -1268,6 +1438,7 @@ function Write-Summary([string]$RunDir, [object[]]$Samples, [hashtable]$Metadata
         heavy_child_process_samples = $heavySamples
         db_timeout_samples = $dbTimeouts
         path_timeout_count = $pathTimeouts
+        wpr_capability = $Metadata.wpr_capability
         latest_trace = $latestTrace
         python_environment = if ($Samples.Count -gt 0) { $Samples[0].python_environment } else { $null }
         voice_pack_install_state = if ($Samples.Count -gt 0) { $Samples[0].voice_pack_install_state } else { $null }
@@ -1278,6 +1449,7 @@ function Write-Summary([string]$RunDir, [object[]]$Samples, [hashtable]$Metadata
     $null = $md.AppendLine("# VoxVulgi External Watch Summary")
     $null = $md.AppendLine()
     $null = $md.AppendLine("- Output dir: $RunDir")
+    $null = $md.AppendLine("- Incident ID: $($summary.incident_id)")
     $null = $md.AppendLine("- Samples: $($summary.sample_count)")
     $null = $md.AppendLine("- Requested sample window: $($summary.requested_duration_ms) ms")
     $null = $md.AppendLine("- Actual sample window: $($summary.actual_sample_window_elapsed_ms) ms")
@@ -1295,6 +1467,7 @@ function Write-Summary([string]$RunDir, [object[]]$Samples, [hashtable]$Metadata
     $null = $md.AppendLine("- Heavy child process samples: $heavySamples")
     $null = $md.AppendLine("- DB timeout samples: $dbTimeouts")
     $null = $md.AppendLine("- Path timeout count: $pathTimeouts")
+    $null = $md.AppendLine("- WPR/WebView2 capability ready: $($summary.wpr_capability.available) ($($summary.wpr_capability.reason))")
     if ($summary.app_version_mismatch) {
         $null = $md.AppendLine("- App version mismatch: live app/executable version differs from the repo under test; rebuild or reinstall before treating UI evidence as current.")
     }
@@ -1359,6 +1532,8 @@ function Write-Summary([string]$RunDir, [object[]]$Samples, [hashtable]$Metadata
         $null = $md.AppendLine("- Commands started/completed/incomplete: $($latestTrace.command_started_count) / $($latestTrace.command_completed_count) / $($latestTrace.command_incomplete_count)")
         $null = $md.AppendLine("- Database busy/locked events: $($latestTrace.database_contention_count)")
         $null = $md.AppendLine("- Panel transitions measured: $($latestTrace.panel_transition_count)")
+        $null = $md.AppendLine("- Correlated incident events: $($latestTrace.incident_event_count) across $(@($latestTrace.incident_ids).Count) incident ID(s)")
+        $null = $md.AppendLine("- Frontend long tasks: $($latestTrace.frontend_long_task_count); max $($latestTrace.frontend_long_task_max_ms) ms")
         foreach ($row in @($latestTrace.slow_panel_transitions)) {
             $null = $md.AppendLine("- Slow panel $($row.page): $($row.elapsed_ms) ms (transition $($row.transition_id), superseded=$($row.superseded))")
         }
@@ -1389,6 +1564,17 @@ $stamp = Get-Date -Format "yyyyMMdd-HHmmss"
 $runDir = Join-Path $OutputRoot ("watch_{0}" -f $stamp)
 New-Item -ItemType Directory -Force -Path $runDir | Out-Null
 
+$incidentSource = "operator"
+if ([string]::IsNullOrWhiteSpace($IncidentId)) {
+    $IncidentId = Get-ActiveAppIncidentId -AppDir $appDir
+    $incidentSource = "active_app_capture"
+}
+if ([string]::IsNullOrWhiteSpace($IncidentId)) {
+    $IncidentId = "watch-" + [guid]::NewGuid().ToString("N")
+    $incidentSource = "watch_only_unmatched"
+}
+$wprCapability = Get-WprCapability -ProfilePath $WprProfilePath -RunDir $runDir
+
 $monitorStartedAtMs = Now-Ms
 $metadata = @{
     repo_root = $repoRoot
@@ -1396,6 +1582,8 @@ $metadata = @{
     app_data_dir = $appDir
     output_root = $OutputRoot
     run_dir = $runDir
+    incident_id = $IncidentId
+    incident_source = $incidentSource
     started_at = (Get-Date).ToString("o")
     duration_seconds = $DurationSeconds
     interval_seconds = $IntervalSeconds
@@ -1409,6 +1597,7 @@ $metadata = @{
     sample_window_started_at_ms = $null
     bootstrap_elapsed_ms = $null
     skipped_intervals = 0
+    wpr_capability = $wprCapability
 }
 Write-Utf8NoBomFile -Path (Join-Path $runDir "metadata.json") -Content ((Convert-ToJsonLine $metadata 8) + "`n")
 
@@ -1448,9 +1637,19 @@ do {
         Start-Sleep -Milliseconds $waitMs
     }
     $sampleIndex += 1
+    # Capture may be armed or triggered after vvwatch starts. Re-read the app-owned state on
+    # every sample and replace only the watcher-generated unmatched ID; an explicit -IncidentId
+    # remains authoritative.
+    [void](Adopt-ActiveAppIncident -AppDir $appDir -Metadata $metadata -RunDir $runDir -CurrentIncidentId ([ref]$IncidentId) -CurrentIncidentSource ([ref]$incidentSource))
     $heavyProbe = ($sampleIndex -eq 1) -or ((($sampleIndex - 1) % $heavyProbeEverySamples) -eq 0)
     $scheduledAtMs = [int64][DateTimeOffset]::new($nextDue).ToUnixTimeMilliseconds()
-    $sample = New-Sample -AppDir $appDir -ProcessName $ProcessName -PythonProbe $pythonProbe -VoicePackInstallProbe $voicePackInstallProbe -SkipPathProbe ([bool]$NoPathProbe) -HeavyProbe $heavyProbe -SampleIndex $sampleIndex -ScheduledAtMs $scheduledAtMs
+    $sample = New-Sample -AppDir $appDir -ProcessName $ProcessName -PythonProbe $pythonProbe -VoicePackInstallProbe $voicePackInstallProbe -SkipPathProbe ([bool]$NoPathProbe) -HeavyProbe $heavyProbe -SampleIndex $sampleIndex -ScheduledAtMs $scheduledAtMs -CorrelationIncidentId $IncidentId
+    # New-Sample performs bounded external probes and can consume the remainder of the watch
+    # window. Re-read the app-owned incident immediately afterwards so the terminal sample and
+    # summary still inherit an incident armed while those probes were running.
+    if (Adopt-ActiveAppIncident -AppDir $appDir -Metadata $metadata -RunDir $runDir -CurrentIncidentId ([ref]$IncidentId) -CurrentIncidentSource ([ref]$incidentSource)) {
+        Update-SampleIncidentCorrelation -Sample $sample -AppDir $appDir -IncidentId $IncidentId
+    }
     $samples.Add($sample)
     Append-Utf8NoBomLine -Path $samplesPath -Content (Convert-ToJsonLine $sample 14)
     if (-not $Quiet) {
@@ -1467,21 +1666,37 @@ do {
         $nextDue = $nextDue.AddSeconds($IntervalSeconds)
     }
     if ($now -ge $deadline) {
+        if (Adopt-ActiveAppIncident -AppDir $appDir -Metadata $metadata -RunDir $runDir -CurrentIncidentId ([ref]$IncidentId) -CurrentIncidentSource ([ref]$incidentSource)) {
+            Update-SampleIncidentCorrelation -Sample $sample -AppDir $appDir -IncidentId $IncidentId
+            Write-SampleSnapshot -Path $samplesPath -Samples @($samples.ToArray())
+        }
         break
     }
     if ($nextDue -ge $deadline) {
         $remainingMs = [int][Math]::Max(1, ($deadline - $now).TotalMilliseconds)
         Start-Sleep -Milliseconds $remainingMs
+        if (Adopt-ActiveAppIncident -AppDir $appDir -Metadata $metadata -RunDir $runDir -CurrentIncidentId ([ref]$IncidentId) -CurrentIncidentSource ([ref]$incidentSource)) {
+            Update-SampleIncidentCorrelation -Sample $sample -AppDir $appDir -IncidentId $IncidentId
+            Write-SampleSnapshot -Path $samplesPath -Samples @($samples.ToArray())
+        }
         break
     }
 } while ($true)
 
+# One final bounded state read closes the race between the last terminal check and summary write.
+if (Adopt-ActiveAppIncident -AppDir $appDir -Metadata $metadata -RunDir $runDir -CurrentIncidentId ([ref]$IncidentId) -CurrentIncidentSource ([ref]$incidentSource)) {
+    if ($samples.Count -gt 0) {
+        Update-SampleIncidentCorrelation -Sample $samples[$samples.Count - 1] -AppDir $appDir -IncidentId $IncidentId
+        Write-SampleSnapshot -Path $samplesPath -Samples @($samples.ToArray())
+    }
+}
 Write-Utf8NoBomFile -Path (Join-Path $runDir "metadata.json") -Content ((Convert-ToJsonLine $metadata 8) + "`n")
 $summary = Write-Summary -RunDir $runDir -Samples @($samples.ToArray()) -Metadata $metadata
 if (-not $Quiet) {
     Write-Host "Summary: $(Join-Path $runDir 'summary.md')"
 }
 
+if ($SelfTest) { Test-SharedRedactionVectors }
 if ($SelfTest -and $summary.sample_count -lt 1) {
     throw "self-test produced no samples"
 }

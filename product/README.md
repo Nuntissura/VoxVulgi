@@ -47,16 +47,17 @@ The app installs runtime tools/models into its app-data folder (local-first; exp
   - `video/subscriptions/` for YouTube subscription folder maps
   - `instagram/` for Instagram archive downloads
   - `images/` for forum/blog image archive downloads
-  - `localization/en/<media-stem>/` for exported SRT/VTT and dubbed preview MP4 files from Localization Studio
+  - `localization/en/<media-stem>/` for explicit subtitle exports and dubbed preview MKV files from Localization Studio
 
 ## Localization Studio output behavior
 
 - Working artifacts stay in app-data under `derived/items/<item_id>/...` so jobs stay reproducible and easy to inspect.
 - The mixed dubbed audio track is `derived/items/<item_id>/dub_preview/mix_dub_preview_v1.wav`.
-- The muxed preview video defaults to `derived/items/<item_id>/dub_preview/mux_dub_preview_v1.mp4`.
+- The muxed preview video defaults to `derived/items/<item_id>/dub_preview/mux_dub_preview_v1.mkv`.
 - Exporting from Localization Studio copies user-facing deliverables into the app-managed localization export folder by default instead of writing next to the source media file.
-- The export set can include an operator-selected source-media copy, and language-marked names use the source stem, for example `<source>.source.<ext>`, `<source>.sub-en.srt`, `<source>.sub-en.vtt`, and `<source>.dub-en.mp4`.
-- The default yt-dlp preset now prefers MP4-compatible formats and requests MP4 merge/remux when the toolchain can do that without re-encoding.
+- The export set can include an operator-selected source-media copy and explicit subtitle-only files; the managed video deliverable uses `<source>.dub-en.mkv` with selected audio and subtitle tracks embedded.
+- Every new managed video download is finalized as MKV at the engine boundary. The default yt-dlp source selector is container-neutral, embedded subtitles do not remain as routine sidecars, and saved legacy presets cannot request a new MP4 final artifact.
+- Historical MP4 media remains supported for import, playback, library scanning, availability, dedupe, repair, and migration. This policy does not convert, move, or delete existing files.
 
 ## In-app image archive batch
 

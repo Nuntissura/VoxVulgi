@@ -991,6 +991,277 @@ details:not([open]) > :not(summary) {
   display: none !important;
 }
 
+/* WP-0301: one responsive Options workspace. The rail and section rules replace the former
+   stack of cards; only the active module mounts, keeping the 800x600 boundary readable. */
+.options-page {
+  width: 100%;
+  min-width: 0;
+}
+
+.options-header {
+  padding: 4px 2px 14px;
+  border-bottom: 1px solid var(--panel-border);
+}
+
+.options-header h1,
+.options-header p,
+.options-module-heading h2,
+.options-module-heading p,
+.options-setting-section h2,
+.options-setting-section p,
+.options-empty-module h2,
+.options-empty-module p {
+  margin-top: 0;
+}
+
+.options-header > p,
+.options-module-heading p,
+.options-setting-section > p,
+.options-empty-module p {
+  color: #4b5563;
+}
+
+.options-search-field {
+  display: grid;
+  grid-template-columns: max-content minmax(180px, 520px);
+  align-items: center;
+  gap: 10px;
+  margin-top: 12px;
+  font-weight: 700;
+}
+
+.options-search-field input {
+  width: 100%;
+}
+
+.options-search-results {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+  gap: 6px;
+  max-height: 210px;
+  margin-top: 8px;
+  overflow: auto;
+}
+
+.options-search-results button {
+  display: flex;
+  align-items: flex-start;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
+  text-align: left;
+}
+
+.options-search-results button span {
+  color: #4b5563;
+  font-size: 0.75rem;
+  font-weight: 500;
+}
+
+.options-layout {
+  display: grid;
+  grid-template-columns: minmax(164px, 210px) minmax(0, 1fr);
+  gap: 18px;
+  padding-top: 14px;
+}
+
+.options-module-nav {
+  display: flex;
+  align-self: start;
+  flex-direction: column;
+  gap: 4px;
+  position: sticky;
+  top: 0;
+}
+
+.options-module-nav button {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 8px;
+  width: 100%;
+  border-color: transparent;
+  background: transparent;
+  box-shadow: none;
+  text-align: left;
+}
+
+.options-module-nav button[aria-selected="true"] {
+  border-color: var(--panel-border);
+  background: rgba(255, 255, 255, 0.5);
+  box-shadow: inset 3px 0 0 #50657e;
+}
+
+.options-module-nav small {
+  color: #6b7280;
+  font-size: 0.66rem;
+  white-space: nowrap;
+}
+
+.options-mobile-module-picker {
+  display: none;
+}
+
+.options-module-panel {
+  min-width: 0;
+  outline: none;
+}
+
+.options-module-panel:focus-visible {
+  outline: 2px solid #50657e;
+  outline-offset: 4px;
+}
+
+.options-module-heading {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 16px;
+  padding-bottom: 10px;
+}
+
+.options-module-heading p {
+  margin-bottom: 0;
+}
+
+.options-module-state {
+  flex: 0 0 auto;
+  color: #334155;
+  font-size: 0.78rem;
+  font-weight: 700;
+}
+
+.options-module-tools {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 8px;
+  padding: 8px 0 12px;
+  border-bottom: 1px solid var(--panel-border);
+}
+
+.options-module-tools span,
+.options-reset-preview {
+  color: #4b5563;
+  font-size: 0.78rem;
+}
+
+.options-reset-preview {
+  padding: 10px 0;
+  border-bottom: 1px solid var(--panel-border);
+}
+
+.options-capability-receipt {
+  display: grid;
+  gap: 3px;
+  padding: 10px 0;
+  border-bottom: 1px solid var(--panel-border);
+  color: #334155;
+  font-size: 0.78rem;
+}
+
+.options-capability-receipt[data-state="success"] strong {
+  color: #166534;
+}
+
+.options-capability-receipt[data-state="failure"] strong {
+  color: #b91c1c;
+}
+
+.options-capability-receipt[data-state="running"] strong {
+  color: #1d4ed8;
+}
+
+.options-capability-receipt[data-state="stale"] strong {
+  color: #92400e;
+}
+
+.options-manual {
+  padding: 10px 0;
+  border-bottom: 1px solid var(--panel-border);
+  color: #4b5563;
+  font-size: 0.8rem;
+}
+
+.options-manual summary {
+  color: #334155;
+  cursor: pointer;
+  font-weight: 700;
+}
+
+.options-manual ol,
+.options-manual p {
+  margin-bottom: 0;
+}
+
+.options-setting-section,
+.options-empty-module {
+  min-width: 0;
+  padding: 18px 0;
+  border-bottom: 1px solid var(--panel-border);
+}
+
+.options-setting-section:last-child,
+.options-empty-module:last-child {
+  border-bottom: 0;
+}
+
+.options-settings-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+  gap: 10px 18px;
+  margin: 12px 0;
+}
+
+.options-settings-grid label {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+}
+
+.options-settings-grid input[type="number"] {
+  width: 88px;
+}
+
+.options-page [aria-invalid="true"] {
+  outline: 2px solid #b91c1c;
+  outline-offset: 1px;
+}
+
+.options-path-value {
+  overflow-wrap: anywhere;
+}
+
+@media (max-width: 700px) {
+  .options-search-field {
+    grid-template-columns: 1fr;
+  }
+
+  .options-layout {
+    display: block;
+    padding-top: 10px;
+  }
+
+  .options-module-nav {
+    display: none;
+  }
+
+  .options-mobile-module-picker {
+    display: grid;
+    grid-template-columns: max-content minmax(0, 1fr);
+    align-items: center;
+    gap: 10px;
+    padding-top: 12px;
+    font-weight: 700;
+  }
+
+  .options-module-heading {
+    flex-direction: column;
+    gap: 4px;
+  }
+}
+
 button,
 select {
   border-radius: var(--panel-radius-tight);

@@ -1,15 +1,14 @@
 use crate::paths::AppPaths;
-use crate::{db, jobs, library, video_libraries, EngineError, Result};
+use crate::{db, jobs, library, persistence, root_rebind, video_libraries, EngineError, Result};
 use csv::ReaderBuilder;
 use regex::Regex;
 use rusqlite::{params, OpenFlags};
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
-use std::io::{BufRead, BufReader, Write};
+use std::io::{BufRead, BufReader};
 use std::path::Path;
 use std::path::PathBuf;
-use std::sync::{Mutex, OnceLock};
-use std::time::{Duration, Instant};
+use std::sync::{Mutex, MutexGuard, OnceLock};
 use url::Url;
 use uuid::Uuid;
 
@@ -30,6 +29,45 @@ const MAX_REFRESH_INTERVAL_MINUTES: i64 = 10080;
 const FOURKVDP_SUBSCRIPTIONS_JSON_FILENAME: &str = "subscriptions.json";
 const FOURKVDP_SUBSCRIPTION_ENTRIES_CSV_FILENAME: &str = "subscription_entries.csv";
 const YT_DLP_ARCHIVE_FILENAME: &str = "voxvulgi_youtube_archive.txt";
+const YT_DLP_ARCHIVE_MERGE_JOURNAL_FILENAME: &str = "voxvulgi_youtube_archive.merge-journal";
+const YOUTUBE_ARCHIVE_JOURNAL_REPLAY_LIMIT: usize = 128;
+const YOUTUBE_ARCHIVE_CARRIER_CLEANUP_RETRY_LIMIT: usize = 16;
+const YOUTUBE_ARCHIVE_CARRIER_CLEANUP_ERROR_PREFIX: &str = "archive carrier cleanup:";
+static YOUTUBE_ARCHIVE_MUTATION_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+
+#[derive(Debug, Default, PartialEq, Eq)]
+struct ArchiveCarrierCleanupReport {
+    removed: usize,
+    failed: usize,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct YoutubeArchiveMergeCarrier {
+    schema_version: u32,
+    intent_id: String,
+}
+
+#[derive(Debug, Clone)]
+struct YoutubeArchiveMergeIntent {
+    intent_id: String,
+    subscription_id: String,
+    target_archive_path: String,
+    source_archive_sha256: String,
+    intended_archive_sha256: String,
+    intended_video_ids: Vec<String>,
+    phase: String,
+}
+
+#[derive(Debug, Clone)]
+struct YoutubeArchiveMergeIntentRow {
+    intent_id: String,
+    subscription_id: String,
+    target_archive_path: String,
+    source_archive_sha256: String,
+    intended_archive_sha256: String,
+    intended_video_ids_json: String,
+    phase: String,
+}
 const DEFAULT_LEGACY_ANALYSIS_MAX_DEPTH: usize = 4;
 const DEFAULT_LEGACY_ANALYSIS_MAX_FILES: usize = 2500;
 const DEFAULT_LEGACY_IMPORT_MAX_DEPTH: usize = 8;
@@ -731,9 +769,7 @@ ORDER BY COALESCE(last_queued_at_ms, 0) ASC, updated_at_ms DESC
     // flood the queue; the recurring-lane cooldown then paces their dispatch. The due-path
     // (startup auto-sync) is uncapped because the cooldown already paces it.
     let cap = if force {
-        jobs::get_antibot_pacing(paths)
-            .map(|s| s.update_all_batch_size)
-            .unwrap_or(usize::MAX)
+        jobs::youtube_update_all_effective_batch_size(paths)
     } else {
         usize::MAX
     };
@@ -1125,7 +1161,7 @@ pub fn seed_archive_from_scan(
     let mut skipped_existing_ids = 0_usize;
     for sub in target_subscriptions {
         let archive_path = ensure_youtube_subscription_archive_state(paths, &sub)?;
-        let (appended, skipped_existing) = merge_archive_file(&archive_path, &inferred_ids)?;
+        let (appended, skipped_existing) = merge_archive_file(paths, &archive_path, &inferred_ids)?;
         if appended > 0 {
             archive_files_updated += 1;
         }
@@ -2336,7 +2372,8 @@ fn seed_archives_from_4kvdp_entries(
             }
         };
 
-        if merge_archive_file(&archive_path, &ids).is_err() {
+        let merged = merge_archive_file(paths, &archive_path, &ids);
+        if merged.is_err() {
             failures += 1;
             continue;
         }
@@ -2413,7 +2450,8 @@ ORDER BY downloader_subscription_info_id ASC, id ASC
             }
         };
 
-        if merge_archive_file(&archive_path, &ids).is_err() {
+        let merged = merge_archive_file(paths, &archive_path, &ids);
+        if merged.is_err() {
             failures += 1;
             continue;
         }
@@ -3211,7 +3249,756 @@ fn resolve_legacy_output_dir(root_dir: &Path, legacy_dirname: &str) -> LegacyRes
     }
 }
 
-fn merge_archive_file(path: &Path, video_ids: &HashSet<String>) -> std::io::Result<(usize, usize)> {
+fn merge_archive_file(
+    paths: &AppPaths,
+    path: &Path,
+    video_ids: &HashSet<String>,
+) -> Result<(usize, usize)> {
+    let _guard = lock_youtube_archive_mutation()?;
+    let subscription_id = archive_subscription_id_from_path(paths, path)?;
+    reconcile_archive_merge_for_subscription_locked(paths, &subscription_id)?;
+    merge_archive_file_locked(paths, path, video_ids)
+}
+
+fn lock_youtube_archive_mutation() -> Result<MutexGuard<'static, ()>> {
+    YOUTUBE_ARCHIVE_MUTATION_LOCK
+        .get_or_init(|| Mutex::new(()))
+        .lock()
+        .map_err(|_| EngineError::InstallFailed("youtube archive mutation lock is poisoned".into()))
+}
+
+fn archive_merge_journal_path(path: &Path) -> PathBuf {
+    path.with_file_name(YT_DLP_ARCHIVE_MERGE_JOURNAL_FILENAME)
+}
+
+fn archive_subscription_id_from_path(paths: &AppPaths, path: &Path) -> Result<String> {
+    let subscription_id = path
+        .parent()
+        .and_then(Path::file_name)
+        .map(|value| value.to_string_lossy().to_string())
+        .filter(|value| !value.trim().is_empty())
+        .ok_or_else(|| {
+            EngineError::InstallFailed("canonical archive path has no subscription identity".into())
+        })?;
+    if paths.youtube_subscription_archive_state_path(&subscription_id) != path {
+        return Err(EngineError::InstallFailed(
+            "youtube archive merge target is not the canonical subscription archive".into(),
+        ));
+    }
+    Ok(subscription_id)
+}
+
+fn canonical_archive_body(video_ids: &[String]) -> String {
+    video_ids
+        .iter()
+        .map(|id| format!("youtube {id}\n"))
+        .collect::<String>()
+}
+
+fn archive_body_sha256(body: &str) -> String {
+    use sha2::{Digest as _, Sha256};
+    format!("{:X}", Sha256::digest(body.as_bytes()))
+}
+
+fn archive_file_sha256(path: &Path) -> Result<String> {
+    use sha2::{Digest as _, Sha256};
+    let bytes = match std::fs::read(path) {
+        Ok(bytes) => bytes,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Vec::new(),
+        Err(error) => return Err(error.into()),
+    };
+    Ok(format!("{:X}", Sha256::digest(bytes)))
+}
+
+fn write_archive_merge_journal(
+    path: &Path,
+    intent_id: &str,
+) -> Result<()> {
+    let carrier = YoutubeArchiveMergeCarrier {
+        schema_version: 2,
+        intent_id: intent_id.to_string(),
+    };
+    persistence::atomic_write_text(path, &serde_json::to_string(&carrier)?)?;
+    Ok(())
+}
+
+fn read_archive_merge_carrier(path: &Path) -> Result<YoutubeArchiveMergeCarrier> {
+    let raw = std::fs::read_to_string(path)?;
+    let carrier: YoutubeArchiveMergeCarrier = serde_json::from_str(&raw).map_err(|_| {
+        EngineError::InstallFailed(
+            "youtube archive merge carrier is legacy, unreadable, or untrusted".to_string(),
+        )
+    })?;
+    if carrier.schema_version != 2
+        || Uuid::parse_str(&carrier.intent_id)
+            .map(|value| value.to_string() != carrier.intent_id)
+            .unwrap_or(true)
+    {
+        return Err(EngineError::InstallFailed(
+            "youtube archive merge carrier identity is invalid".to_string(),
+        ));
+    }
+    Ok(carrier)
+}
+
+fn create_archive_merge_intent(
+    paths: &AppPaths,
+    subscription_id: &str,
+    target_archive_path: &Path,
+    source_archive_sha256: &str,
+    intended_video_ids: &[String],
+) -> Result<String> {
+    let expected_target = paths.youtube_subscription_archive_state_path(subscription_id);
+    let mut canonical_ids = intended_video_ids.to_vec();
+    canonical_ids.sort();
+    canonical_ids.dedup();
+    if target_archive_path != expected_target
+        || canonical_ids != intended_video_ids
+        || intended_video_ids.iter().any(|id| {
+            id.trim().is_empty() || id.trim() != id || id.chars().any(char::is_whitespace)
+        })
+    {
+        return Err(EngineError::InstallFailed(
+            "youtube archive merge intent target or members are invalid".into(),
+        ));
+    }
+    let mut conn = db::open(paths)?;
+    db::migrate(&conn)?;
+    let tx = conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+    let subscription_exists: bool = tx.query_row(
+        "SELECT EXISTS(SELECT 1 FROM youtube_subscription WHERE id=?1)",
+        [subscription_id],
+        |row| row.get(0),
+    )?;
+    if !subscription_exists {
+        return Err(EngineError::InstallFailed(format!(
+            "youtube archive merge subscription does not exist: {subscription_id}"
+        )));
+    }
+    let intent_id = Uuid::new_v4().to_string();
+    let intended_body = canonical_archive_body(intended_video_ids);
+    tx.execute(
+        "INSERT INTO youtube_archive_merge_intent(
+           intent_id,subscription_id,target_archive_path,source_archive_sha256,
+           intended_archive_sha256,intended_video_ids_json,phase,created_at_ms,updated_at_ms
+         ) VALUES(?1,?2,?3,?4,?5,?6,'prepared',?7,?7)",
+        params![
+            intent_id,
+            subscription_id,
+            target_archive_path.to_string_lossy(),
+            source_archive_sha256,
+            archive_body_sha256(&intended_body),
+            serde_json::to_string(intended_video_ids)?,
+            now_ms(),
+        ],
+    )?;
+    tx.commit()?;
+    Ok(intent_id)
+}
+
+fn load_pending_archive_merge_intent_rows(
+    paths: &AppPaths,
+) -> Result<Vec<YoutubeArchiveMergeIntentRow>> {
+    let conn = db::open(paths)?;
+    db::migrate(&conn)?;
+    let mut stmt = conn.prepare(
+        "SELECT intent.intent_id,intent.subscription_id,intent.target_archive_path,
+                intent.source_archive_sha256,intent.intended_archive_sha256,
+                intent.intended_video_ids_json,intent.phase
+         FROM youtube_archive_merge_intent intent
+         LEFT JOIN youtube_archive_merge_intent_failure failure
+           ON failure.intent_id=intent.intent_id AND failure.resolved_at_ms IS NULL
+         WHERE intent.phase IN ('prepared','published')
+         ORDER BY CASE WHEN failure.intent_id IS NULL THEN 0 ELSE 1 END ASC,
+                  COALESCE(failure.last_failed_at_ms,intent.created_at_ms) ASC,
+                  intent.intent_id ASC
+         LIMIT ?1",
+    )?;
+    let rows = stmt.query_map([YOUTUBE_ARCHIVE_JOURNAL_REPLAY_LIMIT as i64], |row| {
+        Ok((
+            row.get::<_, String>(0)?,
+            row.get::<_, String>(1)?,
+            row.get::<_, String>(2)?,
+            row.get::<_, String>(3)?,
+            row.get::<_, String>(4)?,
+            row.get::<_, String>(5)?,
+            row.get::<_, String>(6)?,
+        ))
+    })?;
+    let mut intents = Vec::new();
+    for row in rows {
+        let (intent_id, subscription_id, target_archive_path, source_archive_sha256,
+            intended_archive_sha256, intended_video_ids_json, phase) = row?;
+        intents.push(YoutubeArchiveMergeIntentRow {
+            intent_id,
+            subscription_id,
+            target_archive_path,
+            source_archive_sha256,
+            intended_archive_sha256,
+            intended_video_ids_json,
+            phase,
+        });
+    }
+    Ok(intents)
+}
+
+fn load_pending_archive_merge_intent_row_for_subscription(
+    paths: &AppPaths,
+    subscription_id: &str,
+) -> Result<Option<YoutubeArchiveMergeIntentRow>> {
+    let conn = db::open(paths)?;
+    db::migrate(&conn)?;
+    conn.query_row(
+        "SELECT intent_id,subscription_id,target_archive_path,source_archive_sha256,
+                intended_archive_sha256,intended_video_ids_json,phase
+         FROM youtube_archive_merge_intent
+         WHERE subscription_id=?1 AND phase IN ('prepared','published')
+         ORDER BY created_at_ms ASC,intent_id ASC LIMIT 1",
+        [subscription_id],
+        |row| {
+            Ok(YoutubeArchiveMergeIntentRow {
+                intent_id: row.get(0)?,
+                subscription_id: row.get(1)?,
+                target_archive_path: row.get(2)?,
+                source_archive_sha256: row.get(3)?,
+                intended_archive_sha256: row.get(4)?,
+                intended_video_ids_json: row.get(5)?,
+                phase: row.get(6)?,
+            })
+        },
+    )
+    .optional()
+    .map_err(Into::into)
+}
+
+fn parse_archive_merge_intent_row(
+    row: YoutubeArchiveMergeIntentRow,
+) -> Result<YoutubeArchiveMergeIntent> {
+    let intended_video_ids = serde_json::from_str::<Vec<String>>(&row.intended_video_ids_json)
+        .map_err(|error| {
+            EngineError::InstallFailed(format!(
+                "trusted archive intent members are invalid: {error}"
+            ))
+        })?;
+    Ok(YoutubeArchiveMergeIntent {
+        intent_id: row.intent_id,
+        subscription_id: row.subscription_id,
+        target_archive_path: row.target_archive_path,
+        source_archive_sha256: row.source_archive_sha256,
+        intended_archive_sha256: row.intended_archive_sha256,
+        intended_video_ids,
+        phase: row.phase,
+    })
+}
+
+fn validate_archive_merge_intent(paths: &AppPaths, intent: &YoutubeArchiveMergeIntent) -> Result<PathBuf> {
+    if Uuid::parse_str(&intent.intent_id)
+        .map(|value| value.to_string() != intent.intent_id)
+        .unwrap_or(true)
+        || !matches!(intent.phase.as_str(), "prepared" | "published")
+        || intent.intended_video_ids.iter().any(|id| {
+            id.trim().is_empty() || id.trim() != id || id.chars().any(char::is_whitespace)
+        })
+    {
+        return Err(EngineError::InstallFailed("trusted archive intent binding is invalid".into()));
+    }
+    let mut canonical_ids = intent.intended_video_ids.clone();
+    canonical_ids.sort();
+    canonical_ids.dedup();
+    if canonical_ids != intent.intended_video_ids
+        || archive_body_sha256(&canonical_archive_body(&canonical_ids))
+            != intent.intended_archive_sha256
+    {
+        return Err(EngineError::InstallFailed("trusted archive intent content is invalid".into()));
+    }
+    let expected_path = paths.youtube_subscription_archive_state_path(&intent.subscription_id);
+    if expected_path.to_string_lossy() != intent.target_archive_path {
+        return Err(EngineError::InstallFailed("trusted archive intent target is invalid".into()));
+    }
+    Ok(expected_path)
+}
+
+fn advance_archive_merge_intent_phase(
+    paths: &AppPaths,
+    intent_id: &str,
+    from_phase: &str,
+    to_phase: &str,
+) -> Result<()> {
+    let conn = db::open(paths)?;
+    db::migrate(&conn)?;
+    let advanced = conn.execute(
+        "UPDATE youtube_archive_merge_intent SET phase=?1,updated_at_ms=?2
+         WHERE intent_id=?3 AND phase=?4",
+        params![to_phase, now_ms(), intent_id, from_phase],
+    )?;
+    if advanced != 1 {
+        return Err(EngineError::InstallFailed("youtube archive intent phase CAS failed".into()));
+    }
+    Ok(())
+}
+
+fn remove_archive_merge_carrier_if_owned(path: &Path, intent_id: &str) -> Result<bool> {
+    let carrier = match read_archive_merge_carrier(path) {
+        Ok(carrier) => carrier,
+        Err(_) => return Ok(false),
+    };
+    if carrier.intent_id != intent_id {
+        return Ok(false);
+    }
+    std::fs::remove_file(path)?;
+    Ok(true)
+}
+
+/// Reconcile a bounded number of interrupted canonical archive publications. The journal is the
+/// durable proof that filesystem bytes may be ahead of SQLite, so it is removed only after the
+/// exact canonical file has been projected successfully. Replays are idempotent.
+pub fn reconcile_youtube_archive_merge_journals(paths: &AppPaths) -> Result<usize> {
+    let _guard = lock_youtube_archive_mutation()?;
+    reconcile_archive_merge_journals_locked(paths)
+}
+
+fn record_archive_merge_intent_failure(
+    paths: &AppPaths,
+    row: &YoutubeArchiveMergeIntentRow,
+    error: &EngineError,
+) -> Result<()> {
+    let conn = db::open(paths)?;
+    db::migrate(&conn)?;
+    let failed_at_ms = now_ms();
+    conn.execute(
+        "INSERT INTO youtube_archive_merge_intent_failure(
+           intent_id,subscription_id,error_message,failure_count,
+           first_failed_at_ms,last_failed_at_ms,resolved_at_ms
+         ) VALUES(?1,?2,?3,1,?4,?4,NULL)
+         ON CONFLICT(intent_id) DO UPDATE SET
+           error_message=excluded.error_message,
+           failure_count=youtube_archive_merge_intent_failure.failure_count+1,
+           last_failed_at_ms=excluded.last_failed_at_ms,
+           resolved_at_ms=NULL",
+        params![
+            row.intent_id,
+            row.subscription_id,
+            error.to_string(),
+            failed_at_ms,
+        ],
+    )?;
+    Ok(())
+}
+
+fn reconcile_archive_merge_intent_row(
+    paths: &AppPaths,
+    row: YoutubeArchiveMergeIntentRow,
+) -> Result<()> {
+    let intent = parse_archive_merge_intent_row(row)?;
+    let archive_path = validate_archive_merge_intent(paths, &intent)?;
+    let current_sha256 = archive_file_sha256(&archive_path)?;
+    if intent.phase == "prepared" {
+        if current_sha256 == intent.source_archive_sha256 {
+            persistence::atomic_write_text(
+                &archive_path,
+                &canonical_archive_body(&intent.intended_video_ids),
+            )?;
+        } else if current_sha256 != intent.intended_archive_sha256 {
+            return Err(EngineError::InstallFailed(
+                "youtube archive changed outside its trusted merge intent".into(),
+            ));
+        }
+        advance_archive_merge_intent_phase(
+            paths,
+            &intent.intent_id,
+            "prepared",
+            "published",
+        )?;
+    } else if current_sha256 != intent.intended_archive_sha256 {
+        return Err(EngineError::InstallFailed(
+            "published youtube archive does not match its trusted intent".into(),
+        ));
+    }
+    apply_archive_merge_projection(
+        paths,
+        &intent.intent_id,
+        &intent.subscription_id,
+        &intent.intended_video_ids,
+    )?;
+    let journal = archive_merge_journal_path(&archive_path);
+    let _ = remove_archive_merge_carrier_if_owned(&journal, &intent.intent_id)?;
+    Ok(())
+}
+
+fn reconcile_archive_merge_for_subscription_locked(
+    paths: &AppPaths,
+    subscription_id: &str,
+) -> Result<usize> {
+    let Some(row) = load_pending_archive_merge_intent_row_for_subscription(paths, subscription_id)?
+    else {
+        return Ok(0);
+    };
+    match reconcile_archive_merge_intent_row(paths, row.clone()) {
+        Ok(()) => Ok(1),
+        Err(error) => {
+            if let Err(evidence_error) = record_archive_merge_intent_failure(paths, &row, &error) {
+                return Err(EngineError::InstallFailed(format!(
+                    "{error}; durable archive quarantine evidence could not be written: {evidence_error}"
+                )));
+            }
+            Err(error)
+        }
+    }
+}
+
+fn reconcile_archive_merge_journals_locked(paths: &AppPaths) -> Result<usize> {
+    let mut recovered = 0;
+    let mut evidence_errors = Vec::new();
+    for row in load_pending_archive_merge_intent_rows(paths)? {
+        match reconcile_archive_merge_intent_row(paths, row.clone()) {
+            Ok(()) => recovered += 1,
+            Err(error) => {
+                if let Err(evidence_error) = record_archive_merge_intent_failure(paths, &row, &error)
+                {
+                    evidence_errors.push(format!(
+                        "{}: {}",
+                        row.intent_id, evidence_error
+                    ));
+                }
+            }
+        }
+    }
+    // Ordinary locked, malformed, or unsafe carriers are isolated and durably retryable. If that
+    // retry ownership itself cannot be persisted, fail closed so startup/callers cannot report a
+    // clean reconciliation or advance the durable cursor past unowned work.
+    cleanup_committed_archive_merge_carriers(paths)?;
+    if !evidence_errors.is_empty() {
+        return Err(EngineError::InstallFailed(format!(
+            "one or more archive quarantine receipts could not be written: {}",
+            evidence_errors.join("; ")
+        )));
+    }
+    Ok(recovered)
+}
+
+fn cleanup_committed_archive_merge_carriers(
+    paths: &AppPaths,
+) -> Result<ArchiveCarrierCleanupReport> {
+    cleanup_committed_archive_merge_carriers_with(paths, &mut |path| std::fs::remove_file(path))
+}
+
+fn cleanup_committed_archive_merge_carriers_with<F>(
+    paths: &AppPaths,
+    remove_file: &mut F,
+) -> Result<ArchiveCarrierCleanupReport>
+where
+    F: FnMut(&Path) -> std::io::Result<()>,
+{
+    let (after_intent_id, cursor_generation) = load_archive_carrier_cleanup_cursor(paths)?;
+
+    let retry_candidates = load_failed_committed_archive_carrier_cleanup_candidates(
+        paths,
+        YOUTUBE_ARCHIVE_CARRIER_CLEANUP_RETRY_LIMIT,
+    )?;
+    let mut page_candidates = load_committed_archive_carrier_cleanup_candidates(
+        paths,
+        after_intent_id.as_deref(),
+        YOUTUBE_ARCHIVE_JOURNAL_REPLAY_LIMIT,
+    )?;
+    // UUID intent IDs are not insertion ordered. Once the keyset reaches the end, wrap once so
+    // newer committed intents that sort before the prior cursor are not starved indefinitely.
+    if page_candidates.is_empty() && after_intent_id.is_some() {
+        page_candidates = load_committed_archive_carrier_cleanup_candidates(
+            paths,
+            None,
+            YOUTUBE_ARCHIVE_JOURNAL_REPLAY_LIMIT,
+        )?;
+    }
+
+    let page_tail = page_candidates
+        .last()
+        .map(|(intent_id, _)| intent_id.clone());
+    let mut seen = HashSet::new();
+    let candidates = retry_candidates
+        .into_iter()
+        .chain(page_candidates)
+        .filter(|(intent_id, _)| seen.insert(intent_id.clone()))
+        .collect::<Vec<_>>();
+    if candidates.is_empty() {
+        return Ok(ArchiveCarrierCleanupReport::default());
+    }
+    let receipt_conn = db::open(paths)?;
+    db::migrate(&receipt_conn)?;
+    let mut report = ArchiveCarrierCleanupReport::default();
+    for (intent_id, subscription_id) in candidates {
+        match cleanup_committed_archive_merge_carrier(
+            paths,
+            &intent_id,
+            &subscription_id,
+            remove_file,
+        ) {
+            Ok(removed) => {
+                report.removed += usize::from(removed);
+                if let Err(error) =
+                    resolve_archive_carrier_cleanup_failure(&receipt_conn, &intent_id)
+                {
+                    eprintln!(
+                        "youtube archive carrier cleanup resolution receipt deferred for {intent_id}: {error}"
+                    );
+                }
+            }
+            Err(error) => {
+                report.failed += 1;
+                record_archive_carrier_cleanup_failure(
+                    &receipt_conn,
+                    &intent_id,
+                    &subscription_id,
+                    &error,
+                )
+                .map_err(|receipt_error| {
+                    EngineError::InstallFailed(format!(
+                        "youtube archive carrier cleanup failed and retry ownership could not be persisted for {intent_id}: {receipt_error}"
+                    ))
+                })?;
+            }
+        }
+    }
+
+    // Advance durably only after every candidate in the selected page has had an independent
+    // attempt. A crash before this CAS safely replays the page; a competing process that already
+    // advanced the generation wins without letting this stale pass overwrite newer progress.
+    if let Some(last_intent_id) = page_tail {
+        advance_archive_carrier_cleanup_cursor(
+            &receipt_conn,
+            cursor_generation,
+            after_intent_id.as_deref(),
+            &last_intent_id,
+        )?;
+    }
+    Ok(report)
+}
+
+fn load_archive_carrier_cleanup_cursor(paths: &AppPaths) -> Result<(Option<String>, i64)> {
+    let conn = db::open_readonly(paths)?;
+    conn.query_row(
+        "SELECT after_intent_id,generation
+         FROM youtube_archive_carrier_cleanup_cursor WHERE singleton=1",
+        [],
+        |row| Ok((row.get(0)?, row.get(1)?)),
+    )
+    .map_err(EngineError::from)
+}
+
+fn advance_archive_carrier_cleanup_cursor(
+    conn: &rusqlite::Connection,
+    expected_generation: i64,
+    expected_after_intent_id: Option<&str>,
+    next_after_intent_id: &str,
+) -> Result<bool> {
+    let changed = conn.execute(
+        "UPDATE youtube_archive_carrier_cleanup_cursor
+         SET after_intent_id=?1,generation=generation+1,updated_at_ms=?2
+         WHERE singleton=1 AND generation=?3
+           AND ((after_intent_id IS NULL AND ?4 IS NULL) OR after_intent_id=?4)",
+        params![
+            next_after_intent_id,
+            now_ms(),
+            expected_generation,
+            expected_after_intent_id,
+        ],
+    )?;
+    Ok(changed == 1)
+}
+
+fn cleanup_committed_archive_merge_carrier<F>(
+    paths: &AppPaths,
+    intent_id: &str,
+    subscription_id: &str,
+    remove_file: &mut F,
+) -> Result<bool>
+where
+    F: FnMut(&Path) -> std::io::Result<()>,
+{
+    let journal_path = validated_archive_merge_carrier_path(paths, subscription_id)?;
+    let Some(journal_path) = journal_path else {
+        return Ok(false);
+    };
+    let carrier = read_archive_merge_carrier(&journal_path)?;
+    if carrier.intent_id != intent_id {
+        return Err(EngineError::InstallFailed(
+            "youtube archive carrier intent binding does not match its committed database row"
+                .into(),
+        ));
+    }
+    remove_file(&journal_path)?;
+    Ok(true)
+}
+
+fn validated_archive_merge_carrier_path(
+    paths: &AppPaths,
+    subscription_id: &str,
+) -> Result<Option<PathBuf>> {
+    let mut components = Path::new(subscription_id).components();
+    let safe_component = matches!(components.next(), Some(std::path::Component::Normal(_)))
+        && components.next().is_none()
+        && !subscription_id.trim().is_empty()
+        && !subscription_id.contains('/')
+        && !subscription_id.contains('\\');
+    if !safe_component {
+        return Err(EngineError::InstallFailed(
+            "youtube archive carrier cleanup refused an unsafe subscription identifier".into(),
+        ));
+    }
+
+    let state_root = paths.youtube_subscription_state_dir();
+    let journal_path =
+        archive_merge_journal_path(&paths.youtube_subscription_archive_state_path(subscription_id));
+    if !journal_path.starts_with(&state_root) {
+        return Err(EngineError::InstallFailed(
+            "youtube archive carrier cleanup path escaped the managed state root".into(),
+        ));
+    }
+    if !journal_path.try_exists()? {
+        return Ok(None);
+    }
+    let canonical_root = std::fs::canonicalize(&state_root)?;
+    let canonical_journal = std::fs::canonicalize(&journal_path)?;
+    if !canonical_journal.starts_with(&canonical_root) {
+        return Err(EngineError::InstallFailed(
+            "youtube archive carrier cleanup canonical path escaped the managed state root".into(),
+        ));
+    }
+    Ok(Some(canonical_journal))
+}
+
+fn record_archive_carrier_cleanup_failure(
+    conn: &rusqlite::Connection,
+    intent_id: &str,
+    subscription_id: &str,
+    error: &EngineError,
+) -> Result<()> {
+    let failed_at_ms = now_ms();
+    let message = format!("{YOUTUBE_ARCHIVE_CARRIER_CLEANUP_ERROR_PREFIX} {error}");
+    conn.execute(
+        "INSERT INTO youtube_archive_merge_intent_failure(
+           intent_id,subscription_id,error_message,failure_count,
+           first_failed_at_ms,last_failed_at_ms,resolved_at_ms
+         ) VALUES(?1,?2,?3,1,?4,?4,NULL)
+         ON CONFLICT(intent_id) DO UPDATE SET
+           error_message=excluded.error_message,
+           failure_count=youtube_archive_merge_intent_failure.failure_count+1,
+           last_failed_at_ms=excluded.last_failed_at_ms,
+           resolved_at_ms=NULL",
+        params![intent_id, subscription_id, message, failed_at_ms],
+    )?;
+    Ok(())
+}
+
+fn resolve_archive_carrier_cleanup_failure(
+    conn: &rusqlite::Connection,
+    intent_id: &str,
+) -> Result<()> {
+    conn.execute(
+        "UPDATE youtube_archive_merge_intent_failure
+         SET resolved_at_ms=?1
+         WHERE intent_id=?2 AND resolved_at_ms IS NULL
+           AND error_message LIKE ?3",
+        params![
+            now_ms(),
+            intent_id,
+            format!("{YOUTUBE_ARCHIVE_CARRIER_CLEANUP_ERROR_PREFIX}%"),
+        ],
+    )?;
+    Ok(())
+}
+
+fn load_failed_committed_archive_carrier_cleanup_candidates(
+    paths: &AppPaths,
+    limit: usize,
+) -> Result<Vec<(String, String)>> {
+    if limit == 0 {
+        return Ok(Vec::new());
+    }
+    let conn = db::open_readonly(paths)?;
+    let mut stmt = conn.prepare(
+        "SELECT intent.intent_id,intent.subscription_id
+         FROM youtube_archive_merge_intent_failure failure
+         JOIN youtube_archive_merge_intent intent ON intent.intent_id=failure.intent_id
+         WHERE failure.resolved_at_ms IS NULL
+           AND failure.error_message LIKE ?1
+           AND intent.phase='committed'
+         ORDER BY failure.last_failed_at_ms ASC,intent.intent_id ASC
+         LIMIT ?2",
+    )?;
+    let rows = stmt
+        .query_map(
+            params![
+                format!("{YOUTUBE_ARCHIVE_CARRIER_CLEANUP_ERROR_PREFIX}%"),
+                limit as i64,
+            ],
+            |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)),
+        )?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+    Ok(rows)
+}
+
+fn load_committed_archive_carrier_cleanup_candidates(
+    paths: &AppPaths,
+    after_intent_id: Option<&str>,
+    limit: usize,
+) -> Result<Vec<(String, String)>> {
+    if limit == 0 {
+        return Ok(Vec::new());
+    }
+    let conn = db::open_readonly(paths)?;
+    let rows = if let Some(after_intent_id) = after_intent_id {
+        let mut stmt = conn.prepare(
+            "SELECT intent_id,subscription_id
+             FROM youtube_archive_merge_intent
+             WHERE phase='committed' AND intent_id>?1
+             ORDER BY intent_id ASC
+             LIMIT ?2",
+        )?;
+        let rows = stmt
+            .query_map(params![after_intent_id, limit as i64], |row| {
+                Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+            })?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        rows
+    } else {
+        let mut stmt = conn.prepare(
+            "SELECT intent_id,subscription_id
+             FROM youtube_archive_merge_intent
+             WHERE phase='committed'
+             ORDER BY intent_id ASC
+             LIMIT ?1",
+        )?;
+        let rows = stmt
+            .query_map([limit as i64], |row| {
+                Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+            })?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        rows
+    };
+    Ok(rows)
+}
+
+fn active_archive_merge_quarantine_subscription_ids(paths: &AppPaths) -> Result<HashSet<String>> {
+    let conn = db::open_readonly(paths)?;
+    let mut stmt = conn.prepare(
+        "SELECT failure.subscription_id
+         FROM youtube_archive_merge_intent_failure failure
+         JOIN youtube_archive_merge_intent intent ON intent.intent_id=failure.intent_id
+         WHERE failure.resolved_at_ms IS NULL AND intent.phase<>'committed'",
+    )?;
+    let subscription_ids = stmt
+        .query_map([], |row| row.get::<_, String>(0))?
+        .collect::<rusqlite::Result<HashSet<_>>>()
+        .map_err(EngineError::from)?;
+    Ok(subscription_ids)
+}
+
+fn merge_archive_file_locked(
+    paths: &AppPaths,
+    path: &Path,
+    video_ids: &HashSet<String>,
+) -> Result<(usize, usize)> {
+    let source_archive_sha256 = archive_file_sha256(path)?;
     let mut existing: HashSet<String> = HashSet::new();
     if path.exists() {
         if let Ok(file) = std::fs::File::open(path) {
@@ -3245,11 +4032,111 @@ fn merge_archive_file(path: &Path, video_ids: &HashSet<String>) -> std::io::Resu
     }
     merged.sort();
 
-    let mut file = std::fs::File::create(path)?;
-    for id in merged {
-        writeln!(file, "youtube {id}")?;
+    if appended == 0 {
+        return Ok((appended, skipped_existing));
     }
+
+    let subscription_id = archive_subscription_id_from_path(paths, path)?;
+    if archive_file_sha256(path)? != source_archive_sha256 {
+        return Err(EngineError::InstallFailed(
+            "youtube archive changed while preparing trusted publication".into(),
+        ));
+    }
+    let intent_id = create_archive_merge_intent(
+        paths,
+        &subscription_id,
+        path,
+        &source_archive_sha256,
+        &merged,
+    )?;
+    let journal = archive_merge_journal_path(path);
+    write_archive_merge_journal(&journal, &intent_id)?;
+    if archive_file_sha256(path)? != source_archive_sha256 {
+        return Err(EngineError::InstallFailed(
+            "youtube archive changed before trusted publication".into(),
+        ));
+    }
+    let body = canonical_archive_body(&merged);
+    persistence::atomic_write_text(path, &body)?;
+    advance_archive_merge_intent_phase(paths, &intent_id, "prepared", "published")?;
+    apply_archive_merge_projection(paths, &intent_id, &subscription_id, &merged)?;
+    let _ = remove_archive_merge_carrier_if_owned(&journal, &intent_id)?;
     Ok((appended, skipped_existing))
+}
+
+fn apply_archive_merge_projection(
+    paths: &AppPaths,
+    intent_id: &str,
+    subscription_id: &str,
+    merged: &[String],
+) -> Result<()> {
+    let mut conn = db::open(paths)?;
+    db::migrate(&conn)?;
+    let tx = conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+    for video_id in merged {
+        tx.execute(
+            "INSERT OR IGNORE INTO youtube_subscription_archive_member(subscription_id,video_id,discovered_at_ms) VALUES(?1,?2,?3)",
+            params![subscription_id, video_id, now_ms()],
+        )?;
+    }
+    tx.execute(
+        "INSERT INTO youtube_subscription_archive_rollup(subscription_id,video_count,rebuilt_at_ms,source) VALUES(?1,?2,?3,'archive_event') ON CONFLICT(subscription_id) DO UPDATE SET video_count=excluded.video_count,rebuilt_at_ms=excluded.rebuilt_at_ms,source=excluded.source",
+        params![subscription_id, merged.len() as i64, now_ms()],
+    )?;
+    let advanced = tx.execute(
+        "UPDATE derived_projection_state SET dirty=1,updated_at_ms=updated_at_ms+1 WHERE projection='youtube_archive'",
+        [],
+    )?;
+    if advanced != 1 {
+        return Err(EngineError::InstallFailed("youtube archive projection generation row is missing".into()));
+    }
+    let committed = tx.execute(
+        "UPDATE youtube_archive_merge_intent SET phase='committed',updated_at_ms=?1
+         WHERE intent_id=?2 AND subscription_id=?3 AND phase='published'
+           AND intended_archive_sha256=?4 AND intended_video_ids_json=?5",
+        params![
+            now_ms(),
+            intent_id,
+            subscription_id,
+            archive_body_sha256(&canonical_archive_body(merged)),
+            serde_json::to_string(merged)?,
+        ],
+    )?;
+    if committed != 1 {
+        return Err(EngineError::InstallFailed("youtube archive intent commit CAS failed".into()));
+    }
+    tx.execute(
+        "UPDATE youtube_archive_merge_intent_failure
+         SET resolved_at_ms=?1
+         WHERE intent_id=?2 AND resolved_at_ms IS NULL",
+        params![now_ms(), intent_id],
+    )?;
+    tx.commit()?;
+    Ok(())
+}
+
+pub(crate) fn merge_youtube_archive_member(paths: &AppPaths, subscription_id: &str, video_id: &str) -> Result<()> {
+    let path = paths.youtube_subscription_archive_state_path(subscription_id);
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    merge_archive_file(paths, &path, &HashSet::from([video_id.to_string()]))?;
+    Ok(())
+}
+
+pub(crate) fn mark_youtube_archive_projection_dirty(paths: &AppPaths) -> Result<()> {
+    let conn = db::open(paths)?;
+    db::migrate(&conn)?;
+    let changed = conn.execute(
+        "UPDATE derived_projection_state SET dirty=1,updated_at_ms=updated_at_ms+1 WHERE projection='youtube_archive'",
+        [],
+    )?;
+    if changed != 1 {
+        return Err(EngineError::InstallFailed(
+            "youtube archive projection generation row is missing".to_string(),
+        ));
+    }
+    Ok(())
 }
 
 fn read_archive_file_ids(path: &Path) -> std::io::Result<HashSet<String>> {
@@ -3284,7 +4171,7 @@ pub fn youtube_subscription_output_dir(
         if !p.is_absolute() {
             p = std::env::current_dir()?.join(p);
         }
-        return Ok(p);
+        return root_rebind::resolve_active_alias_path(paths, &p, false);
     }
 
     let library_root = if let Some(library_id) = sub.library_id.as_deref() {
@@ -3295,6 +4182,7 @@ pub fn youtube_subscription_output_dir(
     } else {
         video_libraries::default_video_library_root(paths)?
     };
+    let library_root = root_rebind::resolve_active_alias_path(paths, &library_root, false)?;
     Ok(library_root.join(sanitize_folder_map(&sub.folder_map)))
 }
 
@@ -3518,7 +4406,7 @@ pub fn ensure_youtube_subscription_archive_state(
         if legacy_path != archive_path && legacy_path.exists() {
             let legacy_ids = read_archive_file_ids(&legacy_path)?;
             if !legacy_ids.is_empty() {
-                merge_archive_file(&archive_path, &legacy_ids)?;
+                merge_archive_file(paths, &archive_path, &legacy_ids)?;
             }
         }
     }
@@ -3537,33 +4425,190 @@ pub fn load_youtube_subscription_archive_ids(
 // 43s) and is polled repeatedly by the UI, adding load under DB contention. A short-TTL
 // in-process cache serves recent results so back-to-back UI polls do not re-scan the disk.
 // Read-only and thread-safe; the public signature and Tauri command are unchanged.
-const ARCHIVE_STATS_CACHE_TTL_SECS: u64 = 30;
-
-#[allow(clippy::type_complexity)]
-static ARCHIVE_STATS_CACHE: OnceLock<Mutex<Option<(Instant, HashMap<String, usize>)>>> =
-    OnceLock::new();
-
 pub fn youtube_subscriptions_archive_stats(paths: &AppPaths) -> Result<HashMap<String, usize>> {
-    let cache = ARCHIVE_STATS_CACHE.get_or_init(|| Mutex::new(None));
+    // This is a hot panel poll. It must never take the archive writer lock, reconcile journals,
+    // migrate, or open SQLite read/write. Startup/explicit repair and the bounded background
+    // rebuild own those mutations; the panel consumes only their last committed projection.
+    let conn = db::open_readonly(paths)?;
+    // Dirty/empty projections are intentionally returned as-is. Repair is owned by the explicit
+    // `subscription_projections_rebuild` command (and startup repair), never by a hot UI poll.
+    let mut stmt = conn
+        .prepare("SELECT subscription_id, video_count FROM youtube_subscription_archive_rollup")?;
+    let rows = stmt
+        .query_map([], |row| {
+            Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)? as usize))
+        })?
+        .collect::<rusqlite::Result<HashMap<_, _>>>()?;
+    Ok(rows)
+}
 
-    // Serve a fresh-enough cached snapshot (younger than the TTL) without touching disk.
-    if let Ok(guard) = cache.lock() {
-        if let Some((stored_at, stats)) = guard.as_ref() {
-            if stored_at.elapsed() < Duration::from_secs(ARCHIVE_STATS_CACHE_TTL_SECS) {
-                return Ok(stats.clone());
+pub fn record_youtube_archive_member(
+    paths: &AppPaths,
+    subscription_id: &str,
+    video_id: &str,
+) -> Result<()> {
+    let mut conn = db::open(paths)?;
+    db::migrate(&conn)?;
+    let tx = conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+    tx.execute(
+        "INSERT OR IGNORE INTO youtube_subscription_archive_member(subscription_id,video_id,discovered_at_ms) VALUES(?1,?2,?3)",
+        params![subscription_id, video_id, now_ms()],
+    )?;
+    tx.execute(
+        "INSERT INTO youtube_subscription_archive_rollup(subscription_id,video_count,rebuilt_at_ms,source) SELECT ?1,COUNT(*),?2,'incremental' FROM youtube_subscription_archive_member WHERE subscription_id=?1 ON CONFLICT(subscription_id) DO UPDATE SET video_count=excluded.video_count, rebuilt_at_ms=excluded.rebuilt_at_ms, source=excluded.source",
+        params![subscription_id, now_ms()],
+    )?;
+    // This incremental update is complete for its member, but it must not erase dirty evidence
+    // raised by an unrelated subscription or interrupted canonical reconciliation.
+    tx.execute("UPDATE derived_projection_state SET updated_at_ms=updated_at_ms+1 WHERE projection='youtube_archive'", [])?;
+    tx.commit()?;
+    Ok(())
+}
+
+pub fn rebuild_youtube_subscription_archive_rollups(
+    paths: &AppPaths,
+) -> Result<HashMap<String, usize>> {
+    let _guard = lock_youtube_archive_mutation()?;
+    reconcile_archive_merge_journals_locked(paths)?;
+    for _ in 0..4 {
+        let generation = db::open_readonly(paths)?.query_row(
+            "SELECT updated_at_ms FROM derived_projection_state WHERE projection='youtube_archive'",
+            [],
+            |r| r.get::<_, i64>(0),
+        )?;
+        let file_generation = youtube_archive_file_generation(paths)?;
+        let quarantined = active_archive_merge_quarantine_subscription_ids(paths)?;
+        let mut canonical = compute_youtube_subscriptions_archive_stats(paths)?;
+        canonical.retain(|subscription_id, _| !quarantined.contains(subscription_id));
+        if youtube_archive_file_generation(paths)? != file_generation {
+            continue;
+        }
+        let mut conn = db::open(paths)?;
+        db::migrate(&conn)?;
+        let tx = conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+        let current_generation: i64 = tx.query_row(
+            "SELECT updated_at_ms FROM derived_projection_state WHERE projection='youtube_archive'",
+            [],
+            |r| r.get(0),
+        )?;
+        if current_generation != generation {
+            drop(tx);
+            continue;
+        }
+        tx.execute(
+            "DELETE FROM youtube_subscription_archive_member
+             WHERE subscription_id NOT IN (
+               SELECT failure.subscription_id
+               FROM youtube_archive_merge_intent_failure failure
+               JOIN youtube_archive_merge_intent intent ON intent.intent_id=failure.intent_id
+               WHERE failure.resolved_at_ms IS NULL AND intent.phase<>'committed'
+             )",
+            [],
+        )?;
+        tx.execute(
+            "DELETE FROM youtube_subscription_archive_rollup
+             WHERE subscription_id NOT IN (
+               SELECT failure.subscription_id
+               FROM youtube_archive_merge_intent_failure failure
+               JOIN youtube_archive_merge_intent intent ON intent.intent_id=failure.intent_id
+               WHERE failure.resolved_at_ms IS NULL AND intent.phase<>'committed'
+             )",
+            [],
+        )?;
+        for subscription_id in canonical.keys() {
+            let archive_path = paths.youtube_subscription_archive_state_path(subscription_id);
+            for video_id in read_archive_file_ids(&archive_path)? {
+                tx.execute(
+                "INSERT OR IGNORE INTO youtube_subscription_archive_member(subscription_id,video_id,discovered_at_ms) VALUES(?1,?2,?3)",
+                params![subscription_id, video_id, now_ms()],
+            )?;
             }
         }
+        for (subscription_id, video_count) in &canonical {
+            tx.execute(
+            "INSERT INTO youtube_subscription_archive_rollup(subscription_id,video_count,rebuilt_at_ms,source) VALUES(?1,?2,?3,'canonical_rebuild')",
+            params![subscription_id, *video_count as i64, now_ms()],
+        )?;
+        }
+        let cleared = tx.execute(
+            "UPDATE derived_projection_state
+             SET dirty=CASE WHEN EXISTS(
+               SELECT 1 FROM youtube_archive_merge_intent_failure failure
+               JOIN youtube_archive_merge_intent intent ON intent.intent_id=failure.intent_id
+               WHERE failure.resolved_at_ms IS NULL AND intent.phase<>'committed'
+             ) THEN 1 ELSE 0 END
+             WHERE projection='youtube_archive' AND updated_at_ms=?1",
+            [generation],
+        )?;
+        if cleared != 1 {
+            drop(tx);
+            continue;
+        }
+        tx.commit()?;
+        if youtube_archive_file_generation(paths)? != file_generation {
+            // A writer outside the DB transaction changed canonical bytes. Re-dirty and retry;
+            // never return a rollup proven against a different archive generation.
+            mark_youtube_archive_projection_dirty(paths)?;
+            continue;
+        }
+        return youtube_subscriptions_archive_stats(paths);
     }
+    Err(EngineError::InstallFailed(
+        "youtube archive rollup remained dirty during rebuild".into(),
+    ))
+}
 
-    let stats = compute_youtube_subscriptions_archive_stats(paths)?;
+fn youtube_archive_file_generation(paths: &AppPaths) -> Result<Vec<(String, u64, u128, String)>> {
+    use sha2::{Digest as _, Sha256};
+    use std::io::Read as _;
 
-    // Store the recomputed snapshot for subsequent polls. If the lock is poisoned we still
-    // return the freshly computed value rather than failing the read-only query.
-    if let Ok(mut guard) = cache.lock() {
-        *guard = Some((Instant::now(), stats.clone()));
+    let state_dir = paths.youtube_subscription_state_dir();
+    let entries = match std::fs::read_dir(&state_dir) {
+        Ok(entries) => entries,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
+        Err(error) => return Err(error.into()),
+    };
+    let mut generation = Vec::new();
+    for entry in entries {
+        let entry = entry?;
+        if !entry.file_type()?.is_dir() {
+            continue;
+        }
+        let Some(subscription_id) = entry.file_name().to_str().map(str::to_string) else {
+            continue;
+        };
+        let archive = paths.youtube_subscription_archive_state_path(&subscription_id);
+        let Ok(metadata) = std::fs::metadata(&archive) else {
+            continue;
+        };
+        let modified_ns = metadata
+            .modified()
+            .ok()
+            .and_then(|value| value.duration_since(std::time::UNIX_EPOCH).ok())
+            .map(|value| value.as_nanos())
+            .unwrap_or(0);
+        // Length and timestamp alone miss an adversarial same-size rewrite on coarse or
+        // restored mtimes. Canonical archive text is the rebuild authority, so bind the CAS
+        // snapshot to its exact bytes.
+        let mut file = std::fs::File::open(&archive)?;
+        let mut hasher = Sha256::new();
+        let mut buffer = [0_u8; 64 * 1024];
+        loop {
+            let read = file.read(&mut buffer)?;
+            if read == 0 {
+                break;
+            }
+            hasher.update(&buffer[..read]);
+        }
+        generation.push((
+            subscription_id,
+            metadata.len(),
+            modified_ns,
+            hex::encode(hasher.finalize()),
+        ));
     }
-
-    Ok(stats)
+    generation.sort();
+    Ok(generation)
 }
 
 fn compute_youtube_subscriptions_archive_stats(paths: &AppPaths) -> Result<HashMap<String, usize>> {
@@ -3750,7 +4795,7 @@ pub struct SubscriptionDownloadActivityRow {
     pub current_progress: Option<f32>,
 }
 
-pub fn subscription_download_activity(
+fn compute_subscription_download_activity(
     paths: &AppPaths,
 ) -> Result<Vec<SubscriptionDownloadActivityRow>> {
     let conn = db::open_readonly(paths)?;
@@ -3861,6 +4906,120 @@ pub fn subscription_download_activity(
         });
     }
     Ok(out)
+}
+
+/// Event-path projection update for one canonical job mutation. This keeps the polling surface
+/// current without turning each poll into a full-history rebuild; the global dirty bit remains a
+/// repair signal until the debounced canonical reconciler proves a stable generation.
+pub(crate) fn refresh_subscription_activity_rollup_for_job(
+    paths: &AppPaths,
+    job_id: &str,
+) -> Result<()> {
+    let mut conn = db::open(paths)?;
+    db::migrate(&conn)?;
+    let subscription_id: Option<String> = conn
+        .query_row(
+            "SELECT COALESCE(json_extract(j.params_json,'$.subscription_id'), json_extract(parent.params_json,'$.subscription_id')) FROM job j LEFT JOIN job parent ON parent.id=j.batch_id WHERE j.id=?1",
+            [job_id],
+            |row| row.get(0),
+        )
+        .optional()?
+        .flatten();
+    let Some(subscription_id) = subscription_id.filter(|value| !value.trim().is_empty()) else {
+        return Ok(());
+    };
+    // Acquire the writer reservation before taking the canonical snapshot. Otherwise an older
+    // caller can read counts, pause, and overwrite a newer caller's projection after it commits.
+    let tx = conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+    let counts: (i64, i64, i64, i64) = tx.query_row(
+        "WITH active_batches AS MATERIALIZED (SELECT DISTINCT batch_id FROM job WHERE type='download_direct_url' AND status IN ('queued','running') AND batch_id IS NOT NULL AND json_extract(params_json,'$.subscription_id')=?1) SELECT COALESCE(SUM(status='queued'),0),COALESCE(SUM(status='running'),0),COALESCE(SUM(status='succeeded'),0),COALESCE(SUM(status IN ('failed','canceled')),0) FROM job WHERE type='download_direct_url' AND batch_id IN (SELECT batch_id FROM active_batches)",
+        [&subscription_id],
+        |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+    )?;
+    let current: Option<(Option<String>, Option<f32>)> = tx
+        .query_row(
+            "SELECT target_title,progress FROM job WHERE type='download_direct_url' AND status='running' AND json_extract(params_json,'$.subscription_id')=?1 ORDER BY started_at_ms DESC LIMIT 1",
+            [&subscription_id],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .optional()?;
+    if counts.0 + counts.1 == 0 {
+        tx.execute(
+            "DELETE FROM subscription_activity_rollup WHERE subscription_id=?1",
+            [&subscription_id],
+        )?;
+    } else {
+        tx.execute(
+            "INSERT INTO subscription_activity_rollup(subscription_id,queued,running,succeeded,failed,current_title,current_progress,rebuilt_at_ms,source) VALUES(?1,?2,?3,?4,?5,?6,?7,?8,'job_event') ON CONFLICT(subscription_id) DO UPDATE SET queued=excluded.queued,running=excluded.running,succeeded=excluded.succeeded,failed=excluded.failed,current_title=excluded.current_title,current_progress=excluded.current_progress,rebuilt_at_ms=excluded.rebuilt_at_ms,source=excluded.source",
+            params![subscription_id, counts.0, counts.1, counts.2, counts.3, current.as_ref().and_then(|value| value.0.clone()), current.and_then(|value| value.1), now_ms()],
+        )?;
+    }
+    tx.execute(
+        "UPDATE derived_projection_state SET dirty=1,updated_at_ms=updated_at_ms+1 WHERE projection='subscription_activity'",
+        [],
+    )?;
+    tx.commit()?;
+    Ok(())
+}
+
+pub fn rebuild_subscription_activity_rollup(
+    paths: &AppPaths,
+) -> Result<Vec<SubscriptionDownloadActivityRow>> {
+    for _ in 0..4 {
+        let generation = db::open_readonly(paths)?.query_row("SELECT updated_at_ms FROM derived_projection_state WHERE projection='subscription_activity'", [], |r| r.get::<_, i64>(0))?;
+        let rows = compute_subscription_download_activity(paths)?;
+        let mut conn = db::open(paths)?;
+        db::migrate(&conn)?;
+        let tx = conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+        let current_generation: i64 = tx.query_row("SELECT updated_at_ms FROM derived_projection_state WHERE projection='subscription_activity'", [], |r| r.get(0))?;
+        if current_generation != generation {
+            drop(tx);
+            continue;
+        }
+        tx.execute("DELETE FROM subscription_activity_rollup", [])?;
+        for row in &rows {
+            tx.execute(
+            "INSERT INTO subscription_activity_rollup(subscription_id,queued,running,succeeded,failed,current_title,current_progress,rebuilt_at_ms,source) VALUES(?1,?2,?3,?4,?5,?6,?7,?8,'canonical_rebuild')",
+            params![row.subscription_id, row.queued, row.running, row.succeeded, row.failed, row.current_title, row.current_progress, now_ms()],
+        )?;
+        }
+        let cleared = tx.execute("UPDATE derived_projection_state SET dirty=0 WHERE projection='subscription_activity' AND updated_at_ms=?1", [generation])?;
+        if cleared != 1 {
+            drop(tx);
+            continue;
+        }
+        tx.commit()?;
+        return Ok(rows);
+    }
+    Err(EngineError::InstallFailed(
+        "subscription activity rollup remained dirty during rebuild".into(),
+    ))
+}
+
+pub fn subscription_download_activity(
+    paths: &AppPaths,
+) -> Result<Vec<SubscriptionDownloadActivityRow>> {
+    // Like archive stats, this is a routine panel poll over a committed rollup. Dirty-state
+    // inspection and row projection share one read-only connection; rebuilding stays on the
+    // debounced background path and never turns the UI read into a writer.
+    let conn = db::open_readonly(paths)?;
+    // Return the last committed projection even when dirty. Full-history rebuilding belongs to
+    // the explicit/startup reconciler and must never be spawned by a routine pane poll.
+    let mut stmt = conn.prepare("SELECT subscription_id,queued,running,succeeded,failed,current_title,current_progress FROM subscription_activity_rollup ORDER BY subscription_id")?;
+    let rows = stmt
+        .query_map([], |row| {
+            Ok(SubscriptionDownloadActivityRow {
+                subscription_id: row.get(0)?,
+                queued: row.get(1)?,
+                running: row.get(2)?,
+                succeeded: row.get(3)?,
+                failed: row.get(4)?,
+                current_title: row.get(5)?,
+                current_progress: row.get(6)?,
+            })
+        })?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+    Ok(rows)
 }
 
 fn fourkvd_title(raw: &FourkvdSubscription) -> String {
@@ -4642,6 +5801,50 @@ impl<T> OptionalRowExt<T> for rusqlite::Result<T> {
 mod tests {
     use super::*;
     use crate::paths::AppPaths;
+
+    fn seed_archive_subscription(paths: &AppPaths, subscription_id: &str) {
+        let conn = crate::db::open(paths).expect("archive fixture db");
+        crate::db::migrate(&conn).expect("archive fixture schema");
+        conn.execute(
+            "INSERT OR IGNORE INTO youtube_subscription(
+               id,title,source_url,folder_map,active,created_at_ms,updated_at_ms
+             ) VALUES(?1,?2,?3,?4,1,1,1)",
+            params![
+                subscription_id,
+                format!("Archive fixture {subscription_id}"),
+                format!("https://www.youtube.com/@{subscription_id}"),
+                format!("map-{subscription_id}"),
+            ],
+        )
+        .expect("seed archive subscription");
+    }
+
+    fn seed_committed_archive_carrier(
+        paths: &AppPaths,
+        subscription_id: &str,
+        video_id: &str,
+    ) -> (String, PathBuf) {
+        seed_archive_subscription(paths, subscription_id);
+        let archive = paths.youtube_subscription_archive_state_path(subscription_id);
+        let intended = vec![video_id.to_string()];
+        let intent_id = create_archive_merge_intent(
+            paths,
+            subscription_id,
+            &archive,
+            &archive_file_sha256(&archive).expect("source archive hash"),
+            &intended,
+        )
+        .expect("archive intent");
+        let carrier = archive_merge_journal_path(&archive);
+        write_archive_merge_journal(&carrier, &intent_id).expect("archive carrier");
+        persistence::atomic_write_text(&archive, &canonical_archive_body(&intended))
+            .expect("archive publish");
+        advance_archive_merge_intent_phase(paths, &intent_id, "prepared", "published")
+            .expect("published phase");
+        apply_archive_merge_projection(paths, &intent_id, subscription_id, &intended)
+            .expect("committed projection");
+        (intent_id, carrier)
+    }
 
     #[test]
     fn import_upserts_by_source_url() {
@@ -5637,7 +6840,7 @@ CREATE TABLE IF NOT EXISTS url_description (
             youtube_subscription_archive_path(&paths, &sub).expect("archive path");
         assert!(!managed_archive_path.exists());
 
-        let stats = youtube_subscriptions_archive_stats(&paths).expect("stats");
+        let stats = youtube_subscriptions_archive_stats(&paths).expect("rollup stats");
 
         assert!(
             !stats.contains_key(&sub.id),
@@ -5654,21 +6857,1022 @@ CREATE TABLE IF NOT EXISTS url_description (
     }
 
     #[test]
-    fn archive_stats_counts_managed_files_without_opening_subscription_db() {
+    fn routine_projection_reads_do_not_schedule_or_clear_dirty_repair_state() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let paths = AppPaths::new(dir.path().join("app_state"));
+        crate::db::ensure_schema(&paths).expect("schema");
+        let conn = crate::db::open(&paths).expect("db");
+        conn.execute(
+            "INSERT INTO youtube_subscription_archive_rollup(subscription_id,video_count,rebuilt_at_ms,source) VALUES('stale-archive',7,1,'fixture')",
+            [],
+        )
+        .expect("archive projection");
+        conn.execute(
+            "INSERT INTO subscription_activity_rollup(subscription_id,queued,running,succeeded,failed,current_title,current_progress,rebuilt_at_ms,source) VALUES('stale-activity',1,0,0,0,NULL,NULL,1,'fixture')",
+            [],
+        )
+        .expect("activity projection");
+        conn.execute(
+            "UPDATE derived_projection_state SET dirty=1,updated_at_ms=401 WHERE projection='youtube_archive'",
+            [],
+        )
+        .expect("dirty archive");
+        conn.execute(
+            "UPDATE derived_projection_state SET dirty=1,updated_at_ms=402 WHERE projection='subscription_activity'",
+            [],
+        )
+        .expect("dirty activity");
+        drop(conn);
+
+        let archive = youtube_subscriptions_archive_stats(&paths).expect("archive poll");
+        let activity = subscription_download_activity(&paths).expect("activity poll");
+        assert_eq!(archive.get("stale-archive"), Some(&7));
+        assert_eq!(activity.len(), 1);
+        std::thread::sleep(std::time::Duration::from_millis(1_000));
+
+        let conn = crate::db::open_readonly(&paths).expect("readonly verification");
+        for (projection, expected_generation) in
+            [("youtube_archive", 401_i64), ("subscription_activity", 402_i64)]
+        {
+            let state: (i64, i64) = conn
+                .query_row(
+                    "SELECT dirty,updated_at_ms FROM derived_projection_state WHERE projection=?1",
+                    [projection],
+                    |row| Ok((row.get(0)?, row.get(1)?)),
+                )
+                .expect("projection state");
+            assert_eq!(state, (1, expected_generation));
+        }
+        assert_eq!(
+            conn.query_row(
+                "SELECT COUNT(*) FROM youtube_subscription_archive_rollup",
+                [],
+                |row| row.get::<_, i64>(0),
+            )
+            .expect("archive rows"),
+            1
+        );
+        assert_eq!(
+            conn.query_row(
+                "SELECT COUNT(*) FROM subscription_activity_rollup",
+                [],
+                |row| row.get::<_, i64>(0),
+            )
+            .expect("activity rows"),
+            1
+        );
+    }
+
+    #[test]
+    fn archive_rollup_rebuild_counts_managed_files() {
         let dir = tempfile::tempdir().expect("tempdir");
         let paths = AppPaths::new(dir.path().join("app_state"));
         let subscription_id = "sub-managed-only";
         let archive_path = paths.youtube_subscription_archive_state_path(subscription_id);
         std::fs::create_dir_all(archive_path.parent().expect("archive parent")).expect("mkdir");
         std::fs::write(&archive_path, "youtube video-a\nvideo-b\n\n").expect("write archive");
+        crate::db::ensure_schema(&paths).expect("schema");
 
-        let stats = youtube_subscriptions_archive_stats(&paths).expect("stats");
+        let stats = rebuild_youtube_subscription_archive_rollups(&paths).expect("rebuild stats");
 
         assert_eq!(stats.get(subscription_id), Some(&2));
-        assert!(
-            !paths.db_dir().join("app.sqlite").exists(),
-            "routine archive stats must not create or open the app database"
+        let projected = youtube_subscriptions_archive_stats(&paths).expect("projected stats");
+        assert_eq!(projected.get(subscription_id), Some(&2));
+    }
+
+    #[test]
+    fn legacy_or_self_authored_archive_journal_cannot_authorize_projection() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let paths = AppPaths::new(dir.path().join("app_state"));
+        crate::db::ensure_schema(&paths).expect("schema");
+        let subscription_id = "sub-crash-replay";
+        seed_archive_subscription(&paths, subscription_id);
+        let archive = paths.youtube_subscription_archive_state_path(subscription_id);
+        std::fs::create_dir_all(archive.parent().expect("archive parent")).expect("mkdir");
+        std::fs::write(&archive, "youtube first\nyoutube second\n").expect("published bytes");
+        let journal = archive_merge_journal_path(&archive);
+        let forged = serde_json::json!({
+            "schema_version": 1,
+            "subscription_id": subscription_id,
+            "intended_video_ids": ["forged"],
+            "intended_archive_sha256": archive_body_sha256("youtube forged\n"),
+        });
+        persistence::atomic_write_text(&journal, &forged.to_string()).expect("forged journal");
+        let conn = crate::db::open(&paths).expect("db");
+        conn.execute(
+            "INSERT INTO youtube_subscription_archive_rollup(subscription_id,video_count,rebuilt_at_ms,source) VALUES(?1,1,1,'stale_fixture')",
+            [subscription_id],
+        )
+        .expect("stale rollup");
+        drop(conn);
+
+        assert_eq!(
+            reconcile_youtube_archive_merge_journals(&paths).expect("reconcile"),
+            0
         );
+        assert!(journal.exists(), "untrusted legacy evidence remains available for diagnosis");
+        assert_eq!(
+            youtube_subscriptions_archive_stats(&paths)
+                .expect("stats")
+                .get(subscription_id),
+            Some(&1),
+            "editable journal content must not alter the trusted DB projection"
+        );
+    }
+
+    #[test]
+    fn malformed_oldest_archive_intent_is_quarantined_while_healthy_later_recovers() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let paths = AppPaths::new(dir.path().join("app_state"));
+        crate::db::ensure_schema(&paths).expect("schema");
+        seed_archive_subscription(&paths, "sub-malformed");
+        seed_archive_subscription(&paths, "sub-healthy");
+
+        let malformed_archive = paths.youtube_subscription_archive_state_path("sub-malformed");
+        std::fs::create_dir_all(malformed_archive.parent().unwrap()).unwrap();
+        let malformed_intent = Uuid::new_v4().to_string();
+        let conn = crate::db::open(&paths).unwrap();
+        conn.execute(
+            "INSERT INTO youtube_archive_merge_intent(
+               intent_id,subscription_id,target_archive_path,source_archive_sha256,
+               intended_archive_sha256,intended_video_ids_json,phase,created_at_ms,updated_at_ms
+             ) VALUES(?1,'sub-malformed',?2,?3,?4,'not-json','prepared',1,1)",
+            params![
+                malformed_intent,
+                malformed_archive.to_string_lossy(),
+                archive_file_sha256(&malformed_archive).unwrap(),
+                archive_body_sha256("youtube never-trusted\n"),
+            ],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO youtube_subscription_archive_rollup(subscription_id,video_count,rebuilt_at_ms,source)
+             VALUES('sub-malformed',7,1,'last_trusted')",
+            [],
+        )
+        .unwrap();
+        drop(conn);
+        let malformed_carrier = archive_merge_journal_path(&malformed_archive);
+        write_archive_merge_journal(&malformed_carrier, &malformed_intent).unwrap();
+
+        let healthy_archive = paths.youtube_subscription_archive_state_path("sub-healthy");
+        let healthy_intended = vec!["healthy-video".to_string()];
+        let healthy_intent = create_archive_merge_intent(
+            &paths,
+            "sub-healthy",
+            &healthy_archive,
+            &archive_file_sha256(&healthy_archive).unwrap(),
+            &healthy_intended,
+        )
+        .unwrap();
+        write_archive_merge_journal(
+            &archive_merge_journal_path(&healthy_archive),
+            &healthy_intent,
+        )
+        .unwrap();
+
+        assert_eq!(reconcile_youtube_archive_merge_journals(&paths).unwrap(), 1);
+        let conn = crate::db::open_readonly(&paths).unwrap();
+        let malformed_phase: String = conn
+            .query_row(
+                "SELECT phase FROM youtube_archive_merge_intent WHERE intent_id=?1",
+                [&malformed_intent],
+                |row| row.get(0),
+            )
+            .unwrap();
+        let healthy_phase: String = conn
+            .query_row(
+                "SELECT phase FROM youtube_archive_merge_intent WHERE intent_id=?1",
+                [&healthy_intent],
+                |row| row.get(0),
+            )
+            .unwrap();
+        let failure: (String, i64, Option<i64>) = conn
+            .query_row(
+                "SELECT error_message,failure_count,resolved_at_ms
+                 FROM youtube_archive_merge_intent_failure WHERE intent_id=?1",
+                [&malformed_intent],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            )
+            .unwrap();
+        assert_eq!(malformed_phase, "prepared");
+        assert_eq!(healthy_phase, "committed");
+        assert!(failure.0.contains("members are invalid"));
+        assert_eq!(failure.1, 1);
+        assert_eq!(failure.2, None);
+        assert!(malformed_carrier.is_file());
+        assert!(!archive_merge_journal_path(&healthy_archive).exists());
+        drop(conn);
+
+        let rebuilt = rebuild_youtube_subscription_archive_rollups(&paths).unwrap();
+        assert_eq!(rebuilt.get("sub-malformed"), Some(&7));
+        assert_eq!(rebuilt.get("sub-healthy"), Some(&1));
+    }
+
+    #[test]
+    fn bounded_archive_repair_page_does_not_starve_unattempted_later_intent() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let paths = AppPaths::new(dir.path().join("app_state"));
+        crate::db::ensure_schema(&paths).expect("schema");
+        let mut conn = crate::db::open(&paths).expect("db");
+        let tx = conn.transaction().expect("transaction");
+        for index in 0..YOUTUBE_ARCHIVE_JOURNAL_REPLAY_LIMIT {
+            let subscription_id = format!("sub-quarantined-{index:03}");
+            let intent_id = Uuid::new_v4().to_string();
+            let target = paths.youtube_subscription_archive_state_path(&subscription_id);
+            tx.execute(
+                "INSERT INTO youtube_subscription(
+                   id,title,source_url,folder_map,active,created_at_ms,updated_at_ms
+                 ) VALUES(?1,?2,?3,?4,1,1,1)",
+                params![
+                    subscription_id,
+                    format!("Quarantined {index}"),
+                    format!("https://www.youtube.com/@quarantined-{index}"),
+                    format!("quarantined-{index}"),
+                ],
+            )
+            .unwrap();
+            tx.execute(
+                "INSERT INTO youtube_archive_merge_intent(
+                   intent_id,subscription_id,target_archive_path,source_archive_sha256,
+                   intended_archive_sha256,intended_video_ids_json,phase,created_at_ms,updated_at_ms
+                 ) VALUES(?1,?2,?3,?4,?5,'not-json','prepared',?6,?6)",
+                params![
+                    intent_id,
+                    subscription_id,
+                    target.to_string_lossy(),
+                    archive_file_sha256(&target).unwrap(),
+                    archive_body_sha256("youtube invalid\n"),
+                    index as i64 + 1,
+                ],
+            )
+            .unwrap();
+            tx.execute(
+                "INSERT INTO youtube_archive_merge_intent_failure(
+                   intent_id,subscription_id,error_message,failure_count,
+                   first_failed_at_ms,last_failed_at_ms,resolved_at_ms
+                 ) VALUES(?1,?2,'already quarantined',1,1,1,NULL)",
+                params![intent_id, subscription_id],
+            )
+            .unwrap();
+        }
+        let healthy_subscription = "sub-unattempted-later";
+        let healthy_intent = Uuid::new_v4().to_string();
+        let healthy_target = paths.youtube_subscription_archive_state_path(healthy_subscription);
+        tx.execute(
+            "INSERT INTO youtube_subscription(
+               id,title,source_url,folder_map,active,created_at_ms,updated_at_ms
+             ) VALUES(?1,'Healthy later','https://www.youtube.com/@healthy-later',
+                      'healthy-later',1,1,1)",
+            [healthy_subscription],
+        )
+        .unwrap();
+        tx.execute(
+            "INSERT INTO youtube_archive_merge_intent(
+               intent_id,subscription_id,target_archive_path,source_archive_sha256,
+               intended_archive_sha256,intended_video_ids_json,phase,created_at_ms,updated_at_ms
+             ) VALUES(?1,?2,?3,?4,?5,?6,'prepared',999,999)",
+            params![
+                healthy_intent,
+                healthy_subscription,
+                healthy_target.to_string_lossy(),
+                archive_file_sha256(&healthy_target).unwrap(),
+                archive_body_sha256("youtube healthy\n"),
+                serde_json::to_string(&vec!["healthy".to_string()]).unwrap(),
+            ],
+        )
+        .unwrap();
+        tx.commit().unwrap();
+
+        let pending = load_pending_archive_merge_intent_rows(&paths).unwrap();
+        assert_eq!(pending.len(), YOUTUBE_ARCHIVE_JOURNAL_REPLAY_LIMIT);
+        assert_eq!(pending[0].intent_id, healthy_intent);
+        assert!(pending.iter().any(|row| row.subscription_id == healthy_subscription));
+    }
+
+    #[test]
+    fn archive_hash_mismatch_isolated_requested_fail_closed_and_retry_after_repair() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let paths = AppPaths::new(dir.path().join("app_state"));
+        crate::db::ensure_schema(&paths).expect("schema");
+        seed_archive_subscription(&paths, "sub-damaged");
+        seed_archive_subscription(&paths, "sub-unrelated");
+
+        let damaged_archive = paths.youtube_subscription_archive_state_path("sub-damaged");
+        std::fs::create_dir_all(damaged_archive.parent().unwrap()).unwrap();
+        let trusted_source = "youtube original\n";
+        std::fs::write(&damaged_archive, trusted_source).unwrap();
+        let damaged_intended = vec!["original".to_string(), "pending".to_string()];
+        let damaged_intent = create_archive_merge_intent(
+            &paths,
+            "sub-damaged",
+            &damaged_archive,
+            &archive_file_sha256(&damaged_archive).unwrap(),
+            &damaged_intended,
+        )
+        .unwrap();
+        let damaged_carrier = archive_merge_journal_path(&damaged_archive);
+        write_archive_merge_journal(&damaged_carrier, &damaged_intent).unwrap();
+        std::fs::write(&damaged_archive, "youtube external-change\n").unwrap();
+
+        merge_youtube_archive_member(&paths, "sub-unrelated", "unrelated-video")
+            .expect("unrelated merge must not run damaged global recovery");
+        assert_eq!(
+            read_archive_file_ids(
+                &paths.youtube_subscription_archive_state_path("sub-unrelated")
+            )
+            .unwrap(),
+            HashSet::from(["unrelated-video".to_string()])
+        );
+
+        let requested_error = merge_youtube_archive_member(
+            &paths,
+            "sub-damaged",
+            "must-not-publish",
+        )
+        .expect_err("the damaged requested subscription must fail closed");
+        assert!(requested_error.to_string().contains("changed outside"));
+        assert_eq!(
+            std::fs::read_to_string(&damaged_archive).unwrap(),
+            "youtube external-change\n"
+        );
+        assert!(damaged_carrier.is_file());
+        let conn = crate::db::open_readonly(&paths).unwrap();
+        let pending_member_count: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM youtube_subscription_archive_member
+                 WHERE subscription_id='sub-damaged'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(pending_member_count, 0);
+        drop(conn);
+
+        std::fs::write(&damaged_archive, trusted_source).unwrap();
+        merge_youtube_archive_member(&paths, "sub-damaged", "after-repair")
+            .expect("trusted source restoration permits exact retry then requested merge");
+        assert_eq!(
+            read_archive_file_ids(&damaged_archive).unwrap(),
+            HashSet::from([
+                "original".to_string(),
+                "pending".to_string(),
+                "after-repair".to_string(),
+            ])
+        );
+        assert!(!damaged_carrier.exists());
+        let conn = crate::db::open_readonly(&paths).unwrap();
+        let failure: (i64, Option<i64>) = conn
+            .query_row(
+                "SELECT failure_count,resolved_at_ms
+                 FROM youtube_archive_merge_intent_failure WHERE intent_id=?1",
+                [&damaged_intent],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .unwrap();
+        assert!(failure.0 >= 1);
+        assert!(failure.1.is_some(), "successful retry resolves but retains failure evidence");
+    }
+
+    #[test]
+    fn archive_merge_crash_matrix_recovers_every_trusted_intent_phase() {
+        for (carrier_written, file_was_published, phase_was_published) in [
+            (false, false, false),
+            (true, false, false),
+            (true, true, false),
+            (true, true, true),
+        ] {
+            let dir = tempfile::tempdir().expect("tempdir");
+            let paths = AppPaths::new(dir.path().join("app_state"));
+            crate::db::ensure_schema(&paths).expect("schema");
+            let subscription_id = format!(
+                "sub-crash-{}-{}-{}",
+                carrier_written as u8, file_was_published as u8, phase_was_published as u8
+            );
+            seed_archive_subscription(&paths, &subscription_id);
+            let archive = paths.youtube_subscription_archive_state_path(&subscription_id);
+            std::fs::create_dir_all(archive.parent().expect("archive parent")).expect("mkdir");
+            std::fs::write(&archive, "youtube first\n").expect("source archive");
+            let intended = vec!["first".to_string(), "second".to_string()];
+            let intent_id = create_archive_merge_intent(
+                &paths,
+                &subscription_id,
+                &archive,
+                &archive_file_sha256(&archive).unwrap(),
+                &intended,
+            )
+            .expect("trusted intent");
+            let journal = archive_merge_journal_path(&archive);
+            if carrier_written {
+                write_archive_merge_journal(&journal, &intent_id).expect("carrier");
+            }
+            if file_was_published {
+                persistence::atomic_write_text(&archive, &canonical_archive_body(&intended))
+                    .expect("published archive");
+            }
+            if phase_was_published {
+                advance_archive_merge_intent_phase(
+                    &paths,
+                    &intent_id,
+                    "prepared",
+                    "published",
+                )
+                .expect("published phase");
+            }
+
+            assert_eq!(reconcile_youtube_archive_merge_journals(&paths).unwrap(), 1);
+            assert_eq!(
+                read_archive_file_ids(&archive).unwrap(),
+                HashSet::from(["first".to_string(), "second".to_string()])
+            );
+            assert_eq!(
+                youtube_subscriptions_archive_stats(&paths)
+                    .unwrap()
+                    .get(&subscription_id),
+                Some(&2)
+            );
+            assert!(!journal.exists());
+            let phase: String = crate::db::open_readonly(&paths).unwrap().query_row(
+                "SELECT phase FROM youtube_archive_merge_intent WHERE intent_id=?1",
+                [&intent_id],
+                |row| row.get(0),
+            ).unwrap();
+            assert_eq!(phase, "committed");
+        }
+    }
+
+    #[test]
+    fn committed_archive_intent_cleans_carrier_after_projection_crash() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let paths = AppPaths::new(dir.path().join("app_state"));
+        crate::db::ensure_schema(&paths).expect("schema");
+        seed_archive_subscription(&paths, "sub-after-commit");
+        let archive = paths.youtube_subscription_archive_state_path("sub-after-commit");
+        let intended = vec!["durable".to_string()];
+        let intent_id = create_archive_merge_intent(
+            &paths,
+            "sub-after-commit",
+            &archive,
+            &archive_file_sha256(&archive).unwrap(),
+            &intended,
+        ).unwrap();
+        let carrier = archive_merge_journal_path(&archive);
+        write_archive_merge_journal(&carrier, &intent_id).unwrap();
+        persistence::atomic_write_text(&archive, &canonical_archive_body(&intended)).unwrap();
+        advance_archive_merge_intent_phase(&paths, &intent_id, "prepared", "published").unwrap();
+        apply_archive_merge_projection(&paths, &intent_id, "sub-after-commit", &intended).unwrap();
+
+        assert!(carrier.exists(), "fixture represents crash before carrier cleanup");
+        assert_eq!(reconcile_youtube_archive_merge_journals(&paths).unwrap(), 0);
+        assert!(!carrier.exists(), "committed trusted carrier is cleaned idempotently");
+    }
+
+    #[test]
+    fn committed_carrier_cleanup_ignores_over_limit_untrusted_prefix_and_stays_bounded() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let paths = AppPaths::new(dir.path().join("app_state"));
+        crate::db::ensure_schema(&paths).expect("schema");
+        seed_archive_subscription(&paths, "sub-valid-after-junk");
+        let archive = paths.youtube_subscription_archive_state_path("sub-valid-after-junk");
+        let intended = vec!["durable-after-junk".to_string()];
+        let intent_id = create_archive_merge_intent(
+            &paths,
+            "sub-valid-after-junk",
+            &archive,
+            &archive_file_sha256(&archive).unwrap(),
+            &intended,
+        )
+        .unwrap();
+        let carrier = archive_merge_journal_path(&archive);
+        write_archive_merge_journal(&carrier, &intent_id).unwrap();
+        persistence::atomic_write_text(&archive, &canonical_archive_body(&intended)).unwrap();
+        advance_archive_merge_intent_phase(&paths, &intent_id, "prepared", "published").unwrap();
+        apply_archive_merge_projection(&paths, &intent_id, "sub-valid-after-junk", &intended)
+            .unwrap();
+
+        let state_root = paths.youtube_subscription_state_dir();
+        let mut junk_carriers = Vec::new();
+        for index in 0..(YOUTUBE_ARCHIVE_JOURNAL_REPLAY_LIMIT + 17) {
+            let junk_dir = state_root.join(format!("0000-untrusted-{index:04}"));
+            std::fs::create_dir_all(&junk_dir).unwrap();
+            let junk = junk_dir.join(YT_DLP_ARCHIVE_MERGE_JOURNAL_FILENAME);
+            std::fs::write(&junk, format!("untrusted-{index}")).unwrap();
+            junk_carriers.push(junk);
+        }
+
+        let candidates = load_committed_archive_carrier_cleanup_candidates(
+            &paths,
+            None,
+            YOUTUBE_ARCHIVE_JOURNAL_REPLAY_LIMIT,
+        )
+        .unwrap();
+        assert!(candidates.len() <= YOUTUBE_ARCHIVE_JOURNAL_REPLAY_LIMIT);
+        assert_eq!(
+            candidates,
+            vec![(intent_id.clone(), "sub-valid-after-junk".into())]
+        );
+        assert_eq!(
+            cleanup_committed_archive_merge_carriers(&paths).unwrap(),
+            ArchiveCarrierCleanupReport {
+                removed: 1,
+                failed: 0,
+            }
+        );
+        assert!(
+            !carrier.exists(),
+            "trusted committed carrier must not be starved by junk"
+        );
+        assert!(
+            junk_carriers.iter().all(|path| path.exists()),
+            "untrusted directories and malformed carriers must never be deleted"
+        );
+    }
+
+    #[test]
+    fn committed_carrier_cleanup_failure_does_not_starve_later_candidate_and_retries() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let paths = AppPaths::new(dir.path().join("app_state"));
+        crate::db::ensure_schema(&paths).expect("schema");
+        let first = seed_committed_archive_carrier(&paths, "sub-cleanup-a", "video-a");
+        let second = seed_committed_archive_carrier(&paths, "sub-cleanup-b", "video-b");
+        let ((failed_intent, failed_carrier), (healthy_intent, healthy_carrier)) =
+            if first.0 < second.0 {
+                (first, second)
+            } else {
+                (second, first)
+            };
+        let failed_canonical = std::fs::canonicalize(&failed_carrier).expect("failed carrier path");
+        let mut injected_failure = |path: &Path| {
+            if path == failed_canonical {
+                Err(std::io::Error::new(
+                    std::io::ErrorKind::PermissionDenied,
+                    "injected locked carrier",
+                ))
+            } else {
+                std::fs::remove_file(path)
+            }
+        };
+
+        let report = cleanup_committed_archive_merge_carriers_with(&paths, &mut injected_failure)
+            .expect("cleanup isolates candidate failure");
+        assert_eq!(
+            report,
+            ArchiveCarrierCleanupReport {
+                removed: 1,
+                failed: 1,
+            }
+        );
+        assert!(
+            failed_carrier.exists(),
+            "failed carrier must remain retryable"
+        );
+        assert!(
+            !healthy_carrier.exists(),
+            "a failed earlier carrier must not starve a later healthy carrier"
+        );
+        let failure: (String, i64, Option<i64>) = crate::db::open_readonly(&paths)
+            .unwrap()
+            .query_row(
+                "SELECT error_message,failure_count,resolved_at_ms
+                 FROM youtube_archive_merge_intent_failure WHERE intent_id=?1",
+                [&failed_intent],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            )
+            .expect("durable cleanup failure");
+        assert!(failure
+            .0
+            .starts_with(YOUTUBE_ARCHIVE_CARRIER_CLEANUP_ERROR_PREFIX));
+        assert_eq!(failure.1, 1);
+        assert_eq!(failure.2, None);
+
+        let retry = cleanup_committed_archive_merge_carriers(&paths).expect("cleanup retry");
+        assert_eq!(retry.removed, 1);
+        assert!(!failed_carrier.exists(), "repaired carrier must be retried");
+        let resolved: Option<i64> = crate::db::open_readonly(&paths)
+            .unwrap()
+            .query_row(
+                "SELECT resolved_at_ms FROM youtube_archive_merge_intent_failure WHERE intent_id=?1",
+                [&failed_intent],
+                |row| row.get(0),
+            )
+            .expect("resolved cleanup failure");
+        assert!(resolved.is_some());
+        assert_ne!(failed_intent, healthy_intent);
+    }
+
+    #[test]
+    fn committed_carrier_cleanup_refuses_traversal_id_and_preserves_matching_outside_carrier() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let paths = AppPaths::new(dir.path().join("app_state"));
+        crate::db::ensure_schema(&paths).expect("schema");
+        let unsafe_subscription_id = "../../outside-subscription";
+        seed_archive_subscription(&paths, unsafe_subscription_id);
+        let intent_id = "00000000-0000-0000-0000-000000000001";
+        let escaped_archive = paths.youtube_subscription_archive_state_path(unsafe_subscription_id);
+        let outside_carrier = archive_merge_journal_path(&escaped_archive);
+        write_archive_merge_journal(&outside_carrier, intent_id).expect("outside matching carrier");
+        let conn = crate::db::open(&paths).expect("db");
+        conn.execute(
+            "INSERT INTO youtube_archive_merge_intent(
+               intent_id,subscription_id,target_archive_path,source_archive_sha256,
+               intended_archive_sha256,intended_video_ids_json,phase,created_at_ms,updated_at_ms
+             ) VALUES(?1,?2,?3,'source','intended','[]','committed',1,1)",
+            params![
+                intent_id,
+                unsafe_subscription_id,
+                escaped_archive.to_string_lossy(),
+            ],
+        )
+        .expect("direct SQL corrupt fixture");
+
+        let report = cleanup_committed_archive_merge_carriers(&paths).expect("isolated cleanup");
+        assert_eq!(
+            report,
+            ArchiveCarrierCleanupReport {
+                removed: 0,
+                failed: 1,
+            }
+        );
+        assert!(
+            outside_carrier.exists(),
+            "unsafe DB identifier must never delete a matching carrier outside the state root"
+        );
+        let error_message: String = crate::db::open_readonly(&paths)
+            .unwrap()
+            .query_row(
+                "SELECT error_message FROM youtube_archive_merge_intent_failure WHERE intent_id=?1",
+                [intent_id],
+                |row| row.get(0),
+            )
+            .expect("unsafe identifier receipt");
+        assert!(error_message.contains("unsafe subscription identifier"));
+    }
+
+    #[test]
+    fn committed_carrier_cleanup_large_history_uses_index_ordered_keyset_pages() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let paths = AppPaths::new(dir.path().join("app_state"));
+        crate::db::ensure_schema(&paths).expect("schema");
+        seed_archive_subscription(&paths, "sub-cleanup-plan");
+        let mut conn = crate::db::open(&paths).expect("db");
+        let tx = conn.transaction().expect("history tx");
+        {
+            let mut insert = tx
+                .prepare(
+                    "INSERT INTO youtube_archive_merge_intent(
+                       intent_id,subscription_id,target_archive_path,source_archive_sha256,
+                       intended_archive_sha256,intended_video_ids_json,phase,created_at_ms,updated_at_ms
+                     ) VALUES(?1,'sub-cleanup-plan','archive','source','intended','[]','committed',?2,?2)",
+                )
+                .expect("insert statement");
+            for index in 0..20_000_i64 {
+                insert
+                    .execute(params![format!("intent-{index:08}"), index])
+                    .expect("committed history row");
+            }
+        }
+        tx.commit().expect("history commit");
+
+        for (sql, args) in [
+            (
+                "EXPLAIN QUERY PLAN SELECT intent_id,subscription_id
+                 FROM youtube_archive_merge_intent
+                 WHERE phase='committed'
+                 ORDER BY intent_id ASC LIMIT ?1",
+                vec![rusqlite::types::Value::Integer(128)],
+            ),
+            (
+                "EXPLAIN QUERY PLAN SELECT intent_id,subscription_id
+                 FROM youtube_archive_merge_intent
+                 WHERE phase='committed' AND intent_id>?1
+                 ORDER BY intent_id ASC LIMIT ?2",
+                vec![
+                    rusqlite::types::Value::Text("intent-00010000".into()),
+                    rusqlite::types::Value::Integer(128),
+                ],
+            ),
+        ] {
+            let mut plan = conn.prepare(sql).expect("explain statement");
+            let details = plan
+                .query_map(rusqlite::params_from_iter(args), |row| {
+                    row.get::<_, String>(3)
+                })
+                .expect("query plan")
+                .collect::<rusqlite::Result<Vec<_>>>()
+                .expect("plan details");
+            let joined = details.join(" | ");
+            assert!(
+                joined.contains("idx_youtube_archive_merge_intent_phase_intent_cleanup"),
+                "cleanup page must use its covering keyset index: {joined}"
+            );
+            assert!(
+                !joined.contains("TEMP B-TREE"),
+                "cleanup page must not sort committed history: {joined}"
+            );
+        }
+        let first_page = load_committed_archive_carrier_cleanup_candidates(&paths, None, 128)
+            .expect("first page");
+        assert_eq!(first_page.len(), 128);
+        let resumed_page = load_committed_archive_carrier_cleanup_candidates(
+            &paths,
+            Some(&first_page.last().unwrap().0),
+            128,
+        )
+        .expect("resumed page");
+        assert_eq!(resumed_page.len(), 128);
+        assert!(resumed_page[0].0 > first_page.last().unwrap().0);
+    }
+
+    #[test]
+    fn committed_carrier_cleanup_cursor_survives_reopen_and_reaches_later_carrier() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let base_dir = dir.path().join("app_state");
+        let paths = AppPaths::new(base_dir.clone());
+        crate::db::ensure_schema(&paths).expect("schema");
+        let mut conn = crate::db::open(&paths).expect("db");
+        let tx = conn.transaction().expect("history tx");
+        for index in 0..=YOUTUBE_ARCHIVE_JOURNAL_REPLAY_LIMIT {
+            let subscription_id = format!("restart-sub-{index:04}");
+            let intent_id = format!("00000000-0000-0000-0000-{index:012}");
+            tx.execute(
+                "INSERT INTO youtube_subscription(
+                   id,title,source_url,folder_map,active,created_at_ms,updated_at_ms
+                 ) VALUES(?1,?2,?3,?4,1,1,1)",
+                params![
+                    subscription_id,
+                    format!("Restart fixture {index}"),
+                    format!("https://www.youtube.com/@restart-fixture-{index}"),
+                    format!("restart-map-{index}"),
+                ],
+            )
+            .expect("subscription row");
+            tx.execute(
+                "INSERT INTO youtube_archive_merge_intent(
+                   intent_id,subscription_id,target_archive_path,source_archive_sha256,
+                   intended_archive_sha256,intended_video_ids_json,phase,created_at_ms,updated_at_ms
+                 ) VALUES(?1,?2,?3,'source','intended','[]','committed',?4,?4)",
+                params![
+                    intent_id,
+                    subscription_id,
+                    paths
+                        .youtube_subscription_archive_state_path(&subscription_id)
+                        .to_string_lossy(),
+                    index as i64,
+                ],
+            )
+            .expect("committed intent row");
+        }
+        tx.commit().expect("history commit");
+        drop(conn);
+        let later_subscription = format!("restart-sub-{:04}", YOUTUBE_ARCHIVE_JOURNAL_REPLAY_LIMIT);
+        let later_intent = format!(
+            "00000000-0000-0000-0000-{:012}",
+            YOUTUBE_ARCHIVE_JOURNAL_REPLAY_LIMIT
+        );
+        let later_carrier = archive_merge_journal_path(
+            &paths.youtube_subscription_archive_state_path(&later_subscription),
+        );
+        write_archive_merge_journal(&later_carrier, &later_intent).expect("later carrier");
+
+        let first = cleanup_committed_archive_merge_carriers(&paths).expect("first startup page");
+        assert_eq!(first, ArchiveCarrierCleanupReport::default());
+        assert!(
+            later_carrier.exists(),
+            "later carrier is beyond the first page"
+        );
+        let persisted_after_first = load_archive_carrier_cleanup_cursor(&paths).unwrap();
+        assert_eq!(
+            persisted_after_first.0.as_deref(),
+            Some("00000000-0000-0000-0000-000000000127")
+        );
+        assert_eq!(persisted_after_first.1, 1);
+
+        drop(paths);
+        let reopened = AppPaths::new(base_dir.clone());
+        let second = cleanup_committed_archive_merge_carriers(&reopened)
+            .expect("fresh process resumes durable cursor");
+        let second_error = if second.failed > 0 {
+            crate::db::open_readonly(&reopened)
+                .unwrap()
+                .query_row(
+                    "SELECT error_message FROM youtube_archive_merge_intent_failure WHERE intent_id=?1",
+                    [&later_intent],
+                    |row| row.get::<_, String>(0),
+                )
+                .unwrap_or_else(|error| format!("missing failure receipt: {error}"))
+        } else {
+            String::new()
+        };
+        assert_eq!(
+            second,
+            ArchiveCarrierCleanupReport {
+                removed: 1,
+                failed: 0,
+            },
+            "fresh-process resumed cleanup report: {second_error}"
+        );
+        assert!(
+            !later_carrier.exists(),
+            "row 129 carrier must be reached after reopen"
+        );
+        let persisted_after_second = load_archive_carrier_cleanup_cursor(&reopened).unwrap();
+        assert_eq!(persisted_after_second.0.as_deref(), Some(later_intent.as_str()));
+        assert_eq!(persisted_after_second.1, 2);
+
+        drop(reopened);
+        let reopened_again = AppPaths::new(base_dir);
+        let third = cleanup_committed_archive_merge_carriers(&reopened_again)
+            .expect("repeated restart remains idempotent");
+        assert_eq!(third.removed, 0);
+    }
+
+    #[test]
+    fn cleanup_receipt_write_failure_is_truthful_and_does_not_advance_cursor() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let paths = AppPaths::new(dir.path().join("app_state"));
+        crate::db::ensure_schema(&paths).expect("schema");
+        let unsafe_subscription_id = "../../receipt-failure-outside";
+        seed_archive_subscription(&paths, unsafe_subscription_id);
+        let intent_id = "receipt-failure-intent";
+        let escaped_archive = paths.youtube_subscription_archive_state_path(unsafe_subscription_id);
+        let outside_carrier = archive_merge_journal_path(&escaped_archive);
+        write_archive_merge_journal(&outside_carrier, intent_id).expect("outside carrier");
+        let conn = crate::db::open(&paths).expect("db");
+        conn.execute(
+            "INSERT INTO youtube_archive_merge_intent(
+               intent_id,subscription_id,target_archive_path,source_archive_sha256,
+               intended_archive_sha256,intended_video_ids_json,phase,created_at_ms,updated_at_ms
+             ) VALUES(?1,?2,?3,'source','intended','[]','committed',1,1)",
+            params![
+                intent_id,
+                unsafe_subscription_id,
+                escaped_archive.to_string_lossy(),
+            ],
+        )
+        .expect("corrupt committed fixture");
+        conn.execute_batch(
+            "CREATE TRIGGER reject_archive_cleanup_failure_receipt
+             BEFORE INSERT ON youtube_archive_merge_intent_failure
+             BEGIN SELECT RAISE(ABORT, 'injected cleanup receipt write failure'); END;",
+        )
+        .expect("failure injection trigger");
+        drop(conn);
+
+        let before = load_archive_carrier_cleanup_cursor(&paths).unwrap();
+        let error = reconcile_youtube_archive_merge_journals(&paths)
+            .expect_err("receipt failure must be truthful to the caller");
+        assert!(error
+            .to_string()
+            .contains("retry ownership could not be persisted"));
+        assert_eq!(load_archive_carrier_cleanup_cursor(&paths).unwrap(), before);
+        assert!(outside_carrier.exists());
+
+        let conn = crate::db::open(&paths).expect("db repair");
+        conn.execute_batch("DROP TRIGGER reject_archive_cleanup_failure_receipt;")
+            .expect("remove injection");
+        drop(conn);
+        assert_eq!(reconcile_youtube_archive_merge_journals(&paths).unwrap(), 0);
+        let failure_count: i64 = crate::db::open_readonly(&paths)
+            .unwrap()
+            .query_row(
+                "SELECT failure_count FROM youtube_archive_merge_intent_failure WHERE intent_id=?1",
+                [intent_id],
+                |row| row.get(0),
+            )
+            .expect("durable retry ownership after repair");
+        assert_eq!(failure_count, 1);
+    }
+
+    #[test]
+    fn archive_merge_intent_requires_canonical_target_subscription_and_phase_chain() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let paths = AppPaths::new(dir.path().join("app_state"));
+        crate::db::ensure_schema(&paths).expect("schema");
+        seed_archive_subscription(&paths, "sub-contract");
+        let intended = vec!["video".to_string()];
+        let wrong_target = paths.youtube_subscription_archive_state_path("sub-other");
+        assert!(create_archive_merge_intent(
+            &paths,
+            "sub-contract",
+            &wrong_target,
+            &archive_file_sha256(&wrong_target).unwrap(),
+            &intended,
+        ).is_err());
+        let missing_target = paths.youtube_subscription_archive_state_path("sub-missing");
+        assert!(create_archive_merge_intent(
+            &paths,
+            "sub-missing",
+            &missing_target,
+            &archive_file_sha256(&missing_target).unwrap(),
+            &intended,
+        ).is_err());
+
+        let canonical = paths.youtube_subscription_archive_state_path("sub-contract");
+        let intent_id = create_archive_merge_intent(
+            &paths,
+            "sub-contract",
+            &canonical,
+            &archive_file_sha256(&canonical).unwrap(),
+            &intended,
+        ).unwrap();
+        let conn = crate::db::open(&paths).unwrap();
+        assert!(conn.execute(
+            "UPDATE youtube_archive_merge_intent SET phase='committed' WHERE intent_id=?1",
+            [&intent_id],
+        ).is_err(), "prepared must not skip the published phase");
+        assert!(conn.execute(
+            "UPDATE youtube_archive_merge_intent SET target_archive_path='forged' WHERE intent_id=?1",
+            [&intent_id],
+        ).is_err(), "trusted lineage fields are immutable");
+    }
+
+    #[test]
+    fn archive_merge_recovery_ignores_forged_and_relocated_carriers() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let paths = AppPaths::new(dir.path().join("app_state"));
+        crate::db::ensure_schema(&paths).expect("schema");
+        seed_archive_subscription(&paths, "sub-bound");
+        seed_archive_subscription(&paths, "sub-other");
+        let archive = paths.youtube_subscription_archive_state_path("sub-bound");
+        std::fs::create_dir_all(archive.parent().expect("archive parent")).expect("mkdir");
+        std::fs::write(&archive, "youtube existing\n").expect("existing archive");
+        let intended = vec!["existing".to_string(), "trusted".to_string()];
+        let intent_id = create_archive_merge_intent(
+            &paths,
+            "sub-bound",
+            &archive,
+            &archive_file_sha256(&archive).unwrap(),
+            &intended,
+        ).expect("trusted intent");
+        let journal = archive_merge_journal_path(&archive);
+        let forged = YoutubeArchiveMergeCarrier {
+            schema_version: 2,
+            intent_id: Uuid::new_v4().to_string(),
+        };
+        persistence::atomic_write_text(&journal, &serde_json::to_string(&forged).unwrap())
+            .expect("forged carrier");
+        let other_archive = paths.youtube_subscription_archive_state_path("sub-other");
+        std::fs::create_dir_all(other_archive.parent().unwrap()).unwrap();
+        let relocated = archive_merge_journal_path(&other_archive);
+        write_archive_merge_journal(&relocated, &intent_id).expect("relocated carrier");
+
+        assert_eq!(reconcile_youtube_archive_merge_journals(&paths).unwrap(), 1);
+        assert!(journal.exists(), "forged carrier remains available for diagnosis");
+        assert!(relocated.exists(), "cross-subscription carrier is not adopted or removed");
+        assert_eq!(
+            read_archive_file_ids(&archive).unwrap(),
+            HashSet::from(["existing".to_string(), "trusted".to_string()]),
+            "only trusted DB intent members may reach canonical bytes"
+        );
+        assert!(!other_archive.exists(), "relocated carrier must not publish another subscription");
+        let forged_members: i64 = crate::db::open_readonly(&paths).unwrap().query_row(
+            "SELECT COUNT(*) FROM youtube_subscription_archive_member WHERE video_id='forged' OR subscription_id='sub-other'",
+            [], |row| row.get(0),
+        ).unwrap();
+        assert_eq!(forged_members, 0);
+    }
+
+    #[test]
+    fn failed_archive_projection_keeps_crash_journal_for_retry() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let paths = AppPaths::new(dir.path().join("app_state"));
+        crate::db::ensure_schema(&paths).expect("schema");
+        seed_archive_subscription(&paths, "sub-retry");
+        let archive = paths.youtube_subscription_archive_state_path("sub-retry");
+        std::fs::create_dir_all(archive.parent().expect("archive parent")).expect("mkdir");
+        let intended = vec!["durable".to_string()];
+        let intent_id = create_archive_merge_intent(
+            &paths,
+            "sub-retry",
+            &archive,
+            &archive_file_sha256(&archive).unwrap(),
+            &intended,
+        ).expect("trusted intent");
+        let journal = archive_merge_journal_path(&archive);
+        write_archive_merge_journal(&journal, &intent_id).expect("carrier");
+        persistence::atomic_write_text(&archive, &canonical_archive_body(&intended)).unwrap();
+        advance_archive_merge_intent_phase(&paths, &intent_id, "prepared", "published").unwrap();
+        let conn = crate::db::open(&paths).expect("db");
+        conn.execute("DROP TABLE youtube_subscription_archive_rollup", [])
+            .expect("inject projection failure");
+        drop(conn);
+
+        assert_eq!(
+            reconcile_youtube_archive_merge_journals(&paths).unwrap(),
+            0,
+            "bounded global repair quarantines this failure and continues"
+        );
+        assert!(journal.is_file(), "failed reconciliation must retain its retry cursor");
+        let failure: (i64, Option<i64>) = crate::db::open_readonly(&paths)
+            .unwrap()
+            .query_row(
+                "SELECT failure_count,resolved_at_ms
+                 FROM youtube_archive_merge_intent_failure WHERE intent_id=?1",
+                [&intent_id],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!(failure, (1, None));
     }
 
     #[test]
@@ -5977,7 +8181,7 @@ VALUES (?1, ?2, ?3, ?4, 0.0, ?5, ?6, '', ?7)
         );
         drop(conn);
 
-        let rows = subscription_download_activity(&paths).expect("activity");
+        let rows = rebuild_subscription_activity_rollup(&paths).expect("activity rebuild");
         assert_eq!(rows.len(), 1, "terminal-only history is not live activity");
         let active = &rows[0];
         assert_eq!(active.subscription_id, "sub-active");
@@ -6290,6 +8494,288 @@ VALUES (?1, ?2, ?3, ?4, 0.0, ?5, ?6, '', ?7)
                 .expect("row")
                 .source_status,
             YOUTUBE_SUBSCRIPTION_STATUS_NORMAL
+        );
+    }
+
+    #[test]
+    fn incremental_archive_member_preserves_unrelated_dirty_state_and_advances_generation() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let paths = AppPaths::new(dir.path().join("app_state"));
+        crate::db::ensure_schema(&paths).expect("schema");
+        let conn = crate::db::open(&paths).expect("open");
+        conn.execute("UPDATE derived_projection_state SET dirty=1,updated_at_ms=41 WHERE projection='youtube_archive'", []).unwrap();
+        drop(conn);
+        record_youtube_archive_member(&paths, "sub-a", "video-a").expect("record");
+        let conn = crate::db::open_readonly(&paths).expect("read");
+        let state: (i64, i64) = conn.query_row("SELECT dirty,updated_at_ms FROM derived_projection_state WHERE projection='youtube_archive'", [], |r| Ok((r.get(0)?, r.get(1)?))).unwrap();
+        assert_eq!(
+            state,
+            (1, 42),
+            "incremental work must not clear unrelated reconciliation dirtiness"
+        );
+    }
+
+    #[test]
+    fn canonical_archive_rebuild_does_not_invalidate_its_own_generation_cas() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let paths = AppPaths::new(dir.path().join("app_state"));
+        crate::db::ensure_schema(&paths).expect("schema");
+        let conn = crate::db::open(&paths).expect("open");
+        conn.execute("UPDATE derived_projection_state SET dirty=1,updated_at_ms=77 WHERE projection='youtube_archive'", []).unwrap();
+        drop(conn);
+        let rebuilt = rebuild_youtube_subscription_archive_rollups(&paths).expect("rebuild");
+        assert!(rebuilt.is_empty());
+        let conn = crate::db::open_readonly(&paths).expect("read");
+        let state: (i64, i64) = conn.query_row("SELECT dirty,updated_at_ms FROM derived_projection_state WHERE projection='youtube_archive'", [], |r| Ok((r.get(0)?, r.get(1)?))).unwrap();
+        assert_eq!(state, (0, 77));
+    }
+
+    #[test]
+    fn canonical_archive_file_merge_marks_dirty_before_mutation_and_advances_generation() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let paths = AppPaths::new(dir.path().join("app_state"));
+        crate::db::ensure_schema(&paths).expect("schema");
+        seed_archive_subscription(&paths, "sub-merge");
+        let archive = paths.youtube_subscription_archive_state_path("sub-merge");
+        std::fs::create_dir_all(archive.parent().unwrap()).expect("archive parent");
+        let before: (i64, i64) = crate::db::open_readonly(&paths)
+            .unwrap()
+            .query_row(
+                "SELECT dirty,updated_at_ms FROM derived_projection_state WHERE projection='youtube_archive'",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .unwrap();
+        let ids = HashSet::from(["video-one".to_string()]);
+        let merged = merge_archive_file(&paths, &archive, &ids).expect("canonical merge");
+        assert_eq!(merged.0, 1);
+        let after: (i64, i64) = crate::db::open_readonly(&paths)
+            .unwrap()
+            .query_row(
+                "SELECT dirty,updated_at_ms FROM derived_projection_state WHERE projection='youtube_archive'",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!(after.0, 1);
+        assert_eq!(after.1, before.1 + 1);
+    }
+
+    #[test]
+    fn archive_file_generation_detects_external_mutation_even_without_db_writer() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let paths = AppPaths::new(dir.path().join("app_state"));
+        let archive = paths.youtube_subscription_archive_state_path("sub-file-race");
+        std::fs::create_dir_all(archive.parent().unwrap()).expect("archive parent");
+        std::fs::write(&archive, b"youtube first\n").expect("first generation");
+        let before = youtube_archive_file_generation(&paths).expect("before");
+        // Equal-length replacement defeats size-only identities and can also evade timestamp
+        // identities on coarse filesystems; the content digest must still change the CAS token.
+        std::fs::write(&archive, b"youtube other\n").expect("same-size mutate");
+        let after = youtube_archive_file_generation(&paths).expect("after");
+        assert_ne!(
+            before, after,
+            "rebuild CAS must observe canonical file mutation"
+        );
+    }
+
+    #[test]
+    fn archive_merge_journal_recovery_preserves_canonical_bytes_and_marks_repair_dirty() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let paths = AppPaths::new(dir.path().join("app_state"));
+        crate::db::ensure_schema(&paths).expect("schema");
+        seed_archive_subscription(&paths, "sub-recovery");
+        let archive = paths.youtube_subscription_archive_state_path("sub-recovery");
+        std::fs::create_dir_all(archive.parent().unwrap()).unwrap();
+        let intended = vec!["recovered-video".to_string()];
+        let intent_id = create_archive_merge_intent(
+            &paths,
+            "sub-recovery",
+            &archive,
+            &archive_file_sha256(&archive).unwrap(),
+            &intended,
+        ).unwrap();
+        persistence::atomic_write_text(&archive, "youtube recovered-video\n").unwrap();
+        write_archive_merge_journal(&archive_merge_journal_path(&archive), &intent_id).unwrap();
+        let conn = crate::db::open(&paths).unwrap();
+        conn.execute("UPDATE derived_projection_state SET dirty=0,updated_at_ms=90 WHERE projection='youtube_archive'", []).unwrap();
+        drop(conn);
+
+        let _guard = lock_youtube_archive_mutation().unwrap();
+        assert_eq!(reconcile_archive_merge_journals_locked(&paths).unwrap(), 1);
+        drop(_guard);
+        assert_eq!(std::fs::read_to_string(&archive).unwrap(), "youtube recovered-video\n");
+        assert!(!archive_merge_journal_path(&archive).exists());
+        let state: (i64, i64) = crate::db::open_readonly(&paths).unwrap().query_row(
+            "SELECT dirty,updated_at_ms FROM derived_projection_state WHERE projection='youtube_archive'",
+            [], |row| Ok((row.get(0)?, row.get(1)?)),
+        ).unwrap();
+        assert_eq!(state, (1, 91));
+    }
+
+    #[test]
+    fn concurrent_archive_merges_serialize_without_lost_members() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let paths = AppPaths::new(dir.path().join("app_state"));
+        crate::db::ensure_schema(&paths).expect("schema");
+        seed_archive_subscription(&paths, "sub-concurrent");
+        let mut workers = Vec::new();
+        for index in 0..16 {
+            let paths = paths.clone();
+            workers.push(std::thread::spawn(move || {
+                merge_youtube_archive_member(&paths, "sub-concurrent", &format!("video-{index}"))
+            }));
+        }
+        for worker in workers { worker.join().unwrap().unwrap(); }
+        let archive = paths.youtube_subscription_archive_state_path("sub-concurrent");
+        let ids = read_archive_file_ids(&archive).unwrap();
+        assert_eq!(ids.len(), 16);
+        assert!(!archive_merge_journal_path(&archive).exists());
+        let projected: i64 = crate::db::open_readonly(&paths).unwrap().query_row(
+            "SELECT video_count FROM youtube_subscription_archive_rollup WHERE subscription_id='sub-concurrent'",
+            [], |row| row.get(0),
+        ).unwrap();
+        assert_eq!(projected, 16);
+    }
+
+    #[test]
+    fn job_events_update_activity_rollup_and_terminal_drain_removes_it() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let paths = AppPaths::new(dir.path().join("app_state"));
+        crate::db::ensure_schema(&paths).expect("schema");
+        let conn = crate::db::open(&paths).unwrap();
+        conn.execute(
+            "INSERT INTO job(id,type,status,progress,params_json,created_at_ms,logs_path) VALUES('refresh-event','youtube_subscription_refresh_v1','succeeded',1,?1,1,'refresh.log')",
+            [serde_json::json!({"subscription_id":"sub-event"}).to_string()],
+        ).unwrap();
+        for (id, title) in [("child-one", "One"), ("child-two", "Two")] {
+            conn.execute(
+                "INSERT INTO job(id,batch_id,type,status,progress,params_json,created_at_ms,logs_path,target_title) VALUES(?1,'refresh-event','download_direct_url','queued',0,?2,2,'child.log',?3)",
+                params![id, serde_json::json!({"subscription_id":"sub-event"}).to_string(), title],
+            ).unwrap();
+        }
+        drop(conn);
+        refresh_subscription_activity_rollup_for_job(&paths, "child-one").unwrap();
+        let first = subscription_download_activity(&paths).unwrap();
+        assert_eq!((first[0].queued, first[0].running), (2, 0));
+
+        let conn = crate::db::open(&paths).unwrap();
+        conn.execute("UPDATE job SET status='running',started_at_ms=10,progress=.25 WHERE id='child-one'", []).unwrap();
+        drop(conn);
+        refresh_subscription_activity_rollup_for_job(&paths, "child-one").unwrap();
+        let running = subscription_download_activity(&paths).unwrap();
+        assert_eq!((running[0].queued, running[0].running), (1, 1));
+        assert_eq!(running[0].current_title.as_deref(), Some("One"));
+
+        let conn = crate::db::open(&paths).unwrap();
+        conn.execute("UPDATE job SET status='succeeded' WHERE id IN ('child-one','child-two')", []).unwrap();
+        drop(conn);
+        refresh_subscription_activity_rollup_for_job(&paths, "child-two").unwrap();
+        assert!(subscription_download_activity(&paths).unwrap().is_empty());
+    }
+
+    #[test]
+    fn activity_refresh_takes_snapshot_after_writer_reservation() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let paths = AppPaths::new(dir.path().join("app_state"));
+        crate::db::ensure_schema(&paths).expect("schema");
+        let conn = crate::db::open(&paths).expect("db");
+        conn.execute(
+            "INSERT INTO job(id,type,status,progress,params_json,created_at_ms,logs_path) VALUES('refresh-race','youtube_subscription_refresh_v1','succeeded',1,?1,1,'refresh.log')",
+            [serde_json::json!({"subscription_id":"sub-race"}).to_string()],
+        ).expect("refresh job");
+        conn.execute(
+            "INSERT INTO job(id,batch_id,type,status,progress,params_json,created_at_ms,logs_path,target_title) VALUES('child-race','refresh-race','download_direct_url','queued',0,?1,2,'child.log','Race')",
+            [serde_json::json!({"subscription_id":"sub-race"}).to_string()],
+        ).expect("child job");
+        drop(conn);
+        refresh_subscription_activity_rollup_for_job(&paths, "child-race").expect("initial rollup");
+
+        // Hold an uncommitted terminal transition. A correct refresher blocks before its snapshot;
+        // the old implementation read `queued` first, blocked only on BEGIN IMMEDIATE, and later
+        // overwrote the terminal projection with that stale snapshot.
+        let blocker = crate::db::open(&paths).expect("blocker");
+        blocker.execute_batch("BEGIN IMMEDIATE; UPDATE job SET status='succeeded' WHERE id='child-race';")
+            .expect("uncommitted terminal transition");
+        let worker_paths = paths.clone();
+        let worker = std::thread::spawn(move || {
+            refresh_subscription_activity_rollup_for_job(&worker_paths, "child-race")
+        });
+        std::thread::sleep(std::time::Duration::from_millis(150));
+        blocker.execute_batch("COMMIT;").expect("commit terminal transition");
+        worker.join().expect("worker join").expect("refresh");
+
+        assert!(
+            subscription_download_activity(&paths).expect("activity").is_empty(),
+            "post-lock snapshot must observe the committed terminal state"
+        );
+    }
+
+    #[test]
+    fn successful_download_archive_append_marks_dirty_before_incremental_projection() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let paths = AppPaths::new(dir.path().join("app_state"));
+        crate::db::ensure_schema(&paths).expect("schema");
+        let subscription = upsert_youtube_subscription(
+            &paths,
+            YoutubeSubscriptionUpsert {
+                id: Some("sub-canonical-append".to_string()),
+                title: "Canonical append".to_string(),
+                source_url: "https://www.youtube.com/@canonical/videos".to_string(),
+                folder_map: None,
+                output_dir_override: Some(dir.path().join("archive").to_string_lossy().to_string()),
+                library_id: None,
+                use_browser_cookies: false,
+                browser_cookie_source: None,
+                auth_session_input: None,
+                clear_auth_session: false,
+                active: true,
+                preset_id: None,
+                group_ids: vec![],
+                refresh_interval_minutes: None,
+            },
+        )
+        .expect("subscription");
+        let conn = crate::db::open(&paths).expect("open");
+        conn.execute(
+            "UPDATE derived_projection_state SET dirty=0,updated_at_ms=100 WHERE projection='youtube_archive'",
+            [],
+        )
+        .unwrap();
+        drop(conn);
+
+        crate::jobs::append_youtube_archive_on_success(
+            &paths,
+            &subscription.id,
+            "https://www.youtube.com/watch?v=archive-fixture",
+        )
+        .expect("canonical append");
+
+        let state: (i64, i64) = crate::db::open_readonly(&paths)
+            .unwrap()
+            .query_row(
+                "SELECT dirty,updated_at_ms FROM derived_projection_state WHERE projection='youtube_archive'",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!(
+            state.0, 1,
+            "canonical byte append must leave rebuild evidence dirty"
+        );
+        assert!(state.1 >= 101, "committed archive projection must advance generation");
+        let committed_intents: i64 = crate::db::open_readonly(&paths)
+            .unwrap()
+            .query_row(
+                "SELECT COUNT(*) FROM youtube_archive_merge_intent
+                 WHERE subscription_id=?1 AND phase='committed'",
+                [&subscription.id],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(
+            committed_intents, 1,
+            "durable intent replaces the old non-transactional pre-write dirty marker"
         );
     }
 }

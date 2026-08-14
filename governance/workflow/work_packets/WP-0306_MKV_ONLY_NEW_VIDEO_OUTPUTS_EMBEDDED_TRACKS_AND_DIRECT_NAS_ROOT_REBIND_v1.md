@@ -4,15 +4,15 @@ file_kind: work-packet
 updated_at: 2026-08-09
 ---
 
-<topic id="contract" status="backlog" version="v1" wp="WP-0306" updated_at="2026-08-09">
+<topic id="contract" status="in-progress" version="v1" wp="WP-0306" updated_at="2026-08-09">
 
 # Work Packet: WP-0306 — MKV-only new video outputs, embedded tracks, and direct-NAS root rebind
 
 ## Metadata
 
 - ID: WP-0306
-- Owner: —
-- Status: BACKLOG
+- Owner: agent-wp0306
+- Status: IN_PROGRESS
 - Created: 2026-08-09
 - Refinement: `WP-0306_MKV_ONLY_NEW_VIDEO_OUTPUTS_EMBEDDED_TRACKS_AND_DIRECT_NAS_ROOT_REBIND_v1_REFINEMENT.md`
 - Board: `../TASK_BOARD.md#wp-0306`
@@ -52,5 +52,6 @@ Make MKV with embedded selected tracks the non-bypassable final container for ev
 # Status updates
 
 - 2026-08-09: Created after source/spec/config/SQLite inspection plus current official yt-dlp and FFmpeg documentation review. The exact intended `Z:` target was not visible, so no machine-local root or database state was changed. No historical media was modified.
+- 2026-08-09: Implementable MKV/legacy-MP4 scope started in the first dependency-safe parallel wave. Direct-NAS mutation remains proof-gated because the exact `Z:` target is not visible; independent adversarial review is required.
 
 </topic>

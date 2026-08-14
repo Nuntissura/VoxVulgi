@@ -1,8 +1,9 @@
-import { startTransition, useCallback, useEffect, useMemo, useState } from "react";
+import { startTransition, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { confirm, open, save } from "@tauri-apps/plugin-dialog";
 import { usePageActivity, usePollingLoop } from "../lib/activity";
 import { copyPathToClipboard, openPathBestEffort, revealPath as revealFilesystemPath } from "../lib/pathOpener";
+import { RootRebindControl } from "../components/RootRebindControl";
 
 type DiagnosticsInfo = {
   app_data_dir: string;
@@ -417,6 +418,13 @@ type DiagnosticsTraceDirStatus = {
   default_dir: string;
   exists: boolean;
   using_default: boolean;
+  retained_age_ms: number;
+  rotation_count: number;
+  compressed_files: number;
+  aggregate_path: string;
+  sampling_mode: string;
+  queue_capacity: number;
+  dropped_events_total: number;
 };
 
 type DiagnosticsTraceClearSummary = {
@@ -439,6 +447,100 @@ type DiagnosticsTraceEntry = {
   level: string;
   details: unknown;
   process: DiagnosticsProcessSnapshot | null;
+  incident_id?: string | null;
+  span_id?: string | null;
+};
+
+type DiagnosticsCaptureStatus = {
+  mode: "normal" | "incident";
+  armed_trigger: "panel_switch" | "job_start" | null;
+  incident_id: string | null;
+  armed_at_ms: number | null;
+  started_at_ms: number | null;
+  expires_at_ms: number | null;
+  max_trace_bytes: number;
+  trace_bytes: number;
+  dropped_events: number;
+  artifact_dir: string | null;
+};
+
+type YoutubeProtectionDiagnosticsStatus = {
+  automatic_protection_enabled: boolean;
+  runtime_capabilities: {
+    epoch: string;
+    yt_dlp_available: boolean;
+    yt_dlp_version: string | null;
+    yt_dlp_sha256_hex: string | null;
+    node_version: string | null;
+    npm_version: string | null;
+    node_exe_sha256_hex: string | null;
+    npm_cmd_sha256_hex: string | null;
+    provider_version: string;
+    provider_installed: boolean;
+    provider_running: boolean;
+    provider_healthy: boolean;
+    provider_plugin_sha256_hex: string | null;
+    provider_server_sha256_hex: string | null;
+    provider_lock_sha256_hex: string | null;
+    provider_error: string | null;
+  };
+  state: {
+    operation: string;
+    runtime_epoch: string;
+    mode: "normal" | "cautious" | "conservative" | "cooldown" | "hold";
+    corroboration_count: number;
+    success_streak: number;
+    last_evidence_at_ms: number | null;
+    next_eligible_probe_at_ms: number | null;
+    version: number;
+  };
+  baseline: {
+    concurrent_fragments: number;
+    sleep_interval_secs: number;
+    sleep_requests_secs: number;
+    update_tranche_size: number;
+    limit_rate: string | null;
+    throttled_rate: string | null;
+  };
+  effective: {
+    concurrent_fragments: number;
+    sleep_interval_secs: number;
+    max_sleep_interval_secs: number;
+    sleep_requests_secs: number;
+    aggregate_start_interval_secs: number;
+    update_tranche_size: number;
+    eligible: boolean;
+    canary_only: boolean;
+  };
+};
+
+type YoutubeProtectionDiagnosticsHistory = {
+  outcomes: Array<{
+    id: string;
+    occurred_at_ms: number;
+    outcome_class: string;
+    incident_id: string | null;
+  }>;
+  transitions: Array<{
+    id: string;
+    before_mode: string;
+    after_mode: string;
+    reason: string;
+    evidence_ids: string[];
+    occurred_at_ms: number;
+  }>;
+  raw_total: number;
+  transition_total: number;
+  rollup_event_total: number;
+  unknown_total: number;
+  class_totals: Array<{ outcome_class: string; event_count: number }>;
+};
+
+type YoutubeProtectionReplayReceipt = {
+  events_replayed: number;
+  unknown_events: number;
+  final_mode: string;
+  mode_path: string[];
 };
 
 type StartupPhase = {
@@ -630,6 +732,12 @@ function formatTs(ms: number | null): string {
   }
 }
 
+function formatYoutubeOutcomeClassCounts(history: YoutubeProtectionDiagnosticsHistory): string {
+  return history.class_totals
+    .map(({ outcome_class, event_count }) => `${outcome_class}: ${event_count}`)
+    .join(" · ") || "none in bounded history";
+}
+
 function formatModelRole(role: ModelInventoryItem["role"]): string {
   switch (role) {
     case "required":
@@ -813,6 +921,7 @@ function defaultAdapterConfig(template: VoiceBackendAdapterTemplate): VoiceBacke
 
 export function DiagnosticsPage({ visible = true }: { visible?: boolean }) {
   const pageActive = usePageActivity(visible);
+  const youtubeProtectionRequestRef = useRef(0);
   const [info, setInfo] = useState<DiagnosticsInfo | null>(null);
   const [startup, setStartup] = useState<StartupStatus | null>(null);
   const [inventory, setInventory] = useState<ModelInventory | null>(null);
@@ -858,6 +967,16 @@ export function DiagnosticsPage({ visible = true }: { visible?: boolean }) {
   const [diagnosticsTraceDir, setDiagnosticsTraceDir] =
     useState<DiagnosticsTraceDirStatus | null>(null);
   const [recentTrace, setRecentTrace] = useState<DiagnosticsTraceEntry[]>([]);
+  const [youtubeProtectionDiagnostics, setYoutubeProtectionDiagnostics] = useState<{
+    download: YoutubeProtectionDiagnosticsStatus;
+    enumeration: YoutubeProtectionDiagnosticsStatus;
+    downloadHistory: YoutubeProtectionDiagnosticsHistory;
+    enumerationHistory: YoutubeProtectionDiagnosticsHistory;
+    downloadReplay: YoutubeProtectionReplayReceipt;
+    enumerationReplay: YoutubeProtectionReplayReceipt;
+  } | null>(null);
+  const [diagnosticsCapture, setDiagnosticsCapture] =
+    useState<DiagnosticsCaptureStatus | null>(null);
   const [appStateSnapshot, setAppStateSnapshot] = useState<DiagnosticsAppStateSnapshot | null>(null);
   const [appStateExport, setAppStateExport] =
     useState<DiagnosticsAppStateSnapshotExport | null>(null);
@@ -1190,15 +1309,49 @@ export function DiagnosticsPage({ visible = true }: { visible?: boolean }) {
   }, [updateSectionStatus]);
 
   const loadTraceSection = useCallback(async () => {
+    const protectionGeneration = youtubeProtectionRequestRef.current + 1;
+    youtubeProtectionRequestRef.current = protectionGeneration;
+    const protectionContext = {
+      requestId: `diagnostics-youtube-protection-${protectionGeneration}-${Date.now()}`,
+      spanId: "diagnostics-youtube-protection",
+    };
     updateSectionStatus("trace", "loading");
     try {
-      const [nextDiagnosticsTraceDir, nextRecentTrace] = await Promise.all([
+      const [
+        nextDiagnosticsTraceDir,
+        nextRecentTrace,
+        nextDiagnosticsCapture,
+        downloadProtection,
+        enumerationProtection,
+        downloadHistory,
+        enumerationHistory,
+        downloadReplay,
+        enumerationReplay,
+      ] = await Promise.all([
         invoke<DiagnosticsTraceDirStatus>("diagnostics_trace_dir_status"),
         invoke<DiagnosticsTraceEntry[]>("diagnostics_trace_recent", { limit: 120 }),
+        invoke<DiagnosticsCaptureStatus>("diagnostics_capture_status"),
+        invoke<YoutubeProtectionDiagnosticsStatus>("youtube_protection_status_get", { operation: "download", ...protectionContext }),
+        invoke<YoutubeProtectionDiagnosticsStatus>("youtube_protection_status_get", { operation: "enumeration", ...protectionContext }),
+        invoke<YoutubeProtectionDiagnosticsHistory>("youtube_protection_history_get", { operation: "download", limit: 100, ...protectionContext }),
+        invoke<YoutubeProtectionDiagnosticsHistory>("youtube_protection_history_get", { operation: "enumeration", limit: 100, ...protectionContext }),
+        invoke<YoutubeProtectionReplayReceipt>("youtube_protection_history_replay", { operation: "download", limit: 100, ...protectionContext }),
+        invoke<YoutubeProtectionReplayReceipt>("youtube_protection_history_replay", { operation: "enumeration", limit: 100, ...protectionContext }),
       ]);
       startTransition(() => {
         setDiagnosticsTraceDir(nextDiagnosticsTraceDir);
         setRecentTrace(nextRecentTrace);
+        setDiagnosticsCapture(nextDiagnosticsCapture);
+        if (youtubeProtectionRequestRef.current === protectionGeneration) {
+          setYoutubeProtectionDiagnostics({
+            download: downloadProtection,
+            enumeration: enumerationProtection,
+            downloadHistory,
+            enumerationHistory,
+            downloadReplay,
+            enumerationReplay,
+          });
+        }
         updateSectionStatus("trace", "ready");
       });
     } catch (e) {
@@ -1766,25 +1919,6 @@ export function DiagnosticsPage({ visible = true }: { visible?: boolean }) {
     }
   }
 
-  async function saveBatchOnImportRules() {
-    if (!batchRules) return;
-    setBusy(true);
-    setError(null);
-    setNotice(null);
-    try {
-      const saved = await invoke<BatchOnImportRules>("config_batch_on_import_set", {
-        rules: batchRules,
-      });
-      setBatchRules(saved);
-      setNotice("Saved batch-on-import rules.");
-      await refresh();
-    } catch (e) {
-      setError(String(e));
-    } finally {
-      setBusy(false);
-    }
-  }
-
   async function saveOptionalDiarizationBackend() {
     if (!diarizationOptionalDraft) return;
     setBusy(true);
@@ -1903,44 +2037,6 @@ export function DiagnosticsPage({ visible = true }: { visible?: boolean }) {
     }
   }
 
-  async function chooseDiagnosticsTraceDir() {
-    setError(null);
-    setNotice(null);
-    try {
-      const selected = await open({
-        multiple: false,
-        directory: true,
-        title: "Select Diagnostics trace folder",
-      });
-      if (!selected || typeof selected !== "string") return;
-      const status = await invoke<DiagnosticsTraceDirStatus>("diagnostics_trace_dir_set", {
-        path: selected,
-        createIfMissing: true,
-      });
-      setDiagnosticsTraceDir(status);
-      setNotice(`Diagnostics trace folder set to ${status.current_dir}`);
-    } catch (e) {
-      setError(String(e));
-    }
-  }
-
-  async function useDefaultDiagnosticsTraceDir() {
-    setBusy(true);
-    setError(null);
-    setNotice(null);
-    try {
-      const status = await invoke<DiagnosticsTraceDirStatus>("diagnostics_trace_dir_use_default", {
-        createIfMissing: true,
-      });
-      setDiagnosticsTraceDir(status);
-      setNotice(`Using default Diagnostics trace folder: ${status.current_dir}`);
-    } catch (e) {
-      setError(String(e));
-    } finally {
-      setBusy(false);
-    }
-  }
-
   async function clearDiagnosticsTraceDir() {
     const path = diagnosticsTraceDir?.current_dir?.trim() ?? "";
     const ok = await confirm(
@@ -1972,7 +2068,7 @@ export function DiagnosticsPage({ visible = true }: { visible?: boolean }) {
     setError(null);
     setNotice(null);
     try {
-      const path = await invoke<string>("diagnostics_trace_write_event", {
+      const receipt = await invoke<{ accepted: boolean; dropped_events_total: number }>("diagnostics_trace_write_event", {
         event: "manual_marker",
         level: "info",
         details: {
@@ -1980,9 +2076,43 @@ export function DiagnosticsPage({ visible = true }: { visible?: boolean }) {
           note: "Manual marker written by operator",
         },
       });
-      setNotice(`Wrote marker to ${path}`);
+      setNotice(
+        receipt.accepted
+          ? `Marker queued. ${receipt.dropped_events_total} diagnostics events have been dropped since launch.`
+          : `Marker dropped because the bounded diagnostics queue is full. ${receipt.dropped_events_total} events have been dropped since launch.`,
+      );
     } catch (e) {
       setError(String(e));
+    }
+  }
+
+  async function armDiagnosticsCapture(trigger: "panel_switch" | "job_start") {
+    setError(null);
+    setNotice(null);
+    try {
+      const status = await invoke<DiagnosticsCaptureStatus>("diagnostics_capture_arm", {
+        trigger,
+      });
+      setDiagnosticsCapture(status);
+      setNotice(
+        trigger === "panel_switch"
+          ? "Incident capture armed for the next panel switch."
+          : "Incident capture armed for the next job start.",
+      );
+    } catch (e) {
+      setError(`Arm incident capture failed: ${String(e)}`);
+    }
+  }
+
+  async function disarmDiagnosticsCapture() {
+    setError(null);
+    setNotice(null);
+    try {
+      const status = await invoke<DiagnosticsCaptureStatus>("diagnostics_capture_disarm");
+      setDiagnosticsCapture(status);
+      setNotice("Incident capture disarmed; normal bounded telemetry remains active.");
+    } catch (e) {
+      setError(`Disarm incident capture failed: ${String(e)}`);
     }
   }
 
@@ -2583,6 +2713,85 @@ export function DiagnosticsPage({ visible = true }: { visible?: boolean }) {
       </div>
 
       <div className="card">
+        <h2>YouTube protection diagnostics</h2>
+        <div style={{ color: "#4b5563" }}>
+          Read-only adaptive-policy evidence for the current authenticated runtime epoch. Counts are
+          the bounded recent history shown here; saved pacing remains owned by Options.
+        </div>
+        {youtubeProtectionDiagnostics ? (
+          <>
+            {(["download", "enumeration"] as const).map((operation) => {
+              const status = youtubeProtectionDiagnostics[operation];
+              const history = operation === "download"
+                ? youtubeProtectionDiagnostics.downloadHistory
+                : youtubeProtectionDiagnostics.enumerationHistory;
+              const replay = operation === "download"
+                ? youtubeProtectionDiagnostics.downloadReplay
+                : youtubeProtectionDiagnostics.enumerationReplay;
+              return (
+                <div key={operation} data-testid={`youtube-protection-diagnostics-${operation}`}>
+                  <div className="kv">
+                    <div className="k">{operation === "download" ? "Video downloads" : "Subscription checks"}</div>
+                    <div className="v">
+                      <strong>{status.state.mode}</strong>
+                      {` · eligible ${status.effective.eligible ? "yes" : "no"}`}
+                      {status.effective.canary_only ? " · canary only" : ""}
+                      {` · state v${status.state.version}`}
+                    </div>
+                  </div>
+                  <div className="kv">
+                    <div className="k">Baseline → effective</div>
+                    <div className="v">
+                      {`fragments ${status.baseline.concurrent_fragments} → ${status.effective.concurrent_fragments}`}
+                      {` · request sleep ${status.baseline.sleep_requests_secs}s → ${status.effective.sleep_requests_secs}s`}
+                      {` · start interval ${status.effective.aggregate_start_interval_secs}s`}
+                      {` · tranche ${status.baseline.update_tranche_size} → ${status.effective.update_tranche_size}`}
+                    </div>
+                  </div>
+                  <div className="kv">
+                    <div className="k">Runtime epoch</div>
+                    <div className="v"><code>{status.state.runtime_epoch}</code></div>
+                  </div>
+                  {operation === "download" ? (
+                    <div className="kv" data-testid="youtube-protection-runtime-diagnostics">
+                      <div className="k">Pinned runtime capability</div>
+                      <div className="v">
+                        {status.runtime_capabilities.yt_dlp_available
+                          ? `yt-dlp ${status.runtime_capabilities.yt_dlp_version ?? "unknown"} · ${status.runtime_capabilities.yt_dlp_sha256_hex?.slice(0, 12) ?? "hash unavailable"}`
+                          : "yt-dlp unavailable"}
+                        {` · provider ${status.runtime_capabilities.provider_installed ? `v${status.runtime_capabilities.provider_version}` : "unavailable"}`}
+                        {` · ${status.runtime_capabilities.provider_healthy ? "healthy" : status.runtime_capabilities.provider_running ? "starting" : "stopped"}`}
+                        {` · Node ${status.runtime_capabilities.node_version ?? "unknown"} / npm ${status.runtime_capabilities.npm_version ?? "unknown"}`}
+                        {status.runtime_capabilities.provider_error ? ` · ${status.runtime_capabilities.provider_error}` : ""}
+                      </div>
+                    </div>
+                  ) : null}
+                  <div className="kv">
+                    <div className="k">Recent classes</div>
+                    <div className="v">{formatYoutubeOutcomeClassCounts(history)}</div>
+                  </div>
+                  <div className="kv">
+                    <div className="k">Evidence and replay</div>
+                    <div className="v">
+                      {`${history.raw_total} retained raw rows · ${history.rollup_event_total} rollup events · ${history.transition_total} transitions · ${history.unknown_total} durable unknown · ${replay.events_replayed} bounded rows replayed · replay final ${replay.final_mode}`}
+                    </div>
+                  </div>
+                  <div className="kv">
+                    <div className="k">Latest transition evidence</div>
+                    <div className="v">
+                      {history.transitions[0]
+                        ? `${history.transitions[0].before_mode} → ${history.transitions[0].after_mode} · ${history.transitions[0].reason} · ${history.transitions[0].evidence_ids.length} evidence row(s)`
+                        : "none"}
+                    </div>
+                  </div>
+                </div>
+              );
+            })}
+          </>
+        ) : (
+          <div role="status">Protection evidence is loading or unavailable.</div>
+        )}
+
         <h2>Diagnostics trace</h2>
         <div style={{ color: "#4b5563" }}>
           Internal diagnostics trace events are written here. Default is under app data; you can move
@@ -2605,6 +2814,53 @@ export function DiagnosticsPage({ visible = true }: { visible?: boolean }) {
           <div className="k">Folder exists</div>
           <div className="v">{diagnosticsTraceDir?.exists ? "yes" : "no"}</div>
         </div>
+        <div className="kv">
+          <div className="k">Rotation and retention</div>
+          <div className="v">
+            {diagnosticsTraceDir
+              ? `${diagnosticsTraceDir.rotation_count} rotations · ${diagnosticsTraceDir.compressed_files} compressed · ${Math.round(diagnosticsTraceDir.retained_age_ms / 3_600_000)}h age limit`
+              : "-"}
+          </div>
+        </div>
+        <div className="kv">
+          <div className="k">Sampling and loss</div>
+          <div className="v">
+            {diagnosticsTraceDir
+              ? `${diagnosticsTraceDir.sampling_mode} · queue ${diagnosticsTraceDir.queue_capacity} · ${diagnosticsTraceDir.dropped_events_total} dropped · aggregate ${diagnosticsTraceDir.aggregate_path}`
+              : "-"}
+          </div>
+        </div>
+        <div className="kv">
+          <div className="k">Capture mode</div>
+          <div className="v">
+            {diagnosticsCapture?.armed_trigger
+              ? `armed: ${diagnosticsCapture.armed_trigger.replace("_", " ")}`
+              : diagnosticsCapture?.mode ?? "normal"}
+          </div>
+        </div>
+        <div className="kv">
+          <div className="k">Capture budget</div>
+          <div className="v">
+            {diagnosticsCapture
+              ? `${formatBytes(diagnosticsCapture.trace_bytes)} of ${formatBytes(diagnosticsCapture.max_trace_bytes)}; ${diagnosticsCapture.dropped_events} dropped`
+              : "-"}
+          </div>
+        </div>
+        <div className="kv">
+          <div className="k">Incident</div>
+          <div className="v">
+            {diagnosticsCapture?.incident_id ?? "none"}
+            {diagnosticsCapture?.expires_at_ms
+              ? ` (expires ${formatTs(diagnosticsCapture.expires_at_ms)})`
+              : ""}
+          </div>
+        </div>
+        {diagnosticsCapture?.artifact_dir ? (
+          <div className="kv">
+            <div className="k">Incident artifacts</div>
+            <div className="v">{diagnosticsCapture.artifact_dir}</div>
+          </div>
+        ) : null}
         <div className="row" style={{ flexWrap: "wrap" }}>
           <button
             type="button"
@@ -2613,17 +2869,37 @@ export function DiagnosticsPage({ visible = true }: { visible?: boolean }) {
           >
             Open folder
           </button>
-          <button type="button" disabled={busy} onClick={chooseDiagnosticsTraceDir}>
-            Move folder...
-          </button>
-          <button type="button" disabled={busy} onClick={useDefaultDiagnosticsTraceDir}>
-            Use default
-          </button>
-          <button type="button" disabled={busy} onClick={clearDiagnosticsTraceDir}>
+          <span>Change the trace folder in Options → Diagnostics.</span>
+          <button
+            type="button"
+            disabled={busy || diagnosticsCapture?.mode !== "normal" || Boolean(diagnosticsCapture?.armed_trigger)}
+            onClick={clearDiagnosticsTraceDir}
+          >
             Clear folder
           </button>
           <button type="button" disabled={busy} onClick={writeDiagnosticsTraceMarker}>
             Write marker
+          </button>
+          <button
+            type="button"
+            disabled={busy || diagnosticsCapture?.armed_trigger === "panel_switch"}
+            onClick={() => armDiagnosticsCapture("panel_switch")}
+          >
+            Arm next panel switch
+          </button>
+          <button
+            type="button"
+            disabled={busy || diagnosticsCapture?.armed_trigger === "job_start"}
+            onClick={() => armDiagnosticsCapture("job_start")}
+          >
+            Arm next job start
+          </button>
+          <button
+            type="button"
+            disabled={busy || (!diagnosticsCapture?.armed_trigger && diagnosticsCapture?.mode !== "incident")}
+            onClick={disarmDiagnosticsCapture}
+          >
+            Disarm incident capture
           </button>
         </div>
         <div className="table-wrap" style={{ marginTop: 10 }}>
@@ -3709,16 +3985,8 @@ export function DiagnosticsPage({ visible = true }: { visible?: boolean }) {
             <input
               type="checkbox"
               checked={batchRules?.auto_asr ?? false}
-              disabled={busy}
-              onChange={(e) =>
-                setBatchRules((prev) => ({
-                  auto_asr: e.currentTarget.checked,
-                  auto_translate: prev?.auto_translate ?? false,
-                  auto_separate: prev?.auto_separate ?? false,
-                  auto_diarize: prev?.auto_diarize ?? false,
-                  auto_dub_preview: prev?.auto_dub_preview ?? false,
-                }))
-              }
+              disabled
+              onChange={() => undefined}
             />
             <span>Auto subtitles</span>
           </label>
@@ -3729,16 +3997,8 @@ export function DiagnosticsPage({ visible = true }: { visible?: boolean }) {
             <input
               type="checkbox"
               checked={batchRules?.auto_translate ?? false}
-              disabled={busy}
-              onChange={(e) =>
-                setBatchRules((prev) => ({
-                  auto_asr: prev?.auto_asr ?? false,
-                  auto_translate: e.currentTarget.checked,
-                  auto_separate: prev?.auto_separate ?? false,
-                  auto_diarize: prev?.auto_diarize ?? false,
-                  auto_dub_preview: prev?.auto_dub_preview ?? false,
-                }))
-              }
+              disabled
+              onChange={() => undefined}
             />
             <span>Auto translate to English</span>
           </label>
@@ -3749,16 +4009,8 @@ export function DiagnosticsPage({ visible = true }: { visible?: boolean }) {
             <input
               type="checkbox"
               checked={batchRules?.auto_separate ?? false}
-              disabled={busy}
-              onChange={(e) =>
-                setBatchRules((prev) => ({
-                  auto_asr: prev?.auto_asr ?? false,
-                  auto_translate: prev?.auto_translate ?? false,
-                  auto_separate: e.currentTarget.checked,
-                  auto_diarize: prev?.auto_diarize ?? false,
-                  auto_dub_preview: prev?.auto_dub_preview ?? false,
-                }))
-              }
+              disabled
+              onChange={() => undefined}
             />
             <span>Auto split music &amp; voice</span>
           </label>
@@ -3769,16 +4021,8 @@ export function DiagnosticsPage({ visible = true }: { visible?: boolean }) {
             <input
               type="checkbox"
               checked={batchRules?.auto_diarize ?? false}
-              disabled={busy}
-              onChange={(e) =>
-                setBatchRules((prev) => ({
-                  auto_asr: prev?.auto_asr ?? false,
-                  auto_translate: prev?.auto_translate ?? false,
-                  auto_separate: prev?.auto_separate ?? false,
-                  auto_diarize: e.currentTarget.checked,
-                  auto_dub_preview: prev?.auto_dub_preview ?? false,
-                }))
-              }
+              disabled
+              onChange={() => undefined}
             />
             <span>Auto label speakers</span>
           </label>
@@ -3789,29 +4033,14 @@ export function DiagnosticsPage({ visible = true }: { visible?: boolean }) {
             <input
               type="checkbox"
               checked={batchRules?.auto_dub_preview ?? false}
-              disabled={busy}
-              onChange={(e) =>
-                setBatchRules((prev) => ({
-                  auto_asr: prev?.auto_asr ?? false,
-                  auto_translate: prev?.auto_translate ?? false,
-                  auto_separate: prev?.auto_separate ?? false,
-                  auto_diarize: prev?.auto_diarize ?? false,
-                  auto_dub_preview: e.currentTarget.checked,
-                }))
-              }
+              disabled
+              onChange={() => undefined}
             />
             <span>Auto dub preview</span>
           </label>
         </div>
         <div className="row">
-          <button
-            type="button"
-            disabled={busy || !batchRules}
-            onClick={saveBatchOnImportRules}
-            title="Remember these automatic steps for every video you import from now on."
-          >
-            Save rules
-          </button>
+          <span>These defaults are read-only here. Change them in Options → Diagnostics.</span>
           <button
             type="button"
             disabled={busy}
@@ -4121,6 +4350,7 @@ export function DiagnosticsPage({ visible = true }: { visible?: boolean }) {
         <div style={{ color: "#4b5563", marginBottom: 8 }}>
           Storage totals are best-effort and bounded so Diagnostics does not stall on very large artifact trees.
         </div>
+        <RootRebindControl />
         <div className="kv">
           <div className="k">Library</div>
           <div className="v">{storage ? formatBytes(storage.library_bytes) : "-"}</div>

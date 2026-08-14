@@ -145,13 +145,13 @@ function jobIdentity(job: JobRowLike): ArtifactIdentity {
   const pipeline = asRecord(params?.pipeline);
   const rawVariant = asString(params?.variant_label) ?? asString(pipeline?.variant_label) ?? null;
   const rawTrackId = asString(params?.track_id) ?? null;
-  const rawMuxContainer = asString(params?.output_container);
   return {
     jobType: job.job_type,
     variantLabel: normalizeVariantLabel(rawVariant),
     trackId: rawTrackId,
-    muxContainer:
-      job.job_type === "mux_dub_preview_v1" ? (rawMuxContainer === "mkv" ? "mkv" : "mp4") : null,
+    // The execution boundary forces every queued, legacy, or missing request to MKV.
+    // Identity must describe the artifact the engine will produce, not stale queue JSON.
+    muxContainer: job.job_type === "mux_dub_preview_v1" ? "mkv" : null,
     ttsBackendId:
       job.job_type === "experimental_voice_backend_render_v1"
         ? canonicalTtsBackendId(asString(params?.backend_id) ?? asString(pipeline?.tts_backend_id) ?? null)

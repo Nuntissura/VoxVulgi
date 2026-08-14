@@ -172,13 +172,6 @@ function stemFromPath(path: string): string {
   return fileName.slice(0, dot);
 }
 
-function extensionFromPath(path: string): string {
-  const fileName = fileNameFromPath(path);
-  const dot = fileName.lastIndexOf(".");
-  if (dot <= 0) return "mp4";
-  return fileName.slice(dot + 1).trim() || "mp4";
-}
-
 function trimOrNull(value: string | null | undefined): string | null {
   const next = (value ?? "").trim();
   return next ? next : null;
@@ -1041,7 +1034,7 @@ const SECTION_HELP: Record<string, { what: string; when: string; steps: string[]
   "loc-outputs": {
     what: "Export your finished work — subtitles, dubbed audio, and the combined video file.",
     when: "After a successful localization run when you want to save deliverables to a specific folder.",
-    steps: ["Choose export folder (app default or custom)", "Check the boxes for what to export (SRT, VTT, video)", "Choose video container (MP4 recommended)", "Click Export selected"],
+    steps: ["Choose export folder (app default or custom)", "Check the boxes for what to export (SRT, VTT, video)", "New combined video exports use MKV with embedded tracks", "Click Export selected"],
     concepts: { "Combine audio and video (mux)": "Joining the dubbed audio with the original video into a single file.", "Stems": "Separate audio layers — speech only, background only, or the final mix." },
   },
   "loc-track": {
@@ -1467,11 +1460,7 @@ export function SubtitleEditorPage({
     if (Number.isFinite(parsed)) return Math.max(1.0, Math.min(2.0, parsed));
     return 1.25;
   });
-  const [muxContainer, setMuxContainer] = useState<"mp4" | "mkv">(() => {
-    const raw = safeLocalStorageGet("voxvulgi.v1.editor.mux_container");
-    if (raw === "mkv") return raw;
-    return "mp4";
-  });
+  const muxContainer: "mkv" = "mkv";
   const [muxKeepOriginalAudio, setMuxKeepOriginalAudio] = useState(() => {
     return safeLocalStorageGet("voxvulgi.v1.editor.mux_keep_original_audio") === "1";
   });
@@ -2681,14 +2670,14 @@ export function SubtitleEditorPage({
       },
       {
         id: "mux",
-        title: "Mux MP4",
-        ready: !!outputs?.mux_dub_preview_v1_mp4_exists,
+        title: "Mux MKV",
+        ready: !!outputs?.mux_dub_preview_v1_mkv_exists,
         detail:
           stageJob("mux_dub_preview_v1")?.status === "running"
             ? `Running ${Math.round((stageJob("mux_dub_preview_v1")?.progress ?? 0) * 100)}%`
             : stageJob("mux_dub_preview_v1")
               ? `Last job: ${stageJob("mux_dub_preview_v1")?.status ?? "unknown"}`
-              : "Produce the preview MP4 deliverable for review/export.",
+              : "Produce the preview MKV deliverable with embedded tracks for review/export.",
       },
     ];
   }, [
@@ -3151,11 +3140,11 @@ export function SubtitleEditorPage({
 
   // WP-0289 MT-11 (operator decision 2026-08-05): the Localization Studio export artifact is
   // MKV only. MKV is the only container that carries the dubbed audio, the original audio, and
-  // the subtitle tracks as separately named, selectable tracks. Video Archiver downloads are
-  // unaffected and still export MP4.
+  // the subtitle tracks as separately named, selectable tracks. WP-0306 applies the same
+  // MKV-only final-container boundary to new Video Archiver downloads.
   // Legacy `mux_dub_preview_v1.mp4` files produced by older builds remain playable in the
   // preview dropdown; we simply never produce a new one.
-  function getPreferredMuxExportExt(): "mp4" | "mkv" {
+  function getPreferredMuxExportExt(): "mkv" {
     return "mkv";
   }
 
@@ -3207,7 +3196,7 @@ export function SubtitleEditorPage({
     if (!effectiveExportDirPreview || !item?.media_path) return "";
     return joinPath(
       effectiveExportDirPreview,
-      `${sourceBaseStem}.source.${extensionFromPath(item.media_path)}`,
+      `${sourceBaseStem}.source.mkv`,
     );
   }, [effectiveExportDirPreview, item?.media_path, sourceBaseStem]);
 
@@ -3308,7 +3297,7 @@ export function SubtitleEditorPage({
         ? {
             id: "working-preview-mp4",
             group: "Working",
-            title: "Preview video (MP4)",
+            title: "Historical preview video (legacy MP4)",
             path: outputs.mux_dub_preview_v1_mp4_path,
             kind: "file",
             status_hint: "Working mux preview with dubbed audio embedded.",
@@ -5850,10 +5839,7 @@ export function SubtitleEditorPage({
       if (exportIncludeDubPreview) {
         const next = outputs ?? (await refreshOutputs());
         const dubExt = getPreferredMuxExportExt();
-        if (dubExt === "mp4" && !next.mux_dub_preview_v1_mp4_exists) {
-          throw new Error("MP4 mux preview not found. Run 'Mux preview' (MP4) first.");
-        }
-        if (dubExt === "mkv" && !next.mux_dub_preview_v1_mkv_exists) {
+        if (!next.mux_dub_preview_v1_mkv_exists) {
           throw new Error("MKV mux preview not found. Run 'Mux preview' with MKV first.");
         }
         const outPath = joinPath(outDir, `${sourceBaseStem}.dub-en.${dubExt}`);
@@ -6015,10 +6001,10 @@ export function SubtitleEditorPage({
     setError(null);
     try {
       const next = outputs ?? (await refreshOutputs());
-      const path = next.mux_dub_preview_v1_mp4_exists
-        ? next.mux_dub_preview_v1_mp4_path
-        : next.mux_dub_preview_v1_mkv_exists
-          ? next.mux_dub_preview_v1_mkv_path
+      const path = next.mux_dub_preview_v1_mkv_exists
+        ? next.mux_dub_preview_v1_mkv_path
+        : next.mux_dub_preview_v1_mp4_exists
+          ? next.mux_dub_preview_v1_mp4_path
           : "";
       if (!path) {
         throw new Error("Muxed preview not found yet. Run 'Mux preview' first.");
@@ -6034,10 +6020,10 @@ export function SubtitleEditorPage({
     setNotice(null);
     try {
       const next = outputs ?? (await refreshOutputs());
-      const path = next.mux_dub_preview_v1_mp4_exists
-        ? next.mux_dub_preview_v1_mp4_path
-        : next.mux_dub_preview_v1_mkv_exists
-          ? next.mux_dub_preview_v1_mkv_path
+      const path = next.mux_dub_preview_v1_mkv_exists
+        ? next.mux_dub_preview_v1_mkv_path
+        : next.mux_dub_preview_v1_mp4_exists
+          ? next.mux_dub_preview_v1_mp4_path
           : "";
       if (!path) {
         throw new Error("Muxed preview not found yet. Run 'Mux preview' first.");
@@ -6059,10 +6045,7 @@ export function SubtitleEditorPage({
     try {
       const next = outputs ?? (await refreshOutputs());
       const preferredExt = getPreferredMuxExportExt();
-      if (preferredExt === "mp4" && !next.mux_dub_preview_v1_mp4_exists) {
-        throw new Error("MP4 mux preview not found. Run 'Mux preview' (MP4) first.");
-      }
-      if (preferredExt === "mkv" && !next.mux_dub_preview_v1_mkv_exists) {
+      if (!next.mux_dub_preview_v1_mkv_exists) {
         throw new Error("MKV mux preview not found. Run 'Mux preview' with MKV first.");
       }
 
@@ -6072,10 +6055,7 @@ export function SubtitleEditorPage({
       const out = await save({
         title: `Export muxed preview (${preferredExt.toUpperCase()})`,
         defaultPath: suggested,
-        filters: [
-          { name: "MP4", extensions: ["mp4"] },
-          { name: "MKV", extensions: ["mkv"] },
-        ],
+        filters: [{ name: "MKV", extensions: ["mkv"] }],
       });
       if (!out || typeof out !== "string") return;
 
@@ -6186,7 +6166,7 @@ export function SubtitleEditorPage({
         return;
       }
       if (artifact.rerun_kind === "mux_dub_preview_v1") {
-        const outputContainer = artifact.mux_container === "mkv" ? "mkv" : "mp4";
+        const outputContainer = "mkv";
         await invoke("jobs_enqueue_mux_dub_preview_v1", { itemId, outputContainer });
         setNotice(`Queued mux preview (${outputContainer.toUpperCase()}).`);
         return;
@@ -6487,7 +6467,7 @@ export function SubtitleEditorPage({
                   <span style={{ fontSize: 12 }}>Queue export pack</span>
                 </label>
                 <button type="button" disabled={busy} onClick={enqueueMuxDubPreview}>
-                  Run mux preview MP4
+                  Run mux preview MKV
                 </button>
               </>
             ) : null}
@@ -7111,7 +7091,7 @@ export function SubtitleEditorPage({
           <div className="v">{outputs?.mix_dub_preview_v1_wav_path ?? "-"}</div>
         </div>
         <div className="kv">
-          <div className="k">Working preview video (MP4)</div>
+          <div className="k">Historical working preview (legacy MP4)</div>
           <div className="v">{outputs?.mux_dub_preview_v1_mp4_path ?? "-"}</div>
         </div>
         <div className="kv">
@@ -7123,8 +7103,8 @@ export function SubtitleEditorPage({
           <div className="v">{outputs?.export_pack_v1_zip_path ?? "-"}</div>
         </div>
         <div style={{ fontSize: 12, opacity: 0.8, marginTop: 8 }}>
-          The WAV is the separate dubbed audio track. The MP4 preview embeds that dubbed audio into
-          the video.
+          The WAV is the separate dubbed audio track. The MKV preview embeds dubbed and original
+          audio plus available subtitle tracks in one video.
         </div>
         <div className="row" style={{ marginTop: 0, flexWrap: "wrap" }}>
           <button
@@ -7494,20 +7474,9 @@ export function SubtitleEditorPage({
 
         <div className="row" style={{ marginTop: 10, flexWrap: "wrap" }}>
           <div style={{ fontSize: 12, opacity: 0.85 }}>Video file</div>
-          <label
-            style={{ display: "flex", alignItems: "center", gap: 8 }}
-            title="The type of video file to create. MP4 works almost everywhere."
-          >
-            <span>File type</span>
-            <select
-              value={muxContainer}
-              disabled={busy}
-              onChange={(e) => setMuxContainer(e.currentTarget.value as typeof muxContainer)}
-            >
-              <option value="mp4">MP4 (recommended)</option>
-              <option value="mkv">MKV</option>
-            </select>
-          </label>
+          <div style={{ fontSize: 12 }}>
+            File type: <strong>MKV</strong> (selected audio and subtitle tracks embedded)
+          </div>
           <label
             style={{ display: "flex", alignItems: "center", gap: 8 }}
             title="Also keep the original spoken audio as a second track in the video file."
@@ -10671,7 +10640,7 @@ export function SubtitleEditorPage({
             >
               <option value="original">Original</option>
               <option value="mux_mp4" disabled={!outputs?.mux_dub_preview_v1_mp4_exists}>
-                Mux preview (MP4)
+                Historical mux preview (legacy MP4)
               </option>
               <option value="mux_mkv" disabled={!outputs?.mux_dub_preview_v1_mkv_exists}>
                 Mux preview (MKV)

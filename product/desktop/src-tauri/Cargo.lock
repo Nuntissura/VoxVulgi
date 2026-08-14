@@ -804,6 +804,7 @@ dependencies = [
  "hex",
  "png",
  "raw-window-handle",
+ "regex",
  "rusqlite",
  "serde",
  "serde_json",

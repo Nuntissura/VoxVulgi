@@ -75,7 +75,7 @@ pub fn generate_reference_candidates(
         return Err(EngineError::InstallFailed("item_id is empty".to_string()));
     }
     let item = library::get_item_by_id(paths, item_id)?;
-    let media_path = PathBuf::from(item.media_path.trim());
+    let media_path = library::resolve_media_path(paths, item.media_path.trim())?;
     if !media_path.exists() {
         return Err(EngineError::InstallFailed(format!(
             "source media path does not exist: {}",

@@ -1,5 +1,5 @@
 {
-  "schema_version": 1,
+  "schema_version": 2,
   "allow_unpinned_fallback_env": "VOXVULGI_ALLOW_UNPINNED_FALLBACK",
   "lockfiles": {
     "demucs": "lockfiles/demucs.lock.json",
@@ -9,10 +9,10 @@
     "tts_voice_preserving_local_v1": "lockfiles/tts_voice_preserving_local_v1.lock.json"
   },
   "yt_dlp_windows": {
-    "version": "2026.03.17",
-    "url": "https://github.com/yt-dlp/yt-dlp/releases/download/2026.03.17/yt-dlp.exe",
-    "sha256_hex": "3DB811B366B2DA47337D2FCFDFE5BBD9A258DAD3F350C54974F005DF115A1545",
-    "file_bytes": 18448981,
+    "version": "2026.07.04",
+    "url": "https://github.com/yt-dlp/yt-dlp/releases/download/2026.07.04/yt-dlp.exe",
+    "sha256_hex": "52FE3C26DCF71FBDC85B528589020BB0B8E383155CFA81B64DD447BBE35E24B8",
+    "file_bytes": 18226085,
     "source_label": "github:yt-dlp/yt-dlp"
   },
   "portable_python_windows": {
@@ -27,6 +27,39 @@
     "sha256_hex": "0BF523E2909DA9BFC56100461CD70A1287AE247E6C63B390C52605941D370DD1",
     "file_bytes": 48556258,
     "source_label": "github:denoland/deno"
+  },
+  "node_windows": {
+    "version": "24.19.0",
+    "npm_version": "11.17.0",
+    "node_exe_sha256_hex": "3602F2BB1A10F2CBAB4C36886218A33C1AB3DB87290E73B033C46C77147D0237",
+    "npm_cmd_sha256_hex": "21B46C69AD6E2F231F02A9E120F4BA6C8E75FEF5A45637103002EAB99F888AB8",
+    "complete_tree_sha256_hex": "2D0906A746B7AB1280DDCF6B3C884068FDE9C00FB647BC31DDD1EB82BBC50FBB",
+    "url": "https://nodejs.org/dist/v24.19.0/node-v24.19.0-win-x64.zip",
+    "sha256_hex": "57F71AB3652E797D84ACDDC79C81CC9FF1C6DDB2A1974CDB83F00FEE9BFF4C73",
+    "file_bytes": 37304352,
+    "source_label": "nodejs.org:node-lts-krypton"
+  },
+  "youtube_po_provider": {
+    "version": "1.3.1",
+    "plugin_url": "https://github.com/Brainicism/bgutil-ytdlp-pot-provider/releases/download/1.3.1/bgutil-ytdlp-pot-provider.zip",
+    "plugin_sha256_hex": "B8CEEC7F76143DA172AAF5EBEEC0C2D218E5680C063B931586BCA48567069B38",
+    "plugin_file_bytes": 8067,
+    "plugin_tree_sha256_hex": "8A44CD73DA10CC4211ACA57BF084546E78F355A7C8CB55746FFC7EF1C367706C",
+    "plugin_files_sha256": {
+      "yt_dlp_plugins/extractor/getpot_bgutil.py": "9F483B375BE590D0E7DBFDF11A702A9324247C39CAE072F3CD0CA34913766CE9",
+      "yt_dlp_plugins/extractor/getpot_bgutil_http.py": "AF05A9EEB7A96A132FE79083B7E5F292D3115432EB5F557BFB8373A13BE09501",
+      "yt_dlp_plugins/extractor/getpot_bgutil_script.py": "77F11FB55CB8D184C535983BD52B4F9E0107CB437895B62538F80F73CAA2B560"
+    },
+    "source_commit": "7608dd51ee813b48cf9a6d68c6e42cb197ce10e0",
+    "source_url": "https://codeload.github.com/Brainicism/bgutil-ytdlp-pot-provider/zip/7608dd51ee813b48cf9a6d68c6e42cb197ce10e0",
+    "source_sha256_hex": "255D9ACBBB7540CB5E1EE8BE82BC9A8655F1537B6974F3A5213D9398012AFBB2",
+    "source_file_bytes": 126887,
+    "derived_lock_resource": "youtube_po_provider_1_3_1.package-lock.json",
+    "derived_lock_sha256_hex": "1716EE78267544F03D64AC1CCBB365C718B9CC667BD965406311076AE849F8B4",
+    "node_modules_tree_sha256_hex": "28ED8B72BE8F8AFF827B94ABDF3722F0A1DEE1B3CEAA575ADB561A9AFD22A486",
+    "server_entrypoint_sha256_hex": "13E5077999589EF61D710E879DBC52BFFC64EE2AE1E793737B438A71200CA31F",
+    "application_complete_tree_sha256_hex": "728F821DBCE39DF5BB28A73359637E3002922C13D0FF588BCABA9FE489191963",
+    "source_label": "github:Brainicism/bgutil-ytdlp-pot-provider"
   },
   "spleeter": {
     "bootstrap_packages": [

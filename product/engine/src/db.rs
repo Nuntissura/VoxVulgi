@@ -3,7 +3,7 @@ use crate::Result;
 use rusqlite::{Connection, OpenFlags};
 use std::time::Duration;
 
-const CURRENT_SCHEMA_VERSION: u32 = 31;
+const CURRENT_SCHEMA_VERSION: u32 = 48;
 // WP-0258: raised from 750ms to 4000ms so read-only UI queries wait out a WAL
 // checkpoint instead of erroring "database is locked". Evidence: 47 subscription
 // refreshes failed with "database is locked" under DB contention.
@@ -104,8 +104,76 @@ const MIGRATION_STEPS: &[MigrationStep] = &[
         apply: apply_schema_v30,
     },
     MigrationStep {
-        version: CURRENT_SCHEMA_VERSION,
+        version: 31,
         apply: apply_schema_v31,
+    },
+    MigrationStep {
+        version: 32,
+        apply: apply_schema_v32,
+    },
+    MigrationStep {
+        version: 33,
+        apply: apply_schema_v33,
+    },
+    MigrationStep {
+        version: 34,
+        apply: apply_schema_v34,
+    },
+    MigrationStep {
+        version: 35,
+        apply: apply_schema_v35,
+    },
+    MigrationStep {
+        version: 36,
+        apply: apply_schema_v36,
+    },
+    MigrationStep {
+        version: 37,
+        apply: apply_schema_v37,
+    },
+    MigrationStep {
+        version: 38,
+        apply: apply_schema_v38,
+    },
+    MigrationStep {
+        version: 39,
+        apply: apply_schema_v39,
+    },
+    MigrationStep {
+        version: 40,
+        apply: apply_schema_v40,
+    },
+    MigrationStep {
+        version: 41,
+        apply: apply_schema_v41,
+    },
+    MigrationStep {
+        version: 42,
+        apply: apply_schema_v42,
+    },
+    MigrationStep {
+        version: 43,
+        apply: apply_schema_v43,
+    },
+    MigrationStep {
+        version: 44,
+        apply: apply_schema_v44,
+    },
+    MigrationStep {
+        version: 45,
+        apply: apply_schema_v45,
+    },
+    MigrationStep {
+        version: 46,
+        apply: apply_schema_v46,
+    },
+    MigrationStep {
+        version: 47,
+        apply: apply_schema_v47,
+    },
+    MigrationStep {
+        version: CURRENT_SCHEMA_VERSION,
+        apply: apply_schema_v48,
     },
 ];
 
@@ -1400,6 +1468,1040 @@ fn apply_schema_v31(conn: &Connection) -> Result<()> {
     Ok(())
 }
 
+fn apply_schema_v32(conn: &Connection) -> Result<()> {
+    conn.execute_batch(
+        r#"
+CREATE TABLE IF NOT EXISTS media_availability_observation (
+  path TEXT PRIMARY KEY,
+  state TEXT NOT NULL CHECK(state IN ('present','missing','unreachable','slow')),
+  observed_at_ms INTEGER NOT NULL,
+  source TEXT NOT NULL,
+  duration_ms INTEGER NOT NULL,
+  next_refresh_at_ms INTEGER NOT NULL,
+  invalidated_at_ms INTEGER
+);
+CREATE INDEX IF NOT EXISTS idx_media_availability_refresh
+  ON media_availability_observation(next_refresh_at_ms, invalidated_at_ms);
+
+CREATE TABLE IF NOT EXISTS youtube_subscription_archive_member (
+  subscription_id TEXT NOT NULL,
+  video_id TEXT NOT NULL,
+  discovered_at_ms INTEGER NOT NULL,
+  PRIMARY KEY(subscription_id, video_id)
+);
+CREATE TABLE IF NOT EXISTS youtube_subscription_archive_rollup (
+  subscription_id TEXT PRIMARY KEY,
+  video_count INTEGER NOT NULL,
+  rebuilt_at_ms INTEGER NOT NULL,
+  source TEXT NOT NULL
+);
+CREATE TABLE IF NOT EXISTS subscription_activity_rollup (
+  subscription_id TEXT PRIMARY KEY,
+  queued INTEGER NOT NULL DEFAULT 0,
+  running INTEGER NOT NULL DEFAULT 0,
+  succeeded INTEGER NOT NULL DEFAULT 0,
+  failed INTEGER NOT NULL DEFAULT 0,
+  current_title TEXT,
+  current_progress REAL,
+  rebuilt_at_ms INTEGER NOT NULL,
+  source TEXT NOT NULL
+);
+CREATE TABLE IF NOT EXISTS derived_projection_state (
+  projection TEXT PRIMARY KEY,
+  dirty INTEGER NOT NULL DEFAULT 1,
+  updated_at_ms INTEGER NOT NULL
+);
+INSERT OR IGNORE INTO derived_projection_state(projection, dirty, updated_at_ms)
+VALUES ('subscription_activity', 1, 0), ('youtube_archive', 1, 0);
+CREATE TRIGGER IF NOT EXISTS trg_job_activity_rollup_dirty_insert
+AFTER INSERT ON job BEGIN
+  UPDATE derived_projection_state SET dirty=1 WHERE projection='subscription_activity';
+END;
+CREATE TRIGGER IF NOT EXISTS trg_job_activity_rollup_dirty_update
+AFTER UPDATE OF status, progress, error, params_json ON job BEGIN
+  UPDATE derived_projection_state SET dirty=1 WHERE projection='subscription_activity';
+END;
+CREATE TRIGGER IF NOT EXISTS trg_job_activity_rollup_dirty_delete
+AFTER DELETE ON job BEGIN
+  UPDATE derived_projection_state SET dirty=1 WHERE projection='subscription_activity';
+END;
+"#,
+    )?;
+    Ok(())
+}
+
+fn apply_schema_v33(conn: &Connection) -> Result<()> {
+    conn.execute_batch(r#"
+DROP TRIGGER IF EXISTS trg_job_activity_rollup_dirty_insert;
+DROP TRIGGER IF EXISTS trg_job_activity_rollup_dirty_update;
+DROP TRIGGER IF EXISTS trg_job_activity_rollup_dirty_delete;
+CREATE TRIGGER trg_job_activity_rollup_dirty_insert AFTER INSERT ON job BEGIN UPDATE derived_projection_state SET dirty=1, updated_at_ms=updated_at_ms+1 WHERE projection='subscription_activity'; END;
+CREATE TRIGGER trg_job_activity_rollup_dirty_update AFTER UPDATE OF status, progress, error, params_json ON job BEGIN UPDATE derived_projection_state SET dirty=1, updated_at_ms=updated_at_ms+1 WHERE projection='subscription_activity'; END;
+CREATE TRIGGER trg_job_activity_rollup_dirty_delete AFTER DELETE ON job BEGIN UPDATE derived_projection_state SET dirty=1, updated_at_ms=updated_at_ms+1 WHERE projection='subscription_activity'; END;
+CREATE TRIGGER IF NOT EXISTS trg_archive_rollup_dirty_insert AFTER INSERT ON youtube_subscription_archive_member BEGIN UPDATE derived_projection_state SET dirty=1, updated_at_ms=updated_at_ms+1 WHERE projection='youtube_archive'; END;
+CREATE TRIGGER IF NOT EXISTS trg_archive_rollup_dirty_update AFTER UPDATE ON youtube_subscription_archive_member BEGIN UPDATE derived_projection_state SET dirty=1, updated_at_ms=updated_at_ms+1 WHERE projection='youtube_archive'; END;
+CREATE TRIGGER IF NOT EXISTS trg_archive_rollup_dirty_delete AFTER DELETE ON youtube_subscription_archive_member BEGIN UPDATE derived_projection_state SET dirty=1, updated_at_ms=updated_at_ms+1 WHERE projection='youtube_archive'; END;
+"#)?;
+    Ok(())
+}
+
+fn apply_schema_v34(conn: &Connection) -> Result<()> {
+    // Archive member rows are a derived cache. Its authoritative writer updates the generation
+    // explicitly, so row triggers would make a canonical rebuild invalidate its own CAS.
+    conn.execute_batch(
+        r#"
+DROP TRIGGER IF EXISTS trg_archive_rollup_dirty_insert;
+DROP TRIGGER IF EXISTS trg_archive_rollup_dirty_update;
+DROP TRIGGER IF EXISTS trg_archive_rollup_dirty_delete;
+"#,
+    )?;
+    Ok(())
+}
+
+fn apply_schema_v35(conn: &Connection) -> Result<()> {
+    // WP-0299: raw provider outcomes are append-only evidence. Current policy and its
+    // transition history are separate so adaptation is explainable, replayable, and cannot
+    // silently rewrite the operator's saved downloader preset.
+    conn.execute_batch(r#"
+CREATE TABLE IF NOT EXISTS downloader_outcome (
+  id TEXT PRIMARY KEY,
+  provider TEXT NOT NULL,
+  operation TEXT NOT NULL,
+  target_fingerprint TEXT NOT NULL,
+  auth_fingerprint TEXT NOT NULL,
+  runtime_epoch TEXT NOT NULL,
+  baseline_policy_json TEXT NOT NULL,
+  effective_policy_json TEXT NOT NULL,
+  occurred_at_ms INTEGER NOT NULL,
+  outcome_class TEXT NOT NULL,
+  error_signature TEXT,
+  incident_id TEXT,
+  duration_ms INTEGER
+);
+CREATE INDEX IF NOT EXISTS idx_downloader_outcome_policy_evidence
+  ON downloader_outcome(provider, operation, auth_fingerprint, runtime_epoch, outcome_class, occurred_at_ms, id);
+CREATE INDEX IF NOT EXISTS idx_downloader_outcome_retention
+  ON downloader_outcome(occurred_at_ms, id);
+
+CREATE TABLE IF NOT EXISTS downloader_policy_state (
+  provider TEXT NOT NULL,
+  operation TEXT NOT NULL,
+  auth_fingerprint TEXT NOT NULL,
+  runtime_epoch TEXT NOT NULL,
+  mode TEXT NOT NULL,
+  corroboration_count INTEGER NOT NULL DEFAULT 0,
+  success_streak INTEGER NOT NULL DEFAULT 0,
+  entered_at_ms INTEGER NOT NULL,
+  last_evidence_at_ms INTEGER,
+  next_eligible_probe_at_ms INTEGER,
+  version INTEGER NOT NULL DEFAULT 1,
+  PRIMARY KEY(provider, operation, auth_fingerprint, runtime_epoch)
+);
+
+CREATE TABLE IF NOT EXISTS downloader_policy_transition (
+  id TEXT PRIMARY KEY,
+  provider TEXT NOT NULL,
+  operation TEXT NOT NULL,
+  auth_fingerprint TEXT NOT NULL,
+  runtime_epoch TEXT NOT NULL,
+  before_mode TEXT NOT NULL,
+  after_mode TEXT NOT NULL,
+  reason TEXT NOT NULL,
+  evidence_ids_json TEXT NOT NULL,
+  occurred_at_ms INTEGER NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_downloader_policy_transition_history
+  ON downloader_policy_transition(provider, operation, auth_fingerprint, runtime_epoch, occurred_at_ms, id);
+
+CREATE TABLE IF NOT EXISTS downloader_outcome_rollup (
+  day_utc TEXT NOT NULL,
+  provider TEXT NOT NULL,
+  operation TEXT NOT NULL,
+  auth_fingerprint TEXT NOT NULL,
+  runtime_epoch TEXT NOT NULL,
+  policy_mode TEXT NOT NULL,
+  outcome_class TEXT NOT NULL,
+  event_count INTEGER NOT NULL,
+  duration_ms_total INTEGER NOT NULL DEFAULT 0,
+  updated_at_ms INTEGER NOT NULL,
+  PRIMARY KEY(day_utc, provider, operation, auth_fingerprint, runtime_epoch, policy_mode, outcome_class)
+);
+"#)?;
+    Ok(())
+}
+
+fn apply_schema_v36(conn: &Connection) -> Result<()> {
+    // WP-0299: a controlled cooldown probe is leased rather than advancing the full cooldown.
+    // The primary key makes the reservation atomic; expiry makes abandoned claims recoverable.
+    conn.execute_batch(
+        r#"
+CREATE TABLE IF NOT EXISTS downloader_canary_lease (
+  lease_id TEXT NOT NULL,
+  job_id TEXT NOT NULL DEFAULT '',
+  provider TEXT NOT NULL,
+  operation TEXT NOT NULL,
+  auth_fingerprint TEXT NOT NULL,
+  runtime_epoch TEXT NOT NULL,
+  claimed_at_ms INTEGER NOT NULL,
+  expires_at_ms INTEGER NOT NULL,
+  PRIMARY KEY(provider, operation, auth_fingerprint, runtime_epoch)
+);
+CREATE INDEX IF NOT EXISTS idx_downloader_canary_lease_expiry
+  ON downloader_canary_lease(expires_at_ms);
+CREATE TABLE IF NOT EXISTS downloader_history_reset (
+  reset_id TEXT PRIMARY KEY,
+  provider TEXT NOT NULL,
+  operation TEXT NOT NULL,
+  auth_fingerprint TEXT NOT NULL,
+  runtime_epoch TEXT NOT NULL,
+  outcome_max_rowid INTEGER NOT NULL,
+  transition_max_rowid INTEGER NOT NULL,
+  outcomes_deleted INTEGER NOT NULL DEFAULT 0,
+  transitions_deleted INTEGER NOT NULL DEFAULT 0,
+  rollups_deleted INTEGER NOT NULL DEFAULT 0,
+  states_deleted INTEGER NOT NULL DEFAULT 0,
+  leases_deleted INTEGER NOT NULL DEFAULT 0,
+  UNIQUE(provider,operation,auth_fingerprint,runtime_epoch)
+);
+CREATE INDEX IF NOT EXISTS idx_library_item_media_path
+  ON library_item(media_path COLLATE NOCASE);
+DROP INDEX IF EXISTS idx_downloader_outcome_policy_evidence;
+CREATE INDEX idx_downloader_outcome_policy_evidence
+  ON downloader_outcome(provider, operation, auth_fingerprint, runtime_epoch, outcome_class, occurred_at_ms, id);
+CREATE INDEX IF NOT EXISTS idx_downloader_outcome_history
+  ON downloader_outcome(provider, operation, auth_fingerprint, runtime_epoch, occurred_at_ms, id);
+DROP INDEX IF EXISTS idx_downloader_outcome_retention;
+CREATE INDEX idx_downloader_outcome_retention
+  ON downloader_outcome(occurred_at_ms, id);
+DROP INDEX IF EXISTS idx_downloader_policy_transition_history;
+CREATE INDEX idx_downloader_policy_transition_history
+  ON downloader_policy_transition(provider, operation, auth_fingerprint, runtime_epoch, occurred_at_ms, id);
+"#,
+    )?;
+    ensure_column(
+        conn,
+        "downloader_canary_lease",
+        "job_id",
+        "TEXT NOT NULL DEFAULT ''",
+    )?;
+    ensure_column(
+        conn,
+        "downloader_policy_transition",
+        "evidence_snapshot_json",
+        "TEXT NOT NULL DEFAULT '[]'",
+    )?;
+    Ok(())
+}
+
+fn apply_schema_v37(conn: &Connection) -> Result<()> {
+    // WP-0306: immutable localization preview generations are authorized by transactional
+    // database lineage. Editable manifests/receipts are never an overwrite authority.
+    conn.execute_batch(
+        r#"
+CREATE TABLE IF NOT EXISTS localization_preview_publication (
+  generation_id TEXT PRIMARY KEY,
+  item_id TEXT NOT NULL,
+  variant_key TEXT NOT NULL,
+  input_fingerprint_sha256 TEXT NOT NULL,
+  input_fingerprint_json TEXT NOT NULL,
+  artifact_path TEXT NOT NULL UNIQUE,
+  artifact_bytes INTEGER NOT NULL,
+  artifact_sha256 TEXT NOT NULL,
+  staging_path TEXT NOT NULL,
+  source_job_id TEXT NOT NULL,
+  phase TEXT NOT NULL CHECK(phase IN ('prepared','published','committed')),
+  qc_intent_json TEXT,
+  export_intent_json TEXT,
+  qc_job_id TEXT,
+  export_job_id TEXT,
+  created_at_ms INTEGER NOT NULL,
+  updated_at_ms INTEGER NOT NULL,
+  UNIQUE(item_id, variant_key, input_fingerprint_sha256),
+  FOREIGN KEY (item_id) REFERENCES library_item(id) ON DELETE CASCADE,
+  FOREIGN KEY (source_job_id) REFERENCES job(id) ON DELETE RESTRICT,
+  FOREIGN KEY (qc_job_id) REFERENCES job(id) ON DELETE RESTRICT,
+  FOREIGN KEY (export_job_id) REFERENCES job(id) ON DELETE RESTRICT
+);
+CREATE INDEX IF NOT EXISTS idx_localization_preview_publication_item_phase
+  ON localization_preview_publication(item_id, variant_key, phase, updated_at_ms DESC);
+CREATE TRIGGER IF NOT EXISTS trg_localization_preview_publication_immutable_lineage
+BEFORE UPDATE ON localization_preview_publication
+WHEN NEW.generation_id<>OLD.generation_id
+  OR NEW.item_id<>OLD.item_id
+  OR NEW.variant_key<>OLD.variant_key
+  OR NEW.input_fingerprint_sha256<>OLD.input_fingerprint_sha256
+  OR NEW.input_fingerprint_json<>OLD.input_fingerprint_json
+  OR NEW.artifact_path<>OLD.artifact_path
+  OR NEW.artifact_bytes<>OLD.artifact_bytes
+  OR NEW.artifact_sha256<>OLD.artifact_sha256
+  OR NEW.staging_path<>OLD.staging_path
+  OR NEW.source_job_id<>OLD.source_job_id
+  OR COALESCE(NEW.qc_intent_json,'')<>COALESCE(OLD.qc_intent_json,'')
+  OR COALESCE(NEW.export_intent_json,'')<>COALESCE(OLD.export_intent_json,'')
+  OR NEW.created_at_ms<>OLD.created_at_ms
+BEGIN
+  SELECT RAISE(ABORT, 'localization publication lineage is immutable');
+END;
+CREATE TRIGGER IF NOT EXISTS trg_localization_preview_publication_legal_phase
+BEFORE UPDATE OF phase ON localization_preview_publication
+WHEN NOT (
+  NEW.phase=OLD.phase
+  OR (OLD.phase='prepared' AND NEW.phase='published')
+  OR (OLD.phase='published' AND NEW.phase='committed')
+)
+BEGIN
+  SELECT RAISE(ABORT, 'illegal localization publication phase transition');
+END;
+
+CREATE TABLE IF NOT EXISTS localization_preview_active (
+  item_id TEXT NOT NULL,
+  variant_key TEXT NOT NULL,
+  generation_id TEXT NOT NULL,
+  source_job_created_at_ms INTEGER NOT NULL,
+  source_job_id TEXT NOT NULL,
+  updated_at_ms INTEGER NOT NULL,
+  PRIMARY KEY(item_id, variant_key),
+  FOREIGN KEY (item_id) REFERENCES library_item(id) ON DELETE CASCADE,
+  FOREIGN KEY (generation_id) REFERENCES localization_preview_publication(generation_id) ON DELETE RESTRICT,
+  FOREIGN KEY (source_job_id) REFERENCES job(id) ON DELETE RESTRICT
+);
+"#,
+    )?;
+    Ok(())
+}
+
+fn apply_schema_v38(conn: &Connection) -> Result<()> {
+    // WP-0306: the database is the publication authority. Continuation ownership becomes
+    // immutable once recorded, and an active pointer must reference one internally consistent
+    // publication lineage rather than four independently valid foreign keys.
+    conn.execute_batch(
+        r#"
+DROP TRIGGER IF EXISTS trg_localization_preview_publication_immutable_lineage;
+CREATE TRIGGER trg_localization_preview_publication_immutable_lineage
+BEFORE UPDATE ON localization_preview_publication
+WHEN NEW.generation_id<>OLD.generation_id
+  OR NEW.item_id<>OLD.item_id
+  OR NEW.variant_key<>OLD.variant_key
+  OR NEW.input_fingerprint_sha256<>OLD.input_fingerprint_sha256
+  OR NEW.input_fingerprint_json<>OLD.input_fingerprint_json
+  OR NEW.artifact_path<>OLD.artifact_path
+  OR NEW.artifact_bytes<>OLD.artifact_bytes
+  OR NEW.artifact_sha256<>OLD.artifact_sha256
+  OR NEW.staging_path<>OLD.staging_path
+  OR NEW.source_job_id<>OLD.source_job_id
+  OR COALESCE(NEW.qc_intent_json,'')<>COALESCE(OLD.qc_intent_json,'')
+  OR COALESCE(NEW.export_intent_json,'')<>COALESCE(OLD.export_intent_json,'')
+  OR (
+    (COALESCE(NEW.qc_job_id,'')<>COALESCE(OLD.qc_job_id,'')
+      OR COALESCE(NEW.export_job_id,'')<>COALESCE(OLD.export_job_id,''))
+    AND NOT (OLD.phase='published' AND NEW.phase='committed')
+  )
+  OR NEW.created_at_ms<>OLD.created_at_ms
+BEGIN
+  SELECT RAISE(ABORT, 'localization publication lineage is immutable');
+END;
+
+CREATE UNIQUE INDEX IF NOT EXISTS idx_localization_preview_publication_active_lineage
+  ON localization_preview_publication(generation_id,item_id,variant_key,source_job_id);
+
+CREATE TABLE localization_preview_active_v38 (
+  item_id TEXT NOT NULL,
+  variant_key TEXT NOT NULL,
+  generation_id TEXT NOT NULL,
+  source_job_created_at_ms INTEGER NOT NULL,
+  source_job_id TEXT NOT NULL,
+  updated_at_ms INTEGER NOT NULL,
+  PRIMARY KEY(item_id, variant_key),
+  FOREIGN KEY (item_id) REFERENCES library_item(id) ON DELETE CASCADE,
+  FOREIGN KEY (source_job_id) REFERENCES job(id) ON DELETE RESTRICT,
+  FOREIGN KEY (generation_id,item_id,variant_key,source_job_id)
+    REFERENCES localization_preview_publication(generation_id,item_id,variant_key,source_job_id)
+    ON DELETE RESTRICT
+);
+INSERT INTO localization_preview_active_v38(
+  item_id,variant_key,generation_id,source_job_created_at_ms,source_job_id,updated_at_ms
+)
+SELECT item_id,variant_key,generation_id,source_job_created_at_ms,source_job_id,updated_at_ms
+FROM localization_preview_active;
+DROP TABLE localization_preview_active;
+ALTER TABLE localization_preview_active_v38 RENAME TO localization_preview_active;
+"#,
+    )?;
+    Ok(())
+}
+
+fn apply_schema_v39(conn: &Connection) -> Result<()> {
+    // WP-0298: a bounded timeout/saturated probe is a latency observation, not proof that the
+    // storage endpoint is unreachable. SQLite cannot alter a CHECK constraint in place, so retain
+    // every observation while rebuilding the table transactionally with the distinct `slow` state.
+    conn.execute_batch(
+        r#"
+DROP INDEX IF EXISTS idx_media_availability_refresh;
+ALTER TABLE media_availability_observation RENAME TO media_availability_observation_v38;
+CREATE TABLE media_availability_observation (
+  path TEXT PRIMARY KEY,
+  state TEXT NOT NULL CHECK(state IN ('present','missing','unreachable','slow')),
+  observed_at_ms INTEGER NOT NULL,
+  source TEXT NOT NULL,
+  duration_ms INTEGER NOT NULL,
+  next_refresh_at_ms INTEGER NOT NULL,
+  invalidated_at_ms INTEGER
+);
+INSERT INTO media_availability_observation(
+  path,state,observed_at_ms,source,duration_ms,next_refresh_at_ms,invalidated_at_ms
+)
+SELECT path,state,observed_at_ms,source,duration_ms,next_refresh_at_ms,invalidated_at_ms
+FROM media_availability_observation_v38;
+DROP TABLE media_availability_observation_v38;
+CREATE INDEX idx_media_availability_refresh
+  ON media_availability_observation(next_refresh_at_ms, invalidated_at_ms);
+"#,
+    )?;
+    Ok(())
+}
+
+fn apply_schema_v40(conn: &Connection) -> Result<()> {
+    // WP-0299: recovery ownership and settings mutation ordering must survive process restarts.
+    // Editable filesystem receipts/localStorage values are audit hints, never canonical authority.
+    conn.execute_batch(
+        r#"
+CREATE TABLE IF NOT EXISTS provider_install_lineage (
+  attempt_id TEXT PRIMARY KEY,
+  stage_root TEXT NOT NULL,
+  phase TEXT NOT NULL CHECK(phase IN (
+    'prepared','node_publish_intent','node_published',
+    'provider_publish_intent','provider_published','committed'
+  )),
+  updated_at_ms INTEGER NOT NULL
+);
+CREATE TABLE IF NOT EXISTS youtube_protection_mutation_generation (
+  operation TEXT PRIMARY KEY,
+  generation INTEGER NOT NULL CHECK(generation > 0),
+  updated_at_ms INTEGER NOT NULL
+);
+CREATE TABLE IF NOT EXISTS youtube_retention_continuation (
+  singleton INTEGER PRIMARY KEY CHECK(singleton = 1),
+  pending INTEGER NOT NULL CHECK(pending IN (0,1)),
+  consecutive_failures INTEGER NOT NULL DEFAULT 0 CHECK(consecutive_failures >= 0),
+  updated_at_ms INTEGER NOT NULL
+);
+INSERT OR IGNORE INTO youtube_retention_continuation(singleton,pending,consecutive_failures,updated_at_ms)
+VALUES(1,1,0,0);
+"#,
+    )?;
+    Ok(())
+}
+
+fn apply_schema_v41(conn: &Connection) -> Result<()> {
+    // WP-0298: SQLite is the authority for interrupted YouTube archive publication. The
+    // filesystem journal is only a recovery carrier and cannot mint archive membership.
+    conn.execute_batch(
+        r#"
+CREATE TABLE IF NOT EXISTS youtube_archive_merge_intent (
+  intent_id TEXT PRIMARY KEY,
+  subscription_id TEXT NOT NULL,
+  target_archive_path TEXT NOT NULL,
+  source_archive_sha256 TEXT NOT NULL,
+  intended_archive_sha256 TEXT NOT NULL,
+  intended_video_ids_json TEXT NOT NULL,
+  phase TEXT NOT NULL CHECK(phase IN ('prepared','published','committed')),
+  created_at_ms INTEGER NOT NULL,
+  updated_at_ms INTEGER NOT NULL,
+  FOREIGN KEY (subscription_id) REFERENCES youtube_subscription(id) ON DELETE CASCADE
+);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_youtube_archive_merge_intent_pending_subscription
+  ON youtube_archive_merge_intent(subscription_id)
+  WHERE phase <> 'committed';
+CREATE INDEX IF NOT EXISTS idx_youtube_archive_merge_intent_pending
+  ON youtube_archive_merge_intent(phase, created_at_ms, intent_id);
+CREATE TRIGGER IF NOT EXISTS trg_youtube_archive_merge_intent_immutable
+BEFORE UPDATE ON youtube_archive_merge_intent
+WHEN NEW.intent_id<>OLD.intent_id
+  OR NEW.subscription_id<>OLD.subscription_id
+  OR NEW.target_archive_path<>OLD.target_archive_path
+  OR NEW.source_archive_sha256<>OLD.source_archive_sha256
+  OR NEW.intended_archive_sha256<>OLD.intended_archive_sha256
+  OR NEW.intended_video_ids_json<>OLD.intended_video_ids_json
+  OR NEW.created_at_ms<>OLD.created_at_ms
+BEGIN
+  SELECT RAISE(ABORT, 'youtube archive merge intent lineage is immutable');
+END;
+CREATE TRIGGER IF NOT EXISTS trg_youtube_archive_merge_intent_legal_phase
+BEFORE UPDATE OF phase ON youtube_archive_merge_intent
+WHEN NOT (
+  NEW.phase=OLD.phase
+  OR (OLD.phase='prepared' AND NEW.phase='published')
+  OR (OLD.phase='published' AND NEW.phase='committed')
+)
+BEGIN
+  SELECT RAISE(ABORT, 'illegal youtube archive merge intent phase transition');
+END;
+"#,
+    )?;
+    Ok(())
+}
+
+fn apply_schema_v42(conn: &Connection) -> Result<()> {
+    // WP-0298: one damaged archive intent must remain diagnosable without poisoning every
+    // unrelated subscription. Keep durable failure evidence separate from immutable lineage;
+    // a later successful retry resolves, but does not erase, the historical failure receipt.
+    conn.execute_batch(
+        r#"
+CREATE TABLE IF NOT EXISTS youtube_archive_merge_intent_failure (
+  intent_id TEXT PRIMARY KEY,
+  subscription_id TEXT NOT NULL,
+  error_message TEXT NOT NULL,
+  failure_count INTEGER NOT NULL CHECK(failure_count > 0),
+  first_failed_at_ms INTEGER NOT NULL,
+  last_failed_at_ms INTEGER NOT NULL,
+  resolved_at_ms INTEGER,
+  FOREIGN KEY (intent_id) REFERENCES youtube_archive_merge_intent(intent_id) ON DELETE CASCADE,
+  FOREIGN KEY (subscription_id) REFERENCES youtube_subscription(id) ON DELETE CASCADE
+);
+CREATE INDEX IF NOT EXISTS idx_youtube_archive_merge_intent_failure_active
+  ON youtube_archive_merge_intent_failure(resolved_at_ms, last_failed_at_ms, intent_id);
+CREATE TRIGGER IF NOT EXISTS trg_youtube_archive_merge_intent_failure_binding
+BEFORE INSERT ON youtube_archive_merge_intent_failure
+WHEN NOT EXISTS (
+  SELECT 1 FROM youtube_archive_merge_intent intent
+  WHERE intent.intent_id=NEW.intent_id
+    AND intent.subscription_id=NEW.subscription_id
+)
+BEGIN
+  SELECT RAISE(ABORT, 'youtube archive merge failure binding is invalid');
+END;
+CREATE TRIGGER IF NOT EXISTS trg_youtube_archive_merge_intent_failure_rebind
+BEFORE UPDATE OF intent_id,subscription_id ON youtube_archive_merge_intent_failure
+WHEN NEW.intent_id<>OLD.intent_id OR NEW.subscription_id<>OLD.subscription_id
+BEGIN
+  SELECT RAISE(ABORT, 'youtube archive merge failure binding is immutable');
+END;
+"#,
+    )?;
+    Ok(())
+}
+
+fn apply_schema_v43(conn: &Connection) -> Result<()> {
+    // WP-0299: the lineage table describes immutable attempt state, while this singleton
+    // row is the cross-process install lease. SQLite therefore rejects a second attempt
+    // before it can create staging files or perform network work. A single pre-v43 lineage
+    // is adopted during migration; ambiguous legacy multi-lineage state remains unowned and
+    // must be reconciled explicitly instead of being guessed at during schema migration.
+    conn.execute_batch(
+        r#"
+CREATE TABLE IF NOT EXISTS provider_install_owner (
+  singleton INTEGER PRIMARY KEY CHECK(singleton = 1),
+  attempt_id TEXT NOT NULL UNIQUE,
+  acquired_at_ms INTEGER NOT NULL,
+  updated_at_ms INTEGER NOT NULL,
+  FOREIGN KEY (attempt_id) REFERENCES provider_install_lineage(attempt_id) ON DELETE CASCADE
+);
+INSERT OR IGNORE INTO provider_install_owner(singleton,attempt_id,acquired_at_ms,updated_at_ms)
+SELECT 1,attempt_id,updated_at_ms,updated_at_ms
+FROM provider_install_lineage
+WHERE (SELECT COUNT(*) FROM provider_install_lineage)=1;
+CREATE TRIGGER IF NOT EXISTS trg_provider_install_owner_singleton_immutable
+BEFORE UPDATE OF singleton,attempt_id ON provider_install_owner
+WHEN NEW.singleton<>OLD.singleton OR NEW.attempt_id<>OLD.attempt_id
+BEGIN
+  SELECT RAISE(ABORT, 'provider install owner identity is immutable');
+END;
+"#,
+    )?;
+    Ok(())
+}
+
+fn apply_schema_v44(conn: &Connection) -> Result<()> {
+    // WP-0306: canonical absence means no active pointer. Once a pointer exists it may only
+    // reference a committed immutable publication; prepared/published lineage must fail closed.
+    // Existing invalid rows are deliberately retained for resolver diagnostics rather than
+    // silently deleted or reclassified during migration.
+    conn.execute_batch(
+        r#"
+CREATE TRIGGER IF NOT EXISTS trg_localization_preview_active_committed_insert
+BEFORE INSERT ON localization_preview_active
+WHEN NOT EXISTS (
+  SELECT 1 FROM localization_preview_publication publication
+  WHERE publication.generation_id=NEW.generation_id
+    AND publication.item_id=NEW.item_id
+    AND publication.variant_key=NEW.variant_key
+    AND publication.source_job_id=NEW.source_job_id
+    AND publication.phase='committed'
+)
+BEGIN
+  SELECT RAISE(ABORT, 'localization active pointer requires a committed exact publication');
+END;
+CREATE TRIGGER IF NOT EXISTS trg_localization_preview_active_committed_update
+BEFORE UPDATE ON localization_preview_active
+WHEN NOT EXISTS (
+  SELECT 1 FROM localization_preview_publication publication
+  WHERE publication.generation_id=NEW.generation_id
+    AND publication.item_id=NEW.item_id
+    AND publication.variant_key=NEW.variant_key
+    AND publication.source_job_id=NEW.source_job_id
+    AND publication.phase='committed'
+)
+BEGIN
+  SELECT RAISE(ABORT, 'localization active pointer requires a committed exact publication');
+END;
+"#,
+    )?;
+    Ok(())
+}
+
+fn apply_schema_v45(conn: &Connection) -> Result<()> {
+    // WP-0298: committed archive-carrier cleanup pages by intent_id. The older
+    // (phase,created_at_ms,intent_id) index cannot satisfy that ordering and forces SQLite to
+    // scan/sort the full committed history before applying the page limit.
+    conn.execute_batch(
+        r#"
+CREATE INDEX IF NOT EXISTS idx_youtube_archive_merge_intent_phase_intent_cleanup
+  ON youtube_archive_merge_intent(phase, intent_id, subscription_id);
+"#,
+    )?;
+    Ok(())
+}
+
+fn apply_schema_v46(conn: &Connection) -> Result<()> {
+    // WP-0298: archive carrier cleanup can span many bounded pages and must continue after an
+    // application restart. This singleton belongs to the app database, so it identifies the
+    // cleanup stream without persisting a machine-specific archive path.
+    conn.execute_batch(
+        r#"
+CREATE TABLE IF NOT EXISTS youtube_archive_carrier_cleanup_cursor (
+  singleton INTEGER PRIMARY KEY CHECK(singleton=1),
+  after_intent_id TEXT,
+  generation INTEGER NOT NULL DEFAULT 0,
+  updated_at_ms INTEGER NOT NULL
+);
+INSERT OR IGNORE INTO youtube_archive_carrier_cleanup_cursor(
+  singleton,after_intent_id,generation,updated_at_ms
+) VALUES(1,NULL,0,0);
+CREATE TRIGGER IF NOT EXISTS trg_youtube_archive_carrier_cleanup_cursor_identity
+BEFORE UPDATE OF singleton ON youtube_archive_carrier_cleanup_cursor
+WHEN NEW.singleton<>OLD.singleton
+BEGIN
+  SELECT RAISE(ABORT, 'youtube archive carrier cleanup cursor identity is immutable');
+END;
+"#,
+    )?;
+    Ok(())
+}
+
+fn apply_schema_v47(conn: &Connection) -> Result<()> {
+    // WP-0299: destructive provider recovery is authorized by durable process and filesystem
+    // object identities, not by copyable receipts/markers. Complete pinned-derived tree roots
+    // remain authoritative after the transient install lineage is cleared.
+    ensure_column(
+        conn,
+        "provider_install_lineage",
+        "ownership_token_digest",
+        "TEXT NOT NULL DEFAULT ''",
+    )?;
+    ensure_column(
+        conn,
+        "provider_install_lineage",
+        "node_directory_identity",
+        "TEXT NOT NULL DEFAULT ''",
+    )?;
+    ensure_column(
+        conn,
+        "provider_install_lineage",
+        "provider_directory_identity",
+        "TEXT NOT NULL DEFAULT ''",
+    )?;
+    ensure_column(
+        conn,
+        "provider_install_lineage",
+        "node_tree_sha256",
+        "TEXT NOT NULL DEFAULT ''",
+    )?;
+    ensure_column(
+        conn,
+        "provider_install_lineage",
+        "provider_tree_sha256",
+        "TEXT NOT NULL DEFAULT ''",
+    )?;
+    ensure_column(
+        conn,
+        "provider_install_owner",
+        "owner_pid",
+        "INTEGER NOT NULL DEFAULT 0",
+    )?;
+    ensure_column(
+        conn,
+        "provider_install_owner",
+        "owner_process_identity",
+        "TEXT NOT NULL DEFAULT ''",
+    )?;
+    conn.execute_batch(
+        r#"
+CREATE TABLE IF NOT EXISTS provider_installed_identity (
+  singleton INTEGER PRIMARY KEY CHECK(singleton=1),
+  install_generation TEXT NOT NULL,
+  node_directory_identity TEXT NOT NULL,
+  provider_directory_identity TEXT NOT NULL,
+  node_tree_sha256 TEXT NOT NULL,
+  provider_tree_sha256 TEXT NOT NULL,
+  committed_at_ms INTEGER NOT NULL
+);
+CREATE TRIGGER IF NOT EXISTS trg_provider_installed_identity_singleton_immutable
+BEFORE UPDATE OF singleton ON provider_installed_identity
+WHEN NEW.singleton<>OLD.singleton
+BEGIN
+  SELECT RAISE(ABORT, 'provider installed identity singleton is immutable');
+END;
+CREATE TRIGGER IF NOT EXISTS trg_provider_installed_identity_requires_committed_lineage_insert
+BEFORE INSERT ON provider_installed_identity
+WHEN NOT EXISTS (
+  SELECT 1 FROM provider_install_lineage lineage
+  WHERE lineage.phase='committed'
+    AND lineage.node_directory_identity=NEW.node_directory_identity
+    AND lineage.provider_directory_identity=NEW.provider_directory_identity
+    AND lineage.node_tree_sha256=NEW.node_tree_sha256
+    AND lineage.provider_tree_sha256=NEW.provider_tree_sha256
+)
+BEGIN
+  SELECT RAISE(ABORT, 'provider installed identity requires committed exact lineage');
+END;
+CREATE TRIGGER IF NOT EXISTS trg_provider_installed_identity_requires_committed_lineage_update
+BEFORE UPDATE ON provider_installed_identity
+WHEN NOT EXISTS (
+  SELECT 1 FROM provider_install_lineage lineage
+  WHERE lineage.phase='committed'
+    AND lineage.node_directory_identity=NEW.node_directory_identity
+    AND lineage.provider_directory_identity=NEW.provider_directory_identity
+    AND lineage.node_tree_sha256=NEW.node_tree_sha256
+    AND lineage.provider_tree_sha256=NEW.provider_tree_sha256
+)
+BEGIN
+  SELECT RAISE(ABORT, 'provider installed identity update requires committed exact lineage');
+END;
+"#,
+    )?;
+    Ok(())
+}
+
+fn apply_schema_v48(conn: &Connection) -> Result<()> {
+    // WP-0299: a committed provider identity is a durable lineage reference, not a free-standing
+    // row. Random commit nonces bind the owner, legal phase chain, and installed identity. The
+    // committed lineage remains after owner release so upgrades can prove or replace it without
+    // manufacturing authority from an editable filesystem receipt.
+    ensure_column(
+        conn,
+        "provider_install_lineage",
+        "commit_nonce",
+        "TEXT NOT NULL DEFAULT ''",
+    )?;
+    ensure_column(
+        conn,
+        "provider_install_lineage",
+        "install_generation",
+        "TEXT NOT NULL DEFAULT ''",
+    )?;
+    ensure_column(
+        conn,
+        "provider_install_owner",
+        "commit_nonce",
+        "TEXT NOT NULL DEFAULT ''",
+    )?;
+    ensure_column(
+        conn,
+        "provider_installed_identity",
+        "lineage_attempt_id",
+        "TEXT NOT NULL DEFAULT ''",
+    )?;
+    ensure_column(
+        conn,
+        "provider_installed_identity",
+        "commit_nonce",
+        "TEXT NOT NULL DEFAULT ''",
+    )?;
+
+    // Bind rows created by v47 when their exact committed lineage still exists. An identity whose
+    // transient v47 lineage was already deleted intentionally remains unbound; the engine must
+    // re-authenticate its complete destination trees before adopting it under the lifecycle lock.
+    conn.execute_batch(
+        r#"
+UPDATE provider_install_lineage
+SET commit_nonce=lower(hex(randomblob(32)))
+WHERE commit_nonce='';
+UPDATE provider_install_owner
+SET commit_nonce=COALESCE(
+  (SELECT lineage.commit_nonce FROM provider_install_lineage lineage
+   WHERE lineage.attempt_id=provider_install_owner.attempt_id),
+  lower(hex(randomblob(32)))
+)
+WHERE commit_nonce='';
+UPDATE provider_install_lineage
+SET install_generation=COALESCE((
+  SELECT identity.install_generation FROM provider_installed_identity identity
+  WHERE identity.node_directory_identity=provider_install_lineage.node_directory_identity
+    AND identity.provider_directory_identity=provider_install_lineage.provider_directory_identity
+    AND identity.node_tree_sha256=provider_install_lineage.node_tree_sha256
+    AND identity.provider_tree_sha256=provider_install_lineage.provider_tree_sha256
+  LIMIT 1
+), install_generation)
+WHERE install_generation='';
+UPDATE provider_installed_identity
+SET lineage_attempt_id=COALESCE((
+      SELECT lineage.attempt_id FROM provider_install_lineage lineage
+      WHERE lineage.phase='committed'
+        AND lineage.node_directory_identity=provider_installed_identity.node_directory_identity
+        AND lineage.provider_directory_identity=provider_installed_identity.provider_directory_identity
+        AND lineage.node_tree_sha256=provider_installed_identity.node_tree_sha256
+        AND lineage.provider_tree_sha256=provider_installed_identity.provider_tree_sha256
+      ORDER BY lineage.updated_at_ms DESC LIMIT 1
+    ), ''),
+    commit_nonce=COALESCE((
+      SELECT lineage.commit_nonce FROM provider_install_lineage lineage
+      WHERE lineage.phase='committed'
+        AND lineage.node_directory_identity=provider_installed_identity.node_directory_identity
+        AND lineage.provider_directory_identity=provider_installed_identity.provider_directory_identity
+        AND lineage.node_tree_sha256=provider_installed_identity.node_tree_sha256
+        AND lineage.provider_tree_sha256=provider_installed_identity.provider_tree_sha256
+      ORDER BY lineage.updated_at_ms DESC LIMIT 1
+    ), '')
+WHERE lineage_attempt_id='' OR commit_nonce='';
+
+CREATE TABLE IF NOT EXISTS provider_installed_identity_mutation_guard (
+  singleton INTEGER PRIMARY KEY CHECK(singleton=1),
+  lineage_attempt_id TEXT NOT NULL,
+  commit_nonce TEXT NOT NULL,
+  operation TEXT NOT NULL CHECK(operation IN ('invalidate','uninstall')),
+  created_at_ms INTEGER NOT NULL
+);
+
+DROP TRIGGER IF EXISTS trg_provider_installed_identity_requires_committed_lineage_insert;
+DROP TRIGGER IF EXISTS trg_provider_installed_identity_requires_committed_lineage_update;
+
+CREATE TRIGGER IF NOT EXISTS trg_provider_install_lineage_v48_insert_prepared
+BEFORE INSERT ON provider_install_lineage
+WHEN NEW.phase<>'prepared' OR length(NEW.commit_nonce)<>64
+  OR NEW.commit_nonce GLOB '*[^0-9A-Fa-f]*'
+BEGIN
+  SELECT RAISE(ABORT, 'provider lineage must begin prepared with a commit nonce');
+END;
+
+CREATE TRIGGER IF NOT EXISTS trg_provider_install_owner_v48_requires_lineage_nonce
+BEFORE INSERT ON provider_install_owner
+WHEN length(NEW.commit_nonce)<>64 OR NEW.commit_nonce GLOB '*[^0-9A-Fa-f]*' OR NOT EXISTS (
+  SELECT 1 FROM provider_install_lineage lineage
+  WHERE lineage.attempt_id=NEW.attempt_id
+    AND lineage.phase='prepared'
+    AND lineage.commit_nonce=NEW.commit_nonce
+)
+BEGIN
+  SELECT RAISE(ABORT, 'provider owner requires exact prepared lineage nonce');
+END;
+
+CREATE TRIGGER IF NOT EXISTS trg_provider_install_lineage_v48_immutable_authority
+BEFORE UPDATE ON provider_install_lineage
+WHEN NEW.attempt_id<>OLD.attempt_id
+  OR NEW.stage_root<>OLD.stage_root
+  OR NEW.ownership_token_digest<>OLD.ownership_token_digest
+  OR NEW.commit_nonce<>OLD.commit_nonce
+  OR NEW.install_generation<>OLD.install_generation
+  OR ((OLD.node_directory_identity<>'' OR OLD.provider_directory_identity<>''
+       OR OLD.node_tree_sha256<>'' OR OLD.provider_tree_sha256<>'')
+      AND (NEW.node_directory_identity<>OLD.node_directory_identity
+       OR NEW.provider_directory_identity<>OLD.provider_directory_identity
+       OR NEW.node_tree_sha256<>OLD.node_tree_sha256
+       OR NEW.provider_tree_sha256<>OLD.provider_tree_sha256))
+  OR ((NEW.node_directory_identity<>OLD.node_directory_identity
+       OR NEW.provider_directory_identity<>OLD.provider_directory_identity
+       OR NEW.node_tree_sha256<>OLD.node_tree_sha256
+       OR NEW.provider_tree_sha256<>OLD.provider_tree_sha256)
+      AND (OLD.phase<>'prepared'
+       OR NEW.node_directory_identity='' OR NEW.provider_directory_identity=''
+       OR NEW.node_tree_sha256='' OR NEW.provider_tree_sha256=''))
+BEGIN
+  SELECT RAISE(ABORT, 'provider lineage authority and sealed identity are immutable');
+END;
+
+CREATE TRIGGER IF NOT EXISTS trg_provider_install_lineage_v48_prepared_must_be_sealed
+BEFORE UPDATE OF phase ON provider_install_lineage
+WHEN OLD.phase='prepared' AND NEW.phase<>'prepared' AND (
+  length(OLD.install_generation)<>64
+  OR OLD.install_generation GLOB '*[^0-9A-Fa-f]*'
+  OR length(OLD.ownership_token_digest)<>64
+  OR OLD.ownership_token_digest GLOB '*[^0-9A-Fa-f]*'
+  OR length(OLD.node_tree_sha256)<>64
+  OR OLD.node_tree_sha256 GLOB '*[^0-9A-Fa-f]*'
+  OR length(OLD.provider_tree_sha256)<>64
+  OR OLD.provider_tree_sha256 GLOB '*[^0-9A-Fa-f]*'
+  OR NOT (
+    (length(OLD.node_directory_identity)=57
+      AND substr(OLD.node_directory_identity,1,8)='windows:'
+      AND substr(OLD.node_directory_identity,9,16) NOT GLOB '*[^0-9A-Fa-f]*'
+      AND substr(OLD.node_directory_identity,25,1)=':'
+      AND substr(OLD.node_directory_identity,26,32) NOT GLOB '*[^0-9A-Fa-f]*')
+    OR
+    (substr(OLD.node_directory_identity,1,5)='unix:'
+      AND instr(substr(OLD.node_directory_identity,6),':')>1
+      AND substr(substr(OLD.node_directory_identity,6),1,instr(substr(OLD.node_directory_identity,6),':')-1) NOT GLOB '*[^0-9]*'
+      AND substr(substr(OLD.node_directory_identity,6),instr(substr(OLD.node_directory_identity,6),':')+1)<>''
+      AND substr(substr(OLD.node_directory_identity,6),instr(substr(OLD.node_directory_identity,6),':')+1) NOT GLOB '*[^0-9]*')
+  )
+  OR NOT (
+    (length(OLD.provider_directory_identity)=57
+      AND substr(OLD.provider_directory_identity,1,8)='windows:'
+      AND substr(OLD.provider_directory_identity,9,16) NOT GLOB '*[^0-9A-Fa-f]*'
+      AND substr(OLD.provider_directory_identity,25,1)=':'
+      AND substr(OLD.provider_directory_identity,26,32) NOT GLOB '*[^0-9A-Fa-f]*')
+    OR
+    (substr(OLD.provider_directory_identity,1,5)='unix:'
+      AND instr(substr(OLD.provider_directory_identity,6),':')>1
+      AND substr(substr(OLD.provider_directory_identity,6),1,instr(substr(OLD.provider_directory_identity,6),':')-1) NOT GLOB '*[^0-9]*'
+      AND substr(substr(OLD.provider_directory_identity,6),instr(substr(OLD.provider_directory_identity,6),':')+1)<>''
+      AND substr(substr(OLD.provider_directory_identity,6),instr(substr(OLD.provider_directory_identity,6),':')+1) NOT GLOB '*[^0-9]*')
+  )
+)
+BEGIN
+  SELECT RAISE(ABORT, 'provider lineage cannot leave prepared before exact sealed authority');
+END;
+
+CREATE TRIGGER IF NOT EXISTS trg_provider_install_lineage_v48_legal_phase
+BEFORE UPDATE OF phase ON provider_install_lineage
+WHEN NOT (
+  NEW.phase=OLD.phase
+  OR (OLD.phase='prepared' AND NEW.phase='node_publish_intent')
+  OR (OLD.phase='node_publish_intent' AND NEW.phase='node_published')
+  OR (OLD.phase='node_published' AND NEW.phase='provider_publish_intent')
+  OR (OLD.phase='provider_publish_intent' AND NEW.phase='provider_published')
+  OR (OLD.phase='provider_published' AND NEW.phase='committed')
+)
+BEGIN
+  SELECT RAISE(ABORT, 'illegal provider lineage phase transition');
+END;
+
+CREATE TRIGGER IF NOT EXISTS trg_provider_install_lineage_v48_phase_requires_owner
+BEFORE UPDATE OF phase ON provider_install_lineage
+WHEN NEW.phase<>OLD.phase AND NOT EXISTS (
+  SELECT 1 FROM provider_install_owner owner
+  WHERE owner.singleton=1
+    AND owner.attempt_id=OLD.attempt_id
+    AND owner.commit_nonce=OLD.commit_nonce
+)
+BEGIN
+  SELECT RAISE(ABORT, 'provider lineage transition requires exact owner nonce');
+END;
+
+CREATE TRIGGER IF NOT EXISTS trg_provider_installed_identity_v48_requires_lineage_insert
+BEFORE INSERT ON provider_installed_identity
+WHEN length(NEW.commit_nonce)<>64 OR NEW.commit_nonce GLOB '*[^0-9A-Fa-f]*'
+  OR length(NEW.install_generation)<>64 OR NEW.install_generation GLOB '*[^0-9A-Fa-f]*'
+  OR length(NEW.node_tree_sha256)<>64 OR NEW.node_tree_sha256 GLOB '*[^0-9A-Fa-f]*'
+  OR length(NEW.provider_tree_sha256)<>64 OR NEW.provider_tree_sha256 GLOB '*[^0-9A-Fa-f]*'
+  OR NOT (
+    (length(NEW.node_directory_identity)=57 AND substr(NEW.node_directory_identity,1,8)='windows:'
+      AND substr(NEW.node_directory_identity,9,16) NOT GLOB '*[^0-9A-Fa-f]*'
+      AND substr(NEW.node_directory_identity,25,1)=':'
+      AND substr(NEW.node_directory_identity,26,32) NOT GLOB '*[^0-9A-Fa-f]*')
+    OR (substr(NEW.node_directory_identity,1,5)='unix:'
+      AND instr(substr(NEW.node_directory_identity,6),':')>1
+      AND substr(substr(NEW.node_directory_identity,6),1,instr(substr(NEW.node_directory_identity,6),':')-1) NOT GLOB '*[^0-9]*'
+      AND substr(substr(NEW.node_directory_identity,6),instr(substr(NEW.node_directory_identity,6),':')+1)<>''
+      AND substr(substr(NEW.node_directory_identity,6),instr(substr(NEW.node_directory_identity,6),':')+1) NOT GLOB '*[^0-9]*')
+  )
+  OR NOT (
+    (length(NEW.provider_directory_identity)=57 AND substr(NEW.provider_directory_identity,1,8)='windows:'
+      AND substr(NEW.provider_directory_identity,9,16) NOT GLOB '*[^0-9A-Fa-f]*'
+      AND substr(NEW.provider_directory_identity,25,1)=':'
+      AND substr(NEW.provider_directory_identity,26,32) NOT GLOB '*[^0-9A-Fa-f]*')
+    OR (substr(NEW.provider_directory_identity,1,5)='unix:'
+      AND instr(substr(NEW.provider_directory_identity,6),':')>1
+      AND substr(substr(NEW.provider_directory_identity,6),1,instr(substr(NEW.provider_directory_identity,6),':')-1) NOT GLOB '*[^0-9]*'
+      AND substr(substr(NEW.provider_directory_identity,6),instr(substr(NEW.provider_directory_identity,6),':')+1)<>''
+      AND substr(substr(NEW.provider_directory_identity,6),instr(substr(NEW.provider_directory_identity,6),':')+1) NOT GLOB '*[^0-9]*')
+  )
+  OR NEW.lineage_attempt_id='' OR NOT EXISTS (
+  SELECT 1 FROM provider_install_lineage lineage
+  WHERE lineage.attempt_id=NEW.lineage_attempt_id
+    AND lineage.phase='committed'
+    AND lineage.commit_nonce=NEW.commit_nonce
+    AND lineage.install_generation=NEW.install_generation
+    AND lineage.node_directory_identity=NEW.node_directory_identity
+    AND lineage.provider_directory_identity=NEW.provider_directory_identity
+    AND lineage.node_tree_sha256=NEW.node_tree_sha256
+    AND lineage.provider_tree_sha256=NEW.provider_tree_sha256
+)
+BEGIN
+  SELECT RAISE(ABORT, 'provider installed identity requires exact committed lineage nonce');
+END;
+
+CREATE TRIGGER IF NOT EXISTS trg_provider_installed_identity_v48_requires_lineage_update
+BEFORE UPDATE ON provider_installed_identity
+WHEN NEW.singleton<>OLD.singleton
+  OR length(NEW.commit_nonce)<>64 OR NEW.commit_nonce GLOB '*[^0-9A-Fa-f]*'
+  OR length(NEW.install_generation)<>64 OR NEW.install_generation GLOB '*[^0-9A-Fa-f]*'
+  OR length(NEW.node_tree_sha256)<>64 OR NEW.node_tree_sha256 GLOB '*[^0-9A-Fa-f]*'
+  OR length(NEW.provider_tree_sha256)<>64 OR NEW.provider_tree_sha256 GLOB '*[^0-9A-Fa-f]*'
+  OR NOT (
+    (length(NEW.node_directory_identity)=57 AND substr(NEW.node_directory_identity,1,8)='windows:'
+      AND substr(NEW.node_directory_identity,9,16) NOT GLOB '*[^0-9A-Fa-f]*'
+      AND substr(NEW.node_directory_identity,25,1)=':'
+      AND substr(NEW.node_directory_identity,26,32) NOT GLOB '*[^0-9A-Fa-f]*')
+    OR (substr(NEW.node_directory_identity,1,5)='unix:'
+      AND instr(substr(NEW.node_directory_identity,6),':')>1
+      AND substr(substr(NEW.node_directory_identity,6),1,instr(substr(NEW.node_directory_identity,6),':')-1) NOT GLOB '*[^0-9]*'
+      AND substr(substr(NEW.node_directory_identity,6),instr(substr(NEW.node_directory_identity,6),':')+1)<>''
+      AND substr(substr(NEW.node_directory_identity,6),instr(substr(NEW.node_directory_identity,6),':')+1) NOT GLOB '*[^0-9]*')
+  )
+  OR NOT (
+    (length(NEW.provider_directory_identity)=57 AND substr(NEW.provider_directory_identity,1,8)='windows:'
+      AND substr(NEW.provider_directory_identity,9,16) NOT GLOB '*[^0-9A-Fa-f]*'
+      AND substr(NEW.provider_directory_identity,25,1)=':'
+      AND substr(NEW.provider_directory_identity,26,32) NOT GLOB '*[^0-9A-Fa-f]*')
+    OR (substr(NEW.provider_directory_identity,1,5)='unix:'
+      AND instr(substr(NEW.provider_directory_identity,6),':')>1
+      AND substr(substr(NEW.provider_directory_identity,6),1,instr(substr(NEW.provider_directory_identity,6),':')-1) NOT GLOB '*[^0-9]*'
+      AND substr(substr(NEW.provider_directory_identity,6),instr(substr(NEW.provider_directory_identity,6),':')+1)<>''
+      AND substr(substr(NEW.provider_directory_identity,6),instr(substr(NEW.provider_directory_identity,6),':')+1) NOT GLOB '*[^0-9]*')
+  )
+  OR NEW.lineage_attempt_id='' OR NOT EXISTS (
+    SELECT 1 FROM provider_install_lineage lineage
+    WHERE lineage.attempt_id=NEW.lineage_attempt_id
+      AND lineage.phase='committed'
+      AND lineage.commit_nonce=NEW.commit_nonce
+      AND lineage.install_generation=NEW.install_generation
+      AND lineage.node_directory_identity=NEW.node_directory_identity
+      AND lineage.provider_directory_identity=NEW.provider_directory_identity
+      AND lineage.node_tree_sha256=NEW.node_tree_sha256
+      AND lineage.provider_tree_sha256=NEW.provider_tree_sha256
+  )
+BEGIN
+  SELECT RAISE(ABORT, 'provider installed identity update requires exact committed lineage nonce');
+END;
+
+CREATE TRIGGER IF NOT EXISTS trg_provider_installed_identity_v48_delete_guarded
+BEFORE DELETE ON provider_installed_identity
+WHEN NOT EXISTS (
+  SELECT 1 FROM provider_installed_identity_mutation_guard guard
+  WHERE guard.singleton=1
+    AND guard.lineage_attempt_id=OLD.lineage_attempt_id
+    AND guard.commit_nonce=OLD.commit_nonce
+)
+BEGIN
+  SELECT RAISE(ABORT, 'provider installed identity deletion requires governed invalidation');
+END;
+
+CREATE TRIGGER IF NOT EXISTS trg_provider_install_lineage_v48_preserve_installed_reference
+BEFORE DELETE ON provider_install_lineage
+WHEN EXISTS (
+  SELECT 1 FROM provider_installed_identity identity
+  WHERE identity.singleton=1
+    AND identity.lineage_attempt_id=OLD.attempt_id
+    AND identity.commit_nonce=OLD.commit_nonce
+)
+BEGIN
+  SELECT RAISE(ABORT, 'provider installed lineage cannot be deleted while referenced');
+END;
+"#,
+    )?;
+    Ok(())
+}
+
 fn ensure_column(conn: &Connection, table: &str, column: &str, column_def: &str) -> Result<()> {
     let mut stmt = conn.prepare(&format!("PRAGMA table_info({table})"))?;
     let mut rows = stmt.query([])?;
@@ -1960,5 +3062,448 @@ CREATE TABLE IF NOT EXISTS job (
             )
             .expect("network status");
         assert_eq!(network_status, "normal");
+    }
+
+    #[test]
+    fn projection_generation_contract_uses_job_triggers_but_not_archive_cache_triggers() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let paths = AppPaths::new(dir.path().to_path_buf());
+        let conn = open(&paths).expect("open");
+        migrate(&conn).expect("migrate");
+        let before: i64 = conn.query_row("SELECT updated_at_ms FROM derived_projection_state WHERE projection='youtube_archive'", [], |r| r.get(0)).unwrap();
+        conn.execute("INSERT INTO youtube_subscription_archive_member(subscription_id,video_id,discovered_at_ms) VALUES('s','v',1)", []).unwrap();
+        let after: (i64, i64) = conn.query_row("SELECT dirty,updated_at_ms FROM derived_projection_state WHERE projection='youtube_archive'", [], |r| Ok((r.get(0)?, r.get(1)?))).unwrap();
+        assert_eq!(
+            after.1, before,
+            "derived archive cache writes must not self-invalidate generation CAS"
+        );
+        let archive_triggers: i64 = conn.query_row("SELECT COUNT(*) FROM sqlite_master WHERE type='trigger' AND name LIKE 'trg_archive_rollup_dirty_%'", [], |r| r.get(0)).unwrap();
+        assert_eq!(archive_triggers, 0);
+        let activity_triggers: i64 = conn.query_row("SELECT COUNT(*) FROM sqlite_master WHERE type='trigger' AND name LIKE 'trg_job_activity_rollup_dirty_%'", [], |r| r.get(0)).unwrap();
+        assert_eq!(activity_triggers, 3);
+    }
+
+    #[test]
+    fn v36_idempotently_repairs_pre_owner_and_pre_snapshot_candidate_shapes() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let paths = AppPaths::new(dir.path().to_path_buf());
+        let conn = open(&paths).expect("open");
+        migrate(&conn).expect("migrate baseline");
+        conn.execute_batch(
+            "DROP TABLE downloader_canary_lease;
+             CREATE TABLE downloader_canary_lease (
+               lease_id TEXT NOT NULL,
+               provider TEXT NOT NULL,
+               operation TEXT NOT NULL,
+               auth_fingerprint TEXT NOT NULL,
+               runtime_epoch TEXT NOT NULL,
+               claimed_at_ms INTEGER NOT NULL,
+               expires_at_ms INTEGER NOT NULL,
+               PRIMARY KEY(provider, operation, auth_fingerprint, runtime_epoch)
+             );
+             ALTER TABLE downloader_policy_transition DROP COLUMN evidence_snapshot_json;",
+        )
+        .expect("simulate earlier v36 candidate");
+        apply_schema_v36(&conn).expect("repair candidate shape");
+        let has_column = |table: &str, column: &str| -> bool {
+            let mut statement = conn
+                .prepare(&format!("PRAGMA table_info({table})"))
+                .expect("table info");
+            let names = statement
+                .query_map([], |row| row.get::<_, String>(1))
+                .expect("columns")
+                .collect::<rusqlite::Result<Vec<_>>>()
+                .expect("collect columns");
+            names.iter().any(|name| name == column)
+        };
+        assert!(has_column("downloader_canary_lease", "job_id"));
+        assert!(has_column(
+            "downloader_policy_transition",
+            "evidence_snapshot_json"
+        ));
+        let job_default: String = conn
+            .query_row(
+                "SELECT dflt_value FROM pragma_table_info('downloader_canary_lease') WHERE name='job_id'",
+                [],
+                |row| row.get(0),
+            )
+            .expect("job owner default");
+        assert_eq!(job_default, "''");
+    }
+
+    #[test]
+    fn v38_enforces_immutable_continuations_and_composite_active_lineage() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let paths = AppPaths::new(dir.path().to_path_buf());
+        let conn = open(&paths).expect("open");
+        migrate(&conn).expect("migrate");
+        for (item_id, job_id) in [("item-a", "mux-a"), ("item-b", "mux-b")] {
+            conn.execute(
+                "INSERT INTO library_item(id,created_at_ms,source_type,source_uri,title,media_path) VALUES(?1,1,'local','source','title','media.mkv')",
+                [item_id],
+            )
+            .expect("insert item");
+            conn.execute(
+                "INSERT INTO job(id,item_id,type,status,progress,params_json,created_at_ms,logs_path) VALUES(?1,?2,'mux_dub_preview_v1','succeeded',1.0,'{}',1,'job.log')",
+                params![job_id, item_id],
+            )
+            .expect("insert mux job");
+        }
+        for job_id in ["qc-good", "qc-other"] {
+            conn.execute(
+                "INSERT INTO job(id,item_id,type,status,progress,params_json,created_at_ms,logs_path) VALUES(?1,'item-a','qc_dub_preview_v1','queued',0.0,'{}',2,'job.log')",
+                [job_id],
+            )
+            .expect("insert qc job");
+        }
+        conn.execute(
+            "INSERT INTO localization_preview_publication(generation_id,item_id,variant_key,input_fingerprint_sha256,input_fingerprint_json,artifact_path,artifact_bytes,artifact_sha256,staging_path,source_job_id,phase,qc_intent_json,created_at_ms,updated_at_ms) VALUES('gen-a','item-a','','fingerprint','{}','generation-a.mkv',10,'artifact-hash','staging-a.mkv','mux-a','published','{}',1,1)",
+            [],
+        )
+        .expect("insert publication");
+
+        conn.execute(
+            "UPDATE localization_preview_publication SET phase='committed',qc_job_id='qc-good',updated_at_ms=2 WHERE generation_id='gen-a'",
+            [],
+        )
+        .expect("published commit may record the deterministic continuation owner");
+        assert!(conn
+            .execute(
+                "UPDATE localization_preview_publication SET qc_job_id='qc-other' WHERE generation_id='gen-a'",
+                [],
+            )
+            .is_err(), "committed continuation ownership must be immutable");
+
+        conn.execute(
+            "INSERT INTO localization_preview_active(item_id,variant_key,generation_id,source_job_created_at_ms,source_job_id,updated_at_ms) VALUES('item-a','','gen-a',1,'mux-a',2)",
+            [],
+        )
+        .expect("matching active lineage");
+        assert!(conn
+            .execute(
+                "INSERT INTO localization_preview_active(item_id,variant_key,generation_id,source_job_created_at_ms,source_job_id,updated_at_ms) VALUES('item-b','','gen-a',1,'mux-b',2)",
+                [],
+            )
+            .is_err(), "an active pointer must not cross item/source-job publication lineage");
+    }
+
+    #[test]
+    fn v44_active_pointer_requires_committed_exact_publication() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let paths = AppPaths::new(dir.path().to_path_buf());
+        let conn = open(&paths).expect("open");
+        migrate(&conn).expect("migrate");
+        conn.execute(
+            "INSERT INTO library_item(id,created_at_ms,source_type,source_uri,title,media_path)
+             VALUES('item-v44',1,'local','source','title','media.mkv')",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO job(id,item_id,type,status,progress,params_json,created_at_ms,logs_path)
+             VALUES('mux-v44','item-v44','mux_dub_preview_v1','succeeded',1.0,'{}',1,'job.log')",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO localization_preview_publication(
+               generation_id,item_id,variant_key,input_fingerprint_sha256,input_fingerprint_json,
+               artifact_path,artifact_bytes,artifact_sha256,staging_path,source_job_id,phase,
+               created_at_ms,updated_at_ms
+             ) VALUES('gen-v44-published','item-v44','','fingerprint-a','{}','published.mkv',1,
+                      'hash-a','published-stage.mkv','mux-v44','published',1,1)",
+            [],
+        )
+        .unwrap();
+        assert!(
+            conn.execute(
+                "INSERT INTO localization_preview_active(
+                   item_id,variant_key,generation_id,source_job_created_at_ms,source_job_id,updated_at_ms
+                 ) VALUES('item-v44','','gen-v44-published',1,'mux-v44',1)",
+                [],
+            )
+            .is_err(),
+            "published lineage must not become active"
+        );
+
+        conn.execute(
+            "UPDATE localization_preview_publication SET phase='committed',updated_at_ms=2
+             WHERE generation_id='gen-v44-published'",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO localization_preview_active(
+               item_id,variant_key,generation_id,source_job_created_at_ms,source_job_id,updated_at_ms
+             ) VALUES('item-v44','','gen-v44-published',1,'mux-v44',2)",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO localization_preview_publication(
+               generation_id,item_id,variant_key,input_fingerprint_sha256,input_fingerprint_json,
+               artifact_path,artifact_bytes,artifact_sha256,staging_path,source_job_id,phase,
+               created_at_ms,updated_at_ms
+             ) VALUES('gen-v44-next','item-v44','','fingerprint-b','{}','next.mkv',1,
+                      'hash-b','next-stage.mkv','mux-v44','published',3,3)",
+            [],
+        )
+        .unwrap();
+        assert!(
+            conn.execute(
+                "UPDATE localization_preview_active SET generation_id='gen-v44-next',updated_at_ms=3
+                 WHERE item_id='item-v44' AND variant_key=''",
+                [],
+            )
+            .is_err(),
+            "an existing pointer must not be redirected to published lineage"
+        );
+    }
+
+    #[test]
+    fn v39_preserves_observations_and_accepts_distinct_slow_state() {
+        let conn = Connection::open_in_memory().expect("open");
+        apply_base_schema_v1(&conn).expect("base");
+        conn.execute_batch(
+            r#"
+CREATE TABLE media_availability_observation (
+  path TEXT PRIMARY KEY,
+  state TEXT NOT NULL CHECK(state IN ('present','missing','unreachable')),
+  observed_at_ms INTEGER NOT NULL,
+  source TEXT NOT NULL,
+  duration_ms INTEGER NOT NULL,
+  next_refresh_at_ms INTEGER NOT NULL,
+  invalidated_at_ms INTEGER
+);
+CREATE INDEX idx_media_availability_refresh
+  ON media_availability_observation(next_refresh_at_ms, invalidated_at_ms);
+"#,
+        )
+        .expect("v38 observation shape");
+        conn.execute(
+            "INSERT INTO media_availability_observation(path,state,observed_at_ms,source,duration_ms,next_refresh_at_ms) VALUES('historical','present',1,'fixture',2,3)",
+            [],
+        )
+        .expect("historical observation");
+        conn.pragma_update(None, "user_version", 38)
+            .expect("v38 marker");
+
+        migrate(&conn).expect("v39 migration");
+
+        assert_eq!(
+            conn.query_row(
+                "SELECT state FROM media_availability_observation WHERE path='historical'",
+                [],
+                |row| row.get::<_, String>(0),
+            )
+            .expect("preserved state"),
+            "present"
+        );
+        conn.execute(
+            "INSERT INTO media_availability_observation(path,state,observed_at_ms,source,duration_ms,next_refresh_at_ms) VALUES('timed-out','slow',4,'bounded_timeout',1500,5)",
+            [],
+        )
+        .expect("slow observation accepted");
+        assert_eq!(
+            schema_user_version(&conn).expect("version"),
+            CURRENT_SCHEMA_VERSION,
+            "the v39 observation invariant must survive every later migration"
+        );
+    }
+
+    #[test]
+    fn v48_provider_authority_rejects_illegal_sql_and_allows_governed_reinstall() {
+        let conn = Connection::open_in_memory().expect("open");
+        migrate(&conn).expect("migrate");
+        let nonce = "a".repeat(64);
+        let generation = "b".repeat(64);
+        let token_digest = "c".repeat(64);
+        let node_root = "d".repeat(64);
+        let provider_root = "e".repeat(64);
+        let node_id = "windows:0000000000000001:00000000000000000000000000000001";
+        let provider_id = "windows:0000000000000002:00000000000000000000000000000002";
+        assert!(conn
+            .execute(
+                "INSERT INTO provider_install_lineage(
+                   attempt_id,stage_root,phase,updated_at_ms,ownership_token_digest,commit_nonce,install_generation
+                 ) VALUES('forged-committed','stage','committed',1,?2,?1,?3)",
+                rusqlite::params![nonce, token_digest, generation],
+            )
+            .is_err());
+        conn.execute(
+            "INSERT INTO provider_install_lineage(
+               attempt_id,stage_root,phase,updated_at_ms,ownership_token_digest,commit_nonce,install_generation
+             ) VALUES('attempt-v48','stage','prepared',1,?2,?1,?3)",
+            rusqlite::params![nonce, token_digest, generation],
+        )
+        .expect("prepared lineage");
+        conn.execute(
+            "INSERT INTO provider_install_owner(
+               singleton,attempt_id,acquired_at_ms,updated_at_ms,owner_pid,owner_process_identity,commit_nonce
+             ) VALUES(1,'attempt-v48',1,1,1,'process',?1)",
+            [&nonce],
+        )
+        .expect("exact owner nonce");
+        conn.execute(
+            "UPDATE provider_install_lineage SET
+               node_directory_identity=?1,provider_directory_identity=?2,
+               node_tree_sha256=?3,provider_tree_sha256=?4
+              WHERE attempt_id='attempt-v48'",
+            rusqlite::params![node_id, provider_id, node_root, provider_root],
+        )
+        .expect("seal prepared lineage");
+        assert!(conn
+            .execute(
+                "UPDATE provider_install_lineage SET phase='provider_published' WHERE attempt_id='attempt-v48'",
+                [],
+            )
+            .is_err());
+        assert!(conn
+            .execute(
+                "UPDATE provider_install_lineage SET node_tree_sha256='retargeted' WHERE attempt_id='attempt-v48'",
+                [],
+            )
+            .is_err());
+        for phase in [
+            "node_publish_intent",
+            "node_published",
+            "provider_publish_intent",
+            "provider_published",
+            "committed",
+        ] {
+            conn.execute(
+                "UPDATE provider_install_lineage SET phase=?1 WHERE attempt_id='attempt-v48'",
+                [phase],
+            )
+            .expect("legal phase transition");
+        }
+        let blank_identity_error = conn
+            .execute(
+                "INSERT INTO provider_installed_identity(
+                   singleton,lineage_attempt_id,commit_nonce,install_generation,
+                   node_directory_identity,provider_directory_identity,node_tree_sha256,
+                   provider_tree_sha256,committed_at_ms
+                 ) VALUES(1,'attempt-v48',?1,'',?2,?3,?4,?5,1)",
+                rusqlite::params![nonce, node_id, provider_id, node_root, provider_root],
+            )
+            .expect_err("blank installed generation must fail closed");
+        assert!(
+            blank_identity_error
+                .to_string()
+                .contains("provider installed identity requires exact committed lineage nonce"),
+            "unexpected trigger: {blank_identity_error}"
+        );
+        conn.execute(
+            "INSERT INTO provider_installed_identity(
+               singleton,lineage_attempt_id,commit_nonce,install_generation,
+               node_directory_identity,provider_directory_identity,node_tree_sha256,
+               provider_tree_sha256,committed_at_ms
+             ) VALUES(1,'attempt-v48',?1,?2,?3,?4,?5,?6,1)",
+            rusqlite::params![nonce, generation, node_id, provider_id, node_root, provider_root],
+        )
+        .expect("exact committed identity");
+        let blank_update_error = conn
+            .execute(
+                "UPDATE provider_installed_identity SET commit_nonce='' WHERE singleton=1",
+                [],
+            )
+            .expect_err("blank installed nonce update must fail closed");
+        assert!(
+            blank_update_error
+                .to_string()
+                .contains("provider installed identity update requires exact committed lineage nonce"),
+            "unexpected trigger: {blank_update_error}"
+        );
+        assert!(
+            conn.execute(
+                "UPDATE provider_installed_identity SET node_tree_sha256='retargeted' WHERE singleton=1",
+                [],
+            )
+            .is_err(),
+            "installed identity cannot be retargeted away from exact committed lineage"
+        );
+        assert!(conn
+            .execute("DELETE FROM provider_installed_identity WHERE singleton=1", [])
+            .is_err());
+        assert!(conn
+            .execute(
+                "DELETE FROM provider_install_lineage WHERE attempt_id='attempt-v48'",
+                [],
+            )
+            .is_err());
+        conn.execute(
+            "INSERT INTO provider_installed_identity_mutation_guard(
+               singleton,lineage_attempt_id,commit_nonce,operation,created_at_ms
+             ) VALUES(1,'attempt-v48',?1,'uninstall',2)",
+            [&nonce],
+        )
+        .expect("governed uninstall guard");
+        conn.execute("DELETE FROM provider_installed_identity WHERE singleton=1", [])
+            .expect("governed identity deletion");
+        conn.execute(
+            "DELETE FROM provider_install_lineage WHERE attempt_id='attempt-v48'",
+            [],
+        )
+        .expect("unreferenced lineage deletion");
+        conn.execute(
+            "DELETE FROM provider_installed_identity_mutation_guard WHERE singleton=1",
+            [],
+        )
+        .expect("clear guard");
+
+        let next_nonce = "f".repeat(64);
+        conn.execute(
+            "INSERT INTO provider_install_lineage(
+               attempt_id,stage_root,phase,updated_at_ms,ownership_token_digest,commit_nonce,install_generation
+             ) VALUES('attempt-v48-next','stage-next','prepared',3,?2,?1,?3)",
+            rusqlite::params![next_nonce, token_digest, generation],
+        )
+        .expect("reinstall prepared lineage");
+    }
+
+    #[test]
+    fn v48_blank_or_malformed_sealed_authority_cannot_leave_prepared() {
+        let conn = Connection::open_in_memory().expect("open");
+        migrate(&conn).expect("migrate");
+        let nonce = "1".repeat(64);
+        conn.execute(
+            "INSERT INTO provider_install_lineage(
+               attempt_id,stage_root,phase,updated_at_ms,ownership_token_digest,commit_nonce,install_generation
+             ) VALUES('blank-authority','stage','prepared',1,'',?1,'')",
+            [&nonce],
+        )
+        .expect("prepared permits an incomplete row only while it is non-published");
+        conn.execute(
+            "INSERT INTO provider_install_owner(
+               singleton,attempt_id,acquired_at_ms,updated_at_ms,owner_pid,owner_process_identity,commit_nonce
+             ) VALUES(1,'blank-authority',1,1,1,'process',?1)",
+            [&nonce],
+        )
+        .expect("owner binds exact nonce");
+        assert!(
+            conn.execute(
+                "UPDATE provider_install_lineage SET phase='node_publish_intent'
+                 WHERE attempt_id='blank-authority'",
+                [],
+            )
+            .is_err(),
+            "blank generation, token digest, object IDs, and complete roots must fail closed"
+        );
+        conn.execute(
+            "UPDATE provider_install_lineage SET
+               node_directory_identity='windows:0000000000000001:00000000000000000000000000000001',
+               provider_directory_identity='windows:0000000000000002:00000000000000000000000000000002',
+               node_tree_sha256=?1,provider_tree_sha256=?2
+             WHERE attempt_id='blank-authority'",
+            rusqlite::params!["g".repeat(64), "2".repeat(63)],
+        )
+        .expect("prepared row may attempt to seal fields");
+        assert!(conn
+            .execute(
+                "UPDATE provider_install_lineage SET phase='node_publish_intent'
+                 WHERE attempt_id='blank-authority'",
+                [],
+            )
+            .is_err());
     }
 }

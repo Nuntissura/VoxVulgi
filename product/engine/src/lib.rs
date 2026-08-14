@@ -16,6 +16,7 @@ pub mod paths;
 pub mod persistence;
 pub mod pinned_dependency_manifest;
 pub mod python_lockfile;
+pub mod root_rebind;
 pub mod speakers;
 pub mod subscriptions;
 pub mod subtitle_tracks;
@@ -34,5 +35,6 @@ pub mod voice_plans;
 pub mod voice_reference_candidates;
 pub mod voice_reference_curation;
 pub mod voice_templates;
+pub mod youtube_protection;
 
 pub use error::{EngineError, Result};

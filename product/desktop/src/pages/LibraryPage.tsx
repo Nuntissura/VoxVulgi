@@ -13,6 +13,7 @@ import { invoke } from "@tauri-apps/api/core";
 import { confirm, open, save } from "@tauri-apps/plugin-dialog";
 import { copyPathToClipboard, openPathBestEffort, revealPath } from "../lib/pathOpener";
 import { safeLocalStorageGet, safeLocalStorageSet } from "../lib/persist";
+import { diagnosticsTrace } from "../lib/diagnosticsTrace";
 import {
   inferArchiverMediaKind,
   isCanonicalYoutubeSingleVideoItem,
@@ -27,6 +28,7 @@ import { fileName, joinPath, parentPath } from "../lib/pathUtils";
 // WP-0264: shared failure-state classifier (subscription panel + Jobs use the same rules).
 import { classifyFailure, toneStyle, type FailureState } from "../lib/failureStates";
 import { usePollingLoop } from "../lib/activity";
+import { isProjectionRequestCurrent } from "../lib/projectionFreshness";
 
 type LibraryItem = {
   id: string;
@@ -117,7 +119,7 @@ type JobsTrackActivityPage = {
 type DownloadPreflightRow = {
   input_index: number;
   url: string;
-  status: "ready" | "active" | "present" | "missing" | "operator_deleted" | "storage_unreachable" | "invalid" | "duplicate_input";
+  status: "ready" | "active" | "present" | "missing" | "operator_deleted" | "storage_unreachable" | "storage_slow" | "invalid" | "duplicate_input";
   service: string | null;
   media_id: string | null;
   library_item_id: string | null;
@@ -126,6 +128,12 @@ type DownloadPreflightRow = {
   active_job_id: string | null;
   failed_url: string | null;
   last_error: string | null;
+  observation_state: string | null;
+  observation_observed_at_ms: number | null;
+  observation_source: string | null;
+  observation_duration_ms: number | null;
+  observation_age_ms: number | null;
+  observation_refresh_in_ms: number | null;
 };
 
 function liveSingleSourceUrl(job: LiveSingleJob): string {
@@ -867,6 +875,7 @@ type DownloadPreset = {
   quality_preference: string | null;
   subtitle_mode: string | null;
   yt_dlp_concurrent_fragments: number;
+  yt_dlp_limit_rate: string | null;
   yt_dlp_throttled_rate: string | null;
   yt_dlp_file_access_retries: number;
   yt_dlp_retries: number;
@@ -899,19 +908,6 @@ const DEFAULT_PRESET_YT_DLP_FRAGMENT_RETRIES = 3;
 const DEFAULT_PRESET_YT_DLP_SLEEP_INTERVAL = 0;
 const DEFAULT_PRESET_YT_DLP_SLEEP_REQUESTS = 0;
 
-function normalizePositiveInt(
-  value: string,
-  fallback: number,
-  min: number,
-  max: number,
-): number {
-  const parsed = Number.parseInt(value, 10);
-  if (!Number.isFinite(parsed)) return fallback;
-  if (parsed < min) return min;
-  if (parsed > max) return max;
-  return parsed;
-}
-
 export function LibraryPage({ mode = "all", visible = true }: LibraryPageProps) {
   const maxBatchUrls = 1500;
   const maxInstagramBatchUrls = 1500;
@@ -930,6 +926,7 @@ export function LibraryPage({ mode = "all", visible = true }: LibraryPageProps) 
   const showMediaLibrary = mode === "all" || mode === "media_library";
   const showImportControls = showMediaLibrary;
   const refreshEpochRef = useRef(0);
+  const projectionGenerationRef = useRef({ archive: 0, activity: 0, download: 0, active: 0, loadMore: 0, preflight: 0, youtubeSingleActivity: 0, youtubeSingleBackfill: 0 });
   const title =
     mode === "video_ingest"
       ? "Video Archiver"
@@ -974,6 +971,15 @@ export function LibraryPage({ mode = "all", visible = true }: LibraryPageProps) 
     Record<string, SubscriptionDownloadActivityRow>
   >({});
   const [activeRefreshSubIds, setActiveRefreshSubIds] = useState<Set<string>>(new Set());
+  const [subscriptionProjectionState, setSubscriptionProjectionState] = useState<
+    Record<"archive" | "activity" | "download" | "active", "loading" | "ready" | "stale" | "error">
+  >({ archive: "loading", activity: "loading", download: "loading", active: "loading" });
+  const markSubscriptionProjectionFailure = useCallback((key: "archive" | "activity" | "download" | "active") => {
+    setSubscriptionProjectionState((current) => ({
+      ...current,
+      [key]: current[key] === "ready" || current[key] === "stale" ? "stale" : "error",
+    }));
+  }, []);
   const [advancedMode, setAdvancedMode] = useState(() => {
     return safeLocalStorageGet("voxvulgi.v1.library.advanced_mode") === "1";
   });
@@ -1157,30 +1163,10 @@ export function LibraryPage({ mode = "all", visible = true }: LibraryPageProps) 
   const [presetPathTemplate, setPresetPathTemplate] = useState("{channel}");
   const [presetFilenameTemplate, setPresetFilenameTemplate] = useState("{title}_{id}");
   const [presetFormatPreference, setPresetFormatPreference] = useState(
-    "bv*[ext=mp4]+ba[ext=m4a]/b[ext=mp4]/bv*+ba/b",
+    "bv*+ba/b",
   );
   const [presetQualityPreference, setPresetQualityPreference] = useState("best");
   const [presetSubtitleMode, setPresetSubtitleMode] = useState("auto");
-  const [presetYtDlpConcurrentFragments, setPresetYtDlpConcurrentFragments] =
-    useState(`${DEFAULT_PRESET_YT_DLP_CONCURRENT_FRAGMENTS}`);
-  const [presetYtDlpThrottledRate, setPresetYtDlpThrottledRate] = useState(
-    DEFAULT_PRESET_YT_DLP_THROTTLED_RATE,
-  );
-  const [presetYtDlpFileAccessRetries, setPresetYtDlpFileAccessRetries] = useState(
-    `${DEFAULT_PRESET_YT_DLP_FILE_ACCESS_RETRIES}`,
-  );
-  const [presetYtDlpRetries, setPresetYtDlpRetries] = useState(
-    `${DEFAULT_PRESET_YT_DLP_RETRIES}`,
-  );
-  const [presetYtDlpFragmentRetries, setPresetYtDlpFragmentRetries] = useState(
-    `${DEFAULT_PRESET_YT_DLP_FRAGMENT_RETRIES}`,
-  );
-  const [presetYtDlpSleepInterval, setPresetYtDlpSleepInterval] = useState(
-    `${DEFAULT_PRESET_YT_DLP_SLEEP_INTERVAL}`,
-  );
-  const [presetYtDlpSleepRequests, setPresetYtDlpSleepRequests] = useState(
-    `${DEFAULT_PRESET_YT_DLP_SLEEP_REQUESTS}`,
-  );
   const [mediaLibrarySearch, setMediaLibrarySearch] = useState(() => {
     return safeLocalStorageGet("voxvulgi.v1.library.media_search") ?? "";
   });
@@ -1591,33 +1577,93 @@ export function LibraryPage({ mode = "all", visible = true }: LibraryPageProps) 
     () => items.filter((item) => isInstagramLibraryItem(item)).slice(0, 10),
     [items],
   );
+  const youtubeSingleActivityQueryKey = [
+    visible,
+    showVideoIngest,
+    showMediaLibrary,
+    showInstagramArchive,
+    videoArchiverTab,
+    youtubeSingleActivityOffset,
+    youtubeSingleHistoryAppliedSearch,
+    youtubeSingleHistoryDirection,
+  ].join("|");
+  const youtubeSingleActivityQueryKeyRef = useRef(youtubeSingleActivityQueryKey);
+  youtubeSingleActivityQueryKeyRef.current = youtubeSingleActivityQueryKey;
+  const libraryLoadMoreQueryKey = JSON.stringify([
+    visible,
+    showVideoIngest,
+    showMediaLibrary,
+    showInstagramArchive,
+    videoArchiverTab,
+    mediaLibraryFileStatus,
+    mediaLibrarySearch,
+    mediaLibrarySingleVideoOnly,
+    mediaLibrarySortBy,
+    mediaLibrarySortDirection,
+    mediaLibrarySourceFilter,
+    mediaLibraryTypeFilter,
+    youtubeSingleHistoryAppliedSearch,
+    youtubeSingleHistoryDirection,
+  ]);
+  const libraryLoadMoreQueryKeyRef = useRef(libraryLoadMoreQueryKey);
+  libraryLoadMoreQueryKeyRef.current = libraryLoadMoreQueryKey;
+  const youtubeSingleBackfillQueryKey = JSON.stringify([
+    visible,
+    showVideoIngest,
+    showMediaLibrary,
+    showInstagramArchive,
+    videoArchiverTab,
+    libraryPageSize,
+    youtubeSingleHistoryAppliedSearch,
+    youtubeSingleHistoryDirection,
+  ]);
+  const youtubeSingleBackfillQueryKeyRef = useRef(youtubeSingleBackfillQueryKey);
+  youtubeSingleBackfillQueryKeyRef.current = youtubeSingleBackfillQueryKey;
 
   const refreshArchiveStats = useCallback(async () => {
-    if (!showVideoIngest || videoArchiverTab !== "youtube_recurring") return;
+    if (!showVideoIngest || videoArchiverTab !== "youtube_recurring") { projectionGenerationRef.current.archive += 1; return; }
+    const generation = ++projectionGenerationRef.current.archive;
+    const requestId = `archive-${generation}-${Date.now()}`;
     const nextArchiveStats = await invoke<Record<string, number>>(
       "youtube_subscriptions_archive_stats",
-    ).catch(() => ({}));
+      { requestId, spanId: requestId },
+    ).catch(() => null);
+    void diagnosticsTrace("frontend_receive", { request_id: requestId, span_id: requestId, pane: "youtube_archive_stats" });
+    if (generation !== projectionGenerationRef.current.archive) return;
+    if (nextArchiveStats === null) { markSubscriptionProjectionFailure("archive"); return; }
     setArchiveStats(nextArchiveStats);
-  }, [showVideoIngest, videoArchiverTab]);
+    setSubscriptionProjectionState((current) => ({ ...current, archive: "ready" }));
+    requestAnimationFrame(() => void diagnosticsTrace("frontend_render_commit", { request_id: requestId, span_id: requestId, pane: "youtube_archive_stats" }));
+  }, [markSubscriptionProjectionFailure, showVideoIngest, videoArchiverTab]);
 
   const refreshSubscriptionActivity = useCallback(async () => {
-    if (!showVideoIngest || videoArchiverTab !== "youtube_recurring") return;
+    if (!showVideoIngest || videoArchiverTab !== "youtube_recurring") { projectionGenerationRef.current.activity += 1; return; }
+    const generation = ++projectionGenerationRef.current.activity;
     const rows = await invoke<SubscriptionActivityRow[]>(
       "youtube_subscriptions_activity",
-    ).catch(() => [] as SubscriptionActivityRow[]);
+    ).catch(() => null);
+    if (generation !== projectionGenerationRef.current.activity) return;
+    if (rows === null) { markSubscriptionProjectionFailure("activity"); return; }
     const map: Record<string, SubscriptionActivityRow> = {};
     for (const row of rows) map[row.subscription_id] = row;
     setSubActivity(map);
-  }, [showVideoIngest, videoArchiverTab]);
+    setSubscriptionProjectionState((current) => ({ ...current, activity: "ready" }));
+  }, [markSubscriptionProjectionFailure, showVideoIngest, videoArchiverTab]);
 
   // WP: poll the dedicated read-only download-activity command. Guarded with .catch(() => []) so an
   // unregistered command degrades to "no live download rows" instead of throwing; the run-state
   // resolver then falls back to the youtube_subscriptions_activity feed.
   const refreshSubscriptionDownloadActivity = useCallback(async () => {
-    if (!showVideoIngest || videoArchiverTab !== "youtube_recurring") return;
+    if (!showVideoIngest || videoArchiverTab !== "youtube_recurring") { projectionGenerationRef.current.download += 1; return; }
+    const generation = ++projectionGenerationRef.current.download;
+    const requestId = `download-activity-${generation}-${Date.now()}`;
     const rows = await invoke<SubscriptionDownloadActivityRow[]>(
       "subscription_download_activity",
-    ).catch(() => [] as SubscriptionDownloadActivityRow[]);
+      { requestId, spanId: requestId },
+    ).catch(() => null);
+    void diagnosticsTrace("frontend_receive", { request_id: requestId, span_id: requestId, pane: "subscription_download_activity" });
+    if (generation !== projectionGenerationRef.current.download) return;
+    if (rows === null) { markSubscriptionProjectionFailure("download"); return; }
     const map: Record<string, SubscriptionDownloadActivityRow> = {};
     for (const row of rows) {
       if (!row || typeof row.subscription_id !== "string") continue;
@@ -1628,23 +1674,47 @@ export function LibraryPage({ mode = "all", visible = true }: LibraryPageProps) 
       };
     }
     setSubDownloadActivity(map);
-  }, [showVideoIngest, videoArchiverTab]);
+    setSubscriptionProjectionState((current) => ({ ...current, download: "ready" }));
+    requestAnimationFrame(() => void diagnosticsTrace("frontend_render_commit", { request_id: requestId, span_id: requestId, pane: "subscription_download_activity" }));
+  }, [markSubscriptionProjectionFailure, showVideoIngest, videoArchiverTab]);
 
   const refreshActiveRefreshIds = useCallback(async () => {
-    if (!showVideoIngest || videoArchiverTab !== "youtube_recurring") return;
+    if (!showVideoIngest || videoArchiverTab !== "youtube_recurring") { projectionGenerationRef.current.active += 1; return; }
+    const generation = ++projectionGenerationRef.current.active;
     const nextActiveRefreshIds = await invoke<string[]>(
       "youtube_subscriptions_active_refresh_ids",
-    ).catch(() => []);
+    ).catch(() => null);
+    if (generation !== projectionGenerationRef.current.active) return;
+    if (nextActiveRefreshIds === null) { markSubscriptionProjectionFailure("active"); return; }
     setActiveRefreshSubIds(new Set(nextActiveRefreshIds));
-  }, [showVideoIngest, videoArchiverTab]);
+    setSubscriptionProjectionState((current) => ({ ...current, active: "ready" }));
+  }, [markSubscriptionProjectionFailure, showVideoIngest, videoArchiverTab]);
 
   const refreshYoutubeSingleActivity = useCallback(async () => {
-    if (!visible || !showVideoIngest || videoArchiverTab !== "youtube_single") return;
+    if (!visible || !showVideoIngest || videoArchiverTab !== "youtube_single") {
+      projectionGenerationRef.current.youtubeSingleActivity += 1;
+      return;
+    }
+    const generation = ++projectionGenerationRef.current.youtubeSingleActivity;
+    const queryKey = [
+      visible,
+      showVideoIngest,
+      showMediaLibrary,
+      showInstagramArchive,
+      videoArchiverTab,
+      youtubeSingleActivityOffset,
+      youtubeSingleHistoryAppliedSearch,
+      youtubeSingleHistoryDirection,
+    ].join("|");
     const page = await invoke<JobsTrackActivityPage>("jobs_track_activity", {
       track: "youtube_single",
       limit: singleActivityPageSize,
       offset: youtubeSingleActivityOffset,
     });
+    if (
+      generation !== projectionGenerationRef.current.youtubeSingleActivity ||
+      queryKey !== youtubeSingleActivityQueryKeyRef.current
+    ) return;
     if (page.active_total > 0 && page.offset >= page.active_total && youtubeSingleActivityOffset > 0) {
       setYoutubeSingleActivityOffset(
         Math.max(0, Math.floor((page.active_total - 1) / singleActivityPageSize) * singleActivityPageSize),
@@ -1679,6 +1749,10 @@ export function LibraryPage({ mode = "all", visible = true }: LibraryPageProps) 
         query: youtubeSingleHistoryAppliedSearch || null,
         direction: youtubeSingleHistoryDirection,
       });
+      if (
+        generation !== projectionGenerationRef.current.youtubeSingleActivity ||
+        queryKey !== youtubeSingleActivityQueryKeyRef.current
+      ) return;
       setYoutubeSingleHistoryPage(history);
       setItems(history.items);
       setItemsOffset(history.items.length);
@@ -1687,6 +1761,8 @@ export function LibraryPage({ mode = "all", visible = true }: LibraryPageProps) 
   }, [
     libraryPageSize,
     showVideoIngest,
+    showInstagramArchive,
+    showMediaLibrary,
     singleActivityPageSize,
     videoArchiverTab,
     visible,
@@ -1697,6 +1773,8 @@ export function LibraryPage({ mode = "all", visible = true }: LibraryPageProps) 
 
   const refresh = useCallback(async () => {
     const refreshEpoch = ++refreshEpochRef.current;
+    const requestId = `library-${refreshEpoch}-${Date.now()}`;
+    void diagnosticsTrace("frontend_request_started", { request_id: requestId, span_id: requestId, pane: "library" });
     setError(null);
     const wantsYoutubeSingleHistory = showVideoIngest && videoArchiverTab === "youtube_single";
     const wantsItems = showMediaLibrary || showInstagramArchive || wantsYoutubeSingleHistory;
@@ -1731,6 +1809,8 @@ export function LibraryPage({ mode = "all", visible = true }: LibraryPageProps) 
             singleVideoOnly: mediaLibrarySingleVideoOnly,
             sortBy: mediaLibrarySortBy,
             direction: mediaLibrarySortDirection,
+            requestId,
+            spanId: requestId,
           })
         : wantsItems
         ? invoke<LibraryItem[]>("library_list", {
@@ -1743,22 +1823,23 @@ export function LibraryPage({ mode = "all", visible = true }: LibraryPageProps) 
         ? invoke<BatchOnImportRules>("config_batch_on_import_get").catch(() => null)
         : Promise.resolve(null),
       wantsSubscriptions
-        ? invoke<YoutubeSubscriptionRow[]>("youtube_subscriptions_list").catch(() => [])
-        : Promise.resolve([] as YoutubeSubscriptionRow[]),
+        ? invoke<YoutubeSubscriptionRow[]>("youtube_subscriptions_list").catch(() => null)
+        : Promise.resolve(null),
       wantsSubscriptions
-        ? invoke<YoutubeSubscriptionGroupRow[]>("youtube_subscription_groups_list").catch(() => [])
-        : Promise.resolve([] as YoutubeSubscriptionGroupRow[]),
+        ? invoke<YoutubeSubscriptionGroupRow[]>("youtube_subscription_groups_list").catch(() => null)
+        : Promise.resolve(null),
       wantsVideo
         ? invoke<DownloadPresetsConfig>("download_presets_get").catch(() => null)
         : Promise.resolve(null),
       wantsVideo
-        ? invoke<VideoLibraryRow[]>("video_libraries_list").catch(() => [])
-        : Promise.resolve([] as VideoLibraryRow[]),
+        ? invoke<VideoLibraryRow[]>("video_libraries_list").catch(() => null)
+        : Promise.resolve(null),
       wantsInstagram
-        ? invoke<InstagramSubscriptionRow[]>("instagram_subscriptions_list").catch(() => [])
-        : Promise.resolve([] as InstagramSubscriptionRow[]),
+        ? invoke<InstagramSubscriptionRow[]>("instagram_subscriptions_list").catch(() => null)
+        : Promise.resolve(null),
     ]);
-    if (refreshEpoch !== refreshEpochRef.current) return;
+    void diagnosticsTrace("frontend_receive", { request_id: requestId, span_id: requestId, pane: "library" });
+    if (refreshEpoch !== refreshEpochRef.current) { void diagnosticsTrace("frontend_request_stale", { request_id: requestId, span_id: requestId, pane: "library" }, "warn"); return; }
     const wantsYoutubeHistoryView =
       wantsYoutubeSingleHistory && !showMediaLibrary && !showInstagramArchive;
     const nextYoutubeHistoryPage = wantsYoutubeHistoryView
@@ -1786,15 +1867,18 @@ export function LibraryPage({ mode = "all", visible = true }: LibraryPageProps) 
     );
     setItemsLoadingMore(false);
     if (nextRules) setBatchRules(nextRules);
-    setSubscriptions(nextSubscriptions);
-    setSubscriptionGroups(nextGroups);
-    setVideoLibraries(nextVideoLibraries);
-    setInstagramSubscriptions(nextInstagramSubscriptions);
+    if (nextSubscriptions) setSubscriptions(nextSubscriptions);
+    else if (wantsSubscriptions) markSubscriptionProjectionFailure("activity");
+    if (nextGroups) setSubscriptionGroups(nextGroups);
+    if (nextVideoLibraries) setVideoLibraries(nextVideoLibraries);
+    if (nextInstagramSubscriptions) setInstagramSubscriptions(nextInstagramSubscriptions);
     if (nextPresets) {
       setDownloadPresets(nextPresets);
       setUrlBatchPresetId((current) => current || nextPresets.default_preset_id || "");
     }
-    setSubscriptionLibraryId((current) => current || nextVideoLibraries.find((library) => library.selected)?.id || "");
+    if (nextVideoLibraries) {
+      setSubscriptionLibraryId((current) => current || nextVideoLibraries.find((library) => library.selected)?.id || "");
+    }
     if (wantsSubscriptions) {
       invoke<boolean>("youtube_subscriptions_recurring_paused")
         .then((paused) => setRecurringStopped(paused))
@@ -1813,6 +1897,7 @@ export function LibraryPage({ mode = "all", visible = true }: LibraryPageProps) 
     showInstagramArchive,
     showMediaLibrary,
     showVideoIngest,
+    markSubscriptionProjectionFailure,
     videoArchiverTab,
     youtubeSingleHistoryAppliedSearch,
     youtubeSingleHistoryDirection,
@@ -1820,6 +1905,18 @@ export function LibraryPage({ mode = "all", visible = true }: LibraryPageProps) 
 
   const loadMoreItems = useCallback(async () => {
     if (itemsLoadingMore || !itemsHasMore) return;
+    const generation = ++projectionGenerationRef.current.loadMore;
+    const queryKey = libraryLoadMoreQueryKey;
+    const isSuperseded = () => !isProjectionRequestCurrent(
+      { generation, queryKey },
+      {
+        generation: projectionGenerationRef.current.loadMore,
+        queryKey: libraryLoadMoreQueryKeyRef.current,
+      },
+    );
+    const requestId = `library-more-${generation}-${Date.now()}`;
+    const requestStarted = performance.now();
+    void diagnosticsTrace("frontend_request_started", { request_id: requestId, span_id: requestId, pane: "library_load_more" });
     setItemsLoadingMore(true);
     setError(null);
     try {
@@ -1839,6 +1936,7 @@ export function LibraryPage({ mode = "all", visible = true }: LibraryPageProps) 
           query: youtubeSingleHistoryAppliedSearch || null,
           direction: youtubeSingleHistoryDirection,
         });
+        if (isSuperseded()) return;
         nextItems = page.items;
         canonicalTotal = page.filtered_total;
         setYoutubeSingleHistoryPage(page);
@@ -1853,7 +1951,10 @@ export function LibraryPage({ mode = "all", visible = true }: LibraryPageProps) 
           singleVideoOnly: mediaLibrarySingleVideoOnly,
           sortBy: mediaLibrarySortBy,
           direction: mediaLibrarySortDirection,
+          requestId,
+          spanId: requestId,
         });
+        if (isSuperseded()) return;
         nextItems = page.items;
         canonicalTotal = page.filtered_total;
         setMediaLibraryFilteredTotal(page.filtered_total);
@@ -1864,6 +1965,11 @@ export function LibraryPage({ mode = "all", visible = true }: LibraryPageProps) 
           fileStatus: showMediaLibrary ? mediaLibraryFileStatus : "available",
         });
       }
+      void diagnosticsTrace("frontend_receive", { request_id: requestId, span_id: requestId, pane: "library_load_more", elapsed_ms: Math.round(performance.now() - requestStarted) });
+      if (isSuperseded()) {
+        void diagnosticsTrace("frontend_request_stale", { request_id: requestId, span_id: requestId, pane: "library_load_more" }, "warn");
+        return;
+      }
       setItems((prev) => [...prev, ...nextItems]);
       setItemsOffset((prev) => prev + nextItems.length);
       setItemsHasMore(
@@ -1871,15 +1977,19 @@ export function LibraryPage({ mode = "all", visible = true }: LibraryPageProps) 
           ? nextItems.length >= libraryPageSize
           : itemsOffset + nextItems.length < canonicalTotal,
       );
+      requestAnimationFrame(() => {
+        if (!isSuperseded()) void diagnosticsTrace("frontend_render_commit", { request_id: requestId, span_id: requestId, pane: "library_load_more", elapsed_ms: Math.round(performance.now() - requestStarted) });
+      });
     } catch (e) {
-      setError(String(e));
+      if (!isSuperseded()) setError(String(e));
     } finally {
-      setItemsLoadingMore(false);
+      if (!isSuperseded()) setItemsLoadingMore(false);
     }
   }, [
     itemsHasMore,
     itemsLoadingMore,
     itemsOffset,
+    libraryLoadMoreQueryKey,
     libraryPageSize,
     mediaLibraryFileStatus,
     mediaLibrarySearch,
@@ -2211,7 +2321,14 @@ export function LibraryPage({ mode = "all", visible = true }: LibraryPageProps) 
   }, []);
 
   useEffect(() => {
-    if (!visible) return;
+    projectionGenerationRef.current.archive += 1;
+    projectionGenerationRef.current.activity += 1;
+    projectionGenerationRef.current.download += 1;
+    projectionGenerationRef.current.active += 1;
+    projectionGenerationRef.current.loadMore += 1;
+    projectionGenerationRef.current.preflight += 1;
+    projectionGenerationRef.current.youtubeSingleActivity += 1;
+    if (!visible) { refreshEpochRef.current += 1; return; }
     const timer = window.setTimeout(() => {
       refresh().catch((e) => setError(String(e)));
       void refreshSharedDownloadDirStatus();
@@ -2220,7 +2337,7 @@ export function LibraryPage({ mode = "all", visible = true }: LibraryPageProps) 
       window.clearTimeout(timer);
       refreshEpochRef.current += 1;
     };
-  }, [refresh, showMediaLibrary, visible]);
+  }, [refresh, showMediaLibrary, showVideoIngest, videoArchiverTab, visible]);
 
   usePollingLoop(
     async () => {
@@ -2235,9 +2352,14 @@ export function LibraryPage({ mode = "all", visible = true }: LibraryPageProps) 
   usePollingLoop(
     async () => {
       if (!downloadPreflightRows.length) return;
+      const generation = ++projectionGenerationRef.current.preflight;
+      const requestId = `preflight-${generation}-${Date.now()}`;
       const rows = await invoke<DownloadPreflightRow[]>("library_download_preflight", {
         urls: downloadPreflightRows.map((row) => row.url),
+        requestId,
+        spanId: requestId,
       });
+      if (generation !== projectionGenerationRef.current.preflight) return;
       setDownloadPreflightRows(rows.filter((row) => row.status !== "ready"));
     },
     {
@@ -2377,6 +2499,15 @@ export function LibraryPage({ mode = "all", visible = true }: LibraryPageProps) 
 
   useEffect(() => {
     const backfill = youtubeSingleHistoryPage?.backfill;
+    const generation = ++projectionGenerationRef.current.youtubeSingleBackfill;
+    const queryKey = youtubeSingleBackfillQueryKey;
+    const isSuperseded = () => !isProjectionRequestCurrent(
+      { generation, queryKey },
+      {
+        generation: projectionGenerationRef.current.youtubeSingleBackfill,
+        queryKey: youtubeSingleBackfillQueryKeyRef.current,
+      },
+    );
     const historyVisible =
       visible &&
       showVideoIngest &&
@@ -2405,25 +2536,26 @@ export function LibraryPage({ mode = "all", visible = true }: LibraryPageProps) 
           query: youtubeSingleHistoryAppliedSearch || null,
           direction: youtubeSingleHistoryDirection,
         });
-        if (canceled) return;
+        if (canceled || isSuperseded()) return;
         setYoutubeLineageBackfillError(null);
         setYoutubeSingleHistoryPage(page);
         setItems(page.items);
         setItemsOffset(page.items.length);
         setItemsHasMore(page.items.length < page.filtered_total);
       } catch (e) {
-        if (!canceled) {
+        if (!canceled && !isSuperseded()) {
           const message = `Single-video history classification paused: ${String(e)}`;
           setYoutubeLineageBackfillError(message);
           setError(message);
         }
       } finally {
-        if (!canceled) setYoutubeLineageBackfillBusy(false);
+        if (!canceled && !isSuperseded()) setYoutubeLineageBackfillBusy(false);
       }
     }, 1500);
 
     return () => {
       canceled = true;
+      projectionGenerationRef.current.youtubeSingleBackfill += 1;
       window.clearTimeout(timer);
     };
   }, [
@@ -2434,6 +2566,7 @@ export function LibraryPage({ mode = "all", visible = true }: LibraryPageProps) 
     videoArchiverTab,
     visible,
     youtubeLineageBackfillError,
+    youtubeSingleBackfillQueryKey,
     youtubeSingleHistoryAppliedSearch,
     youtubeSingleHistoryDirection,
     youtubeSingleHistoryPage?.backfill,
@@ -2807,8 +2940,17 @@ export function LibraryPage({ mode = "all", visible = true }: LibraryPageProps) 
       setDownloadPreflightRows([]);
       return;
     }
-    const rows = await invoke<DownloadPreflightRow[]>("library_download_preflight", { urls });
+    const requestId = `preflight-rerun-${Date.now()}`;
+    const started = performance.now();
+    void diagnosticsTrace("frontend_request_started", { request_id: requestId, span_id: requestId, pane: "download_preflight_rerun" });
+    const rows = await invoke<DownloadPreflightRow[]>("library_download_preflight", {
+      urls,
+      requestId,
+      spanId: requestId,
+    });
+    void diagnosticsTrace("frontend_receive", { request_id: requestId, span_id: requestId, pane: "download_preflight_rerun", elapsed_ms: Math.round(performance.now() - started) });
     setDownloadPreflightRows(rows.filter((row) => row.status !== "ready"));
+    requestAnimationFrame(() => void diagnosticsTrace("frontend_render_commit", { request_id: requestId, span_id: requestId, pane: "download_preflight_rerun" }));
   }
 
   async function queueApprovedMissing(rows: DownloadPreflightRow[]) {
@@ -2941,10 +3083,19 @@ export function LibraryPage({ mode = "all", visible = true }: LibraryPageProps) 
           return;
         }
       }
-      const preflight = await invoke<DownloadPreflightRow[]>("library_download_preflight", { urls });
+      const requestId = `preflight-enqueue-${Date.now()}`;
+      const preflightStarted = performance.now();
+      void diagnosticsTrace("frontend_request_started", { request_id: requestId, span_id: requestId, pane: "download_preflight_enqueue" });
+      const preflight = await invoke<DownloadPreflightRow[]>("library_download_preflight", {
+        urls,
+        requestId,
+        spanId: requestId,
+      });
+      void diagnosticsTrace("frontend_receive", { request_id: requestId, span_id: requestId, pane: "download_preflight_enqueue", elapsed_ms: Math.round(performance.now() - preflightStarted) });
       const blocked = preflight.filter((row) => row.status !== "ready");
       const readyUrls = preflight.filter((row) => row.status === "ready").map((row) => row.url);
       setDownloadPreflightRows(blocked);
+      requestAnimationFrame(() => void diagnosticsTrace("frontend_render_commit", { request_id: requestId, span_id: requestId, pane: "download_preflight_enqueue" }));
       if (!readyUrls.length) {
         setNotice(
           `Nothing new was queued. ${blocked.length} input${blocked.length === 1 ? " needs" : "s need"} review below because it is already present, active, missing, unreachable, duplicated, or invalid.`,
@@ -3700,13 +3851,6 @@ export function LibraryPage({ mode = "all", visible = true }: LibraryPageProps) 
     setPresetFormatPreference(preset.format_preference ?? "");
     setPresetQualityPreference(preset.quality_preference ?? "");
     setPresetSubtitleMode(preset.subtitle_mode ?? "auto");
-    setPresetYtDlpConcurrentFragments(`${preset.yt_dlp_concurrent_fragments}`);
-    setPresetYtDlpThrottledRate(preset.yt_dlp_throttled_rate ?? DEFAULT_PRESET_YT_DLP_THROTTLED_RATE);
-    setPresetYtDlpFileAccessRetries(`${preset.yt_dlp_file_access_retries}`);
-    setPresetYtDlpRetries(`${preset.yt_dlp_retries}`);
-    setPresetYtDlpFragmentRetries(`${preset.yt_dlp_fragment_retries}`);
-    setPresetYtDlpSleepInterval(`${preset.yt_dlp_sleep_interval}`);
-    setPresetYtDlpSleepRequests(`${preset.yt_dlp_sleep_requests}`);
   }
 
   function resetPresetEditor() {
@@ -3714,16 +3858,9 @@ export function LibraryPage({ mode = "all", visible = true }: LibraryPageProps) 
     setPresetTitle("");
     setPresetPathTemplate("{channel}");
     setPresetFilenameTemplate("{title}_{id}");
-    setPresetFormatPreference("bv*[ext=mp4]+ba[ext=m4a]/b[ext=mp4]/bv*+ba/b");
+    setPresetFormatPreference("bv*+ba/b");
     setPresetQualityPreference("best");
     setPresetSubtitleMode("auto");
-    setPresetYtDlpConcurrentFragments(`${DEFAULT_PRESET_YT_DLP_CONCURRENT_FRAGMENTS}`);
-    setPresetYtDlpThrottledRate(DEFAULT_PRESET_YT_DLP_THROTTLED_RATE);
-    setPresetYtDlpFileAccessRetries(`${DEFAULT_PRESET_YT_DLP_FILE_ACCESS_RETRIES}`);
-    setPresetYtDlpRetries(`${DEFAULT_PRESET_YT_DLP_RETRIES}`);
-    setPresetYtDlpFragmentRetries(`${DEFAULT_PRESET_YT_DLP_FRAGMENT_RETRIES}`);
-    setPresetYtDlpSleepInterval(`${DEFAULT_PRESET_YT_DLP_SLEEP_INTERVAL}`);
-    setPresetYtDlpSleepRequests(`${DEFAULT_PRESET_YT_DLP_SLEEP_REQUESTS}`);
   }
 
   async function savePreset() {
@@ -3736,6 +3873,7 @@ export function LibraryPage({ mode = "all", visible = true }: LibraryPageProps) 
         presets: [],
       };
       const id = presetEditId ?? `preset_${Date.now()}`;
+      const existingPreset = current.presets.find((preset) => preset.id === id);
       const nextPreset: DownloadPreset = {
         id,
         title: presetTitle.trim() || "Preset",
@@ -3744,43 +3882,17 @@ export function LibraryPage({ mode = "all", visible = true }: LibraryPageProps) 
         format_preference: presetFormatPreference.trim() || null,
         quality_preference: presetQualityPreference.trim() || null,
         subtitle_mode: presetSubtitleMode.trim() || null,
-        yt_dlp_concurrent_fragments: normalizePositiveInt(
-          presetYtDlpConcurrentFragments,
-          DEFAULT_PRESET_YT_DLP_CONCURRENT_FRAGMENTS,
-          1,
-          128,
-        ),
-        yt_dlp_throttled_rate: presetYtDlpThrottledRate.trim() || DEFAULT_PRESET_YT_DLP_THROTTLED_RATE,
-        yt_dlp_file_access_retries: normalizePositiveInt(
-          presetYtDlpFileAccessRetries,
-          DEFAULT_PRESET_YT_DLP_FILE_ACCESS_RETRIES,
-          0,
-          1000,
-        ),
-        yt_dlp_retries: normalizePositiveInt(
-          presetYtDlpRetries,
-          DEFAULT_PRESET_YT_DLP_RETRIES,
-          1,
-          1000,
-        ),
-        yt_dlp_fragment_retries: normalizePositiveInt(
-          presetYtDlpFragmentRetries,
-          DEFAULT_PRESET_YT_DLP_FRAGMENT_RETRIES,
-          1,
-          1000,
-        ),
-        yt_dlp_sleep_interval: normalizePositiveInt(
-          presetYtDlpSleepInterval,
-          DEFAULT_PRESET_YT_DLP_SLEEP_INTERVAL,
-          0,
-          86400,
-        ),
-        yt_dlp_sleep_requests: normalizePositiveInt(
-          presetYtDlpSleepRequests,
-          DEFAULT_PRESET_YT_DLP_SLEEP_REQUESTS,
-          0,
-          10000,
-        ),
+        // Options is the sole writer for downloader safety/runtime fields. Catalog edits preserve
+        // existing values; new presets receive neutral defaults until they become the default,
+        // when the protected catalog command carries forward the active Options values.
+        yt_dlp_concurrent_fragments: existingPreset?.yt_dlp_concurrent_fragments ?? DEFAULT_PRESET_YT_DLP_CONCURRENT_FRAGMENTS,
+        yt_dlp_limit_rate: existingPreset?.yt_dlp_limit_rate ?? null,
+        yt_dlp_throttled_rate: existingPreset?.yt_dlp_throttled_rate ?? DEFAULT_PRESET_YT_DLP_THROTTLED_RATE,
+        yt_dlp_file_access_retries: existingPreset?.yt_dlp_file_access_retries ?? DEFAULT_PRESET_YT_DLP_FILE_ACCESS_RETRIES,
+        yt_dlp_retries: existingPreset?.yt_dlp_retries ?? DEFAULT_PRESET_YT_DLP_RETRIES,
+        yt_dlp_fragment_retries: existingPreset?.yt_dlp_fragment_retries ?? DEFAULT_PRESET_YT_DLP_FRAGMENT_RETRIES,
+        yt_dlp_sleep_interval: existingPreset?.yt_dlp_sleep_interval ?? DEFAULT_PRESET_YT_DLP_SLEEP_INTERVAL,
+        yt_dlp_sleep_requests: existingPreset?.yt_dlp_sleep_requests ?? DEFAULT_PRESET_YT_DLP_SLEEP_REQUESTS,
       };
 
       const nextPresets = current.presets.filter((preset) => preset.id !== id);
@@ -3789,7 +3901,7 @@ export function LibraryPage({ mode = "all", visible = true }: LibraryPageProps) 
         default_preset_id: current.default_preset_id ?? id,
         presets: nextPresets,
       };
-      const saved = await invoke<DownloadPresetsConfig>("download_presets_set", {
+      const saved = await invoke<DownloadPresetsConfig>("download_presets_catalog_set", {
         config_value: nextConfig,
         configValue: nextConfig,
       });
@@ -3814,7 +3926,7 @@ export function LibraryPage({ mode = "all", visible = true }: LibraryPageProps) 
       const nextPresets = current.presets.filter((preset) => preset.id !== presetId);
       const nextDefault =
         current.default_preset_id === presetId ? nextPresets[0]?.id ?? null : current.default_preset_id;
-      const saved = await invoke<DownloadPresetsConfig>("download_presets_set", {
+      const saved = await invoke<DownloadPresetsConfig>("download_presets_catalog_set", {
         config_value: {
           default_preset_id: nextDefault,
           presets: nextPresets,
@@ -3846,7 +3958,7 @@ export function LibraryPage({ mode = "all", visible = true }: LibraryPageProps) 
     setNotice(null);
     try {
       if (!downloadPresets) return;
-      const saved = await invoke<DownloadPresetsConfig>("download_presets_set", {
+      const saved = await invoke<DownloadPresetsConfig>("download_presets_catalog_set", {
         config_value: {
           ...downloadPresets,
           default_preset_id: presetId,
@@ -4215,7 +4327,7 @@ export function LibraryPage({ mode = "all", visible = true }: LibraryPageProps) 
           {mode === "video_ingest" && videoArchiverTab === "website"
             ? `Paste one or more supported website video links, up to ${maxBatchUrls} at a time.`
             : `Paste one or more direct YouTube video or Shorts links, up to ${maxBatchUrls} at a time.`}{" "}
-          Videos are saved as MP4 to <code>{defaultVideoDownloadsDir || "video"}</code> unless you pick another folder below.
+          Videos are saved as MKV with selected audio and subtitle tracks embedded to <code>{defaultVideoDownloadsDir || "video"}</code> unless you pick another folder below. Existing MP4 files remain supported.
         </div>
         <textarea
           value={urlBatchText}
@@ -4318,10 +4430,11 @@ export function LibraryPage({ mode = "all", visible = true }: LibraryPageProps) 
                       row.status === "missing" ? "File missing" :
                       row.status === "operator_deleted" ? "Deleted by operator" :
                       row.status === "storage_unreachable" ? "Storage unreachable" :
+                      row.status === "storage_slow" ? "Storage slow" :
                       row.status === "duplicate_input" ? "Duplicate in this batch" : "Invalid link";
                     return (
                       <tr key={`${key}:${row.input_index}`}>
-                        <td><strong>{stateLabel}</strong></td>
+                        <td><strong>{stateLabel}</strong>{row.observation_state ? <div style={{fontSize: 11, color: "#6b7280"}}>Observed {Math.round((row.observation_age_ms ?? 0) / 1000)}s ago via {row.observation_source}; probe {row.observation_duration_ms ?? 0}ms; refresh in {Math.round((row.observation_refresh_in_ms ?? 0) / 1000)}s.</div> : null}</td>
                         <td style={{ minWidth: 280, overflowWrap: "anywhere" }}>
                           <div style={{ fontWeight: 600 }}>{row.library_title || row.url}</div>
                           {row.library_title ? <div style={{ color: "#4b5563", fontSize: 12 }}>{row.url}</div> : null}
@@ -4373,6 +4486,8 @@ export function LibraryPage({ mode = "all", visible = true }: LibraryPageProps) 
                             </span>
                           ) : row.status === "storage_unreachable" ? (
                             <span>Check the NAS/storage connection. No record was changed.</span>
+                          ) : row.status === "storage_slow" ? (
+                            <span>The bounded storage probe was too slow. No record was changed; retry after storage responsiveness recovers.</span>
                           ) : (
                             <span>No action needed.</span>
                           )}
@@ -4644,12 +4759,12 @@ export function LibraryPage({ mode = "all", visible = true }: LibraryPageProps) 
         </div>
         <div className="row">
           <label style={{ display: "flex", alignItems: "center", gap: 8 }}>
-            <span>Format</span>
+            <span>Source format selector</span>
             <input
               value={presetFormatPreference}
               disabled={busy}
               onChange={(e) => setPresetFormatPreference(e.currentTarget.value)}
-              placeholder="bv*[ext=mp4]+ba[ext=m4a]/b[ext=mp4]/bv*+ba/b"
+              placeholder="bv*+ba/b"
             />
           </label>
           <label style={{ display: "flex", alignItems: "center", gap: 8 }}>
@@ -4674,87 +4789,10 @@ export function LibraryPage({ mode = "all", visible = true }: LibraryPageProps) 
             </select>
           </label>
         </div>
-        <div className="row">
-          <label style={{ display: "flex", alignItems: "center", gap: 8 }}>
-            <span>Retries</span>
-            <input
-              type="number"
-              min={1}
-              value={presetYtDlpRetries}
-              disabled={busy}
-              onChange={(e) => setPresetYtDlpRetries(e.currentTarget.value)}
-              placeholder="3"
-            />
-          </label>
-          <label style={{ display: "flex", alignItems: "center", gap: 8 }}>
-            <span>Frag retries</span>
-            <input
-              type="number"
-              min={1}
-              value={presetYtDlpFragmentRetries}
-              disabled={busy}
-              onChange={(e) => setPresetYtDlpFragmentRetries(e.currentTarget.value)}
-              placeholder="3"
-            />
-          </label>
-          <label style={{ display: "flex", alignItems: "center", gap: 8 }}>
-            <span>File-access retries</span>
-            <input
-              type="number"
-              min={0}
-              value={presetYtDlpFileAccessRetries}
-              disabled={busy}
-              onChange={(e) => setPresetYtDlpFileAccessRetries(e.currentTarget.value)}
-              placeholder="10"
-            />
-          </label>
-        </div>
-        <div className="row">
-          <label style={{ display: "flex", alignItems: "center", gap: 8 }}>
-            <span>Concurrent fragments</span>
-            <input
-              type="number"
-              min={1}
-              value={presetYtDlpConcurrentFragments}
-              disabled={busy}
-              onChange={(e) => setPresetYtDlpConcurrentFragments(e.currentTarget.value)}
-              placeholder={String(DEFAULT_PRESET_YT_DLP_CONCURRENT_FRAGMENTS)}
-            />
-          </label>
-          <label style={{ display: "flex", alignItems: "center", gap: 8, flex: 1 }}>
-            <span>Throttled rate</span>
-            <input
-              value={presetYtDlpThrottledRate}
-              disabled={busy}
-              onChange={(e) => setPresetYtDlpThrottledRate(e.currentTarget.value)}
-              placeholder={DEFAULT_PRESET_YT_DLP_THROTTLED_RATE}
-            />
-          </label>
-        </div>
-        <div className="row">
-          <label style={{ display: "flex", alignItems: "center", gap: 8 }}>
-            <span>Sleep interval (s)</span>
-            <input
-              type="number"
-              min={0}
-              value={presetYtDlpSleepInterval}
-              disabled={busy}
-              onChange={(e) => setPresetYtDlpSleepInterval(e.currentTarget.value)}
-              placeholder={`${DEFAULT_PRESET_YT_DLP_SLEEP_INTERVAL}`}
-            />
-          </label>
-          <label style={{ display: "flex", alignItems: "center", gap: 8 }}>
-            <span>Sleep requests</span>
-            <input
-              type="number"
-              min={0}
-              value={presetYtDlpSleepRequests}
-              disabled={busy}
-              onChange={(e) => setPresetYtDlpSleepRequests(e.currentTarget.value)}
-              placeholder={`${DEFAULT_PRESET_YT_DLP_SLEEP_REQUESTS}`}
-            />
-          </label>
-        </div>
+        <p className="muted">
+          Download speed, retries, throttling, and request pacing are owned by Options → Video Archiver.
+          Changing a preset here preserves those Options-managed runtime values.
+        </p>
         <div className="row">
           <button type="button" disabled={busy} onClick={savePreset}>
             {presetEditId ? "Update preset" : "Save preset"}
@@ -4816,6 +4854,10 @@ export function LibraryPage({ mode = "all", visible = true }: LibraryPageProps) 
             </tbody>
           </table>
         </div>
+        </div>
+        <div style={{ color: "#4b5563", marginTop: 6 }}>
+          The selector controls source stream quality. Every new video is finalized as MKV;
+          saved legacy presets cannot change the output container.
         </div>
         </details>
       ) : null}
@@ -5237,6 +5279,13 @@ export function LibraryPage({ mode = "all", visible = true }: LibraryPageProps) 
           <span className="sub-status-sep">·</span>
           <span className="sub-status-metric">last sync {formatTimeAgo(subscriptionOverview.lastSync)}</span>
         </div>
+        {Object.values(subscriptionProjectionState).some((state) => state === "stale" || state === "error") ? (
+          <div data-testid="library-subscription-projection-state" role="status" className="sub-status-strip">
+            {Object.values(subscriptionProjectionState).some((state) => state === "stale")
+              ? "Some subscription totals could not refresh; showing the last confirmed values."
+              : "Subscription totals are unavailable; failed polls are not shown as empty results."}
+          </div>
+        ) : null}
         {/* WP: toggle to show/hide the green "Checking for new videos" activity list. Hidden by
             DEFAULT (operator found it noisy and it buried the subscription list); persisted. */}
         <div style={{ display: "flex", justifyContent: "flex-end", margin: "2px 0 0" }}>

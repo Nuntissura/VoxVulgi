@@ -498,6 +498,3821 @@ pub fn install_js_runtime_tools(paths: &AppPaths) -> Result<JsRuntimeToolsStatus
     }
 }
 
+#[derive(Debug, Clone, Serialize)]
+pub struct YoutubePoProviderInstallStatus {
+    pub installed: bool,
+    pub provider_version: String,
+    pub node_version: Option<String>,
+    pub npm_version: Option<String>,
+    pub node_exe_sha256_hex: Option<String>,
+    pub npm_cmd_sha256_hex: Option<String>,
+    pub plugin_sha256_hex: Option<String>,
+    pub plugin_tree_sha256_hex: Option<String>,
+    pub server_entrypoint_sha256_hex: Option<String>,
+    pub derived_lock_sha256_hex: Option<String>,
+    pub node_modules_tree_sha256_hex: Option<String>,
+    pub node_modules_integrity_verifying: bool,
+    pub node_modules_integrity_state: String,
+    pub node_modules_verified_at_ms: Option<i64>,
+    pub security_audit_passed: bool,
+    pub readiness_error: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, serde::Deserialize)]
+struct ProviderNodeModulesIntegrityReceipt {
+    schema_version: u32,
+    install_generation: String,
+    tree_sha256_hex: String,
+    verified_at_ms: i64,
+}
+
+#[derive(Debug, Clone)]
+struct ProviderNodeModulesProcessAttestation {
+    install_generation: String,
+    tree_sha256_hex: String,
+    verified_at_ms: i64,
+}
+
+fn provider_node_modules_process_attestations(
+) -> &'static std::sync::Mutex<HashMap<PathBuf, ProviderNodeModulesProcessAttestation>> {
+    static ATTESTATIONS: std::sync::OnceLock<
+        std::sync::Mutex<HashMap<PathBuf, ProviderNodeModulesProcessAttestation>>,
+    > = std::sync::OnceLock::new();
+    ATTESTATIONS.get_or_init(|| std::sync::Mutex::new(HashMap::new()))
+}
+
+fn provider_node_modules_process_invalidations(
+) -> &'static std::sync::Mutex<HashMap<PathBuf, String>> {
+    static INVALIDATIONS: std::sync::OnceLock<std::sync::Mutex<HashMap<PathBuf, String>>> =
+        std::sync::OnceLock::new();
+    INVALIDATIONS.get_or_init(|| std::sync::Mutex::new(HashMap::new()))
+}
+
+fn provider_node_modules_integrity_receipt_path(server_dir: &Path) -> PathBuf {
+    server_dir.join(".node_modules_integrity.json")
+}
+
+fn provider_install_generation() -> String {
+    use sha2::Digest;
+    let manifest = pinned_dependency_manifest::manifest();
+    let provider = &manifest.youtube_po_provider;
+    let node = &manifest.node_windows;
+    let payload = format!(
+        "node={}|node_sha={}|npm={}|npm_sha={}|node_tree={}|plugin={}|plugin_tree={}|server={}|lock={}|node_modules={}|provider_tree={}",
+        node.version,
+        node.node_exe_sha256_hex,
+        node.npm_version,
+        node.npm_cmd_sha256_hex,
+        node.complete_tree_sha256_hex,
+        provider.plugin_sha256_hex,
+        provider.plugin_tree_sha256_hex,
+        provider.server_entrypoint_sha256_hex,
+        provider.derived_lock_sha256_hex,
+        provider.node_modules_tree_sha256_hex,
+        provider.application_complete_tree_sha256_hex,
+    );
+    hex::encode_upper(sha2::Sha256::digest(payload.as_bytes()))
+}
+
+fn read_provider_node_modules_integrity_receipt(
+    server_dir: &Path,
+) -> Option<ProviderNodeModulesIntegrityReceipt> {
+    let bytes = std::fs::read(provider_node_modules_integrity_receipt_path(server_dir)).ok()?;
+    let receipt: ProviderNodeModulesIntegrityReceipt = serde_json::from_slice(&bytes).ok()?;
+    (receipt.schema_version == 1 && receipt.install_generation == provider_install_generation())
+        .then_some(receipt)
+}
+
+fn provider_node_modules_process_attestation(
+    server_dir: &Path,
+) -> Option<ProviderNodeModulesProcessAttestation> {
+    provider_node_modules_process_attestations()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .get(server_dir)
+        .filter(|attestation| attestation.install_generation == provider_install_generation())
+        .cloned()
+}
+
+fn clear_provider_node_modules_process_attestation(server_dir: &Path) {
+    provider_node_modules_process_attestations()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .remove(server_dir);
+}
+
+fn attest_provider_node_modules_tree(
+    server_dir: &Path,
+    tree_sha256_hex: &str,
+) -> Result<ProviderNodeModulesProcessAttestation> {
+    let expected = &pinned_dependency_manifest::manifest()
+        .youtube_po_provider
+        .node_modules_tree_sha256_hex;
+    if !tree_sha256_hex.eq_ignore_ascii_case(expected) {
+        return Err(EngineError::HashMismatch {
+            path: server_dir.join("node_modules"),
+            expected: expected.clone(),
+            actual: tree_sha256_hex.to_string(),
+        });
+    }
+    let attestation = ProviderNodeModulesProcessAttestation {
+        install_generation: provider_install_generation(),
+        tree_sha256_hex: tree_sha256_hex.to_ascii_uppercase(),
+        verified_at_ms: now_ms(),
+    };
+    write_provider_node_modules_integrity_receipt(server_dir, &attestation.tree_sha256_hex)?;
+    provider_node_modules_process_attestations()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .insert(server_dir.to_path_buf(), attestation.clone());
+    provider_node_modules_process_invalidations()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .remove(server_dir);
+    Ok(attestation)
+}
+
+fn write_provider_node_modules_integrity_receipt(
+    server_dir: &Path,
+    tree_sha256_hex: &str,
+) -> Result<()> {
+    let receipt = ProviderNodeModulesIntegrityReceipt {
+        schema_version: 1,
+        install_generation: provider_install_generation(),
+        tree_sha256_hex: tree_sha256_hex.to_ascii_uppercase(),
+        verified_at_ms: now_ms(),
+    };
+    Ok(crate::persistence::atomic_write_text(
+        &provider_node_modules_integrity_receipt_path(server_dir),
+        &serde_json::to_string_pretty(&receipt)?,
+    )?)
+}
+
+fn provider_node_modules_integrity_verifying() -> &'static std::sync::atomic::AtomicBool {
+    static VERIFYING: std::sync::OnceLock<std::sync::atomic::AtomicBool> =
+        std::sync::OnceLock::new();
+    VERIFYING.get_or_init(|| std::sync::atomic::AtomicBool::new(false))
+}
+
+struct ProviderIntegrityVerificationGuard;
+
+impl Drop for ProviderIntegrityVerificationGuard {
+    fn drop(&mut self) {
+        provider_node_modules_integrity_verifying()
+            .store(false, std::sync::atomic::Ordering::Release);
+    }
+}
+
+/// Performs the expensive authoritative installed-byte verification. Hot status polling only
+/// reads the current process's in-memory attestation; startup/offline hydration and explicit
+/// capability probes call this function on a background/blocking worker.
+pub fn verify_youtube_po_provider_node_modules(
+    paths: &AppPaths,
+) -> Result<YoutubePoProviderInstallStatus> {
+    let _lifecycle_guard = youtube_po_provider_lifecycle_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    paths.ensure_dirs()?;
+    let _interprocess_guard = acquire_youtube_po_provider_install_interprocess_lock(
+        paths,
+        YOUTUBE_PO_PROVIDER_INSTALL_LOCK_TIMEOUT_MS,
+    )?;
+    verify_youtube_po_provider_node_modules_locked(paths)
+}
+
+fn require_exact_committed_provider_identity_lineage(
+    paths: &AppPaths,
+    identity: &ProviderInstalledIdentity,
+) -> Result<()> {
+    if identity.lineage_attempt_id.is_empty() || identity.commit_nonce.is_empty() {
+        return Err(EngineError::InstallFailed(
+            "provider installed identity is not bound to v48 committed lineage".to_string(),
+        ));
+    }
+    let conn = crate::db::open(paths)?;
+    crate::db::migrate(&conn)?;
+    let bound: i64 = conn.query_row(
+        "SELECT COUNT(*) FROM provider_install_lineage lineage
+         WHERE lineage.attempt_id=?1 AND lineage.commit_nonce=?2
+           AND lineage.phase='committed' AND lineage.install_generation=?3
+           AND lineage.node_directory_identity=?4
+           AND lineage.provider_directory_identity=?5
+           AND lineage.node_tree_sha256=?6 AND lineage.provider_tree_sha256=?7",
+        rusqlite::params![
+            identity.lineage_attempt_id,
+            identity.commit_nonce,
+            identity.install_generation,
+            identity.node_directory_identity,
+            identity.provider_directory_identity,
+            identity.node_tree_sha256,
+            identity.provider_tree_sha256,
+        ],
+        |row| row.get(0),
+    )?;
+    if bound != 1 {
+        return Err(EngineError::InstallFailed(
+            "provider installed identity has no exact committed v48 lineage".to_string(),
+        ));
+    }
+    Ok(())
+}
+
+fn authenticate_stored_managed_provider_identity_at(
+    paths: &AppPaths,
+    identity: &ProviderInstalledIdentity,
+    node_root: &Path,
+    provider_root: &Path,
+) -> Result<()> {
+    require_exact_committed_provider_identity_lineage(paths, identity)?;
+    verify_published_directory_lineage(
+        node_root,
+        &identity.node_directory_identity,
+        &identity.node_tree_sha256,
+        canonical_provider_node_tree_sha256_hex,
+        "managed Node",
+    )?;
+    verify_published_directory_lineage(
+        provider_root,
+        &identity.provider_directory_identity,
+        &identity.provider_tree_sha256,
+        canonical_provider_application_tree_sha256_hex,
+        "managed provider",
+    )
+}
+
+fn authenticate_authoritative_installed_provider_identity(paths: &AppPaths) -> Result<()> {
+    let identity = load_provider_installed_identity(paths)?.ok_or_else(|| {
+        EngineError::InstallFailed(
+            "provider payload has no authoritative committed complete-tree identity".to_string(),
+        )
+    })?;
+    require_exact_committed_provider_identity_lineage(paths, &identity)?;
+    if identity.install_generation != provider_install_generation() {
+        return Err(EngineError::InstallFailed(
+            "provider committed identity belongs to a different pinned install generation"
+                .to_string(),
+        ));
+    }
+    let manifest = pinned_dependency_manifest::manifest();
+    if !identity
+        .node_tree_sha256
+        .eq_ignore_ascii_case(&manifest.node_windows.complete_tree_sha256_hex)
+        || !identity.provider_tree_sha256.eq_ignore_ascii_case(
+            &manifest
+                .youtube_po_provider
+                .application_complete_tree_sha256_hex,
+        )
+    {
+        return Err(EngineError::InstallFailed(
+            "provider committed identity does not match the executable-pinned complete trees"
+                .to_string(),
+        ));
+    }
+    verify_published_directory_lineage(
+        &paths.node_runtime_dir(),
+        &identity.node_directory_identity,
+        &identity.node_tree_sha256,
+        canonical_provider_node_tree_sha256_hex,
+        "Node",
+    )?;
+    verify_published_directory_lineage(
+        &paths.youtube_po_provider_dir(),
+        &identity.provider_directory_identity,
+        &identity.provider_tree_sha256,
+        canonical_provider_application_tree_sha256_hex,
+        "provider",
+    )
+}
+
+fn authenticate_embedded_complete_provider_payload(
+    paths: &AppPaths,
+) -> Result<ProviderInstalledIdentity> {
+    authenticate_published_node_payload(paths)?;
+    authenticate_published_provider_payload(paths)?;
+    let manifest = pinned_dependency_manifest::manifest();
+    authenticate_complete_provider_trees_against(
+        paths,
+        &manifest.node_windows.complete_tree_sha256_hex,
+        &manifest
+            .youtube_po_provider
+            .application_complete_tree_sha256_hex,
+    )
+}
+
+fn authenticate_complete_provider_trees_against(
+    paths: &AppPaths,
+    expected_node_tree_sha256: &str,
+    expected_provider_tree_sha256: &str,
+) -> Result<ProviderInstalledIdentity> {
+    let node_tree_sha256 = canonical_provider_node_tree_sha256_hex(&paths.node_runtime_dir())
+        .ok_or_else(|| {
+            EngineError::InstallFailed(
+                "offline provider Node tree could not be completely authenticated".to_string(),
+            )
+        })?;
+    if !node_tree_sha256.eq_ignore_ascii_case(expected_node_tree_sha256) {
+        return Err(EngineError::HashMismatch {
+            path: paths.node_runtime_dir(),
+            expected: expected_node_tree_sha256.to_string(),
+            actual: node_tree_sha256,
+        });
+    }
+    let provider_tree_sha256 =
+        canonical_provider_application_tree_sha256_hex(&paths.youtube_po_provider_dir())
+            .ok_or_else(|| {
+                EngineError::InstallFailed(
+                    "offline provider application tree could not be completely authenticated"
+                        .to_string(),
+                )
+            })?;
+    if !provider_tree_sha256.eq_ignore_ascii_case(expected_provider_tree_sha256) {
+        return Err(EngineError::HashMismatch {
+            path: paths.youtube_po_provider_dir(),
+            expected: expected_provider_tree_sha256.to_string(),
+            actual: provider_tree_sha256,
+        });
+    }
+    Ok(ProviderInstalledIdentity {
+        lineage_attempt_id: String::new(),
+        commit_nonce: String::new(),
+        install_generation: provider_install_generation(),
+        node_directory_identity: provider_directory_identity(&paths.node_runtime_dir())?,
+        provider_directory_identity: provider_directory_identity(
+            &paths.youtube_po_provider_dir(),
+        )?,
+        node_tree_sha256: expected_node_tree_sha256.to_ascii_uppercase(),
+        provider_tree_sha256: expected_provider_tree_sha256.to_ascii_uppercase(),
+    })
+}
+
+fn provider_portable_attestation_path(paths: &AppPaths) -> PathBuf {
+    paths
+        .tools_dir()
+        .join(".youtube_po_provider_portable_attestation.json")
+}
+
+/// Writes an audit-only carrier after authenticating the final trees against roots compiled into
+/// the executable. Runtime adoption never consumes this editable JSON as authority.
+pub fn write_youtube_po_provider_portable_attestation(paths: &AppPaths) -> Result<()> {
+    let verified = authenticate_embedded_complete_provider_payload(paths)?;
+    let carrier = ProviderPortableAttestation {
+        schema_version: 1,
+        install_generation: verified.install_generation,
+        node_complete_tree_sha256: verified.node_tree_sha256,
+        provider_complete_tree_sha256: verified.provider_tree_sha256,
+    };
+    crate::persistence::atomic_write_text(
+        &provider_portable_attestation_path(paths),
+        &format!("{}\n", serde_json::to_string_pretty(&carrier)?),
+    )?;
+    Ok(())
+}
+
+fn adopt_embedded_complete_provider_payload(paths: &AppPaths) -> Result<()> {
+    let verified = authenticate_embedded_complete_provider_payload(paths)?;
+    commit_adopted_provider_identity(paths, verified)
+}
+
+fn commit_adopted_provider_identity(
+    paths: &AppPaths,
+    verified: ProviderInstalledIdentity,
+) -> Result<()> {
+    if let Some(existing) = load_provider_installed_identity(paths)? {
+        let legacy_unbound = existing.lineage_attempt_id.is_empty() && existing.commit_nonce.is_empty();
+        if !legacy_unbound {
+            if existing.install_generation == verified.install_generation
+                && existing.node_directory_identity == verified.node_directory_identity
+                && existing.provider_directory_identity == verified.provider_directory_identity
+                && existing
+                    .node_tree_sha256
+                    .eq_ignore_ascii_case(&verified.node_tree_sha256)
+                && existing
+                    .provider_tree_sha256
+                    .eq_ignore_ascii_case(&verified.provider_tree_sha256)
+            {
+                return Ok(());
+            }
+            return Err(EngineError::InstallFailed(
+                "provider installed identity conflicts with the authenticated destination bytes"
+                    .to_string(),
+            ));
+        }
+        if existing.install_generation != verified.install_generation
+            || existing.node_directory_identity != verified.node_directory_identity
+            || existing.provider_directory_identity != verified.provider_directory_identity
+            || !existing
+                .node_tree_sha256
+                .eq_ignore_ascii_case(&verified.node_tree_sha256)
+            || !existing
+                .provider_tree_sha256
+                .eq_ignore_ascii_case(&verified.provider_tree_sha256)
+        {
+            return Err(EngineError::InstallFailed(
+                "legacy provider identity does not match the executable-pinned destination bytes"
+                    .to_string(),
+            ));
+        }
+    }
+
+    let attempt_id = uuid::Uuid::new_v4().to_string();
+    let commit_nonce = random_provider_authority_nonce();
+    let ownership_token_digest = provider_ownership_token_digest(&format!(
+        "{}{}",
+        uuid::Uuid::new_v4().simple(),
+        uuid::Uuid::new_v4().simple()
+    ));
+    let stage_root = paths
+        .tools_dir()
+        .join(format!("youtube_po_provider_stage_{attempt_id}"));
+    let current_pid = std::process::id();
+    let current_process_identity = provider_process_identity(current_pid).ok_or_else(|| {
+        EngineError::InstallFailed(
+            "could not establish offline provider adoption process identity".to_string(),
+        )
+    })?;
+    let mut conn = crate::db::open(paths)?;
+    crate::db::migrate(&conn)?;
+    let tx = conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+    let owners: i64 = tx.query_row("SELECT COUNT(*) FROM provider_install_owner", [], |row| {
+        row.get(0)
+    })?;
+    let unresolved: i64 = tx.query_row(
+        "SELECT COUNT(*) FROM provider_install_lineage lineage
+         WHERE NOT EXISTS(
+           SELECT 1 FROM provider_installed_identity identity
+           WHERE identity.singleton=1
+             AND identity.lineage_attempt_id=lineage.attempt_id
+             AND identity.commit_nonce=lineage.commit_nonce
+             AND lineage.phase='committed'
+         )",
+        [],
+        |row| row.get(0),
+    )?;
+    if owners != 0 || unresolved != 0 {
+        return Err(EngineError::InstallFailed(
+            "offline provider adoption refused active or unresolved install lineage".to_string(),
+        ));
+    }
+    let timestamp = now_ms();
+    tx.execute(
+        "INSERT INTO provider_install_lineage(
+           attempt_id,stage_root,phase,updated_at_ms,ownership_token_digest,commit_nonce,install_generation
+         ) VALUES(?1,?2,'prepared',?3,?4,?5,?6)",
+        rusqlite::params![
+            attempt_id,
+            stage_root.to_string_lossy(),
+            timestamp,
+            ownership_token_digest,
+            commit_nonce,
+            verified.install_generation,
+        ],
+    )?;
+    tx.execute(
+        "INSERT INTO provider_install_owner(
+           singleton,attempt_id,acquired_at_ms,updated_at_ms,owner_pid,owner_process_identity,commit_nonce
+         ) VALUES(1,?1,?2,?2,?3,?4,?5)",
+        rusqlite::params![
+            attempt_id,
+            timestamp,
+            current_pid,
+            current_process_identity,
+            commit_nonce,
+        ],
+    )?;
+    tx.execute(
+        "UPDATE provider_install_lineage SET
+           node_directory_identity=?1,provider_directory_identity=?2,
+           node_tree_sha256=?3,provider_tree_sha256=?4
+         WHERE attempt_id=?5 AND phase='prepared'",
+        rusqlite::params![
+            verified.node_directory_identity,
+            verified.provider_directory_identity,
+            verified.node_tree_sha256,
+            verified.provider_tree_sha256,
+            attempt_id,
+        ],
+    )?;
+    for (before, after) in [
+        ("prepared", "node_publish_intent"),
+        ("node_publish_intent", "node_published"),
+        ("node_published", "provider_publish_intent"),
+        ("provider_publish_intent", "provider_published"),
+        ("provider_published", "committed"),
+    ] {
+        let changed = tx.execute(
+            "UPDATE provider_install_lineage SET phase=?1,updated_at_ms=?2
+             WHERE attempt_id=?3 AND phase=?4",
+            rusqlite::params![after, now_ms(), attempt_id, before],
+        )?;
+        if changed != 1 {
+            return Err(EngineError::InstallFailed(
+                "offline provider adoption lost its legal lineage transition".to_string(),
+            ));
+        }
+    }
+    tx.execute(
+        "INSERT INTO provider_installed_identity(
+           singleton,lineage_attempt_id,commit_nonce,install_generation,
+           node_directory_identity,provider_directory_identity,node_tree_sha256,
+           provider_tree_sha256,committed_at_ms
+         ) VALUES(1,?1,?2,?3,?4,?5,?6,?7,?8)
+         ON CONFLICT(singleton) DO UPDATE SET
+           lineage_attempt_id=excluded.lineage_attempt_id,
+           commit_nonce=excluded.commit_nonce,
+           install_generation=excluded.install_generation,
+           node_directory_identity=excluded.node_directory_identity,
+           provider_directory_identity=excluded.provider_directory_identity,
+           node_tree_sha256=excluded.node_tree_sha256,
+           provider_tree_sha256=excluded.provider_tree_sha256,
+           committed_at_ms=excluded.committed_at_ms",
+        rusqlite::params![
+            attempt_id,
+            commit_nonce,
+            verified.install_generation,
+            verified.node_directory_identity,
+            verified.provider_directory_identity,
+            verified.node_tree_sha256,
+            verified.provider_tree_sha256,
+            now_ms(),
+        ],
+    )?;
+    tx.execute(
+        "DELETE FROM provider_install_owner
+         WHERE singleton=1 AND attempt_id=?1 AND commit_nonce=?2",
+        rusqlite::params![attempt_id, commit_nonce],
+    )?;
+    tx.execute(
+        "DELETE FROM provider_install_lineage
+         WHERE phase='committed' AND attempt_id<>?1
+           AND NOT EXISTS(
+             SELECT 1 FROM provider_installed_identity identity
+             WHERE identity.lineage_attempt_id=provider_install_lineage.attempt_id
+               AND identity.commit_nonce=provider_install_lineage.commit_nonce
+           )",
+        [attempt_id.as_str()],
+    )?;
+    tx.commit()?;
+    Ok(())
+}
+
+fn reconcile_provider_lineage_before_verification(paths: &AppPaths) -> Result<()> {
+    if let Some(lineage) = load_provider_install_lineage(paths)? {
+        let owner_is_live = provider_process_identity(lineage.owner_pid).as_deref()
+            == Some(lineage.owner_process_identity.as_str());
+        if owner_is_live {
+            return Err(EngineError::InstallFailed(
+                "provider verification refused while an install owner is still alive".to_string(),
+            ));
+        }
+        if lineage.phase != "committed" {
+            return Err(EngineError::InstallFailed(format!(
+                "provider payload is not launchable while install lineage is in {} phase",
+                lineage.phase
+            )));
+        }
+        reconcile_interrupted_provider_install(paths)?;
+    }
+    if load_provider_install_lineage(paths)?.is_some() {
+        return Err(EngineError::InstallFailed(
+            "provider install lineage was not authoritatively cleared".to_string(),
+        ));
+    }
+    match authenticate_authoritative_installed_provider_identity(paths) {
+        Ok(()) => Ok(()),
+        Err(error) => {
+            let legacy_or_absent = load_provider_installed_identity(paths)?.is_none_or(|identity| {
+                identity.lineage_attempt_id.is_empty() && identity.commit_nonce.is_empty()
+            });
+            if !legacy_or_absent {
+                return Err(error);
+            }
+            adopt_embedded_complete_provider_payload(paths)?;
+            authenticate_authoritative_installed_provider_identity(paths)
+        }
+    }
+}
+
+fn verify_youtube_po_provider_node_modules_locked(
+    paths: &AppPaths,
+) -> Result<YoutubePoProviderInstallStatus> {
+    let server_dir = paths.youtube_po_provider_server_dir();
+    clear_provider_node_modules_process_attestation(&server_dir);
+    if let Err(error) = reconcile_provider_lineage_before_verification(paths) {
+        let _ = std::fs::remove_file(provider_node_modules_integrity_receipt_path(&server_dir));
+        provider_node_modules_process_invalidations()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .insert(server_dir, error.to_string());
+        return Err(error);
+    }
+    if provider_node_modules_integrity_verifying()
+        .compare_exchange(
+            false,
+            true,
+            std::sync::atomic::Ordering::AcqRel,
+            std::sync::atomic::Ordering::Acquire,
+        )
+        .is_err()
+    {
+        return Err(EngineError::InstallFailed(
+            "provider dependency integrity verification is already running".to_string(),
+        ));
+    }
+    let _guard = ProviderIntegrityVerificationGuard;
+    let node_modules_dir = server_dir.join("node_modules");
+    let expected = &pinned_dependency_manifest::manifest()
+        .youtube_po_provider
+        .node_modules_tree_sha256_hex;
+    let actual = match authenticate_provider_node_modules_tree(&node_modules_dir, expected) {
+        Ok(actual) => actual,
+        Err(error) => {
+            let _ = std::fs::remove_file(provider_node_modules_integrity_receipt_path(&server_dir));
+            provider_node_modules_process_invalidations()
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .insert(server_dir, error.to_string());
+            return Err(error);
+        }
+    };
+    attest_provider_node_modules_tree(&server_dir, &actual)?;
+    Ok(youtube_po_provider_install_status(paths))
+}
+
+fn provider_plugin_tree_sha256_hex(
+    root: &Path,
+    expected_files: &std::collections::BTreeMap<String, String>,
+) -> Option<String> {
+    use sha2::Digest;
+    let mut actual = std::collections::BTreeMap::new();
+    let mut stack = vec![root.to_path_buf()];
+    while let Some(dir) = stack.pop() {
+        for entry in std::fs::read_dir(&dir).ok()? {
+            let entry = entry.ok()?;
+            let path = entry.path();
+            let metadata = std::fs::symlink_metadata(&path).ok()?;
+            if metadata.file_type().is_symlink() || provider_metadata_is_reparse_point(&metadata) {
+                return None;
+            }
+            if metadata.is_dir() {
+                stack.push(path);
+                continue;
+            }
+            if !metadata.is_file() {
+                return None;
+            }
+            let relative = path
+                .strip_prefix(root)
+                .ok()?
+                .to_string_lossy()
+                .replace('\\', "/");
+            if relative == ".plugin_archive_sha256" {
+                continue;
+            }
+            actual.insert(relative, file_sha256_hex(&path)?);
+        }
+    }
+    if actual.len() != expected_files.len()
+        || actual.iter().any(|(path, hash)| {
+            expected_files
+                .get(path)
+                .map(|expected| !hash.eq_ignore_ascii_case(expected))
+                .unwrap_or(true)
+        })
+    {
+        return None;
+    }
+    let mut hasher = sha2::Sha256::new();
+    for (path, hash) in actual {
+        hasher.update(path.as_bytes());
+        hasher.update([0]);
+        hasher.update(hash.as_bytes());
+        hasher.update(b"\n");
+    }
+    Some(hex::encode_upper(hasher.finalize()))
+}
+
+fn file_sha256_hex(path: &Path) -> Option<String> {
+    sha256_file(path).ok().map(hex::encode_upper)
+}
+
+/// Hash an installed dependency tree by normalized relative path and complete file bytes.
+/// File metadata is deliberately excluded so restores and reproducible installs remain stable,
+/// while same-size byte replacement is still detected. Symlinks/reparse-style file links are
+/// rejected rather than followed because the production provider must be self-contained.
+const PROVIDER_NODE_TREE_EXCLUSIONS: &[&str] = &[".voxvulgi_provider_install_attempt"];
+const PROVIDER_APPLICATION_TREE_EXCLUSIONS: &[&str] = &[
+    ".voxvulgi_provider_install_attempt",
+    "server/.node_modules_integrity.json",
+];
+
+fn canonical_directory_tree_sha256_hex_with_exclusions(
+    root: &Path,
+    exact_excluded_files: &[&str],
+) -> Option<String> {
+    use sha2::Digest;
+    const MAX_FILES: usize = 12_000;
+    const MAX_TOTAL_BYTES: u64 = 512 * 1024 * 1024;
+    const MAX_FILE_BYTES: u64 = 128 * 1024 * 1024;
+    const MAX_DEPTH: usize = 32;
+    const MAX_ELAPSED: std::time::Duration = std::time::Duration::from_secs(10 * 60);
+    let started = std::time::Instant::now();
+    let mut total_bytes = 0_u64;
+    let mut files = std::collections::BTreeMap::new();
+    let mut stack = vec![root.to_path_buf()];
+    while let Some(directory) = stack.pop() {
+        for entry in std::fs::read_dir(&directory).ok()? {
+            if started.elapsed() > MAX_ELAPSED {
+                return None;
+            }
+            let entry = entry.ok()?;
+            let path = entry.path();
+            let metadata = std::fs::symlink_metadata(&path).ok()?;
+            if metadata.file_type().is_symlink() || provider_metadata_is_reparse_point(&metadata) {
+                return None;
+            }
+            if metadata.is_dir() {
+                stack.push(path);
+                continue;
+            }
+            if !metadata.is_file() {
+                return None;
+            }
+            let relative = path
+                .strip_prefix(root)
+                .ok()?
+                .to_string_lossy()
+                .replace('\\', "/");
+            if exact_excluded_files.contains(&relative.as_str()) {
+                continue;
+            }
+            if relative.split('/').count() > MAX_DEPTH
+                || metadata.len() > MAX_FILE_BYTES
+                || files.len() >= MAX_FILES
+            {
+                return None;
+            }
+            total_bytes = total_bytes.checked_add(metadata.len())?;
+            if total_bytes > MAX_TOTAL_BYTES {
+                return None;
+            }
+            files.insert(relative, file_sha256_hex(&path)?);
+        }
+    }
+    if files.is_empty() {
+        return None;
+    }
+    let mut hasher = sha2::Sha256::new();
+    for (path, hash) in files {
+        hasher.update(path.as_bytes());
+        hasher.update([0]);
+        hasher.update(hash.as_bytes());
+        hasher.update(b"\n");
+    }
+    Some(hex::encode_upper(hasher.finalize()))
+}
+
+#[cfg(windows)]
+fn provider_metadata_is_reparse_point(metadata: &std::fs::Metadata) -> bool {
+    use std::os::windows::fs::MetadataExt;
+    const FILE_ATTRIBUTE_REPARSE_POINT: u32 = 0x0000_0400;
+    metadata.file_attributes() & FILE_ATTRIBUTE_REPARSE_POINT != 0
+}
+
+#[cfg(not(windows))]
+fn provider_metadata_is_reparse_point(_metadata: &std::fs::Metadata) -> bool {
+    false
+}
+
+fn canonical_directory_tree_sha256_hex(root: &Path) -> Option<String> {
+    canonical_directory_tree_sha256_hex_with_exclusions(root, &[])
+}
+
+fn canonical_provider_node_tree_sha256_hex(root: &Path) -> Option<String> {
+    canonical_directory_tree_sha256_hex_with_exclusions(root, PROVIDER_NODE_TREE_EXCLUSIONS)
+}
+
+fn canonical_provider_application_tree_sha256_hex(root: &Path) -> Option<String> {
+    canonical_directory_tree_sha256_hex_with_exclusions(root, PROVIDER_APPLICATION_TREE_EXCLUSIONS)
+}
+
+fn authenticate_provider_node_modules_tree(root: &Path, expected: &str) -> Result<String> {
+    let actual = canonical_directory_tree_sha256_hex(root).ok_or_else(|| {
+        EngineError::InstallFailed(
+            "installed provider production dependency tree could not be authenticated".to_string(),
+        )
+    })?;
+    if !actual.eq_ignore_ascii_case(expected) {
+        #[cfg(test)]
+        if let Some(capture_root) =
+            std::env::var_os("VOXVULGI_CAPTURE_PROVIDER_NODE_MODULES_DIR").map(PathBuf::from)
+        {
+            if !capture_root.exists() {
+                if let Some(parent) = capture_root.parent() {
+                    let _ = std::fs::create_dir_all(parent);
+                }
+                let _ = std::fs::rename(root, &capture_root);
+            }
+        }
+        return Err(EngineError::HashMismatch {
+            path: root.to_path_buf(),
+            expected: expected.to_string(),
+            actual,
+        });
+    }
+    Ok(actual)
+}
+
+fn youtube_po_plugin_entrypoint(paths: &AppPaths) -> Option<PathBuf> {
+    let root = paths.youtube_po_provider_plugin_dir();
+    let candidates = [
+        root.join("yt_dlp_plugins")
+            .join("extractor")
+            .join("getpot_bgutil.py"),
+        root.join("yt_dlp_plugins")
+            .join("extractor")
+            .join("youtube_pot_bgutil.py"),
+    ];
+    candidates
+        .into_iter()
+        .find(|path| path.exists())
+        .or_else(|| {
+            let mut stack = vec![root];
+            while let Some(dir) = stack.pop() {
+                for entry in std::fs::read_dir(dir).ok()? {
+                    let entry = entry.ok()?;
+                    let path = entry.path();
+                    if path.is_dir() {
+                        stack.push(path);
+                    } else if path.extension().and_then(|value| value.to_str()) == Some("py") {
+                        return Some(path);
+                    }
+                }
+            }
+            None
+        })
+}
+
+pub fn youtube_po_provider_install_status(paths: &AppPaths) -> YoutubePoProviderInstallStatus {
+    let pin = &pinned_dependency_manifest::manifest().youtube_po_provider;
+    let node_version = if paths.node_exe().exists() {
+        tool_version_first_line_with_arg(&paths.node_exe(), "--version")
+    } else {
+        None
+    };
+    let npm_version = if paths.node_npm_cmd().exists() {
+        tool_version_first_line_with_arg(&paths.node_npm_cmd(), "--version")
+    } else {
+        None
+    };
+    let node_exe_sha256_hex = file_sha256_hex(&paths.node_exe());
+    let npm_cmd_sha256_hex = file_sha256_hex(&paths.node_npm_cmd());
+    let plugin_marker = paths
+        .youtube_po_provider_plugin_dir()
+        .join(".plugin_archive_sha256");
+    let plugin_sha256_hex = youtube_po_plugin_entrypoint(paths).and_then(|_| {
+        std::fs::read_to_string(plugin_marker)
+            .ok()
+            .map(|value| value.trim().to_ascii_uppercase())
+    });
+    let plugin_tree_sha256_hex = provider_plugin_tree_sha256_hex(
+        &paths.youtube_po_provider_plugin_dir(),
+        &pin.plugin_files_sha256,
+    );
+    let server_entrypoint_sha256_hex = file_sha256_hex(&paths.youtube_po_provider_entrypoint());
+    let derived_lock_sha256_hex = file_sha256_hex(
+        &paths
+            .youtube_po_provider_server_dir()
+            .join("package-lock.json"),
+    );
+    // The JSON receipt is an audit/history artifact only. It is deliberately not an executable
+    // trust root: a local file can be copied, stale, or forged. Readiness requires a full-byte
+    // verification completed by this process and recorded in the in-memory attestation map.
+    let node_modules_process_attestation =
+        provider_node_modules_process_attestation(&paths.youtube_po_provider_server_dir());
+    let node_modules_tree_sha256_hex = node_modules_process_attestation
+        .as_ref()
+        .map(|attestation| attestation.tree_sha256_hex.clone());
+    let security_audit_marker = paths
+        .youtube_po_provider_server_dir()
+        .join(".production_audit_zero");
+    let security_audit_passed = security_audit_marker.exists()
+        && std::fs::read_to_string(&security_audit_marker)
+            .ok()
+            .map(|value| value.trim() == pin.derived_lock_sha256_hex)
+            .unwrap_or(false);
+    let lifecycle_allowlist_valid =
+        std::fs::read(paths.youtube_po_provider_server_dir().join("package.json"))
+            .ok()
+            .and_then(|bytes| serde_json::from_slice::<serde_json::Value>(&bytes).ok())
+            .map(|package| provider_lifecycle_allowlist_is_exact(&package))
+            .unwrap_or(false);
+    let version_matches = node_version
+        .as_deref()
+        .map(|version| {
+            version.trim_start_matches('v')
+                == pinned_dependency_manifest::manifest().node_windows.version
+        })
+        .unwrap_or(false);
+    let npm_version_matches = npm_version.as_deref()
+        == Some(
+            pinned_dependency_manifest::manifest()
+                .node_windows
+                .npm_version
+                .as_str(),
+        );
+    let node_bytes_match = node_exe_sha256_hex.as_deref().is_some_and(|hash| {
+        hash.eq_ignore_ascii_case(
+            &pinned_dependency_manifest::manifest()
+                .node_windows
+                .node_exe_sha256_hex,
+        )
+    });
+    let npm_bytes_match = npm_cmd_sha256_hex.as_deref().is_some_and(|hash| {
+        hash.eq_ignore_ascii_case(
+            &pinned_dependency_manifest::manifest()
+                .node_windows
+                .npm_cmd_sha256_hex,
+        )
+    });
+    let lock_matches = derived_lock_sha256_hex
+        .as_deref()
+        .map(|hash| hash.eq_ignore_ascii_case(&pin.derived_lock_sha256_hex))
+        .unwrap_or(false);
+    let node_modules_tree_matches = node_modules_tree_sha256_hex
+        .as_deref()
+        .is_some_and(|hash| hash.eq_ignore_ascii_case(&pin.node_modules_tree_sha256_hex));
+    let plugin_matches = plugin_sha256_hex
+        .as_deref()
+        .map(|hash| hash.eq_ignore_ascii_case(&pin.plugin_sha256_hex))
+        .unwrap_or(false);
+    let plugin_tree_matches = plugin_tree_sha256_hex
+        .as_deref()
+        .map(|hash| hash.eq_ignore_ascii_case(&pin.plugin_tree_sha256_hex))
+        .unwrap_or(false);
+    let server_present = server_entrypoint_sha256_hex.is_some();
+    let server_matches = server_entrypoint_sha256_hex
+        .as_deref()
+        .is_some_and(|hash| hash.eq_ignore_ascii_case(&pin.server_entrypoint_sha256_hex));
+    let installed = version_matches
+        && npm_version_matches
+        && node_bytes_match
+        && npm_bytes_match
+        && plugin_matches
+        && plugin_tree_matches
+        && server_matches
+        && lock_matches
+        && node_modules_tree_matches
+        && security_audit_passed
+        && lifecycle_allowlist_valid;
+    let integrity_verifying =
+        provider_node_modules_integrity_verifying().load(std::sync::atomic::Ordering::Acquire);
+    let integrity_invalid = provider_node_modules_process_invalidations()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .contains_key(&paths.youtube_po_provider_server_dir());
+    let node_modules_integrity_state = if integrity_verifying {
+        "verifying"
+    } else if node_modules_process_attestation.is_some() {
+        "verified"
+    } else if integrity_invalid {
+        "invalid"
+    } else {
+        "unverified"
+    }
+    .to_string();
+    YoutubePoProviderInstallStatus {
+        installed,
+        provider_version: pin.version.clone(),
+        node_version,
+        npm_version,
+        node_exe_sha256_hex,
+        npm_cmd_sha256_hex,
+        plugin_sha256_hex,
+        plugin_tree_sha256_hex,
+        server_entrypoint_sha256_hex,
+        derived_lock_sha256_hex,
+        node_modules_tree_sha256_hex,
+        node_modules_integrity_verifying: integrity_verifying,
+        node_modules_integrity_state,
+        node_modules_verified_at_ms: node_modules_process_attestation
+            .as_ref()
+            .map(|attestation| attestation.verified_at_ms),
+        security_audit_passed,
+        readiness_error: if installed {
+            None
+        } else {
+            Some(format!(
+                "pinned localhost PO provider payload failed integrity validation (node_version={version_matches}, npm_version={npm_version_matches}, node_bytes={node_bytes_match}, npm_bytes={npm_bytes_match}, plugin_archive={plugin_matches}, plugin_tree={plugin_tree_matches}, server_present={server_present}, server_bytes={server_matches}, lock={lock_matches}, node_modules_tree={node_modules_tree_matches}, audit={security_audit_passed}, lifecycle={lifecycle_allowlist_valid})",
+            ))
+        },
+    }
+}
+
+fn download_verified_file(
+    url: &str,
+    destination: &Path,
+    expected_bytes: u64,
+    expected_sha256_hex: &str,
+    label: &str,
+) -> Result<()> {
+    let response = ureq::get(url)
+        .call()
+        .map_err(|error| EngineError::InstallFailed(format!("{label} download failed: {error}")))?;
+    if response.status().as_u16() >= 400 {
+        return Err(EngineError::InstallFailed(format!(
+            "{label} download failed (status={})",
+            response.status()
+        )));
+    }
+    let mut reader = response.into_body().into_reader();
+    let mut output = std::fs::File::create(destination)?;
+    std::io::copy(&mut reader, &mut output)?;
+    output.flush()?;
+    let actual_bytes = std::fs::metadata(destination)?.len();
+    if actual_bytes != expected_bytes {
+        return Err(EngineError::SizeMismatch {
+            path: destination.to_path_buf(),
+            expected: expected_bytes,
+            actual: actual_bytes,
+        });
+    }
+    let actual_hash = file_sha256_hex(destination).unwrap_or_default();
+    if !actual_hash.eq_ignore_ascii_case(expected_sha256_hex) {
+        return Err(EngineError::HashMismatch {
+            path: destination.to_path_buf(),
+            expected: expected_sha256_hex.to_string(),
+            actual: actual_hash,
+        });
+    }
+    Ok(())
+}
+
+fn patch_po_provider_for_localhost(server_dir: &Path) -> Result<()> {
+    let package_path = server_dir.join("package.json");
+    let mut package: serde_json::Value = serde_json::from_slice(&std::fs::read(&package_path)?)?;
+    package["allowScripts"] = serde_json::json!({
+        "canvas@3.2.3": true,
+        "@swc/core@1.15.47": false,
+    });
+    std::fs::write(
+        &package_path,
+        format!("{}\n", serde_json::to_string_pretty(&package)?),
+    )?;
+
+    let main_path = server_dir.join("src").join("main.ts");
+    let source = std::fs::read_to_string(&main_path)?;
+    let block_start = source
+        .find("const httpServer = express();")
+        .ok_or_else(|| {
+            EngineError::InstallFailed(
+                "provider server entrypoint shape changed before localhost patch".to_string(),
+            )
+        })?;
+    let listen_start = source[block_start..]
+        .find("httpServer\n    .listen(")
+        .map(|index| block_start + index)
+        .ok_or_else(|| EngineError::InstallFailed("provider listen block missing".to_string()))?;
+    let route_start = source[listen_start..]
+        .find("\nconst sessionManager")
+        .map(|index| listen_start + index)
+        .ok_or_else(|| EngineError::InstallFailed("provider route boundary missing".to_string()))?;
+    let mut patched = String::with_capacity(source.len());
+    patched.push_str(&source[..listen_start]);
+    patched.push_str(
+        "httpServer.listen(\n    { host: \"127.0.0.1\", port: PORT_NUMBER },\n    (err) => {\n        if (err) throw err;\n        console.log(`Started POT server (v${VERSION}) on address 127.0.0.1:${PORT_NUMBER}`);\n    },\n);\n",
+    );
+    patched.push_str(&source[route_start..]);
+    if patched.contains("host: \"::\"") || patched.contains("host: \"0.0.0.0\"") {
+        return Err(EngineError::InstallFailed(
+            "provider localhost hardening left a wildcard bind".to_string(),
+        ));
+    }
+    std::fs::write(main_path, patched)?;
+    if !provider_lifecycle_allowlist_is_exact(&package) {
+        return Err(EngineError::InstallFailed(
+            "provider lifecycle-script allowlist is not exact".to_string(),
+        ));
+    }
+    Ok(())
+}
+
+fn provider_lifecycle_allowlist_is_exact(package: &serde_json::Value) -> bool {
+    let Some(entries) = package
+        .get("allowScripts")
+        .and_then(serde_json::Value::as_object)
+    else {
+        return false;
+    };
+    entries.len() == 2
+        && entries
+            .get("canvas@3.2.3")
+            .and_then(serde_json::Value::as_bool)
+            == Some(true)
+        && entries
+            .get("@swc/core@1.15.47")
+            .and_then(serde_json::Value::as_bool)
+            == Some(false)
+}
+
+fn provider_lock_matches_manifest(lock: &[u8], expected_sha256_hex: &str) -> bool {
+    use sha2::Digest;
+    hex::encode_upper(sha2::Sha256::digest(lock)).eq_ignore_ascii_case(expected_sha256_hex)
+}
+
+fn provider_npm_ci_args() -> [&'static str; 2] {
+    ["ci", "--ignore-scripts"]
+}
+
+fn provider_lock_lifecycle_packages_are_exact(lock: &[u8]) -> bool {
+    let Ok(lock): std::result::Result<serde_json::Value, _> = serde_json::from_slice(lock) else {
+        return false;
+    };
+    let Some(packages) = lock.get("packages").and_then(serde_json::Value::as_object) else {
+        return false;
+    };
+    let mut lifecycle = packages
+        .iter()
+        .filter(|(_, value)| {
+            value
+                .get("hasInstallScript")
+                .and_then(serde_json::Value::as_bool)
+                == Some(true)
+        })
+        .map(|(path, value)| {
+            format!(
+                "{}@{}",
+                path.trim_start_matches("node_modules/"),
+                value
+                    .get("version")
+                    .and_then(serde_json::Value::as_str)
+                    .unwrap_or("missing")
+            )
+        })
+        .collect::<Vec<_>>();
+    lifecycle.sort();
+    lifecycle == ["@swc/core@1.15.47", "canvas@3.2.3"]
+}
+
+fn installed_provider_lifecycle_packages_are_exact(server_dir: &Path) -> bool {
+    [("canvas", "3.2.3"), ("@swc/core", "1.15.47")]
+        .into_iter()
+        .all(|(name, expected)| {
+            let package_path = name
+                .split('/')
+                .fold(server_dir.join("node_modules"), |path, part| {
+                    path.join(part)
+                })
+                .join("package.json");
+            std::fs::read(package_path)
+                .ok()
+                .and_then(|bytes| serde_json::from_slice::<serde_json::Value>(&bytes).ok())
+                .and_then(|package| {
+                    package
+                        .get("version")
+                        .and_then(serde_json::Value::as_str)
+                        .map(str::to_string)
+                })
+                .as_deref()
+                == Some(expected)
+        })
+}
+
+#[cfg(windows)]
+fn run_provider_npm(
+    node_dir: &Path,
+    server_dir: &Path,
+    args: &[&str],
+) -> Result<std::process::Output> {
+    let existing_path = std::env::var_os("PATH").unwrap_or_default();
+    let joined_path = std::env::join_paths(
+        std::iter::once(node_dir.to_path_buf()).chain(std::env::split_paths(&existing_path)),
+    )
+    .map_err(|error| EngineError::InstallFailed(format!("could not compose Node PATH: {error}")))?;
+    let controlled_config = server_dir.join(".voxvulgi_npmrc");
+    let controlled_global_config = server_dir.join(".voxvulgi_global_npmrc");
+    let controlled_config_text =
+        b"registry=https://registry.npmjs.org/\nignore-scripts=true\naudit=true\nfund=false\n";
+    std::fs::write(&controlled_config, controlled_config_text)?;
+    std::fs::write(&controlled_global_config, controlled_config_text)?;
+    // npm also reads a project-local .npmrc after the user/global files. Replace the untrusted
+    // upstream project config inside this attempt-owned staging tree with the same reviewed
+    // policy so it cannot re-enable scripts or redirect the registry.
+    std::fs::write(server_dir.join(".npmrc"), controlled_config_text)?;
+    let mut command = crate::cmd::command(node_dir.join("npm.cmd"));
+    command
+        .args(args)
+        .arg("--userconfig")
+        .arg(&controlled_config)
+        .arg("--globalconfig")
+        .arg(&controlled_global_config)
+        .arg("--cache")
+        .arg(server_dir.join(".npm_cache"))
+        .arg("--registry=https://registry.npmjs.org/")
+        .current_dir(server_dir)
+        .env("PATH", joined_path);
+    for (name, _) in std::env::vars_os() {
+        if name
+            .to_string_lossy()
+            .to_ascii_uppercase()
+            .starts_with("NPM_CONFIG_")
+        {
+            command.env_remove(name);
+        }
+    }
+    command.output().map_err(|error| {
+        EngineError::InstallFailed(format!("provider npm command failed to start: {error}"))
+    })
+}
+
+fn require_success(output: std::process::Output, label: &str) -> Result<std::process::Output> {
+    if output.status.success() {
+        return Ok(output);
+    }
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    Err(EngineError::InstallFailed(format!(
+        "{label} failed (code={:?}): {}{}",
+        output.status.code(),
+        stdout.trim(),
+        if stderr.trim().is_empty() {
+            String::new()
+        } else {
+            format!("; {}", stderr.trim())
+        }
+    )))
+}
+
+struct AttemptDirectoryGuard {
+    path: PathBuf,
+    armed: bool,
+}
+
+struct ProviderInstallOperationGuard {
+    paths: AppPaths,
+    attempt_id: String,
+    armed: bool,
+}
+
+struct ManagedProviderReplacementGuard {
+    final_node: PathBuf,
+    final_provider: PathBuf,
+    archived_node: PathBuf,
+    archived_provider: PathBuf,
+    armed: bool,
+}
+
+impl ManagedProviderReplacementGuard {
+    fn preserve_archive(mut self) {
+        self.armed = false;
+    }
+}
+
+impl Drop for ManagedProviderReplacementGuard {
+    fn drop(&mut self) {
+        if !self.armed || self.final_node.exists() || self.final_provider.exists() {
+            return;
+        }
+        if self.archived_node.exists() && self.archived_provider.exists() {
+            if std::fs::rename(&self.archived_node, &self.final_node).is_ok()
+                && std::fs::rename(&self.archived_provider, &self.final_provider).is_err()
+            {
+                // Do not leave a half-restored managed runtime. Returning Node to its
+                // authenticated archive preserves the all-or-nothing recovery boundary.
+                let _ = std::fs::rename(&self.final_node, &self.archived_node);
+            }
+        }
+    }
+}
+
+impl ProviderInstallOperationGuard {
+    fn new(paths: &AppPaths, attempt_id: &str) -> Self {
+        Self {
+            paths: paths.clone(),
+            attempt_id: attempt_id.to_string(),
+            armed: true,
+        }
+    }
+
+    fn preserve_for_crash_recovery(&mut self) {
+        self.armed = false;
+    }
+}
+
+fn enter_durable_provider_publication<F>(
+    operation_guard: &mut ProviderInstallOperationGuard,
+    persist_node_publish_intent: F,
+) -> Result<()>
+where
+    F: FnOnce() -> Result<()>,
+{
+    persist_node_publish_intent()?;
+    operation_guard.preserve_for_crash_recovery();
+    Ok(())
+}
+
+impl Drop for ProviderInstallOperationGuard {
+    fn drop(&mut self) {
+        if self.armed {
+            let _ = abort_prepublication_provider_install(&self.paths, &self.attempt_id);
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct ProviderInstallAttemptReceipt {
+    attempt_id: String,
+    stage_root: PathBuf,
+    phase: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct ProviderInstallOwnershipMarker {
+    schema_version: u32,
+    attempt_id: String,
+    ownership_token: String,
+}
+
+#[derive(Debug, Clone)]
+struct ProviderInstallLineage {
+    attempt_id: String,
+    stage_root: PathBuf,
+    phase: String,
+    install_generation: String,
+    ownership_token_digest: String,
+    node_directory_identity: String,
+    provider_directory_identity: String,
+    node_tree_sha256: String,
+    provider_tree_sha256: String,
+    commit_nonce: String,
+    owner_pid: u32,
+    owner_process_identity: String,
+}
+
+#[derive(Debug, Clone)]
+struct ProviderInstalledIdentity {
+    lineage_attempt_id: String,
+    commit_nonce: String,
+    install_generation: String,
+    node_directory_identity: String,
+    provider_directory_identity: String,
+    node_tree_sha256: String,
+    provider_tree_sha256: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct ProviderPortableAttestation {
+    schema_version: u32,
+    install_generation: String,
+    node_complete_tree_sha256: String,
+    provider_complete_tree_sha256: String,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct ProviderIdentityCommitOutcome {
+    committed: bool,
+    receipt_written: bool,
+}
+
+fn random_provider_authority_nonce() -> String {
+    format!(
+        "{}{}",
+        uuid::Uuid::new_v4().simple(),
+        uuid::Uuid::new_v4().simple()
+    )
+}
+
+const PROVIDER_INSTALL_PHASES: &[&str] = &[
+    "prepared",
+    "node_publish_intent",
+    "node_published",
+    "provider_publish_intent",
+    "provider_published",
+    "committed",
+];
+
+fn valid_provider_attempt_id(attempt_id: &str) -> bool {
+    uuid::Uuid::parse_str(attempt_id)
+        .ok()
+        .is_some_and(|parsed| parsed.hyphenated().to_string() == attempt_id)
+}
+
+fn provider_ownership_token_digest(token: &str) -> String {
+    use sha2::Digest;
+    hex::encode_upper(sha2::Sha256::digest(token.as_bytes()))
+}
+
+#[cfg(windows)]
+fn provider_directory_identity(path: &Path) -> Result<String> {
+    use std::os::windows::ffi::OsStrExt;
+    use windows_sys::Win32::Foundation::{CloseHandle, INVALID_HANDLE_VALUE};
+    use windows_sys::Win32::Storage::FileSystem::{
+        CreateFileW, FileIdInfo, GetFileInformationByHandleEx, FILE_FLAG_BACKUP_SEMANTICS,
+        FILE_ID_INFO, FILE_SHARE_DELETE, FILE_SHARE_READ, FILE_SHARE_WRITE, OPEN_EXISTING,
+    };
+    let wide = path
+        .as_os_str()
+        .encode_wide()
+        .chain(std::iter::once(0))
+        .collect::<Vec<_>>();
+    let handle = unsafe {
+        CreateFileW(
+            wide.as_ptr(),
+            0,
+            FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+            std::ptr::null(),
+            OPEN_EXISTING,
+            FILE_FLAG_BACKUP_SEMANTICS,
+            std::ptr::null_mut(),
+        )
+    };
+    if handle == INVALID_HANDLE_VALUE {
+        return Err(EngineError::InstallFailed(format!(
+            "provider directory identity is unavailable for {}: {}",
+            path.display(),
+            std::io::Error::last_os_error()
+        )));
+    }
+    let mut info = std::mem::MaybeUninit::<FILE_ID_INFO>::zeroed();
+    let ok = unsafe {
+        GetFileInformationByHandleEx(
+            handle,
+            FileIdInfo,
+            info.as_mut_ptr().cast(),
+            std::mem::size_of::<FILE_ID_INFO>() as u32,
+        )
+    };
+    unsafe {
+        let _ = CloseHandle(handle);
+    }
+    if ok == 0 {
+        return Err(EngineError::InstallFailed(format!(
+            "provider directory file ID is unavailable for {}: {}",
+            path.display(),
+            std::io::Error::last_os_error()
+        )));
+    }
+    let info = unsafe { info.assume_init() };
+    Ok(format!(
+        "windows:{:016X}:{}",
+        info.VolumeSerialNumber,
+        hex::encode_upper(info.FileId.Identifier)
+    ))
+}
+
+#[cfg(unix)]
+fn provider_directory_identity(path: &Path) -> Result<String> {
+    use std::os::unix::fs::MetadataExt;
+    let metadata = std::fs::metadata(path)?;
+    Ok(format!("unix:{}:{}", metadata.dev(), metadata.ino()))
+}
+
+#[cfg(not(any(windows, unix)))]
+fn provider_directory_identity(path: &Path) -> Result<String> {
+    Err(EngineError::InstallFailed(format!(
+        "provider directory identity is unsupported for {}",
+        path.display()
+    )))
+}
+
+#[cfg(windows)]
+fn provider_process_identity(pid: u32) -> Option<String> {
+    use windows_sys::Win32::Foundation::{CloseHandle, FILETIME};
+    use windows_sys::Win32::System::Threading::{
+        GetProcessTimes, OpenProcess, PROCESS_QUERY_LIMITED_INFORMATION,
+    };
+    let handle = unsafe { OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, 0, pid) };
+    if handle.is_null() {
+        return None;
+    }
+    let mut created = std::mem::MaybeUninit::<FILETIME>::zeroed();
+    let mut exited = std::mem::MaybeUninit::<FILETIME>::zeroed();
+    let mut kernel = std::mem::MaybeUninit::<FILETIME>::zeroed();
+    let mut user = std::mem::MaybeUninit::<FILETIME>::zeroed();
+    let ok = unsafe {
+        GetProcessTimes(
+            handle,
+            created.as_mut_ptr(),
+            exited.as_mut_ptr(),
+            kernel.as_mut_ptr(),
+            user.as_mut_ptr(),
+        )
+    };
+    unsafe {
+        let _ = CloseHandle(handle);
+    }
+    if ok == 0 {
+        return None;
+    }
+    let created = unsafe { created.assume_init() };
+    let ticks = (u64::from(created.dwHighDateTime) << 32) | u64::from(created.dwLowDateTime);
+    Some(format!("windows:{pid}:{ticks:016X}"))
+}
+
+#[cfg(unix)]
+fn provider_process_identity(pid: u32) -> Option<String> {
+    let stat = std::fs::read_to_string(format!("/proc/{pid}/stat")).ok()?;
+    let after_name = stat.rsplit_once(") ")?.1;
+    let start_ticks = after_name.split_whitespace().nth(19)?;
+    Some(format!("unix:{pid}:{start_ticks}"))
+}
+
+#[cfg(not(any(windows, unix)))]
+fn provider_process_identity(pid: u32) -> Option<String> {
+    (pid == std::process::id()).then(|| format!("process:{pid}"))
+}
+
+fn validated_provider_stage_root(
+    paths: &AppPaths,
+    attempt_id: &str,
+    claimed: &Path,
+) -> Result<PathBuf> {
+    if !valid_provider_attempt_id(attempt_id) {
+        return Err(EngineError::InstallFailed(
+            "provider install lineage has an invalid attempt id".to_string(),
+        ));
+    }
+    let tools_root = paths.tools_dir();
+    std::fs::create_dir_all(&tools_root)?;
+    let expected = tools_root.join(format!("youtube_po_provider_stage_{attempt_id}"));
+    if claimed != expected {
+        return Err(EngineError::InstallFailed(
+            "provider install lineage has an invalid staging root".to_string(),
+        ));
+    }
+    let canonical_tools = std::fs::canonicalize(&tools_root)?;
+    let containment_probe = if expected.exists() {
+        std::fs::canonicalize(&expected)?
+    } else {
+        canonical_tools.join(format!("youtube_po_provider_stage_{attempt_id}"))
+    };
+    if containment_probe.parent() != Some(canonical_tools.as_path()) {
+        return Err(EngineError::InstallFailed(
+            "provider install staging root escaped the managed tools directory".to_string(),
+        ));
+    }
+    Ok(expected)
+}
+
+fn provider_phase_transition_allowed(before: Option<&str>, after: &str) -> bool {
+    matches!(
+        (before, after),
+        (None, "prepared")
+            | (Some("prepared"), "prepared" | "node_publish_intent")
+            | (
+                Some("node_publish_intent"),
+                "node_publish_intent" | "node_published"
+            )
+            | (
+                Some("node_published"),
+                "node_published" | "provider_publish_intent"
+            )
+            | (
+                Some("provider_publish_intent"),
+                "provider_publish_intent" | "provider_published"
+            )
+            | (
+                Some("provider_published"),
+                "provider_published" | "committed"
+            )
+            | (Some("committed"), "committed")
+    )
+}
+
+fn claim_provider_install_owner(
+    paths: &AppPaths,
+    attempt_id: &str,
+    stage_root: &Path,
+    ownership_token_digest: &str,
+    commit_nonce: &str,
+) -> Result<()> {
+    if commit_nonce.len() < 32 {
+        return Err(EngineError::InstallFailed(
+            "provider install commit nonce is invalid".to_string(),
+        ));
+    }
+    let stage_root = validated_provider_stage_root(paths, attempt_id, stage_root)?;
+    let mut conn = crate::db::open(paths)?;
+    crate::db::migrate(&conn)?;
+    let tx = conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+    let owner = match tx.query_row(
+        "SELECT attempt_id,owner_pid,owner_process_identity,commit_nonce FROM provider_install_owner WHERE singleton=1",
+        [],
+        |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, u32>(1)?,
+                row.get::<_, String>(2)?,
+                row.get::<_, String>(3)?,
+            ))
+        },
+    ) {
+        Ok(value) => Some(value),
+        Err(rusqlite::Error::QueryReturnedNoRows) => None,
+        Err(error) => return Err(error.into()),
+    };
+    let current_pid = std::process::id();
+    let current_process_identity = provider_process_identity(current_pid).ok_or_else(|| {
+        EngineError::InstallFailed(
+            "could not establish the provider install owner process identity".to_string(),
+        )
+    })?;
+    if let Some((owner, owner_pid, owner_process_identity, owner_commit_nonce)) = owner.as_ref() {
+        if owner != attempt_id {
+            return Err(EngineError::InstallFailed(format!(
+                "provider install is already owned by active attempt {owner}; explicit recovery is required"
+            )));
+        }
+        if *owner_pid != current_pid || owner_process_identity != &current_process_identity {
+            return Err(EngineError::InstallFailed(
+                "provider install owner process identity does not match this process".to_string(),
+            ));
+        }
+        let (existing_root, existing_phase, existing_token_digest) = tx.query_row(
+            "SELECT stage_root,phase,ownership_token_digest FROM provider_install_lineage WHERE attempt_id=?1",
+            [attempt_id],
+            |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, String>(2)?,
+                ))
+            },
+        )?;
+        if Path::new(&existing_root) != stage_root
+            || existing_phase != "prepared"
+            || existing_token_digest != ownership_token_digest
+            || owner_commit_nonce != commit_nonce
+        {
+            return Err(EngineError::InstallFailed(
+                "provider install owner cannot be re-claimed after publication began".to_string(),
+            ));
+        }
+        tx.execute(
+            "UPDATE provider_install_owner SET updated_at_ms=?1 WHERE singleton=1 AND attempt_id=?2",
+            rusqlite::params![now_ms(), attempt_id],
+        )?;
+        tx.commit()?;
+        let _ = write_provider_install_attempt_receipt(paths, attempt_id, &stage_root, "prepared");
+        return Ok(());
+    }
+
+    let existing_lineages: i64 = tx.query_row(
+        "SELECT COUNT(*) FROM provider_install_lineage lineage
+         WHERE NOT EXISTS(
+           SELECT 1 FROM provider_installed_identity identity
+           WHERE identity.singleton=1
+             AND identity.lineage_attempt_id=lineage.attempt_id
+             AND identity.commit_nonce=lineage.commit_nonce
+             AND lineage.phase='committed'
+         )",
+        [],
+        |row| row.get(0),
+    )?;
+    if existing_lineages != 0 {
+        return Err(EngineError::InstallFailed(
+            "unowned provider install lineage requires explicit recovery".to_string(),
+        ));
+    }
+    let timestamp = now_ms();
+    tx.execute(
+        "INSERT INTO provider_install_lineage(attempt_id,stage_root,phase,updated_at_ms,ownership_token_digest,commit_nonce,install_generation) VALUES(?1,?2,'prepared',?3,?4,?5,?6)",
+        rusqlite::params![attempt_id, stage_root.to_string_lossy(), timestamp, ownership_token_digest, commit_nonce, provider_install_generation()],
+    )?;
+    tx.execute(
+        "INSERT INTO provider_install_owner(singleton,attempt_id,acquired_at_ms,updated_at_ms,owner_pid,owner_process_identity,commit_nonce) VALUES(1,?1,?2,?2,?3,?4,?5)",
+        rusqlite::params![attempt_id, timestamp, current_pid, current_process_identity, commit_nonce],
+    )?;
+    tx.commit()?;
+    let _ = write_provider_install_attempt_receipt(paths, attempt_id, &stage_root, "prepared");
+    Ok(())
+}
+
+fn persist_provider_install_lineage(
+    paths: &AppPaths,
+    attempt_id: &str,
+    stage_root: &Path,
+    phase: &str,
+) -> Result<()> {
+    if !PROVIDER_INSTALL_PHASES.contains(&phase) {
+        return Err(EngineError::InstallFailed(
+            "provider install lineage has an invalid phase".to_string(),
+        ));
+    }
+    let stage_root = validated_provider_stage_root(paths, attempt_id, stage_root)?;
+    let mut conn = crate::db::open(paths)?;
+    crate::db::migrate(&conn)?;
+    let tx = conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+    let owner = match tx.query_row(
+        "SELECT attempt_id,commit_nonce FROM provider_install_owner WHERE singleton=1",
+        [],
+        |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)),
+    ) {
+        Ok(value) => value,
+        Err(rusqlite::Error::QueryReturnedNoRows) => {
+            return Err(EngineError::InstallFailed(
+                "provider install lineage has no authoritative owner".to_string(),
+            ))
+        }
+        Err(error) => return Err(error.into()),
+    };
+    if owner.0 != attempt_id {
+        return Err(EngineError::InstallFailed(
+            "provider install lineage update was rejected for a non-owner attempt".to_string(),
+        ));
+    }
+    let existing = match tx.query_row(
+        "SELECT stage_root,phase,install_generation,ownership_token_digest,node_directory_identity,provider_directory_identity,node_tree_sha256,provider_tree_sha256,commit_nonce FROM provider_install_lineage WHERE attempt_id=?1",
+        [attempt_id],
+        |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, String>(2)?,
+                row.get::<_, String>(3)?,
+                row.get::<_, String>(4)?,
+                row.get::<_, String>(5)?,
+                row.get::<_, String>(6)?,
+                row.get::<_, String>(7)?,
+                row.get::<_, String>(8)?,
+            ))
+        },
+    ) {
+        Ok(value) => Some(value),
+        Err(rusqlite::Error::QueryReturnedNoRows) => None,
+        Err(error) => return Err(error.into()),
+    };
+    if let Some((
+        existing_root,
+        existing_phase,
+        install_generation,
+        ownership_token_digest,
+        node_directory_identity,
+        provider_directory_identity,
+        node_tree_sha256,
+        provider_tree_sha256,
+        commit_nonce,
+    )) = existing.as_ref()
+    {
+        if Path::new(existing_root) != stage_root
+            || !provider_phase_transition_allowed(Some(existing_phase), phase)
+            || commit_nonce != &owner.1
+        {
+            return Err(EngineError::InstallFailed(
+                "provider install lineage phase/root transition was rejected".to_string(),
+            ));
+        }
+        if phase != "prepared"
+            && [
+                install_generation,
+                ownership_token_digest,
+                node_directory_identity,
+                provider_directory_identity,
+                node_tree_sha256,
+                provider_tree_sha256,
+            ]
+            .iter()
+            .any(|value| value.is_empty())
+        {
+            return Err(EngineError::InstallFailed(
+                "provider publication requires generation, sealed token, directory, and complete-tree identities"
+                    .to_string(),
+            ));
+        }
+    } else if !provider_phase_transition_allowed(None, phase) {
+        return Err(EngineError::InstallFailed(
+            "provider install lineage must begin in prepared phase".to_string(),
+        ));
+    } else {
+        return Err(EngineError::InstallFailed(
+            "provider install owner references a missing lineage".to_string(),
+        ));
+    }
+    let updated = tx.execute(
+        "UPDATE provider_install_lineage SET phase=?1,updated_at_ms=?2 WHERE attempt_id=?3 AND stage_root=?4",
+        rusqlite::params![phase, now_ms(), attempt_id, stage_root.to_string_lossy()],
+    )?;
+    if updated != 1 {
+        return Err(EngineError::InstallFailed(
+            "provider install lineage update did not affect its exact authoritative row"
+                .to_string(),
+        ));
+    }
+    tx.commit()?;
+    let _ = write_provider_install_attempt_receipt(paths, attempt_id, &stage_root, phase);
+    Ok(())
+}
+
+fn seal_provider_install_lineage(
+    paths: &AppPaths,
+    attempt_id: &str,
+    stage_root: &Path,
+    ownership_token_digest: &str,
+    node_directory_identity: &str,
+    provider_directory_identity: &str,
+    node_tree_sha256: &str,
+    provider_tree_sha256: &str,
+) -> Result<()> {
+    let stage_root = validated_provider_stage_root(paths, attempt_id, stage_root)?;
+    let mut conn = crate::db::open(paths)?;
+    crate::db::migrate(&conn)?;
+    let tx = conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+    let changed = tx.execute(
+        "UPDATE provider_install_lineage
+         SET ownership_token_digest=?1,node_directory_identity=?2,
+             provider_directory_identity=?3,node_tree_sha256=?4,
+             provider_tree_sha256=?5,updated_at_ms=?6
+         WHERE attempt_id=?7 AND stage_root=?8 AND phase='prepared'
+           AND EXISTS(SELECT 1 FROM provider_install_owner owner
+                      WHERE owner.singleton=1 AND owner.attempt_id=?7
+                        AND owner.commit_nonce=provider_install_lineage.commit_nonce)",
+        rusqlite::params![
+            ownership_token_digest,
+            node_directory_identity,
+            provider_directory_identity,
+            node_tree_sha256,
+            provider_tree_sha256,
+            now_ms(),
+            attempt_id,
+            stage_root.to_string_lossy(),
+        ],
+    )?;
+    if changed != 1 {
+        return Err(EngineError::InstallFailed(
+            "provider install lineage could not be sealed before publication".to_string(),
+        ));
+    }
+    tx.commit()?;
+    Ok(())
+}
+
+fn commit_provider_installed_identity(
+    paths: &AppPaths,
+    attempt_id: &str,
+    stage_root: &Path,
+) -> Result<ProviderIdentityCommitOutcome> {
+    commit_provider_installed_identity_with_receipt(paths, attempt_id, stage_root, |paths, attempt, root| {
+        write_provider_install_attempt_receipt(paths, attempt, root, "committed")
+    })
+}
+
+fn commit_provider_installed_identity_with_receipt<W>(
+    paths: &AppPaths,
+    attempt_id: &str,
+    stage_root: &Path,
+    write_receipt: W,
+) -> Result<ProviderIdentityCommitOutcome>
+where
+    W: FnOnce(&AppPaths, &str, &Path) -> Result<()>,
+{
+    let stage_root = validated_provider_stage_root(paths, attempt_id, stage_root)?;
+    let mut conn = crate::db::open(paths)?;
+    crate::db::migrate(&conn)?;
+    let tx = conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+    let identity = tx.query_row(
+        "SELECT node_directory_identity,provider_directory_identity,node_tree_sha256,provider_tree_sha256,commit_nonce
+         FROM provider_install_lineage
+         WHERE attempt_id=?1 AND stage_root=?2 AND phase='provider_published'
+           AND EXISTS(SELECT 1 FROM provider_install_owner owner
+                      WHERE owner.singleton=1 AND owner.attempt_id=?1)",
+        rusqlite::params![attempt_id, stage_root.to_string_lossy()],
+        |row| {
+            Ok(ProviderInstalledIdentity {
+                lineage_attempt_id: attempt_id.to_string(),
+                commit_nonce: row.get(4)?,
+                install_generation: provider_install_generation(),
+                node_directory_identity: row.get(0)?,
+                provider_directory_identity: row.get(1)?,
+                node_tree_sha256: row.get(2)?,
+                provider_tree_sha256: row.get(3)?,
+            })
+        },
+    )?;
+    let changed = tx.execute(
+        "UPDATE provider_install_lineage SET phase='committed',updated_at_ms=?1
+         WHERE attempt_id=?2 AND phase='provider_published'",
+        rusqlite::params![now_ms(), attempt_id],
+    )?;
+    if changed != 1 {
+        return Err(EngineError::InstallFailed(
+            "provider installed identity commit lost its publication lineage".to_string(),
+        ));
+    }
+    tx.execute(
+        "INSERT INTO provider_installed_identity(
+           singleton,lineage_attempt_id,commit_nonce,install_generation,
+           node_directory_identity,provider_directory_identity,
+           node_tree_sha256,provider_tree_sha256,committed_at_ms
+         ) VALUES(1,?1,?2,?3,?4,?5,?6,?7,?8)
+         ON CONFLICT(singleton) DO UPDATE SET
+           lineage_attempt_id=excluded.lineage_attempt_id,
+           commit_nonce=excluded.commit_nonce,
+           install_generation=excluded.install_generation,
+           node_directory_identity=excluded.node_directory_identity,
+           provider_directory_identity=excluded.provider_directory_identity,
+           node_tree_sha256=excluded.node_tree_sha256,
+           provider_tree_sha256=excluded.provider_tree_sha256,
+           committed_at_ms=excluded.committed_at_ms",
+        rusqlite::params![
+            identity.lineage_attempt_id,
+            identity.commit_nonce,
+            identity.install_generation,
+            identity.node_directory_identity,
+            identity.provider_directory_identity,
+            identity.node_tree_sha256,
+            identity.provider_tree_sha256,
+            now_ms(),
+        ],
+    )?;
+    tx.execute(
+        "DELETE FROM provider_install_lineage
+         WHERE phase='committed' AND attempt_id<>?1
+           AND NOT EXISTS(
+             SELECT 1 FROM provider_installed_identity identity
+             WHERE identity.lineage_attempt_id=provider_install_lineage.attempt_id
+               AND identity.commit_nonce=provider_install_lineage.commit_nonce
+           )",
+        [attempt_id],
+    )?;
+    tx.commit()?;
+    let receipt_written = write_receipt(paths, attempt_id, &stage_root).is_ok();
+    Ok(ProviderIdentityCommitOutcome {
+        committed: true,
+        receipt_written,
+    })
+}
+
+fn load_provider_installed_identity(paths: &AppPaths) -> Result<Option<ProviderInstalledIdentity>> {
+    let conn = crate::db::open(paths)?;
+    crate::db::migrate(&conn)?;
+    match conn.query_row(
+        "SELECT lineage_attempt_id,commit_nonce,install_generation,
+                node_directory_identity,provider_directory_identity,
+                node_tree_sha256,provider_tree_sha256
+         FROM provider_installed_identity WHERE singleton=1",
+        [],
+        |row| {
+            Ok(ProviderInstalledIdentity {
+                lineage_attempt_id: row.get(0)?,
+                commit_nonce: row.get(1)?,
+                install_generation: row.get(2)?,
+                node_directory_identity: row.get(3)?,
+                provider_directory_identity: row.get(4)?,
+                node_tree_sha256: row.get(5)?,
+                provider_tree_sha256: row.get(6)?,
+            })
+        },
+    ) {
+        Ok(identity) => Ok(Some(identity)),
+        Err(rusqlite::Error::QueryReturnedNoRows) => Ok(None),
+        Err(error) => Err(error.into()),
+    }
+}
+
+fn invalidate_provider_installed_identity(paths: &AppPaths, operation: &str) -> Result<()> {
+    if !matches!(operation, "invalidate" | "uninstall") {
+        return Err(EngineError::InstallFailed(
+            "provider identity invalidation operation is invalid".to_string(),
+        ));
+    }
+    let mut conn = crate::db::open(paths)?;
+    crate::db::migrate(&conn)?;
+    let tx = conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+    let identity = match tx.query_row(
+        "SELECT lineage_attempt_id,commit_nonce FROM provider_installed_identity WHERE singleton=1",
+        [],
+        |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)),
+    ) {
+        Ok(value) => Some(value),
+        Err(rusqlite::Error::QueryReturnedNoRows) => None,
+        Err(error) => return Err(error.into()),
+    };
+    let Some((attempt_id, commit_nonce)) = identity else {
+        return Ok(());
+    };
+    tx.execute(
+        "INSERT INTO provider_installed_identity_mutation_guard(
+           singleton,lineage_attempt_id,commit_nonce,operation,created_at_ms
+         ) VALUES(1,?1,?2,?3,?4)",
+        rusqlite::params![attempt_id, commit_nonce, operation, now_ms()],
+    )?;
+    let deleted_identity = tx.execute(
+        "DELETE FROM provider_installed_identity
+         WHERE singleton=1 AND lineage_attempt_id=?1 AND commit_nonce=?2",
+        rusqlite::params![attempt_id, commit_nonce],
+    )?;
+    let deleted_lineage = tx.execute(
+        "DELETE FROM provider_install_lineage
+         WHERE attempt_id=?1 AND commit_nonce=?2 AND phase='committed'",
+        rusqlite::params![attempt_id, commit_nonce],
+    )?;
+    if deleted_identity != 1 || deleted_lineage != 1 {
+        return Err(EngineError::InstallFailed(
+            "provider governed invalidation lost its exact identity lineage".to_string(),
+        ));
+    }
+    tx.execute(
+        "DELETE FROM provider_installed_identity_mutation_guard WHERE singleton=1",
+        [],
+    )?;
+    tx.commit()?;
+    clear_provider_node_modules_process_attestation(&paths.youtube_po_provider_server_dir());
+    Ok(())
+}
+
+fn managed_provider_replacement_archive_root(paths: &AppPaths, attempt_id: &str) -> Result<PathBuf> {
+    if !valid_provider_attempt_id(attempt_id) {
+        return Err(EngineError::InstallFailed(
+            "provider replacement archive rejected an invalid attempt ID".to_string(),
+        ));
+    }
+    Ok(paths
+        .tools_dir()
+        .join(format!("youtube_po_provider_previous_{attempt_id}")))
+}
+
+fn prepare_governed_provider_replacement(
+    paths: &AppPaths,
+    attempt_id: &str,
+) -> Result<Option<ManagedProviderReplacementGuard>> {
+    let final_node = paths.node_runtime_dir();
+    let final_provider = paths.youtube_po_provider_dir();
+    if !final_node.exists() && !final_provider.exists() {
+        return Ok(None);
+    }
+    if !final_node.is_dir() || !final_provider.is_dir() {
+        return Err(EngineError::InstallFailed(
+            "provider replacement requires both exact managed final directories".to_string(),
+        ));
+    }
+    let identity = load_provider_installed_identity(paths)?.ok_or_else(|| {
+        EngineError::InstallFailed(
+            "provider replacement refused final directories without installed identity".to_string(),
+        )
+    })?;
+    authenticate_stored_managed_provider_identity_at(
+        paths,
+        &identity,
+        &final_node,
+        &final_provider,
+    )?;
+    let archive_root = managed_provider_replacement_archive_root(paths, attempt_id)?;
+    if archive_root.exists() {
+        return Err(EngineError::InstallFailed(
+            "provider replacement archive already exists for this attempt".to_string(),
+        ));
+    }
+    std::fs::create_dir(&archive_root)?;
+    let archived_node = archive_root.join("node");
+    let archived_provider = archive_root.join("provider");
+    std::fs::rename(&final_node, &archived_node)?;
+    if let Err(error) = std::fs::rename(&final_provider, &archived_provider) {
+        let _ = std::fs::rename(&archived_node, &final_node);
+        let _ = std::fs::remove_dir(&archive_root);
+        return Err(error.into());
+    }
+    if let Err(error) = authenticate_stored_managed_provider_identity_at(
+        paths,
+        &identity,
+        &archived_node,
+        &archived_provider,
+    ) {
+        let _ = std::fs::rename(&archived_provider, &final_provider);
+        let _ = std::fs::rename(&archived_node, &final_node);
+        let _ = std::fs::remove_dir(&archive_root);
+        return Err(error);
+    }
+    Ok(Some(ManagedProviderReplacementGuard {
+        final_node,
+        final_provider,
+        archived_node,
+        archived_provider,
+        armed: true,
+    }))
+}
+
+fn restore_governed_provider_replacement_if_present(
+    paths: &AppPaths,
+    attempt_id: &str,
+) -> Result<()> {
+    let archive_root = managed_provider_replacement_archive_root(paths, attempt_id)?;
+    if !archive_root.exists() {
+        return Ok(());
+    }
+    let final_node = paths.node_runtime_dir();
+    let final_provider = paths.youtube_po_provider_dir();
+    if final_node.exists() || final_provider.exists() {
+        return Err(EngineError::InstallFailed(
+            "provider replacement recovery refused to overwrite a managed final".to_string(),
+        ));
+    }
+    let archived_node = archive_root.join("node");
+    let archived_provider = archive_root.join("provider");
+    let identity = load_provider_installed_identity(paths)?.ok_or_else(|| {
+        EngineError::InstallFailed(
+            "provider replacement recovery has no prior installed identity".to_string(),
+        )
+    })?;
+    authenticate_stored_managed_provider_identity_at(
+        paths,
+        &identity,
+        &archived_node,
+        &archived_provider,
+    )?;
+    std::fs::rename(&archived_node, &final_node)?;
+    if let Err(error) = std::fs::rename(&archived_provider, &final_provider) {
+        let _ = std::fs::rename(&final_node, &archived_node);
+        return Err(error.into());
+    }
+    let _ = std::fs::remove_dir(archive_root);
+    Ok(())
+}
+
+fn load_provider_install_lineage(paths: &AppPaths) -> Result<Option<ProviderInstallLineage>> {
+    let conn = crate::db::open(paths)?;
+    crate::db::migrate(&conn)?;
+    let unresolved_lineage_count: i64 = conn.query_row(
+        "SELECT COUNT(*) FROM provider_install_lineage lineage
+         WHERE NOT EXISTS(
+           SELECT 1 FROM provider_installed_identity identity
+           WHERE identity.singleton=1
+             AND identity.lineage_attempt_id=lineage.attempt_id
+             AND identity.commit_nonce=lineage.commit_nonce
+             AND lineage.phase='committed'
+         )",
+        [],
+        |row| row.get(0),
+    )?;
+    let mut stmt = conn.prepare(
+        "SELECT lineage.attempt_id,lineage.stage_root,lineage.phase,
+                lineage.install_generation,lineage.ownership_token_digest,lineage.node_directory_identity,
+                lineage.provider_directory_identity,lineage.node_tree_sha256,
+                lineage.provider_tree_sha256,lineage.commit_nonce,
+                owner.owner_pid,owner.owner_process_identity
+         FROM provider_install_owner owner
+         JOIN provider_install_lineage lineage ON lineage.attempt_id=owner.attempt_id
+         WHERE owner.singleton=1",
+    )?;
+    let rows = stmt
+        .query_map([], |row| {
+            Ok(ProviderInstallLineage {
+                attempt_id: row.get(0)?,
+                stage_root: PathBuf::from(row.get::<_, String>(1)?),
+                phase: row.get(2)?,
+                install_generation: row.get(3)?,
+                ownership_token_digest: row.get(4)?,
+                node_directory_identity: row.get(5)?,
+                provider_directory_identity: row.get(6)?,
+                node_tree_sha256: row.get(7)?,
+                provider_tree_sha256: row.get(8)?,
+                commit_nonce: row.get(9)?,
+                owner_pid: row.get(10)?,
+                owner_process_identity: row.get(11)?,
+            })
+        })?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+    let single_settled_committed_owner = rows.len() == 1
+        && unresolved_lineage_count == 0
+        && rows[0].phase == "committed";
+    if rows.len() > 1
+        || (rows.is_empty() && unresolved_lineage_count != 0)
+        || (!rows.is_empty()
+            && unresolved_lineage_count != 1
+            && !single_settled_committed_owner)
+    {
+        return Err(EngineError::InstallFailed(
+            "provider install lineage has no unambiguous authoritative owner; explicit recovery is required"
+                .to_string(),
+        ));
+    }
+    Ok(rows.into_iter().next())
+}
+
+fn delete_provider_install_lineage(paths: &AppPaths, attempt_id: &str) -> Result<()> {
+    let conn = crate::db::open(paths)?;
+    crate::db::migrate(&conn)?;
+    conn.execute(
+        "DELETE FROM provider_install_lineage WHERE attempt_id=?1",
+        [attempt_id],
+    )?;
+    Ok(())
+}
+
+fn release_provider_install_owner(paths: &AppPaths, attempt_id: &str) -> Result<()> {
+    let mut conn = crate::db::open(paths)?;
+    crate::db::migrate(&conn)?;
+    let tx = conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+    let changed = tx.execute(
+        "DELETE FROM provider_install_owner
+         WHERE singleton=1 AND attempt_id=?1
+           AND EXISTS(
+             SELECT 1 FROM provider_install_lineage lineage
+             WHERE lineage.attempt_id=?1 AND lineage.phase='committed'
+               AND lineage.commit_nonce=provider_install_owner.commit_nonce
+           )",
+        [attempt_id],
+    )?;
+    if changed != 1 {
+        return Err(EngineError::InstallFailed(
+            "provider committed owner release lost its exact lineage".to_string(),
+        ));
+    }
+    tx.commit()?;
+    Ok(())
+}
+
+fn abort_prepublication_provider_install(paths: &AppPaths, attempt_id: &str) -> Result<()> {
+    let mut conn = crate::db::open(paths)?;
+    crate::db::migrate(&conn)?;
+    let tx = conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+    let state = match tx.query_row(
+        "SELECT lineage.stage_root,lineage.phase,owner.owner_pid,owner.owner_process_identity
+         FROM provider_install_owner owner
+         JOIN provider_install_lineage lineage ON lineage.attempt_id=owner.attempt_id
+         WHERE owner.singleton=1 AND owner.attempt_id=?1
+           AND owner.commit_nonce=lineage.commit_nonce",
+        [attempt_id],
+        |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, u32>(2)?,
+                row.get::<_, String>(3)?,
+            ))
+        },
+    ) {
+        Ok(value) => Some(value),
+        Err(rusqlite::Error::QueryReturnedNoRows) => None,
+        Err(error) => return Err(error.into()),
+    };
+    let Some((stage_root, phase, owner_pid, owner_process_identity)) = state else {
+        return Ok(());
+    };
+    if phase != "prepared"
+        || owner_pid != std::process::id()
+        || provider_process_identity(owner_pid).as_deref() != Some(owner_process_identity.as_str())
+    {
+        return Err(EngineError::InstallFailed(
+            "provider prepublication cleanup refused non-prepared or foreign owner".to_string(),
+        ));
+    }
+    tx.execute(
+        "DELETE FROM provider_install_owner WHERE singleton=1 AND attempt_id=?1",
+        [attempt_id],
+    )?;
+    tx.execute(
+        "DELETE FROM provider_install_lineage WHERE attempt_id=?1 AND phase='prepared'",
+        [attempt_id],
+    )?;
+    tx.commit()?;
+    let _ = std::fs::remove_file(provider_install_attempt_receipt_path(paths));
+    let stage_root = PathBuf::from(stage_root);
+    if stage_root.exists() {
+        let _ = std::fs::remove_dir_all(stage_root);
+    }
+    Ok(())
+}
+
+fn abort_owned_provider_install_after_complete_rollback(
+    paths: &AppPaths,
+    attempt_id: &str,
+) -> Result<()> {
+    let lineage = load_provider_install_lineage(paths)?.ok_or_else(|| {
+        EngineError::InstallFailed(
+            "provider rollback cleanup could not find its durable lineage".to_string(),
+        )
+    })?;
+    if lineage.attempt_id != attempt_id
+        || lineage.phase == "committed"
+        || lineage.owner_pid != std::process::id()
+        || provider_process_identity(lineage.owner_pid).as_deref()
+            != Some(lineage.owner_process_identity.as_str())
+    {
+        return Err(EngineError::InstallFailed(
+            "provider rollback cleanup refused committed or foreign ownership".to_string(),
+        ));
+    }
+    if paths.node_runtime_dir().exists() || paths.youtube_po_provider_dir().exists() {
+        return Err(EngineError::InstallFailed(
+            "provider rollback cleanup refused while a published destination remains".to_string(),
+        ));
+    }
+    let stage_root = validated_provider_stage_root(paths, attempt_id, &lineage.stage_root)?;
+    verify_published_directory_lineage(
+        &stage_root.join("node"),
+        &lineage.node_directory_identity,
+        &lineage.node_tree_sha256,
+        canonical_provider_node_tree_sha256_hex,
+        "rolled-back Node",
+    )?;
+    verify_published_directory_lineage(
+        &stage_root.join("provider"),
+        &lineage.provider_directory_identity,
+        &lineage.provider_tree_sha256,
+        canonical_provider_application_tree_sha256_hex,
+        "rolled-back provider",
+    )?;
+
+    let mut conn = crate::db::open(paths)?;
+    crate::db::migrate(&conn)?;
+    let tx = conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+    let owner_deleted = tx.execute(
+        "DELETE FROM provider_install_owner
+         WHERE singleton=1 AND attempt_id=?1 AND commit_nonce=?2",
+        rusqlite::params![attempt_id, lineage.commit_nonce],
+    )?;
+    let lineage_deleted = tx.execute(
+        "DELETE FROM provider_install_lineage
+         WHERE attempt_id=?1 AND commit_nonce=?2 AND phase<>'committed'",
+        rusqlite::params![attempt_id, lineage.commit_nonce],
+    )?;
+    if owner_deleted != 1 || lineage_deleted != 1 {
+        return Err(EngineError::InstallFailed(
+            "provider rollback cleanup lost its exact owner or lineage".to_string(),
+        ));
+    }
+    tx.commit()?;
+    let _ = std::fs::remove_file(provider_install_attempt_receipt_path(paths));
+    std::fs::remove_dir_all(stage_root)?;
+    Ok(())
+}
+
+fn provider_install_attempt_receipt_path(paths: &AppPaths) -> PathBuf {
+    paths
+        .tools_dir()
+        .join(".youtube_po_provider_install_attempt.json")
+}
+
+fn quarantine_or_remove_provider_install_receipt(paths: &AppPaths) {
+    let receipt = provider_install_attempt_receipt_path(paths);
+    if !receipt.exists() {
+        return;
+    }
+    let quarantine = paths.tools_dir().join(format!(
+        ".youtube_po_provider_install_attempt.orphan.{}.json",
+        uuid::Uuid::new_v4().simple()
+    ));
+    if std::fs::rename(&receipt, quarantine).is_err() {
+        let _ = std::fs::remove_file(receipt);
+    }
+}
+
+fn provider_attempt_marker(dir: &Path) -> PathBuf {
+    dir.join(".voxvulgi_provider_install_attempt")
+}
+
+fn write_provider_install_attempt_receipt(
+    paths: &AppPaths,
+    attempt_id: &str,
+    stage_root: &Path,
+    phase: &str,
+) -> Result<()> {
+    crate::persistence::atomic_write_text(
+        &provider_install_attempt_receipt_path(paths),
+        &format!(
+            "{}\n",
+            serde_json::to_string_pretty(&ProviderInstallAttemptReceipt {
+                attempt_id: attempt_id.to_string(),
+                stage_root: stage_root.to_path_buf(),
+                phase: phase.to_string(),
+            })?
+        ),
+    )?;
+    Ok(())
+}
+
+fn write_provider_ownership_marker(
+    dir: &Path,
+    attempt_id: &str,
+    ownership_token: &str,
+) -> Result<()> {
+    crate::persistence::atomic_write_text(
+        &provider_attempt_marker(dir),
+        &serde_json::to_string(&ProviderInstallOwnershipMarker {
+            schema_version: 2,
+            attempt_id: attempt_id.to_string(),
+            ownership_token: ownership_token.to_string(),
+        })?,
+    )?;
+    Ok(())
+}
+
+fn attempt_marker_matches(dir: &Path, lineage: &ProviderInstallLineage) -> bool {
+    std::fs::read(provider_attempt_marker(dir))
+        .ok()
+        .and_then(|bytes| serde_json::from_slice::<ProviderInstallOwnershipMarker>(&bytes).ok())
+        .is_some_and(|marker| {
+            marker.schema_version == 2
+                && marker.attempt_id == lineage.attempt_id
+                && !marker.ownership_token.is_empty()
+                && provider_ownership_token_digest(&marker.ownership_token)
+                    == lineage.ownership_token_digest
+        })
+}
+
+fn authenticate_published_node_payload_against(
+    paths: &AppPaths,
+    expected_node_sha256: &str,
+    expected_npm_sha256: &str,
+) -> Result<()> {
+    for (path, expected) in [
+        (paths.node_exe(), expected_node_sha256),
+        (paths.node_npm_cmd(), expected_npm_sha256),
+    ] {
+        let actual = file_sha256_hex(&path).ok_or_else(|| {
+            EngineError::InstallFailed(format!(
+                "published provider Node payload could not be authenticated: {}",
+                path.display()
+            ))
+        })?;
+        if !actual.eq_ignore_ascii_case(expected) {
+            return Err(EngineError::HashMismatch {
+                path,
+                expected: expected.to_string(),
+                actual,
+            });
+        }
+    }
+    Ok(())
+}
+
+fn authenticate_published_node_payload(paths: &AppPaths) -> Result<()> {
+    let pin = &pinned_dependency_manifest::manifest().node_windows;
+    authenticate_published_node_payload_against(
+        paths,
+        &pin.node_exe_sha256_hex,
+        &pin.npm_cmd_sha256_hex,
+    )
+}
+
+struct PublishedProviderIdentity<'a> {
+    plugin_archive_sha256: &'a str,
+    plugin_files_sha256: &'a std::collections::BTreeMap<String, String>,
+    plugin_tree_sha256: &'a str,
+    server_entrypoint_sha256: &'a str,
+    derived_lock_sha256: &'a str,
+    node_modules_tree_sha256: &'a str,
+}
+
+fn authenticate_published_provider_payload_against(
+    paths: &AppPaths,
+    expected: &PublishedProviderIdentity<'_>,
+) -> Result<String> {
+    let plugin_dir = paths.youtube_po_provider_plugin_dir();
+    let server_dir = paths.youtube_po_provider_server_dir();
+
+    let plugin_marker = std::fs::read_to_string(plugin_dir.join(".plugin_archive_sha256"))
+        .map_err(|_| {
+            EngineError::InstallFailed(
+                "published provider plugin archive identity is missing".to_string(),
+            )
+        })?;
+    if !plugin_marker
+        .trim()
+        .eq_ignore_ascii_case(expected.plugin_archive_sha256)
+    {
+        return Err(EngineError::HashMismatch {
+            path: plugin_dir.join(".plugin_archive_sha256"),
+            expected: expected.plugin_archive_sha256.to_string(),
+            actual: plugin_marker.trim().to_string(),
+        });
+    }
+    let plugin_tree = provider_plugin_tree_sha256_hex(&plugin_dir, expected.plugin_files_sha256)
+        .ok_or_else(|| {
+            EngineError::InstallFailed(
+                "published provider plugin tree could not be authenticated".to_string(),
+            )
+        })?;
+    if !plugin_tree.eq_ignore_ascii_case(expected.plugin_tree_sha256) {
+        return Err(EngineError::HashMismatch {
+            path: plugin_dir,
+            expected: expected.plugin_tree_sha256.to_string(),
+            actual: plugin_tree,
+        });
+    }
+
+    for (path, expected) in [
+        (
+            paths.youtube_po_provider_entrypoint(),
+            expected.server_entrypoint_sha256,
+        ),
+        (
+            server_dir.join("package-lock.json"),
+            expected.derived_lock_sha256,
+        ),
+    ] {
+        let actual = file_sha256_hex(&path).ok_or_else(|| {
+            EngineError::InstallFailed(format!(
+                "published provider payload could not be authenticated: {}",
+                path.display()
+            ))
+        })?;
+        if !actual.eq_ignore_ascii_case(expected) {
+            return Err(EngineError::HashMismatch {
+                path,
+                expected: expected.to_string(),
+                actual,
+            });
+        }
+    }
+
+    let audit_marker =
+        std::fs::read_to_string(server_dir.join(".production_audit_zero")).map_err(|_| {
+            EngineError::InstallFailed(
+                "published provider security-audit identity is missing".to_string(),
+            )
+        })?;
+    if audit_marker.trim() != expected.derived_lock_sha256 {
+        return Err(EngineError::InstallFailed(
+            "published provider security-audit identity does not match the reviewed lock"
+                .to_string(),
+        ));
+    }
+    let package = std::fs::read(server_dir.join("package.json"))
+        .ok()
+        .and_then(|bytes| serde_json::from_slice::<serde_json::Value>(&bytes).ok())
+        .ok_or_else(|| {
+            EngineError::InstallFailed(
+                "published provider package manifest could not be authenticated".to_string(),
+            )
+        })?;
+    if !provider_lifecycle_allowlist_is_exact(&package)
+        || !installed_provider_lifecycle_packages_are_exact(&server_dir)
+    {
+        return Err(EngineError::InstallFailed(
+            "published provider lifecycle-package identities are not the reviewed set".to_string(),
+        ));
+    }
+    authenticate_provider_node_modules_tree(
+        &server_dir.join("node_modules"),
+        expected.node_modules_tree_sha256,
+    )
+}
+
+fn authenticate_published_provider_payload(paths: &AppPaths) -> Result<String> {
+    let pin = &pinned_dependency_manifest::manifest().youtube_po_provider;
+    authenticate_published_provider_payload_against(
+        paths,
+        &PublishedProviderIdentity {
+            plugin_archive_sha256: &pin.plugin_sha256_hex,
+            plugin_files_sha256: &pin.plugin_files_sha256,
+            plugin_tree_sha256: &pin.plugin_tree_sha256_hex,
+            server_entrypoint_sha256: &pin.server_entrypoint_sha256_hex,
+            derived_lock_sha256: &pin.derived_lock_sha256_hex,
+            node_modules_tree_sha256: &pin.node_modules_tree_sha256_hex,
+        },
+    )
+}
+
+fn verify_published_directory_lineage(
+    path: &Path,
+    expected_directory_identity: &str,
+    expected_tree_sha256: &str,
+    tree_hash: fn(&Path) -> Option<String>,
+    label: &str,
+) -> Result<()> {
+    if expected_directory_identity.is_empty() || expected_tree_sha256.is_empty() {
+        return Err(EngineError::InstallFailed(format!(
+            "{label} recovery lineage is not sealed with directory and complete-tree identity"
+        )));
+    }
+    let actual_directory_identity = provider_directory_identity(path)?;
+    if actual_directory_identity != expected_directory_identity {
+        return Err(EngineError::InstallFailed(format!(
+            "{label} published directory is a different filesystem object than the sealed staging directory"
+        )));
+    }
+    let actual_tree = tree_hash(path).ok_or_else(|| {
+        EngineError::InstallFailed(format!(
+            "{label} complete published tree could not be authenticated"
+        ))
+    })?;
+    if !actual_tree.eq_ignore_ascii_case(expected_tree_sha256) {
+        return Err(EngineError::HashMismatch {
+            path: path.to_path_buf(),
+            expected: expected_tree_sha256.to_string(),
+            actual: actual_tree,
+        });
+    }
+    Ok(())
+}
+
+fn authenticate_committed_provider_install(
+    paths: &AppPaths,
+    lineage: &ProviderInstallLineage,
+) -> Result<()> {
+    verify_published_directory_lineage(
+        &paths.node_runtime_dir(),
+        &lineage.node_directory_identity,
+        &lineage.node_tree_sha256,
+        canonical_provider_node_tree_sha256_hex,
+        "Node",
+    )?;
+    verify_published_directory_lineage(
+        &paths.youtube_po_provider_dir(),
+        &lineage.provider_directory_identity,
+        &lineage.provider_tree_sha256,
+        canonical_provider_application_tree_sha256_hex,
+        "provider",
+    )?;
+    let installed_identity = load_provider_installed_identity(paths)?.ok_or_else(|| {
+        EngineError::InstallFailed(
+            "committed provider lineage has no authoritative installed identity".to_string(),
+        )
+    })?;
+    if lineage.install_generation != provider_install_generation()
+        || installed_identity.install_generation != lineage.install_generation
+        || installed_identity.lineage_attempt_id != lineage.attempt_id
+        || installed_identity.commit_nonce != lineage.commit_nonce
+        || installed_identity.node_directory_identity != lineage.node_directory_identity
+        || installed_identity.provider_directory_identity != lineage.provider_directory_identity
+        || installed_identity.node_tree_sha256 != lineage.node_tree_sha256
+        || installed_identity.provider_tree_sha256 != lineage.provider_tree_sha256
+    {
+        return Err(EngineError::InstallFailed(
+            "committed provider installed identity does not match its exact lineage".to_string(),
+        ));
+    }
+    authenticate_published_node_payload(paths)?;
+    let server_dir = paths.youtube_po_provider_server_dir();
+    let actual = authenticate_published_provider_payload(paths)?;
+    attest_provider_node_modules_tree(&server_dir, &actual)?;
+    let status = youtube_po_provider_install_status(paths);
+    if status.installed {
+        Ok(())
+    } else {
+        clear_provider_node_modules_process_attestation(&server_dir);
+        Err(EngineError::InstallFailed(
+            status.readiness_error.unwrap_or_else(|| {
+                "committed provider payload failed full authoritative readiness validation"
+                    .to_string()
+            }),
+        ))
+    }
+}
+
+fn reconcile_interrupted_provider_install_with_checks<N, P, C>(
+    paths: &AppPaths,
+    authenticate_node: N,
+    authenticate_provider: P,
+    authenticate_committed: C,
+    owner_is_live: impl Fn(&ProviderInstallLineage) -> bool,
+) -> Result<()>
+where
+    N: Fn(&AppPaths) -> Result<()>,
+    P: Fn(&AppPaths) -> Result<()>,
+    C: Fn(&AppPaths, &ProviderInstallLineage) -> Result<()>,
+{
+    let receipt_path = provider_install_attempt_receipt_path(paths);
+    let Some(lineage) = load_provider_install_lineage(paths)? else {
+        if receipt_path.exists() {
+            quarantine_or_remove_provider_install_receipt(paths);
+        }
+        return Ok(());
+    };
+    let stage_root =
+        validated_provider_stage_root(paths, &lineage.attempt_id, &lineage.stage_root)?;
+    if !PROVIDER_INSTALL_PHASES.contains(&lineage.phase.as_str()) {
+        return Err(EngineError::InstallFailed(
+            "provider install database lineage has an invalid phase".to_string(),
+        ));
+    }
+    if owner_is_live(&lineage) {
+        return Err(EngineError::InstallFailed(
+            "provider install recovery refused because the durable owner process is still alive"
+                .to_string(),
+        ));
+    }
+    if receipt_path.exists() {
+        let receipt_matches = std::fs::read(&receipt_path)
+            .ok()
+            .and_then(|bytes| serde_json::from_slice::<ProviderInstallAttemptReceipt>(&bytes).ok())
+            .is_some_and(|receipt| {
+                receipt.attempt_id == lineage.attempt_id
+                    && receipt.stage_root == stage_root
+                    && PROVIDER_INSTALL_PHASES.contains(&receipt.phase.as_str())
+            });
+        if !receipt_matches {
+            quarantine_or_remove_provider_install_receipt(paths);
+        }
+    }
+    if lineage.phase == "committed" {
+        authenticate_committed(paths, &lineage)?;
+        let _ = std::fs::remove_file(provider_attempt_marker(&paths.node_runtime_dir()));
+        let _ = std::fs::remove_file(provider_attempt_marker(&paths.youtube_po_provider_dir()));
+        let _ = std::fs::remove_file(&receipt_path);
+        if stage_root.exists() {
+            std::fs::remove_dir_all(&stage_root)?;
+        }
+        release_provider_install_owner(paths, &lineage.attempt_id)?;
+        return Ok(());
+    }
+    let node_authorized = matches!(
+        lineage.phase.as_str(),
+        "node_publish_intent" | "node_published" | "provider_publish_intent" | "provider_published"
+    );
+    let provider_authorized = matches!(
+        lineage.phase.as_str(),
+        "provider_publish_intent" | "provider_published"
+    );
+    let publications = [
+        (
+            paths.node_runtime_dir(),
+            stage_root.join("node"),
+            "Node",
+            node_authorized,
+        ),
+        (
+            paths.youtube_po_provider_dir(),
+            stage_root.join("provider"),
+            "provider",
+            provider_authorized,
+        ),
+    ];
+    // Validate every published candidate before moving any bytes. A later invalid/ambiguous
+    // directory must not leave an earlier valid directory partially rolled back.
+    for (published, staged, label, phase_authorized) in &publications {
+        if !published.exists() {
+            continue;
+        }
+        if !phase_authorized {
+            return Err(EngineError::InstallFailed(format!(
+                "refusing to recover {label}: phase {} does not authorize this published directory",
+                lineage.phase
+            )));
+        }
+        if !attempt_marker_matches(&published, &lineage) {
+            return Err(EngineError::InstallFailed(format!(
+                "refusing to recover {label}: published directory is not owned by attempt {}",
+                lineage.attempt_id
+            )));
+        }
+        match *label {
+            "Node" => {
+                verify_published_directory_lineage(
+                    published,
+                    &lineage.node_directory_identity,
+                    &lineage.node_tree_sha256,
+                    canonical_provider_node_tree_sha256_hex,
+                    "Node",
+                )?;
+                authenticate_node(paths)?;
+            }
+            "provider" => {
+                verify_published_directory_lineage(
+                    published,
+                    &lineage.provider_directory_identity,
+                    &lineage.provider_tree_sha256,
+                    canonical_provider_application_tree_sha256_hex,
+                    "provider",
+                )?;
+                authenticate_provider(paths)?;
+            }
+            _ => unreachable!("fixed provider publication label"),
+        }
+        if staged.exists() {
+            return Err(EngineError::InstallFailed(format!(
+                "refusing to recover {label}: both staged and published attempt directories exist"
+            )));
+        }
+    }
+    std::fs::create_dir_all(&stage_root)?;
+    for (published, staged, _, _) in &publications {
+        if !published.exists() {
+            continue;
+        }
+        std::fs::rename(&published, &staged)?;
+    }
+    restore_governed_provider_replacement_if_present(paths, &lineage.attempt_id)?;
+    std::fs::remove_dir_all(&stage_root)?;
+    if receipt_path.exists() {
+        std::fs::remove_file(receipt_path)?;
+    }
+    delete_provider_install_lineage(paths, &lineage.attempt_id)?;
+    Ok(())
+}
+
+fn reconcile_interrupted_provider_install(paths: &AppPaths) -> Result<()> {
+    reconcile_interrupted_provider_install_with_checks(
+        paths,
+        authenticate_published_node_payload,
+        |paths| authenticate_published_provider_payload(paths).map(|_| ()),
+        authenticate_committed_provider_install,
+        |lineage| {
+            provider_process_identity(lineage.owner_pid).as_deref()
+                == Some(lineage.owner_process_identity.as_str())
+        },
+    )
+}
+
+impl AttemptDirectoryGuard {
+    fn new(path: PathBuf) -> Self {
+        Self { path, armed: true }
+    }
+
+    fn finish(mut self) -> Result<()> {
+        if self.path.exists() {
+            std::fs::remove_dir_all(&self.path)?;
+        }
+        self.armed = false;
+        Ok(())
+    }
+}
+
+impl Drop for AttemptDirectoryGuard {
+    fn drop(&mut self) {
+        if self.armed {
+            let _ = std::fs::remove_dir_all(&self.path);
+        }
+    }
+}
+
+fn rollback_attempt_owned_publish(
+    final_node: &Path,
+    node_stage: &Path,
+    final_provider: &Path,
+    provider_stage: &Path,
+) -> Result<()> {
+    let mut failures = Vec::new();
+    for (published, staged, label) in [
+        (final_provider, provider_stage, "provider"),
+        (final_node, node_stage, "Node"),
+    ] {
+        if !published.exists() {
+            continue;
+        }
+        if staged.exists() {
+            failures.push(format!("{label} staging destination unexpectedly exists"));
+            continue;
+        }
+        if let Err(error) = std::fs::rename(published, staged) {
+            failures.push(format!("could not roll back {label}: {error}"));
+        }
+    }
+    if failures.is_empty() {
+        Ok(())
+    } else {
+        Err(EngineError::InstallFailed(failures.join("; ")))
+    }
+}
+
+fn publish_provider_pair_with_checks<B, F, R>(
+    node_stage: &Path,
+    provider_stage: &Path,
+    final_node: &Path,
+    final_provider: &Path,
+    before_node_publish: B,
+    before_provider_publish: F,
+    readiness: R,
+) -> Result<()>
+where
+    B: FnOnce() -> Result<()>,
+    F: FnOnce() -> Result<()>,
+    R: FnOnce() -> Result<()>,
+{
+    if final_node.exists() || final_provider.exists() {
+        return Err(EngineError::InstallFailed(
+            "refusing to overwrite an existing provider payload; prepare into a fresh offline staging root"
+                .to_string(),
+        ));
+    }
+    before_node_publish()?;
+    std::fs::rename(node_stage, final_node)?;
+    let publish_result = before_provider_publish()
+        .and_then(|_| std::fs::rename(provider_stage, final_provider).map_err(EngineError::from));
+    if let Err(error) = publish_result {
+        let rollback =
+            rollback_attempt_owned_publish(final_node, node_stage, final_provider, provider_stage);
+        return match rollback {
+            Ok(()) => Err(error),
+            Err(rollback_error) => Err(EngineError::InstallFailed(format!(
+                "provider pair publication failed: {error}; rollback also failed: {rollback_error}"
+            ))),
+        };
+    }
+    if let Err(error) = readiness() {
+        let rollback =
+            rollback_attempt_owned_publish(final_node, node_stage, final_provider, provider_stage);
+        return match rollback {
+            Ok(()) => Err(error),
+            Err(rollback_error) => Err(EngineError::InstallFailed(format!(
+                "provider readiness failed: {error}; rollback also failed: {rollback_error}"
+            ))),
+        };
+    }
+    Ok(())
+}
+
+#[cfg(windows)]
+pub fn install_youtube_po_provider(paths: &AppPaths) -> Result<YoutubePoProviderInstallStatus> {
+    let _lifecycle_guard = youtube_po_provider_lifecycle_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    paths.ensure_dirs()?;
+    // This guard covers recovery as well as claim/download/publication. Without it, a second
+    // process can observe the first process's durable owner and incorrectly "recover" a live
+    // attempt by deleting its staging tree before the singleton claim is reached.
+    let _interprocess_guard = acquire_youtube_po_provider_install_interprocess_lock(
+        paths,
+        YOUTUBE_PO_PROVIDER_INSTALL_LOCK_TIMEOUT_MS,
+    )?;
+    reconcile_interrupted_provider_install(paths)?;
+    if paths.node_runtime_dir().exists() || paths.youtube_po_provider_dir().exists() {
+        let legacy_or_absent = load_provider_installed_identity(paths)?.is_none_or(|identity| {
+            identity.lineage_attempt_id.is_empty() && identity.commit_nonce.is_empty()
+        });
+        if legacy_or_absent {
+            // A v47/fresh-profile identity is never accepted in place. Exact executable-pinned
+            // final bytes are first bound through the legal v48 transaction, after which the
+            // ordinary governed replacement protocol can preserve them during a reinstall.
+            adopt_embedded_complete_provider_payload(paths)?;
+        }
+    }
+    clear_provider_node_modules_process_attestation(&paths.youtube_po_provider_server_dir());
+    let manifest = pinned_dependency_manifest::manifest();
+    let node_pin = &manifest.node_windows;
+    let provider_pin = &manifest.youtube_po_provider;
+    let attempt_id = uuid::Uuid::new_v4().to_string();
+    let ownership_token = format!(
+        "{}{}",
+        uuid::Uuid::new_v4().simple(),
+        uuid::Uuid::new_v4().simple()
+    );
+    let ownership_token_digest = provider_ownership_token_digest(&ownership_token);
+    let commit_nonce = random_provider_authority_nonce();
+    let stage_root = paths
+        .tools_dir()
+        .join(format!("youtube_po_provider_stage_{attempt_id}"));
+    // The SQLite singleton is acquired before staging or network work and remains the durable
+    // ownership record. The named mutex above prevents another live process from misclassifying
+    // that owner as an interrupted attempt while this installation is still running.
+    claim_provider_install_owner(
+        paths,
+        &attempt_id,
+        &stage_root,
+        &ownership_token_digest,
+        &commit_nonce,
+    )?;
+    let mut operation_guard = ProviderInstallOperationGuard::new(paths, &attempt_id);
+    let replacement_guard = prepare_governed_provider_replacement(paths, &attempt_id)?;
+    let node_stage = stage_root.join("node");
+    let provider_stage = stage_root.join("provider");
+    let plugin_stage = provider_stage.join("plugin");
+    let server_stage = provider_stage.join("server");
+    std::fs::create_dir_all(&stage_root)?;
+    let stage_guard = AttemptDirectoryGuard::new(stage_root.clone());
+
+    let node_zip = stage_root.join("node.zip");
+    download_verified_file(
+        &node_pin.url,
+        &node_zip,
+        node_pin.file_bytes,
+        &node_pin.sha256_hex,
+        "Node LTS",
+    )?;
+    extract_zip_strip_prefix(
+        &node_zip,
+        &node_stage,
+        &format!("node-v{}-win-x64/", node_pin.version),
+    )?;
+    for (path, expected) in [
+        (
+            node_stage.join("node.exe"),
+            node_pin.node_exe_sha256_hex.as_str(),
+        ),
+        (
+            node_stage.join("npm.cmd"),
+            node_pin.npm_cmd_sha256_hex.as_str(),
+        ),
+    ] {
+        let actual = file_sha256_hex(&path).unwrap_or_default();
+        if !actual.eq_ignore_ascii_case(expected) {
+            return Err(EngineError::HashMismatch {
+                path,
+                expected: expected.to_string(),
+                actual,
+            });
+        }
+    }
+    let node_version = tool_version_first_line_with_arg(&node_stage.join("node.exe"), "--version")
+        .ok_or_else(|| {
+            EngineError::InstallFailed("pinned Node executable is not runnable".to_string())
+        })?;
+    if node_version.trim_start_matches('v') != node_pin.version {
+        return Err(EngineError::InstallFailed(format!(
+            "pinned Node version mismatch: expected {}, got {}",
+            node_pin.version, node_version
+        )));
+    }
+    let npm_version = tool_version_first_line_with_arg(&node_stage.join("npm.cmd"), "--version")
+        .ok_or_else(|| {
+            EngineError::InstallFailed("pinned npm executable is not runnable".to_string())
+        })?;
+    if npm_version != node_pin.npm_version {
+        return Err(EngineError::InstallFailed(format!(
+            "pinned npm version mismatch: expected {}, got {npm_version}",
+            node_pin.npm_version
+        )));
+    }
+
+    let plugin_zip = stage_root.join("provider_plugin.zip");
+    download_verified_file(
+        &provider_pin.plugin_url,
+        &plugin_zip,
+        provider_pin.plugin_file_bytes,
+        &provider_pin.plugin_sha256_hex,
+        "yt-dlp PO provider plugin",
+    )?;
+    std::fs::create_dir_all(&plugin_stage)?;
+    extract_zip_strip_prefix(&plugin_zip, &plugin_stage, "")?;
+    let extracted_plugin_tree =
+        provider_plugin_tree_sha256_hex(&plugin_stage, &provider_pin.plugin_files_sha256)
+            .ok_or_else(|| {
+                EngineError::InstallFailed(
+                    "extracted PO provider plugin tree does not match the exact reviewed file set"
+                        .to_string(),
+                )
+            })?;
+    if !extracted_plugin_tree.eq_ignore_ascii_case(&provider_pin.plugin_tree_sha256_hex) {
+        return Err(EngineError::HashMismatch {
+            path: plugin_stage.clone(),
+            expected: provider_pin.plugin_tree_sha256_hex.clone(),
+            actual: extracted_plugin_tree,
+        });
+    }
+
+    let source_zip = stage_root.join("provider_source.zip");
+    download_verified_file(
+        &provider_pin.source_url,
+        &source_zip,
+        provider_pin.source_file_bytes,
+        &provider_pin.source_sha256_hex,
+        "PO provider source",
+    )?;
+    std::fs::create_dir_all(&server_stage)?;
+    extract_zip_strip_prefix(
+        &source_zip,
+        &server_stage,
+        &format!(
+            "bgutil-ytdlp-pot-provider-{}/server/",
+            provider_pin.source_commit
+        ),
+    )?;
+    patch_po_provider_for_localhost(&server_stage)?;
+
+    let lock_path = server_stage.join("package-lock.json");
+    let embedded_lock = pinned_dependency_manifest::YOUTUBE_PO_PROVIDER_DERIVED_LOCK;
+    if !provider_lock_matches_manifest(
+        embedded_lock.as_bytes(),
+        &provider_pin.derived_lock_sha256_hex,
+    ) || !provider_lock_lifecycle_packages_are_exact(embedded_lock.as_bytes())
+    {
+        return Err(EngineError::InstallFailed(
+            "embedded provider dependency lock failed its manifest hash or exact lifecycle-package policy"
+                .to_string(),
+        ));
+    }
+    crate::persistence::atomic_write_text(&lock_path, embedded_lock)?;
+    let lock_hash = file_sha256_hex(&lock_path).unwrap_or_default();
+    if !lock_hash.eq_ignore_ascii_case(&provider_pin.derived_lock_sha256_hex) {
+        return Err(EngineError::HashMismatch {
+            path: lock_path,
+            expected: provider_pin.derived_lock_sha256_hex.clone(),
+            actual: lock_hash,
+        });
+    }
+    let audit = require_success(
+        run_provider_npm(
+            &node_stage,
+            &server_stage,
+            &["audit", "--omit=dev", "--json"],
+        )?,
+        "provider production dependency audit",
+    )?;
+    let audit_json: serde_json::Value = serde_json::from_slice(&audit.stdout).map_err(|error| {
+        EngineError::InstallFailed(format!("provider audit returned invalid JSON: {error}"))
+    })?;
+    let vulnerability_total = audit_json
+        .pointer("/metadata/vulnerabilities/total")
+        .and_then(serde_json::Value::as_u64)
+        .unwrap_or(u64::MAX);
+    if vulnerability_total != 0 {
+        return Err(EngineError::InstallFailed(format!(
+            "provider production audit reported {vulnerability_total} vulnerabilities"
+        )));
+    }
+    require_success(
+        run_provider_npm(&node_stage, &server_stage, &provider_npm_ci_args())?,
+        "provider reproducible npm install",
+    )?;
+    if !installed_provider_lifecycle_packages_are_exact(&server_stage) {
+        return Err(EngineError::InstallFailed(
+            "installed provider lifecycle-package identities do not match the reviewed lock"
+                .to_string(),
+        ));
+    }
+    require_success(
+        run_provider_npm(
+            &node_stage,
+            &server_stage,
+            &["rebuild", "canvas", "--ignore-scripts=false"],
+        )?,
+        "reviewed canvas lifecycle build",
+    )?;
+    require_success(
+        crate::cmd::command(
+            server_stage
+                .join("node_modules")
+                .join(".bin")
+                .join("tsc.cmd"),
+        )
+        .current_dir(&server_stage)
+        .output()
+        .map_err(|error| {
+            EngineError::InstallFailed(format!(
+                "provider TypeScript compiler failed to start: {error}"
+            ))
+        })?,
+        "provider TypeScript build",
+    )?;
+    require_success(
+        run_provider_npm(
+            &node_stage,
+            &server_stage,
+            &["prune", "--omit=dev", "--ignore-scripts"],
+        )?,
+        "provider production dependency prune",
+    )?;
+    // npm is allowed to normalize package-lock.json during prune. The installed production
+    // tree is audited below, while the durable lock remains the exact reviewed repo resource.
+    crate::persistence::atomic_write_text(&lock_path, embedded_lock)?;
+    let restored_lock_hash = file_sha256_hex(&lock_path).unwrap_or_default();
+    if !restored_lock_hash.eq_ignore_ascii_case(&provider_pin.derived_lock_sha256_hex) {
+        return Err(EngineError::HashMismatch {
+            path: lock_path.clone(),
+            expected: provider_pin.derived_lock_sha256_hex.clone(),
+            actual: restored_lock_hash,
+        });
+    }
+    let installed_audit = require_success(
+        run_provider_npm(
+            &node_stage,
+            &server_stage,
+            &["audit", "--omit=dev", "--json"],
+        )?,
+        "installed provider production dependency audit",
+    )?;
+    let installed_audit_json: serde_json::Value = serde_json::from_slice(&installed_audit.stdout)
+        .map_err(|error| {
+        EngineError::InstallFailed(format!(
+            "installed provider audit returned invalid JSON: {error}"
+        ))
+    })?;
+    let installed_vulnerability_total = installed_audit_json
+        .pointer("/metadata/vulnerabilities/total")
+        .and_then(serde_json::Value::as_u64)
+        .unwrap_or(u64::MAX);
+    if installed_vulnerability_total != 0 {
+        return Err(EngineError::InstallFailed(format!(
+            "installed provider production audit reported {installed_vulnerability_total} vulnerabilities"
+        )));
+    }
+    let installed_node_modules_tree = authenticate_provider_node_modules_tree(
+        &server_stage.join("node_modules"),
+        &provider_pin.node_modules_tree_sha256_hex,
+    )?;
+    if !server_stage.join("build").join("main.js").exists() {
+        return Err(EngineError::InstallFailed(
+            "provider build did not produce build/main.js".to_string(),
+        ));
+    }
+    let built_entrypoint = server_stage.join("build").join("main.js");
+    let built_entrypoint_hash = file_sha256_hex(&built_entrypoint).unwrap_or_default();
+    if !built_entrypoint_hash.eq_ignore_ascii_case(&provider_pin.server_entrypoint_sha256_hex) {
+        return Err(EngineError::HashMismatch {
+            path: built_entrypoint,
+            expected: provider_pin.server_entrypoint_sha256_hex.clone(),
+            actual: built_entrypoint_hash,
+        });
+    }
+    require_success(
+        crate::cmd::command(node_stage.join("node.exe"))
+            .args([
+                "-e",
+                "const c=require('canvas'); if(typeof c.createCanvas!=='function') process.exit(2); c.createCanvas(1,1).toBuffer();",
+            ])
+            .current_dir(&server_stage)
+            .output()
+            .map_err(|error| {
+                EngineError::InstallFailed(format!(
+                    "provider canvas smoke probe failed to start: {error}"
+                ))
+            })?,
+        "provider canvas smoke probe",
+    )?;
+    let provider_version_probe = require_success(
+        crate::cmd::command(node_stage.join("node.exe"))
+            .arg(server_stage.join("build").join("generate_once.js"))
+            .arg("--version")
+            .current_dir(&server_stage)
+            .output()
+            .map_err(|error| {
+                EngineError::InstallFailed(format!(
+                    "provider version probe failed to start: {error}"
+                ))
+            })?,
+        "provider generator version probe",
+    )?;
+    if String::from_utf8_lossy(&provider_version_probe.stdout).trim() != provider_pin.version {
+        return Err(EngineError::InstallFailed(
+            "provider executable version did not match the pinned source".to_string(),
+        ));
+    }
+    crate::persistence::atomic_write_text(
+        &server_stage.join(".production_audit_zero"),
+        &format!("{}\n", provider_pin.derived_lock_sha256_hex),
+    )?;
+    crate::persistence::atomic_write_text(
+        &plugin_stage.join(".plugin_archive_sha256"),
+        &format!("{}\n", provider_pin.plugin_sha256_hex),
+    )?;
+    write_provider_ownership_marker(&node_stage, &attempt_id, &ownership_token)?;
+    write_provider_ownership_marker(&provider_stage, &attempt_id, &ownership_token)?;
+    let node_directory_identity = provider_directory_identity(&node_stage)?;
+    let provider_directory_identity = provider_directory_identity(&provider_stage)?;
+    let node_tree_sha256 =
+        canonical_provider_node_tree_sha256_hex(&node_stage).ok_or_else(|| {
+            EngineError::InstallFailed(
+                "complete pinned-derived Node distribution tree could not be sealed".to_string(),
+            )
+        })?;
+    let provider_tree_sha256 = canonical_provider_application_tree_sha256_hex(&provider_stage)
+        .ok_or_else(|| {
+            EngineError::InstallFailed(
+                "complete pinned-derived provider application tree could not be sealed".to_string(),
+            )
+        })?;
+    seal_provider_install_lineage(
+        paths,
+        &attempt_id,
+        &stage_root,
+        &ownership_token_digest,
+        &node_directory_identity,
+        &provider_directory_identity,
+        &node_tree_sha256,
+        &provider_tree_sha256,
+    )?;
+    persist_provider_install_lineage(paths, &attempt_id, &stage_root, "prepared")?;
+
+    let final_node = paths.node_runtime_dir();
+    let final_provider = paths.youtube_po_provider_dir();
+    if let Some(parent) = final_node.parent() {
+        std::fs::create_dir_all(parent).map_err(|error| {
+            EngineError::InstallFailed(format!(
+                "could not prepare the managed Node publication parent {}: {error}",
+                parent.display()
+            ))
+        })?;
+    }
+    // The operation guard remains armed until the first publication intent is durably committed.
+    // A DB/callback failure here is still prepublication and must release the owner for immediate
+    // same-process retry instead of manufacturing a live prepared owner that recovery refuses.
+    enter_durable_provider_publication(&mut operation_guard, || {
+        persist_provider_install_lineage(paths, &attempt_id, &stage_root, "node_publish_intent")
+    })?;
+    let publish_result = publish_provider_pair_with_checks(
+        &node_stage,
+        &provider_stage,
+        &final_node,
+        &final_provider,
+        || Ok(()),
+        || {
+            persist_provider_install_lineage(paths, &attempt_id, &stage_root, "node_published")?;
+            persist_provider_install_lineage(
+                paths,
+                &attempt_id,
+                &stage_root,
+                "provider_publish_intent",
+            )
+        },
+        || {
+            persist_provider_install_lineage(
+                paths,
+                &attempt_id,
+                &stage_root,
+                "provider_published",
+            )?;
+            // Publication changes the executable identity boundary. Re-authenticate the final
+            // bytes after both attempt-owned directories are in place; only this exact result
+            // may seed the current-process attestation used by readiness and launch.
+            let final_tree = authenticate_provider_node_modules_tree(
+                &paths.youtube_po_provider_server_dir().join("node_modules"),
+                &installed_node_modules_tree,
+            )?;
+            attest_provider_node_modules_tree(
+                &paths.youtube_po_provider_server_dir(),
+                &final_tree,
+            )?;
+            let status = youtube_po_provider_install_status(paths);
+            if status.installed {
+                verify_published_directory_lineage(
+                    &paths.node_runtime_dir(),
+                    &node_directory_identity,
+                    &node_tree_sha256,
+                    canonical_provider_node_tree_sha256_hex,
+                    "Node",
+                )?;
+                verify_published_directory_lineage(
+                    &paths.youtube_po_provider_dir(),
+                    &provider_directory_identity,
+                    &provider_tree_sha256,
+                    canonical_provider_application_tree_sha256_hex,
+                    "provider",
+                )?;
+                let committed =
+                    commit_provider_installed_identity(paths, &attempt_id, &stage_root)?;
+                if !committed.committed {
+                    return Err(EngineError::InstallFailed(
+                        "provider identity commit did not reach its terminal DB state".to_string(),
+                    ));
+                }
+                Ok(())
+            } else {
+                Err(EngineError::InstallFailed(
+                    status
+                        .readiness_error
+                        .unwrap_or_else(|| "provider readiness failed after install".to_string()),
+                ))
+            }
+        },
+    );
+    if let Err(error) = publish_result {
+        clear_provider_node_modules_process_attestation(&paths.youtube_po_provider_server_dir());
+        let _ = std::fs::remove_file(provider_install_attempt_receipt_path(paths));
+        if !final_node.exists() && !final_provider.exists() {
+            if let Err(cleanup_error) =
+                abort_owned_provider_install_after_complete_rollback(paths, &attempt_id)
+            {
+                return Err(EngineError::InstallFailed(format!(
+                    "provider publication failed: {error}; durable retry cleanup also failed: {cleanup_error}"
+                )));
+            }
+        }
+        return Err(error);
+    }
+    let status = youtube_po_provider_install_status(paths);
+    let _ = std::fs::remove_file(provider_attempt_marker(&final_node));
+    let _ = std::fs::remove_file(provider_attempt_marker(&final_provider));
+    let _ = std::fs::remove_file(provider_install_attempt_receipt_path(paths));
+    release_provider_install_owner(paths, &attempt_id)?;
+    stage_guard.finish()?;
+    if let Some(guard) = replacement_guard {
+        guard.preserve_archive();
+    }
+    Ok(status)
+}
+
+#[cfg(not(windows))]
+pub fn install_youtube_po_provider(_paths: &AppPaths) -> Result<YoutubePoProviderInstallStatus> {
+    Err(EngineError::InstallFailed(
+        "automatic YouTube PO provider install is only supported on Windows".to_string(),
+    ))
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct YoutubePoProviderRuntimeStatus {
+    pub installed: bool,
+    pub running: bool,
+    pub healthy: bool,
+    pub provider_version: String,
+    pub port: Option<u16>,
+    pub process_id: Option<u32>,
+    pub startup_ms: Option<u64>,
+    pub error: Option<String>,
+}
+
+struct ManagedYoutubePoProvider {
+    child: std::process::Child,
+    port: u16,
+    provider_version: String,
+    install_identity: String,
+    startup_ms: u64,
+    #[cfg(windows)]
+    job_handle: isize,
+}
+
+impl Drop for ManagedYoutubePoProvider {
+    fn drop(&mut self) {
+        #[cfg(windows)]
+        unsafe {
+            if self.job_handle != 0 {
+                let _ = windows_sys::Win32::Foundation::CloseHandle(self.job_handle as _);
+                self.job_handle = 0;
+            }
+        }
+        let _ = self.child.kill();
+        let _ = self.child.wait();
+    }
+}
+
+fn youtube_po_provider_slot() -> &'static std::sync::Mutex<Option<ManagedYoutubePoProvider>> {
+    static SLOT: std::sync::OnceLock<std::sync::Mutex<Option<ManagedYoutubePoProvider>>> =
+        std::sync::OnceLock::new();
+    SLOT.get_or_init(|| std::sync::Mutex::new(None))
+}
+
+fn youtube_po_provider_lifecycle_lock() -> &'static std::sync::Mutex<()> {
+    static LIFECYCLE_LOCK: std::sync::OnceLock<std::sync::Mutex<()>> = std::sync::OnceLock::new();
+    LIFECYCLE_LOCK.get_or_init(|| std::sync::Mutex::new(()))
+}
+
+const YOUTUBE_PO_PROVIDER_INSTALL_LOCK_TIMEOUT_MS: u32 = 5_000;
+
+#[cfg(windows)]
+struct YoutubePoProviderInstallInterprocessGuard {
+    handle: windows_sys::Win32::Foundation::HANDLE,
+}
+
+#[cfg(windows)]
+impl Drop for YoutubePoProviderInstallInterprocessGuard {
+    fn drop(&mut self) {
+        unsafe {
+            let _ = windows_sys::Win32::System::Threading::ReleaseMutex(self.handle);
+            let _ = windows_sys::Win32::Foundation::CloseHandle(self.handle);
+        }
+    }
+}
+
+#[cfg(not(windows))]
+struct YoutubePoProviderInstallInterprocessGuard;
+
+#[cfg(not(windows))]
+fn acquire_youtube_po_provider_install_interprocess_lock(
+    _paths: &AppPaths,
+    _timeout_ms: u32,
+) -> Result<YoutubePoProviderInstallInterprocessGuard> {
+    Ok(YoutubePoProviderInstallInterprocessGuard)
+}
+
+#[cfg(windows)]
+fn youtube_po_provider_install_interprocess_lock_name(paths: &AppPaths) -> String {
+    use sha2::Digest;
+    let tools_root = std::fs::canonicalize(paths.tools_dir()).unwrap_or_else(|_| paths.tools_dir());
+    let identity = hex::encode_upper(sha2::Sha256::digest(
+        tools_root.to_string_lossy().to_ascii_lowercase().as_bytes(),
+    ));
+    format!(
+        "Global\\VoxVulgiYoutubePoProviderInstall-{}",
+        &identity[..32]
+    )
+}
+
+#[cfg(windows)]
+fn acquire_youtube_po_provider_install_interprocess_lock(
+    paths: &AppPaths,
+    timeout_ms: u32,
+) -> Result<YoutubePoProviderInstallInterprocessGuard> {
+    use std::os::windows::ffi::OsStrExt;
+    use windows_sys::Win32::Foundation::{WAIT_ABANDONED, WAIT_OBJECT_0, WAIT_TIMEOUT};
+    use windows_sys::Win32::System::Threading::{CreateMutexW, WaitForSingleObject};
+
+    // Global spans Windows Terminal Services sessions. Null SECURITY_ATTRIBUTES applies the
+    // creating operator token's default DACL: same-user console/RDP processes coordinate while
+    // unrelated user SIDs do not receive an intentionally permissive ACL.
+    let lock_name =
+        std::ffi::OsStr::new(&youtube_po_provider_install_interprocess_lock_name(paths))
+            .encode_wide()
+            .chain(std::iter::once(0))
+            .collect::<Vec<_>>();
+    let handle = unsafe { CreateMutexW(std::ptr::null(), 0, lock_name.as_ptr()) };
+    if handle.is_null() {
+        return Err(EngineError::InstallFailed(format!(
+            "could not create the YouTube provider install lock: {}",
+            std::io::Error::last_os_error()
+        )));
+    }
+    let wait = unsafe { WaitForSingleObject(handle, timeout_ms) };
+    if wait == WAIT_OBJECT_0 || wait == WAIT_ABANDONED {
+        return Ok(YoutubePoProviderInstallInterprocessGuard { handle });
+    }
+    unsafe {
+        let _ = windows_sys::Win32::Foundation::CloseHandle(handle);
+    }
+    if wait == WAIT_TIMEOUT {
+        return Err(EngineError::InstallFailed(
+            "another VoxVulgi process is installing or recovering the YouTube provider; retry after it finishes"
+                .to_string(),
+        ));
+    }
+    Err(EngineError::InstallFailed(format!(
+        "could not acquire the YouTube provider install lock: {}",
+        std::io::Error::last_os_error()
+    )))
+}
+
+#[cfg(windows)]
+fn assign_kill_on_parent_exit(child: &std::process::Child) -> Result<isize> {
+    use std::os::windows::io::AsRawHandle;
+    use windows_sys::Win32::System::JobObjects::{
+        AssignProcessToJobObject, CreateJobObjectW, JobObjectExtendedLimitInformation,
+        SetInformationJobObject, JOBOBJECT_EXTENDED_LIMIT_INFORMATION,
+        JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE,
+    };
+    unsafe {
+        let job = CreateJobObjectW(std::ptr::null(), std::ptr::null());
+        if job.is_null() {
+            return Err(EngineError::InstallFailed(
+                "could not create the provider lifecycle job".to_string(),
+            ));
+        }
+        let mut info: JOBOBJECT_EXTENDED_LIMIT_INFORMATION = std::mem::zeroed();
+        info.BasicLimitInformation.LimitFlags = JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE;
+        let configured = SetInformationJobObject(
+            job,
+            JobObjectExtendedLimitInformation,
+            &info as *const _ as *const std::ffi::c_void,
+            std::mem::size_of::<JOBOBJECT_EXTENDED_LIMIT_INFORMATION>() as u32,
+        );
+        let assigned = if configured != 0 {
+            AssignProcessToJobObject(job, child.as_raw_handle() as _)
+        } else {
+            0
+        };
+        if configured == 0 || assigned == 0 {
+            let _ = windows_sys::Win32::Foundation::CloseHandle(job);
+            return Err(EngineError::InstallFailed(
+                "could not bind the provider process to the app lifecycle".to_string(),
+            ));
+        }
+        Ok(job as isize)
+    }
+}
+
+fn ping_youtube_po_provider(port: u16) -> Option<String> {
+    let mut config = ureq::Agent::config_builder();
+    config = config.timeout_global(Some(std::time::Duration::from_secs(2)));
+    let agent: ureq::Agent = config.build().into();
+    let mut response = agent
+        .get(&format!("http://127.0.0.1:{port}/ping"))
+        .call()
+        .ok()?;
+    let body = response.body_mut().read_to_string().ok()?;
+    let payload: serde_json::Value = serde_json::from_str(&body).ok()?;
+    payload
+        .get("version")
+        .and_then(serde_json::Value::as_str)
+        .map(str::to_string)
+}
+
+fn provider_install_identity(status: &YoutubePoProviderInstallStatus) -> String {
+    format!(
+        "node={}|node_sha={}|npm_sha={}|plugin={}|server={}|lock={}|node_modules={}",
+        status.node_version.as_deref().unwrap_or("missing"),
+        status.node_exe_sha256_hex.as_deref().unwrap_or("missing"),
+        status.npm_cmd_sha256_hex.as_deref().unwrap_or("missing"),
+        status
+            .plugin_tree_sha256_hex
+            .as_deref()
+            .unwrap_or("missing"),
+        status
+            .server_entrypoint_sha256_hex
+            .as_deref()
+            .unwrap_or("missing"),
+        status
+            .derived_lock_sha256_hex
+            .as_deref()
+            .unwrap_or("missing"),
+        status
+            .node_modules_tree_sha256_hex
+            .as_deref()
+            .unwrap_or("missing"),
+    )
+}
+
+pub fn youtube_po_provider_runtime_status(paths: &AppPaths) -> YoutubePoProviderRuntimeStatus {
+    let installed = youtube_po_provider_install_status(paths);
+    let identity = provider_install_identity(&installed);
+    let mut slot = youtube_po_provider_slot()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let mut clear = false;
+    let status = if let Some(managed) = slot.as_mut() {
+        let running = managed.child.try_wait().ok().flatten().is_none();
+        let health_version = running
+            .then(|| ping_youtube_po_provider(managed.port))
+            .flatten();
+        let healthy = health_version.as_deref() == Some(managed.provider_version.as_str())
+            && managed.install_identity == identity;
+        clear = !running || managed.install_identity != identity;
+        YoutubePoProviderRuntimeStatus {
+            installed: installed.installed,
+            running,
+            healthy,
+            provider_version: managed.provider_version.clone(),
+            port: Some(managed.port),
+            process_id: Some(managed.child.id()),
+            startup_ms: Some(managed.startup_ms),
+            error: if healthy {
+                None
+            } else {
+                Some("localhost provider health check failed".to_string())
+            },
+        }
+    } else {
+        YoutubePoProviderRuntimeStatus {
+            installed: installed.installed,
+            running: false,
+            healthy: false,
+            provider_version: installed.provider_version,
+            port: None,
+            process_id: None,
+            startup_ms: None,
+            error: installed
+                .readiness_error
+                .or_else(|| Some("localhost provider is stopped".to_string())),
+        }
+    };
+    if clear {
+        *slot = None;
+    }
+    status
+}
+
+pub fn ensure_youtube_po_provider(paths: &AppPaths) -> Result<YoutubePoProviderRuntimeStatus> {
+    let _lifecycle_guard = youtube_po_provider_lifecycle_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    paths.ensure_dirs()?;
+    let _interprocess_guard = acquire_youtube_po_provider_install_interprocess_lock(
+        paths,
+        YOUTUBE_PO_PROVIDER_INSTALL_LOCK_TIMEOUT_MS,
+    )?;
+    if provider_node_modules_integrity_verifying().load(std::sync::atomic::Ordering::Acquire) {
+        return Err(EngineError::InstallFailed(
+            "provider dependency integrity verification is still in progress".to_string(),
+        ));
+    }
+    // Every launch/relaunch boundary re-authenticates the final installed dependency bytes.
+    // An earlier current-process attestation cannot remain launch authority after a same-process
+    // filesystem mutation.
+    verify_youtube_po_provider_node_modules_locked(paths)?;
+    let installed = youtube_po_provider_install_status(paths);
+    if !installed.installed {
+        return Err(EngineError::InstallFailed(
+            installed
+                .readiness_error
+                .unwrap_or_else(|| "PO provider payload is unavailable".to_string()),
+        ));
+    }
+    let identity = provider_install_identity(&installed);
+    let mut slot = youtube_po_provider_slot()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    if let Some(managed) = slot.as_mut() {
+        if managed.install_identity == identity
+            && managed.child.try_wait()?.is_none()
+            && ping_youtube_po_provider(managed.port).as_deref()
+                == Some(managed.provider_version.as_str())
+        {
+            return Ok(YoutubePoProviderRuntimeStatus {
+                installed: true,
+                running: true,
+                healthy: true,
+                provider_version: managed.provider_version.clone(),
+                port: Some(managed.port),
+                process_id: Some(managed.child.id()),
+                startup_ms: Some(managed.startup_ms),
+                error: None,
+            });
+        }
+        *slot = None;
+    }
+    drop(slot);
+
+    let listener = std::net::TcpListener::bind((std::net::Ipv4Addr::LOCALHOST, 0))?;
+    let port = listener.local_addr()?.port();
+    drop(listener);
+    let log_dir = paths.install_logs_dir().join("youtube_po_provider");
+    std::fs::create_dir_all(&log_dir)?;
+    let stdout = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(log_dir.join("stdout.log"))?;
+    let stderr = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(log_dir.join("stderr.log"))?;
+    let mut child = crate::cmd::command(paths.node_exe())
+        .arg(paths.youtube_po_provider_entrypoint())
+        .arg("--port")
+        .arg(port.to_string())
+        .current_dir(paths.youtube_po_provider_server_dir())
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::from(stdout))
+        .stderr(std::process::Stdio::from(stderr))
+        .spawn()
+        .map_err(|error| {
+            EngineError::InstallFailed(format!("could not start localhost PO provider: {error}"))
+        })?;
+    #[cfg(windows)]
+    let job_handle = match assign_kill_on_parent_exit(&child) {
+        Ok(handle) => handle,
+        Err(error) => {
+            let _ = child.kill();
+            let _ = child.wait();
+            return Err(error);
+        }
+    };
+    let started = std::time::Instant::now();
+    let deadline = started + std::time::Duration::from_secs(60);
+    loop {
+        if let Some(exit) = child.try_wait()? {
+            return Err(EngineError::InstallFailed(format!(
+                "localhost PO provider exited during startup (code={:?})",
+                exit.code()
+            )));
+        }
+        if ping_youtube_po_provider(port).as_deref() == Some(installed.provider_version.as_str()) {
+            break;
+        }
+        if std::time::Instant::now() >= deadline {
+            let _ = child.kill();
+            let _ = child.wait();
+            return Err(EngineError::InstallFailed(
+                "localhost PO provider did not become healthy within 60 seconds".to_string(),
+            ));
+        }
+        std::thread::sleep(std::time::Duration::from_millis(250));
+    }
+    let startup_ms = started.elapsed().as_millis().min(u64::MAX as u128) as u64;
+    let status = YoutubePoProviderRuntimeStatus {
+        installed: true,
+        running: true,
+        healthy: true,
+        provider_version: installed.provider_version.clone(),
+        port: Some(port),
+        process_id: Some(child.id()),
+        startup_ms: Some(startup_ms),
+        error: None,
+    };
+    let mut slot = youtube_po_provider_slot()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    *slot = Some(ManagedYoutubePoProvider {
+        child,
+        port,
+        provider_version: installed.provider_version,
+        install_identity: identity,
+        startup_ms,
+        #[cfg(windows)]
+        job_handle,
+    });
+    Ok(status)
+}
+
+pub fn request_youtube_po_provider_start(paths: &AppPaths) -> bool {
+    use std::sync::atomic::{AtomicBool, Ordering};
+    static START_REQUESTED: AtomicBool = AtomicBool::new(false);
+    if youtube_po_provider_runtime_status(paths).healthy {
+        return false;
+    }
+    if START_REQUESTED
+        .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
+        .is_err()
+    {
+        return false;
+    }
+    let paths = paths.clone();
+    std::thread::Builder::new()
+        .name("youtube-po-provider-start".to_string())
+        .spawn(move || {
+            let _ = ensure_youtube_po_provider(&paths);
+            START_REQUESTED.store(false, Ordering::Release);
+        })
+        .map(|_| true)
+        .unwrap_or_else(|_| {
+            START_REQUESTED.store(false, Ordering::Release);
+            false
+        })
+}
+
+pub fn shutdown_youtube_po_provider() {
+    let _lifecycle_guard = youtube_po_provider_lifecycle_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let mut slot = youtube_po_provider_slot()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    *slot = None;
+    provider_node_modules_process_attestations()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .clear();
+    provider_node_modules_process_invalidations()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .clear();
+}
+
 fn unpinned_fallback_disabled_error(context: &str, pinned_err: &EngineError) -> EngineError {
     EngineError::InstallFailed(format!(
         "{context} failed after pinned install error: {pinned_err}. Mutable fallback installs are disabled by default. Set {}=1 to opt in for local recovery runs.",
@@ -1815,7 +5630,7 @@ import tarfile
 import tempfile
 import time
 import urllib.request
- 
+
 MODEL_PATH = r"{model_path}"
 os.makedirs(MODEL_PATH, exist_ok=True)
 
@@ -4012,6 +7827,16 @@ fn run_python_checked_with_retries(
 mod tests {
     use super::*;
 
+    static PROVIDER_INTEGRITY_TEST_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    fn provider_test_ownership_token() -> String {
+        format!(
+            "{}{}",
+            uuid::Uuid::new_v4().simple(),
+            uuid::Uuid::new_v4().simple()
+        )
+    }
+
     #[test]
     fn diarization_runtime_validation_exercises_runtime_dependency_chain() {
         let code = diarization_runtime_validation_code();
@@ -4037,6 +7862,2309 @@ mod tests {
         assert!(pack_lockfile_runtime_ready(true, true));
         assert!(pack_lockfile_runtime_ready(false, true));
         assert!(!pack_lockfile_runtime_ready(false, false));
+    }
+
+    #[test]
+    fn provider_lifecycle_allowlist_rejects_missing_wildcard_or_extra_approvals() {
+        let exact = serde_json::json!({
+            "allowScripts": {
+                "canvas@3.2.3": true,
+                "@swc/core@1.15.47": false,
+            }
+        });
+        assert!(provider_lifecycle_allowlist_is_exact(&exact));
+        for invalid in [
+            serde_json::json!({}),
+            serde_json::json!({"allowScripts": {"canvas": true, "@swc/core@1.15.47": false}}),
+            serde_json::json!({"allowScripts": {"canvas@3.2.3": true, "@swc/core@1.15.47": true}}),
+            serde_json::json!({"allowScripts": {"canvas@3.2.3": true, "@swc/core@1.15.47": false, "prebuild-install": true}}),
+        ] {
+            assert!(!provider_lifecycle_allowlist_is_exact(&invalid));
+        }
+        assert_eq!(
+            provider_npm_ci_args(),
+            ["ci", "--ignore-scripts"],
+            "pinned npm 11.17 must suppress every lifecycle script before the exact canvas rebuild"
+        );
+        assert_eq!(
+            pinned_dependency_manifest::manifest()
+                .node_windows
+                .npm_version,
+            "11.17.0",
+            "the executable contract must match npm bundled in the exact Node archive"
+        );
+    }
+
+    #[test]
+    fn embedded_provider_lock_hash_rejects_tampering() {
+        let pin = &pinned_dependency_manifest::manifest().youtube_po_provider;
+        let lock = pinned_dependency_manifest::YOUTUBE_PO_PROVIDER_DERIVED_LOCK.as_bytes();
+        assert!(provider_lock_matches_manifest(
+            lock,
+            &pin.derived_lock_sha256_hex
+        ));
+        let mut tampered = lock.to_vec();
+        tampered[0] ^= 1;
+        assert!(!provider_lock_matches_manifest(
+            &tampered,
+            &pin.derived_lock_sha256_hex
+        ));
+        assert!(provider_lock_lifecycle_packages_are_exact(lock));
+        let unexpected = br#"{"packages":{"node_modules/canvas":{"version":"3.2.3","hasInstallScript":true},"node_modules/evil":{"version":"1.0.0","hasInstallScript":true}}}"#;
+        assert!(!provider_lock_lifecycle_packages_are_exact(unexpected));
+    }
+
+    #[test]
+    fn provider_plugin_tree_rejects_same_size_tamper_with_intact_archive_marker() {
+        let base = std::env::temp_dir().join(format!(
+            "voxvulgi_plugin_tamper_{}_{}",
+            std::process::id(),
+            uuid::Uuid::new_v4()
+        ));
+        let plugin = base.join("plugin");
+        let script = plugin
+            .join("yt_dlp_plugins")
+            .join("extractor")
+            .join("provider.py");
+        std::fs::create_dir_all(script.parent().unwrap()).unwrap();
+        std::fs::write(&script, b"trusted-bytes").unwrap();
+        std::fs::write(
+            plugin.join(".plugin_archive_sha256"),
+            b"INTACT_ARCHIVE_MARKER\n",
+        )
+        .unwrap();
+        let mut expected = std::collections::BTreeMap::new();
+        expected.insert(
+            "yt_dlp_plugins/extractor/provider.py".to_string(),
+            file_sha256_hex(&script).unwrap(),
+        );
+        assert!(provider_plugin_tree_sha256_hex(&plugin, &expected).is_some());
+        std::fs::write(&script, b"tamperd-bytes").unwrap();
+        assert_eq!(std::fs::metadata(&script).unwrap().len(), 13);
+        assert!(provider_plugin_tree_sha256_hex(&plugin, &expected).is_none());
+        assert_eq!(
+            std::fs::read_to_string(plugin.join(".plugin_archive_sha256"))
+                .unwrap()
+                .trim(),
+            "INTACT_ARCHIVE_MARKER"
+        );
+        let _ = std::fs::remove_dir_all(base);
+    }
+
+    #[test]
+    fn published_node_and_provider_identity_reject_non_node_same_size_tamper() {
+        let base = std::env::temp_dir().join(format!(
+            "voxvulgi_provider_published_identity_{}_{}",
+            std::process::id(),
+            uuid::Uuid::new_v4()
+        ));
+        let paths = AppPaths::new(base.clone());
+        paths.ensure_dirs().unwrap();
+
+        std::fs::create_dir_all(paths.node_runtime_dir()).unwrap();
+        std::fs::write(paths.node_exe(), b"fixture-node").unwrap();
+        std::fs::write(paths.node_npm_cmd(), b"fixture-npm").unwrap();
+        let node_hash = file_sha256_hex(&paths.node_exe()).unwrap();
+        let npm_hash = file_sha256_hex(&paths.node_npm_cmd()).unwrap();
+        authenticate_published_node_payload_against(&paths, &node_hash, &npm_hash).unwrap();
+
+        let plugin_dir = paths.youtube_po_provider_plugin_dir();
+        let plugin_script = plugin_dir
+            .join("yt_dlp_plugins")
+            .join("extractor")
+            .join("provider.py");
+        std::fs::create_dir_all(plugin_script.parent().unwrap()).unwrap();
+        std::fs::write(&plugin_script, b"trusted-plugin").unwrap();
+        std::fs::write(
+            plugin_dir.join(".plugin_archive_sha256"),
+            b"FIXTURE-ARCHIVE\n",
+        )
+        .unwrap();
+        let mut plugin_files = std::collections::BTreeMap::new();
+        plugin_files.insert(
+            "yt_dlp_plugins/extractor/provider.py".to_string(),
+            file_sha256_hex(&plugin_script).unwrap(),
+        );
+        let plugin_tree = provider_plugin_tree_sha256_hex(&plugin_dir, &plugin_files).unwrap();
+
+        let server_dir = paths.youtube_po_provider_server_dir();
+        let entrypoint = paths.youtube_po_provider_entrypoint();
+        std::fs::create_dir_all(entrypoint.parent().unwrap()).unwrap();
+        std::fs::write(&entrypoint, b"trusted-server").unwrap();
+        let lock = server_dir.join("package-lock.json");
+        std::fs::write(&lock, b"trusted-lock").unwrap();
+        let lock_hash = file_sha256_hex(&lock).unwrap();
+        std::fs::write(
+            server_dir.join(".production_audit_zero"),
+            format!("{lock_hash}\n"),
+        )
+        .unwrap();
+        std::fs::write(
+            server_dir.join("package.json"),
+            serde_json::to_vec(&serde_json::json!({
+                "allowScripts": {
+                    "canvas@3.2.3": true,
+                    "@swc/core@1.15.47": false
+                }
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+        for (name, version) in [("canvas", "3.2.3"), ("@swc/core", "1.15.47")] {
+            let package = name
+                .split('/')
+                .fold(server_dir.join("node_modules"), |path, part| {
+                    path.join(part)
+                })
+                .join("package.json");
+            std::fs::create_dir_all(package.parent().unwrap()).unwrap();
+            std::fs::write(
+                package,
+                serde_json::to_vec(&serde_json::json!({"version": version})).unwrap(),
+            )
+            .unwrap();
+        }
+        let node_modules_tree =
+            canonical_directory_tree_sha256_hex(&server_dir.join("node_modules")).unwrap();
+        let entrypoint_hash = file_sha256_hex(&entrypoint).unwrap();
+        let expected = PublishedProviderIdentity {
+            plugin_archive_sha256: "FIXTURE-ARCHIVE",
+            plugin_files_sha256: &plugin_files,
+            plugin_tree_sha256: &plugin_tree,
+            server_entrypoint_sha256: &entrypoint_hash,
+            derived_lock_sha256: &lock_hash,
+            node_modules_tree_sha256: &node_modules_tree,
+        };
+        authenticate_published_provider_payload_against(&paths, &expected).unwrap();
+
+        std::fs::write(&entrypoint, b"tamperd-server").unwrap();
+        assert_eq!(std::fs::metadata(&entrypoint).unwrap().len(), 14);
+        assert!(authenticate_published_provider_payload_against(&paths, &expected).is_err());
+        std::fs::write(&entrypoint, b"trusted-server").unwrap();
+        std::fs::write(&plugin_script, b"tamperd-plugin").unwrap();
+        assert_eq!(std::fs::metadata(&plugin_script).unwrap().len(), 14);
+        assert!(authenticate_published_provider_payload_against(&paths, &expected).is_err());
+        assert!(paths.node_runtime_dir().exists());
+        assert!(paths.youtube_po_provider_dir().exists());
+        let _ = std::fs::remove_dir_all(base);
+    }
+
+    #[test]
+    fn provider_node_modules_tree_hash_is_content_addressed_and_metadata_independent() {
+        let base = std::env::temp_dir().join(format!(
+            "voxvulgi_provider_node_modules_hash_{}_{}",
+            std::process::id(),
+            uuid::Uuid::new_v4()
+        ));
+        let nested = base.join("package");
+        std::fs::create_dir_all(&nested).unwrap();
+        let first = nested.join("index.js");
+        let second = base.join("package.json");
+        std::fs::write(&first, b"trusted-byte").unwrap();
+        std::fs::write(&second, b"{}").unwrap();
+        let trusted = canonical_directory_tree_sha256_hex(&base).expect("tree hash");
+        let original_modified = std::fs::metadata(&first).unwrap().modified().unwrap();
+        std::fs::write(&first, b"tampered-byt").unwrap();
+        std::fs::File::options()
+            .write(true)
+            .open(&first)
+            .unwrap()
+            .set_times(std::fs::FileTimes::new().set_modified(original_modified))
+            .unwrap();
+        assert_eq!(std::fs::metadata(&first).unwrap().len(), 12);
+        assert!(
+            authenticate_provider_node_modules_tree(&base, &trusted).is_err(),
+            "same-size replacement with restored mtime must fail authoritative byte verification"
+        );
+        std::fs::write(&first, b"trusted-byte").unwrap();
+        assert_eq!(canonical_directory_tree_sha256_hex(&base).unwrap(), trusted);
+        let _ = std::fs::remove_dir_all(base);
+    }
+
+    #[test]
+    fn persisted_audit_receipt_can_be_stale_but_authoritative_verification_catches_tamper() {
+        let base = std::env::temp_dir().join(format!(
+            "voxvulgi_provider_receipt_{}_{}",
+            std::process::id(),
+            uuid::Uuid::new_v4()
+        ));
+        let server = base.join("server");
+        let node_modules = server.join("node_modules");
+        std::fs::create_dir_all(&node_modules).unwrap();
+        let module = node_modules.join("index.js");
+        std::fs::write(&module, b"trusted-byte").unwrap();
+        let trusted = canonical_directory_tree_sha256_hex(&node_modules).unwrap();
+        write_provider_node_modules_integrity_receipt(&server, &trusted).unwrap();
+        let projected = read_provider_node_modules_integrity_receipt(&server).unwrap();
+
+        let original_modified = std::fs::metadata(&module).unwrap().modified().unwrap();
+        std::fs::write(&module, b"tampered-byt").unwrap();
+        std::fs::File::options()
+            .write(true)
+            .open(&module)
+            .unwrap()
+            .set_times(std::fs::FileTimes::new().set_modified(original_modified))
+            .unwrap();
+        assert_eq!(
+            read_provider_node_modules_integrity_receipt(&server)
+                .unwrap()
+                .tree_sha256_hex,
+            projected.tree_sha256_hex,
+            "the persisted receipt is history and does not self-authenticate later bytes"
+        );
+        assert!(authenticate_provider_node_modules_tree(&node_modules, &trusted).is_err());
+        let _ = std::fs::remove_dir_all(base);
+    }
+
+    #[test]
+    fn forged_or_stale_receipt_never_becomes_current_process_launch_attestation() {
+        let _guard = PROVIDER_INTEGRITY_TEST_LOCK.lock().unwrap();
+        let base = std::env::temp_dir().join(format!(
+            "voxvulgi_provider_forged_receipt_{}_{}",
+            std::process::id(),
+            uuid::Uuid::new_v4()
+        ));
+        let paths = AppPaths::new(base.clone());
+        let server = paths.youtube_po_provider_server_dir();
+        std::fs::create_dir_all(&server).unwrap();
+        let expected = pinned_dependency_manifest::manifest()
+            .youtube_po_provider
+            .node_modules_tree_sha256_hex
+            .clone();
+        write_provider_node_modules_integrity_receipt(&server, &expected).unwrap();
+        assert!(read_provider_node_modules_integrity_receipt(&server).is_some());
+        assert!(provider_node_modules_process_attestation(&server).is_none());
+        let status = youtube_po_provider_install_status(&paths);
+        assert_eq!(status.node_modules_tree_sha256_hex, None);
+        assert!(
+            !status.installed,
+            "receipt-only trust must never authorize execution"
+        );
+        assert!(
+            ensure_youtube_po_provider(&paths).is_err(),
+            "launch must force full verification instead of consuming the forged receipt"
+        );
+        assert!(provider_node_modules_process_attestation(&server).is_none());
+        clear_provider_node_modules_process_attestation(&server);
+        let _ = std::fs::remove_dir_all(base);
+    }
+
+    #[test]
+    fn forced_tamper_verification_clears_prior_process_attestation_and_receipt() {
+        let _guard = PROVIDER_INTEGRITY_TEST_LOCK.lock().unwrap();
+        let base = std::env::temp_dir().join(format!(
+            "voxvulgi_provider_forced_tamper_{}_{}",
+            std::process::id(),
+            uuid::Uuid::new_v4()
+        ));
+        let paths = AppPaths::new(base.clone());
+        let server = paths.youtube_po_provider_server_dir();
+        let node_modules = server.join("node_modules");
+        std::fs::create_dir_all(&node_modules).unwrap();
+        std::fs::write(node_modules.join("index.js"), b"tampered-runtime").unwrap();
+        let expected = pinned_dependency_manifest::manifest()
+            .youtube_po_provider
+            .node_modules_tree_sha256_hex
+            .clone();
+        // Seed the precondition directly: this represents a prior successful in-process
+        // verification followed by a same-process disk mutation.
+        attest_provider_node_modules_tree(&server, &expected).unwrap();
+        assert!(provider_node_modules_process_attestation(&server).is_some());
+        assert!(verify_youtube_po_provider_node_modules(&paths).is_err());
+        assert!(provider_node_modules_process_attestation(&server).is_none());
+        assert!(!provider_node_modules_integrity_receipt_path(&server).exists());
+        let _ = std::fs::remove_dir_all(base);
+    }
+
+    #[test]
+    fn startup_verification_race_never_projects_forged_receipt_as_installed() {
+        let _guard = PROVIDER_INTEGRITY_TEST_LOCK.lock().unwrap();
+        let base = std::env::temp_dir().join(format!(
+            "voxvulgi_provider_startup_race_{}_{}",
+            std::process::id(),
+            uuid::Uuid::new_v4()
+        ));
+        let paths = AppPaths::new(base.clone());
+        let server = paths.youtube_po_provider_server_dir();
+        std::fs::create_dir_all(&server).unwrap();
+        let expected = pinned_dependency_manifest::manifest()
+            .youtube_po_provider
+            .node_modules_tree_sha256_hex
+            .clone();
+        write_provider_node_modules_integrity_receipt(&server, &expected).unwrap();
+        clear_provider_node_modules_process_attestation(&server);
+        provider_node_modules_integrity_verifying()
+            .store(true, std::sync::atomic::Ordering::Release);
+        let status = youtube_po_provider_install_status(&paths);
+        let launch = ensure_youtube_po_provider(&paths);
+        provider_node_modules_integrity_verifying()
+            .store(false, std::sync::atomic::Ordering::Release);
+        assert!(status.node_modules_integrity_verifying);
+        assert_eq!(status.node_modules_tree_sha256_hex, None);
+        assert!(!status.installed);
+        assert!(
+            launch.is_err(),
+            "launch must remain held while verification is active"
+        );
+        let _ = std::fs::remove_dir_all(base);
+    }
+
+    #[test]
+    fn provider_node_modules_authentication_rejects_unbounded_depth() {
+        let base = std::env::temp_dir().join(format!(
+            "voxvulgi_provider_depth_{}_{}",
+            std::process::id(),
+            uuid::Uuid::new_v4()
+        ));
+        let mut nested = base.clone();
+        for index in 0..33 {
+            nested.push(format!("d{index}"));
+        }
+        std::fs::create_dir_all(&nested).unwrap();
+        std::fs::write(nested.join("index.js"), b"bounded").unwrap();
+        assert!(canonical_directory_tree_sha256_hex(&base).is_none());
+        let _ = std::fs::remove_dir_all(base);
+    }
+
+    #[test]
+    fn exact_provider_node_modules_tree_hash_probe_when_available() {
+        let Some(root) = std::env::var_os("VOXVULGI_PROVIDER_NODE_MODULES_DIR").map(PathBuf::from)
+        else {
+            return;
+        };
+        let hash = canonical_directory_tree_sha256_hex(&root).expect("canonical node_modules hash");
+        eprintln!("provider_node_modules_tree_sha256={hash}");
+    }
+
+    #[test]
+    fn compare_provider_node_modules_files_when_requested() {
+        let (Some(baseline), Some(candidate)) = (
+            std::env::var_os("VOXVULGI_PROVIDER_NODE_MODULES_BASELINE").map(PathBuf::from),
+            std::env::var_os("VOXVULGI_PROVIDER_NODE_MODULES_CANDIDATE").map(PathBuf::from),
+        ) else {
+            return;
+        };
+        fn hashes(root: &Path) -> std::collections::BTreeMap<String, String> {
+            let mut result = std::collections::BTreeMap::new();
+            let mut stack = vec![root.to_path_buf()];
+            while let Some(directory) = stack.pop() {
+                for entry in std::fs::read_dir(&directory).expect("read provider tree") {
+                    let entry = entry.expect("provider tree entry");
+                    let path = entry.path();
+                    let metadata = std::fs::symlink_metadata(&path).expect("provider metadata");
+                    assert!(!metadata.file_type().is_symlink());
+                    assert!(!provider_metadata_is_reparse_point(&metadata));
+                    if metadata.is_dir() {
+                        stack.push(path);
+                    } else if metadata.is_file() {
+                        let relative = path
+                            .strip_prefix(root)
+                            .expect("provider relative path")
+                            .to_string_lossy()
+                            .replace('\\', "/");
+                        result.insert(relative, file_sha256_hex(&path).expect("provider file hash"));
+                    } else {
+                        panic!("unexpected provider tree entry: {}", path.display());
+                    }
+                }
+            }
+            result
+        }
+        let baseline_hashes = hashes(&baseline);
+        let candidate_hashes = hashes(&candidate);
+        let paths = baseline_hashes
+            .keys()
+            .chain(candidate_hashes.keys())
+            .cloned()
+            .collect::<std::collections::BTreeSet<_>>();
+        let differences = paths
+            .into_iter()
+            .filter_map(|path| {
+                let before = baseline_hashes.get(&path);
+                let after = candidate_hashes.get(&path);
+                (before != after).then(|| (path, before.cloned(), after.cloned()))
+            })
+            .collect::<Vec<_>>();
+        let baseline_only = differences
+            .iter()
+            .filter(|(_, before, after)| before.is_some() && after.is_none())
+            .count();
+        let candidate_only = differences
+            .iter()
+            .filter(|(_, before, after)| before.is_none() && after.is_some())
+            .count();
+        let changed = differences
+            .iter()
+            .filter(|(_, before, after)| before.is_some() && after.is_some())
+            .count();
+        eprintln!(
+            "PROVIDER_NODE_MODULES_FILE_COUNTS baseline={} candidate={} baseline_only={baseline_only} candidate_only={candidate_only} changed={changed}",
+            baseline_hashes.len(),
+            candidate_hashes.len()
+        );
+        eprintln!("PROVIDER_NODE_MODULES_FILE_DIFFERENCES={}", differences.len());
+        for (path, before, after) in differences {
+            if before.is_none() || (before.is_some() && after.is_some()) {
+                eprintln!(
+                    "PROVIDER_NODE_MODULES_DIFF path={path} baseline={} candidate={}",
+                    before.as_deref().unwrap_or("<missing>"),
+                    after.as_deref().unwrap_or("<missing>")
+                );
+            }
+        }
+    }
+
+    fn synthetic_provider_destination(paths: &AppPaths) -> ProviderInstalledIdentity {
+        paths.ensure_dirs().unwrap();
+        std::fs::create_dir_all(paths.node_runtime_dir()).unwrap();
+        std::fs::create_dir_all(paths.youtube_po_provider_dir()).unwrap();
+        std::fs::write(paths.node_runtime_dir().join("node_fixture"), b"node").unwrap();
+        std::fs::write(
+            paths.youtube_po_provider_dir().join("provider_fixture"),
+            b"provider",
+        )
+        .unwrap();
+        let node_root = canonical_provider_node_tree_sha256_hex(&paths.node_runtime_dir()).unwrap();
+        let provider_root =
+            canonical_provider_application_tree_sha256_hex(&paths.youtube_po_provider_dir())
+                .unwrap();
+        authenticate_complete_provider_trees_against(paths, &node_root, &provider_root).unwrap()
+    }
+
+    #[test]
+    fn fresh_offline_adoption_is_atomic_idempotent_and_carrier_independent() {
+        let base = std::env::temp_dir().join(format!(
+            "voxvulgi_provider_adoption_{}_{}",
+            std::process::id(),
+            uuid::Uuid::new_v4()
+        ));
+        let paths = AppPaths::new(base.clone());
+        let verified = synthetic_provider_destination(&paths);
+        std::fs::write(
+            provider_portable_attestation_path(&paths),
+            br#"{"schema_version":1,"node_complete_tree_sha256":"FORGED","provider_complete_tree_sha256":"FORGED"}"#,
+        )
+        .unwrap();
+        let independently_verified = authenticate_complete_provider_trees_against(
+            &paths,
+            &verified.node_tree_sha256,
+            &verified.provider_tree_sha256,
+        )
+        .unwrap();
+        commit_adopted_provider_identity(&paths, independently_verified.clone()).unwrap();
+        commit_adopted_provider_identity(&paths, independently_verified.clone()).unwrap();
+        let identity = load_provider_installed_identity(&paths).unwrap().unwrap();
+        assert!(!identity.lineage_attempt_id.is_empty());
+        assert!(identity.commit_nonce.len() >= 32);
+        let conn = crate::db::open(&paths).unwrap();
+        crate::db::migrate(&conn).unwrap();
+        assert_eq!(
+            conn.query_row("SELECT COUNT(*) FROM provider_install_owner", [], |row| row
+                .get::<_, i64>(0))
+                .unwrap(),
+            0
+        );
+        assert_eq!(
+            conn.query_row(
+                "SELECT COUNT(*) FROM provider_install_lineage WHERE phase='committed'",
+                [],
+                |row| row.get::<_, i64>(0),
+            )
+            .unwrap(),
+            1
+        );
+        drop(conn);
+        invalidate_provider_installed_identity(&paths, "uninstall").unwrap();
+        assert!(load_provider_installed_identity(&paths).unwrap().is_none());
+        commit_adopted_provider_identity(&paths, independently_verified).unwrap();
+        assert!(load_provider_installed_identity(&paths).unwrap().is_some());
+        std::fs::write(
+            paths.youtube_po_provider_dir().join("tampered_extra"),
+            b"tampered",
+        )
+        .unwrap();
+        assert!(authenticate_complete_provider_trees_against(
+            &paths,
+            &verified.node_tree_sha256,
+            &verified.provider_tree_sha256,
+        )
+        .is_err());
+        let _ = std::fs::remove_dir_all(base);
+    }
+
+    #[test]
+    fn governed_install_replacement_preserves_pin_n_and_commits_pin_n_plus_one() {
+        let base = std::env::temp_dir().join(format!(
+            "voxvulgi_provider_generation_replacement_{}_{}",
+            std::process::id(),
+            uuid::Uuid::new_v4()
+        ));
+        let paths = AppPaths::new(base.clone());
+        let mut old_identity = synthetic_provider_destination(&paths);
+        old_identity.install_generation = "A".repeat(64);
+        commit_adopted_provider_identity(&paths, old_identity.clone()).unwrap();
+        let old_identity = load_provider_installed_identity(&paths).unwrap().unwrap();
+
+        let attempt_id = uuid::Uuid::new_v4().to_string();
+        let stage_root = paths
+            .tools_dir()
+            .join(format!("youtube_po_provider_stage_{attempt_id}"));
+        let token = provider_test_ownership_token();
+        claim_provider_install_owner(
+            &paths,
+            &attempt_id,
+            &stage_root,
+            &provider_ownership_token_digest(&token),
+            &random_provider_authority_nonce(),
+        )
+        .unwrap();
+        let replacement = prepare_governed_provider_replacement(&paths, &attempt_id)
+            .unwrap()
+            .expect("old managed finals must enter the governed archive");
+        assert!(!paths.node_runtime_dir().exists());
+        assert!(!paths.youtube_po_provider_dir().exists());
+
+        let node_stage = stage_root.join("node");
+        let provider_stage = stage_root.join("provider");
+        std::fs::create_dir_all(&node_stage).unwrap();
+        std::fs::create_dir_all(&provider_stage).unwrap();
+        std::fs::write(node_stage.join("node_fixture"), b"node-n-plus-one").unwrap();
+        std::fs::write(
+            provider_stage.join("provider_fixture"),
+            b"provider-n-plus-one",
+        )
+        .unwrap();
+        write_provider_ownership_marker(&node_stage, &attempt_id, &token).unwrap();
+        write_provider_ownership_marker(&provider_stage, &attempt_id, &token).unwrap();
+        seal_provider_install_lineage(
+            &paths,
+            &attempt_id,
+            &stage_root,
+            &provider_ownership_token_digest(&token),
+            &provider_directory_identity(&node_stage).unwrap(),
+            &provider_directory_identity(&provider_stage).unwrap(),
+            &canonical_provider_node_tree_sha256_hex(&node_stage).unwrap(),
+            &canonical_provider_application_tree_sha256_hex(&provider_stage).unwrap(),
+        )
+        .unwrap();
+        persist_provider_install_lineage(&paths, &attempt_id, &stage_root, "node_publish_intent")
+            .unwrap();
+        std::fs::rename(&node_stage, paths.node_runtime_dir()).unwrap();
+        persist_provider_install_lineage(&paths, &attempt_id, &stage_root, "node_published")
+            .unwrap();
+        persist_provider_install_lineage(
+            &paths,
+            &attempt_id,
+            &stage_root,
+            "provider_publish_intent",
+        )
+        .unwrap();
+        std::fs::rename(&provider_stage, paths.youtube_po_provider_dir()).unwrap();
+        persist_provider_install_lineage(&paths, &attempt_id, &stage_root, "provider_published")
+            .unwrap();
+        commit_provider_installed_identity(&paths, &attempt_id, &stage_root).unwrap();
+        release_provider_install_owner(&paths, &attempt_id).unwrap();
+        replacement.preserve_archive();
+
+        let current = load_provider_installed_identity(&paths).unwrap().unwrap();
+        assert_eq!(current.install_generation, provider_install_generation());
+        assert_ne!(current.lineage_attempt_id, old_identity.lineage_attempt_id);
+        let archive_root = managed_provider_replacement_archive_root(&paths, &attempt_id).unwrap();
+        let archived_node = archive_root.join("node");
+        let archived_provider = archive_root.join("provider");
+        assert_eq!(
+            provider_directory_identity(&archived_node).unwrap(),
+            old_identity.node_directory_identity
+        );
+        assert_eq!(
+            provider_directory_identity(&archived_provider).unwrap(),
+            old_identity.provider_directory_identity
+        );
+        assert_eq!(
+            canonical_provider_node_tree_sha256_hex(&archived_node).unwrap(),
+            old_identity.node_tree_sha256
+        );
+        assert_eq!(
+            canonical_provider_application_tree_sha256_hex(&archived_provider).unwrap(),
+            old_identity.provider_tree_sha256
+        );
+        let _ = std::fs::remove_dir_all(base);
+    }
+
+    #[test]
+    fn interrupted_governed_replacement_restores_authenticated_pin_n_without_data_loss() {
+        let base = std::env::temp_dir().join(format!(
+            "vv_grr_{}_{}",
+            std::process::id(),
+            &uuid::Uuid::new_v4().simple().to_string()[..8]
+        ));
+        let paths = AppPaths::new(base.clone());
+        let mut old_identity = synthetic_provider_destination(&paths);
+        old_identity.install_generation = "A".repeat(64);
+        commit_adopted_provider_identity(&paths, old_identity.clone()).unwrap();
+        let old_identity = load_provider_installed_identity(&paths).unwrap().unwrap();
+
+        let attempt_id = uuid::Uuid::new_v4().to_string();
+        let stage_root = paths
+            .tools_dir()
+            .join(format!("youtube_po_provider_stage_{attempt_id}"));
+        let token = provider_test_ownership_token();
+        let token_digest = provider_ownership_token_digest(&token);
+        claim_provider_install_owner(
+            &paths,
+            &attempt_id,
+            &stage_root,
+            &token_digest,
+            &random_provider_authority_nonce(),
+        )
+        .unwrap();
+        let replacement = prepare_governed_provider_replacement(&paths, &attempt_id)
+            .unwrap()
+            .expect("old managed finals must enter the governed archive");
+
+        let node_stage = stage_root.join("node");
+        let provider_stage = stage_root.join("provider");
+        std::fs::create_dir_all(&node_stage).unwrap();
+        std::fs::create_dir_all(&provider_stage).unwrap();
+        std::fs::write(node_stage.join("node_fixture"), b"node-n-plus-one").unwrap();
+        std::fs::write(
+            provider_stage.join("provider_fixture"),
+            b"provider-n-plus-one",
+        )
+        .unwrap();
+        write_provider_ownership_marker(&node_stage, &attempt_id, &token).unwrap();
+        write_provider_ownership_marker(&provider_stage, &attempt_id, &token).unwrap();
+        seal_provider_install_lineage(
+            &paths,
+            &attempt_id,
+            &stage_root,
+            &token_digest,
+            &provider_directory_identity(&node_stage).unwrap(),
+            &provider_directory_identity(&provider_stage).unwrap(),
+            &canonical_provider_node_tree_sha256_hex(&node_stage).unwrap(),
+            &canonical_provider_application_tree_sha256_hex(&provider_stage).unwrap(),
+        )
+        .unwrap();
+        persist_provider_install_lineage(&paths, &attempt_id, &stage_root, "prepared").unwrap();
+        persist_provider_install_lineage(&paths, &attempt_id, &stage_root, "node_publish_intent")
+            .unwrap();
+        std::fs::rename(&node_stage, paths.node_runtime_dir()).unwrap();
+        persist_provider_install_lineage(&paths, &attempt_id, &stage_root, "node_published")
+            .unwrap();
+
+        // Simulate process death: the in-process rollback guard never runs. Durable recovery
+        // must roll the new attempt back and restore only the authenticated archived generation.
+        std::mem::forget(replacement);
+        reconcile_interrupted_provider_install_with_checks(
+            &paths,
+            |_| Ok(()),
+            |_| Ok(()),
+            |_, _| Ok(()),
+            |_| false,
+        )
+        .unwrap();
+
+        let restored = load_provider_installed_identity(&paths).unwrap().unwrap();
+        assert_eq!(restored.lineage_attempt_id, old_identity.lineage_attempt_id);
+        assert_eq!(restored.commit_nonce, old_identity.commit_nonce);
+        assert_eq!(restored.install_generation, old_identity.install_generation);
+        assert_eq!(
+            restored.node_directory_identity,
+            old_identity.node_directory_identity
+        );
+        assert_eq!(
+            restored.provider_directory_identity,
+            old_identity.provider_directory_identity
+        );
+        assert_eq!(restored.node_tree_sha256, old_identity.node_tree_sha256);
+        assert_eq!(
+            restored.provider_tree_sha256,
+            old_identity.provider_tree_sha256
+        );
+        authenticate_stored_managed_provider_identity_at(
+            &paths,
+            &restored,
+            &paths.node_runtime_dir(),
+            &paths.youtube_po_provider_dir(),
+        )
+        .unwrap();
+        assert!(!stage_root.exists());
+        assert!(!managed_provider_replacement_archive_root(&paths, &attempt_id)
+            .unwrap()
+            .exists());
+        let conn = crate::db::open(&paths).unwrap();
+        crate::db::migrate(&conn).unwrap();
+        assert_eq!(
+            conn.query_row(
+                "SELECT COUNT(*) FROM provider_install_owner WHERE attempt_id=?1",
+                rusqlite::params![attempt_id],
+                |row| row.get::<_, i64>(0),
+            )
+            .unwrap(),
+            0
+        );
+        let _ = std::fs::remove_dir_all(base);
+    }
+
+    fn seed_v47_unbound_provider_identity(
+        paths: &AppPaths,
+        identity: &ProviderInstalledIdentity,
+        node_tree_override: Option<&str>,
+    ) {
+        paths.ensure_dirs().unwrap();
+        let conn = rusqlite::Connection::open(paths.db_dir().join("app.sqlite")).unwrap();
+        conn.execute_batch(
+            "CREATE TABLE meta(key TEXT PRIMARY KEY,value TEXT NOT NULL);
+             INSERT INTO meta(key,value) VALUES('schema_version','47');
+             CREATE TABLE provider_install_lineage(
+               attempt_id TEXT PRIMARY KEY,stage_root TEXT NOT NULL,phase TEXT NOT NULL,
+               updated_at_ms INTEGER NOT NULL,ownership_token_digest TEXT NOT NULL DEFAULT '',
+               node_directory_identity TEXT NOT NULL DEFAULT '',provider_directory_identity TEXT NOT NULL DEFAULT '',
+               node_tree_sha256 TEXT NOT NULL DEFAULT '',provider_tree_sha256 TEXT NOT NULL DEFAULT ''
+             );
+             CREATE TABLE provider_install_owner(
+               singleton INTEGER PRIMARY KEY,attempt_id TEXT NOT NULL UNIQUE,
+               acquired_at_ms INTEGER NOT NULL,updated_at_ms INTEGER NOT NULL,
+               owner_pid INTEGER NOT NULL DEFAULT 0,owner_process_identity TEXT NOT NULL DEFAULT ''
+             );
+             CREATE TABLE provider_installed_identity(
+               singleton INTEGER PRIMARY KEY,install_generation TEXT NOT NULL,
+               node_directory_identity TEXT NOT NULL,provider_directory_identity TEXT NOT NULL,
+               node_tree_sha256 TEXT NOT NULL,provider_tree_sha256 TEXT NOT NULL,
+               committed_at_ms INTEGER NOT NULL
+             );
+             PRAGMA user_version=47;",
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO provider_installed_identity(
+               singleton,install_generation,node_directory_identity,provider_directory_identity,
+               node_tree_sha256,provider_tree_sha256,committed_at_ms
+             ) VALUES(1,?1,?2,?3,?4,?5,1)",
+            rusqlite::params![
+                identity.install_generation,
+                identity.node_directory_identity,
+                identity.provider_directory_identity,
+                node_tree_override.unwrap_or(&identity.node_tree_sha256),
+                identity.provider_tree_sha256,
+            ],
+        )
+        .unwrap();
+    }
+
+    #[test]
+    fn v47_unbound_identity_binds_only_to_exact_authenticated_destination() {
+        for mismatch in [false, true] {
+            let base = std::env::temp_dir().join(format!(
+                "voxvulgi_provider_v47_adoption_{}_{}_{}",
+                mismatch,
+                std::process::id(),
+                uuid::Uuid::new_v4()
+            ));
+            let paths = AppPaths::new(base.clone());
+            let verified = synthetic_provider_destination(&paths);
+            seed_v47_unbound_provider_identity(
+                &paths,
+                &verified,
+                mismatch.then_some("BAD_LEGACY_ROOT"),
+            );
+            assert!(
+                authenticate_authoritative_installed_provider_identity(&paths).is_err(),
+                "a parseable v47 row must never be accepted before transactional binding"
+            );
+            let result = commit_adopted_provider_identity(&paths, verified);
+            assert_eq!(result.is_err(), mismatch, "adoption result: {result:?}");
+            let identity = load_provider_installed_identity(&paths).unwrap().unwrap();
+            assert_eq!(identity.lineage_attempt_id.is_empty(), mismatch);
+            assert_eq!(identity.commit_nonce.is_empty(), mismatch);
+            if !mismatch {
+                require_exact_committed_provider_identity_lineage(&paths, &identity).unwrap();
+            }
+            let _ = std::fs::remove_dir_all(base);
+        }
+    }
+
+    fn seed_provider_published_lineage(
+        paths: &AppPaths,
+        verified: &ProviderInstalledIdentity,
+    ) -> (String, PathBuf) {
+        let attempt_id = uuid::Uuid::new_v4().to_string();
+        let stage_root = paths
+            .tools_dir()
+            .join(format!("youtube_po_provider_stage_{attempt_id}"));
+        let token = provider_test_ownership_token();
+        let token_digest = provider_ownership_token_digest(&token);
+        let nonce = random_provider_authority_nonce();
+        claim_provider_install_owner(paths, &attempt_id, &stage_root, &token_digest, &nonce)
+            .unwrap();
+        seal_provider_install_lineage(
+            paths,
+            &attempt_id,
+            &stage_root,
+            &token_digest,
+            &verified.node_directory_identity,
+            &verified.provider_directory_identity,
+            &verified.node_tree_sha256,
+            &verified.provider_tree_sha256,
+        )
+        .unwrap();
+        persist_provider_install_lineage(paths, &attempt_id, &stage_root, "prepared").unwrap();
+        for phase in [
+            "node_publish_intent",
+            "node_published",
+            "provider_publish_intent",
+            "provider_published",
+        ] {
+            persist_provider_install_lineage(paths, &attempt_id, &stage_root, phase).unwrap();
+        }
+        (attempt_id, stage_root)
+    }
+
+    #[test]
+    fn postcommit_receipt_failure_retains_finals_and_authoritative_identity() {
+        let base = std::env::temp_dir().join(format!(
+            "voxvulgi_provider_receipt_commit_{}_{}",
+            std::process::id(),
+            uuid::Uuid::new_v4()
+        ));
+        let paths = AppPaths::new(base.clone());
+        let verified = synthetic_provider_destination(&paths);
+        let (attempt_id, stage_root) = seed_provider_published_lineage(&paths, &verified);
+        let outcome = commit_provider_installed_identity_with_receipt(
+            &paths,
+            &attempt_id,
+            &stage_root,
+            |_paths, _attempt, _root| {
+                Err(EngineError::InstallFailed(
+                    "injected postcommit receipt failure".to_string(),
+                ))
+            },
+        )
+        .unwrap();
+        assert_eq!(
+            outcome,
+            ProviderIdentityCommitOutcome {
+                committed: true,
+                receipt_written: false,
+            }
+        );
+        assert!(paths.node_runtime_dir().exists());
+        assert!(paths.youtube_po_provider_dir().exists());
+        let identity = load_provider_installed_identity(&paths).unwrap().unwrap();
+        assert_eq!(identity.lineage_attempt_id, attempt_id);
+        let conn = crate::db::open(&paths).unwrap();
+        crate::db::migrate(&conn).unwrap();
+        assert_eq!(
+            conn.query_row(
+                "SELECT phase FROM provider_install_lineage WHERE attempt_id=?1",
+                [&attempt_id],
+                |row| row.get::<_, String>(0),
+            )
+            .unwrap(),
+            "committed"
+        );
+        drop(conn);
+        release_provider_install_owner(&paths, &attempt_id).unwrap();
+        std::fs::write(provider_install_attempt_receipt_path(&paths), b"malformed").unwrap();
+        reconcile_interrupted_provider_install(&paths).unwrap();
+        assert!(!provider_install_attempt_receipt_path(&paths).exists());
+        assert!(load_provider_installed_identity(&paths).unwrap().is_some());
+        assert!(paths.node_runtime_dir().exists());
+        assert!(paths.youtube_po_provider_dir().exists());
+        let _ = std::fs::remove_dir_all(base);
+    }
+
+    #[test]
+    fn prepublication_failures_release_durable_owner_for_same_process_retry() {
+        let base = std::env::temp_dir().join(format!(
+            "voxvulgi_provider_prepublication_retry_{}_{}",
+            std::process::id(),
+            uuid::Uuid::new_v4()
+        ));
+        let paths = AppPaths::new(base.clone());
+        paths.ensure_dirs().unwrap();
+        for boundary in ["download", "extract", "npm", "audit", "seal"] {
+            let attempt_id = uuid::Uuid::new_v4().to_string();
+            let stage_root = paths
+                .tools_dir()
+                .join(format!("youtube_po_provider_stage_{attempt_id}"));
+            let token = provider_test_ownership_token();
+            let nonce = random_provider_authority_nonce();
+            claim_provider_install_owner(
+                &paths,
+                &attempt_id,
+                &stage_root,
+                &provider_ownership_token_digest(&token),
+                &nonce,
+            )
+            .unwrap();
+            std::fs::create_dir_all(&stage_root).unwrap();
+            std::fs::write(stage_root.join(format!("{boundary}_partial")), boundary).unwrap();
+            drop(ProviderInstallOperationGuard::new(&paths, &attempt_id));
+            let conn = crate::db::open(&paths).unwrap();
+            crate::db::migrate(&conn).unwrap();
+            assert_eq!(
+                conn.query_row("SELECT COUNT(*) FROM provider_install_owner", [], |row| row
+                    .get::<_, i64>(0))
+                    .unwrap(),
+                0,
+                "owner leaked after {boundary}"
+            );
+            assert_eq!(
+                conn.query_row("SELECT COUNT(*) FROM provider_install_lineage", [], |row| row
+                    .get::<_, i64>(0))
+                    .unwrap(),
+                0,
+                "lineage leaked after {boundary}"
+            );
+            drop(conn);
+            assert!(!stage_root.exists(), "stage leaked after {boundary}");
+        }
+        let retry_id = uuid::Uuid::new_v4().to_string();
+        let retry_stage = paths
+            .tools_dir()
+            .join(format!("youtube_po_provider_stage_{retry_id}"));
+        let retry_token = provider_test_ownership_token();
+        claim_provider_install_owner(
+            &paths,
+            &retry_id,
+            &retry_stage,
+            &provider_ownership_token_digest(&retry_token),
+            &random_provider_authority_nonce(),
+        )
+        .unwrap();
+        abort_prepublication_provider_install(&paths, &retry_id).unwrap();
+        let _ = std::fs::remove_dir_all(base);
+    }
+
+    #[test]
+    fn every_publication_persistence_failure_releases_owner_for_same_process_retry() {
+        for boundary in [
+            "node_publish_intent",
+            "node_published",
+            "provider_publish_intent",
+            "provider_published",
+        ] {
+            let base = std::env::temp_dir().join(format!(
+                "vv_cb_{}_{}",
+                std::process::id(),
+                &uuid::Uuid::new_v4().simple().to_string()[..8]
+            ));
+            let paths = AppPaths::new(base.clone());
+            let (attempt_id, _token, stage_root) =
+                seed_provider_recovery_phase(&paths, "prepared");
+            let node_stage = stage_root.join("node");
+            let provider_stage = stage_root.join("provider");
+            let final_node = paths.node_runtime_dir();
+            let final_provider = paths.youtube_po_provider_dir();
+            let mut operation_guard = ProviderInstallOperationGuard::new(&paths, &attempt_id);
+
+            if boundary == "node_publish_intent" {
+                let result = enter_durable_provider_publication(&mut operation_guard, || {
+                    Err(EngineError::InstallFailed(
+                        "injected node_publish_intent persistence failure".to_string(),
+                    ))
+                });
+                assert!(result.is_err());
+                drop(operation_guard);
+            } else {
+                enter_durable_provider_publication(&mut operation_guard, || {
+                    persist_provider_install_lineage(
+                        &paths,
+                        &attempt_id,
+                        &stage_root,
+                        "node_publish_intent",
+                    )
+                })
+                .unwrap();
+                let result = publish_provider_pair_with_checks(
+                    &node_stage,
+                    &provider_stage,
+                    &final_node,
+                    &final_provider,
+                    || Ok(()),
+                    || {
+                        if boundary == "node_published" {
+                            return Err(EngineError::InstallFailed(
+                                "injected node_published persistence failure".to_string(),
+                            ));
+                        }
+                        persist_provider_install_lineage(
+                            &paths,
+                            &attempt_id,
+                            &stage_root,
+                            "node_published",
+                        )?;
+                        if boundary == "provider_publish_intent" {
+                            return Err(EngineError::InstallFailed(
+                                "injected provider_publish_intent persistence failure".to_string(),
+                            ));
+                        }
+                        persist_provider_install_lineage(
+                            &paths,
+                            &attempt_id,
+                            &stage_root,
+                            "provider_publish_intent",
+                        )
+                    },
+                    || {
+                        Err(EngineError::InstallFailed(
+                            "injected provider_published persistence failure".to_string(),
+                        ))
+                    },
+                );
+                assert!(result.is_err());
+                assert!(!final_node.exists() && !final_provider.exists());
+                abort_owned_provider_install_after_complete_rollback(&paths, &attempt_id)
+                    .unwrap();
+                drop(operation_guard);
+            }
+
+            let conn = crate::db::open(&paths).unwrap();
+            crate::db::migrate(&conn).unwrap();
+            let owner_count: i64 = conn
+                .query_row("SELECT COUNT(*) FROM provider_install_owner", [], |row| row.get(0))
+                .unwrap();
+            let lineage_count: i64 = conn
+                .query_row("SELECT COUNT(*) FROM provider_install_lineage", [], |row| row.get(0))
+                .unwrap();
+            assert_eq!(owner_count, 0, "owner leaked at {boundary}");
+            assert_eq!(lineage_count, 0, "lineage leaked at {boundary}");
+            drop(conn);
+
+            let retry_id = uuid::Uuid::new_v4().to_string();
+            let retry_stage = paths
+                .tools_dir()
+                .join(format!("youtube_po_provider_stage_{retry_id}"));
+            claim_provider_install_owner(
+                &paths,
+                &retry_id,
+                &retry_stage,
+                &provider_ownership_token_digest(&provider_test_ownership_token()),
+                &random_provider_authority_nonce(),
+            )
+            .unwrap();
+            abort_prepublication_provider_install(&paths, &retry_id).unwrap();
+            let _ = std::fs::remove_dir_all(base);
+        }
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn locked_orphan_receipt_never_blocks_and_is_removed_after_restart_retry() {
+        use std::os::windows::ffi::OsStrExt;
+        use windows_sys::Win32::Foundation::{CloseHandle, GENERIC_READ, INVALID_HANDLE_VALUE};
+        use windows_sys::Win32::Storage::FileSystem::{CreateFileW, OPEN_EXISTING};
+
+        let base = std::env::temp_dir().join(format!(
+            "voxvulgi_provider_locked_receipt_{}_{}",
+            std::process::id(),
+            uuid::Uuid::new_v4()
+        ));
+        let paths = AppPaths::new(base.clone());
+        let verified = synthetic_provider_destination(&paths);
+        commit_adopted_provider_identity(&paths, verified).unwrap();
+        let receipt = provider_install_attempt_receipt_path(&paths);
+        std::fs::write(&receipt, b"orphan").unwrap();
+        let wide = receipt
+            .as_os_str()
+            .encode_wide()
+            .chain(std::iter::once(0))
+            .collect::<Vec<_>>();
+        let handle = unsafe {
+            CreateFileW(
+                wide.as_ptr(),
+                GENERIC_READ,
+                0,
+                std::ptr::null(),
+                OPEN_EXISTING,
+                0,
+                std::ptr::null_mut(),
+            )
+        };
+        assert_ne!(handle, INVALID_HANDLE_VALUE);
+        reconcile_interrupted_provider_install(&paths).unwrap();
+        assert!(receipt.exists(), "locked audit receipt should be left for retry");
+        unsafe {
+            let _ = CloseHandle(handle);
+        }
+        reconcile_interrupted_provider_install(&paths).unwrap();
+        assert!(!receipt.exists(), "fresh retry should remove orphan receipt");
+        assert!(load_provider_installed_identity(&paths).unwrap().is_some());
+        let _ = std::fs::remove_dir_all(base);
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn derive_fresh_pinned_provider_complete_roots_when_requested() {
+        if std::env::var_os("VOXVULGI_DERIVE_PROVIDER_COMPLETE_ROOTS").is_none() {
+            return;
+        }
+        let base = std::env::temp_dir().join(format!(
+            "vv_roots_{}_{}",
+            std::process::id(),
+            uuid::Uuid::new_v4().simple()
+        ));
+        let paths = AppPaths::new(base.clone());
+        let status = install_youtube_po_provider(&paths).expect("fresh pinned provider install");
+        assert!(status.installed && status.security_audit_passed);
+        let node_root = canonical_provider_node_tree_sha256_hex(&paths.node_runtime_dir())
+            .expect("complete Node root");
+        let provider_root =
+            canonical_provider_application_tree_sha256_hex(&paths.youtube_po_provider_dir())
+                .expect("complete provider root");
+        eprintln!("PINNED_PROVIDER_NODE_COMPLETE_ROOT={node_root}");
+        eprintln!("PINNED_PROVIDER_APPLICATION_COMPLETE_ROOT={provider_root}");
+        let _ = std::fs::remove_dir_all(base);
+    }
+
+    #[test]
+    fn stale_node_published_receipt_recovers_only_attempt_owned_payload() {
+        let base = std::env::temp_dir().join(format!(
+            "voxvulgi_provider_recovery_{}_{}",
+            std::process::id(),
+            uuid::Uuid::new_v4()
+        ));
+        let paths = AppPaths::new(base.clone());
+        paths.ensure_dirs().unwrap();
+        let attempt_id = uuid::Uuid::new_v4().to_string();
+        let ownership_token = provider_test_ownership_token();
+        let commit_nonce = random_provider_authority_nonce();
+        let stage_root = paths
+            .tools_dir()
+            .join(format!("youtube_po_provider_stage_{attempt_id}"));
+        let node_stage = stage_root.join("node");
+        let provider_stage = stage_root.join("provider");
+        std::fs::create_dir_all(&node_stage).unwrap();
+        std::fs::create_dir_all(&provider_stage).unwrap();
+        std::fs::write(node_stage.join("node_fixture"), b"node").unwrap();
+        std::fs::write(provider_stage.join("provider_fixture"), b"provider").unwrap();
+        write_provider_ownership_marker(&node_stage, &attempt_id, &ownership_token).unwrap();
+        write_provider_ownership_marker(&provider_stage, &attempt_id, &ownership_token).unwrap();
+        claim_provider_install_owner(
+            &paths,
+            &attempt_id,
+            &stage_root,
+            &provider_ownership_token_digest(&ownership_token),
+            &commit_nonce,
+        )
+        .unwrap();
+        seal_provider_install_lineage(
+            &paths,
+            &attempt_id,
+            &stage_root,
+            &provider_ownership_token_digest(&ownership_token),
+            &provider_directory_identity(&node_stage).unwrap(),
+            &provider_directory_identity(&provider_stage).unwrap(),
+            &canonical_provider_node_tree_sha256_hex(&node_stage).unwrap(),
+            &canonical_provider_application_tree_sha256_hex(&provider_stage).unwrap(),
+        )
+        .unwrap();
+        persist_provider_install_lineage(&paths, &attempt_id, &stage_root, "prepared").unwrap();
+        persist_provider_install_lineage(&paths, &attempt_id, &stage_root, "node_publish_intent")
+            .unwrap();
+        std::fs::create_dir_all(paths.node_runtime_dir().parent().unwrap()).unwrap();
+        std::fs::rename(&node_stage, paths.node_runtime_dir()).unwrap();
+        persist_provider_install_lineage(&paths, &attempt_id, &stage_root, "node_published")
+            .unwrap();
+
+        reconcile_interrupted_provider_install_with_checks(
+            &paths,
+            |_| Ok(()),
+            |_| Ok(()),
+            |_, _| Ok(()),
+            |_| false,
+        )
+        .unwrap();
+        assert!(!paths.node_runtime_dir().exists());
+        assert!(!paths.youtube_po_provider_dir().exists());
+        assert!(!stage_root.exists());
+        assert!(!provider_install_attempt_receipt_path(&paths).exists());
+        let conn = crate::db::open(&paths).unwrap();
+        crate::db::migrate(&conn).unwrap();
+        let owners: i64 = conn
+            .query_row("SELECT COUNT(*) FROM provider_install_owner", [], |row| {
+                row.get(0)
+            })
+            .unwrap();
+        assert_eq!(owners, 0, "stale owner must be released by recovery");
+        drop(conn);
+        let _ = std::fs::remove_dir_all(base);
+    }
+
+    fn seed_provider_recovery_phase(paths: &AppPaths, phase: &str) -> (String, String, PathBuf) {
+        paths.ensure_dirs().unwrap();
+        let attempt_id = uuid::Uuid::new_v4().to_string();
+        let ownership_token = provider_test_ownership_token();
+        let commit_nonce = random_provider_authority_nonce();
+        let stage_root = paths
+            .tools_dir()
+            .join(format!("youtube_po_provider_stage_{attempt_id}"));
+        let node_stage = stage_root.join("node");
+        let provider_stage = stage_root.join("provider");
+        std::fs::create_dir_all(&node_stage).unwrap();
+        std::fs::create_dir_all(&provider_stage).unwrap();
+        std::fs::write(node_stage.join("node_fixture"), b"node").unwrap();
+        std::fs::write(provider_stage.join("provider_fixture"), b"provider").unwrap();
+        write_provider_ownership_marker(&node_stage, &attempt_id, &ownership_token).unwrap();
+        write_provider_ownership_marker(&provider_stage, &attempt_id, &ownership_token).unwrap();
+        claim_provider_install_owner(
+            paths,
+            &attempt_id,
+            &stage_root,
+            &provider_ownership_token_digest(&ownership_token),
+            &commit_nonce,
+        )
+        .unwrap();
+        seal_provider_install_lineage(
+            paths,
+            &attempt_id,
+            &stage_root,
+            &provider_ownership_token_digest(&ownership_token),
+            &provider_directory_identity(&node_stage).unwrap(),
+            &provider_directory_identity(&provider_stage).unwrap(),
+            &canonical_provider_node_tree_sha256_hex(&node_stage).unwrap(),
+            &canonical_provider_application_tree_sha256_hex(&provider_stage).unwrap(),
+        )
+        .unwrap();
+
+        if phase != "prepared" {
+            persist_provider_install_lineage(paths, &attempt_id, &stage_root, "prepared").unwrap();
+            persist_provider_install_lineage(
+                paths,
+                &attempt_id,
+                &stage_root,
+                "node_publish_intent",
+            )
+            .unwrap();
+            std::fs::create_dir_all(paths.node_runtime_dir().parent().unwrap()).unwrap();
+            std::fs::rename(&node_stage, paths.node_runtime_dir()).unwrap();
+            if phase != "node_publish_intent" {
+                persist_provider_install_lineage(paths, &attempt_id, &stage_root, "node_published")
+                    .unwrap();
+                if phase != "node_published" {
+                    persist_provider_install_lineage(
+                        paths,
+                        &attempt_id,
+                        &stage_root,
+                        "provider_publish_intent",
+                    )
+                    .unwrap();
+                    std::fs::rename(&provider_stage, paths.youtube_po_provider_dir()).unwrap();
+                    if phase != "provider_publish_intent" {
+                        persist_provider_install_lineage(
+                            paths,
+                            &attempt_id,
+                            &stage_root,
+                            "provider_published",
+                        )
+                        .unwrap();
+                        if phase == "committed" {
+                            commit_provider_installed_identity(paths, &attempt_id, &stage_root)
+                                .unwrap();
+                        }
+                    }
+                }
+            }
+        }
+        (attempt_id, ownership_token, stage_root)
+    }
+
+    #[test]
+    fn provider_directory_identity_survives_rename_but_rejects_identical_copy() {
+        let base = tempfile::tempdir().unwrap();
+        let staged = base.path().join("staged");
+        let published = base.path().join("published");
+        let copied = base.path().join("copied");
+        std::fs::create_dir_all(&staged).unwrap();
+        std::fs::write(staged.join("payload"), b"identical").unwrap();
+        let staged_identity = provider_directory_identity(&staged).unwrap();
+        std::fs::rename(&staged, &published).unwrap();
+        assert_eq!(
+            provider_directory_identity(&published).unwrap(),
+            staged_identity,
+            "same-parent publication must preserve the staged filesystem object identity"
+        );
+        std::fs::create_dir_all(&copied).unwrap();
+        std::fs::copy(published.join("payload"), copied.join("payload")).unwrap();
+        assert_ne!(
+            provider_directory_identity(&copied).unwrap(),
+            staged_identity,
+            "an identical-byte copied directory must not inherit destructive recovery authority"
+        );
+    }
+
+    #[test]
+    fn copied_valid_marker_and_bytes_in_authorized_phase_preserve_both_objects() {
+        let base = std::env::temp_dir().join(format!(
+            "voxvulgi_provider_copied_identity_{}_{}",
+            std::process::id(),
+            uuid::Uuid::new_v4()
+        ));
+        let paths = AppPaths::new(base.clone());
+        let (_attempt_id, _ownership_token, stage_root) =
+            seed_provider_recovery_phase(&paths, "node_published");
+        let published = paths.node_runtime_dir();
+        let original = paths.tools_dir().join("original_node_object");
+        std::fs::rename(&published, &original).unwrap();
+        std::fs::create_dir_all(&published).unwrap();
+        for entry in std::fs::read_dir(&original).unwrap() {
+            let entry = entry.unwrap();
+            assert!(entry.file_type().unwrap().is_file());
+            std::fs::copy(entry.path(), published.join(entry.file_name())).unwrap();
+        }
+        assert_eq!(
+            canonical_provider_node_tree_sha256_hex(&published),
+            canonical_provider_node_tree_sha256_hex(&original)
+        );
+        assert!(reconcile_interrupted_provider_install_with_checks(
+            &paths,
+            |_| Ok(()),
+            |_| Ok(()),
+            |_, _| Ok(()),
+            |_| false,
+        )
+        .is_err());
+        assert!(
+            published.exists(),
+            "copied final must be preserved on ambiguity"
+        );
+        assert!(
+            original.exists(),
+            "original sealed object must remain preserved"
+        );
+        assert!(
+            stage_root.exists(),
+            "recovery evidence must remain available"
+        );
+        let _ = std::fs::remove_dir_all(base);
+    }
+
+    #[test]
+    fn live_owner_identity_refuses_recovery_before_any_cleanup() {
+        let base = std::env::temp_dir().join(format!(
+            "voxvulgi_provider_live_owner_{}_{}",
+            std::process::id(),
+            uuid::Uuid::new_v4()
+        ));
+        let paths = AppPaths::new(base.clone());
+        let (_attempt_id, _ownership_token, stage_root) =
+            seed_provider_recovery_phase(&paths, "prepared");
+        assert!(reconcile_interrupted_provider_install(&paths).is_err());
+        assert!(stage_root.exists());
+        let _ = std::fs::remove_dir_all(base);
+    }
+
+    #[test]
+    fn provider_published_lineage_is_never_verifiable_or_launchable() {
+        let base = std::env::temp_dir().join(format!(
+            "voxvulgi_provider_uncommitted_launch_{}_{}",
+            std::process::id(),
+            uuid::Uuid::new_v4()
+        ));
+        let paths = AppPaths::new(base.clone());
+        let (_attempt_id, _ownership_token, _stage_root) =
+            seed_provider_recovery_phase(&paths, "provider_published");
+        let conn = crate::db::open(&paths).unwrap();
+        crate::db::migrate(&conn).unwrap();
+        conn.execute(
+            "UPDATE provider_install_owner SET owner_pid=0,owner_process_identity='dead-process' WHERE singleton=1",
+            [],
+        )
+        .unwrap();
+        drop(conn);
+        assert!(verify_youtube_po_provider_node_modules(&paths).is_err());
+        assert!(ensure_youtube_po_provider(&paths).is_err());
+        assert!(
+            provider_node_modules_process_attestation(&paths.youtube_po_provider_server_dir())
+                .is_none()
+        );
+        let _ = std::fs::remove_dir_all(base);
+    }
+
+    #[test]
+    fn complete_provider_tree_roots_detect_unlisted_same_size_tamper() {
+        let base = tempfile::tempdir().unwrap();
+        let node = base.path().join("node");
+        let provider = base.path().join("provider");
+        std::fs::create_dir_all(node.join("node_modules/npm/lib")).unwrap();
+        std::fs::create_dir_all(provider.join("server/build")).unwrap();
+        let npm_impl = node.join("node_modules/npm/lib/cli.js");
+        let provider_extra = provider.join("server/build/worker.js");
+        std::fs::write(node.join("node.exe"), b"node").unwrap();
+        std::fs::write(&npm_impl, b"trusted-npm").unwrap();
+        std::fs::write(provider.join("server/build/main.js"), b"main").unwrap();
+        std::fs::write(&provider_extra, b"trusted-app").unwrap();
+        let node_root = canonical_provider_node_tree_sha256_hex(&node).unwrap();
+        let provider_root = canonical_provider_application_tree_sha256_hex(&provider).unwrap();
+
+        let npm_mtime = std::fs::metadata(&npm_impl).unwrap().modified().unwrap();
+        std::fs::write(&npm_impl, b"tamperd-npm").unwrap();
+        std::fs::File::options()
+            .write(true)
+            .open(&npm_impl)
+            .unwrap()
+            .set_times(std::fs::FileTimes::new().set_modified(npm_mtime))
+            .unwrap();
+        assert_ne!(
+            canonical_provider_node_tree_sha256_hex(&node).unwrap(),
+            node_root
+        );
+
+        let app_mtime = std::fs::metadata(&provider_extra)
+            .unwrap()
+            .modified()
+            .unwrap();
+        std::fs::write(&provider_extra, b"tamperd-app").unwrap();
+        std::fs::File::options()
+            .write(true)
+            .open(&provider_extra)
+            .unwrap()
+            .set_times(std::fs::FileTimes::new().set_modified(app_mtime))
+            .unwrap();
+        assert_ne!(
+            canonical_provider_application_tree_sha256_hex(&provider).unwrap(),
+            provider_root
+        );
+        assert_eq!(
+            PROVIDER_NODE_TREE_EXCLUSIONS,
+            [".voxvulgi_provider_install_attempt"]
+        );
+        assert_eq!(
+            PROVIDER_APPLICATION_TREE_EXCLUSIONS,
+            [
+                ".voxvulgi_provider_install_attempt",
+                "server/.node_modules_integrity.json"
+            ]
+        );
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn provider_interprocess_mutex_is_global_and_tree_rejects_reparse_escape() {
+        let base = tempfile::tempdir().unwrap();
+        let paths = AppPaths::new(base.path().to_path_buf());
+        paths.ensure_dirs().unwrap();
+        assert!(youtube_po_provider_install_interprocess_lock_name(&paths)
+            .starts_with("Global\\VoxVulgiYoutubePoProviderInstall-"));
+
+        let tree = base.path().join("tree");
+        let outside = base.path().join("outside");
+        std::fs::create_dir_all(&tree).unwrap();
+        std::fs::create_dir_all(&outside).unwrap();
+        std::fs::write(outside.join("payload"), b"outside").unwrap();
+        match std::os::windows::fs::symlink_dir(&outside, tree.join("junction_like")) {
+            Ok(()) => assert!(canonical_provider_application_tree_sha256_hex(&tree).is_none()),
+            Err(error) => eprintln!("reparse creation unavailable in this test context: {error}"),
+        }
+    }
+
+    #[test]
+    fn provider_recovery_phase_matrix_only_rolls_back_phase_authorized_valid_payloads() {
+        for (phase, expected_node_checks, expected_provider_checks, expected_committed_checks) in [
+            ("prepared", 0, 0, 0),
+            ("node_publish_intent", 1, 0, 0),
+            ("node_published", 1, 0, 0),
+            ("provider_publish_intent", 1, 1, 0),
+            ("provider_published", 1, 1, 0),
+            ("committed", 0, 0, 1),
+        ] {
+            let base = std::env::temp_dir().join(format!(
+                "vv_ppm_{}_{}",
+                std::process::id(),
+                uuid::Uuid::new_v4()
+            ));
+            let paths = AppPaths::new(base.clone());
+            let (_attempt_id, _ownership_token, stage_root) =
+                seed_provider_recovery_phase(&paths, phase);
+            let node_checks = std::cell::Cell::new(0);
+            let provider_checks = std::cell::Cell::new(0);
+            let committed_checks = std::cell::Cell::new(0);
+            reconcile_interrupted_provider_install_with_checks(
+                &paths,
+                |_| {
+                    node_checks.set(node_checks.get() + 1);
+                    Ok(())
+                },
+                |_| {
+                    provider_checks.set(provider_checks.get() + 1);
+                    Ok(())
+                },
+                |_, _| {
+                    committed_checks.set(committed_checks.get() + 1);
+                    Ok(())
+                },
+                |_| false,
+            )
+            .unwrap_or_else(|error| panic!("phase={phase}: {error}"));
+            assert_eq!(node_checks.get(), expected_node_checks, "phase={phase}");
+            assert_eq!(
+                provider_checks.get(),
+                expected_provider_checks,
+                "phase={phase}"
+            );
+            assert_eq!(
+                committed_checks.get(),
+                expected_committed_checks,
+                "phase={phase}"
+            );
+            assert_eq!(
+                paths.node_runtime_dir().exists(),
+                phase == "committed",
+                "phase={phase}"
+            );
+            assert_eq!(
+                paths.youtube_po_provider_dir().exists(),
+                phase == "committed",
+                "phase={phase}"
+            );
+            assert!(!stage_root.exists(), "phase={phase}");
+            let _ = std::fs::remove_dir_all(base);
+        }
+    }
+
+    #[test]
+    fn committed_recovery_authenticates_finals_before_owner_release() {
+        for mutation in ["valid", "tampered", "missing"] {
+            let base = std::env::temp_dir().join(format!(
+                "vv_pcr_{}_{}_{}",
+                &mutation[..1],
+                std::process::id(),
+                uuid::Uuid::new_v4()
+            ));
+            let paths = AppPaths::new(base.clone());
+            let (_attempt_id, _token, _stage_root) =
+                seed_provider_recovery_phase(&paths, "committed");
+            if mutation == "tampered" {
+                std::fs::write(paths.node_runtime_dir().join("node_fixture"), b"changed")
+                    .unwrap();
+            } else if mutation == "missing" {
+                std::fs::remove_dir_all(paths.youtube_po_provider_dir()).unwrap();
+            }
+            let result = reconcile_interrupted_provider_install_with_checks(
+                &paths,
+                |_| Ok(()),
+                |_| Ok(()),
+                |paths, lineage| {
+                    verify_published_directory_lineage(
+                        &paths.node_runtime_dir(),
+                        &lineage.node_directory_identity,
+                        &lineage.node_tree_sha256,
+                        canonical_provider_node_tree_sha256_hex,
+                        "Node",
+                    )?;
+                    verify_published_directory_lineage(
+                        &paths.youtube_po_provider_dir(),
+                        &lineage.provider_directory_identity,
+                        &lineage.provider_tree_sha256,
+                        canonical_provider_application_tree_sha256_hex,
+                        "provider",
+                    )
+                },
+                |_| false,
+            );
+            assert_eq!(result.is_err(), mutation != "valid", "mutation={mutation}");
+            let conn = crate::db::open(&paths).unwrap();
+            crate::db::migrate(&conn).unwrap();
+            let owners = conn
+                .query_row("SELECT COUNT(*) FROM provider_install_owner", [], |row| {
+                    row.get::<_, i64>(0)
+                })
+                .unwrap();
+            assert_eq!(owners, i64::from(mutation != "valid"), "mutation={mutation}");
+            assert!(load_provider_installed_identity(&paths).unwrap().is_some());
+            let _ = std::fs::remove_dir_all(base);
+        }
+    }
+
+    #[test]
+    fn prepared_lineage_with_copied_markers_preserves_prior_installed_payloads() {
+        let base = std::env::temp_dir().join(format!(
+            "voxvulgi_provider_prepared_preserve_{}_{}",
+            std::process::id(),
+            uuid::Uuid::new_v4()
+        ));
+        let paths = AppPaths::new(base.clone());
+        let (attempt_id, ownership_token, stage_root) =
+            seed_provider_recovery_phase(&paths, "prepared");
+        for final_dir in [paths.node_runtime_dir(), paths.youtube_po_provider_dir()] {
+            std::fs::create_dir_all(&final_dir).unwrap();
+            write_provider_ownership_marker(&final_dir, &attempt_id, &ownership_token).unwrap();
+            std::fs::write(final_dir.join("prior_payload"), b"preserve-me").unwrap();
+        }
+        assert!(reconcile_interrupted_provider_install_with_checks(
+            &paths,
+            |_| panic!("prepared phase must not authenticate Node final"),
+            |_| panic!("prepared phase must not authenticate provider final"),
+            |_, _| panic!("prepared phase is not committed"),
+            |_| false,
+        )
+        .is_err());
+        assert!(paths.node_runtime_dir().join("prior_payload").exists());
+        assert!(paths
+            .youtube_po_provider_dir()
+            .join("prior_payload")
+            .exists());
+        assert!(
+            stage_root.exists(),
+            "ambiguous recovery must retain staging evidence"
+        );
+        let _ = std::fs::remove_dir_all(base);
+    }
+
+    #[test]
+    fn node_phase_never_rolls_back_or_deletes_a_provider_final() {
+        let base = std::env::temp_dir().join(format!(
+            "voxvulgi_provider_node_phase_preserve_{}_{}",
+            std::process::id(),
+            uuid::Uuid::new_v4()
+        ));
+        let paths = AppPaths::new(base.clone());
+        let (attempt_id, ownership_token, stage_root) =
+            seed_provider_recovery_phase(&paths, "node_published");
+        let provider_final = paths.youtube_po_provider_dir();
+        std::fs::create_dir_all(&provider_final).unwrap();
+        write_provider_ownership_marker(&provider_final, &attempt_id, &ownership_token).unwrap();
+        std::fs::write(provider_final.join("prior_payload"), b"preserve-me").unwrap();
+        assert!(reconcile_interrupted_provider_install_with_checks(
+            &paths,
+            |_| Ok(()),
+            |_| panic!("node phase must reject provider before authentication"),
+            |_, _| panic!("node phase is not committed"),
+            |_| false,
+        )
+        .is_err());
+        assert!(paths.node_runtime_dir().exists());
+        assert!(provider_final.join("prior_payload").exists());
+        assert!(stage_root.exists());
+        let _ = std::fs::remove_dir_all(base);
+    }
+
+    #[test]
+    fn forged_marker_and_committed_non_node_tamper_preserve_all_final_payloads() {
+        for (phase, committed_tamper) in [
+            ("node_publish_intent", false),
+            ("node_published", false),
+            ("provider_publish_intent", false),
+            ("provider_published", false),
+            ("committed", true),
+        ] {
+            let base = std::env::temp_dir().join(format!(
+                "vv_fpf_{phase}_{}_{}",
+                std::process::id(),
+                uuid::Uuid::new_v4()
+            ));
+            let paths = AppPaths::new(base.clone());
+            let (_attempt_id, _ownership_token, stage_root) =
+                seed_provider_recovery_phase(&paths, phase);
+            if !committed_tamper {
+                let forged = if phase.starts_with("provider") {
+                    paths.youtube_po_provider_dir()
+                } else {
+                    paths.node_runtime_dir()
+                };
+                std::fs::write(provider_attempt_marker(&forged), "copied-wrong-attempt").unwrap();
+            }
+            let result = reconcile_interrupted_provider_install_with_checks(
+                &paths,
+                |_| Ok(()),
+                |_| Ok(()),
+                |_, _| {
+                    Err(EngineError::InstallFailed(
+                        "simulated plugin/server tamper".to_string(),
+                    ))
+                },
+                |_| false,
+            );
+            assert!(result.is_err(), "phase={phase}");
+            if phase != "prepared" {
+                assert!(paths.node_runtime_dir().exists(), "phase={phase}");
+            }
+            if phase.starts_with("provider") || phase == "committed" {
+                assert!(paths.youtube_po_provider_dir().exists(), "phase={phase}");
+            }
+            assert!(stage_root.exists(), "phase={phase}");
+            let _ = std::fs::remove_dir_all(base);
+        }
+    }
+
+    #[test]
+    fn provider_install_owner_is_singleton_across_independent_connections() {
+        let base = std::env::temp_dir().join(format!(
+            "voxvulgi_provider_owner_race_{}_{}",
+            std::process::id(),
+            uuid::Uuid::new_v4()
+        ));
+        let paths = AppPaths::new(base.clone());
+        paths.ensure_dirs().unwrap();
+        crate::db::ensure_schema(&paths).unwrap();
+        let attempts = [
+            uuid::Uuid::new_v4().to_string(),
+            uuid::Uuid::new_v4().to_string(),
+        ];
+        let barrier = std::sync::Arc::new(std::sync::Barrier::new(3));
+        let mut joins = Vec::new();
+        for attempt_id in attempts.clone() {
+            let paths = paths.clone();
+            let barrier = std::sync::Arc::clone(&barrier);
+            let ownership_token = provider_test_ownership_token();
+            let commit_nonce = random_provider_authority_nonce();
+            joins.push(std::thread::spawn(move || {
+                let stage_root = paths
+                    .tools_dir()
+                    .join(format!("youtube_po_provider_stage_{attempt_id}"));
+                barrier.wait();
+                claim_provider_install_owner(
+                    &paths,
+                    &attempt_id,
+                    &stage_root,
+                    &provider_ownership_token_digest(&ownership_token),
+                    &commit_nonce,
+                )
+                .map(|_| attempt_id)
+            }));
+        }
+        barrier.wait();
+        let results = joins
+            .into_iter()
+            .map(|join| join.join().unwrap())
+            .collect::<Vec<_>>();
+        assert_eq!(results.iter().filter(|result| result.is_ok()).count(), 1);
+        assert_eq!(results.iter().filter(|result| result.is_err()).count(), 1);
+        let conn = crate::db::open(&paths).unwrap();
+        crate::db::migrate(&conn).unwrap();
+        let owner_and_lineage: (i64, i64) = (
+            conn.query_row("SELECT COUNT(*) FROM provider_install_owner", [], |row| {
+                row.get(0)
+            })
+            .unwrap(),
+            conn.query_row("SELECT COUNT(*) FROM provider_install_lineage", [], |row| {
+                row.get(0)
+            })
+            .unwrap(),
+        );
+        assert_eq!(owner_and_lineage, (1, 1));
+        drop(conn);
+        let _ = std::fs::remove_dir_all(base);
+    }
+
+    #[test]
+    fn provider_install_owner_child_process_probe() {
+        let Some(base) = std::env::var_os("VOXVULGI_PROVIDER_OWNER_PROBE_ROOT").map(PathBuf::from)
+        else {
+            return;
+        };
+        let attempt_id =
+            std::env::var("VOXVULGI_PROVIDER_OWNER_PROBE_ATTEMPT").expect("child attempt id");
+        let ownership_token =
+            std::env::var("VOXVULGI_PROVIDER_OWNER_PROBE_TOKEN").expect("child ownership token");
+        let commit_nonce =
+            std::env::var("VOXVULGI_PROVIDER_OWNER_PROBE_NONCE").expect("child commit nonce");
+        let paths = AppPaths::new(base);
+        let stage_root = paths
+            .tools_dir()
+            .join(format!("youtube_po_provider_stage_{attempt_id}"));
+        if claim_provider_install_owner(
+            &paths,
+            &attempt_id,
+            &stage_root,
+            &provider_ownership_token_digest(&ownership_token),
+            &commit_nonce,
+        )
+        .is_err()
+        {
+            // This helper runs only in a spawned test process. Exit distinctly without a panic
+            // so the parent can assert that exactly one cross-process claimant was rejected.
+            std::process::exit(42);
+        }
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn provider_install_interprocess_lock_child_probe() {
+        let Some(base) =
+            std::env::var_os("VOXVULGI_PROVIDER_INSTALL_LOCK_PROBE_ROOT").map(PathBuf::from)
+        else {
+            return;
+        };
+        let timeout_ms = std::env::var("VOXVULGI_PROVIDER_INSTALL_LOCK_PROBE_TIMEOUT_MS")
+            .ok()
+            .and_then(|value| value.parse::<u32>().ok())
+            .unwrap_or(250);
+        let paths = AppPaths::new(base);
+        paths.ensure_dirs().unwrap();
+        if acquire_youtube_po_provider_install_interprocess_lock(&paths, timeout_ms).is_err() {
+            std::process::exit(42);
+        }
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn live_provider_install_cannot_be_recovered_by_a_second_process() {
+        let base = std::env::temp_dir().join(format!(
+            "voxvulgi_provider_install_lock_{}_{}",
+            std::process::id(),
+            uuid::Uuid::new_v4()
+        ));
+        let paths = AppPaths::new(base.clone());
+        paths.ensure_dirs().unwrap();
+        let test_exe = std::env::current_exe().unwrap();
+
+        let guard = acquire_youtube_po_provider_install_interprocess_lock(&paths, 500).unwrap();
+        let blocked = std::process::Command::new(&test_exe)
+            .args([
+                "--exact",
+                "tools::tests::provider_install_interprocess_lock_child_probe",
+            ])
+            .env("VOXVULGI_PROVIDER_INSTALL_LOCK_PROBE_ROOT", &base)
+            .env("VOXVULGI_PROVIDER_INSTALL_LOCK_PROBE_TIMEOUT_MS", "100")
+            .status()
+            .unwrap();
+        assert_eq!(blocked.code(), Some(42));
+
+        drop(guard);
+        let acquired_after_release = std::process::Command::new(&test_exe)
+            .args([
+                "--exact",
+                "tools::tests::provider_install_interprocess_lock_child_probe",
+            ])
+            .env("VOXVULGI_PROVIDER_INSTALL_LOCK_PROBE_ROOT", &base)
+            .env("VOXVULGI_PROVIDER_INSTALL_LOCK_PROBE_TIMEOUT_MS", "500")
+            .status()
+            .unwrap();
+        assert!(acquired_after_release.success());
+        let _ = std::fs::remove_dir_all(base);
+    }
+
+    #[test]
+    fn provider_install_owner_rejects_a_second_process_attempt() {
+        let base = std::env::temp_dir().join(format!(
+            "voxvulgi_provider_owner_process_{}_{}",
+            std::process::id(),
+            uuid::Uuid::new_v4()
+        ));
+        let paths = AppPaths::new(base.clone());
+        paths.ensure_dirs().unwrap();
+        crate::db::ensure_schema(&paths).unwrap();
+        let test_exe = std::env::current_exe().expect("current Rust test executable");
+        let mut children = Vec::new();
+        for _ in 0..2 {
+            let attempt_id = uuid::Uuid::new_v4().to_string();
+            let ownership_token = provider_test_ownership_token();
+            let commit_nonce = random_provider_authority_nonce();
+            children.push(
+                std::process::Command::new(&test_exe)
+                    .args([
+                        "--exact",
+                        "tools::tests::provider_install_owner_child_process_probe",
+                    ])
+                    .env("VOXVULGI_PROVIDER_OWNER_PROBE_ROOT", &base)
+                    .env("VOXVULGI_PROVIDER_OWNER_PROBE_ATTEMPT", attempt_id)
+                    .env("VOXVULGI_PROVIDER_OWNER_PROBE_TOKEN", ownership_token)
+                    .env("VOXVULGI_PROVIDER_OWNER_PROBE_NONCE", commit_nonce)
+                    .spawn()
+                    .expect("spawn independent provider owner claimant"),
+            );
+        }
+        let statuses = children
+            .into_iter()
+            .map(|mut child| child.wait().expect("provider claimant exit"))
+            .collect::<Vec<_>>();
+        assert_eq!(statuses.iter().filter(|status| status.success()).count(), 1);
+        let conn = crate::db::open(&paths).unwrap();
+        crate::db::migrate(&conn).unwrap();
+        assert_eq!(
+            conn.query_row("SELECT COUNT(*) FROM provider_install_owner", [], |row| row
+                .get::<_, i64>(0))
+                .unwrap(),
+            1
+        );
+        assert_eq!(
+            conn.query_row("SELECT COUNT(*) FROM provider_install_lineage", [], |row| {
+                row.get::<_, i64>(0)
+            })
+            .unwrap(),
+            1
+        );
+        let stored_nonces = conn
+            .query_row(
+                "SELECT owner.commit_nonce,lineage.commit_nonce
+                 FROM provider_install_owner owner
+                 JOIN provider_install_lineage lineage ON lineage.attempt_id=owner.attempt_id
+                 WHERE owner.singleton=1",
+                [],
+                |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)),
+            )
+            .unwrap();
+        assert!(stored_nonces.0.len() >= 32);
+        assert_eq!(stored_nonces.0, stored_nonces.1);
+        drop(conn);
+        let _ = std::fs::remove_dir_all(base);
+    }
+
+    #[test]
+    fn provider_install_owner_same_attempt_claim_is_idempotent() {
+        let base = std::env::temp_dir().join(format!(
+            "voxvulgi_provider_owner_idempotent_{}_{}",
+            std::process::id(),
+            uuid::Uuid::new_v4()
+        ));
+        let paths = AppPaths::new(base.clone());
+        paths.ensure_dirs().unwrap();
+        let attempt_id = uuid::Uuid::new_v4().to_string();
+        let ownership_token = provider_test_ownership_token();
+        let stage_root = paths
+            .tools_dir()
+            .join(format!("youtube_po_provider_stage_{attempt_id}"));
+        let token_digest = provider_ownership_token_digest(&ownership_token);
+        let commit_nonce = random_provider_authority_nonce();
+        claim_provider_install_owner(
+            &paths,
+            &attempt_id,
+            &stage_root,
+            &token_digest,
+            &commit_nonce,
+        )
+        .unwrap();
+        claim_provider_install_owner(
+            &paths,
+            &attempt_id,
+            &stage_root,
+            &token_digest,
+            &commit_nonce,
+        )
+        .unwrap();
+        let conn = crate::db::open(&paths).unwrap();
+        crate::db::migrate(&conn).unwrap();
+        assert_eq!(
+            conn.query_row("SELECT COUNT(*) FROM provider_install_owner", [], |row| row
+                .get::<_, i64>(0))
+                .unwrap(),
+            1
+        );
+        assert_eq!(
+            conn.query_row("SELECT COUNT(*) FROM provider_install_lineage", [], |row| {
+                row.get::<_, i64>(0)
+            })
+            .unwrap(),
+            1
+        );
+        let stored_nonces = conn
+            .query_row(
+                "SELECT owner.commit_nonce,lineage.commit_nonce
+                 FROM provider_install_owner owner
+                 JOIN provider_install_lineage lineage ON lineage.attempt_id=owner.attempt_id
+                 WHERE owner.singleton=1",
+                [],
+                |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)),
+            )
+            .unwrap();
+        assert!(stored_nonces.0.len() >= 32);
+        assert_eq!(stored_nonces.0, commit_nonce);
+        assert_eq!(stored_nonces.1, commit_nonce);
+        drop(conn);
+        let _ = std::fs::remove_dir_all(base);
+    }
+
+    #[test]
+    fn provider_recovery_rejects_traversal_and_receipt_only_forged_markers() {
+        let base = std::env::temp_dir().join(format!(
+            "voxvulgi_provider_recovery_forgery_{}_{}",
+            std::process::id(),
+            uuid::Uuid::new_v4()
+        ));
+        let paths = AppPaths::new(base.clone());
+        paths.ensure_dirs().unwrap();
+        let traversal_id = format!("{}\\..\\..\\outside", uuid::Uuid::new_v4());
+        let traversal_root = paths
+            .tools_dir()
+            .join(format!("youtube_po_provider_stage_{traversal_id}"));
+        assert!(validated_provider_stage_root(&paths, &traversal_id, &traversal_root).is_err());
+
+        let forged_id = uuid::Uuid::new_v4().to_string();
+        let forged_stage = paths
+            .tools_dir()
+            .join(format!("youtube_po_provider_stage_{forged_id}"));
+        std::fs::create_dir_all(paths.node_runtime_dir()).unwrap();
+        std::fs::create_dir_all(paths.youtube_po_provider_dir()).unwrap();
+        std::fs::write(
+            provider_attempt_marker(&paths.node_runtime_dir()),
+            &forged_id,
+        )
+        .unwrap();
+        std::fs::write(
+            provider_attempt_marker(&paths.youtube_po_provider_dir()),
+            &forged_id,
+        )
+        .unwrap();
+        write_provider_install_attempt_receipt(
+            &paths,
+            &forged_id,
+            &forged_stage,
+            "provider_published",
+        )
+        .unwrap();
+        assert!(reconcile_interrupted_provider_install(&paths).is_ok());
+        assert!(
+            !provider_install_attempt_receipt_path(&paths).exists(),
+            "a receipt without trusted lineage is only an orphan carrier"
+        );
+        assert!(paths.node_runtime_dir().exists());
+        assert!(paths.youtube_po_provider_dir().exists());
+        let _ = std::fs::remove_dir_all(base);
+    }
+
+    #[test]
+    fn launch_revalidates_and_rejects_a_tampered_previously_attested_tree() {
+        let base = std::env::temp_dir().join(format!(
+            "voxvulgi_provider_launch_revalidation_{}_{}",
+            std::process::id(),
+            uuid::Uuid::new_v4()
+        ));
+        let paths = AppPaths::new(base.clone());
+        paths.ensure_dirs().unwrap();
+        let server = paths.youtube_po_provider_server_dir();
+        let node_modules = server.join("node_modules");
+        std::fs::create_dir_all(&node_modules).unwrap();
+        std::fs::write(node_modules.join("tampered.js"), b"not pinned").unwrap();
+        let expected = pinned_dependency_manifest::manifest()
+            .youtube_po_provider
+            .node_modules_tree_sha256_hex
+            .clone();
+        provider_node_modules_process_attestations()
+            .lock()
+            .unwrap()
+            .insert(
+                server.clone(),
+                ProviderNodeModulesProcessAttestation {
+                    install_generation: provider_install_generation(),
+                    tree_sha256_hex: expected,
+                    verified_at_ms: now_ms(),
+                },
+            );
+        assert!(provider_node_modules_process_attestation(&server).is_some());
+        assert!(ensure_youtube_po_provider(&paths).is_err());
+        assert!(provider_node_modules_process_attestation(&server).is_none());
+        assert_eq!(
+            youtube_po_provider_install_status(&paths).node_modules_integrity_state,
+            "invalid"
+        );
+        let _ = std::fs::remove_dir_all(base);
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn pinned_npm_ignore_scripts_blocks_an_unexpected_lifecycle_package() {
+        let Some(node_dir) = std::env::var_os("VOXVULGI_PINNED_NODE_DIR").map(PathBuf::from) else {
+            eprintln!("VOXVULGI_PINNED_NODE_DIR not set; exact archive executable probe skipped");
+            return;
+        };
+        let npm = node_dir.join("npm.cmd");
+        let expected_npm = &pinned_dependency_manifest::manifest()
+            .node_windows
+            .npm_version;
+        assert_eq!(
+            tool_version_first_line_with_arg(&npm, "--version").as_deref(),
+            Some(expected_npm.as_str())
+        );
+        let base = std::env::temp_dir().join(format!(
+            "voxvulgi_npm_negative_{}_{}",
+            std::process::id(),
+            uuid::Uuid::new_v4()
+        ));
+        let dependency = base.join("unexpected_dependency");
+        let app = base.join("app");
+        std::fs::create_dir_all(&dependency).unwrap();
+        std::fs::create_dir_all(&app).unwrap();
+        std::fs::write(
+            dependency.join("package.json"),
+            r#"{"name":"unexpected-lifecycle","version":"1.0.0","scripts":{"postinstall":"node postinstall.js"}}"#,
+        )
+        .unwrap();
+        std::fs::write(
+            dependency.join("postinstall.js"),
+            "require('fs').writeFileSync('../unexpected_lifecycle_ran','bad')",
+        )
+        .unwrap();
+        std::fs::write(
+            app.join("package.json"),
+            r#"{"name":"fixture","version":"1.0.0","dependencies":{"unexpected-lifecycle":"file:../unexpected_dependency"}}"#,
+        )
+        .unwrap();
+        let lock = crate::cmd::command(&npm)
+            .args([
+                "install",
+                "--package-lock-only",
+                "--ignore-scripts",
+                "--no-audit",
+                "--registry=https://registry.npmjs.org/",
+            ])
+            .current_dir(&app)
+            .output()
+            .unwrap();
+        assert!(lock.status.success(), "fixture lock generation failed");
+        std::fs::write(
+            app.join(".npmrc"),
+            b"ignore-scripts=false\nregistry=http://127.0.0.1:9/\n",
+        )
+        .unwrap();
+        let install =
+            run_provider_npm(&node_dir, &app, &["ci", "--ignore-scripts", "--no-audit"]).unwrap();
+        assert!(install.status.success(), "fixture npm ci failed");
+        assert!(
+            !app.join("unexpected_lifecycle_ran").exists()
+                && !base.join("unexpected_lifecycle_ran").exists(),
+            "an unexpected dependency lifecycle script executed"
+        );
+        let effective_project_config = std::fs::read_to_string(app.join(".npmrc")).unwrap();
+        assert!(effective_project_config.contains("ignore-scripts=true"));
+        assert!(effective_project_config.contains("registry=https://registry.npmjs.org/"));
+        let _ = std::fs::remove_dir_all(base);
+    }
+
+    #[cfg(windows)]
+    #[test]
+    #[ignore = "WP-0299 exact pinned provider executable install proof"]
+    fn exact_pinned_provider_install_is_audited_built_and_runnable() {
+        let root = std::env::var_os("VOXVULGI_PROVIDER_INSTALL_PROBE_ROOT")
+            .map(PathBuf::from)
+            .expect("set VOXVULGI_PROVIDER_INSTALL_PROBE_ROOT to an empty disposable path");
+        assert!(!root.exists(), "probe root must be fresh");
+        let paths = AppPaths::new(root.clone());
+        let status = install_youtube_po_provider(&paths).expect("exact provider install");
+        assert!(status.installed);
+        assert!(status.security_audit_passed);
+        assert_eq!(status.node_version.as_deref(), Some("v24.19.0"));
+        assert_eq!(status.npm_version.as_deref(), Some("11.17.0"));
+        assert_eq!(status.provider_version, "1.3.1");
+        eprintln!(
+            "provider_server_entrypoint_sha256={}",
+            status
+                .server_entrypoint_sha256_hex
+                .as_deref()
+                .expect("built entrypoint hash")
+        );
+        let runtime = ensure_youtube_po_provider(&paths).expect("localhost provider runtime");
+        assert!(runtime.healthy);
+        shutdown_youtube_po_provider();
+        if std::env::var_os("VOXVULGI_KEEP_PROVIDER_PROBE").is_none() {
+            let _ = std::fs::remove_dir_all(root);
+        }
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn existing_exact_provider_status_rejects_same_size_server_tamper() {
+        let Some(root) =
+            std::env::var_os("VOXVULGI_PROVIDER_EXISTING_PROBE_ROOT").map(PathBuf::from)
+        else {
+            eprintln!(
+                "VOXVULGI_PROVIDER_EXISTING_PROBE_ROOT not set; existing provider probe skipped"
+            );
+            return;
+        };
+        let paths = AppPaths::new(root);
+        let before = youtube_po_provider_install_status(&paths);
+        assert!(
+            before.installed,
+            "existing exact provider must begin ready: {:?}",
+            before.readiness_error
+        );
+        assert_eq!(
+            before.server_entrypoint_sha256_hex.as_deref(),
+            Some(
+                pinned_dependency_manifest::manifest()
+                    .youtube_po_provider
+                    .server_entrypoint_sha256_hex
+                    .as_str()
+            )
+        );
+        let entrypoint = paths.youtube_po_provider_entrypoint();
+        let original = std::fs::read(&entrypoint).unwrap();
+        let mut tampered = original.clone();
+        let index = tampered.len() / 2;
+        tampered[index] ^= 1;
+        std::fs::write(&entrypoint, &tampered).unwrap();
+        assert_eq!(
+            std::fs::metadata(&entrypoint).unwrap().len(),
+            original.len() as u64
+        );
+        let rejected = youtube_po_provider_install_status(&paths);
+        std::fs::write(&entrypoint, &original).unwrap();
+        assert!(!rejected.installed);
+        assert!(rejected
+            .readiness_error
+            .as_deref()
+            .unwrap_or_default()
+            .contains("server_bytes=false"));
+        assert!(youtube_po_provider_install_status(&paths).installed);
+    }
+
+    #[test]
+    fn provider_pair_publication_rolls_back_second_publish_and_readiness_failures() {
+        for fail_readiness in [false, true] {
+            let base = std::env::temp_dir().join(format!(
+                "voxvulgi_provider_publish_{}_{}_{}",
+                std::process::id(),
+                fail_readiness,
+                uuid::Uuid::new_v4()
+            ));
+            let stage_root = base.join("attempt");
+            let node_stage = stage_root.join("node");
+            let provider_stage = stage_root.join("provider");
+            let final_node = base.join("final_node");
+            let final_provider = base.join("final_provider");
+            std::fs::create_dir_all(&node_stage).unwrap();
+            std::fs::create_dir_all(&provider_stage).unwrap();
+            std::fs::write(node_stage.join("owned.txt"), b"node").unwrap();
+            std::fs::write(provider_stage.join("owned.txt"), b"provider").unwrap();
+            let guard = AttemptDirectoryGuard::new(stage_root.clone());
+            let result = publish_provider_pair_with_checks(
+                &node_stage,
+                &provider_stage,
+                &final_node,
+                &final_provider,
+                || Ok(()),
+                || {
+                    if fail_readiness {
+                        Ok(())
+                    } else {
+                        Err(EngineError::InstallFailed(
+                            "injected second publication failure".to_string(),
+                        ))
+                    }
+                },
+                || {
+                    if fail_readiness {
+                        Err(EngineError::InstallFailed(
+                            "injected readiness failure".to_string(),
+                        ))
+                    } else {
+                        Ok(())
+                    }
+                },
+            );
+            assert!(result.is_err());
+            assert!(
+                !final_node.exists(),
+                "attempt-owned Node must not be orphaned"
+            );
+            assert!(
+                !final_provider.exists(),
+                "attempt-owned provider must not be orphaned"
+            );
+            assert!(node_stage.exists(), "Node must return to guarded staging");
+            assert!(
+                provider_stage.exists(),
+                "provider must return to guarded staging"
+            );
+            drop(guard);
+            assert!(
+                !stage_root.exists(),
+                "failure guard must remove staging bytes"
+            );
+            let _ = std::fs::remove_dir_all(base);
+        }
     }
 
     #[test]

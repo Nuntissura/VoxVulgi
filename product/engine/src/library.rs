@@ -1,5 +1,6 @@
 use crate::ffmpeg;
 use crate::paths::AppPaths;
+use crate::root_rebind;
 use crate::{db, EngineError, Result};
 use rusqlite::{params, OptionalExtension, TransactionBehavior};
 use serde::{Deserialize, Serialize};
@@ -30,6 +31,12 @@ pub struct DownloadPreflightRow {
     pub active_job_id: Option<String>,
     pub failed_url: Option<String>,
     pub last_error: Option<String>,
+    pub observation_state: Option<String>,
+    pub observation_observed_at_ms: Option<i64>,
+    pub observation_source: Option<String>,
+    pub observation_duration_ms: Option<i64>,
+    pub observation_age_ms: Option<i64>,
+    pub observation_refresh_in_ms: Option<i64>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -46,20 +53,143 @@ pub(crate) enum MediaPathObservation {
     Present,
     Missing,
     Unreachable,
+    Slow,
+}
+
+#[derive(Debug, Clone, Default)]
+pub struct MediaProbeCausalEnvelope {
+    pub request_id: Option<String>,
+    pub span_id: Option<String>,
+    pub incident_id: Option<String>,
 }
 
 const MEDIA_PATH_OBSERVATION_TTL: Duration = Duration::from_secs(30);
 const MEDIA_PATH_OBSERVATION_TIMEOUT: Duration = Duration::from_millis(1_500);
+const MEDIA_PATH_RECONCILE_QUEUE_CAPACITY: usize = 128;
+const MEDIA_PATH_PROBE_QUEUE_CAPACITY: usize = 64;
+const MEDIA_PATH_PROBE_WORKERS: usize = 4;
+const MEDIA_PATH_OBSERVATION_CACHE_CAPACITY: usize = 4_096;
 static MEDIA_PATH_OBSERVATIONS: OnceLock<Mutex<HashMap<String, (Instant, MediaPathObservation)>>> =
     OnceLock::new();
+static MEDIA_PATH_OBSERVATION_GENERATIONS: OnceLock<Mutex<HashMap<String, (u64, Instant)>>> =
+    OnceLock::new();
+static MEDIA_PATH_RECONCILER: OnceLock<
+    mpsc::SyncSender<(AppPaths, String, Option<MediaProbeCausalEnvelope>)>,
+> = OnceLock::new();
+static MEDIA_PATH_RECONCILE_PENDING: OnceLock<Mutex<HashSet<String>>> = OnceLock::new();
+
+/// Resolve a historical stored media identity to its verified active filesystem location.
+/// The stored DB value remains unchanged so identity/dedupe and rollback stay stable.
+pub fn resolve_media_path(paths: &AppPaths, stored_path: &str) -> Result<PathBuf> {
+    root_rebind::resolve_active_alias_path(paths, Path::new(stored_path.trim()), false)
+}
+static MEDIA_PATH_PROBE_POOL: OnceLock<
+    mpsc::SyncSender<(PathBuf, mpsc::SyncSender<MediaPathObservation>)>,
+> = OnceLock::new();
+
+fn media_path_probe_pool(
+) -> &'static mpsc::SyncSender<(PathBuf, mpsc::SyncSender<MediaPathObservation>)> {
+    MEDIA_PATH_PROBE_POOL.get_or_init(|| {
+        let (sender, receiver) = mpsc::sync_channel::<(
+            PathBuf,
+            mpsc::SyncSender<MediaPathObservation>,
+        )>(MEDIA_PATH_PROBE_QUEUE_CAPACITY);
+        let receiver = std::sync::Arc::new(Mutex::new(receiver));
+        for index in 0..MEDIA_PATH_PROBE_WORKERS {
+            let receiver = receiver.clone();
+            std::thread::Builder::new()
+                .name(format!("voxvulgi-media-probe-{index}"))
+                .spawn(move || loop {
+                    let request = receiver.lock().unwrap_or_else(|p| p.into_inner()).recv();
+                    let Ok((candidate, reply)) = request else {
+                        break;
+                    };
+                    let observation = match candidate.try_exists() {
+                        Ok(true) if candidate.is_file() => MediaPathObservation::Present,
+                        Ok(_) => MediaPathObservation::Missing,
+                        Err(_) => MediaPathObservation::Unreachable,
+                    };
+                    let _ = reply.try_send(observation);
+                })
+                .expect("media probe worker must start");
+        }
+        sender
+    })
+}
 
 fn media_path_observations() -> &'static Mutex<HashMap<String, (Instant, MediaPathObservation)>> {
     MEDIA_PATH_OBSERVATIONS.get_or_init(|| Mutex::new(HashMap::new()))
 }
 
+fn media_path_observation_generations() -> &'static Mutex<HashMap<String, (u64, Instant)>> {
+    MEDIA_PATH_OBSERVATION_GENERATIONS.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+fn media_path_observation_generation(path: &str) -> u64 {
+    let mut generations = media_path_observation_generations()
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let Some((generation, touched_at)) = generations.get_mut(path) else {
+        return 0;
+    };
+    *touched_at = Instant::now();
+    *generation
+}
+
+fn bound_media_path_observation_generations(
+    generations: &mut HashMap<String, (u64, Instant)>,
+    incoming_path: &str,
+) {
+    if !generations.contains_key(incoming_path)
+        && generations.len() >= MEDIA_PATH_OBSERVATION_CACHE_CAPACITY
+    {
+        if let Some(oldest) = generations
+            .iter()
+            .min_by_key(|(_, (_, touched_at))| *touched_at)
+            .map(|(path, _)| path.clone())
+        {
+            generations.remove(&oldest);
+        }
+    }
+}
+
+fn cache_media_path_observation(path: &str, observation: MediaPathObservation) {
+    let mut cache = media_path_observations()
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    if !cache.contains_key(path) && cache.len() >= MEDIA_PATH_OBSERVATION_CACHE_CAPACITY {
+        if let Some(oldest) = cache
+            .iter()
+            .min_by_key(|(_, (observed_at, _))| *observed_at)
+            .map(|(key, _)| key.clone())
+        {
+            cache.remove(&oldest);
+            media_path_observation_generations()
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .remove(&oldest);
+        }
+    }
+    cache.insert(path.to_string(), (Instant::now(), observation));
+}
+
 /// A disconnected or heavily contended NAS must not pin a Tauri worker indefinitely. Cache a
 /// bounded observation briefly, and distinguish timeout/error from an authoritative missing file.
-pub(crate) fn observe_media_path(path: &str) -> MediaPathObservation {
+pub(crate) fn observe_media_path(paths: &AppPaths, path: &str) -> MediaPathObservation {
+    if let Ok(conn) = db::open_readonly(paths) {
+        return observe_media_path_with_conn(paths, &conn, path, None, false);
+    }
+    queue_media_path_reconcile(paths, path, None);
+    MediaPathObservation::Unreachable
+}
+
+fn observe_media_path_with_conn(
+    paths: &AppPaths,
+    conn: &rusqlite::Connection,
+    path: &str,
+    causal: Option<&MediaProbeCausalEnvelope>,
+    fresh_if_stale: bool,
+) -> MediaPathObservation {
     let now = Instant::now();
     if let Some((observed_at, observation)) = media_path_observations()
         .lock()
@@ -72,40 +202,308 @@ pub(crate) fn observe_media_path(path: &str) -> MediaPathObservation {
         }
     }
 
-    observe_media_path_fresh(path)
+    let persisted = conn
+        .query_row(
+            "SELECT state, next_refresh_at_ms, invalidated_at_ms FROM media_availability_observation WHERE path=?1",
+            [path],
+            |row| Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)?, row.get::<_, Option<i64>>(2)?)),
+        )
+        .optional()
+        .ok()
+        .flatten();
+    if let Some((state, next_refresh_at_ms, invalidated_at_ms)) = persisted {
+        let observation = media_path_observation_from_str(&state);
+        if invalidated_at_ms.is_none() && next_refresh_at_ms > now_ms() {
+            cache_media_path_observation(path, observation);
+            return observation;
+        }
+        if fresh_if_stale {
+            return observe_media_path_fresh_with_causal(paths, path, causal);
+        }
+        queue_media_path_reconcile(paths, path, causal.cloned());
+        return observation;
+    }
+    if fresh_if_stale {
+        return observe_media_path_fresh_with_causal(paths, path, causal);
+    }
+    queue_media_path_reconcile(paths, path, causal.cloned());
+    MediaPathObservation::Unreachable
 }
 
 /// Execution-boundary callers must not reuse the short-lived observation cache: a cleanup,
 /// relocation, or restore can change a canonical path while an old job remains queued.
 /// The actual filesystem probe stays timeout-bounded and must be called outside a DB
 /// transaction.
-pub(crate) fn observe_media_path_fresh(path: &str) -> MediaPathObservation {
+pub(crate) fn observe_media_path_fresh(paths: &AppPaths, path: &str) -> MediaPathObservation {
+    observe_media_path_fresh_with_causal(paths, path, None)
+}
+
+fn observe_media_path_fresh_with_causal(
+    paths: &AppPaths,
+    path: &str,
+    causal: Option<&MediaProbeCausalEnvelope>,
+) -> MediaPathObservation {
     let now = Instant::now();
-    let candidate = PathBuf::from(path);
+    let probe_started_at_ms = now_ms();
+    let generation = media_path_observation_generation(path);
+    crate::diagnostics::emit_trace_event(
+        paths,
+        "media_path_probe_started",
+        "info",
+        media_path_probe_details(causal, generation, "nas_bounded_worker_pool", None, None),
+    );
+    // Keep historical identity paths immutable; resolve a verified alias only for this bounded
+    // filesystem probe so a rebind stays reversible and cleanup inventory remains truthful.
+    let candidate = match root_rebind::resolve_active_alias_path(paths, Path::new(path), false) {
+        Ok(candidate) => candidate,
+        Err(_) => {
+            let observation = MediaPathObservation::Unreachable;
+            commit_media_path_observation_if_current(
+                paths,
+                path,
+                observation,
+                "root_alias_resolution_failed",
+                now.elapsed(),
+                probe_started_at_ms,
+                generation,
+            );
+            emit_media_path_probe_completed(paths, causal, generation, observation, "root_alias_resolution_failed", now.elapsed());
+            return observation;
+        }
+    };
     let (sender, receiver) = mpsc::sync_channel(1);
-    std::thread::spawn(move || {
-        let observation = match candidate.try_exists() {
-            Ok(true) if candidate.is_file() => MediaPathObservation::Present,
-            Ok(_) => MediaPathObservation::Missing,
-            Err(_) => MediaPathObservation::Unreachable,
-        };
-        let _ = sender.send(observation);
-    });
-    let observation = receiver
-        .recv_timeout(MEDIA_PATH_OBSERVATION_TIMEOUT)
-        .unwrap_or(MediaPathObservation::Unreachable);
-    media_path_observations()
-        .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner())
-        .insert(path.to_string(), (now, observation));
+    let observation = match media_path_probe_pool().try_send((candidate, sender)) {
+        Ok(()) => media_path_observation_from_probe_receive(
+            receiver.recv_timeout(MEDIA_PATH_OBSERVATION_TIMEOUT),
+        ),
+        // Fixed-capacity saturation is a distinct latency signal, not evidence that storage is
+        // unreachable. The caller remains bounded and the occupied worker slots stay accounted.
+        Err(mpsc::TrySendError::Full(_)) => MediaPathObservation::Slow,
+        Err(mpsc::TrySendError::Disconnected(_)) => MediaPathObservation::Unreachable,
+    };
+    commit_media_path_observation_if_current(
+        paths,
+        path,
+        observation,
+        "fresh_probe",
+        now.elapsed(),
+        probe_started_at_ms,
+        generation,
+    );
+    emit_media_path_probe_completed(paths, causal, generation, observation, "nas_bounded_worker_pool", now.elapsed());
     observation
 }
 
-fn invalidate_media_path_observation(path: &str) {
+fn media_path_observation_from_probe_receive(
+    result: std::result::Result<MediaPathObservation, mpsc::RecvTimeoutError>,
+) -> MediaPathObservation {
+    match result {
+        Ok(observation) => observation,
+        Err(mpsc::RecvTimeoutError::Timeout) => MediaPathObservation::Slow,
+        Err(mpsc::RecvTimeoutError::Disconnected) => MediaPathObservation::Unreachable,
+    }
+}
+
+fn emit_media_path_probe_completed(
+    paths: &AppPaths,
+    causal: Option<&MediaProbeCausalEnvelope>,
+    generation: u64,
+    observation: MediaPathObservation,
+    source: &str,
+    duration: Duration,
+) {
+    let result = match observation {
+        MediaPathObservation::Present => "present",
+        MediaPathObservation::Missing => "missing",
+        MediaPathObservation::Unreachable => "unreachable",
+        MediaPathObservation::Slow => "slow",
+    };
+    crate::diagnostics::emit_trace_event(
+        paths,
+        "media_path_probe_completed",
+        if matches!(observation, MediaPathObservation::Unreachable | MediaPathObservation::Slow) { "warn" } else { "info" },
+        media_path_probe_details(causal, generation, source, Some(duration), Some(result)),
+    );
+}
+
+fn media_path_probe_details(
+    causal: Option<&MediaProbeCausalEnvelope>,
+    generation: u64,
+    source: &str,
+    duration: Option<Duration>,
+    result: Option<&str>,
+) -> serde_json::Value {
+    serde_json::json!({
+        "request_id": causal.and_then(|value| value.request_id.clone()),
+        "span_id": causal.and_then(|value| value.span_id.clone()),
+        "incident_id": causal.and_then(|value| value.incident_id.clone()),
+        "duration_ms": duration.map(|value| value.as_millis() as u64),
+        "source": source,
+        "generation": generation,
+        "result": result,
+    })
+}
+
+fn invalidate_media_path_observation_memory(path: &str) {
     media_path_observations()
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner())
         .remove(path);
+    let mut generations = media_path_observation_generations()
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    bound_media_path_observation_generations(&mut generations, path);
+    let generation = generations
+        .entry(path.to_string())
+        .or_insert_with(|| (0, Instant::now()));
+    generation.0 = generation.0.saturating_add(1);
+    generation.1 = Instant::now();
+}
+
+fn persist_media_path_observation_invalidation(
+    conn: &rusqlite::Connection,
+    path: &str,
+) -> Result<()> {
+    conn.execute(
+        "INSERT INTO media_availability_observation(path,state,observed_at_ms,source,duration_ms,next_refresh_at_ms,invalidated_at_ms) VALUES(?1,'unreachable',0,'invalidated',0,0,?2) ON CONFLICT(path) DO UPDATE SET invalidated_at_ms=excluded.invalidated_at_ms,next_refresh_at_ms=0",
+        params![path, now_ms()],
+    )?;
+    Ok(())
+}
+
+pub(crate) fn persist_media_path_observation_rewrite_invalidation(
+    conn: &rusqlite::Connection,
+    old_path: &str,
+    new_path: &str,
+) -> Result<()> {
+    persist_media_path_observation_invalidation(conn, old_path)?;
+    if !old_path.eq_ignore_ascii_case(new_path) {
+        persist_media_path_observation_invalidation(conn, new_path)?;
+    }
+    Ok(())
+}
+
+pub(crate) fn invalidate_media_path_observation_rewrite_memory(
+    old_path: &str,
+    new_path: &str,
+) {
+    invalidate_media_path_observation_memory(old_path);
+    if !old_path.eq_ignore_ascii_case(new_path) {
+        invalidate_media_path_observation_memory(new_path);
+    }
+}
+
+fn invalidate_media_path_observation(paths: &AppPaths, path: &str) -> Result<()> {
+    let mut conn = db::open(paths)?;
+    db::migrate(&conn)?;
+    let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
+    persist_media_path_observation_invalidation(&tx, path)?;
+    tx.commit()?;
+    invalidate_media_path_observation_memory(path);
+    Ok(())
+}
+
+pub(crate) fn invalidate_media_path_observation_rewrite(
+    paths: &AppPaths,
+    old_path: &str,
+    new_path: &str,
+) -> Result<()> {
+    let mut conn = db::open(paths)?;
+    db::migrate(&conn)?;
+    let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
+    persist_media_path_observation_rewrite_invalidation(&tx, old_path, new_path)?;
+    tx.commit()?;
+    invalidate_media_path_observation_rewrite_memory(old_path, new_path);
+    Ok(())
+}
+
+fn media_path_observation_from_str(value: &str) -> MediaPathObservation {
+    match value {
+        "present" => MediaPathObservation::Present,
+        "missing" => MediaPathObservation::Missing,
+        "slow" => MediaPathObservation::Slow,
+        _ => MediaPathObservation::Unreachable,
+    }
+}
+
+fn commit_media_path_observation_if_current(
+    paths: &AppPaths,
+    path: &str,
+    observation: MediaPathObservation,
+    source: &str,
+    duration: Duration,
+    probe_started_at_ms: i64,
+    expected_generation: u64,
+) {
+    if media_path_observation_generation(path) != expected_generation {
+        return;
+    }
+    let state = match observation {
+        MediaPathObservation::Present => "present",
+        MediaPathObservation::Missing => "missing",
+        MediaPathObservation::Unreachable => "unreachable",
+        MediaPathObservation::Slow => "slow",
+    };
+    let observed_at_ms = now_ms();
+    let refresh_after_ms = match observation {
+        MediaPathObservation::Present => 10 * 60 * 1000,
+        MediaPathObservation::Missing => 2 * 60 * 1000,
+        MediaPathObservation::Unreachable => 30 * 1000,
+        MediaPathObservation::Slow => 15 * 1000,
+    };
+    if let Ok(conn) = db::open(paths) {
+        let _ = db::migrate(&conn);
+        let committed = conn.execute(
+            "INSERT INTO media_availability_observation(path,state,observed_at_ms,source,duration_ms,next_refresh_at_ms,invalidated_at_ms) VALUES(?1,?2,?3,?4,?5,?6,NULL) ON CONFLICT(path) DO UPDATE SET state=excluded.state, observed_at_ms=excluded.observed_at_ms, source=excluded.source, duration_ms=excluded.duration_ms, next_refresh_at_ms=excluded.next_refresh_at_ms, invalidated_at_ms=NULL WHERE (media_availability_observation.invalidated_at_ms IS NULL OR media_availability_observation.invalidated_at_ms < ?7) AND media_availability_observation.observed_at_ms <= ?7",
+            params![path, state, observed_at_ms, source, duration.as_millis() as i64, observed_at_ms + refresh_after_ms, probe_started_at_ms],
+        ).unwrap_or(0);
+        if committed > 0 && media_path_observation_generation(path) == expected_generation {
+            cache_media_path_observation(path, observation);
+        }
+    }
+}
+
+fn queue_media_path_reconcile(
+    paths: &AppPaths,
+    path: &str,
+    causal: Option<MediaProbeCausalEnvelope>,
+) {
+    let pending = MEDIA_PATH_RECONCILE_PENDING.get_or_init(|| Mutex::new(HashSet::new()));
+    if !pending
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .insert(path.to_string())
+    {
+        return;
+    }
+    let sender = MEDIA_PATH_RECONCILER.get_or_init(|| {
+        let (sender, receiver) =
+            mpsc::sync_channel::<(AppPaths, String, Option<MediaProbeCausalEnvelope>)>(
+                MEDIA_PATH_RECONCILE_QUEUE_CAPACITY,
+            );
+        let _ = std::thread::Builder::new()
+            .name("voxvulgi-media-reconciler".to_string())
+            .spawn(move || {
+                while let Ok((paths, path, causal)) = receiver.recv() {
+                    let _ = observe_media_path_fresh_with_causal(&paths, &path, causal.as_ref());
+                    MEDIA_PATH_RECONCILE_PENDING
+                        .get_or_init(|| Mutex::new(HashSet::new()))
+                        .lock()
+                        .unwrap_or_else(|poisoned| poisoned.into_inner())
+                        .remove(&path);
+                }
+            });
+        sender
+    });
+    if sender
+        .try_send((paths.clone(), path.to_string(), causal))
+        .is_err()
+    {
+        pending
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .remove(path);
+    }
 }
 
 pub fn canonical_media_source(raw_url: &str) -> Option<CanonicalMediaSource> {
@@ -540,6 +938,14 @@ pub fn preflight_download_urls(
     paths: &AppPaths,
     urls: &[String],
 ) -> Result<Vec<DownloadPreflightRow>> {
+    preflight_download_urls_with_causal(paths, urls, None)
+}
+
+pub fn preflight_download_urls_with_causal(
+    paths: &AppPaths,
+    urls: &[String],
+    causal: Option<&MediaProbeCausalEnvelope>,
+) -> Result<Vec<DownloadPreflightRow>> {
     let conn = db::open(paths)?;
     db::migrate(&conn)?;
     let mut seen = HashSet::new();
@@ -558,6 +964,12 @@ pub fn preflight_download_urls(
                 active_job_id: None,
                 failed_url: None,
                 last_error: None,
+                observation_state: None,
+                observation_observed_at_ms: None,
+                observation_source: None,
+                observation_duration_ms: None,
+                observation_age_ms: None,
+                observation_refresh_in_ms: None,
             });
             continue;
         };
@@ -575,6 +987,12 @@ pub fn preflight_download_urls(
                 active_job_id: None,
                 failed_url: None,
                 last_error: None,
+                observation_state: None,
+                observation_observed_at_ms: None,
+                observation_source: None,
+                observation_duration_ms: None,
+                observation_age_ms: None,
+                observation_refresh_in_ms: None,
             });
             continue;
         }
@@ -608,14 +1026,23 @@ WHERE i.service=?1 AND i.media_id=?2
         } else if active_job_id.is_some() {
             "active"
         } else if let Some(path) = row.2.as_deref() {
-            match observe_media_path(path) {
+            // Download preflight controls whether an existing canonical item is suppressed or
+            // offered for repair. It is an execution-correctness boundary rather than a rendering
+            // poll, so an absent/invalid observation receives one bounded exact probe.
+            match observe_media_path_with_conn(paths, &conn, path, causal, true) {
                 MediaPathObservation::Present => "present",
                 MediaPathObservation::Missing => "missing",
                 MediaPathObservation::Unreachable => "storage_unreachable",
+                MediaPathObservation::Slow => "storage_slow",
             }
         } else {
             "ready"
         };
+        let observation = row.2.as_deref().and_then(|path| conn.query_row(
+            "SELECT state, observed_at_ms, source, duration_ms, next_refresh_at_ms FROM media_availability_observation WHERE path=?1",
+            [path], |r| Ok((r.get::<_, String>(0)?, r.get::<_, i64>(1)?, r.get::<_, String>(2)?, r.get::<_, i64>(3)?, r.get::<_, i64>(4)?))
+        ).optional().ok().flatten());
+        let observed_now = now_ms();
         out.push(DownloadPreflightRow {
             input_index,
             url: url.clone(),
@@ -627,6 +1054,16 @@ WHERE i.service=?1 AND i.media_id=?2
             media_path: row.2,
             active_job_id,
             failed_url: row.3,
+            observation_state: observation.as_ref().map(|v| v.0.clone()),
+            observation_observed_at_ms: observation.as_ref().map(|v| v.1),
+            observation_source: observation.as_ref().map(|v| v.2.clone()),
+            observation_duration_ms: observation.as_ref().map(|v| v.3),
+            observation_age_ms: observation
+                .as_ref()
+                .map(|v| observed_now.saturating_sub(v.1)),
+            observation_refresh_in_ms: observation
+                .as_ref()
+                .map(|v| v.4.saturating_sub(observed_now).max(0)),
             last_error: row.4,
         });
     }
@@ -696,11 +1133,16 @@ WHERE i.service=?1 AND i.media_id=?2
             // An explicit manual redownload treats the tombstoned path as intentionally absent.
             // A file that reappeared out of band remains protected by the normal present check.
         }
-        match observe_media_path(&media_path) {
+        match observe_media_path_fresh(paths, &media_path) {
             MediaPathObservation::Present => return Ok(DownloadSourceClaim::Present(item_id)),
             MediaPathObservation::Unreachable => {
                 return Err(EngineError::InstallFailed(format!(
-                    "storage unreachable or timed out while checking canonical media: {media_path}"
+                    "storage is unreachable while checking canonical media: {media_path}"
+                )))
+            }
+            MediaPathObservation::Slow => {
+                return Err(EngineError::InstallFailed(format!(
+                    "storage probe was too slow while checking canonical media: {media_path}"
                 )))
             }
             MediaPathObservation::Missing if !allow_missing => {
@@ -797,10 +1239,17 @@ pub fn relocate_canonical_media(
         ));
     }
     let canonical_text = canonical.to_string_lossy().to_string();
-    invalidate_media_path_observation(&canonical_text);
-    let conn = db::open(paths)?;
+    let mut conn = db::open(paths)?;
     db::migrate(&conn)?;
-    let changed = conn.execute(
+    let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
+    let previous_path = tx
+        .query_row(
+            "SELECT media_path FROM library_item WHERE id=?1",
+            [item_id.trim()],
+            |row| row.get::<_, String>(0),
+        )
+        .optional()?;
+    let changed = tx.execute(
         "UPDATE library_item SET media_path=?1 WHERE id=?2",
         params![canonical_text, item_id.trim()],
     )?;
@@ -809,10 +1258,23 @@ pub fn relocate_canonical_media(
             "library item not found".to_string(),
         ));
     }
-    conn.execute(
-        "UPDATE media_source_identity SET repair_state='ready', last_error=NULL, updated_at_ms=?1 WHERE library_item_id=?2",
-        params![now_ms(), item_id.trim()],
-    )?;
+    if let Some(previous_path) = previous_path {
+        persist_media_path_observation_rewrite_invalidation(
+            &tx,
+            &previous_path,
+            &canonical_text,
+        )?;
+        tx.execute(
+            "UPDATE media_source_identity SET repair_state='ready', last_error=NULL, updated_at_ms=?1 WHERE library_item_id=?2",
+            params![now_ms(), item_id.trim()],
+        )?;
+        tx.commit()?;
+        invalidate_media_path_observation_rewrite_memory(&previous_path, &canonical_text);
+    } else {
+        return Err(EngineError::InstallFailed(
+            "library item had no canonical media path".to_string(),
+        ));
+    }
     get_item_by_id(paths, item_id)
 }
 
@@ -1089,17 +1551,32 @@ WHERE status='queued'
         };
     }
 
-    let observation = observe_media_path_fresh(&media_path);
-    let filesystem_result = match observation {
-        MediaPathObservation::Present if mode == "trash" => {
-            trash::delete(Path::new(&media_path)).map_err(|err| err.to_string())
+    let physical_media_path = resolve_media_path(paths, &media_path);
+    let physical_media_text = physical_media_path
+        .as_ref()
+        .ok()
+        .map(|path| path.to_string_lossy().to_string());
+    let observation = if physical_media_path.is_ok() {
+        observe_media_path_fresh(paths, &media_path)
+    } else {
+        MediaPathObservation::Unreachable
+    };
+    let filesystem_result = match (observation, physical_media_path.as_ref()) {
+        (_, Err(error)) => Err(format!(
+            "verified media root alias could not be resolved: {error}"
+        )),
+        (MediaPathObservation::Present, Ok(path)) if mode == "trash" => {
+            trash::delete(path).map_err(|err| err.to_string())
         }
-        MediaPathObservation::Present => {
-            std::fs::remove_file(&media_path).map_err(|err| err.to_string())
+        (MediaPathObservation::Present, Ok(path)) => {
+            std::fs::remove_file(path).map_err(|err| err.to_string())
         }
-        MediaPathObservation::Missing => Ok(()),
-        MediaPathObservation::Unreachable => {
-            Err("storage is unreachable or timed out; file was not marked deleted".to_string())
+        (MediaPathObservation::Missing, Ok(_)) => Ok(()),
+        (MediaPathObservation::Unreachable, Ok(_)) => {
+            Err("storage is unreachable; file was not marked deleted".to_string())
+        }
+        (MediaPathObservation::Slow, Ok(_)) => {
+            Err("storage probe was too slow; file was not marked deleted".to_string())
         }
     };
     if let Err(message) = filesystem_result {
@@ -1124,14 +1601,30 @@ WHERE status='queued'
             message,
         };
     }
-    invalidate_media_path_observation(&media_path);
-    match conn.execute(
-        "UPDATE library_item SET file_status='operator_deleted', \
-         file_status_changed_at_ms=?1, file_status_change_source=?2, file_delete_method=?3 \
-         WHERE id=?4 AND file_status='delete_pending'",
-        params![now_ms(), change_source, mode, item_id],
-    ) {
-        Ok(1) => LibraryFileDeleteResult {
+    let physical_observation_path = physical_media_text.filter(|path| path != &media_path);
+    let finalization: Result<bool> = (|| {
+        let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        persist_media_path_observation_invalidation(&tx, &media_path)?;
+        if let Some(physical_path) = physical_observation_path.as_deref() {
+            persist_media_path_observation_invalidation(&tx, physical_path)?;
+        }
+        let changed = tx.execute(
+            "UPDATE library_item SET file_status='operator_deleted', \
+             file_status_changed_at_ms=?1, file_status_change_source=?2, file_delete_method=?3 \
+             WHERE id=?4 AND file_status='delete_pending'",
+            params![now_ms(), change_source, mode, item_id],
+        )?;
+        tx.commit()?;
+        if changed == 1 {
+            invalidate_media_path_observation_memory(&media_path);
+            if let Some(physical_path) = physical_observation_path.as_deref() {
+                invalidate_media_path_observation_memory(physical_path);
+            }
+        }
+        Ok(changed == 1)
+    })();
+    match finalization {
+        Ok(true) => LibraryFileDeleteResult {
             item_id: item_id.to_string(),
             title: Some(title),
             media_path: Some(media_path),
@@ -1144,7 +1637,7 @@ WHERE status='queued'
                 "file permanently removed and marked deleted".to_string()
             },
         },
-        Ok(_) => LibraryFileDeleteResult {
+        Ok(false) => LibraryFileDeleteResult {
             item_id: item_id.to_string(),
             title: Some(title),
             media_path: Some(media_path),
@@ -1196,7 +1689,8 @@ LIMIT 1
             "selected item is not an operator-deleted canonical YouTube video".to_string(),
         ));
     };
-    let output_dir = Path::new(&media_path)
+    let resolved_media_path = resolve_media_path(paths, &media_path)?;
+    let output_dir = resolved_media_path
         .parent()
         .ok_or_else(|| {
             EngineError::InstallFailed("deleted video path has no parent folder".to_string())
@@ -1489,7 +1983,7 @@ pub fn ensure_thumbnail_path(paths: &AppPaths, item_id: &str) -> Result<Option<P
         return Ok(Some(thumbnail_path));
     }
 
-    let media_path = PathBuf::from(item.media_path.trim());
+    let media_path = resolve_media_path(paths, item.media_path.trim())?;
     if !media_path.is_file() {
         if item.thumbnail_path.is_some() {
             set_item_thumbnail_path(paths, item_id, None)?;
@@ -1747,6 +2241,11 @@ canonical AS (
       WHEN li.width IS NOT NULL
         OR li.height IS NOT NULL
         OR COALESCE(li.video_codec, '') <> ''
+        OR lower(li.media_path) GLOB '*.mp4'
+        OR lower(li.media_path) GLOB '*.mkv'
+        OR lower(li.media_path) GLOB '*.webm'
+        OR lower(li.media_path) GLOB '*.mov'
+        OR lower(li.media_path) GLOB '*.avi'
         THEN 'video'
       WHEN COALESCE(li.audio_codec, '') <> '' THEN 'audio'
       ELSE 'other'
@@ -2425,7 +2924,7 @@ LIMIT ?2
     }
     if advanced_cursor != cursor {
         write_download_lineage_backfill_cursor_in_transaction(&tx, advanced_cursor)?;
-    }
+    };
     tx.commit()?;
     download_lineage_backfill_state(&conn)
 }
@@ -2589,7 +3088,7 @@ fn sha256_of_file(path: &Path) -> std::io::Result<String> {
             break;
         }
         hasher.update(&buf[..n]);
-    }
+    };
     Ok(format!("{:x}", hasher.finalize()))
 }
 
@@ -2626,7 +3125,7 @@ pub fn resync_local_fallback_downloads(paths: &AppPaths) -> Result<FallbackResyn
     }
     report.configured_reachable = true;
 
-    let conn = db::open(paths)?;
+    let mut conn = db::open(paths)?;
     db::migrate(&conn)?;
 
     let prefix = fallback_root.to_string_lossy().to_string();
@@ -2701,10 +3200,18 @@ pub fn resync_local_fallback_downloads(paths: &AppPaths) -> Result<FallbackResyn
                 let target_str = target.to_string_lossy().to_string();
                 // Relink the DB BEFORE deleting the local copy, so the item always points
                 // at the verified copy on the configured root even if the delete fails.
-                conn.execute(
+                let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
+                tx.execute(
                     "UPDATE library_item SET media_path=?1 WHERE id=?2",
-                    params![target_str, id],
+                    params![&target_str, id],
                 )?;
+                persist_media_path_observation_rewrite_invalidation(
+                    &tx,
+                    &media_path,
+                    &target_str,
+                )?;
+                tx.commit()?;
+                invalidate_media_path_observation_rewrite_memory(&media_path, &target_str);
                 let _ = std::fs::remove_file(&src);
                 report.moved += 1;
                 manifest.push(format!("MOVED\t{id}\t{media_path}\t->\t{target_str}"));
@@ -2729,9 +3236,17 @@ pub fn resync_local_fallback_downloads(paths: &AppPaths) -> Result<FallbackResyn
 }
 
 pub fn upsert_item_metadata(paths: &AppPaths, item: &LibraryItem) -> Result<()> {
-    let conn = db::open(paths)?;
+    let mut conn = db::open(paths)?;
     db::migrate(&conn)?;
-    conn.execute(
+    let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
+    let previous_path = tx
+        .query_row(
+            "SELECT media_path FROM library_item WHERE id=?1",
+            [&item.id],
+            |row| row.get::<_, String>(0),
+        )
+        .optional()?;
+    tx.execute(
         r#"
 INSERT INTO library_item (
   id,
@@ -2778,6 +3293,22 @@ ON CONFLICT(id) DO UPDATE SET
             &item.thumbnail_path,
         ],
     )?;
+    match previous_path.as_deref() {
+        Some(previous_path) => persist_media_path_observation_rewrite_invalidation(
+            &tx,
+            previous_path,
+            &item.media_path,
+        )?,
+        None => persist_media_path_observation_invalidation(&tx, &item.media_path)?,
+    };
+    tx.commit()?;
+    match previous_path {
+        Some(previous_path) => invalidate_media_path_observation_rewrite_memory(
+            &previous_path,
+            &item.media_path,
+        ),
+        None => invalidate_media_path_observation_memory(&item.media_path),
+    };
     Ok(())
 }
 
@@ -2790,7 +3321,7 @@ pub fn transfer_item_metadata_between_roots(
     copy: bool,
 ) -> Result<LibraryItemTransferSummary> {
     let items = list_items_under_roots(paths, &[source_root.to_string()])?;
-    let conn = db::open(paths)?;
+    let mut conn = db::open(paths)?;
     db::migrate(&conn)?;
     let mut copied = 0_usize;
     let mut moved = 0_usize;
@@ -2804,10 +3335,18 @@ pub fn transfer_item_metadata_between_roots(
             upsert_item_metadata(paths, &copied_item)?;
             copied = copied.saturating_add(1);
         } else {
-            conn.execute(
+            let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
+            tx.execute(
                 "UPDATE library_item SET media_path = ?1, thumbnail_path = NULL WHERE id = ?2",
-                params![target_path, &item.id],
+                params![&target_path, &item.id],
             )?;
+            persist_media_path_observation_rewrite_invalidation(
+                &tx,
+                &item.media_path,
+                &target_path,
+            )?;
+            tx.commit()?;
+            invalidate_media_path_observation_rewrite_memory(&item.media_path, &target_path);
             moved = moved.saturating_add(1);
         }
     }
@@ -2940,13 +3479,13 @@ pub fn get_item_by_canonical_media_path(
 ) -> Result<Option<LibraryItem>> {
     let canonical = media_path.canonicalize()?;
     let media_path_str = canonical.to_string_lossy().to_string();
+    let supplied_path_str = media_path.to_string_lossy().to_string();
 
     let conn = db::open(paths)?;
     db::migrate(&conn)?;
 
-    let item = conn
-        .query_row(
-            r#"
+    let mut statement = conn.prepare_cached(
+        r#"
 SELECT
   id,
   created_at_ms,
@@ -2962,16 +3501,51 @@ SELECT
   audio_codec,
   thumbnail_path
 FROM library_item
-WHERE media_path=?1
+WHERE media_path=?1 COLLATE NOCASE
 ORDER BY created_at_ms DESC
 LIMIT 1
 "#,
-            params![media_path_str],
-            library_item_from_row,
-        )
-        .optional()?;
+    )?;
+    let mut physical_candidates = vec![media_path_str.clone()];
+    if !media_path_str.eq_ignore_ascii_case(&supplied_path_str) {
+        physical_candidates.push(supplied_path_str);
+    }
+    for candidate in &physical_candidates {
+        if let Some(item) = statement
+            .query_row([candidate], library_item_from_row)
+            .optional()?
+        {
+            return Ok(Some(item));
+        }
+    }
 
-    Ok(item)
+    // A direct-root rebind intentionally preserves historical DB identity. Invert the bounded
+    // one-hop alias set and perform case-insensitive exact lookups through
+    // idx_library_item_media_path. Never enumerate/canonicalize the full library: on a large NAS
+    // that turned one dedupe check into 140k filesystem probes.
+    let aliases = crate::root_rebind::load_root_aliases(paths)?;
+    if aliases.aliases.is_empty() {
+        return Ok(None);
+    }
+    let mut historical_candidates = Vec::new();
+    for candidate in &physical_candidates {
+        historical_candidates.extend(crate::root_rebind::historical_alias_candidates(
+            &aliases.aliases,
+            candidate,
+        )?);
+    }
+    historical_candidates.sort_by_key(|value| value.to_ascii_lowercase());
+    historical_candidates.dedup_by(|left, right| left.eq_ignore_ascii_case(right));
+    for candidate in historical_candidates {
+        if let Some(item) = statement
+            .query_row([candidate], library_item_from_row)
+            .optional()?
+        {
+            return Ok(Some(item));
+        }
+    }
+
+    Ok(None)
 }
 
 pub fn add_item_to_localization_workspace(
@@ -3067,13 +3641,14 @@ WHERE i.service=?1 AND i.media_id=?2
         }
     }
     let tx = conn.transaction()?;
-    let item_exists = tx
-        .query_row("SELECT 1 FROM library_item WHERE id=?1", [&item.id], |_| {
-            Ok(())
-        })
-        .optional()?
-        .is_some();
-    if item_exists {
+    let previous_media_path = tx
+        .query_row(
+            "SELECT media_path FROM library_item WHERE id=?1",
+            [&item.id],
+            |row| row.get::<_, String>(0),
+        )
+        .optional()?;
+    if previous_media_path.is_some() {
         tx.execute(
             r#"
 UPDATE library_item SET
@@ -3181,7 +3756,23 @@ WHERE service=?4 AND media_id=?5
             "voxvulgi_download",
         )?;
     }
+    match previous_media_path.as_deref() {
+        Some(previous_path) => persist_media_path_observation_rewrite_invalidation(
+            &tx,
+            previous_path,
+            &item.media_path,
+        )?,
+        None => persist_media_path_observation_invalidation(&tx, &item.media_path)?,
+    };
     tx.commit()?;
+
+    match previous_media_path {
+        Some(previous_path) => invalidate_media_path_observation_rewrite_memory(
+            &previous_path,
+            &item.media_path,
+        ),
+        None => invalidate_media_path_observation_memory(&item.media_path),
+    };
 
     item.lineage_service = Some(lineage.classification.service);
     item.lineage_origin_kind = Some(lineage.classification.origin_kind);
@@ -3252,6 +3843,10 @@ fn prepare_media_item(
             audio_codec: None,
             width: None,
             height: None,
+            video_stream_count: 0,
+            audio_stream_count: 0,
+            audio_streams: Vec::new(),
+            subtitle_streams: Vec::new(),
         },
         Err(crate::EngineError::ExternalToolFailed { .. }) => ffmpeg::MediaProbe {
             duration_ms: None,
@@ -3260,6 +3855,10 @@ fn prepare_media_item(
             audio_codec: None,
             width: None,
             height: None,
+            video_stream_count: 0,
+            audio_stream_count: 0,
+            audio_streams: Vec::new(),
+            subtitle_streams: Vec::new(),
         },
         Err(e) => return Err(e),
     };
@@ -3520,6 +4119,38 @@ mod tests {
     use super::*;
     use filetime::{set_file_mtime, FileTime};
     use rusqlite::params;
+
+    fn seed_present_observation(paths: &AppPaths, path: &str) {
+        let conn = db::open(paths).expect("observation db");
+        conn.execute(
+            "INSERT INTO media_availability_observation(path,state,observed_at_ms,source,duration_ms,next_refresh_at_ms,invalidated_at_ms) VALUES(?1,'present',1,'fixture',1,9999999999999,NULL) ON CONFLICT(path) DO UPDATE SET state='present',observed_at_ms=1,source='fixture',duration_ms=1,next_refresh_at_ms=9999999999999,invalidated_at_ms=NULL",
+            [path],
+        )
+        .expect("seed observation");
+        cache_media_path_observation(path, MediaPathObservation::Present);
+    }
+
+    fn assert_observation_invalidated(paths: &AppPaths, path: &str) {
+        assert!(
+            !media_path_observations()
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .contains_key(path),
+            "in-memory observation remained eligible for {path}"
+        );
+        let conn = db::open_readonly(paths).expect("readonly observation db");
+        let invalidated_at_ms = conn
+            .query_row(
+                "SELECT invalidated_at_ms FROM media_availability_observation WHERE path=?1",
+                [path],
+                |row| row.get::<_, Option<i64>>(0),
+            )
+            .expect("stored observation");
+        assert!(
+            invalidated_at_ms.is_some(),
+            "persistent observation remained eligible for {path}"
+        );
+    }
 
     fn seed_lineage_item(
         paths: &AppPaths,
@@ -4172,7 +4803,8 @@ INSERT INTO library_item (
         );
 
         std::fs::remove_file(&original).expect("simulate missing media");
-        invalidate_media_path_observation(&original.to_string_lossy());
+        invalidate_media_path_observation(&paths, &original.to_string_lossy())
+            .expect("invalidate original observation");
         let missing =
             preflight_download_urls(&paths, &[source_url.to_string()]).expect("missing preflight");
         assert_eq!(missing[0].status, "missing");
@@ -4378,7 +5010,7 @@ FROM library_item li WHERE li.id='deleted-item'
         );
         let unreachable_path = "invalid\0windows-path.mp4";
         assert_eq!(
-            observe_media_path_fresh(unreachable_path),
+            observe_media_path_fresh(&paths, unreachable_path),
             MediaPathObservation::Unreachable,
             "the fixture must exercise the unreachable/error branch"
         );
@@ -4549,6 +5181,14 @@ FROM library_item li WHERE li.id='deleted-item'
         );
         let replacement = dir.path().join("replacement.mp4");
         std::fs::write(&replacement, b"replacement").expect("replacement");
+        let old_text = old_path.to_string_lossy().to_string();
+        let replacement_text = replacement
+            .canonicalize()
+            .expect("canonical replacement")
+            .to_string_lossy()
+            .to_string();
+        seed_present_observation(&paths, &old_text);
+        seed_present_observation(&paths, &replacement_text);
         let item = import_downloaded_file_with_lineage(
             &paths,
             &replacement,
@@ -4577,6 +5217,8 @@ FROM library_item li WHERE li.id='deleted-item'
             replacement.canonicalize().unwrap().to_string_lossy()
         );
         assert!(stored.file_redownload_authorized_job_id.is_none());
+        assert_observation_invalidated(&paths, &old_text);
+        assert_observation_invalidated(&paths, &replacement_text);
     }
 
     #[test]
@@ -4775,4 +5417,689 @@ INSERT INTO media_source_identity (
             "exact imported identity must not invent single-video lineage"
         );
     }
+
+    #[test]
+    fn relocate_and_root_transfer_invalidate_both_old_and_new_observations() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let paths = AppPaths::new(dir.path().join("app_data"));
+        db::ensure_schema(&paths).expect("schema");
+
+        let old = dir.path().join("relocate-old.mkv");
+        let relocated = dir.path().join("relocate-new.mkv");
+        std::fs::write(&old, b"old").expect("old fixture");
+        std::fs::write(&relocated, b"new").expect("new fixture");
+        let old_text = old.canonicalize().unwrap().to_string_lossy().to_string();
+        let relocated_text = relocated
+            .canonicalize()
+            .unwrap()
+            .to_string_lossy()
+            .to_string();
+        seed_lineage_item(
+            &paths,
+            "relocate-observation-item",
+            1,
+            "file://relocate",
+            "Relocate observation",
+            &old_text,
+        );
+        seed_present_observation(&paths, &old_text);
+        seed_present_observation(&paths, &relocated_text);
+        relocate_canonical_media(&paths, "relocate-observation-item", &relocated)
+            .expect("relocate");
+        assert_observation_invalidated(&paths, &old_text);
+        assert_observation_invalidated(&paths, &relocated_text);
+
+        let source_root = dir.path().join("source_root");
+        let target_root = dir.path().join("target_root");
+        std::fs::create_dir_all(&source_root).unwrap();
+        std::fs::create_dir_all(&target_root).unwrap();
+        let source_path = source_root.join("transfer.mkv").to_string_lossy().to_string();
+        let target_path = replace_root_prefix(
+            &source_path,
+            &source_root.to_string_lossy(),
+            &target_root.to_string_lossy(),
+        );
+        seed_lineage_item(
+            &paths,
+            "transfer-observation-item",
+            2,
+            "file://transfer",
+            "Transfer observation",
+            &source_path,
+        );
+        seed_present_observation(&paths, &source_path);
+        seed_present_observation(&paths, &target_path);
+        let summary = transfer_item_metadata_between_roots(
+            &paths,
+            "source-library",
+            &source_root.to_string_lossy(),
+            "target-library",
+            &target_root.to_string_lossy(),
+            false,
+        )
+        .expect("root transfer");
+        assert_eq!(summary.items_moved, 1);
+        assert_observation_invalidated(&paths, &source_path);
+        assert_observation_invalidated(&paths, &target_path);
+    }
+
+    #[test]
+    fn fallback_resync_invalidates_source_and_destination_observations() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let paths = AppPaths::new(dir.path().join("app_data"));
+        paths.ensure_dirs().expect("app dirs");
+        db::ensure_schema(&paths).expect("schema");
+        let configured = dir.path().join("configured_root");
+        std::fs::create_dir_all(&configured).expect("configured root");
+        paths
+            .set_download_dir_override(&configured)
+            .expect("download override");
+        let fallback = paths.local_fallback_download_dir();
+        std::fs::create_dir_all(&fallback).expect("fallback root");
+        let source = fallback.join("channel").join("fallback.mkv");
+        std::fs::create_dir_all(source.parent().unwrap()).unwrap();
+        std::fs::write(&source, b"fallback bytes").expect("fallback fixture");
+        let source_text = source.canonicalize().unwrap().to_string_lossy().to_string();
+        let destination = configured.join("channel").join("fallback.mkv");
+        let destination_text = destination.to_string_lossy().to_string();
+        seed_lineage_item(
+            &paths,
+            "fallback-observation-item",
+            3,
+            "file://fallback",
+            "Fallback observation",
+            &source_text,
+        );
+        seed_present_observation(&paths, &source_text);
+        seed_present_observation(&paths, &destination_text);
+
+        let report = resync_local_fallback_downloads(&paths).expect("fallback resync");
+        assert_eq!(report.moved, 1);
+        assert!(destination.is_file());
+        assert_observation_invalidated(&paths, &source_text);
+        assert_observation_invalidated(&paths, &destination_text);
+    }
+}
+#[test]
+fn media_availability_observation_persists_and_invalidation_forces_refresh() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let paths = AppPaths::new(dir.path().join("app_data"));
+    db::ensure_schema(&paths).expect("schema");
+    let media = dir.path().join("observation_fixture.mkv");
+    std::fs::write(&media, b"fixture").expect("write fixture");
+    let media_text = media.to_string_lossy().to_string();
+
+    assert_eq!(
+        observe_media_path_fresh(&paths, &media_text),
+        MediaPathObservation::Present
+    );
+    media_path_observations()
+        .lock()
+        .expect("cache lock")
+        .remove(&media_text);
+    std::fs::remove_file(&media).expect("remove fixture");
+    assert_eq!(
+        observe_media_path(&paths, &media_text),
+        MediaPathObservation::Present,
+        "fresh persisted observation should survive an in-memory cache reset"
+    );
+
+    invalidate_media_path_observation(&paths, &media_text).expect("invalidate observation");
+    assert_eq!(
+        observe_media_path_fresh(&paths, &media_text),
+        MediaPathObservation::Missing,
+        "an invalidated correctness boundary must perform a fresh probe"
+    );
+    let conn = db::open_readonly(&paths).expect("readonly db");
+    let row: (String, String, i64, Option<i64>) = conn
+            .query_row(
+                "SELECT state,source,duration_ms,invalidated_at_ms FROM media_availability_observation WHERE path=?1",
+                [&media_text],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+            )
+            .expect("persistent observation");
+    assert_eq!(row.0, "missing");
+    assert_eq!(row.1, "fresh_probe");
+    assert!(row.2 >= 0);
+    assert!(row.3.is_none());
+}
+
+#[test]
+fn media_observation_invalidation_failure_is_truthful_and_keeps_memory_generation() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let paths = AppPaths::new(dir.path().join("app_data"));
+    db::ensure_schema(&paths).expect("schema");
+    let media_text = dir.path().join("durable-invalidation.mkv").to_string_lossy().to_string();
+    let conn = db::open(&paths).expect("observation db");
+    conn.execute(
+        "INSERT INTO media_availability_observation(path,state,observed_at_ms,source,duration_ms,next_refresh_at_ms,invalidated_at_ms) VALUES(?1,'present',1,'fixture',1,9999999999999,NULL) ON CONFLICT(path) DO UPDATE SET state='present',observed_at_ms=1,source='fixture',duration_ms=1,next_refresh_at_ms=9999999999999,invalidated_at_ms=NULL",
+        [&media_text],
+    )
+    .expect("seed observation");
+    drop(conn);
+    cache_media_path_observation(&media_text, MediaPathObservation::Present);
+    let generation_before = media_path_observation_generation(&media_text);
+    let conn = db::open(&paths).expect("db");
+    conn.execute("DROP TABLE media_availability_observation", [])
+        .expect("inject durable invalidation failure");
+    drop(conn);
+
+    assert!(invalidate_media_path_observation(&paths, &media_text).is_err());
+    assert_eq!(
+        media_path_observation_generation(&media_text),
+        generation_before,
+        "memory invalidation must not claim success before durable invalidation commits"
+    );
+    assert_eq!(
+        media_path_observations()
+            .lock()
+            .expect("cache")
+            .get(&media_text)
+            .map(|entry| entry.1),
+        Some(MediaPathObservation::Present)
+    );
+}
+
+#[test]
+fn bounded_probe_timeout_persists_as_slow_not_unreachable() {
+    assert_eq!(
+        media_path_observation_from_probe_receive(Err(mpsc::RecvTimeoutError::Timeout)),
+        MediaPathObservation::Slow
+    );
+    assert_eq!(
+        media_path_observation_from_probe_receive(Err(mpsc::RecvTimeoutError::Disconnected)),
+        MediaPathObservation::Unreachable
+    );
+    let dir = tempfile::tempdir().expect("tempdir");
+    let paths = AppPaths::new(dir.path().join("app_data"));
+    db::ensure_schema(&paths).expect("schema");
+    commit_media_path_observation_if_current(
+        &paths,
+        "slow-fixture",
+        MediaPathObservation::Slow,
+        "bounded_timeout",
+        MEDIA_PATH_OBSERVATION_TIMEOUT,
+        now_ms(),
+        media_path_observation_generation("slow-fixture"),
+    );
+    assert_eq!(
+        db::open_readonly(&paths)
+            .expect("readonly")
+            .query_row(
+                "SELECT state FROM media_availability_observation WHERE path='slow-fixture'",
+                [],
+                |row| row.get::<_, String>(0),
+            )
+            .expect("slow row"),
+        "slow"
+    );
+}
+
+#[test]
+fn media_observation_cache_is_bounded_and_evicts_oldest_entry() {
+    let mut cache = media_path_observations()
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    cache.clear();
+    drop(cache);
+    for index in 0..=MEDIA_PATH_OBSERVATION_CACHE_CAPACITY {
+        cache_media_path_observation(
+            &format!("bounded-observation-{index}"),
+            MediaPathObservation::Missing,
+        );
+    }
+    let cache = media_path_observations()
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    assert_eq!(cache.len(), MEDIA_PATH_OBSERVATION_CACHE_CAPACITY);
+    assert!(!cache.contains_key("bounded-observation-0"));
+    assert!(cache.contains_key(&format!(
+        "bounded-observation-{MEDIA_PATH_OBSERVATION_CACHE_CAPACITY}"
+    )));
+}
+
+#[test]
+fn media_observation_generation_map_is_bounded_beyond_4096_paths() {
+    let mut generations = media_path_observation_generations()
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    generations.clear();
+    for index in 0..=(MEDIA_PATH_OBSERVATION_CACHE_CAPACITY + 64) {
+        let path = format!("bounded-generation-{index}");
+        bound_media_path_observation_generations(&mut generations, &path);
+        generations.insert(path, (index as u64, Instant::now()));
+    }
+    assert_eq!(generations.len(), MEDIA_PATH_OBSERVATION_CACHE_CAPACITY);
+    assert!(!generations.contains_key("bounded-generation-0"));
+    assert!(generations.contains_key(&format!(
+        "bounded-generation-{}",
+        MEDIA_PATH_OBSERVATION_CACHE_CAPACITY + 64
+    )));
+}
+
+#[test]
+fn nas_probe_receipt_preserves_causal_envelope_generation_source_duration_and_result() {
+    let causal = MediaProbeCausalEnvelope {
+        request_id: Some("request-fixture".into()),
+        span_id: Some("span-fixture".into()),
+        incident_id: Some("incident-fixture".into()),
+    };
+    let details = media_path_probe_details(
+        Some(&causal),
+        17,
+        "nas_bounded_worker_pool",
+        Some(Duration::from_millis(23)),
+        Some("unreachable"),
+    );
+    assert_eq!(details["request_id"], "request-fixture");
+    assert_eq!(details["span_id"], "span-fixture");
+    assert_eq!(details["incident_id"], "incident-fixture");
+    assert_eq!(details["generation"], 17);
+    assert_eq!(details["duration_ms"], 23);
+    assert_eq!(details["source"], "nas_bounded_worker_pool");
+    assert_eq!(details["result"], "unreachable");
+}
+
+#[test]
+fn invalidation_generation_rejects_late_probe_commit() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let paths = AppPaths::new(dir.path().join("app"));
+    db::ensure_schema(&paths).expect("schema");
+    let path = dir
+        .path()
+        .join("late-probe.mkv")
+        .to_string_lossy()
+        .to_string();
+    let initial_generation = media_path_observation_generation(&path);
+    commit_media_path_observation_if_current(
+        &paths,
+        &path,
+        MediaPathObservation::Missing,
+        "initial_fixture",
+        Duration::from_millis(1),
+        now_ms(),
+        initial_generation,
+    );
+    let stale_generation = media_path_observation_generation(&path);
+    let probe_started_at_ms = now_ms();
+    invalidate_media_path_observation(&paths, &path).expect("invalidate observation");
+    commit_media_path_observation_if_current(
+        &paths,
+        &path,
+        MediaPathObservation::Present,
+        "late_probe_fixture",
+        Duration::from_millis(1),
+        probe_started_at_ms,
+        stale_generation,
+    );
+    assert!(!media_path_observations()
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .contains_key(&path));
+    let conn = db::open_readonly(&paths).expect("readonly");
+    let invalidated: Option<i64> = conn
+        .query_row(
+            "SELECT invalidated_at_ms FROM media_availability_observation WHERE path=?1",
+            [&path],
+            |row| row.get(0),
+        )
+        .optional()
+        .expect("query")
+        .flatten();
+    assert!(
+        invalidated.is_some(),
+        "late probe must not clear invalidation"
+    );
+}
+
+#[test]
+fn canonical_mp4_dedupe_resolves_verified_root_alias_without_rewriting_identity() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let paths = AppPaths::new(dir.path().join("app_data"));
+    db::ensure_schema(&paths).expect("schema");
+    let target_root = dir.path().join("direct_archive");
+    std::fs::create_dir_all(&target_root).expect("target root");
+    let current_mp4 = target_root.join("legacy.mp4");
+    std::fs::write(&current_mp4, b"historical mp4").expect("historical file");
+    let stored_mp4 = r"C:\old_archive\legacy.mp4";
+    let conn = db::open(&paths).expect("db");
+    conn.execute(
+        "INSERT INTO library_item(id,created_at_ms,source_type,source_uri,title,media_path) VALUES('legacy-item',1,'local_file',?1,'Legacy MP4',?1)",
+        [stored_mp4],
+    )
+    .expect("stored historical identity");
+    drop(conn);
+    let aliases = crate::root_rebind::RootAliasesConfig {
+        schema_version: 1,
+        aliases: vec![crate::root_rebind::RootAliasRecord {
+            id: "test-alias".to_string(),
+            from_root: r"C:\old_archive".to_string(),
+            to_root: target_root
+                .canonicalize()
+                .expect("canonical alias target")
+                .to_string_lossy()
+                .to_string(),
+            verified_at_ms: 1,
+            status: "active".to_string(),
+            receipt_path: "test-receipt.json".to_string(),
+        }],
+    };
+    crate::persistence::atomic_write_text(
+        &paths.root_aliases_config_path(),
+        &format!("{}\n", serde_json::to_string_pretty(&aliases).unwrap()),
+    )
+    .expect("alias config");
+
+    let found = get_item_by_canonical_media_path(&paths, &current_mp4)
+        .expect("alias-aware dedupe")
+        .expect("historical item found");
+    assert_eq!(found.id, "legacy-item");
+    assert_eq!(
+        found.media_path, stored_mp4,
+        "database identity stays historical"
+    );
+}
+
+#[test]
+fn historical_mp4_behavior_matrix_covers_alias_availability_dedupe_delete_retry_membership_and_nonconversion(
+) {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let paths = AppPaths::new(dir.path().join("app_data"));
+    db::ensure_schema(&paths).expect("schema");
+    let target_root = dir.path().join("direct_archive");
+    std::fs::create_dir_all(&target_root).expect("target root");
+    let current_mp4 = target_root.join("legacy-delete.mp4");
+    std::fs::write(&current_mp4, b"historical mp4 delete fixture").expect("historical file");
+    let canonical_target_root = target_root.canonicalize().expect("canonical alias target");
+    let stored_mp4 = r"C:\old_archive\legacy-delete.mp4";
+    let conn = db::open(&paths).expect("db");
+    conn.execute(
+        "INSERT INTO library_item(id,created_at_ms,source_type,source_uri,title,media_path,container) VALUES('legacy-delete-item',1,'url_direct','https://www.youtube.com/watch?v=legacydelete','Legacy MP4 delete',?1,'mp4')",
+        [stored_mp4],
+    )
+    .expect("stored historical identity");
+    conn.execute(
+        "INSERT INTO media_source_identity(service,media_id,canonical_url,library_item_id,repair_state,created_at_ms,updated_at_ms) VALUES('youtube','legacydelete','https://www.youtube.com/watch?v=legacydelete','legacy-delete-item','ready',1,1)",
+        [],
+    )
+    .expect("canonical identity");
+    conn.execute(
+        "INSERT INTO media_source_membership(service,media_id,source_subscription_id,source_kind,source_url_snapshot,source_title_snapshot,evidence_kind,created_at_ms,updated_at_ms) VALUES('youtube','legacydelete','legacy-subscription','subscription','https://www.youtube.com/@legacy','Legacy subscription','runtime',1,1)",
+        [],
+    )
+    .expect("historical subscription membership");
+    drop(conn);
+    let aliases = crate::root_rebind::RootAliasesConfig {
+        schema_version: 1,
+        aliases: vec![crate::root_rebind::RootAliasRecord {
+            id: "test-delete-alias".to_string(),
+            from_root: r"C:\old_archive".to_string(),
+            to_root: canonical_target_root.to_string_lossy().to_string(),
+            verified_at_ms: 1,
+            status: "active".to_string(),
+            receipt_path: "test-receipt.json".to_string(),
+        }],
+    };
+    crate::persistence::atomic_write_text(
+        &paths.root_aliases_config_path(),
+        &format!("{}\n", serde_json::to_string_pretty(&aliases).unwrap()),
+    )
+    .expect("alias config");
+
+    assert_eq!(
+        observe_media_path_fresh(&paths, stored_mp4),
+        MediaPathObservation::Present,
+        "historical stored identity must resolve to an available physical MP4"
+    );
+    let deduped = get_item_by_canonical_media_path(&paths, &current_mp4)
+        .expect("alias-aware canonical lookup")
+        .expect("dedupe identity");
+    assert_eq!(deduped.id, "legacy-delete-item");
+    assert_eq!(deduped.media_path, stored_mp4);
+
+    let receipt = delete_library_item_files(
+        &paths,
+        &["legacy-delete-item".to_string()],
+        "permanent",
+        "operator",
+    )
+    .expect("delete receipt");
+    assert_eq!(receipt.deleted, 1);
+    assert_eq!(receipt.failed, 0);
+    assert!(
+        !current_mp4.exists(),
+        "resolved physical MP4 must be deleted"
+    );
+    let item = get_item_by_id(&paths, "legacy-delete-item").expect("preserved item");
+    assert_eq!(
+        item.media_path, stored_mp4,
+        "historical DB identity stays unchanged"
+    );
+    assert_eq!(item.container.as_deref(), Some("mp4"));
+    assert_eq!(item.file_status, LIBRARY_FILE_STATUS_OPERATOR_DELETED);
+    let conn = db::open_readonly(&paths).expect("matrix state");
+    let membership_count: i64 = conn
+        .query_row(
+            "SELECT COUNT(*) FROM media_source_membership WHERE service='youtube' AND media_id='legacydelete' AND source_subscription_id='legacy-subscription'",
+            [],
+            |row| row.get(0),
+        )
+        .expect("membership count");
+    assert_eq!(
+        membership_count, 1,
+        "file action must preserve source membership"
+    );
+    drop(conn);
+    let redownload = operator_deleted_redownload_target(&paths, "legacy-delete-item")
+        .expect("alias-aware retry target");
+    assert_eq!(
+        PathBuf::from(redownload.output_dir),
+        canonical_target_root,
+        "retry destination follows the verified physical root while lineage remains historical"
+    );
+    assert!(
+        !target_root.join("legacy-delete.mkv").exists(),
+        "historical compatibility must not silently convert the MP4"
+    );
+}
+
+#[test]
+fn disconnected_alias_restores_historical_mp4_read_open_reveal_availability_and_dedupe() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let paths = AppPaths::new(dir.path().join("app_data"));
+    db::ensure_schema(&paths).expect("schema");
+    let old_root = dir.path().join("restored_old_root");
+    let target_root = dir.path().join("disconnected_direct_root");
+    std::fs::create_dir_all(old_root.join("channel")).expect("old root");
+    std::fs::create_dir_all(target_root.join("channel")).expect("initial target root");
+    let old_mp4 = old_root.join("channel").join("legacy-restored.mp4");
+    let canonical_target_root = target_root.canonicalize().expect("canonical alias target");
+    let target_mp4 = canonical_target_root
+        .join("channel")
+        .join("legacy-restored.mp4");
+    std::fs::write(&old_mp4, b"historical restored mp4").expect("historical file");
+    std::fs::write(&target_mp4, b"direct target mp4").expect("target file");
+    let stored_mp4 = old_mp4.to_string_lossy().to_string();
+    let conn = db::open(&paths).expect("db");
+    conn.execute(
+        "INSERT INTO library_item(id,created_at_ms,source_type,source_uri,title,media_path,container) VALUES('legacy-restored-item',1,'local_file','https://www.youtube.com/watch?v=legacyrestored','Restored Legacy MP4',?1,'mp4')",
+        [&stored_mp4],
+    )
+    .expect("historical row");
+    drop(conn);
+    let aliases = crate::root_rebind::RootAliasesConfig {
+        schema_version: 1,
+        aliases: vec![crate::root_rebind::RootAliasRecord {
+            id: "disconnected-alias".to_string(),
+            from_root: old_root.to_string_lossy().to_string(),
+            to_root: canonical_target_root.to_string_lossy().to_string(),
+            verified_at_ms: 1,
+            status: "active".to_string(),
+            receipt_path: "test-receipt.json".to_string(),
+        }],
+    };
+    crate::persistence::atomic_write_text(
+        &paths.root_aliases_config_path(),
+        &format!("{}\n", serde_json::to_string_pretty(&aliases).unwrap()),
+    )
+    .expect("alias config");
+
+    assert_eq!(
+        resolve_media_path(&paths, &stored_mp4).expect("connected alias resolver"),
+        target_mp4,
+        "connected target remains the active physical read location"
+    );
+    std::fs::remove_dir_all(&target_root).expect("simulate direct target disconnect");
+    std::thread::sleep(crate::root_rebind::ALIAS_TARGET_CACHE_TTL + Duration::from_millis(25));
+
+    let resolved = resolve_media_path(&paths, &stored_mp4).expect("historical read resolver");
+    assert_eq!(
+        resolved, old_mp4,
+        "open/reveal source must fall back to restored old root"
+    );
+    assert_eq!(
+        observe_media_path_fresh(&paths, &stored_mp4),
+        MediaPathObservation::Present,
+        "availability must observe the restored historical file"
+    );
+    let deduped = get_item_by_canonical_media_path(&paths, &old_mp4)
+        .expect("canonical lookup")
+        .expect("historical row");
+    assert_eq!(deduped.id, "legacy-restored-item");
+    assert_eq!(deduped.container.as_deref(), Some("mp4"));
+    assert_eq!(deduped.media_path, stored_mp4);
+
+    let search = query_items_page(
+        &paths,
+        20,
+        0,
+        Some("available"),
+        Some("restored legacy"),
+        Some("video"),
+        Some("all"),
+        false,
+        Some("title"),
+        Some("asc"),
+    )
+    .expect("historical MP4 search");
+    assert_eq!(search.filtered_total, 1);
+    assert_eq!(search.items[0].id, "legacy-restored-item");
+    let scan = list_youtube_video_candidates(&paths, 20, 0).expect("legacy candidate scan");
+    assert!(scan.iter().any(|item| item.id == "legacy-restored-item"));
+
+    let imported_path = old_root.join("imported-legacy.mp4");
+    std::fs::write(&imported_path, b"legacy import fixture").expect("import fixture");
+    let imported = import_local_file(&paths, &imported_path).expect("historical MP4 import");
+    assert!(imported.media_path.to_ascii_lowercase().ends_with(".mp4"));
+    assert!(
+        imported_path.exists(),
+        "import must not convert historical MP4"
+    );
+
+    let conn = db::open(&paths).expect("migration connection");
+    db::migrate(&conn).expect("schema migration preserves legacy rows");
+    drop(conn);
+    assert_eq!(
+        get_item_by_id(&paths, "legacy-restored-item")
+            .expect("post-migration item")
+            .media_path,
+        stored_mp4,
+        "schema migration must not rewrite historical MP4 identity"
+    );
+
+    let repaired_path = old_root.join("channel").join("legacy-repaired.mp4");
+    std::fs::write(&repaired_path, b"historical repaired mp4").expect("repair target");
+    let repaired = relocate_canonical_media(&paths, "legacy-restored-item", &repaired_path)
+        .expect("repair relocation accepts MP4");
+    assert!(repaired.media_path.to_ascii_lowercase().ends_with(".mp4"));
+    assert!(
+        repaired_path.exists(),
+        "repair must not convert historical MP4"
+    );
+}
+
+#[test]
+fn alias_aware_dedupe_uses_indexed_bounded_candidates_without_library_scan() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let paths = AppPaths::new(dir.path().join("app_data"));
+    db::ensure_schema(&paths).expect("schema");
+    let target_root = dir.path().join("target");
+    std::fs::create_dir_all(&target_root).expect("target");
+    let current = target_root.join("wanted.mp4");
+    std::fs::write(&current, b"historical").expect("media");
+    let conn = db::open(&paths).expect("db");
+    let tx = conn.unchecked_transaction().expect("transaction");
+    for index in 0..2_000 {
+        tx.execute(
+            "INSERT INTO library_item(id,created_at_ms,source_type,source_uri,title,media_path) VALUES(?1,?2,'local_file',?3,?4,?5)",
+            rusqlite::params![
+                format!("unrelated-{index}"),
+                index as i64,
+                format!("file://unrelated/{index}"),
+                format!("Unrelated {index}"),
+                format!(r"Q:\offline\unrelated-{index}.mp4")
+            ],
+        )
+        .expect("unrelated row");
+    }
+    tx.execute(
+        "INSERT INTO library_item(id,created_at_ms,source_type,source_uri,title,media_path) VALUES('wanted',3000,'local_file','file://wanted','Wanted',?1)",
+        [r"C:\old\wanted.mp4"],
+    )
+    .expect("wanted row");
+    tx.commit().expect("commit");
+    let plan = conn
+        .prepare(
+            "EXPLAIN QUERY PLAN SELECT id FROM library_item WHERE media_path=?1 COLLATE NOCASE ORDER BY created_at_ms DESC LIMIT 1",
+        )
+        .expect("plan")
+        .query_map([r"C:\old\wanted.mp4"], |row| row.get::<_, String>(3))
+        .expect("plan rows")
+        .collect::<rusqlite::Result<Vec<_>>>()
+        .expect("plan details")
+        .join(" ");
+    assert!(
+        plan.contains("idx_library_item_media_path"),
+        "exact alias candidate lookup must use the NOCASE media-path index: {plan}"
+    );
+    drop(conn);
+    let aliases = crate::root_rebind::RootAliasesConfig {
+        schema_version: 1,
+        aliases: vec![crate::root_rebind::RootAliasRecord {
+            id: "bounded-candidate".to_string(),
+            from_root: r"C:\old".to_string(),
+            to_root: target_root
+                .canonicalize()
+                .expect("canonical alias target")
+                .to_string_lossy()
+                .to_string(),
+            verified_at_ms: 1,
+            status: "active".to_string(),
+            receipt_path: "test.json".to_string(),
+        }],
+    };
+    crate::persistence::atomic_write_text(
+        &paths.root_aliases_config_path(),
+        &format!("{}\n", serde_json::to_string_pretty(&aliases).unwrap()),
+    )
+    .expect("aliases");
+    let candidates = crate::root_rebind::historical_alias_candidates(
+        &aliases.aliases,
+        &current
+            .canonicalize()
+            .expect("canonical current")
+            .to_string_lossy(),
+    )
+    .expect("historical candidates");
+    assert_eq!(
+        candidates,
+        vec![r"C:\old\wanted.mp4".to_string()],
+        "target={} canonical={}",
+        target_root.to_string_lossy(),
+        current.canonicalize().unwrap().to_string_lossy()
+    );
+    let found = get_item_by_canonical_media_path(&paths, &current)
+        .expect("indexed lookup")
+        .expect("wanted row");
+    assert_eq!(found.id, "wanted");
 }

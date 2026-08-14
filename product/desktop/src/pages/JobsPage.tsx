@@ -1,4 +1,4 @@
-import { Fragment, useCallback, useEffect, useMemo, useState, type FormEvent } from "react";
+import { Fragment, useCallback, useEffect, useMemo, useRef, useState, type FormEvent } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { confirm, save } from "@tauri-apps/plugin-dialog";
 import { usePageActivity, usePollingLoop } from "../lib/activity";
@@ -15,6 +15,7 @@ import {
 } from "../lib/archiverRuntime";
 // WP-0264: shared failure-state classifier (same rules the subscription panel uses).
 import { classifyFailure, toneStyle } from "../lib/failureStates";
+import { diagnosticsTrace } from "../lib/diagnosticsTrace";
 
 type JobStatus = "queued" | "running" | "succeeded" | "failed" | "canceled";
 
@@ -228,8 +229,7 @@ type YoutubeGateState = {
 };
 
 // Provisional WP-0270 desktop contract shared with the Tauri layer:
-// jobs_track_runtime_get -> this snapshot;
-// jobs_track_runtime_set({ settings }) -> this snapshot.
+// jobs_track_runtime_get -> this read-only snapshot. Persistent budget writes are owned by Options.
 // `unclassified` is a canonical legacy count, never a budgeted runnable track.
 type JobsTrackRuntimeSnapshot = {
   tracks: JobTrackRuntimeRow[];
@@ -880,8 +880,6 @@ export function JobsPage({ visible = true }: { visible?: boolean }) {
   const [dummySeconds, setDummySeconds] = useState(10);
   const [queuePaused, setQueuePaused] = useState(false);
   const [trackRuntime, setTrackRuntime] = useState<JobsTrackRuntimeSnapshot | null>(null);
-  const [trackSettingsDraft, setTrackSettingsDraft] = useState<JobRuntimeSettings | null>(null);
-  const [trackSettingsDirty, setTrackSettingsDirty] = useState(false);
   const [trackRuntimeState, setTrackRuntimeState] = useState<"loading" | "ready" | "stale" | "error">("loading");
   const [jobSearchQuery, setJobSearchQuery] = useState("");
   const [jobsFilter, setJobsFilter] = useState<JobsFilter>("all");
@@ -895,6 +893,17 @@ export function JobsPage({ visible = true }: { visible?: boolean }) {
     Record<string, SubscriptionDownloadActivityRow>
   >({});
   const [activeRefreshSubscriptionIds, setActiveRefreshSubscriptionIds] = useState<Set<string>>(new Set());
+  const jobsSnapshotGenerationRef = useRef(0);
+  const jobsProjectionGenerationRef = useRef({ lookups: 0, download: 0, active: 0 });
+  const [jobsProjectionState, setJobsProjectionState] = useState<
+    Record<"lookups" | "download" | "active", "loading" | "ready" | "stale" | "error">
+  >({ lookups: "loading", download: "loading", active: "loading" });
+  const markJobsProjectionFailure = useCallback((key: "lookups" | "download" | "active") => {
+    setJobsProjectionState((current) => ({
+      ...current,
+      [key]: current[key] === "ready" || current[key] === "stale" ? "stale" : "error",
+    }));
+  }, []);
 
   async function handlePathOpenFailure(path: string, error: unknown, actionLabel: string) {
     const copied = await copyPathToClipboard(path);
@@ -903,26 +912,43 @@ export function JobsPage({ visible = true }: { visible?: boolean }) {
   }
 
   const refreshJobsSnapshot = useCallback(async () => {
+    const generation = ++jobsSnapshotGenerationRef.current;
+    const requestId = `jobs-${generation}-${Date.now()}`;
+    const started = performance.now();
+    void diagnosticsTrace("frontend_request_started", { request_id: requestId, span_id: requestId, pane: "jobs" });
     const query = jobSearchQuery.trim();
     const overviewRequest = invoke<JobsOverviewSnapshot>("jobs_overview", {
       view: primaryView,
       track: selectedTrack,
+      requestId,
+      spanId: requestId,
     });
     if (!query) {
       const overview = await overviewRequest;
+      void diagnosticsTrace("frontend_receive", { request_id: requestId, span_id: requestId, pane: "jobs", elapsed_ms: Math.round(performance.now() - started) });
+      if (generation !== jobsSnapshotGenerationRef.current) {
+        void diagnosticsTrace("frontend_request_stale", { request_id: requestId, span_id: requestId, pane: "jobs" }, "warn");
+        return;
+      }
       setOverviewCounts(overview.counts);
       setSelectedOverviewCounts(overview.selected_counts);
       setJobs((current) => (jobRowsEqual(current, overview.jobs) ? current : overview.jobs));
       setJobsLoaded(true);
       setError((current) => (current?.includes("database is locked") ? null : current));
+      requestAnimationFrame(() => void diagnosticsTrace("frontend_render_commit", { request_id: requestId, span_id: requestId, pane: "jobs", elapsed_ms: Math.round(performance.now() - started) }));
       return;
     }
-    // Search is only a bounded preview. Continue loading canonical overview
-    // counts in parallel so the status strip never becomes a rendered-subset count.
     const [overview, next] = await Promise.all([
       overviewRequest,
       invoke<JobRow[]>("jobs_search", { query, limit: JOBS_SEARCH_LIMIT, track: selectedTrack }),
     ]);
+    void diagnosticsTrace("frontend_receive", { request_id: requestId, span_id: requestId, pane: "jobs", elapsed_ms: Math.round(performance.now() - started) });
+    if (generation !== jobsSnapshotGenerationRef.current) {
+      void diagnosticsTrace("frontend_request_stale", { request_id: requestId, span_id: requestId, pane: "jobs" }, "warn");
+      return;
+    }
+    // Search is only a bounded preview. Continue loading canonical overview
+    // counts in parallel so the status strip never becomes a rendered-subset count.
     setOverviewCounts(overview.counts);
     setSelectedOverviewCounts(overview.selected_counts);
     // WP-0258 (2b): keep the previous array identity when the poll returned no material change so
@@ -930,26 +956,23 @@ export function JobsPage({ visible = true }: { visible?: boolean }) {
     setJobs((current) => (jobRowsEqual(current, next) ? current : next));
     setJobsLoaded(true);
     setError((current) => (current?.includes("database is locked") ? null : current));
+    requestAnimationFrame(() => void diagnosticsTrace("frontend_render_commit", { request_id: requestId, span_id: requestId, pane: "jobs", elapsed_ms: Math.round(performance.now() - started) }));
   }, [jobSearchQuery, primaryView, selectedTrack]);
 
   const refreshTrackRuntime = useCallback(async function refreshTrackRuntime() {
     try {
       const runtime = await invoke<JobsTrackRuntimeSnapshot>("jobs_track_runtime_get");
-      const settings = trackSettingsFromRuntime(runtime);
-      if (!settings || canonicalTrackRows(runtime).length !== CANONICAL_JOB_TRACKS.length) {
+      if (!trackSettingsFromRuntime(runtime) || canonicalTrackRows(runtime).length !== CANONICAL_JOB_TRACKS.length) {
         throw new Error("The canonical track runtime response was incomplete.");
       }
       setTrackRuntime(runtime);
-      setTrackSettingsDraft((current) =>
-        trackSettingsDirty && current ? current : settings,
-      );
       setTrackRuntimeState("ready");
     } catch (err) {
       console.warn("jobs_track_runtime_get failed", err);
       // Preserve the last verified snapshot but make its age/truth boundary visible.
       setTrackRuntimeState((current) => (current === "ready" || current === "stale" ? "stale" : "error"));
     }
-  }, [trackSettingsDirty]);
+  }, []);
 
   const refreshQueueControls = useCallback(async function refreshQueueControls() {
     const [control] = await Promise.all([
@@ -963,22 +986,40 @@ export function JobsPage({ visible = true }: { visible?: boolean }) {
   }, [refreshTrackRuntime]);
 
   const refreshSubscriptionLookups = useCallback(async () => {
+    const generation = ++jobsProjectionGenerationRef.current.lookups;
     const [youtubeSubscriptions, instagramSubscriptions] = await Promise.all([
-      invoke<YoutubeSubscriptionRow[]>("youtube_subscriptions_list").catch(() => []),
-      invoke<InstagramSubscriptionRow[]>("instagram_subscriptions_list").catch(() => []),
+      invoke<YoutubeSubscriptionRow[]>("youtube_subscriptions_list").catch(() => null),
+      invoke<InstagramSubscriptionRow[]>("instagram_subscriptions_list").catch(() => null),
     ]);
+    if (generation !== jobsProjectionGenerationRef.current.lookups) return;
+    if (youtubeSubscriptions === null || instagramSubscriptions === null) {
+      markJobsProjectionFailure("lookups");
+      return;
+    }
     setYoutubeSubscriptionsById(
       Object.fromEntries(youtubeSubscriptions.map((subscription) => [subscription.id, subscription])),
     );
     setInstagramSubscriptionsById(
       Object.fromEntries(instagramSubscriptions.map((subscription) => [subscription.id, subscription])),
     );
-  }, []);
+    setJobsProjectionState((current) => ({ ...current, lookups: "ready" }));
+  }, [markJobsProjectionFailure]);
 
   const refreshSubscriptionDownloadActivity = useCallback(async () => {
+    const generation = ++jobsProjectionGenerationRef.current.download;
+    const requestId = `jobs-download-activity-${Date.now()}`;
+    const started = performance.now();
+    void diagnosticsTrace("frontend_request_started", { request_id: requestId, span_id: requestId, pane: "jobs_subscription_download_activity" });
     const rows = await invoke<SubscriptionDownloadActivityRow[]>(
       "subscription_download_activity",
-    ).catch(() => [] as SubscriptionDownloadActivityRow[]);
+      { requestId, spanId: requestId },
+    ).catch(() => null);
+    void diagnosticsTrace("frontend_receive", { request_id: requestId, span_id: requestId, pane: "jobs_subscription_download_activity", elapsed_ms: Math.round(performance.now() - started) });
+    if (generation !== jobsProjectionGenerationRef.current.download) return;
+    if (rows === null) {
+      markJobsProjectionFailure("download");
+      return;
+    }
     const next: Record<string, SubscriptionDownloadActivityRow> = {};
     for (const row of rows) {
       if (!row || typeof row.subscription_id !== "string") continue;
@@ -993,16 +1034,25 @@ export function JobsPage({ visible = true }: { visible?: boolean }) {
       };
     }
     setSubscriptionDownloadActivityById(next);
-  }, []);
+    setJobsProjectionState((current) => ({ ...current, download: "ready" }));
+    requestAnimationFrame(() => void diagnosticsTrace("frontend_render_commit", { request_id: requestId, span_id: requestId, pane: "jobs_subscription_download_activity" }));
+  }, [markJobsProjectionFailure]);
 
   const refreshActiveSubscriptionRefreshes = useCallback(async () => {
-    const ids = await invoke<string[]>("youtube_subscriptions_active_refresh_ids").catch(() => [] as string[]);
+    const generation = ++jobsProjectionGenerationRef.current.active;
+    const ids = await invoke<string[]>("youtube_subscriptions_active_refresh_ids").catch(() => null);
+    if (generation !== jobsProjectionGenerationRef.current.active) return;
+    if (ids === null) {
+      markJobsProjectionFailure("active");
+      return;
+    }
     const normalized = ids
       .map((id) => stringOrNull(id))
       .filter((id): id is string => Boolean(id))
       .map((id) => id);
     setActiveRefreshSubscriptionIds(new Set(normalized));
-  }, []);
+    setJobsProjectionState((current) => ({ ...current, active: "ready" }));
+  }, [markJobsProjectionFailure]);
 
   const refresh = useCallback(async function refresh() {
     try {
@@ -1027,7 +1077,13 @@ export function JobsPage({ visible = true }: { visible?: boolean }) {
   ]);
 
   useEffect(() => {
-    if (!shouldPoll) return;
+    if (!shouldPoll) {
+      jobsSnapshotGenerationRef.current += 1;
+      jobsProjectionGenerationRef.current.lookups += 1;
+      jobsProjectionGenerationRef.current.download += 1;
+      jobsProjectionGenerationRef.current.active += 1;
+      return;
+    }
     refresh().catch((e) => setError(String(e)));
   }, [shouldPoll, refresh]);
 
@@ -1568,14 +1624,21 @@ export function JobsPage({ visible = true }: { visible?: boolean }) {
     setError(null);
     setNotice(null);
     try {
+      const requestId = `jobs-clear-search-${Date.now()}`;
+      const started = performance.now();
+      void diagnosticsTrace("frontend_request_started", { request_id: requestId, span_id: requestId, pane: "jobs_clear_search" });
       const overview = await invoke<JobsOverviewSnapshot>("jobs_overview", {
         view: primaryView,
         track: selectedTrack,
+        requestId,
+        spanId: requestId,
       });
+      void diagnosticsTrace("frontend_receive", { request_id: requestId, span_id: requestId, pane: "jobs_clear_search", elapsed_ms: Math.round(performance.now() - started) });
       setOverviewCounts(overview.counts);
       setSelectedOverviewCounts(overview.selected_counts);
       setJobs((current) => (jobRowsEqual(current, overview.jobs) ? current : overview.jobs));
       setJobsLoaded(true);
+      requestAnimationFrame(() => void diagnosticsTrace("frontend_render_commit", { request_id: requestId, span_id: requestId, pane: "jobs_clear_search" }));
     } catch (e) {
       setError(String(e));
     } finally {
@@ -2021,10 +2084,10 @@ export function JobsPage({ visible = true }: { visible?: boolean }) {
     setError(null);
     try {
       const outputs = await invoke<ItemOutputs>("item_outputs", { itemId });
-      const path = outputs.mux_dub_preview_v1_mp4_exists
-        ? outputs.mux_dub_preview_v1_mp4_path
-        : outputs.mux_dub_preview_v1_mkv_exists
-          ? outputs.mux_dub_preview_v1_mkv_path
+      const path = outputs.mux_dub_preview_v1_mkv_exists
+        ? outputs.mux_dub_preview_v1_mkv_path
+        : outputs.mux_dub_preview_v1_mp4_exists
+          ? outputs.mux_dub_preview_v1_mp4_path
           : "";
       if (!path) {
         throw new Error(
@@ -2044,22 +2107,20 @@ export function JobsPage({ visible = true }: { visible?: boolean }) {
 
   async function exportMuxedPreview(itemId: string, suggestedStem: string) {
     setError(null);
-    let preferredExt = "mp4";
     try {
       const outputs = await invoke<ItemOutputs>("item_outputs", { itemId });
-      if (outputs.mux_dub_preview_v1_mp4_exists) preferredExt = "mp4";
-      else if (outputs.mux_dub_preview_v1_mkv_exists) preferredExt = "mkv";
-    } catch {
-      // ignore
+      if (!outputs.mux_dub_preview_v1_mkv_exists) {
+        throw new Error("MKV mux preview not found. Legacy MP4 previews remain playable but are not copied as new exports.");
+      }
+    } catch (e) {
+      setError(String(e));
+      return;
     }
 
     const out = await save({
-      title: `Export muxed preview (${preferredExt.toUpperCase()})`,
-      defaultPath: `${suggestedStem}.${preferredExt}`,
-      filters: [
-        { name: "MP4", extensions: ["mp4"] },
-        { name: "MKV", extensions: ["mkv"] },
-      ],
+      title: "Export muxed preview (MKV)",
+      defaultPath: `${suggestedStem}.mkv`,
+      filters: [{ name: "MKV", extensions: ["mkv"] }],
     });
     if (!out || typeof out !== "string") return;
 
@@ -2214,45 +2275,6 @@ export function JobsPage({ visible = true }: { visible?: boolean }) {
       }
     } catch (e) {
       setError(String(e));
-    }
-  }
-
-  async function applyTrackRuntimeSettings() {
-    if (!trackSettingsDraft) return;
-    setBusy(true);
-    setError(null);
-    setNotice(null);
-    try {
-      const settings: JobRuntimeSettings = {
-        youtube_single: trackSettingsDraft.youtube_single,
-        youtube_recurring: trackSettingsDraft.youtube_recurring,
-        instagram: trackSettingsDraft.instagram,
-        other_video: trackSettingsDraft.other_video,
-        image_archive: trackSettingsDraft.image_archive,
-        localization: trackSettingsDraft.localization,
-      };
-      for (const [track, value] of Object.entries(settings)) {
-        if (!Number.isInteger(value) || value < 1 || value > 16) {
-          throw new Error(`${track} budget must be a whole number between 1 and 16.`);
-        }
-      }
-      const runtime = await invoke<JobsTrackRuntimeSnapshot>("jobs_track_runtime_set", {
-        settings,
-      });
-      const savedSettings = trackSettingsFromRuntime(runtime);
-      if (!savedSettings || canonicalTrackRows(runtime).length !== CANONICAL_JOB_TRACKS.length) {
-        throw new Error("The scheduler returned an incomplete canonical track runtime response.");
-      }
-      setTrackRuntime(runtime);
-      setTrackSettingsDraft(savedSettings);
-      setTrackSettingsDirty(false);
-      setTrackRuntimeState("ready");
-      setNotice("Track budgets saved. New work now uses the scheduler settings shown here.");
-      await refresh();
-    } catch (e) {
-      setError(String(e));
-    } finally {
-      setBusy(false);
     }
   }
 
@@ -2606,6 +2628,13 @@ export function JobsPage({ visible = true }: { visible?: boolean }) {
             </span>
           </summary>
         <div className="jobs-track-strip" aria-label="Canonical track status">
+          {Object.values(jobsProjectionState).some((state) => state === "stale" || state === "error") ? (
+            <div data-testid="jobs-subscription-projection-state" className="jobs-track-runtime-state is-stale" role="status">
+              {Object.values(jobsProjectionState).some((state) => state === "stale")
+                ? "Subscription activity could not refresh; showing the last confirmed state."
+                : "Subscription activity is unavailable; no failed poll was projected as an empty result."}
+            </div>
+          ) : null}
           {trackRuntimeState === "loading" ? (
             <div id="jobs-track-runtime-state" data-testid="jobs-track-runtime-state" className="jobs-track-runtime-state" role="status">
               Loading canonical track status and scheduler budgets…
@@ -2674,7 +2703,7 @@ export function JobsPage({ visible = true }: { visible?: boolean }) {
         </div>
         </details>
         <details className="jobs-toolbar-more">
-          <summary>Queue settings, cleanup, and developer tools</summary>
+          <summary>Queue status, cleanup, and developer tools</summary>
           <div className="jobs-track-controls" aria-label="Scheduler track budgets">
             {trackRuntimeState === "loading" || trackRuntimeState === "error" ? (
               <div className="jobs-track-runtime-state">
@@ -2683,7 +2712,7 @@ export function JobsPage({ visible = true }: { visible?: boolean }) {
                   : "Scheduler budgets are unavailable until canonical track status loads."}
               </div>
             ) : trackRows.map((track) => (
-              <label
+              <div
                 key={track.track}
                 id={`jobs-track-control-${track.track}`}
                 data-testid={`jobs-track-control-${track.track}`}
@@ -2692,18 +2721,7 @@ export function JobsPage({ visible = true }: { visible?: boolean }) {
                 <span>
                   {jobTrackLabel(track.track)}{track.track === "youtube_recurring" ? " direct transfer" : ""} budget
                 </span>
-                <input
-                  type="number"
-                  min={1}
-                  max={16}
-                  value={trackSettingsDraft?.[track.track] ?? track.configured_budget}
-                  disabled={busy || !trackSettingsDraft}
-                  onChange={(event) => {
-                    const value = Number(event.currentTarget.value);
-                    setTrackSettingsDirty(true);
-                    setTrackSettingsDraft((current) => current ? ({ ...current, [track.track]: value }) : current);
-                  }}
-                />
+                <output>{track.configured_budget} configured / {track.effective_budget} effective</output>
                 <small>
                   {track.paused
                     ? "Held by the scheduler."
@@ -2711,13 +2729,10 @@ export function JobsPage({ visible = true }: { visible?: boolean }) {
                       ? `Running ${track.running} total jobs (subscription checks and transfers); queued ${track.queued}.`
                       : `Running ${track.running}; queued ${track.queued}.`}
                 </small>
-              </label>
+              </div>
             ))}
           </div>
           <div className="row" style={{ marginTop: 8 }}>
-            <button type="button" disabled={busy || !trackSettingsDraft} onClick={applyTrackRuntimeSettings}>
-              Apply track budgets
-            </button>
             <button
               type="button"
               disabled={busy}
@@ -2728,8 +2743,8 @@ export function JobsPage({ visible = true }: { visible?: boolean }) {
             </button>
           </div>
           <div className="jobs-help-text">
-            Each budget changes the scheduler setting for its named track. A reported hold stops new starts
-            on that track while running work continues. Retry creates new queued work; it does not cancel older running jobs.
+            Queue budgets are edited in Options → Jobs / Queue. A reported hold stops new starts on that
+            track while running work continues. Retry creates new queued work; it does not cancel older running jobs.
           </div>
           <div className="row" style={{ marginTop: 8 }}>
             <label style={{ display: "flex", alignItems: "center", gap: 8 }}>

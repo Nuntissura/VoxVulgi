@@ -1,18 +1,18 @@
 ---
 file_id: WP-0299-v1
 file_kind: work-packet
-updated_at: 2026-08-09
+updated_at: 2026-08-10
 ---
 
-<topic id="contract" status="backlog" version="v1" wp="WP-0299" updated_at="2026-08-09">
+<topic id="contract" status="active" version="v1" wp="WP-0299" owner="agent-wp0299" updated_at="2026-08-10">
 
 # Work Packet: WP-0299 — Secure downloader runtime and adaptive YouTube protection
 
 ## Metadata
 
 - ID: WP-0299
-- Owner: —
-- Status: BACKLOG
+- Owner: agent-wp0299
+- Status: IN_PROGRESS
 - Created: 2026-08-09
 - Refinement: `WP-0299_SECURE_DOWNLOADER_RUNTIME_AND_ADAPTIVE_YOUTUBE_PROTECTION_v1_REFINEMENT.md`
 - Board: `../TASK_BOARD.md#wp-0299`
@@ -45,10 +45,47 @@ Ship a secure current downloader runtime and an explainable adaptive YouTube con
 
 </topic>
 
-<topic id="status-updates" status="active" version="v1" wp="WP-0299" updated_at="2026-08-09">
+<topic id="status-updates" status="active" version="v1" wp="WP-0299" updated_at="2026-08-13">
 
 # Status updates
 
 - 2026-08-09: Created from direct repo/runtime inspection and current yt-dlp release, security, YouTube pacing, PO-token, and option documentation. No product code or live queue changed.
+- 2026-08-10: Implementation started after WP-0298 boundary work reached remediation. Dependency/runtime, policy persistence, controller, command receipt, and operator-surface work remain proof-gated; no live queue or subscription canary has been authorized.
+- 2026-08-13: Non-owner adversarial review, part 1 (deterministic/code-level gates) — PASS. Reviewer did not author this code. Any prior review verdict is unrecoverable: the session holding it was closed, and no repo artifact recorded it, so this review was re-derived from source. Read-only; no product code changed.
+
+# Review record: non-owner adversarial review, part 1 (2026-08-13)
+
+Scope reviewed: deterministic and code-level acceptance gates only. Runtime, packaged, and app-boundary gates are NOT covered and remain open.
+
+Gates passed, with the evidence used:
+
+- Hard predecessor (dependency/security refresh): PASS, independently verified rather than taken from the manifest. Upstream confirms `2026.07.04` exists and is the patched release for GHSA-6v4j-43gg-vj32 / CVE-2026-55404 (High, CVSS 7.5), superseding the `2026.06.09` fix for GHSA-f7j3-774f-rfhj. Staged payload `tmp_offline_bundle_stage/tools/yt-dlp/yt-dlp.exe` independently hashed: 18226085 bytes, SHA-256 `52FE3C26DCF71FBDC85B528589020BB0B8E383155CFA81B64DD447BBE35E24B8` — exact match to the pin.
+- Runtime pin enforcement: PASS. `jobs.rs::verify_protected_youtube_runtime` re-checks pinned size and SHA-256 at every launch and fails closed ("protected YouTube work is held"). For YouTube targets the PATH and `python -m yt_dlp` fallbacks are disabled, so no unpinned interpreter can serve protected work.
+- Link-output advisory surface kept out of governed builders: PASS. `reject_forbidden_ytdlp_output_flags` is enforced at the single `run_yt_dlp` choke point, before runtime bootstrap and process creation, alongside `--ignore-config`, so untrusted saved presets and retry arguments cannot reintroduce the flags.
+- `limit_rate` versus `throttled_rate` separation: PASS. Distinct fields end to end.
+- Classifier: PASS. All eight contract classes present and distinct.
+- `unknown` never trains pacing: PASS. Enforced in code and asserted in test, including an adversarial case that a generic local rate-limit phrase must not train remote pacing.
+- Corroboration requires distinct targets separated in time: PASS. Enforced in the evidence query.
+- Secrets absent from outcome history: PASS structurally. Schema stores SHA-256 `target_fingerprint` / `auth_fingerprint`, a redacted `error_signature`, and no URL, cookie, or token column, so the class of leak is impossible by shape rather than filtered after the fact.
+- Persistence contract: PASS. All four contract tables plus canary-lease and history-reset, with `runtime_epoch` in every primary key and index, `version` on policy state, and `evidence_ids_json` on transitions.
+- Epoch isolation: PASS, covered by `runtime_epoch_prevents_old_evidence_from_controlling_new_runtime`.
+- Retention and compaction: PASS at unit level, including bounded resumable batches, interrupted-drain recovery, and wall-time budget yield.
+- Baseline immutability under overlay: PASS at unit level.
+
+Findings:
+
+- FINDING-1 (low, open): `tools.rs::invalidate_provider_installed_identity` is the only deletion path for `provider_installed_identity` and is never called, so the `provider_installed_identity_mutation_guard` machinery is unreachable in production and an uninstalled provider leaves its identity row behind. Not reinstall-blocking — both insert paths use `ON CONFLICT(singleton) DO UPDATE` — and not a readiness bypass, because readiness still requires in-process full-byte attestation. Disposition required: wire it into the provider uninstall flow, or remove it. It must not remain as unreachable security-adjacent code.
+- NOT-A-FINDING (recorded so it is not re-raised): `tools.rs::read_provider_node_modules_integrity_receipt` is also uncalled, but that is correct by design. The receipt is documented in-code as an audit artifact and deliberately not an executable trust root; readiness requires a full-byte verification performed by the current process and held in the in-memory attestation map, so an attestation miss fails closed.
+
+Gates still open, all requiring runtime or app-boundary evidence that this review did not produce:
+
+- Packaged offline capability test (network-blocked tool invocation from the packaged payload).
+- Controlled exact-source canary.
+- Restart-safe baseline/overlay separation proven at the app boundary rather than in unit tests.
+- Canary recovery behavior end to end.
+- Settings, Options, and Diagnostics surfaces under headless audit.
+- Governed target build, semantic version increment, changelog entry, and proof `summary.md`.
+
+WP-0299 must not be moved to DONE on the strength of this review. Part 1 clears the code-level and hard-predecessor gates only.
 
 </topic>

@@ -6,11 +6,28 @@ use serde::Serialize;
 use std::collections::BTreeMap;
 use std::io::{BufRead, BufReader, Write};
 use std::path::{Path, PathBuf};
-use std::sync::OnceLock;
+use std::sync::{Arc, OnceLock};
 use std::time::{Duration, Instant};
 
 const STORAGE_SCAN_MAX_ENTRIES_PER_ROOT: usize = 25_000;
 const STORAGE_SCAN_MAX_MILLIS_PER_ROOT: u64 = 1_500;
+
+/// The desktop process owns diagnostics persistence, rotation, incident state and
+/// backpressure. Engine code may emit observations, but must never write those
+/// files independently because concurrent append/manifest writers can corrupt an
+/// incident and defeat queue bounds.
+pub type TraceSink = dyn Fn(&AppPaths, &str, &str, serde_json::Value) + Send + Sync + 'static;
+static TRACE_SINK: OnceLock<Arc<TraceSink>> = OnceLock::new();
+
+pub fn install_trace_sink(sink: Arc<TraceSink>) -> bool {
+    TRACE_SINK.set(sink).is_ok()
+}
+
+pub fn emit_trace_event(paths: &AppPaths, event: &str, level: &str, details: serde_json::Value) {
+    if let Some(sink) = TRACE_SINK.get() {
+        sink(paths, event, level, details);
+    }
+}
 
 #[derive(Debug, Clone, Serialize)]
 pub struct StorageBreakdown {
@@ -706,6 +723,7 @@ fn redact_free_text(value: &str) -> String {
     static UNC_PATH_RE: OnceLock<Regex> = OnceLock::new();
     static UNIX_HOME_PATH_RE: OnceLock<Regex> = OnceLock::new();
     static SENSITIVE_KV_RE: OnceLock<Regex> = OnceLock::new();
+    static AUTHORIZATION_RE: OnceLock<Regex> = OnceLock::new();
     static BEARER_RE: OnceLock<Regex> = OnceLock::new();
 
     let mut out = value.to_string();
@@ -726,6 +744,19 @@ fn redact_free_text(value: &str) -> String {
     let unix_re =
         UNIX_HOME_PATH_RE.get_or_init(|| Regex::new(r#"/(Users|home)/[^\s"']+"#).unwrap());
     out = unix_re.replace_all(&out, "<redacted_path>").to_string();
+
+    // Authorization is a tuple: redacting only the scheme leaves the credential behind, while
+    // redacting only the first whitespace-delimited value leaves `Bearer secret` as `secret`.
+    // Consume the complete recognized scheme + credential before the generic key/value pass.
+    let authorization_re = AUTHORIZATION_RE.get_or_init(|| {
+        Regex::new(
+            r#"(?i)\b(?:proxy-)?authorization\b\s*[:=]\s*(?:bearer|basic)\s+(?:\"[^\"]*\"|'[^']*'|[^\s,;:=]+)"#,
+        )
+        .unwrap()
+    });
+    out = authorization_re
+        .replace_all(&out, "Authorization: <redacted>")
+        .to_string();
 
     let bearer_re = BEARER_RE.get_or_init(|| Regex::new(r"(?i)\bbearer\s+[a-z0-9._-]+").unwrap());
     out = bearer_re.replace_all(&out, "Bearer <redacted>").to_string();
@@ -972,5 +1003,60 @@ INSERT INTO job(
             redacted_log.contains("<redacted>") || redacted_log.contains("<redacted_path>"),
             "redacted log should include redaction markers"
         );
+    }
+
+    #[test]
+    fn free_text_redacts_complete_authorization_scheme_and_credential_tuple() {
+        for (input, secret) in [
+            (
+                "Authorization: Bearer bearer-secret action=read",
+                "bearer-secret",
+            ),
+            (
+                "authorization = Basic basic-secret next=value",
+                "basic-secret",
+            ),
+            ("AUTHORIZATION:   bEaReR   mixed-secret", "mixed-secret"),
+            (
+                "Authorization: Basic \"quoted secret\" action=read",
+                "quoted secret",
+            ),
+        ] {
+            let redacted = redact_free_text(input);
+            assert!(
+                !redacted.contains(secret),
+                "credential leaked for {input}: {redacted}"
+            );
+            assert!(redacted.contains("<redacted>"));
+            assert!(
+                redacted.contains("action=read")
+                    || redacted.contains("next=value")
+                    || input.ends_with("mixed-secret")
+            );
+        }
+    }
+
+    #[test]
+    fn shared_adversarial_redaction_vectors_remove_proxy_and_quoted_header_credentials() {
+        #[derive(serde::Deserialize)]
+        struct Vector {
+            input: String,
+            secrets: Vec<String>,
+            preserve: Vec<String>,
+        }
+        let vectors: Vec<Vector> = serde_json::from_str(include_str!(
+            "../../diagnostics/redaction_adversarial_vectors.json"
+        ))
+        .expect("shared redaction vectors");
+        for vector in vectors {
+            let redacted = redact_free_text(&vector.input);
+            for secret in vector.secrets {
+                assert!(!redacted.to_ascii_lowercase().contains(&secret.to_ascii_lowercase()), "secret leaked: {redacted}");
+            }
+            for context in vector.preserve {
+                assert!(redacted.to_ascii_lowercase().contains(&context.to_ascii_lowercase()), "context lost: {redacted}");
+            }
+            assert!(redacted.contains("<redacted>"));
+        }
     }
 }

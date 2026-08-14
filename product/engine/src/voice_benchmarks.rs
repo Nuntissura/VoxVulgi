@@ -4,7 +4,7 @@ use crate::jobs::{
 use crate::paths::AppPaths;
 use crate::subtitle_tracks;
 use crate::subtitles::SubtitleDocument;
-use crate::Result;
+use crate::{EngineError, Result};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -300,7 +300,7 @@ fn build_candidate_reports(
     doc: &SubtitleDocument,
     track_id: &str,
 ) -> Result<Vec<VoiceBenchmarkCandidate>> {
-    let specs = discover_manifest_candidates(paths, item_dir, track_id)?;
+    let specs = discover_manifest_candidates(paths, item_id, item_dir, track_id)?;
     if specs.is_empty() {
         return Err(crate::EngineError::InstallFailed(
             "no voice benchmark candidates found; render at least one TTS or voice-preserving output first"
@@ -327,6 +327,7 @@ fn build_candidate_reports(
 
 fn discover_manifest_candidates(
     paths: &AppPaths,
+    item_id: &str,
     item_dir: &Path,
     track_id: &str,
 ) -> Result<Vec<ManifestCandidateSpec>> {
@@ -344,7 +345,7 @@ fn discover_manifest_candidates(
         let Some(backend_name) = backend_dir.file_name().and_then(|value| value.to_str()) else {
             continue;
         };
-        if let Some(spec) = load_manifest_candidate(paths, item_dir, track_id, backend_name, None)?
+        if let Some(spec) = load_manifest_candidate(paths, item_id, item_dir, track_id, backend_name, None)?
         {
             out.push(spec);
         }
@@ -364,7 +365,7 @@ fn discover_manifest_candidates(
                 continue;
             };
             if let Some(spec) =
-                load_manifest_candidate(paths, item_dir, track_id, backend_name, Some(label))?
+                load_manifest_candidate(paths, item_id, item_dir, track_id, backend_name, Some(label))?
             {
                 out.push(spec);
             }
@@ -375,8 +376,29 @@ fn discover_manifest_candidates(
     Ok(out)
 }
 
+fn localization_preview_ready_for_benchmark(
+    paths: &AppPaths,
+    item_id: &str,
+    variant_label: Option<&str>,
+    dub_dir: &Path,
+) -> Result<bool> {
+    match jobs::localization_preview_consumer_outcome(paths, item_id, variant_label) {
+        jobs::LocalizationPreviewConsumerOutcome::Active(path) => Ok(path.is_file()),
+        jobs::LocalizationPreviewConsumerOutcome::CanonicalAbsence => Ok(
+            dub_dir.join("mux_dub_preview_v1.mkv").is_file()
+                || dub_dir.join("mux_dub_preview_v1.mp4").is_file(),
+        ),
+        jobs::LocalizationPreviewConsumerOutcome::LineageFailure(error) => Err(
+            EngineError::InstallFailed(format!(
+                "voice benchmark readiness refused localization preview with invalid immutable lineage: {error}"
+            )),
+        ),
+    }
+}
+
 fn load_manifest_candidate(
     paths: &AppPaths,
+    item_id: &str,
     item_dir: &Path,
     track_id: &str,
     backend_dir: &str,
@@ -446,9 +468,13 @@ fn load_manifest_candidate(
     };
     let variant_dir = tts_variant_dir(item_dir, backend_dir, normalized_variant.as_deref());
     let dub_dir = dub_variant_dir(item_dir, normalized_variant.as_deref());
-    let final_mix_ready = dub_dir.join("mix_dub_preview_v1.wav").exists()
-        || dub_dir.join("mux_dub_preview_v1.mp4").exists()
-        || dub_dir.join("mux_dub_preview_v1.mkv").exists();
+    let mux_ready = localization_preview_ready_for_benchmark(
+        paths,
+        item_id,
+        normalized_variant.as_deref(),
+        &dub_dir,
+    )?;
+    let final_mix_ready = dub_dir.join("mix_dub_preview_v1.wav").exists() || mux_ready;
     let export_pack_ready = match normalized_variant.as_deref() {
         Some(label) => item_dir
             .join("exports")
@@ -1480,7 +1506,148 @@ mod tests {
     use crate::db;
     use crate::subtitles::{SubtitleDocument, SubtitleSegment, SUBTITLE_JSON_SCHEMA_VERSION};
     use rusqlite::params;
+    use sha2::{Digest, Sha256};
     use std::time::Duration;
+
+    fn seed_active_preview_lineage(
+        paths: &AppPaths,
+        item_id: &str,
+        hash_source: &[u8],
+        artifact_bytes: Option<&[u8]>,
+        phase: &str,
+    ) -> (PathBuf, PathBuf) {
+        db::ensure_schema(paths).expect("schema");
+        let generation_id = format!("localization-preview-{}", "b".repeat(64));
+        let dub_dir = paths.derived_item_dir(item_id).join("dub_preview");
+        std::fs::create_dir_all(&dub_dir).expect("dub dir");
+        let fixed = dub_dir.join("mux_dub_preview_v1.mkv");
+        std::fs::write(&fixed, b"fixed-fallback-must-not-mask-lineage-failure")
+            .expect("fixed fallback");
+        let artifact = dub_dir.join(format!("mux_dub_preview_v1.gen-{}.mkv", "b".repeat(64)));
+        if let Some(bytes) = artifact_bytes {
+            std::fs::write(&artifact, bytes).expect("immutable artifact fixture");
+        }
+        let expected_sha = format!("{:x}", Sha256::digest(hash_source));
+        let conn = db::open(paths).expect("db");
+        conn.execute(
+            "INSERT INTO library_item(id,created_at_ms,source_type,source_uri,title,media_path) VALUES(?1,1,'local_file','file://source','Source','source.mp4')",
+            [item_id],
+        )
+        .expect("item");
+        let job_id = format!("mux-{item_id}");
+        conn.execute(
+            "INSERT INTO job(id,item_id,type,status,progress,params_json,created_at_ms,logs_path) VALUES(?1,?2,'mux_dub_preview_v1','succeeded',1,'{}',1,'mux.log')",
+            params![job_id, item_id],
+        )
+        .expect("job");
+        conn.execute(
+            "INSERT INTO localization_preview_publication(generation_id,item_id,variant_key,input_fingerprint_sha256,input_fingerprint_json,artifact_path,artifact_bytes,artifact_sha256,staging_path,source_job_id,phase,created_at_ms,updated_at_ms) VALUES(?1,?2,'','fingerprint','{}',?3,?4,?5,?6,?7,?8,1,1)",
+            params![
+                generation_id,
+                item_id,
+                artifact.to_string_lossy(),
+                hash_source.len() as i64,
+                expected_sha,
+                dub_dir.join("missing-staging.mkv").to_string_lossy(),
+                job_id,
+                phase,
+            ],
+        )
+        .expect("publication");
+        if phase != "committed" {
+            conn.execute_batch(
+                "DROP TRIGGER trg_localization_preview_active_committed_insert;
+                 DROP TRIGGER trg_localization_preview_active_committed_update;",
+            )
+            .expect("simulate upgraded pre-v44 active pointer");
+        }
+        conn.execute(
+            "INSERT INTO localization_preview_active(item_id,variant_key,generation_id,source_job_created_at_ms,source_job_id,updated_at_ms) VALUES(?1,'',?2,1,?3,1)",
+            params![item_id, generation_id, job_id],
+        )
+        .expect("active");
+        (dub_dir, fixed)
+    }
+
+    #[test]
+    fn benchmark_readiness_falls_back_only_for_canonical_absence() {
+        let absent_dir = tempfile::tempdir().expect("absent tempdir");
+        let absent_paths = AppPaths::new(absent_dir.path().join("app"));
+        absent_paths.ensure_dirs().expect("absent dirs");
+        db::ensure_schema(&absent_paths).expect("absent schema");
+        let absent_dub = absent_paths
+            .derived_item_dir("absent-item")
+            .join("dub_preview");
+        std::fs::create_dir_all(&absent_dub).expect("absent dub dir");
+        std::fs::write(absent_dub.join("mux_dub_preview_v1.mp4"), b"historical-mp4")
+            .expect("historical fallback");
+        assert!(localization_preview_ready_for_benchmark(
+            &absent_paths,
+            "absent-item",
+            None,
+            &absent_dub,
+        )
+        .expect("canonical absence permits historical compatibility"));
+
+        let missing_dir = tempfile::tempdir().expect("missing tempdir");
+        let missing_paths = AppPaths::new(missing_dir.path().join("app"));
+        missing_paths.ensure_dirs().expect("missing dirs");
+        let (missing_dub, _) =
+            seed_active_preview_lineage(
+                &missing_paths,
+                "missing-item",
+                b"trusted-bytes",
+                None,
+                "committed",
+            );
+        assert!(localization_preview_ready_for_benchmark(
+            &missing_paths,
+            "missing-item",
+            None,
+            &missing_dub,
+        )
+        .is_err());
+
+        let tamper_dir = tempfile::tempdir().expect("tamper tempdir");
+        let tamper_paths = AppPaths::new(tamper_dir.path().join("app"));
+        tamper_paths.ensure_dirs().expect("tamper dirs");
+        let (tamper_dub, _) = seed_active_preview_lineage(
+            &tamper_paths,
+            "tamper-item",
+            b"trusted-bytes",
+            Some(b"tampered-byte"),
+            "committed",
+        );
+        assert_eq!(b"trusted-bytes".len(), b"tampered-byte".len());
+        assert!(localization_preview_ready_for_benchmark(
+            &tamper_paths,
+            "tamper-item",
+            None,
+            &tamper_dub,
+        )
+        .is_err());
+
+        let published_dir = tempfile::tempdir().expect("published tempdir");
+        let published_paths = AppPaths::new(published_dir.path().join("app"));
+        published_paths.ensure_dirs().expect("published dirs");
+        let (published_dub, _) = seed_active_preview_lineage(
+            &published_paths,
+            "published-item",
+            b"trusted-bytes",
+            Some(b"trusted-bytes"),
+            "published",
+        );
+        assert!(
+            localization_preview_ready_for_benchmark(
+                &published_paths,
+                "published-item",
+                None,
+                &published_dub,
+            )
+            .is_err(),
+            "benchmark must not use fixed legacy bytes while active lineage is published"
+        );
+    }
 
     #[test]
     fn discover_manifest_candidates_reads_base_and_variant_manifests() {
@@ -1523,7 +1690,8 @@ mod tests {
         .expect("write variant manifest");
 
         let candidates =
-            discover_manifest_candidates(&paths, &item_dir, "track-1").expect("discover");
+            discover_manifest_candidates(&paths, "item-1", &item_dir, "track-1")
+                .expect("discover");
         assert_eq!(candidates.len(), 2);
         assert_eq!(candidates[0].backend_id, "dub_voice_preserving_v1");
         assert_eq!(candidates[1].variant_label.as_deref(), Some("alt_a"));

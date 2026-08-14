@@ -1,3 +1,5 @@
+import { readLocalStorageBaseline, verifiedLocalStorageSet } from "./persist";
+
 const STORAGE_KEY = "voxvulgi.v1.ui.font_scale_pct";
 const DEFAULT_FONT_SCALE_PCT = 100;
 export const MIN_FONT_SCALE_PCT = 90;
@@ -16,18 +18,20 @@ function safeLocalStorageGet(key: string): string | null {
   }
 }
 
-function safeLocalStorageSet(key: string, value: string) {
-  try {
-    window.localStorage.setItem(key, value);
-  } catch {
-    // Ignore persistence failures; the live CSS variable still applies.
-  }
-}
-
 export function getStoredDesktopFontScalePct() {
   const raw = safeLocalStorageGet(STORAGE_KEY);
   const parsed = raw ? Number(raw) : NaN;
   return clampFontScale(parsed);
+}
+
+export function getDesktopFontScaleBaseline() {
+  const baseline = readLocalStorageBaseline(STORAGE_KEY);
+  const parsed = baseline.value ? Number(baseline.value) : DEFAULT_FONT_SCALE_PCT;
+  return {
+    value: clampFontScale(parsed),
+    available: baseline.available,
+    error: baseline.error,
+  };
 }
 
 export function applyDesktopFontScalePct(fontScalePct: number) {
@@ -45,7 +49,7 @@ export function applyStoredDesktopFontScalePct() {
 
 export function setStoredDesktopFontScalePct(fontScalePct: number) {
   const normalized = applyDesktopFontScalePct(fontScalePct);
-  safeLocalStorageSet(STORAGE_KEY, String(normalized));
+  verifiedLocalStorageSet(STORAGE_KEY, String(normalized));
   return normalized;
 }
 

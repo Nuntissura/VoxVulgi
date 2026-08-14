@@ -264,7 +264,7 @@ Initial language focus: **Korean + Japanese → English**.
   - target speech generation,
   - optional voice-preserving conversion or experimental backend render,
   - background-aware mix,
-  - MP4 mux/export,
+  - MKV mux/export with selected audio and subtitle tracks embedded; historical MP4 previews remain readable but are never produced by new localization runs,
   - explicit review of outputs.
 - The educational-core reusable-voice promise should remain simple even as advanced surfaces grow:
   - capture a reusable voice from the current speaker setup,

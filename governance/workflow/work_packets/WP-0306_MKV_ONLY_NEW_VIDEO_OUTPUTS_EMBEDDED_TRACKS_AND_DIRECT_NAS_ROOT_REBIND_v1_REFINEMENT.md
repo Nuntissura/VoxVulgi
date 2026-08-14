@@ -1,10 +1,10 @@
 ---
 file_id: WP-0306-REFINEMENT-v1
 file_kind: work-packet-refinement
-updated_at: 2026-08-09
+updated_at: 2026-08-10
 ---
 
-<topic id="operator-request-and-verified-state" status="active" version="v1" wp="WP-0306" updated_at="2026-08-09">
+<topic id="operator-request-and-verified-state" status="active" version="v1" wp="WP-0306" updated_at="2026-08-10">
 
 # Operator request
 
@@ -16,7 +16,8 @@ updated_at: 2026-08-09
 
 # Verified current state
 
-- The exact intended `Z:` path was tested read-only on 2026-08-09 and was not visible to this agent session. `Win32_LogicalDisk`, `Get-SmbMapping`, and `net use` exposed no `Z:` volume or SMB mapping. The path is therefore `UNVERIFIED`, and no active storage config or database path has been changed to it.
+- The exact intended `Z:` path was tested read-only on 2026-08-09 and was not visible to that agent session. `Win32_LogicalDisk`, `Get-SmbMapping`, and `net use` exposed no `Z:` volume or SMB mapping. At that observation the path was `UNVERIFIED`, and no active storage config or database path was changed to it.
+- On 2026-08-10, the direct Ethernet link exposed Synology peer `169.254.99.26`; `MIR.local` resolved to that APIPA peer, TCP/445 was reachable, and the existing canonical `\\MIR\home\Video\4K Video\4K Video 21-08-2025` path was readable. Windows `Z:` was mapped to that verified `\\MIR\home` share with `persistent:yes`, after which the exact intended `Z:\Video\4K Video\4K Video 21-08-2025` target passed a fresh read-only container check and `net use` reported that new connections will be remembered. Read-only `fsutil file queryfileid` returned the same directory identity `0x000000000000026a` for the UNC source and `Z:` target, proving this is an intentional logical-root migration over the same media tree rather than a byte move. Current target reachability over the direct link is proven; restoration after a real sign-out/reboot remains unverified, and the guarded root-rebind mutation has not run.
 - Machine-local `feature_storage_roots.json` and the active `video_library` row still reference the former `\\?\UNC\MIR\home\Video\4K Video\4K Video 21-08-2025` root.
 - Inspection found 250 of 262 YouTube subscription output overrides on the former root, 11 empty overrides, one non-device-prefix UNC variant, and approximately 140,791 library paths under the former root. These are canonical metadata/path populations, not permission for a blind text rewrite.
 - The current saved default archive preset constrains formats to MP4/M4A. Engine code also unconditionally appends `--merge-output-format mp4` and `--remux-video mp4`; direct-HTTP video stages use `download.mp4`; current subtitle handling writes/converts sidecars without `--embed-subs`.
@@ -82,7 +83,7 @@ updated_at: 2026-08-09
 
 </topic>
 
-<topic id="roi-red-team-microtasks-and-proof" status="active" version="v1" wp="WP-0306" updated_at="2026-08-09">
+<topic id="roi-red-team-microtasks-and-proof" status="active" version="v1" wp="WP-0306" updated_at="2026-08-10">
 
 # High-ROI additions
 
@@ -146,7 +147,7 @@ updated_at: 2026-08-09
 - Command-capture tests prove every new managed video path finalizes as `.mkv` and no engine/UI/default/custom/queued/provider/direct-HTTP path can finalize a new `.mp4`.
 - Probed representative outputs are Matroska with expected video/audio and selected/available embedded subtitle streams; successful routine video jobs leave no user-facing SRT/VTT sidecar.
 - Existing MP4 files remain recognized and usable across the complete compatibility matrix and are not converted, moved, deleted, or redownloaded by this packet.
-- The `Z:` rebind remains blocked until a fresh canonical target read proves the exact path and target identity. If proof remains false, MKV implementation may complete but the root-rebind acceptance surface remains not passed.
+- The exact `Z:` path passed a fresh read-only reachability check on 2026-08-10. The rebind remains blocked until the remediated guarded workflow independently proves bounded target identity, exact dry-run scope, verified backups, and a fresh adversarial PASS. If any remaining proof stays false, MKV implementation may complete but the root-rebind acceptance surface remains not passed.
 - A successful rebind includes independently verified backup, exact dry-run counts, atomic config/canonical-root/override change, alias receipt, execution-boundary mapping, and before/after access proof. Historical path rows remain preserved.
 - No repository product/authority file hardcodes the operator's drive letter as a runtime default.
 - Relevant automated tests, app-boundary command/output proof, headless UI audit/snapshots, governed build/version/changelog, adversarial review receipt, and `summary.md` satisfy PROOF_STANDARD.

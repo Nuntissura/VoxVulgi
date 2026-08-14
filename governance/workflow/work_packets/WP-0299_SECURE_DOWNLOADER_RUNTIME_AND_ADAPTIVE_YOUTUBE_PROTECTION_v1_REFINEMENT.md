@@ -1,10 +1,10 @@
 ---
 file_id: WP-0299-REFINEMENT-v1
 file_kind: work-packet-refinement
-updated_at: 2026-08-09
+updated_at: 2026-08-10
 ---
 
-<topic id="operator-request-and-verified-state" status="active" version="v1" wp="WP-0299" updated_at="2026-08-09">
+<topic id="operator-request-and-verified-state" status="active" version="v1" wp="WP-0299" updated_at="2026-08-10">
 
 # Operator request
 
@@ -13,8 +13,9 @@ updated_at: 2026-08-09
 
 # Verified current state
 
-- The bundled manifest pins yt-dlp `2026.03.17`; upstream `2026.07.04` is current at investigation time.
+- The bundled manifest pins yt-dlp `2026.03.17`; upstream `2026.07.04` remains the latest stable release on 2026-08-10.
 - yt-dlp versions before `2026.06.09` are affected by GHSA-f7j3-774f-rfhj when curl is used with cookies across redirects/fragment hosts. Dependency refresh is a hard predecessor to expanded authenticated automation.
+- yt-dlp versions before `2026.07.04` are affected by high-severity GHSA-6v4j-43gg-vj32, in which malicious metadata written through the link-output options can become downstream command execution when the generated shortcut is opened. The selected `2026.07.04` pin is the first patched stable release; VoxVulgi must also keep those link-output options out of governed command builders.
 - Existing WP-0257 implements corroboration, TTL/backoff, recurring cooldown, and request pacing; WP-0269 implements shared YouTube start gating and conservative recurring behavior. These must be extended, not replaced by a parallel gate.
 - Current yt-dlp guidance recommends roughly 5-10 seconds between YouTube downloads after request-rate-limit errors and documents materially different guest/account request limits.
 - Current yt-dlp guidance states PO-token enforcement is rolling out and recommends an automatic PO-token provider for `mweb`; manually captured tokens are video-bound/short-lived and are not an operationally stable app workflow.
@@ -33,12 +34,13 @@ updated_at: 2026-08-09
 
 </topic>
 
-<topic id="research-basis-and-selected-design" status="active" version="v1" wp="WP-0299" updated_at="2026-08-09">
+<topic id="research-basis-and-selected-design" status="active" version="v1" wp="WP-0299" updated_at="2026-08-10">
 
 # Sources checked
 
 - yt-dlp `2026.07.04` release: `https://github.com/yt-dlp/yt-dlp/releases/tag/2026.07.04`.
 - yt-dlp GHSA-f7j3-774f-rfhj: `https://github.com/yt-dlp/yt-dlp/security/advisories/GHSA-f7j3-774f-rfhj`.
+- yt-dlp GHSA-6v4j-43gg-vj32: `https://github.com/yt-dlp/yt-dlp/security/advisories/GHSA-6v4j-43gg-vj32`.
 - yt-dlp YouTube extractor/rate guidance: `https://github.com/yt-dlp/yt-dlp/wiki/Extractors`.
 - yt-dlp PO Token Guide: `https://github.com/yt-dlp/yt-dlp/wiki/Po-Token-Guide`.
 - yt-dlp option contract: `https://github.com/yt-dlp/yt-dlp/blob/master/README.md`.

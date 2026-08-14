@@ -132,7 +132,12 @@ test("Localization home does not mark source-audio fallback dub mixes as ready",
   );
   assert.match(
     appSource,
-    /outputs\.deliverable_exists && outputs\.mux_dub_preview_v1_mp4_exists/,
-    "Localization home must only expose preview MP4 actions when the backend says the deliverable is valid.",
+    /outputs\.deliverable_exists/,
+    "Localization home must only expose preview actions when the backend says the deliverable is valid.",
+  );
+  assert.match(
+    appSource,
+    /outputs\.mux_dub_preview_v1_mkv_exists/,
+    "Localization home must prefer the managed MKV deliverable while legacy MP4 remains readable.",
   );
 });
