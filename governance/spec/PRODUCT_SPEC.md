@@ -287,7 +287,7 @@ Initial language focus: **Korean + Japanese → English**.
   - Ctrl+1 through Ctrl+5 — jump to Track, Voice Basics, Run, Outputs, Artifacts,
   - visible shortcut reference in the Workflow Map card; disabled when typing in form fields.
 - Sticky quick-actions bar: persistent bottom bar visible when an item is open, showing item title, run status (idle/running), and Run/Export/Open Outputs buttons at all scroll positions.
-- Batch-on-import auto-processing surface: collapsible section in Localization Studio home Import card with checkboxes for Speech recognition, Translate to English, Separate audio stems, Label speakers, Dub preview; changes save immediately.
+- Batch-on-import defaults remain configurable through Options/Diagnostics and compatible import flows. Localization-owned intake does not apply them implicitly: import remains idle until the operator reviews source language and run settings, then presses the explicit start action (WP-0199 supersedes WP-0174 on this surface).
 - Provide mix controls:
   - ducking, loudness normalization, fade, noise reduction (optional).
 - Current dubbing-quality controls:

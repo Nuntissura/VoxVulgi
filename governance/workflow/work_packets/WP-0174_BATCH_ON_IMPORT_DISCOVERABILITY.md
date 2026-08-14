@@ -3,7 +3,8 @@
 ## Metadata
 - ID: WP-0174
 - Owner: Codex
-- Status: REVIEW
+- Status: SUPERSEDED
+- Superseded by: WP-0199
 - Created: 2026-04-08
 - Target milestone: UX Polish
 
@@ -29,3 +30,7 @@ Out of scope:
 - Batch-on-import toggles visible on Localization Studio home.
 - Toggling a checkbox persists immediately via the existing config command.
 - `npm run build` passes.
+
+## Status updates
+
+- 2026-08-14: Superseded by WP-0199's later explicit-start contract. Localization-owned intake now passes `applyBatchOnImport: false`, remains idle after import, and requires the operator to review settings before starting a run. Batch-on-import defaults remain available outside that intake path through Options/Diagnostics and compatible import flows.
