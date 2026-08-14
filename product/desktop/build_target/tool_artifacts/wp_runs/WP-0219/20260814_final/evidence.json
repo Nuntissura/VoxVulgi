@@ -1,0 +1,23 @@
+{
+  "wp": "WP-0219",
+  "status": "DONE",
+  "verified_at": "2026-08-14T14:06:00Z",
+  "offline_bundle_id": "offline_full_win64_20260814_082842",
+  "payload_bytes": 6161329153,
+  "pinned_dependency_manifest_sha256": "5286FA2FF9D94570A9E4E000FF7D2C28B8220DC99CF410FFCBE983684310773A",
+  "build": {
+    "version": "0.1.138",
+    "log": "product/desktop/build_target/logs/build_desktop_target_20260814-143555_0_1_138.log",
+    "log_sha256": "B881C54FA6193CBBC79630955A179D99EB607F4AFA7B3CF81757E1E6A91ED39C",
+    "fingerprint_matched": true,
+    "payload_reused": true,
+    "completed": true
+  },
+  "paths_verified": {
+    "validation_only": true,
+    "refresh": true,
+    "force_refresh": true,
+    "stale_skip_rejection": true,
+    "npm_aliases": true
+  }
+}

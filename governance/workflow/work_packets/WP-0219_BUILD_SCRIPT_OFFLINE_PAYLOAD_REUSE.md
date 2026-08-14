@@ -2,7 +2,7 @@
 
 ## Status
 
-REVIEW
+DONE
 
 ## Base Scope
 
@@ -45,3 +45,4 @@ REVIEW
 - 2026-05-14: `powershell -ExecutionPolicy Bypass -File governance/scripts/build_desktop_target.ps1 -ValidateOfflinePayloadOnly` passed and adopted the current local payload fingerprint.
 - 2026-05-14: `npm run build:desktop:payload:validate` passed from `product/desktop`.
 - 2026-05-14: `git diff --check` passed.
+- 2026-08-14: DONE. The current fingerprint and all control paths were re-inspected, and governed v0.1.138 exercised successful reuse of the verified 6,161,329,153-byte payload. Proof: `product/desktop/build_target/tool_artifacts/wp_runs/WP-0219/20260814_final/`.
