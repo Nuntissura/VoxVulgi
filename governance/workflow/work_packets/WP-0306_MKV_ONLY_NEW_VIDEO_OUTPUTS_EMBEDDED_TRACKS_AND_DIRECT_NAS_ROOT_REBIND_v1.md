@@ -1,10 +1,10 @@
 ---
 file_id: WP-0306-v1
 file_kind: work-packet
-updated_at: 2026-08-09
+updated_at: 2026-08-14
 ---
 
-<topic id="contract" status="in-progress" version="v1" wp="WP-0306" updated_at="2026-08-09">
+<topic id="contract" status="done" version="v1" wp="WP-0306" updated_at="2026-08-14">
 
 # Work Packet: WP-0306 — MKV-only new video outputs, embedded tracks, and direct-NAS root rebind
 
@@ -12,7 +12,7 @@ updated_at: 2026-08-09
 
 - ID: WP-0306
 - Owner: agent-wp0306
-- Status: IN_PROGRESS
+- Status: DONE
 - Created: 2026-08-09
 - Refinement: `WP-0306_MKV_ONLY_NEW_VIDEO_OUTPUTS_EMBEDDED_TRACKS_AND_DIRECT_NAS_ROOT_REBIND_v1_REFINEMENT.md`
 - Board: `../TASK_BOARD.md#wp-0306`
@@ -53,5 +53,6 @@ Make MKV with embedded selected tracks the non-bypassable final container for ev
 
 - 2026-08-09: Created after source/spec/config/SQLite inspection plus current official yt-dlp and FFmpeg documentation review. The exact intended `Z:` target was not visible, so no machine-local root or database state was changed. No historical media was modified.
 - 2026-08-09: Implementable MKV/legacy-MP4 scope started in the first dependency-safe parallel wave. Direct-NAS mutation remains proof-gated because the exact `Z:` target is not visible; independent adversarial review is required.
+- 2026-08-14: DONE. Engine-forced MKV/embedded-track and historical-MP4 compatibility gates passed; the exact `Z:` target and prior UNC root freshly proved the same file ID; guarded receipt `root-rebind-163d2da1-968d-47e3-a695-baa42fd94240` applied 7,840 exact mutations with verified backups while preserving 143,756 historical paths; packaged v0.1.137 Diagnostics/Media Library and status-command proof passed; independent adversarial review passed. Proof: `product/desktop/build_target/tool_artifacts/wp_runs/WP-0306/20260814_final/summary.md`.
 
 </topic>

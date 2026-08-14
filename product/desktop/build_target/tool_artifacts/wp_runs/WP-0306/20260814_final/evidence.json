@@ -1,0 +1,123 @@
+{
+  "schema_version": 1,
+  "wp": "WP-0306",
+  "status": "DONE",
+  "verified_at": "2026-08-14",
+  "app": {
+    "version": "0.1.137",
+    "artifact": "product/desktop/build_target/Current/release/desktop.exe",
+    "build_commit": "9d4c9b9",
+    "build_log": "product/desktop/build_target/logs/build_desktop_target_20260814-121923_0_1_137.log",
+    "agent_headless": true
+  },
+  "automated_checks": {
+    "frontend_contracts": { "passed": 187, "failed": 0 },
+    "focused_engine": {
+      "passed": 45,
+      "failed": 0,
+      "filters": [
+        "root_rebind",
+        "managed_video",
+        "embedded_sidecar_cleanup",
+        "direct_http_remux",
+        "yt_dlp_track_receipt",
+        "yt_dlp_multi_audio",
+        "yt_dlp_real_shape",
+        "yt_dlp_current_null_selection",
+        "yt_dlp_explicit_video_only",
+        "yt_dlp_audio_bearing",
+        "subtitle_language_equivalence",
+        "historical_mp4"
+      ]
+    },
+    "tauri_cargo_check": "PASS"
+  },
+  "root_identity": {
+    "mapping_status": "OK",
+    "mapping_remote_path": "\\\\MIR\\home",
+    "old_root": "\\\\?\\UNC\\MIR\\home\\Video\\4K Video\\4K Video 21-08-2025",
+    "new_root": "Z:\\Video\\4K Video\\4K Video 21-08-2025",
+    "old_exists": true,
+    "new_exists": true,
+    "old_file_id": "0x000000000000026a",
+    "new_file_id": "0x000000000000026a",
+    "identity_equal": true
+  },
+  "receipt": {
+    "schema_version": 4,
+    "id": "root-rebind-163d2da1-968d-47e3-a695-baa42fd94240",
+    "status": "applied",
+    "phase": "alias_activated",
+    "identity_evidence_count": 3,
+    "affected_rows_total": 7840,
+    "affected_by_surface": {
+      "feature_storage_roots": 1,
+      "job": 7587,
+      "video_library": 1,
+      "youtube_subscription": 251
+    }
+  },
+  "backup": {
+    "sqlite_bytes": 1060265984,
+    "sqlite_integrity": "ok",
+    "sqlite_sha256": "23d0ad9602c6eccb14929eb7344b9dede860726a2eec89f8d536d8a673864938",
+    "feature_config_bytes": 190,
+    "feature_config_verified": true,
+    "feature_config_sha256": "d80d19fafac9aa3b4039f7d69c8b88c316b1235f4e51a4cb73d19ec2894564cb",
+    "aliases_config_bytes": 43,
+    "aliases_config_verified": true,
+    "aliases_config_sha256": "0496530c723ceb96af57e924b4cb9c72872a6a10b26323761ad4078546fd755e"
+  },
+  "post_apply_database": {
+    "video_library_new": 1,
+    "video_library_old": 0,
+    "youtube_new": 251,
+    "youtube_old": 0,
+    "queued_new": 7587,
+    "queued_old": 0,
+    "running_total": 0,
+    "historical_old": 143756,
+    "historical_new": 0,
+    "jobs_queue_paused": false
+  },
+  "ui": {
+    "media_library": {
+      "returned_elements": 625,
+      "missing_accessible_names": 0,
+      "truncated": false,
+      "snapshot": "governance/snapshots/WP-0306_build_0_1_137/media_library_after_rebind_1786703498770.png",
+      "dump": "governance/snapshots/WP-0306_build_0_1_137/media_library_after_rebind_1786703498787.dump.json"
+    },
+    "diagnostics_root_rebind": {
+      "viewport": [800, 600],
+      "returned_elements": 124,
+      "missing_accessible_names": 0,
+      "truncated": false,
+      "snapshot": "governance/snapshots/WP-0306_build_0_1_137/diagnostics_root_rebind_scrolled_1786708942358.png",
+      "dump": "governance/snapshots/WP-0306_build_0_1_137/diagnostics_root_rebind_scrolled_1786708942367.dump.json"
+    },
+    "packaged_status_command": {
+      "receipt_count": 1,
+      "status": "applied",
+      "phase": "alias_activated",
+      "affected_rows": 7840,
+      "identity_evidence": 3,
+      "backup_integrity": "ok"
+    }
+  },
+  "data_safety": {
+    "historical_media_paths_preserved": true,
+    "historical_media_bytes_moved": false,
+    "historical_mp4_auto_converted": false,
+    "historical_mp4_auto_deleted": false
+  },
+  "adversarial_review": {
+    "status": "PASS",
+    "runtime_drive_default_found": false,
+    "active_mp4_finalizer_found": false,
+    "unresolved_findings": []
+  },
+  "non_blocking_caveats": [
+    "Persistent mapping is configured and current identity is proven, but a real Windows sign-out/reboot restoration was not exercised in this proof run."
+  ]
+}
