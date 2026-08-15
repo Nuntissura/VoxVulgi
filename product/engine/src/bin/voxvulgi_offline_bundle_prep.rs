@@ -1,3 +1,6 @@
+use sha2::{Digest, Sha256};
+use std::fs::File;
+use std::io::{BufReader, Read};
 use std::path::{Path, PathBuf};
 
 use voxvulgi_engine::models::ModelStore;
@@ -362,21 +365,24 @@ fn export_offline_payload(paths: &AppPaths, out_dir: &Path) -> Result<()> {
         let _ = std::fs::remove_file(out_dir.join("manifest.json"));
     }
 
-    // Best-effort cleanup from the previous directory-based export format.
-    for legacy in ["tools", "models", "cache"] {
-        let path = out_dir.join(legacy);
-        if path.exists() {
-            let _ = std::fs::remove_dir_all(&path);
-        }
-    }
-
     let tools_src = paths.tools_dir();
     let models_src = paths.models_dir();
     let hf_cache_src = paths.cache_dir().join("huggingface");
 
-    copy_tree(&tools_src, &out_dir.join("tools"))?;
-    copy_tree(&models_src, &out_dir.join("models"))?;
-    copy_tree(&hf_cache_src, &out_dir.join("cache").join("huggingface"))?;
+    // WP-0129 remediation: keep completed files across an interrupted refresh. The payload is
+    // large enough that deleting it before every attempt turns any crash or forced shutdown into
+    // another multi-hour full copy. copy_tree only reuses byte-identical files and promotes each
+    // replacement after std::fs::copy has returned successfully; stale entries are reconciled
+    // afterwards so the exported tree still exactly follows the prepared source.
+    let tools_dst = out_dir.join("tools");
+    let models_dst = out_dir.join("models");
+    let hf_cache_dst = out_dir.join("cache").join("huggingface");
+    copy_tree(&tools_src, &tools_dst)?;
+    remove_stale_payload_entries(&tools_src, &tools_dst)?;
+    copy_tree(&models_src, &models_dst)?;
+    remove_stale_payload_entries(&models_src, &models_dst)?;
+    copy_tree(&hf_cache_src, &hf_cache_dst)?;
+    remove_stale_payload_entries(&hf_cache_src, &hf_cache_dst)?;
 
     let payload_bytes = dir_size(&out_dir.join("tools"))?
         + dir_size(&out_dir.join("models"))?
@@ -408,6 +414,9 @@ fn copy_tree(src_root: &Path, dst_root: &Path) -> Result<()> {
     std::fs::create_dir_all(dst_root)?;
 
     let mut stack: Vec<PathBuf> = vec![src_root.to_path_buf()];
+    let mut files_seen = 0_u64;
+    let mut files_copied = 0_u64;
+    let mut files_reused = 0_u64;
     while let Some(dir) = stack.pop() {
         for entry in std::fs::read_dir(&dir)? {
             let entry = match entry {
@@ -433,14 +442,32 @@ fn copy_tree(src_root: &Path, dst_root: &Path) -> Result<()> {
                 std::fs::create_dir_all(&dst)?;
                 stack.push(path);
             } else if file_type.is_file() || file_type.is_symlink() {
-                copy_payload_file(&path, &dst, file_type.is_symlink())?;
+                files_seen = files_seen.saturating_add(1);
+                match copy_payload_file(&path, &dst, file_type.is_symlink())? {
+                    CopyDisposition::Copied => files_copied = files_copied.saturating_add(1),
+                    CopyDisposition::Reused => files_reused = files_reused.saturating_add(1),
+                }
+                if files_seen % 5_000 == 0 {
+                    println!(
+                        "offline payload progress: {files_seen} files checked ({files_copied} copied, {files_reused} reused)"
+                    );
+                }
             }
         }
     }
+    println!(
+        "offline payload tree complete: {files_seen} files checked ({files_copied} copied, {files_reused} reused)"
+    );
     Ok(())
 }
 
-fn copy_payload_file(src: &Path, dst: &Path, is_symlink: bool) -> Result<()> {
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum CopyDisposition {
+    Copied,
+    Reused,
+}
+
+fn copy_payload_file(src: &Path, dst: &Path, is_symlink: bool) -> Result<CopyDisposition> {
     if is_symlink {
         let target_metadata = std::fs::metadata(src).map_err(|error| {
             EngineError::InstallFailed(format!(
@@ -458,10 +485,134 @@ fn copy_payload_file(src: &Path, dst: &Path, is_symlink: bool) -> Result<()> {
     if let Some(parent) = dst.parent() {
         std::fs::create_dir_all(parent)?;
     }
+    let source_len = std::fs::metadata(src)?.len();
+    if let Ok(destination_metadata) = std::fs::metadata(dst) {
+        if destination_metadata.is_file()
+            && destination_metadata.len() == source_len
+            && sha256_file(src)? == sha256_file(dst)?
+        {
+            return Ok(CopyDisposition::Reused);
+        }
+    }
+
     // std::fs::copy follows a file symlink and materializes the target bytes at the
     // destination. Hugging Face snapshots rely on these links; copying only
     // DirEntry::file_type().is_file() silently produced incomplete installers.
-    std::fs::copy(src, dst)?;
+    // Copy to a sibling first so an interrupted CopyFileEx call never leaves a partial
+    // destination that a later refresh could mistake for complete.
+    let partial = payload_partial_path(dst);
+    remove_payload_file_if_present(&partial)?;
+    let copied = std::fs::copy(src, &partial)?;
+    let partial_len = std::fs::metadata(&partial)?.len();
+    if copied != source_len || partial_len != source_len {
+        remove_payload_file_if_present(&partial)?;
+        return Err(EngineError::InstallFailed(format!(
+            "offline payload copy length mismatch for {}: source={source_len} copied={copied} destination={partial_len}",
+            src.display()
+        )));
+    }
+    #[cfg(windows)]
+    make_payload_file_writable_if_present(dst)?;
+    std::fs::rename(&partial, dst).map_err(|error| {
+        EngineError::InstallFailed(format!(
+            "failed to promote completed offline payload file {} -> {}: {error}",
+            partial.display(),
+            dst.display()
+        ))
+    })?;
+    Ok(CopyDisposition::Copied)
+}
+
+#[cfg(windows)]
+fn make_payload_file_writable_if_present(path: &Path) -> Result<()> {
+    let metadata = match std::fs::symlink_metadata(path) {
+        Ok(metadata) => metadata,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(error) => return Err(error.into()),
+    };
+    if metadata.permissions().readonly() {
+        let mut permissions = metadata.permissions();
+        permissions.set_readonly(false);
+        std::fs::set_permissions(path, permissions)?;
+    }
+    Ok(())
+}
+
+fn sha256_file(path: &Path) -> Result<[u8; 32]> {
+    let file = File::open(path)?;
+    let mut reader = BufReader::with_capacity(1024 * 1024, file);
+    let mut hasher = Sha256::new();
+    let mut buffer = vec![0_u8; 1024 * 1024];
+    loop {
+        let read = reader.read(&mut buffer)?;
+        if read == 0 {
+            break;
+        }
+        hasher.update(&buffer[..read]);
+    }
+    Ok(hasher.finalize().into())
+}
+
+fn payload_partial_path(dst: &Path) -> PathBuf {
+    let digest = Sha256::digest(dst.to_string_lossy().as_bytes());
+    let suffix = digest[..12]
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect::<String>();
+    dst.parent()
+        .unwrap_or_else(|| Path::new("."))
+        .join(format!(".voxvulgi-part-{suffix}"))
+}
+
+fn remove_payload_file_if_present(path: &Path) -> Result<()> {
+    let metadata = match std::fs::symlink_metadata(path) {
+        Ok(metadata) => metadata,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(error) => return Err(error.into()),
+    };
+    if metadata.is_dir() {
+        std::fs::remove_dir_all(path)?;
+        return Ok(());
+    }
+    #[cfg(windows)]
+    if metadata.permissions().readonly() {
+        let mut permissions = metadata.permissions();
+        permissions.set_readonly(false);
+        std::fs::set_permissions(path, permissions)?;
+    }
+    std::fs::remove_file(path)?;
+    Ok(())
+}
+
+fn remove_stale_payload_entries(src_root: &Path, dst_root: &Path) -> Result<()> {
+    if !dst_root.exists() {
+        return Ok(());
+    }
+    let mut stack = vec![dst_root.to_path_buf()];
+    while let Some(dir) = stack.pop() {
+        for entry in std::fs::read_dir(&dir)? {
+            let entry = match entry {
+                Ok(entry) => entry,
+                Err(_) => continue,
+            };
+            let path = entry.path();
+            let relative = match path.strip_prefix(dst_root) {
+                Ok(relative) => relative,
+                Err(_) => continue,
+            };
+            let source = src_root.join(relative);
+            let file_type = entry.file_type()?;
+            if file_type.is_dir() {
+                if should_skip_payload_entry(relative) || !source.is_dir() {
+                    std::fs::remove_dir_all(&path)?;
+                } else {
+                    stack.push(path);
+                }
+            } else if should_skip_payload_entry(relative) || !source.is_file() {
+                remove_payload_file_if_present(&path)?;
+            }
+        }
+    }
     Ok(())
 }
 
@@ -640,6 +791,68 @@ mod tests {
             std::fs::read(destination.join("nested").join("weights.bin")).unwrap(),
             b"weights"
         );
+    }
+
+    #[test]
+    fn payload_copy_reuses_only_identical_files() {
+        let temp = tempfile::tempdir().unwrap();
+        let source = temp.path().join("source.bin");
+        let destination = temp.path().join("destination.bin");
+        std::fs::write(&source, b"model-bytes").unwrap();
+        std::fs::write(&destination, b"model-bytes").unwrap();
+
+        assert_eq!(
+            copy_payload_file(&source, &destination, false).unwrap(),
+            CopyDisposition::Reused
+        );
+
+        std::fs::write(&destination, b"broken-data").unwrap();
+        assert_eq!(
+            copy_payload_file(&source, &destination, false).unwrap(),
+            CopyDisposition::Copied
+        );
+        assert_eq!(std::fs::read(&destination).unwrap(), b"model-bytes");
+        assert!(!payload_partial_path(&destination).exists());
+    }
+
+    #[test]
+    fn payload_copy_replaces_an_interrupted_partial_file() {
+        let temp = tempfile::tempdir().unwrap();
+        let source = temp.path().join("source.bin");
+        let destination = temp.path().join("destination.bin");
+        let partial = payload_partial_path(&destination);
+        std::fs::write(&source, b"complete-model-bytes").unwrap();
+        std::fs::write(&partial, b"partial").unwrap();
+
+        assert_eq!(
+            copy_payload_file(&source, &destination, false).unwrap(),
+            CopyDisposition::Copied
+        );
+        assert_eq!(
+            std::fs::read(&destination).unwrap(),
+            b"complete-model-bytes"
+        );
+        assert!(!partial.exists());
+    }
+
+    #[test]
+    fn stale_payload_reconciliation_preserves_source_and_removes_orphans() {
+        let temp = tempfile::tempdir().unwrap();
+        let source = temp.path().join("source");
+        let destination = temp.path().join("destination");
+        std::fs::create_dir_all(source.join("nested")).unwrap();
+        std::fs::create_dir_all(destination.join("nested")).unwrap();
+        std::fs::create_dir_all(destination.join("orphan_dir")).unwrap();
+        std::fs::write(source.join("nested").join("keep.bin"), b"keep").unwrap();
+        std::fs::write(destination.join("nested").join("keep.bin"), b"keep").unwrap();
+        std::fs::write(destination.join("orphan.bin"), b"remove").unwrap();
+        std::fs::write(destination.join("orphan_dir").join("stale.bin"), b"remove").unwrap();
+
+        remove_stale_payload_entries(&source, &destination).unwrap();
+
+        assert!(destination.join("nested").join("keep.bin").is_file());
+        assert!(!destination.join("orphan.bin").exists());
+        assert!(!destination.join("orphan_dir").exists());
     }
 
     #[cfg(windows)]
