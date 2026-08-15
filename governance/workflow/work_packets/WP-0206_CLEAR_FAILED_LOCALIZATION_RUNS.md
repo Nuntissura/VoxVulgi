@@ -3,7 +3,7 @@
 ## Metadata
 - ID: WP-0206
 - Owner: Codex
-- Status: IN_PROGRESS
+- Status: DONE
 - Created: 2026-04-25
 - Target milestone: Localization operator usability
 
@@ -48,3 +48,5 @@ Out of scope:
 ## Status updates
 
 - 2026-04-25: Created. Implementation pass started in parallel with WP-0205.
+- 2026-08-15: Restored the failed-run count and per-item clear action to the default setup-first Localization home, including the recent-workbench drawer and successful-output rows. Focused engine fixtures passed for item-scoped deletion and opt-in orphan-artifact cleanup; frontend contracts and TypeScript passed; governed desktop build v0.1.166 completed with the verified offline payload reused.
+- 2026-08-15: Packaged headless proof used an isolated app-data database only. The v0.1.166 UI showed `Clear failed runs (1)` for the fixture, the app-boundary command removed exactly one failed job with `purge_orphan_artifacts=false`, a canonical SQLite reread found no remaining fixture jobs, and the refreshed UI showed the action disabled at zero. Operator library data and the Queen sample were not touched.

@@ -2565,6 +2565,19 @@ function LocalizationStudioHome({
                         <button type="button" disabled={uiBusy || !status?.working_dir} onClick={() => void openLocalizationPath("Job folder", status?.working_dir, "reveal")}>
                           Open job
                         </button>
+                        <button
+                          type="button"
+                          disabled={uiBusy || !status || status.failed_jobs_count <= 0}
+                          title={
+                            status && status.failed_jobs_count > 0
+                              ? `Clear ${status.failed_jobs_count} failed run(s) for this item`
+                              : "No failed runs to clear"
+                          }
+                          onClick={() => void clearFailedRunsForItem(item.id, item.title || "Untitled media")}
+                        >
+                          Clear failed runs
+                          {status && status.failed_jobs_count > 0 ? ` (${status.failed_jobs_count})` : ""}
+                        </button>
                       </div>
                     </div>
                   );
@@ -2582,20 +2595,37 @@ function LocalizationStudioHome({
               <details className="loc-setup-recent-drawer">
                 <summary>Load another recent workbench item</summary>
                 <div className="loc-setup-recent-list">
-                  {recentHomeItems.map((item) => (
-                    <button
-                      type="button"
-                      key={item.id}
-                      onClick={() => {
-                        setSelectedWorkbenchItemId(item.id);
-                        setWorkbenchCleared(false);
-                        setNotice(null);
-                        setError(null);
-                      }}
-                    >
-                      {item.title || fileNameFromPath(item.media_path) || "Untitled media"}
-                    </button>
-                  ))}
+                  {recentHomeItems.map((item) => {
+                    const status = recentItemStatuses[item.id];
+                    return (
+                      <div className="loc-setup-recent-row" key={item.id}>
+                        <button
+                          type="button"
+                          onClick={() => {
+                            setSelectedWorkbenchItemId(item.id);
+                            setWorkbenchCleared(false);
+                            setNotice(null);
+                            setError(null);
+                          }}
+                        >
+                          {item.title || fileNameFromPath(item.media_path) || "Untitled media"}
+                        </button>
+                        <button
+                          type="button"
+                          disabled={uiBusy || !status || status.failed_jobs_count <= 0}
+                          title={
+                            status && status.failed_jobs_count > 0
+                              ? `Clear ${status.failed_jobs_count} failed run(s) for this item`
+                              : "No failed runs to clear"
+                          }
+                          onClick={() => void clearFailedRunsForItem(item.id, item.title || "Untitled media")}
+                        >
+                          Clear failed runs
+                          {status && status.failed_jobs_count > 0 ? ` (${status.failed_jobs_count})` : ""}
+                        </button>
+                      </div>
+                    );
+                  })}
                 </div>
               </details>
             ) : null}

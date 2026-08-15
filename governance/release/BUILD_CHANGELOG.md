@@ -1346,3 +1346,11 @@ This changelog tracks desktop installer builds produced by `governance/scripts/b
 - Artifacts:
   - `product/desktop/build_target/Current/release/bundle/nsis/VoxVulgi_0.1.165_x64-setup.exe`
 - Notes: WP-0212 completes hidden Safe Mode proof support by auditing app chrome and allowlisting only the session-local exit-notice dismiss control.
+
+## 0.1.166 - 2026-08-15T07:18:22Z
+- Work Packets: `WP-0206`
+- Commit: `4f3e7e6`
+- Offline Bundle ID: `offline_full_win64_20260814_082842`
+- Artifacts:
+  - `product/desktop/build_target/Current/release/bundle/nsis/VoxVulgi_0.1.166_x64-setup.exe`
+- Notes: WP-0206 restores per-item failed-run count and clear actions to the default setup-first Localization home while retaining non-destructive defaults.

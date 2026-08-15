@@ -835,6 +835,12 @@ code {
   margin-top: 10px;
 }
 
+.loc-setup-recent-row {
+  display: inline-flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
 .shell-status-strip {
   display: grid;
   grid-template-columns: repeat(auto-fit, minmax(280px, 1fr));
