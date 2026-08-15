@@ -4,7 +4,7 @@
 
 - ID: WP-0247
 - Owner: Codex
-- Status: REVIEW
+- Status: DONE
 - Created: 2026-06-01
 - Target milestone: Desktop archive/operator usability
 
@@ -155,3 +155,4 @@ Out of scope:
 - 2026-06-01: Verification recorded under `product/desktop/build_target/tool_artifacts/wp_runs/WP-0247/2026-06-01_archiver_session_job_context/summary.md`. Focused frontend/Rust tests and `npm run build` pass. App-boundary snapshots/dumps captured through the bridge for Video Archiver, Jobs, and Media Library. WP is in REVIEW pending operator review/release-build decision.
 - 2026-06-01: Closed audit gap in the YouTube single history list by replacing the 80-row display cap with a dedicated read-only backend query for all YouTube video candidates. Built managed desktop target `0.1.55` with WP-0247 changelog entry and captured release-boundary snapshots. Installer artifacts exist; installed app update is not run because this non-elevated session cannot safely perform a per-machine silent update without possible UAC/foreground interaction.
 - 2026-06-01: Verified there were no active jobs, closed the old installed-app process, and launched the fixed `0.1.55` release executable as the live app process (PID `111220`, bridge port `49378`, safe mode off). Captured live real-data bridge snapshots for Video Archiver history, the old `29/29` failed Jobs batch context, and Media Library single/legacy filtering. Persistent shortcut/start-menu update still requires the `0.1.55` installer to be run with elevation/operator approval.
+- 2026-08-15: Promoted to DONE after current-state reconciliation. Focused frontend tests passed 9/9, the global-auth-precedence Rust regression passed, and hidden packaged v0.1.153 inspection confirmed the downloaded-single history, Media Library single-video filter semantic control, and Jobs source/batch context remain present. Proof: `product/desktop/build_target/tool_artifacts/wp_runs/WP-0247/20260815_board_reconciliation_v0_1_153/summary.md`.

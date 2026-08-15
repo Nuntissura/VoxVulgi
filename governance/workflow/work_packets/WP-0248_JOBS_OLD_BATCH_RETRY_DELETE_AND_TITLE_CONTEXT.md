@@ -4,7 +4,7 @@
 
 - ID: WP-0248
 - Owner: Codex
-- Status: REVIEW
+- Status: DONE
 - Created: 2026-06-02
 - Target milestone: Desktop archive/operator usability
 
@@ -210,3 +210,4 @@ Out of scope:
 - 2026-06-03: Implemented Firefox browser-cookie source default while preserving Chrome, Edge, and Opera support. Backend browser-cookie source normalization defaults missing source to Firefox; yt-dlp expansion no longer hardcodes Chrome; Instagram browser-cookie selectors initialize blank legacy state to Firefox and persist Firefox for enabled rows. Verification passed: focused Rust source test, full engine unit tests, frontend contract tests, desktop web build, Tauri `cargo check`, managed desktop build `0.1.65`, and bridge snapshot/dump. Proof: `product/desktop/build_target/tool_artifacts/wp_runs/WP-0248/2026-06-03_browser_source_default_firefox/summary.md`.
 - 2026-06-04: Operator reports the old batch still does not visibly show correct downloaded-vs-failed status. Live read-only DB inspection of `42a89117-db6e-4202-970a-fe62a01b2dbe` shows the core issue: `55` canonical video URLs all have at least one success, but historical attempt rows still include `96` failed and `23` canceled rows, so the UI and retry controls must make canonical target truth dominant and keep failed attempts in history.
 - 2026-06-04: Implemented the canonical-target follow-up. Backend batch retry now groups by canonical target and skips any target with a successful attempt, even when later failed/canceled historical attempts remain. Jobs batch rows now show video target health first (`55 videos: 55 downloaded / 0 queued or running / 0 unresolved`) and attempt history separately (`232 attempts: 113 succeeded / 96 failed / 23 canceled / 99 auth-blocked`), with the batch retry action labeled `Retry unresolved` and disabled/no-op when unresolved videos are `0`. Live DB/file proof confirms all `55` succeeded targets have linked library items and existing media files. Verification passed: frontend contracts, focused Rust regression, full engine unit suite, desktop web build, Tauri `cargo check`, managed build `0.1.66`, and bridge visual proof against the old batch. Proof: `product/desktop/build_target/tool_artifacts/wp_runs/WP-0248/2026-06-04_batch_target_health_status/summary.md`.
+- 2026-08-15: Promoted to DONE after current-state reconciliation. The successful-target retry-skip regression passed, current focused frontend tests passed 9/9, the exact v0.1.66 canonical-batch screenshot was re-inspected, and hidden packaged v0.1.153 Jobs inspection retained source/batch context with zero missing accessible names. Proof: `product/desktop/build_target/tool_artifacts/wp_runs/WP-0248/20260815_board_reconciliation_v0_1_153/summary.md`.
