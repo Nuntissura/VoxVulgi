@@ -29,11 +29,17 @@ test("every queue compaction apply creates and reopens an online SQLite backup",
   const applyBoundary = jobsSource.slice(applyStart, jobsSource.indexOf("fn hydrate_job_target_titles", applyStart));
   assert.match(applyBoundary, /if dry_run \{[\s\S]*return Ok\(summary\);[\s\S]*create_verified_queue_identity_backup/);
   assert.match(applyBoundary, /summary\.backup = Some/);
+  assert.match(applyBoundary, /verify_queue_identity_observations_fresh\(paths, &observations\)/);
   assert.match(applyBoundary, /transaction_with_behavior\(TransactionBehavior::Immediate\)/);
   assert.ok(
     applyBoundary.indexOf("create_verified_queue_identity_backup") <
+      applyBoundary.indexOf("verify_queue_identity_observations_fresh"),
+    "storage evidence must be rechecked after the potentially long backup",
+  );
+  assert.ok(
+    applyBoundary.indexOf("verify_queue_identity_observations_fresh") <
       applyBoundary.indexOf("transaction_with_behavior(TransactionBehavior::Immediate)"),
-    "verified backup must precede the mutation transaction",
+    "fresh storage evidence must precede the mutation transaction",
   );
 });
 

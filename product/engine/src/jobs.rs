@@ -5532,6 +5532,21 @@ fn create_verified_queue_identity_backup(
     })
 }
 
+fn verify_queue_identity_observations_fresh(
+    paths: &AppPaths,
+    observations: &HashMap<String, QueueIdentityObservation>,
+) -> Result<()> {
+    for (media_id, expected) in observations {
+        let observed = library::observe_media_path_fresh(paths, &expected.media_path);
+        if observed != expected.state {
+            return Err(EngineError::InstallFailed(format!(
+                "canonical media path state changed after backup for YouTube identity {media_id}; rerun the preview"
+            )));
+        }
+    }
+    Ok(())
+}
+
 fn youtube_identity_db_states(
     conn: &rusqlite::Connection,
 ) -> Result<HashMap<String, QueueIdentityDbState>> {
@@ -5774,6 +5789,7 @@ pub fn youtube_queue_identity_reconcile(
         &operation_id,
         &scan,
     )?);
+    verify_queue_identity_observations_fresh(paths, &observations)?;
 
     let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
     if !is_queue_paused_conn(&tx)? {
@@ -36820,6 +36836,28 @@ VV_MEDIA_POST:{"requested_subtitles":null}"#;
             present_path.is_file(),
             "reconciliation must not alter media"
         );
+    }
+
+    #[test]
+    fn queue_identity_apply_rejects_storage_state_that_changed_after_backup() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let paths = AppPaths::new(dir.path().join("app_data"));
+        let media_path = dir.path().join("present-then-missing.mkv");
+        std::fs::write(&media_path, b"present").expect("present fixture");
+        let observations = HashMap::from([(
+            "state-change-id".to_string(),
+            QueueIdentityObservation {
+                library_item_id: "state-change-item".to_string(),
+                media_path: media_path.to_string_lossy().to_string(),
+                state: library::MediaPathObservation::Present,
+            },
+        )]);
+        verify_queue_identity_observations_fresh(&paths, &observations)
+            .expect("unchanged state accepted");
+        std::fs::remove_file(&media_path).expect("remove fixture");
+        let error = verify_queue_identity_observations_fresh(&paths, &observations)
+            .expect_err("changed state must abort apply");
+        assert!(error.to_string().contains("state changed after backup"));
     }
 
     fn seed_queued_youtube_job(
