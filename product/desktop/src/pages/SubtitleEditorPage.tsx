@@ -1229,7 +1229,7 @@ const LEGACY_ANCHOR_TO_STAGE: Record<string, WorkspaceStageId> = {
   "loc-artifacts": "files",
   "loc-run": "captions",
   "loc-workflow": "captions",
-  "loc-advanced": "files",
+  "loc-advanced": "dub",
 };
 
 function SectionHelp({ sectionId }: { sectionId: string }) {
@@ -3913,6 +3913,13 @@ export function SubtitleEditorPage({
     );
   }
 
+  function revealLocalizationSection(sectionId: string) {
+    const target = document.getElementById(sectionId);
+    const disclosure = target instanceof HTMLDetailsElement ? target : target?.closest("details");
+    if (disclosure instanceof HTMLDetailsElement) disclosure.open = true;
+    target?.scrollIntoView({ behavior: "smooth", block: "start" });
+  }
+
   function scrollToLocalizationSection(sectionId: string) {
     // WP-0211: select the owning stage first so the anchor is mounted in the
     // right pane, then scroll once a frame has passed for layout to settle.
@@ -3920,13 +3927,11 @@ export function SubtitleEditorPage({
     if (stage && stage !== selectedStage) {
       selectWorkspaceStage(stage);
       window.setTimeout(() => {
-        const target = document.getElementById(sectionId);
-        target?.scrollIntoView({ behavior: "smooth", block: "start" });
+        revealLocalizationSection(sectionId);
       }, 50);
       return;
     }
-    const target = document.getElementById(sectionId);
-    target?.scrollIntoView({ behavior: "smooth", block: "start" });
+    revealLocalizationSection(sectionId);
   }
 
   // Keyboard shortcuts for Localization Studio (WP-0173 + WP-0175)
@@ -3989,8 +3994,8 @@ export function SubtitleEditorPage({
     const ownerStage = sectionId ? LEGACY_ANCHOR_TO_STAGE[sectionId] : null;
     if (ownerStage) selectWorkspaceStage(ownerStage);
     const timer = window.setTimeout(() => {
-      const target = sectionId ? document.getElementById(sectionId) : rootSectionRef.current;
-      target?.scrollIntoView({ behavior: "smooth", block: "start" });
+      if (sectionId) revealLocalizationSection(sectionId);
+      else rootSectionRef.current?.scrollIntoView({ behavior: "smooth", block: "start" });
       if (request) onNavigationConsumed?.(request.nonce);
     }, ownerStage ? 50 : 0);
     return () => window.clearTimeout(timer);
@@ -8061,7 +8066,7 @@ export function SubtitleEditorPage({
         )}
       </div>
 
-      <div className="card loc-stage-card" data-stage="captions voice_plan" id="loc-track">
+      <div className="card loc-stage-card" data-stage="captions voice_plan dub" id="loc-track">
         <h2>Track <SectionHelp sectionId="loc-track" /></h2>
         <div className="row">
           <select
@@ -8173,7 +8178,7 @@ export function SubtitleEditorPage({
           </button>
         </div>
 
-        <details style={{ marginTop: 10 }}>
+        <details id="loc-advanced" style={{ marginTop: 10 }}>
           <summary style={{ cursor: "pointer", color: "#4b5563", fontSize: 13 }}>
             Advanced audio/video (most people can leave these alone)
           </summary>

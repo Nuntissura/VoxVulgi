@@ -28,6 +28,7 @@ test("legacy localization anchors select their owning stage before scrolling", (
     '"loc-glossary": "translate"',
     '"loc-voice-basics": "voice_plan"',
     '"loc-backends": "dub"',
+    '"loc-advanced": "dub"',
     '"loc-qc": "mux"',
     '"loc-library": "files"',
     '"loc-run": "captions"',
@@ -37,6 +38,10 @@ test("legacy localization anchors select their owning stage before scrolling", (
   }
   assert.match(source, /const ownerStage = sectionId \? LEGACY_ANCHOR_TO_STAGE\[sectionId\] : null/);
   assert.match(source, /if \(ownerStage\) selectWorkspaceStage\(ownerStage\)/);
+  assert.match(source, /data-stage="captions voice_plan dub" id="loc-track"/);
+  assert.match(source, /<details id="loc-advanced"/);
+  assert.match(source, /disclosure instanceof HTMLDetailsElement[\s\S]*disclosure\.open = true/);
+  assert.match(source, /if \(sectionId\) revealLocalizationSection\(sectionId\)/);
 });
 
 test("selected stages retain their primary inline controls and accessible track selectors", () => {
