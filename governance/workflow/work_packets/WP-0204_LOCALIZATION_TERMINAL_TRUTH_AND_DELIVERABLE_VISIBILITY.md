@@ -3,7 +3,7 @@
 ## Metadata
 - ID: WP-0204
 - Owner: Codex
-- Status: REVIEW
+- Status: DONE
 - Created: 2026-04-24
 - Target milestone: Localization operator usability
 
@@ -49,3 +49,4 @@ Out of scope:
 - 2026-04-24: Created after operator smoke reported "finished" localization work with no visible Localization Library item, no expected output file, and no clear explanation of whether the source file had been copied, whether captions existed, or whether a preview/export had actually been produced.
 - 2026-04-25: Implementation pass started. Scope is a shared item-output/run-outcome contract consumed by Localization home, current-item context, and Jobs.
 - 2026-04-25: Moved to REVIEW. `item_outputs` now exposes terminal state, summary/detail, deliverable existence/path, source media, and track availability; Localization home/library and Jobs consume that shared truth. Queen item now surfaces `Failed before deliverable: Label speakers` instead of implying full success. Proof: `product/desktop/build_target/tool_artifacts/wp_runs/WP-0204/2026-04-25_0315_wp0202_0204/summary.md`.
+- 2026-08-15: Closed DONE after re-inspecting the exact Queen partial-run screenshots, verifying the current v0.1.169 governed build, and adding a focused regression contract for all terminal states, shared operator-surface wiring, and availability-gated path actions. Closure proof: `product/desktop/build_target/tool_artifacts/wp_runs/WP-0204/20260815-184300-v0_1_169/summary.md`.

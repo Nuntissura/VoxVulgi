@@ -2,7 +2,7 @@
 
 ## Status
 
-REVIEW
+DONE
 
 ## Owner
 
@@ -34,3 +34,4 @@ Codex
 
 - 2026-05-13: Created after the live localization item reached the real next blocker: missing voice-preserving TTS/OpenVoice pack. The operator clarified that VoxVulgi is for users with no technical skills, so voice setup must be owned by Start.
 - 2026-05-13: Implemented setup-aware dub continuation and plain-language UI notices. Verification summary: `product/desktop/build_target/tool_artifacts/wp_runs/WP-0218/20260513_174250/summary.md`.
+- 2026-08-15: Closed DONE against packaged v0.1.169. Localization Studio visibly owns the missing-pack flow with `Set up now`, `Set up later`, `Jobs/Queue`, and `Advanced setup options`; semantic audit returned 51 elements with zero truncation/missing names. Current source contracts prove tracked setup request persistence and automatic resume. Closure proof: `product/desktop/build_target/tool_artifacts/wp_runs/WP-0218/20260815-190000-v0_1_169/summary.md`.

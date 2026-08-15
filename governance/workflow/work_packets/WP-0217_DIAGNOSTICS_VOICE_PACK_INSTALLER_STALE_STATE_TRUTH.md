@@ -2,7 +2,7 @@
 
 ## Status
 
-REVIEW
+DONE
 
 ## Owner
 
@@ -32,3 +32,4 @@ Codex
 
 - 2026-05-13: Created after the live app showed `Voice packages: Installing...` from an April 27 interrupted installer while the job database had no active install job.
 - 2026-05-13: Implemented backend state normalization plus frontend status helpers. Verification summary: `product/desktop/build_target/tool_artifacts/wp_runs/WP-0217/20260513_173351/summary.md`.
+- 2026-08-15: Closed DONE against packaged v0.1.169. An isolated stale installer journal with a missing matching job rendered `Voice packages: Interrupted`, never `Installing...`; semantic audit returned 132 elements, zero truncation, and zero missing accessible names. Focused desktop contracts passed 18/18. Closure proof: `product/desktop/build_target/tool_artifacts/wp_runs/WP-0217/20260815-185000-v0_1_169/summary.md`.

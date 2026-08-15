@@ -2,7 +2,7 @@
 
 ## Status
 
-REVIEW
+DONE
 
 ## Owner
 
@@ -36,3 +36,4 @@ Codex
 - 2026-05-13: Created after the running localization test finished diarization but paused at `voice_plan` for `S1`, contradicting the setup-first voice-clone service promise.
 - 2026-05-13: Implemented automatic source-reference generation/apply before the voice-plan pause. Repaired the live test item by generating an `S1` source reference and queuing the dub continuation; that dub job then failed on the real next blocker: missing voice-preserving TTS/OpenVoice pack.
 - 2026-05-13: Verification summary: `product/desktop/build_target/tool_artifacts/wp_runs/WP-0216/20260513_143027/summary.md`.
+- 2026-08-15: Closed DONE. The retained live item proof is still materially present: its generated S1 reference is a valid 3.84-second WAV (122,958 bytes, SHA256 `FA51764823CED32AB2EA16A4A744FAB2CB58D55837736832F03C1CD16C44F346`). Current focused contracts prove generate/apply-before-pause and continuation to dub-or-setup, and the v0.1.169 governed build compiles the same engine path. Closure proof: `product/desktop/build_target/tool_artifacts/wp_runs/WP-0216/20260815-190000-v0_1_169/summary.md`.

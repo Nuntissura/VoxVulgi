@@ -2,7 +2,7 @@
 
 ## Status
 
-REVIEW
+DONE
 
 ## Owner
 
@@ -40,3 +40,4 @@ Codex
 
 - 2026-05-13: Created after multi-speaker readiness review found existing per-speaker dubbing support but implicit diarization speaker-count behavior.
 - 2026-05-13: Implemented speaker-count request plumbing across setup-first runs, editor runs, direct diarization, baseline clustering, pyannote BYO kwargs, and diarization reports. Verification summary: `product/desktop/build_target/tool_artifacts/wp_runs/WP-0215/20260513_031159/summary.md`.
+- 2026-08-15: Closed DONE against packaged v0.1.169. The headless semantic audit exposed `Speakers`, all three modes, and the exact-count input with zero truncation/missing names; the exact screen was visually inspected. Three focused current contracts prove entry-surface serialization, baseline/pyannote count plumbing, and requested/observed report metadata. Closure proof: `product/desktop/build_target/tool_artifacts/wp_runs/WP-0215/20260815-190000-v0_1_169/summary.md`.
