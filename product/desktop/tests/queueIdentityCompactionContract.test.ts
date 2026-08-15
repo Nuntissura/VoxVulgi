@@ -39,6 +39,12 @@ test("every queue compaction apply creates and reopens an online SQLite backup",
 
 test("CLI and Options consume the engine-owned backup receipt instead of bypassing it", () => {
   assert.doesNotMatch(runnerSource, /--backup <verified-backup\.sqlite>/);
+  assert.match(runnerSource, /if apply && !queue_was_paused[\s\S]*set_queue_paused\(&paths, true\)/);
+  assert.ok(
+    runnerSource.indexOf("set_queue_paused(&paths, true)") <
+      runnerSource.indexOf("youtube_queue_identity_reconcile(&paths, true"),
+    "maintenance apply must pause the queue before its canonical preview",
+  );
   assert.match(runnerSource, /summary\.backup\.clone\(\)/);
   assert.match(optionsSource, /Verified pre-apply backup:/);
   assert.match(optionsSource, /Create and verify an online database backup/);

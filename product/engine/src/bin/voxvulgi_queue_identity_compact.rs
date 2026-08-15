@@ -2,14 +2,16 @@ use serde::Serialize;
 use std::env;
 use std::path::PathBuf;
 use voxvulgi_engine::jobs::{
-    youtube_queue_identity_reconcile, YoutubeQueueIdentityBackupReceipt,
-    YoutubeQueueIdentityReconcileSummary,
+    get_queue_control, set_queue_paused, youtube_queue_identity_reconcile,
+    YoutubeQueueIdentityBackupReceipt, YoutubeQueueIdentityReconcileSummary,
 };
 use voxvulgi_engine::paths::AppPaths;
 
 #[derive(Serialize)]
 struct Receipt {
     base_dir: String,
+    queue_was_paused: bool,
+    queue_is_paused: bool,
     backup: Option<YoutubeQueueIdentityBackupReceipt>,
     preview: YoutubeQueueIdentityReconcileSummary,
     applied: Option<YoutubeQueueIdentityReconcileSummary>,
@@ -44,6 +46,16 @@ fn run() -> Result<Receipt, String> {
     }
     let base_dir = base_dir.map_or_else(default_base_dir, Ok)?;
     let paths = AppPaths::new(base_dir.clone());
+    let queue_was_paused = get_queue_control(&paths)
+        .map_err(|error| format!("read queue pause state: {error}"))?
+        .paused;
+    if apply && !queue_was_paused {
+        set_queue_paused(&paths, true)
+            .map_err(|error| format!("pause queue before compaction: {error}"))?;
+    }
+    let queue_is_paused = get_queue_control(&paths)
+        .map_err(|error| format!("verify queue pause state: {error}"))?
+        .paused;
     let preview = youtube_queue_identity_reconcile(&paths, true, None, Some(500))
         .map_err(|error| format!("preview failed: {error}"))?;
     let applied = if apply {
@@ -57,6 +69,8 @@ fn run() -> Result<Receipt, String> {
     let backup = applied.as_ref().and_then(|summary| summary.backup.clone());
     Ok(Receipt {
         base_dir: base_dir.to_string_lossy().to_string(),
+        queue_was_paused,
+        queue_is_paused,
         backup,
         preview,
         applied,
