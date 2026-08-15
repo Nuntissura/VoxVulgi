@@ -36,5 +36,5 @@ test("clone preflight runs authoritative curation before enqueue and remains ove
   assert.match(editorSource, /Check clone readiness/);
   assert.match(editorSource, /checkCloneReadinessOnly/);
   assert.match(editorSource, /Proceed anyway\?/);
-  assert.match(editorSource, /data-stage="captions voice_plan" id="loc-track"/);
+  assert.match(editorSource, /data-stage="captions voice_plan dub" id="loc-track"/);
 });
