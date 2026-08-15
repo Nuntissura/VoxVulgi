@@ -3,7 +3,7 @@
 ## Metadata
 - ID: WP-0191
 - Owner: Codex
-- Status: IN_PROGRESS
+- Status: DONE
 - Created: 2026-04-23
 - Target milestone: Archive reliability
 
@@ -42,3 +42,4 @@ Out of scope:
 - 2026-04-23: Created from recent Instagram Archiver failures and diagnostic-trace review.
 - 2026-04-23: Operator smoke reproduced the one-shot profile failure path with `ERROR: [instagram:user] ... Unable to extract data`, while older failures in the same app data also show repeated `got more than 100 headers` extraction failures. The current failed one-shot jobs never create a `library_item`, which leaves Jobs without item/output context and makes root-path verification harder for operators.
 - 2026-04-24: Additional operator notes confirmed the remaining UX gap around this failure path: one-shot Instagram Archiver and recurring Instagram subscriptions are still easy to confuse, and when extractor failure happens before item creation the operator cannot verify the expected output root or whether anything should have landed on disk at all.
+- 2026-08-15: DONE. Read-only canonical DB inspection found 8/8 terminal Instagram jobs failing with `Unable to extract data` across both single and recurring lanes, zero Instagram job failures caused by SQLite locks, and browser-cookie configuration on every current Instagram job. The live production call graph routes both lanes through the same generic yt-dlp execution path; current upstream still marks `InstagramUserIE` non-working. WP-0299 owns the runtime refresh and WP-0303 owns exact profile/post/reel recovery plus the proof-gated provider decision. Redacted report: `product/desktop/build_target/tool_artifacts/wp_runs/WP-0191/20260815_failure_analysis/summary.md`.
