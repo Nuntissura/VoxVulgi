@@ -674,9 +674,15 @@ fn upsert_provider_metadata_tx(
         }
         Some((existing_rank, existing_observed_at_ms))
             if quality_rank == existing_rank
-                && observation.observed_at_ms >= existing_observed_at_ms =>
+                && observation.observed_at_ms > existing_observed_at_ms =>
         {
-            (true, "same_quality_newer_or_equal".to_string())
+            (true, "same_quality_newer".to_string())
+        }
+        Some((existing_rank, existing_observed_at_ms))
+            if quality_rank == existing_rank
+                && observation.observed_at_ms == existing_observed_at_ms =>
+        {
+            (false, "same_quality_equal_timestamp_rejected".to_string())
         }
         Some((existing_rank, _)) if quality_rank < existing_rank => {
             (false, "lower_quality_rejected".to_string())
@@ -1130,6 +1136,20 @@ mod tests {
         )
         .expect("older");
         assert!(!older.accepted);
+        let equal_timestamp = upsert_provider_metadata(
+            &paths,
+            fixture(
+                "Conflicting equal-time title",
+                ProviderMetadataQuality::RemoteCanonical,
+                200,
+            ),
+        )
+        .expect("equal timestamp");
+        assert!(!equal_timestamp.accepted);
+        assert_eq!(
+            equal_timestamp.decision_reason,
+            "same_quality_equal_timestamp_rejected"
+        );
         let conn = db::open_readonly(&paths).expect("readonly");
         let stored: String = conn
             .query_row(
@@ -1146,7 +1166,7 @@ mod tests {
                 |row| row.get(0),
             )
             .expect("history count");
-        assert_eq!(observations, 3);
+        assert_eq!(observations, 4);
     }
 
     #[test]
