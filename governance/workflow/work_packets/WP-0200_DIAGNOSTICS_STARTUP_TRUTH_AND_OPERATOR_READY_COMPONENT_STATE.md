@@ -3,7 +3,7 @@
 ## Metadata
 - ID: WP-0200
 - Owner: Codex
-- Status: REVIEW
+- Status: DONE
 - Created: 2026-04-24
 - Target milestone: Diagnostics operator trust
 
@@ -47,3 +47,4 @@ Out of scope:
 
 - 2026-04-24: Created after operator smoke showed Diagnostics still behaving like a cold-loading surface despite startup claiming `100%`, with component-state trust breaking down in normal use.
 - 2026-04-24: First implementation slice landed: the app now pre-visits Diagnostics after startup settles so component state can hydrate before the operator opens the page, reducing the misleading cold-start feel on first entry. Verification: `npm run build`, `cargo check`.
+- 2026-08-15: DONE on packaged v0.1.169 using the newer visibility-gated architecture. Diagnostics is not pre-mounted hidden; when opened it remained responsive and settled all six sections to ready with Loading 0, Failed 0, Startup progress 100%, truthful missing-component state, and visible Recent failures. Focused contracts passed 6/6. Proof: `product/desktop/build_target/tool_artifacts/wp_runs/WP-0200/20260815-183250-v0_1_169/summary.md`.

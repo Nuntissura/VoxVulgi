@@ -3,7 +3,7 @@
 ## Metadata
 - ID: WP-0145
 - Owner: Codex
-- Status: IN_PROGRESS
+- Status: DONE
 - Created: 2026-03-12
 - Target milestone: Post-0.1.6 smoke regression recovery
 
@@ -47,3 +47,4 @@ Out of scope:
 - 2026-03-22: The remaining first-screen hierarchy work is now tracked under `WP-0153` and `WP-0154`, which make advanced discoverability part of the explicit home-dashboard contract rather than an accidental byproduct of the current layout.
 - 2026-03-22: `WP-0154` now adds the explicit `Next` orientation layer on the first screen, keeping `Advanced tools` adjacent to the recommended next action instead of leaving it as a secondary discoverability guess. Verified with `npm run build`; operator confirmation is still required.
 - 2026-08-15: Packaged v0.1.168 headless audit exposed a post-WP-0211 routing regression: `loc-advanced` selected Files, while backend/benchmark/batch/A-B anchors lived inside a card hidden from that stage. The fix assigns the advanced route and owning card to Dub, gives the disclosure the stable `loc-advanced` anchor, and opens an owning `<details>` before scrolling to any deep link. Focused master-detail contracts pass 4/4; governed build and packaged re-proof remain pending.
+- 2026-08-15: DONE on packaged v0.1.169. The exact `loc-advanced` route selected Dub, scrolled to the mounted advanced surface, and exposed readable backend, benchmark, batch, A/B, QC, cleanup, and artifact paths. Focused visual and semantic proof: `product/desktop/build_target/tool_artifacts/wp_runs/WP-0145/20260815-180640-v0_1_169/summary.md`.

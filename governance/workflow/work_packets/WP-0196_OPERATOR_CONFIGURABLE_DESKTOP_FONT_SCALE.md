@@ -3,7 +3,7 @@
 ## Metadata
 - ID: WP-0196
 - Owner: Codex
-- Status: IN_PROGRESS
+- Status: DONE
 - Created: 2026-04-23
 - Target milestone: Desktop accessibility and operator comfort
 
@@ -40,3 +40,4 @@ Out of scope:
 
 - 2026-04-23: Created after post-`WP-0190` operator feedback asked for a real adjustable font size instead of only the new default scale.
 - 2026-04-23: Implemented a first desktop font-scale preference in `OptionsPage` plus app bootstrap wiring. The chosen percentage now persists locally and applies app-wide through the root CSS scale variable. `npm run build` passed.
+- 2026-08-15: DONE on packaged v0.1.169. The accessible Options control applied 120% immediately, persisted through an exact-process restart, remained usable across Localization, Video Archiver, Media Library, Jobs, Diagnostics, and Options, and reset to 100%. Proof: `product/desktop/build_target/tool_artifacts/wp_runs/WP-0196/20260815-180640-v0_1_169/summary.md`.

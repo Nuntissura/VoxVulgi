@@ -1370,3 +1370,11 @@ This changelog tracks desktop installer builds produced by `governance/scripts/b
 - Artifacts:
   - `product/desktop/build_target/Current/release/bundle/nsis/VoxVulgi_0.1.168_x64-setup.exe`
 - Notes: WP-0211 master-detail closeout: smart default selection, legacy-anchor stage routing, all eight selected-stage controls, and zero unnamed audited controls across Captions and Files surfaces.
+
+## 0.1.169 - 2026-08-15T15:56:34Z
+- Work Packets: `WP-0129`, `WP-0145`, `WP-0196`
+- Commit: `a96c105`
+- Offline Bundle ID: `offline_full_win64_20260815_151923`
+- Artifacts:
+  - `product/desktop/build_target/Current/release/bundle/nsis/VoxVulgi_0.1.169_x64-setup.exe`
+- Notes: Makes offline payload export interruption-resumable, restores Localization advanced deep-link routing and reveal behavior, and exposes accessible headless-verifiable desktop font-scale controls.

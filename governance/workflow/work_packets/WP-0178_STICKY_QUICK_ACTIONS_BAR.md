@@ -3,7 +3,7 @@
 ## Metadata
 - ID: WP-0178
 - Owner: Codex
-- Status: REVIEW
+- Status: DONE
 - Created: 2026-04-08
 - Target milestone: UX Polish
 
@@ -30,3 +30,7 @@ Out of scope:
 - Run, Export, and Open Outputs work from the bar.
 - Bar shows current run status.
 - `npm run build` passes.
+
+## Status updates
+
+- 2026-08-15: DONE on packaged v0.1.169. The bottom bar remained visible and non-overlapping across top, Track, advanced, backend, benchmark, batch, A/B, QC, cleanup, and artifact scroll positions; the semantic audit exposed current item/status plus enabled Start, Export, and Open outputs controls. Focused handler/CSS contract passed 3/3. Proof: `product/desktop/build_target/tool_artifacts/wp_runs/WP-0178/20260815-181110-v0_1_169/summary.md`.
