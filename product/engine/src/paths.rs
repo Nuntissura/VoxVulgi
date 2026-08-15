@@ -664,6 +664,10 @@ impl AppPaths {
         self.config_dir().join("root_rebind_backups")
     }
 
+    pub fn queue_identity_backups_dir(&self) -> PathBuf {
+        self.config_dir().join("queue_identity_backups")
+    }
+
     pub fn youtube_auth_config_path(&self) -> PathBuf {
         self.config_dir().join("youtube_auth.json")
     }

@@ -1,5 +1,8 @@
+use rusqlite::types::ValueRef;
 use rusqlite::{Connection, OpenFlags};
 use serde::Serialize;
+use sha2::{Digest, Sha256};
+use std::collections::HashSet;
 use std::env;
 use std::path::{Path, PathBuf};
 use voxvulgi_engine::paths::AppPaths;
@@ -13,6 +16,8 @@ struct BackupVerification {
     quick_check: String,
     job_count: i64,
     download_job_count: i64,
+    logical_sha256: String,
+    table_count: usize,
     file_bytes: u64,
 }
 
@@ -60,6 +65,145 @@ fn readonly_counts(path: &Path) -> Result<(i64, i64), String> {
         )
         .map_err(|error| format!("download job count for {}: {error}", path.display()))?;
     Ok((job_count, download_job_count))
+}
+
+fn quote_identifier(value: &str) -> String {
+    format!("\"{}\"", value.replace('"', "\"\""))
+}
+
+fn hash_framed(hasher: &mut Sha256, bytes: &[u8]) {
+    hasher.update((bytes.len() as u64).to_le_bytes());
+    hasher.update(bytes);
+}
+
+fn hash_sql_value(hasher: &mut Sha256, value: ValueRef<'_>) {
+    match value {
+        ValueRef::Null => hasher.update([0]),
+        ValueRef::Integer(value) => {
+            hasher.update([1]);
+            hasher.update(value.to_le_bytes());
+        }
+        ValueRef::Real(value) => {
+            hasher.update([2]);
+            hasher.update(value.to_bits().to_le_bytes());
+        }
+        ValueRef::Text(value) => {
+            hasher.update([3]);
+            hash_framed(hasher, value);
+        }
+        ValueRef::Blob(value) => {
+            hasher.update([4]);
+            hash_framed(hasher, value);
+        }
+    }
+}
+
+fn readonly_logical_fingerprint(path: &Path) -> Result<(String, usize), String> {
+    let conn = Connection::open_with_flags(
+        path,
+        OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_FULL_MUTEX,
+    )
+    .map_err(|error| format!("open {} for logical fingerprint: {error}", path.display()))?;
+    let tables = {
+        let mut stmt = conn
+            .prepare("SELECT name, COALESCE(sql, '') FROM sqlite_schema WHERE type='table' ORDER BY name")
+            .map_err(|error| format!("prepare schema fingerprint for {}: {error}", path.display()))?;
+        stmt.query_map([], |row| {
+            Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+        })
+        .map_err(|error| format!("query schema fingerprint for {}: {error}", path.display()))?
+        .collect::<rusqlite::Result<Vec<_>>>()
+        .map_err(|error| format!("read schema fingerprint for {}: {error}", path.display()))?
+    };
+    let mut hasher = Sha256::new();
+    hash_framed(&mut hasher, b"voxvulgi-logical-sqlite-v1");
+    for (table_name, schema_sql) in &tables {
+        hash_framed(&mut hasher, table_name.as_bytes());
+        hash_framed(&mut hasher, schema_sql.as_bytes());
+        let columns = {
+            let mut stmt = conn
+                .prepare("SELECT name, pk FROM pragma_table_info(?1) ORDER BY cid")
+                .map_err(|error| format!("prepare columns for {table_name}: {error}"))?;
+            stmt.query_map([table_name], |row| {
+                Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)?))
+            })
+            .map_err(|error| format!("query columns for {table_name}: {error}"))?
+            .collect::<rusqlite::Result<Vec<_>>>()
+            .map_err(|error| format!("read columns for {table_name}: {error}"))?
+        };
+        if columns.is_empty() {
+            return Err(format!(
+                "cannot fingerprint table with no visible columns: {table_name}"
+            ));
+        }
+        for (column, primary_key_order) in &columns {
+            hash_framed(&mut hasher, column.as_bytes());
+            hasher.update(primary_key_order.to_le_bytes());
+        }
+        let lower_columns = columns
+            .iter()
+            .map(|(name, _)| name.to_ascii_lowercase())
+            .collect::<HashSet<_>>();
+        let without_rowid = schema_sql.to_ascii_uppercase().contains("WITHOUT ROWID");
+        let rowid_alias = if without_rowid {
+            None
+        } else {
+            ["rowid", "_rowid_", "oid"]
+                .into_iter()
+                .find(|candidate| !lower_columns.contains(*candidate))
+        };
+        let quoted_columns = columns
+            .iter()
+            .map(|(name, _)| quote_identifier(name))
+            .collect::<Vec<_>>();
+        let order_columns = if let Some(alias) = rowid_alias {
+            vec![quote_identifier(alias)]
+        } else {
+            let mut primary_keys = columns
+                .iter()
+                .filter(|(_, order)| *order > 0)
+                .map(|(name, order)| (*order, quote_identifier(name)))
+                .collect::<Vec<_>>();
+            primary_keys.sort_by_key(|(order, _)| *order);
+            if primary_keys.is_empty() {
+                quoted_columns.clone()
+            } else {
+                primary_keys.into_iter().map(|(_, name)| name).collect()
+            }
+        };
+        let mut selected_columns = quoted_columns.clone();
+        if let Some(alias) = rowid_alias {
+            selected_columns.insert(0, quote_identifier(alias));
+        }
+        let sql = format!(
+            "SELECT {} FROM {} ORDER BY {}",
+            selected_columns.join(","),
+            quote_identifier(table_name),
+            order_columns.join(",")
+        );
+        let mut stmt = conn
+            .prepare(&sql)
+            .map_err(|error| format!("prepare logical fingerprint for {table_name}: {error}"))?;
+        let column_count = selected_columns.len();
+        let mut rows = stmt
+            .query([])
+            .map_err(|error| format!("query logical fingerprint for {table_name}: {error}"))?;
+        while let Some(row) = rows
+            .next()
+            .map_err(|error| format!("read logical fingerprint row for {table_name}: {error}"))?
+        {
+            hasher.update([0x52]);
+            for index in 0..column_count {
+                hash_sql_value(
+                    &mut hasher,
+                    row.get_ref(index).map_err(|error| {
+                        format!("read logical fingerprint value for {table_name}: {error}")
+                    })?,
+                );
+            }
+        }
+    }
+    Ok((hex::encode_upper(hasher.finalize()), tables.len()))
 }
 
 #[cfg(windows)]
@@ -145,11 +289,20 @@ fn verify_backup(live_path: &Path, backup_path: &Path) -> Result<BackupVerificat
             "backup preimage mismatch: live jobs/downloads={live_jobs}/{live_download_jobs}, backup={backup_jobs}/{backup_download_jobs}"
         ));
     }
+    let (live_logical_sha256, live_table_count) = readonly_logical_fingerprint(live_path)?;
+    let (backup_logical_sha256, backup_table_count) = readonly_logical_fingerprint(backup_path)?;
+    if (live_table_count, &live_logical_sha256) != (backup_table_count, &backup_logical_sha256) {
+        return Err(format!(
+            "backup logical preimage mismatch: live tables/sha256={live_table_count}/{live_logical_sha256}, backup={backup_table_count}/{backup_logical_sha256}"
+        ));
+    }
     Ok(BackupVerification {
         path: backup_path.to_string_lossy().to_string(),
         quick_check,
         job_count: backup_jobs,
         download_job_count: backup_download_jobs,
+        logical_sha256: backup_logical_sha256,
+        table_count: backup_table_count,
         file_bytes: std::fs::metadata(backup_path)
             .map_err(|error| format!("backup metadata: {error}"))?
             .len(),
@@ -257,6 +410,55 @@ fn main() {
             eprintln!("{error}");
             std::process::exit(1);
         }
+    }
+}
+
+#[cfg(test)]
+mod backup_tests {
+    use super::*;
+
+    fn create_test_database(path: &Path, title: &str) {
+        let conn = Connection::open(path).expect("open test database");
+        conn.execute_batch(
+            "CREATE TABLE job(id TEXT PRIMARY KEY, type TEXT NOT NULL, title TEXT);\n\
+             CREATE TABLE preference(key TEXT PRIMARY KEY, value TEXT) WITHOUT ROWID;",
+        )
+        .expect("create test schema");
+        conn.execute(
+            "INSERT INTO job(id,type,title) VALUES('job-1','download_direct_url',?1)",
+            [title],
+        )
+        .expect("insert test job");
+        conn.execute(
+            "INSERT INTO preference(key,value) VALUES('theme','dark')",
+            [],
+        )
+        .expect("insert preference");
+    }
+
+    #[test]
+    fn backup_verification_rejects_same_counts_with_different_content() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let live = temp.path().join("live.sqlite");
+        let backup = temp.path().join("backup.sqlite");
+        create_test_database(&live, "canonical title");
+        create_test_database(&backup, "wrong stale title");
+
+        let error = verify_backup(&live, &backup).expect_err("different content must fail");
+        assert!(error.contains("logical preimage mismatch"), "{error}");
+    }
+
+    #[test]
+    fn backup_verification_accepts_logically_identical_databases() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let live = temp.path().join("live.sqlite");
+        let backup = temp.path().join("backup.sqlite");
+        create_test_database(&live, "같은 제목");
+        create_test_database(&backup, "같은 제목");
+
+        let verification = verify_backup(&live, &backup).expect("matching backup");
+        assert_eq!(verification.table_count, 2);
+        assert_eq!(verification.logical_sha256.len(), 64);
     }
 }
 

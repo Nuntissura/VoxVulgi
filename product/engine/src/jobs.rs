@@ -263,6 +263,17 @@ pub struct YoutubeQueueIdentityReconcileCandidate {
 }
 
 #[derive(Debug, Clone, Serialize)]
+pub struct YoutubeQueueIdentityBackupReceipt {
+    pub path: String,
+    pub quick_check: String,
+    pub sha256: String,
+    pub file_bytes: u64,
+    pub queued_direct_jobs: usize,
+    pub running_direct_jobs: usize,
+    pub queue_paused: bool,
+}
+
+#[derive(Debug, Clone, Serialize)]
 pub struct YoutubeQueueIdentityReconcileSummary {
     pub operation_id: String,
     pub dry_run: bool,
@@ -290,6 +301,7 @@ pub struct YoutubeQueueIdentityReconcileSummary {
     pub has_more: bool,
     pub next_cursor: Option<String>,
     pub candidates: Vec<YoutubeQueueIdentityReconcileCandidate>,
+    pub backup: Option<YoutubeQueueIdentityBackupReceipt>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -5447,6 +5459,79 @@ LIMIT ?3
     })
 }
 
+fn create_verified_queue_identity_backup(
+    paths: &AppPaths,
+    operation_id: &str,
+    expected_scan: &QueuedDirectScan,
+) -> Result<YoutubeQueueIdentityBackupReceipt> {
+    let source = db::open_readonly(paths)?;
+    let source_quick_check: String = source.query_row("PRAGMA quick_check", [], |row| row.get(0))?;
+    if source_quick_check != "ok" {
+        return Err(EngineError::InstallFailed(format!(
+            "queue identity backup refused because live SQLite quick_check failed: {source_quick_check}"
+        )));
+    }
+    let source_scan = scan_queued_direct_jobs(&source)?;
+    if source_scan != *expected_scan {
+        return Err(EngineError::InstallFailed(
+            "queued direct-download state changed before backup; rerun the preview".to_string(),
+        ));
+    }
+    let queue_paused = is_queue_paused_conn(&source)?;
+    let running_direct_jobs = source
+        .query_row(
+            "SELECT COUNT(*) FROM job WHERE status='running' AND type='download_direct_url'",
+            [],
+            |row| row.get::<_, i64>(0),
+        )?
+        .max(0) as usize;
+    if !queue_paused || running_direct_jobs != 0 {
+        return Err(EngineError::InstallFailed(format!(
+            "queue identity backup requires paused queue and zero running direct downloads; paused={queue_paused}, running={running_direct_jobs}"
+        )));
+    }
+
+    let backup_dir = paths.queue_identity_backups_dir().join(operation_id);
+    std::fs::create_dir_all(&backup_dir)?;
+    let backup_path = backup_dir.join("app.sqlite");
+    if backup_path.exists() {
+        std::fs::remove_file(&backup_path)?;
+    }
+    let mut destination = rusqlite::Connection::open(&backup_path)?;
+    {
+        let backup = rusqlite::backup::Backup::new(&source, &mut destination)?;
+        backup.run_to_completion(256, Duration::from_millis(10), None)?;
+    }
+    drop(destination);
+    drop(source);
+
+    let reopened = rusqlite::Connection::open_with_flags(
+        &backup_path,
+        rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY | rusqlite::OpenFlags::SQLITE_OPEN_FULL_MUTEX,
+    )?;
+    let quick_check: String = reopened.query_row("PRAGMA quick_check", [], |row| row.get(0))?;
+    if quick_check != "ok" {
+        return Err(EngineError::InstallFailed(format!(
+            "queue identity backup quick_check failed: {quick_check}"
+        )));
+    }
+    let backup_scan = scan_queued_direct_jobs(&reopened)?;
+    if backup_scan != *expected_scan {
+        return Err(EngineError::InstallFailed(
+            "queue identity backup did not preserve the exact queued preimage".to_string(),
+        ));
+    }
+    Ok(YoutubeQueueIdentityBackupReceipt {
+        path: backup_path.to_string_lossy().to_string(),
+        quick_check,
+        sha256: sha256_file_hex(&backup_path)?,
+        file_bytes: std::fs::metadata(&backup_path)?.len(),
+        queued_direct_jobs: backup_scan.all_rows.len(),
+        running_direct_jobs,
+        queue_paused,
+    })
+}
+
 fn youtube_identity_db_states(
     conn: &rusqlite::Connection,
 ) -> Result<HashMap<String, QueueIdentityDbState>> {
@@ -5678,10 +5763,17 @@ pub fn youtube_queue_identity_reconcile(
         has_more: false,
         next_cursor: None,
         candidates,
+        backup: None,
     };
     if dry_run {
         return Ok(summary);
     }
+
+    summary.backup = Some(create_verified_queue_identity_backup(
+        paths,
+        &operation_id,
+        &scan,
+    )?);
 
     let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
     if !is_queue_paused_conn(&tx)? {
@@ -22063,6 +22155,7 @@ fn parse_ytdlp_flat_json_entries(
 ) -> Result<Vec<(String, Option<String>)>> {
     let mut seen = HashSet::new();
     let mut entries = Vec::new();
+    let mut metadata_observations = Vec::new();
     let mut malformed_count = 0_usize;
     for (line_index, raw_line) in stdout.split(|byte| *byte == b'\n').enumerate() {
         let raw_line = raw_line.strip_suffix(b"\r").unwrap_or(raw_line);
@@ -22111,10 +22204,7 @@ fn parse_ytdlp_flat_json_entries(
                 "flat_enumeration",
             )
             .expect("media id checked");
-            provider_metadata::upsert_provider_metadata(
-                paths,
-                observation,
-            )?;
+            metadata_observations.push(observation);
         }
         if seen.insert(entry_url.clone()) {
             entries.push((entry_url, title));
@@ -22125,6 +22215,7 @@ fn parse_ytdlp_flat_json_entries(
             "yt-dlp returned {malformed_count} malformed UTF-8 JSON metadata item(s) and no valid entries"
         )));
     }
+    provider_metadata::upsert_provider_metadata_batch(paths, metadata_observations)?;
     Ok(entries)
 }
 
@@ -36658,6 +36749,13 @@ VV_MEDIA_POST:{"requested_subtitles":null}"#;
         set_queue_paused(&paths, true).expect("pause queue");
         let applied = youtube_queue_identity_reconcile(&paths, false, None, None).expect("apply");
         assert_eq!(applied.canceled_jobs, 1);
+        let backup = applied.backup.as_ref().expect("verified pre-apply backup");
+        assert_eq!(backup.quick_check, "ok");
+        assert_eq!(backup.queued_direct_jobs, 2);
+        assert_eq!(backup.running_direct_jobs, 0);
+        assert!(backup.queue_paused);
+        assert!(Path::new(&backup.path).is_file());
+        assert_eq!(backup.sha256.len(), 64);
         let conn = db::open_readonly(&paths).expect("verify");
         let statuses = conn
             .prepare("SELECT id, status FROM job ORDER BY id")
@@ -36794,6 +36892,9 @@ VV_MEDIA_POST:{"requested_subtitles":null}"#;
 
         let applied = youtube_queue_identity_reconcile(&paths, false, None, None).expect("apply");
         assert_eq!(applied.canceled_jobs, 3);
+        assert!(applied.backup.as_ref().is_some_and(|backup| {
+            backup.quick_check == "ok" && Path::new(&backup.path).is_file()
+        }));
         assert_eq!(applied.remaining_duplicate_identities, 0);
         assert_eq!(applied.remaining_present_jobs, 0);
         assert_eq!(applied.claim_mismatches, 0);

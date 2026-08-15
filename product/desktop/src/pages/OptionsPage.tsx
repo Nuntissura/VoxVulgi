@@ -361,6 +361,15 @@ type YoutubeQueueIdentityReconcilePage = {
   canceled_jobs: number;
   has_more: boolean;
   next_cursor: string | null;
+  backup: {
+    path: string;
+    quick_check: string;
+    sha256: string;
+    file_bytes: number;
+    queued_direct_jobs: number;
+    running_direct_jobs: number;
+    queue_paused: boolean;
+  } | null;
 };
 
 type DownloaderProfileId = "aggressive" | "balanced" | "gentle" | "conservative";
@@ -1904,6 +1913,8 @@ export function OptionsPage() {
           unreachable_jobs: 0,
           slow_jobs: 0,
           canceled_jobs: 0,
+          backup_path: null as string | null,
+          backup_sha256: null as string | null,
         };
         do {
           const page: YoutubeQueueIdentityReconcilePage =
@@ -1929,12 +1940,16 @@ export function OptionsPage() {
           totals.unreachable_jobs += page.unreachable_jobs ?? 0;
           totals.slow_jobs += page.slow_jobs ?? 0;
           totals.canceled_jobs += page.canceled_jobs ?? 0;
+          if (page.backup) {
+            totals.backup_path = page.backup.path;
+            totals.backup_sha256 = page.backup.sha256;
+          }
           cursor = page.has_more ? page.next_cursor ?? null : null;
         } while (cursor);
         return totals;
       },
       (summary) =>
-        `${apply ? `Canceled ${summary.canceled_jobs}` : `Would cancel ${summary.would_cancel_jobs}`} queued job(s) across ${summary.canonical_identities} canonical YouTube identities (${summary.duplicate_identities} duplicate groups); ${summary.kept_jobs} keeper job(s) remain and ${summary.source_memberships_preserved} source membership pair(s) are preserved. Storage evidence: ${summary.present_jobs} present-job observations, ${summary.missing_jobs} missing-file observations, ${summary.slow_jobs} storage probe was slow observation(s), ${summary.unreachable_jobs} unreachable-storage observations.`,
+        `${apply ? `Canceled ${summary.canceled_jobs}` : `Would cancel ${summary.would_cancel_jobs}`} queued job(s) across ${summary.canonical_identities} canonical YouTube identities (${summary.duplicate_identities} duplicate groups); ${summary.kept_jobs} keeper job(s) remain and ${summary.source_memberships_preserved} source membership pair(s) are preserved. Storage evidence: ${summary.present_jobs} present-job observations, ${summary.missing_jobs} missing-file observations, ${summary.slow_jobs} storage probe was slow observation(s), ${summary.unreachable_jobs} unreachable-storage observations.${summary.backup_path ? ` Verified pre-apply backup: ${summary.backup_path} (SHA-256 ${summary.backup_sha256}).` : ""}`,
     );
   }
 
@@ -3535,10 +3550,10 @@ export function OptionsPage() {
           <button type="button" disabled={legacyRecoveryBusy} onClick={indexLegacyRecoveryDownloads} title="Add the videos you already downloaded to your VoxVulgi library.">
             Add my downloaded videos
           </button>
-          <button type="button" disabled={legacyRecoveryBusy} onClick={() => reconcileQueuedYoutubeDuplicates(false)} title="Check the complete queued YouTube set and report jobs whose canonical file is already present.">
+          <button type="button" disabled={legacyRecoveryBusy} onClick={() => reconcileQueuedYoutubeDuplicates(false)} title="Check the complete queued YouTube set by canonical video identity. Report present-media jobs and redundant queued attempts without changing anything.">
             Preview queued duplicates
           </button>
-          <button type="button" disabled={legacyRecoveryBusy} onClick={() => reconcileQueuedYoutubeDuplicates(true)} title="Cancel only queued jobs whose canonical file is verified present. Missing or unreachable files remain queued.">
+          <button type="button" disabled={legacyRecoveryBusy} onClick={() => reconcileQueuedYoutubeDuplicates(true)} title="Create and verify an online database backup, then cancel present-media jobs and redundant queued attempts while preserving one deterministic keeper, memberships, and job history. Missing or unreachable identities keep one queued owner.">
             Cancel verified duplicate jobs
           </button>
           <button

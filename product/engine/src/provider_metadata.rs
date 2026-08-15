@@ -626,10 +626,9 @@ pub fn parse_provider_json_line(bytes: &[u8]) -> Result<ProviderMetadataObservat
     Ok(serde_json::from_slice(bytes)?)
 }
 
-pub fn upsert_provider_metadata(
-    paths: &AppPaths,
+fn normalize_provider_metadata_observation(
     mut observation: ProviderMetadataObservation,
-) -> Result<ProviderMetadataUpsertReceipt> {
+) -> Result<ProviderMetadataObservation> {
     observation.service = required_trimmed(&observation.service, "service")?.to_ascii_lowercase();
     observation.media_id = required_trimmed(&observation.media_id, "media_id")?;
     observation.provider_name = required_trimmed(&observation.provider_name, "provider_name")?;
@@ -649,15 +648,18 @@ pub fn upsert_provider_metadata(
     observation.provider_version = normalized_optional(observation.provider_version);
     observation.source_job_id = normalized_optional(observation.source_job_id);
     observation.source_subscription_id = normalized_optional(observation.source_subscription_id);
+    Ok(observation)
+}
 
+fn upsert_provider_metadata_tx(
+    tx: &rusqlite::Transaction<'_>,
+    observation: ProviderMetadataObservation,
+) -> Result<ProviderMetadataUpsertReceipt> {
     let quality_rank = observation.quality.rank();
     let normalized_title = observation
         .raw_title
         .as_deref()
         .map(normalize_title_for_search);
-    let mut conn = db::open(paths)?;
-    db::migrate(&conn)?;
-    let tx = conn.transaction()?;
     let existing = tx
         .query_row(
             "SELECT quality_rank,observed_at_ms FROM media_provider_metadata WHERE service=?1 AND media_id=?2",
@@ -759,8 +761,6 @@ pub fn upsert_provider_metadata(
             ],
         )?;
     }
-    tx.commit()?;
-
     Ok(ProviderMetadataUpsertReceipt {
         service: observation.service,
         media_id: observation.media_id,
@@ -771,6 +771,41 @@ pub fn upsert_provider_metadata(
         quality_rank,
         observed_at_ms: observation.observed_at_ms,
     })
+}
+
+pub fn upsert_provider_metadata(
+    paths: &AppPaths,
+    observation: ProviderMetadataObservation,
+) -> Result<ProviderMetadataUpsertReceipt> {
+    let observation = normalize_provider_metadata_observation(observation)?;
+    let mut conn = db::open(paths)?;
+    db::migrate(&conn)?;
+    let tx = conn.transaction()?;
+    let receipt = upsert_provider_metadata_tx(&tx, observation)?;
+    tx.commit()?;
+    Ok(receipt)
+}
+
+pub fn upsert_provider_metadata_batch(
+    paths: &AppPaths,
+    observations: Vec<ProviderMetadataObservation>,
+) -> Result<Vec<ProviderMetadataUpsertReceipt>> {
+    if observations.is_empty() {
+        return Ok(Vec::new());
+    }
+    let observations = observations
+        .into_iter()
+        .map(normalize_provider_metadata_observation)
+        .collect::<Result<Vec<_>>>()?;
+    let mut conn = db::open(paths)?;
+    db::migrate(&conn)?;
+    let tx = conn.transaction()?;
+    let mut receipts = Vec::with_capacity(observations.len());
+    for observation in observations {
+        receipts.push(upsert_provider_metadata_tx(&tx, observation)?);
+    }
+    tx.commit()?;
+    Ok(receipts)
 }
 
 pub fn set_operator_title_override(
@@ -1013,6 +1048,57 @@ mod tests {
         assert_eq!(stored.0, title);
         assert_eq!(stored.1, "한국어 日本語 😀 العربية line two");
         assert!(parse_provider_json_line(b"{\"raw_title\":\"bad\xff\"}").is_err());
+    }
+
+    #[test]
+    fn batch_upsert_is_atomic_and_preserves_each_observation_receipt() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let paths = AppPaths::new(dir.path().join("app"));
+        db::ensure_schema(&paths).expect("schema");
+        let mut second = fixture(
+            "두 번째 제목",
+            ProviderMetadataQuality::RemoteCanonical,
+            101,
+        );
+        second.media_id = "second-id".to_string();
+        let receipts = upsert_provider_metadata_batch(
+            &paths,
+            vec![
+                fixture(
+                    "첫 번째 제목",
+                    ProviderMetadataQuality::RemoteCanonical,
+                    100,
+                ),
+                second,
+            ],
+        )
+        .expect("batch upsert");
+        assert_eq!(receipts.len(), 2);
+        assert!(receipts.iter().all(|receipt| receipt.accepted));
+
+        let mut invalid = fixture(
+            "invalid batch member",
+            ProviderMetadataQuality::RemoteCanonical,
+            102,
+        );
+        invalid.media_id = " ".to_string();
+        let mut would_be_valid = fixture(
+            "must roll back",
+            ProviderMetadataQuality::RemoteCanonical,
+            102,
+        );
+        would_be_valid.media_id = "rollback-id".to_string();
+        assert!(upsert_provider_metadata_batch(&paths, vec![would_be_valid, invalid]).is_err());
+
+        let conn = db::open_readonly(&paths).expect("readonly");
+        let rollback_rows: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM media_provider_metadata WHERE media_id='rollback-id'",
+                [],
+                |row| row.get(0),
+            )
+            .expect("rollback count");
+        assert_eq!(rollback_rows, 0);
     }
 
     #[test]

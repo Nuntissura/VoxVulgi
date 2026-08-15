@@ -21,6 +21,12 @@ test("provider enumeration is strict UTF-8 JSON rather than delimiter or lossy t
   assert.match(boundary, /serde_json::from_slice/);
   assert.doesNotMatch(boundary, /from_utf8_lossy/);
   assert.doesNotMatch(boundary, /split_once\('\t'\)/);
+  const parserStart = jobsSource.indexOf("fn parse_ytdlp_flat_json_entries(");
+  const parserEnd = jobsSource.indexOf("fn source_subscription_id_for_job(", parserStart);
+  assert.ok(parserStart >= 0 && parserEnd > parserStart, "flat parser boundary must remain locatable");
+  const parserBoundary = jobsSource.slice(parserStart, parserEnd);
+  assert.match(parserBoundary, /upsert_provider_metadata_batch/);
+  assert.doesNotMatch(parserBoundary, /upsert_provider_metadata\(\s*paths/);
 });
 
 test("Jobs exposes canonical title provenance instead of flattening every title to one claim", () => {
