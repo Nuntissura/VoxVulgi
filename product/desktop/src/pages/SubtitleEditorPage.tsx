@@ -3,6 +3,16 @@ import { convertFileSrc, invoke } from "@tauri-apps/api/core";
 import { confirm, open, save } from "@tauri-apps/plugin-dialog";
 import { usePageActivity, usePollingLoop } from "../lib/activity";
 import { diagnosticsTrace } from "../lib/diagnosticsTrace";
+import {
+  evaluateClonePreflightSpeaker,
+  isFallbackCloneSegment,
+  plainLanguageCloneFallbackReason,
+  referenceQualityFactors,
+  segmentClonePresentation,
+  summarizeClonePreflight,
+  type ClonePreflightSummary,
+  type SegmentCloneInfo,
+} from "../lib/cloneUx";
 import { segmentAudioRange, segmentAudioReachedEnd } from "../lib/segmentAudioRange";
 import {
   buildDiarizationSpeakerCountRequest,
@@ -1361,7 +1371,11 @@ export function SubtitleEditorPage({
     if (raw === "ja" || raw === "ko") return raw;
     return "auto";
   });
-  const [segmentCloneMap, setSegmentCloneMap] = useState<Record<number, { outcome: string | null; error: string | null }>>({});
+  const [segmentCloneMap, setSegmentCloneMap] = useState<Record<number, SegmentCloneInfo>>({});
+  const [showFallbackCloneSegmentsOnly, setShowFallbackCloneSegmentsOnly] = useState(false);
+  const [clonePreflightSummary, setClonePreflightSummary] =
+    useState<ClonePreflightSummary | null>(null);
+  const [clonePreflightBusy, setClonePreflightBusy] = useState(false);
   const segmentAudioRef = useRef<HTMLAudioElement | null>(null);
   const segmentAudioTimer = useRef<number | null>(null);
   const segmentAudioRequest = useRef(0);
@@ -2725,6 +2739,19 @@ export function SubtitleEditorPage({
     };
   }, [activeVoiceCloneArtifact]);
 
+  const activeCloneFallbackReasons = useMemo(
+    () =>
+      Array.from(
+        new Set(
+          Object.values(segmentCloneMap)
+            .filter((segment) => segment.outcome === "fallback_tts")
+            .map((segment) => plainLanguageCloneFallbackReason(segment.error))
+            .filter((reason): reason is string => !!reason),
+        ),
+      ),
+    [segmentCloneMap],
+  );
+
   // WP-0186: Load per-segment clone breakdown when manifest artifact is available
   useEffect(() => {
     if (!activeVoiceCloneArtifact?.path) {
@@ -2738,7 +2765,7 @@ export function SubtitleEditorPage({
       { path: activeVoiceCloneArtifact.path },
     )
       .then((segments) => {
-        const map: Record<number, { outcome: string | null; error: string | null }> = {};
+        const map: Record<number, SegmentCloneInfo> = {};
         for (const seg of segments) {
           map[seg.index] = { outcome: seg.voice_clone_outcome, error: seg.voice_clone_error };
         }
@@ -2751,18 +2778,41 @@ export function SubtitleEditorPage({
   const prevCloneOutcomeRef = useRef<string | null>(null);
   useEffect(() => {
     if (!activeVoiceCloneTruth) return;
-    const key = `${activeVoiceCloneTruth.artifact.id}:${activeVoiceCloneTruth.label}`;
+    if (
+      (activeVoiceCloneTruth.artifact.voice_clone_fallback_segments ?? 0) > 0 &&
+      Object.keys(segmentCloneMap).length === 0
+    ) {
+      return;
+    }
+    const key = `${activeVoiceCloneTruth.artifact.id}:${activeVoiceCloneTruth.label}:${activeCloneFallbackReasons.join("|")}`;
     if (prevCloneOutcomeRef.current === key) return;
     prevCloneOutcomeRef.current = key;
     const outcome = activeVoiceCloneTruth.artifact.voice_clone_outcome;
+    logDiagnosticsEvent(
+      "localization.voice_clone_outcome",
+      {
+        artifact_id: activeVoiceCloneTruth.artifact.id,
+        manifest_path: activeVoiceCloneTruth.artifact.path,
+        outcome,
+        requested_segments: activeVoiceCloneTruth.artifact.voice_clone_requested_segments,
+        converted_segments: activeVoiceCloneTruth.artifact.voice_clone_converted_segments,
+        fallback_segments: activeVoiceCloneTruth.artifact.voice_clone_fallback_segments,
+        standard_tts_segments: activeVoiceCloneTruth.artifact.voice_clone_standard_tts_segments,
+        fallback_reasons: activeCloneFallbackReasons,
+      },
+      outcome === "clone_preserved" || outcome === "standard_tts_only" ? "info" : "warn",
+    );
+    const reasonSummary = activeCloneFallbackReasons.length
+      ? ` ${activeCloneFallbackReasons.join(" ")}`
+      : "";
     if (outcome === "clone_preserved") {
       setNotice(`Voice cloning complete: ${activeVoiceCloneTruth.label}. ${activeVoiceCloneTruth.detail || "All segments used cloned voice."}`);
     } else if (outcome === "partial_fallback" || outcome === "fallback_only") {
-      setError(`Voice cloning issue: ${activeVoiceCloneTruth.label}. ${activeVoiceCloneTruth.detail || "Some segments fell back to standard TTS."} Check voice samples and reference quality.`);
+      setError(`Voice cloning issue: ${activeVoiceCloneTruth.label}. ${activeVoiceCloneTruth.detail || "Some segments fell back to standard TTS."}${reasonSummary} Check voice samples and reference quality.`);
     } else if (outcome === "standard_tts_only") {
       setNotice(`Dubbing complete (standard TTS only). ${activeVoiceCloneTruth.detail || "No voice cloning was attempted."}`);
     }
-  }, [activeVoiceCloneTruth]);
+  }, [activeCloneFallbackReasons, activeVoiceCloneTruth, segmentCloneMap]);
 
   const voiceBasicsSpeakerSetting = useMemo(() => {
     if (!voiceBasicsSpeakerKey) return null;
@@ -4586,21 +4636,93 @@ export function SubtitleEditorPage({
     }
   }
 
-  function checkCloneReadiness(): { ready: boolean; warnings: string[] } {
-    const warnings: string[] = [];
-    if (!speakerSettings.length) {
-      warnings.push("No speakers configured. Run diarization first to label speakers.");
-      return { ready: false, warnings };
+  async function runClonePreflight(): Promise<ClonePreflightSummary> {
+    const cloneSpeakers = speakerSettings.filter(
+      (setting) => setting.render_mode === "clone" || !setting.render_mode,
+    );
+    if (!cloneSpeakers.length) {
+      const summary = summarizeClonePreflight([
+        evaluateClonePreflightSpeaker({
+          speakerKey: "unconfigured",
+          label: "Voice plan",
+          profilePaths: [],
+          curation: null,
+        }),
+      ]);
+      setClonePreflightSummary(summary);
+      return summary;
     }
-    for (const setting of speakerSettings) {
-      if (setting.render_mode === "clone" || !setting.render_mode) {
-        const paths = setting.tts_voice_profile_paths ?? [];
-        if (paths.length === 0) {
-          warnings.push(`Speaker "${setting.speaker_key}": no voice samples set. Will fall back to standard TTS.`);
-        }
+
+    const results = [];
+    for (const setting of cloneSpeakers) {
+      const profilePaths = speakerProfilePaths(setting);
+      const label = setting.display_name?.trim() || setting.speaker_key;
+      if (!profilePaths.length) {
+        results.push(
+          evaluateClonePreflightSpeaker({
+            speakerKey: setting.speaker_key,
+            label,
+            profilePaths,
+            curation: null,
+          }),
+        );
+        continue;
+      }
+      try {
+        const report = await invoke<VoiceReferenceCurationReport>(
+          "voice_reference_curation_generate",
+          { itemId, speakerKey: setting.speaker_key },
+        );
+        setVoiceReferenceCurationReports((prev) => ({
+          ...prev,
+          [setting.speaker_key]: report,
+        }));
+        results.push(
+          evaluateClonePreflightSpeaker({
+            speakerKey: setting.speaker_key,
+            label,
+            profilePaths,
+            curation: report,
+          }),
+        );
+      } catch (error) {
+        results.push(
+          evaluateClonePreflightSpeaker({
+            speakerKey: setting.speaker_key,
+            label,
+            profilePaths,
+            curation: null,
+            analysisError: String(error),
+          }),
+        );
       }
     }
-    return { ready: warnings.length === 0, warnings };
+    const summary = summarizeClonePreflight(results);
+    setClonePreflightSummary(summary);
+    logDiagnosticsEvent("localization.clone_preflight", {
+      tone: summary.tone,
+      ready: summary.ready,
+      speakers: summary.speakers,
+    }, summary.ready ? "info" : "warn");
+    return summary;
+  }
+
+  async function checkCloneReadinessOnly() {
+    setClonePreflightBusy(true);
+    setError(null);
+    setNotice(null);
+    try {
+      const summary = await runClonePreflight();
+      setNotice(
+        summary.ready
+          ? "Clone readiness check complete: all speakers are ready."
+          : `Clone readiness check complete: ${summary.title}. Fix the flagged references or proceed from Run voice-preserving dub after review.`,
+      );
+    } catch (error) {
+      setError(String(error));
+    } finally {
+      setClonePreflightBusy(false);
+    }
   }
 
   async function enqueueDubVoicePreservingV1() {
@@ -4644,9 +4766,11 @@ export function SubtitleEditorPage({
     }
 
     // WP-0187: Pre-flight check
-    const preflight = checkCloneReadiness();
+    const preflight = await runClonePreflight();
     if (!preflight.ready) {
-      const msg = `Clone pre-flight check:\n${preflight.warnings.join("\n")}\n\nProceed anyway?`;
+      const msg = `Clone pre-flight check: ${preflight.title}\n${preflight.speakers
+        .map((speaker) => `${speaker.label}: ${speaker.summary}${speaker.guidance ? ` ${speaker.guidance}` : ""}`)
+        .join("\n")}\n\nProceed anyway?`;
       const proceed = await confirm(msg, { title: "Voice cloning readiness", kind: "warning" });
       if (!proceed) {
         setBusy(false);
@@ -6716,9 +6840,16 @@ export function SubtitleEditorPage({
           ) : null}
           {activeVoiceCloneTruth ? (
             <div className={`loc-workspace-rail-clone loc-workspace-rail-clone-${
-              activeVoiceCloneTruth.tone.color === "#9a3412" ? "warn" : "ok"
+              activeVoiceCloneTruth.artifact.voice_clone_outcome === "partial_fallback" ||
+              activeVoiceCloneTruth.artifact.voice_clone_outcome === "fallback_only"
+                ? "warn"
+                : "ok"
             }`}>
               Clone status: {activeVoiceCloneTruth.label}
+              {activeVoiceCloneTruth.detail ? ` — ${activeVoiceCloneTruth.detail}` : ""}
+              {activeCloneFallbackReasons.length
+                ? ` ${activeCloneFallbackReasons.join(" ")}`
+                : ""}
             </div>
           ) : null}
         </aside>
@@ -6878,6 +7009,15 @@ export function SubtitleEditorPage({
                 </button>
               </>
             ) : null}
+            {selectedStage === "voice_plan" ? (
+              <button
+                type="button"
+                disabled={busy || clonePreflightBusy}
+                onClick={() => checkCloneReadinessOnly().catch((error) => setError(String(error)))}
+              >
+                {clonePreflightBusy ? "Checking clone readiness..." : "Check clone readiness"}
+              </button>
+            ) : null}
             {selectedStage === "dub" ? (
               <button
                 type="button"
@@ -6919,6 +7059,47 @@ export function SubtitleEditorPage({
               </>
             ) : null}
           </div>
+          {clonePreflightSummary ? (
+            <div
+              aria-label="Voice cloning pre-flight summary"
+              style={{
+                marginTop: 10,
+                borderRadius: 10,
+                padding: "10px 12px",
+                border:
+                  clonePreflightSummary.tone === "green"
+                    ? "1px solid #bbf7d0"
+                    : clonePreflightSummary.tone === "yellow"
+                      ? "1px solid #fde68a"
+                      : "1px solid #fecaca",
+                color:
+                  clonePreflightSummary.tone === "green"
+                    ? "#166534"
+                    : clonePreflightSummary.tone === "yellow"
+                      ? "#854d0e"
+                      : "#991b1b",
+                background:
+                  clonePreflightSummary.tone === "green"
+                    ? "#ecfdf5"
+                    : clonePreflightSummary.tone === "yellow"
+                      ? "#fffbeb"
+                      : "#fef2f2",
+              }}
+            >
+              <div style={{ fontWeight: 700 }}>{clonePreflightSummary.title}</div>
+              {clonePreflightSummary.speakers.map((speaker) => (
+                <div key={`clone-preflight-${speaker.speakerKey}`} style={{ marginTop: 4, fontSize: 12 }}>
+                  <strong>{speaker.label}:</strong> {speaker.summary}
+                  {speaker.guidance ? ` ${speaker.guidance}` : ""}
+                </div>
+              ))}
+              <div style={{ marginTop: 6, fontSize: 12 }}>
+                Reference quality tip: use 3-12 seconds of clear speech, no background music,
+                natural pace. You can proceed anyway after reviewing warnings, or fix the voice
+                references first.
+              </div>
+            </div>
+          ) : null}
           {selectedStage === "speakers" ? (
             <div className="loc-workspace-stage-hint">
               <strong>Speakers</strong> &mdash; diarization runs from the strip above. Per-speaker
@@ -7394,6 +7575,11 @@ export function SubtitleEditorPage({
             <div style={{ fontSize: 12 }}>
               {activeVoiceCloneTruth.detail || "No segment-level counts were reported."}
             </div>
+            {activeCloneFallbackReasons.length ? (
+              <div style={{ fontSize: 12 }}>
+                Fallback reason: {activeCloneFallbackReasons.join(" ")}
+              </div>
+            ) : null}
             <div style={{ fontSize: 12, opacity: 0.85 }}>
               Source manifest: <code>{activeVoiceCloneTruth.artifact.path}</code>
             </div>
@@ -7849,7 +8035,7 @@ export function SubtitleEditorPage({
         )}
       </div>
 
-      <div className="card loc-stage-card" data-stage="captions" id="loc-track">
+      <div className="card loc-stage-card" data-stage="captions voice_plan" id="loc-track">
         <h2>Track <SectionHelp sectionId="loc-track" /></h2>
         <div className="row">
           <select
@@ -8660,6 +8846,46 @@ export function SubtitleEditorPage({
                                     <div style={{ fontSize: 12, opacity: 0.75 }}>
                                       {`dur ${Math.round(entry.stats.duration_ms)} ms | silence ${Math.round(entry.stats.silence_ratio * 100)}% | clipping ${(entry.stats.clipped_ratio * 100).toFixed(2)}% | warnings ${entry.warn_count} | fails ${entry.fail_count}`}
                                     </div>
+                                    <div
+                                      aria-label={`Reference quality factors for ${entry.label}`}
+                                      style={{
+                                        display: "grid",
+                                        gridTemplateColumns: "repeat(auto-fit, minmax(150px, 1fr))",
+                                        gap: 6,
+                                      }}
+                                    >
+                                      {referenceQualityFactors(entry.stats, entry.score_breakdown).map(
+                                        (factor) => {
+                                          const tone =
+                                            factor.state === "good"
+                                              ? { color: "#166534", background: "#dcfce7" }
+                                              : factor.state === "marginal"
+                                                ? { color: "#854d0e", background: "#fef9c3" }
+                                                : { color: "#991b1b", background: "#fee2e2" };
+                                          return (
+                                            <div
+                                              key={`${entry.path}-${factor.key}`}
+                                              style={{
+                                                borderRadius: 8,
+                                                padding: "6px 8px",
+                                                color: tone.color,
+                                                background: tone.background,
+                                              }}
+                                            >
+                                              <div style={{ fontSize: 11, fontWeight: 700 }}>
+                                                {factor.label}: {factor.state}
+                                              </div>
+                                              <div style={{ fontSize: 11 }}>{factor.detail}</div>
+                                              {factor.suggestion ? (
+                                                <div style={{ marginTop: 3, fontSize: 11 }}>
+                                                  Improve: {factor.suggestion}
+                                                </div>
+                                              ) : null}
+                                            </div>
+                                          );
+                                        },
+                                      )}
+                                    </div>
                                     {entry.strengths.length ? (
                                       <div style={{ fontSize: 12, opacity: 0.75 }}>
                                         Strengths: {entry.strengths.join(" | ")}
@@ -8675,6 +8901,20 @@ export function SubtitleEditorPage({
                             </div>
                           </div>
                         ) : null}
+                        <div
+                          style={{
+                            border: "1px solid #dbeafe",
+                            borderRadius: 8,
+                            padding: 8,
+                            fontSize: 12,
+                            color: "#1e3a8a",
+                            background: "#eff6ff",
+                          }}
+                        >
+                          <strong>Reference quality tips:</strong> use 3-12 seconds of clear speech,
+                          avoid background music and clipping, trim long silence, and keep a natural
+                          pace and pitch.
+                        </div>
                         <div className="row" style={{ alignItems: "center", gap: 10, flexWrap: "wrap" }}>
                           <select
                             value={setting?.render_mode ?? ""}
@@ -11387,6 +11627,24 @@ export function SubtitleEditorPage({
             </div>
 
             <div className="table-wrap">
+              {Object.keys(segmentCloneMap).length ? (
+                <label
+                  style={{
+                    display: "flex",
+                    alignItems: "center",
+                    gap: 8,
+                    padding: "8px 10px",
+                    fontSize: 12,
+                  }}
+                >
+                  <input
+                    type="checkbox"
+                    checked={showFallbackCloneSegmentsOnly}
+                    onChange={(event) => setShowFallbackCloneSegmentsOnly(event.currentTarget.checked)}
+                  />
+                  Show fallback segments only
+                </label>
+              ) : null}
               <table>
                 <thead>
                   <tr>
@@ -11395,13 +11653,21 @@ export function SubtitleEditorPage({
                     <th>Start</th>
                     <th>End</th>
                     <th>Spk</th>
+                    <th>Clone status</th>
                     <th>Text{doc ? ` (${doc.lang})` : ""}</th>
                     {bilingualDoc ? <th>Other ({bilingualDoc.lang})</th> : null}
                     <th>Actions</th>
                   </tr>
                 </thead>
                 <tbody>
-                  {doc.segments.map((seg, i) => (
+                  {doc.segments
+                    .map((seg, i) => ({ seg, i }))
+                    .filter(
+                      ({ seg }) =>
+                        !showFallbackCloneSegmentsOnly ||
+                        isFallbackCloneSegment(segmentCloneMap[seg.index]),
+                    )
+                    .map(({ seg, i }) => (
                     <tr
                       key={`${seg.index}-${i}`}
                       data-audio-playing={playingSegmentIndex === i ? "true" : undefined}
@@ -11413,34 +11679,6 @@ export function SubtitleEditorPage({
                     >
                       <td>
                         <code>{i + 1}</code>
-                        {segmentCloneMap[i] ? (
-                          <span
-                            title={
-                              segmentCloneMap[i].outcome === "converted"
-                                ? "Cloned"
-                                : segmentCloneMap[i].outcome === "fallback_tts"
-                                  ? `Fallback TTS${segmentCloneMap[i].error ? `: ${segmentCloneMap[i].error}` : ""}`
-                                  : segmentCloneMap[i].outcome === "standard_tts"
-                                    ? "Standard TTS"
-                                    : segmentCloneMap[i].outcome ?? "Unknown"
-                            }
-                            style={{
-                              display: "inline-block",
-                              width: 8,
-                              height: 8,
-                              borderRadius: "50%",
-                              marginLeft: 4,
-                              background:
-                                segmentCloneMap[i].outcome === "converted"
-                                  ? "#22c55e"
-                                  : segmentCloneMap[i].outcome === "fallback_tts"
-                                    ? "#ef4444"
-                                    : segmentCloneMap[i].outcome === "standard_tts"
-                                      ? "#6b7280"
-                                      : "#eab308",
-                            }}
-                          />
-                        ) : null}
                       </td>
                       <td>
                         <input
@@ -11531,6 +11769,33 @@ export function SubtitleEditorPage({
                           return setting?.display_name ?? k;
                         })()}
                       </code>
+                    </td>
+                    <td>
+                      {(() => {
+                        const presentation = segmentClonePresentation(segmentCloneMap[seg.index]);
+                        return (
+                          <div style={{ display: "flex", flexDirection: "column", gap: 3 }}>
+                            <span
+                              style={{
+                                alignSelf: "flex-start",
+                                borderRadius: 999,
+                                padding: "2px 7px",
+                                fontSize: 11,
+                                fontWeight: 600,
+                                color: presentation.color,
+                                background: presentation.background,
+                              }}
+                            >
+                              {presentation.label}
+                            </span>
+                            {presentation.detail ? (
+                              <span style={{ maxWidth: 240, fontSize: 11, color: "#4b5563" }}>
+                                {presentation.detail}
+                              </span>
+                            ) : null}
+                          </div>
+                        );
+                      })()}
                     </td>
                     <td style={{ minWidth: 320 }}>
                       <textarea

@@ -3,7 +3,7 @@
 ## Metadata
 - ID: WP-0188
 - Owner: Codex
-- Status: REVIEW
+- Status: DONE
 - Created: 2026-04-08
 - Target milestone: Voice Cloning UX
 
@@ -31,3 +31,11 @@ Out of scope:
 - Each speaker's reference shows a multi-factor quality breakdown.
 - Weak factors are highlighted with improvement suggestions.
 - `npm run build` passes.
+
+## Final verification
+
+- Focused clone UX tests: 9 passed, 0 failed, including all seven curation factors and unavailable-pitch guidance.
+- Frontend production build passed.
+- Governed desktop build produced packaged v0.1.153.
+- Hidden packaged-app proof rendered all seven factors from real `candidate_bundle_v1.wav` curation (score 93.3), including the corrected unavailable-pitch suggestion. The screenshot was visually inspected and the paired dump recorded zero console entries.
+- Proof bundle: `product/desktop/build_target/tool_artifacts/wp_runs/WP-0188/20260815-0205_v0_1_153/summary.md`.

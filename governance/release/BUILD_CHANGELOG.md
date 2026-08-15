@@ -1218,3 +1218,35 @@ This changelog tracks desktop installer builds produced by `governance/scripts/b
 - Artifacts:
   - `product/desktop/build_target/Current/release/bundle/nsis/VoxVulgi_0.1.149_x64-setup.exe`
 - Notes: WP-0182: enable exact-file dynamic Tauri asset scope for owned source/derived media; harden segment playback cancellation and visible media errors.
+
+## 0.1.150 - 2026-08-14T23:23:36Z
+- Work Packets: `WP-0185`, `WP-0186`, `WP-0188`
+- Commit: `10944fe`
+- Offline Bundle ID: `offline_full_win64_20260814_082842`
+- Artifacts:
+  - `product/desktop/build_target/Current/release/bundle/nsis/VoxVulgi_0.1.150_x64-setup.exe`
+- Notes: Clone outcome diagnostics, canonical per-segment fallback review, and seven-factor reference quality explanation. Built in place because an unidentified directory handle blocked archival while every file passed exclusive-open validation.
+
+## 0.1.151 - 2026-08-14T23:36:53Z
+- Work Packets: `WP-0185`, `WP-0186`, `WP-0187`, `WP-0188`
+- Commit: `10944fe`
+- Offline Bundle ID: `offline_full_win64_20260814_082842`
+- Artifacts:
+  - `product/desktop/build_target/Current/release/bundle/nsis/VoxVulgi_0.1.151_x64-setup.exe`
+- Notes: Final clone UX wave: outcome diagnostics, canonical per-segment fallback review, authoritative sequential clone preflight, visible full voice-plan routing, and seven-factor reference quality explanation. Built in place because an unidentified directory handle blocked archival while every file passed exclusive-open validation.
+
+## 0.1.152 - 2026-08-14T23:47:04Z
+- Work Packets: `WP-0185`, `WP-0186`, `WP-0187`, `WP-0188`
+- Commit: `10944fe`
+- Offline Bundle ID: `offline_full_win64_20260814_082842`
+- Artifacts:
+  - `product/desktop/build_target/Current/release/bundle/nsis/VoxVulgi_0.1.152_x64-setup.exe`
+- Notes: Final clone UX wave with visually reviewed pitch-unavailable guidance: outcome diagnostics, canonical per-segment fallback review, authoritative sequential clone preflight, visible full voice-plan routing, and seven-factor reference quality explanation. Built in place because an unidentified directory handle blocked archival while every file passed exclusive-open validation.
+
+## 0.1.153 - 2026-08-14T23:59:21Z
+- Work Packets: `WP-0185`, `WP-0186`, `WP-0187`, `WP-0188`
+- Commit: `10944fe`
+- Offline Bundle ID: `offline_full_win64_20260814_082842`
+- Artifacts:
+  - `product/desktop/build_target/Current/release/bundle/nsis/VoxVulgi_0.1.153_x64-setup.exe`
+- Notes: Final clone UX wave with dedicated non-queueing clone readiness check, visually reviewed pitch-unavailable guidance, outcome diagnostics, canonical per-segment fallback review, visible full voice-plan routing, and seven-factor reference quality explanation. Built in place because an unidentified directory handle blocked archival while every file passed exclusive-open validation.

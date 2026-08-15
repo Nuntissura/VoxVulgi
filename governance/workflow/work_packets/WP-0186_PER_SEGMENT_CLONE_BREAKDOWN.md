@@ -3,7 +3,7 @@
 ## Metadata
 - ID: WP-0186
 - Owner: Codex
-- Status: REVIEW
+- Status: DONE
 - Created: 2026-04-08
 - Target milestone: Voice Cloning UX
 
@@ -30,3 +30,11 @@ Out of scope:
 - Operators can filter to show only fallback segments.
 - Fallback reasons are shown in plain language.
 - `npm run build` passes.
+
+## Final verification
+
+- Focused clone UX tests: 9 passed, 0 failed.
+- Frontend production build passed.
+- Governed desktop build produced packaged v0.1.153.
+- Hidden packaged-app proof rendered the Clone status column, green `Cloned` status, and fallback-only filter from the real manifest. The filter changed rendered rows 2 -> 0 -> 2 without mutating data; the paired dump recorded zero console entries.
+- Proof bundle: `product/desktop/build_target/tool_artifacts/wp_runs/WP-0186/20260815-0205_v0_1_153/summary.md`.
