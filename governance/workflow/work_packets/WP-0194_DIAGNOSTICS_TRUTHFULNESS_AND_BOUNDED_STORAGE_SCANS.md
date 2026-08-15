@@ -3,7 +3,7 @@
 ## Metadata
 - ID: WP-0194
 - Owner: Codex
-- Status: IN_PROGRESS
+- Status: DONE
 - Created: 2026-04-23
 - Target milestone: Desktop diagnostics reliability
 
@@ -40,3 +40,4 @@ Out of scope:
 
 - 2026-04-23: Created after smoke reported Tools/Storage still loading long after startup, while trace evidence showed offline bundle hydration already completed successfully.
 - 2026-04-23: Implemented a first truthfulness pass: Diagnostics now loads core tool readiness before optional pack details, summary cards no longer default to misleading `Missing`/`Not installed` states while still checking, and engine storage scans are explicitly bounded so the storage section can settle. `cargo check` passed.
+- 2026-08-15: DONE on packaged v0.1.168. Hidden app-boundary verification first proved an empty app-data root settles honestly at 6/6 ready with FFmpeg missing, then reran with exact FFmpeg/ffprobe bytes from the governed offline payload present at the canonical installed paths. The hydrated-tools run settled after 30 seconds at `Diagnostics ready: 6/6`, `Loading: 0`, `Failed: 0`, `FFmpeg Ready`, and `Storage 1 MB`; the snapshot was visually inspected and the semantic audit had 0 unnamed controls. Focused diagnostics contracts passed 6/6. Proof: `product/desktop/build_target/tool_artifacts/wp_runs/WP-0194/20260815-1128_v0_1_168/summary.md`.
