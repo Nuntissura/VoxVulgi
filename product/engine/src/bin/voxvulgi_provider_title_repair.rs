@@ -108,12 +108,14 @@ fn readonly_logical_fingerprint(path: &Path) -> Result<(String, usize), String> 
         let mut stmt = conn
             .prepare("SELECT name, COALESCE(sql, '') FROM sqlite_schema WHERE type='table' ORDER BY name")
             .map_err(|error| format!("prepare schema fingerprint for {}: {error}", path.display()))?;
-        stmt.query_map([], |row| {
-            Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
-        })
-        .map_err(|error| format!("query schema fingerprint for {}: {error}", path.display()))?
-        .collect::<rusqlite::Result<Vec<_>>>()
-        .map_err(|error| format!("read schema fingerprint for {}: {error}", path.display()))?
+        let rows = stmt
+            .query_map([], |row| {
+                Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+            })
+            .map_err(|error| format!("query schema fingerprint for {}: {error}", path.display()))?
+            .collect::<rusqlite::Result<Vec<_>>>()
+            .map_err(|error| format!("read schema fingerprint for {}: {error}", path.display()))?;
+        rows
     };
     let mut hasher = Sha256::new();
     hash_framed(&mut hasher, b"voxvulgi-logical-sqlite-v1");
@@ -124,12 +126,14 @@ fn readonly_logical_fingerprint(path: &Path) -> Result<(String, usize), String> 
             let mut stmt = conn
                 .prepare("SELECT name, pk FROM pragma_table_info(?1) ORDER BY cid")
                 .map_err(|error| format!("prepare columns for {table_name}: {error}"))?;
-            stmt.query_map([table_name], |row| {
-                Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)?))
-            })
-            .map_err(|error| format!("query columns for {table_name}: {error}"))?
-            .collect::<rusqlite::Result<Vec<_>>>()
-            .map_err(|error| format!("read columns for {table_name}: {error}"))?
+            let rows = stmt
+                .query_map([table_name], |row| {
+                    Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)?))
+                })
+                .map_err(|error| format!("query columns for {table_name}: {error}"))?
+                .collect::<rusqlite::Result<Vec<_>>>()
+                .map_err(|error| format!("read columns for {table_name}: {error}"))?;
+            rows
         };
         if columns.is_empty() {
             return Err(format!(
