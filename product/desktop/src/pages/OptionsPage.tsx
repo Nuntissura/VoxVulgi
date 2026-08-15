@@ -3109,17 +3109,34 @@ export function OptionsPage() {
             onChange={(e) => updateFontScale(Number(e.currentTarget.value))}
             style={{ flex: 1, minWidth: 240 }}
           />
-          <button type="button" onClick={() => updateFontScale(100)}>
+          <button
+            type="button"
+            data-testid="options-font-scale-100"
+            data-agent-safe-action="true"
+            onClick={() => updateFontScale(100)}
+          >
             100%
           </button>
-          <button type="button" onClick={() => updateFontScale(110)}>
+          <button
+            type="button"
+            data-testid="options-font-scale-110"
+            data-agent-safe-action="true"
+            onClick={() => updateFontScale(110)}
+          >
             110%
           </button>
-          <button type="button" onClick={() => updateFontScale(120)}>
+          <button
+            type="button"
+            data-testid="options-font-scale-120"
+            data-agent-safe-action="true"
+            onClick={() => updateFontScale(120)}
+          >
             120%
           </button>
           <button
             type="button"
+            data-testid="options-font-scale-reset"
+            data-agent-safe-action="true"
             onClick={() => {
               updateFontScale(100);
             }}

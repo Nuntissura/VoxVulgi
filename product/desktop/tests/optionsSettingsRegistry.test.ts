@@ -303,6 +303,12 @@ test("desktop font scale exposes a stable accessible control name and value", ()
   const source = readFileSync(new URL("../src/pages/OptionsPage.tsx", import.meta.url), "utf8");
   assert.match(source, /aria-label="Desktop font scale"/);
   assert.match(source, /aria-valuetext=\{`\$\{fontScalePct\}%`\}/);
+  for (const id of ["100", "110", "120", "reset"]) {
+    assert.match(
+      source,
+      new RegExp(`data-testid="options-font-scale-${id}"[\\s\\S]{0,120}data-agent-safe-action="true"`),
+    );
+  }
 });
 
 test("module reset proves fresh rollback baselines before invoking the first adapter", () => {
