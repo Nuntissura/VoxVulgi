@@ -2,7 +2,7 @@
 
 ## Status
 
-IN_PROGRESS
+DONE
 
 ## Owner
 
@@ -46,3 +46,4 @@ Codex
 
 - 2026-05-12: Created after operator approval of the setup-first Localization Studio direction.
 - 2026-05-12: Implemented the setup-first home, source-copy export command, `.sub-en` / `.dub-en` naming, and subtitle-only run mode. `npm run build`, targeted engine test, and Tauri `cargo check` pass. Headless snapshot against the already-running app still showed the old loaded frontend because the WebView had not reloaded; no app restart/focus steal was performed.
+- 2026-08-15: Closed on the freshly built v0.1.163 artifact. Hidden bridge identity/state checks passed; the Localization audit returned 37/37 elements with 0 missing accessible names; setup, run/progress, Options-linked output, source-copy, and successful-output surfaces were visually inspected without changing the persisted `Show all help` preference. The focused subtitle-only engine test passed 1/1 and the dedicated WP-0214 contract passed 3/3. Proof: `product/desktop/build_target/tool_artifacts/wp_runs/WP-0214/20260815-0830_v0_1_163/summary.md`.
