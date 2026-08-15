@@ -3,7 +3,7 @@
 ## Metadata
 - ID: WP-0205
 - Owner: Codex
-- Status: IN_PROGRESS
+- Status: DONE
 - Created: 2026-04-25
 - Target milestone: Localization operator usability
 - Supersedes direction of: WP-0153, WP-0154
@@ -48,3 +48,5 @@ Out of scope:
 ## Status updates
 
 - 2026-04-25: Created. Operator feedback retired the WP-0154 orientation-cards direction. Implementation pass started.
+- 2026-08-15: Closed against packaged v0.1.168 and the current setup-first successor layout. Semantic audit returned 49 elements, 0 missing accessible names, and no retired `Now / Next / Last Output` matches while retaining the setup region, Start localization control, successful-output area, and recent-workbench drawer.
+- 2026-08-15: Source contract confirms the 2.5-second loop is disabled unless an import or a recent item is running, targets only pending/running items, and refreshes statuses through one batched home-output command. Product and technical specs now explicitly retire the orientation grid; WP-0154's packet status is synchronized to `SUPERSEDED`.

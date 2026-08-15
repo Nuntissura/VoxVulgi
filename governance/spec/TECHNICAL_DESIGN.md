@@ -443,7 +443,7 @@ Operator-flow implementation requirements:
   - current-item/run/output surfaces should show clone-truth labels from runtime metadata rather than generic dub-success messaging,
   - benchmark cards may add detail, but clone-vs-fallback truth must already be visible on the main item path.
 - Item handoff from import -> current localization item should be visible inside Localization Studio rather than hidden behind a separate Media Library navigation step.
-- The Localization home surface should expose a compact first-screen orientation layer that makes the current item, recommended next action, and latest preview or deliverable path obvious without a second navigation hop.
+- The Localization home surface uses one setup-first workbench plus successful-output and recent-item recovery surfaces; it does not render a separate `Now / Next / Last Output` orientation grid. Status refresh is event-driven on entry and otherwise polls only while an import or localization run is active, using the batched home-output projection rather than per-item job fan-out.
 - Non-blocking startup/recovery state should use compact shell-level status affordances when the app is otherwise usable; expanded cards or modal detail views should be reserved for Safe Mode, active startup failure, or explicit operator request for details.
 
 R&D plan: see `governance/spec/VOICE_PRESERVING_DUBBING_RD_PLAN.md`.

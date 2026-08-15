@@ -3,7 +3,8 @@
 ## Metadata
 - ID: WP-0154
 - Owner: Codex
-- Status: IN_PROGRESS
+- Status: SUPERSEDED
+- Superseded by: WP-0205
 - Created: 2026-03-22
 - Target milestone: Post-0.1.6 localization-first recovery
 
@@ -48,3 +49,4 @@ Out of scope:
 
 - 2026-03-22: Created as the implementation follow-on to `WP-0153` after the first dashboard refactor still left startup/recovery chrome too dominant on the Localization first screen.
 - 2026-03-22: Implemented the follow-on hierarchy tranche in the desktop app: Localization home now shows an explicit `Now / Next / Last Output` orientation layer, while Safe Mode and startup hydration states render as compact shell-status cards/pills instead of large generic content cards. Verified with `npm run build`; live operator validation is still required.
+- 2026-08-15: Superseded by WP-0205 after operator feedback rejected the orientation-card layer. The compact shell-status portion remains; the `Now / Next / Last Output` requirement is retired.
