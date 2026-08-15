@@ -1,7 +1,7 @@
 ---
 file_id: WP-0283-v1
 file_kind: work-packet
-updated_at: 2026-07-27
+updated_at: 2026-08-15
 ---
 
 <topic id="contract" status="in-progress" version="v1" wp="WP-0283" updated_at="2026-07-27">
@@ -45,5 +45,6 @@ Correct the unproven queued-versus-queued gap left by WP-0276 and prevent legacy
 # Status updates
 
 - 2026-07-27: Created after repo and live-library inspection proved WP-0276 canceled only queued jobs linked to already-present media and did not compact queued-versus-queued canonical identities. Queue remains paused.
+- 2026-08-15: Current runner enforced the live queue pause, created and reopened a verified 1,066,110,976-byte online backup (`quick_check=ok`, SHA-256 `c76c6cc1b0a1bf7f50627aa55f8047a1ea9f0c471629552b07c50447f2cb7b68`), scanned all 7,588 queued direct jobs, and applied with zero duplicate identities, present jobs, claim mismatches, or running direct jobs. An independent read-only live-versus-backup audit proved job, membership, association, batch, retry, identity, and active-claim counts were preserved. Focused reconciliation, post-backup storage revalidation, execution-gate, and runner build checks pass. Live proof: `product/desktop/build_target/tool_artifacts/wp_runs/WP-0283/20260815_live_closure/summary.md`. Packet remains `IN_PROGRESS` until the combined current-state governed desktop build and packaged app-boundary gate pass.
 
 </topic>
