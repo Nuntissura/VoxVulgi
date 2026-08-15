@@ -43,6 +43,15 @@ test("agent UI audit bridge is headless-only and has no arbitrary eval route", (
   assert.match(rust, /agent_bridge_marker_owned_by_process/);
 });
 
+test("agent UI audit includes app chrome while preserving stateful-only activation", () => {
+  const auditSource = readRepoFile("src", "lib", "agentUiAudit.ts");
+  const app = readRepoFile("src", "App.tsx");
+  assert.match(auditSource, /const root = document\.body/);
+  assert.match(app, /className=\{`safe-mode-pill[\s\S]{0,320}aria-pressed=\{safeMode\?\.enabled \?\? false\}/);
+  assert.match(app, /aria-label="Dismiss Safe Mode exit notice"[\s\S]{0,120}data-agent-safe-action="true"/);
+  assert.doesNotMatch(app, /className="win-btn"[\s\S]{0,160}data-agent-safe-action="true"/);
+});
+
 test("Windows headless startup hides without blocking the setup thread", () => {
   const rust = readRepoFile("src-tauri", "src", "lib.rs");
   const windowsHide = rust.match(

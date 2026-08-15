@@ -264,7 +264,12 @@ function describeElement(element: HTMLElement): AgentUiElement {
 }
 
 export function buildAgentUiAudit(request: AgentUiAuditRequest = {}): AgentUiAuditResult {
-  const root = document.querySelector<HTMLElement>(".content") ?? document.body;
+  // WP-0212: app chrome is part of the product surface too. Restricting the
+  // inventory to `.content` made the mandated headless proof path unable to
+  // inspect stateful topbar controls such as the Safe Mode pill. Action safety
+  // remains governed by classifySafeAgentActions; widening discovery does not
+  // make generic chrome buttons clickable.
+  const root = document.body;
   const requestedLimit = Number.isFinite(request.limit) ? Number(request.limit) : 700;
   const limit = Math.max(1, Math.min(1500, Math.trunc(requestedLimit)));
   const candidates = Array.from(

@@ -4154,6 +4154,7 @@ function App() {
                   className="shell-status-card-close"
                   aria-label="Dismiss Safe Mode exit notice"
                   title="Dismiss"
+                  data-agent-safe-action="true"
                   onClick={() => setSafeModeExitNoticeVisible(false)}
                 >
                   &#x2715;

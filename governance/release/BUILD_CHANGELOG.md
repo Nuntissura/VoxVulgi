@@ -1330,3 +1330,19 @@ This changelog tracks desktop installer builds produced by `governance/scripts/b
 - Artifacts:
   - `product/desktop/build_target/Current/release/bundle/nsis/VoxVulgi_0.1.163_x64-setup.exe`
 - Notes: WP-0229 adds installed-pack short-circuiting for all six Phase2 packs plus explicit force routing and force-safe resume behavior.
+
+## 0.1.164 - 2026-08-15T06:30:00Z
+- Work Packets: `WP-0212`
+- Commit: `d453405`
+- Offline Bundle ID: `offline_full_win64_20260814_082842`
+- Artifacts:
+  - `product/desktop/build_target/Current/release/bundle/nsis/VoxVulgi_0.1.164_x64-setup.exe`
+- Notes: WP-0212 makes topbar chrome discoverable to the existing headless semantic audit while retaining stateful-only click safety.
+
+## 0.1.165 - 2026-08-15T06:43:13Z
+- Work Packets: `WP-0212`
+- Commit: `d453405`
+- Offline Bundle ID: `offline_full_win64_20260814_082842`
+- Artifacts:
+  - `product/desktop/build_target/Current/release/bundle/nsis/VoxVulgi_0.1.165_x64-setup.exe`
+- Notes: WP-0212 completes hidden Safe Mode proof support by auditing app chrome and allowlisting only the session-local exit-notice dismiss control.

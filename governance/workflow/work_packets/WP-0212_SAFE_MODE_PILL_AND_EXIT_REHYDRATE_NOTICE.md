@@ -3,7 +3,7 @@
 ## Metadata
 - ID: WP-0212
 - Owner: Codex
-- Status: IN_PROGRESS
+- Status: BLOCKED
 - Created: 2026-04-27
 - Target milestone: Operator UX clarity
 - Builds on: WP-0060
@@ -58,3 +58,5 @@ Out of scope (deferred):
 ## Status updates
 
 - 2026-04-27: Created.
+- 2026-08-15: Governed v0.1.165 proof completed for the hidden-testable contract. The bridge now inventories app chrome; OFF→ON, queue pause, persisted-ON restart, skipped Safe Mode hydration, ON→OFF, queue resume, inline notice, X dismiss, and clean OFF restart all passed in an isolated app-data root with 0 missing accessible names. Focused bridge contracts passed 8/8, TypeScript passed, and the normal-vs-safe-vs-headless Rust startup gate passed 1/1. Proof: `product/desktop/build_target/tool_artifacts/wp_runs/WP-0212/20260815-0905_v0_1_165/summary.md`.
+- 2026-08-15: Status is `BLOCKED`, not `DONE`, on the final installed non-headless restart proving `offline_bundle=ready`. Headless mode intentionally skips hydration even when Safe Mode is OFF, and launching a foreground installed app would violate the no-focus-steal proof rule.
