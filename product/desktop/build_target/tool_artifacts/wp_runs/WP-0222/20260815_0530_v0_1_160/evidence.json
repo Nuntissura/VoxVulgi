@@ -1,0 +1,22 @@
+{
+  "wp": "WP-0222",
+  "app_version": "0.1.160",
+  "outcome": "BLOCKED",
+  "rust_test": {
+    "command": "cargo test --manifest-path product/desktop/src-tauri/Cargo.toml windows_reveal_accepts_exit_one_only_for_file_selection -- --nocapture",
+    "passed": 1,
+    "failed": 0,
+    "cargo_build_jobs": 1,
+    "priority": "BelowNormal"
+  },
+  "frontend_contract": {
+    "command": "node --import tsx --test tests/revealMediaTruthfulnessContract.test.ts",
+    "passed": 2,
+    "failed": 0
+  },
+  "manual_smoke": {
+    "required": true,
+    "completed": false,
+    "blocker": "Foreground Explorer launch is forbidden during quiet agent testing."
+  }
+}

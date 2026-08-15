@@ -2,7 +2,7 @@
 
 ## Status
 
-IN_PROGRESS
+BLOCKED
 
 ## Base Scope
 
@@ -16,7 +16,7 @@ IN_PROGRESS
 ## Research Basis
 
 - The reveal command runs `explorer.exe /select,<file>` on Windows (`product/desktop/src-tauri/src/lib.rs:2046-2055`).
-- Microsoft's documented behavior for `explorer.exe /select,` is to return exit code 1 even on successful Explorer launch + file selection. This is a well-known quirk going back at least to Windows 7 and reproducible on Windows 10/11.
+- Microsoft's community support material documents the `explorer.exe /select,<path>` syntax, but no checked official Microsoft source documents exit code 1 as a success code. The exit-1/success behavior is established here by the operator's exact runtime report: Explorer opened and selected the target while the pre-fix command surfaced `Some(1)` as an error.
 - The reveal helper routed through `run_shell_command` (lib.rs:2012-2021) which treated any non-zero exit as failure, so the toast lied while Explorer correctly opened.
 - Folder-only reveals (`path.is_dir()` true, no `/select,`) do not exhibit the quirk and should keep strict success semantics so a real failure surfaces.
 
@@ -65,3 +65,4 @@ IN_PROGRESS
 ## Status Updates
 
 - 2026-05-17: Created packet from operator report. Implemented in the same slice as WP-0221 freeze diagnostic and WP-0220 single-video subfolder follow-up. Ships in desktop v0.1.19.
+- 2026-08-15: Added a pure regression seam and Rust test proving exit 1 is accepted only for file-selection reveals; folder reveals, other codes, and missing codes remain failures. Added frontend contracts proving the genuine-failure path still copies the media path before showing the error. Rust test passed 1/1 and frontend contract passed 2/2. The packet is `BLOCKED` only on its explicit installed-app manual smoke because triggering Explorer would open a foreground window during agent testing. Partial proof: `product/desktop/build_target/tool_artifacts/wp_runs/WP-0222/20260815_0530_v0_1_160/summary.md`.

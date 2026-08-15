@@ -4150,6 +4150,15 @@ mod tests {
     }
 
     #[test]
+    fn windows_reveal_accepts_exit_one_only_for_file_selection() {
+        assert!(windows_reveal_status_is_success(false, true, Some(0)));
+        assert!(windows_reveal_status_is_success(true, false, Some(1)));
+        assert!(!windows_reveal_status_is_success(false, false, Some(1)));
+        assert!(!windows_reveal_status_is_success(true, false, Some(2)));
+        assert!(!windows_reveal_status_is_success(true, false, None));
+    }
+
+    #[test]
     fn media_asset_scope_accepts_only_the_item_source_and_derived_files() {
         let dir = tempfile::tempdir().expect("tempdir");
         let paths = AppPaths::new(dir.path().join("app"));
@@ -6057,6 +6066,15 @@ fn shell_open_target(path: &std::path::Path) -> Result<(), String> {
     }
 }
 
+#[cfg(any(target_os = "windows", test))]
+fn windows_reveal_status_is_success(
+    is_select: bool,
+    status_success: bool,
+    exit_code: Option<i32>,
+) -> bool {
+    status_success || (is_select && exit_code == Some(1))
+}
+
 fn shell_reveal_target(path: &std::path::Path) -> Result<(), String> {
     #[cfg(target_os = "windows")]
     {
@@ -6072,11 +6090,8 @@ fn shell_reveal_target(path: &std::path::Path) -> Result<(), String> {
         // as success only for the /select, call path; folder-only reveals
         // keep strict success semantics.
         let status = command.status().map_err(|e| format!("reveal path: {e}"))?;
-        if !status.success() {
+        if !windows_reveal_status_is_success(is_select, status.success(), status.code()) {
             let code = status.code();
-            if is_select && code == Some(1) {
-                return Ok(());
-            }
             return Err(format!("reveal path failed with exit code {:?}", code));
         }
         return Ok(());
