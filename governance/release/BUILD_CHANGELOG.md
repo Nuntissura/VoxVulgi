@@ -1274,3 +1274,35 @@ This changelog tracks desktop installer builds produced by `governance/scripts/b
 - Artifacts:
   - `product/desktop/build_target/Current/release/bundle/nsis/VoxVulgi_0.1.156_x64-setup.exe`
 - Notes: Desktop target build via build_desktop_target.ps1.
+
+## 0.1.157 - 2026-08-15T02:16:42Z
+- Work Packets: `WP-0226`
+- Commit: `0f540a7`
+- Offline Bundle ID: `offline_full_win64_20260814_082842`
+- Artifacts:
+  - `product/desktop/build_target/Current/release/bundle/nsis/VoxVulgi_0.1.157_x64-setup.exe`
+- Notes: Desktop target build via build_desktop_target.ps1.
+
+## 0.1.158 - 2026-08-15T02:43:57Z
+- Work Packets: `WP-0226`
+- Commit: `0f540a7`
+- Offline Bundle ID: `offline_full_win64_20260814_082842`
+- Artifacts:
+  - `product/desktop/build_target/Current/release/bundle/nsis/VoxVulgi_0.1.158_x64-setup.exe`
+- Notes: Desktop target build via build_desktop_target.ps1.
+
+## 0.1.159 - 2026-08-15T02:56:13Z
+- Work Packets: `WP-0226`
+- Commit: `0f540a7`
+- Offline Bundle ID: `offline_full_win64_20260814_082842`
+- Artifacts:
+  - `product/desktop/build_target/Current/release/bundle/nsis/VoxVulgi_0.1.159_x64-setup.exe`
+- Notes: Desktop target build via build_desktop_target.ps1.
+
+## 0.1.160 - 2026-08-15T03:06:09Z
+- Work Packets: `WP-0226`
+- Commit: `0f540a7`
+- Offline Bundle ID: `offline_full_win64_20260814_082842`
+- Artifacts:
+  - `product/desktop/build_target/Current/release/bundle/nsis/VoxVulgi_0.1.160_x64-setup.exe`
+- Notes: Desktop target build via build_desktop_target.ps1.

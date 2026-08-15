@@ -2318,14 +2318,20 @@ export function SubtitleEditorPage({
     setError(null);
     setNotice(null);
     setBusy(true);
-    Promise.all([
-      invoke<LibraryItem>("library_get", { itemId }),
-      refreshTracks(),
-      refreshSpeakerSettings(),
-      refreshOutputs(),
-      refreshArtifacts(),
-      refreshItemJobs(),
-    ])
+    // WP-0226: establish the bounded Jobs projection before fanning out the rest of
+    // the editor bootstrap. Starting all six reads together made the first packaged
+    // jobs_list_for_item invocation wait 604 ms under load even though its indexed
+    // SQL and title hydration were both sub-millisecond.
+    refreshItemJobs()
+      .then(() =>
+        Promise.all([
+          invoke<LibraryItem>("library_get", { itemId }),
+          refreshTracks(),
+          refreshSpeakerSettings(),
+          refreshOutputs(),
+          refreshArtifacts(),
+        ]),
+      )
       .then(async ([nextItem, nextTracks]) => {
         if (cancelled) return;
         setItem(nextItem);

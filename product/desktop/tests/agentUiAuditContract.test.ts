@@ -70,3 +70,11 @@ test("Jobs group disclosures expose semantic expanded state", () => {
   const source = readRepoFile("src", "pages", "JobsPage.tsx");
   assert.match(source, /aria-expanded=\{expanded\}[\s\S]*?setExpandedGroups/);
 });
+
+test("Localization current-item navigation is safe for a headless read-only probe", () => {
+  const source = readRepoFile("src", "App.tsx");
+  assert.match(
+    source,
+    /data-agent-safe-action="true"[\s\S]*?data-testid="localization-open-current-item"[\s\S]*?onClick=\{\(\) => onOpenEditor\(currentHomeItem\.id\)\}/,
+  );
+});

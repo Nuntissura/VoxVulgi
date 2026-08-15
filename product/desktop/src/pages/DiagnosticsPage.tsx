@@ -1013,6 +1013,7 @@ export function DiagnosticsPage({ visible = true }: { visible?: boolean }) {
   const [notice, setNotice] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
   const [freezeSelfTestRunning, setFreezeSelfTestRunning] = useState(false);
+  const [readSweepRunning, setReadSweepRunning] = useState(false);
   const [providerTitleRepairBusy, setProviderTitleRepairBusy] = useState(false);
   const [providerTitleRepair, setProviderTitleRepair] = useState<ProviderTitleRepairPageReceipt | null>(null);
   const [providerTitleRepairStatus, setProviderTitleRepairStatus] =
@@ -2206,6 +2207,38 @@ export function DiagnosticsPage({ visible = true }: { visible?: boolean }) {
       setError(`Freeze detector self-test failed: ${String(e)}`);
     } finally {
       setFreezeSelfTestRunning(false);
+    }
+  }
+
+  async function runReadOnlyUiReadSweep() {
+    if (readSweepRunning) return;
+    setReadSweepRunning(true);
+    setError(null);
+    setNotice("Running the five WP-0226 read-only UI commands in sequence…");
+    try {
+      await invoke<JobRow[]>("jobs_list", { limit: 200, offset: 0 });
+      const libraryItems = await invoke<Array<{ id: string }>>("library_list", {
+        limit: 1,
+        offset: 0,
+        fileStatus: null,
+      });
+      const itemId = libraryItems[0]?.id.trim();
+      if (!itemId) {
+        throw new Error("The library has no item ID for the read-only timing check.");
+      }
+      await invoke<JobRow[]>("jobs_list_for_item", { itemId, limit: 1000, offset: 0 });
+      await invoke<{ paused: boolean }>("jobs_queue_control_get");
+      await invoke<{ max_concurrency: number }>("jobs_runtime_settings_get");
+      await invoke<unknown>("library_get", { itemId });
+      setNotice(
+        `WP-0226 read-only timing check completed for item ${shortId(itemId)}. ` +
+          "Capture a freeze report to inspect the five command_completed timings.",
+      );
+    } catch (e) {
+      setNotice(null);
+      setError(`WP-0226 read-only timing check failed: ${String(e)}`);
+    } finally {
+      setReadSweepRunning(false);
     }
   }
 
@@ -4653,6 +4686,20 @@ export function DiagnosticsPage({ visible = true }: { visible?: boolean }) {
 
       <div className="card" id="diag-failures">
         <h2>Recent failures</h2>
+        <div className="row" style={{ marginTop: 0, marginBottom: 12, flexWrap: "wrap" }}>
+          <button
+            type="button"
+            data-testid="diagnostics-readonly-ui-sweep"
+            data-agent-safe-action="true"
+            disabled={readSweepRunning}
+            onClick={runReadOnlyUiReadSweep}
+          >
+            {readSweepRunning ? "Running read-only timing check…" : "Run read-only UI timing check"}
+          </button>
+          <span style={{ color: "#6b7280", alignSelf: "center", fontSize: 13 }}>
+            Sequentially checks the five WP-0226 Jobs and Library reads without changing data.
+          </span>
+        </div>
         <div className="table-wrap">
           <table>
             <thead>

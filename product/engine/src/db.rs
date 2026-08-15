@@ -3,7 +3,7 @@ use crate::Result;
 use rusqlite::{Connection, OpenFlags};
 use std::time::Duration;
 
-const CURRENT_SCHEMA_VERSION: u32 = 49;
+const CURRENT_SCHEMA_VERSION: u32 = 50;
 // WP-0258: raised from 750ms to 4000ms so read-only UI queries wait out a WAL
 // checkpoint instead of erroring "database is locked". Evidence: 47 subscription
 // refreshes failed with "database is locked" under DB contention.
@@ -176,8 +176,12 @@ const MIGRATION_STEPS: &[MigrationStep] = &[
         apply: apply_schema_v48,
     },
     MigrationStep {
-        version: CURRENT_SCHEMA_VERSION,
+        version: 49,
         apply: apply_schema_v49,
+    },
+    MigrationStep {
+        version: CURRENT_SCHEMA_VERSION,
+        apply: apply_schema_v50,
     },
 ];
 
@@ -2616,6 +2620,28 @@ CREATE INDEX IF NOT EXISTS idx_media_provider_metadata_repair_change_job
     Ok(())
 }
 
+fn apply_schema_v50(conn: &Connection) -> Result<()> {
+    // WP-0226: `list_jobs_for_item` filters by item_id and orders by newest job.
+    // Without this composite shape SQLite scans the full created-at index and rejects
+    // unrelated rows, which took 382-389 ms directly on the 320k-row operator DB and
+    // exceeded 800 ms through the packaged command under host load.
+    // Historical import/repair fixtures can be intentionally partial databases. They
+    // still pass through the shared migrator, but have no job registry to index. A
+    // canonical app database always creates `job` in v1 before reaching this step.
+    let job_table_exists = conn.query_row(
+        "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type='table' AND name='job')",
+        [],
+        |row| row.get::<_, bool>(0),
+    )?;
+    if job_table_exists {
+        conn.execute_batch(
+            "CREATE INDEX IF NOT EXISTS idx_job_item_created \
+             ON job(item_id, created_at_ms DESC);",
+        )?;
+    }
+    Ok(())
+}
+
 fn ensure_column(conn: &Connection, table: &str, column: &str, column_def: &str) -> Result<()> {
     let mut stmt = conn.prepare(&format!("PRAGMA table_info({table})"))?;
     let mut rows = stmt.query([])?;
@@ -3078,6 +3104,59 @@ CREATE TABLE IF NOT EXISTS job (
             )
             .expect("meta schema version");
         assert_eq!(meta, CURRENT_SCHEMA_VERSION.to_string());
+    }
+
+    #[test]
+    fn migrate_v50_indexes_jobs_for_item_filter_and_order() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let paths = AppPaths::new(dir.path().to_path_buf());
+        let conn = open(&paths).expect("open");
+        migrate(&conn).expect("migrate");
+
+        let plan = conn
+            .prepare(
+                r#"
+EXPLAIN QUERY PLAN
+SELECT
+  id, item_id, batch_id, type, status, progress, error, created_at_ms,
+  started_at_ms, finished_at_ms, logs_path, params_json, target_title,
+  retry_of_job_id, retry_replacement_job_id, track
+FROM job
+WHERE item_id=?1
+ORDER BY created_at_ms DESC
+LIMIT ?2 OFFSET ?3
+"#,
+            )
+            .expect("prepare query plan")
+            .query_map(params!["item-1", 100_i64, 0_i64], |row| row.get::<_, String>(3))
+            .expect("query plan")
+            .collect::<rusqlite::Result<Vec<_>>>()
+            .expect("collect query plan");
+
+        assert!(
+            plan.iter()
+                .any(|detail| detail.contains("idx_job_item_created")),
+            "jobs-for-item query must use the composite item/created index: {plan:?}"
+        );
+        assert!(
+            plan.iter()
+                .all(|detail| !detail.contains("SCAN job USING INDEX idx_job_created")),
+            "jobs-for-item query must not scan the full created-at index: {plan:?}"
+        );
+    }
+
+    #[test]
+    fn apply_schema_v50_tolerates_partial_database_without_job_registry() {
+        let conn = Connection::open_in_memory().expect("open");
+        apply_schema_v50(&conn).expect("partial database migration");
+        let index_count: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM sqlite_master WHERE type='index' AND name='idx_job_item_created'",
+                [],
+                |row| row.get(0),
+            )
+            .expect("query index count");
+        assert_eq!(index_count, 0);
     }
 
     #[test]

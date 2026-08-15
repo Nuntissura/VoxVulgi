@@ -1,0 +1,43 @@
+{
+  "wp": "WP-0226",
+  "app_version": "0.1.160",
+  "outcome": "PASS",
+  "generated_at": "2026-08-15T05:09:00+02:00",
+  "canonical_database": {
+    "path": "%APPDATA%/com.voxvulgi.voxvulgi/db/app.sqlite",
+    "bytes_approx": 1060000000,
+    "job_rows": 320122,
+    "schema_user_version": 50,
+    "index": "idx_job_item_created",
+    "query_plan": "SEARCH job USING INDEX idx_job_item_created (item_id=?)",
+    "exact_query_timings_ms": [0.1, 0.051, 0.049, 0.046, 0.04]
+  },
+  "packaged_freeze_report": {
+    "file": "freeze_report_1786763342332.json",
+    "app_version": "0.1.160",
+    "pid": 112996,
+    "bridge_port": 55102,
+    "trace_rows": 1000,
+    "commands": {
+      "jobs_list": [10, 21, 20, 17, 19],
+      "jobs_list_for_item": [9, 9, 9, 9],
+      "jobs_queue_control_get": [9, 8, 11, 8, 10],
+      "jobs_runtime_settings_get": [9, 10, 10, 10],
+      "library_get": [9, 8, 10, 9]
+    },
+    "threshold_ms": 500,
+    "max_observed_ms": 21
+  },
+  "tests": {
+    "engine_full_command_exit": 0,
+    "engine_library_tests_executed": 544,
+    "targeted_frontend_passed": 34,
+    "targeted_frontend_failed": 0,
+    "production_frontend_build": "PASS",
+    "governed_desktop_build": "PASS"
+  },
+  "visual_artifacts": [
+    "governance/snapshots/WP-0226/v0_1_160_read_sweep_completed_top_1786763321974.png",
+    "governance/snapshots/WP-0226/v0_1_160_read_sweep_control_1786763324838.png"
+  ]
+}

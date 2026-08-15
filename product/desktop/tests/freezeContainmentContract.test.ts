@@ -309,6 +309,35 @@ test("Localization home status hydration avoids duplicate per-item job fan-out",
   );
 });
 
+test("Diagnostics can reproduce every WP-0226 read timing without mutating state", () => {
+  const source = readRepoFile("src", "pages", "DiagnosticsPage.tsx");
+  const start = source.indexOf("async function runReadOnlyUiReadSweep");
+  const end = source.indexOf("async function", start + 1);
+  const block = source.slice(start, end);
+  const commands = [
+    "jobs_list",
+    "library_list",
+    "jobs_list_for_item",
+    "jobs_queue_control_get",
+    "jobs_runtime_settings_get",
+    "library_get",
+  ];
+
+  assert.ok(start > 0, "WP-0226 read-only diagnostics check must exist");
+  let prior = -1;
+  for (const command of commands) {
+    const position = block.indexOf(`\"${command}\"`);
+    assert.ok(position > prior, `${command} must run sequentially after its predecessor`);
+    prior = position;
+  }
+  assert.doesNotMatch(block, /Promise\.all/, "the timing check must not create its own DB contention");
+  assert.match(
+    source,
+    /data-testid="diagnostics-readonly-ui-sweep"[\s\S]{0,120}data-agent-safe-action="true"/,
+    "the non-mutating timing check must be reachable through the headless semantic bridge",
+  );
+});
+
 test("Jobs item_outputs_many avoids per-item DB reopening", () => {
   const tauriSource = readRepoFile("src-tauri", "src", "lib.rs");
   const commandStart = tauriSource.indexOf("async fn item_outputs_many");

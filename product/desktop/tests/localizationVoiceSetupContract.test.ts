@@ -85,6 +85,25 @@ test("Localization item bootstrap does not refetch base data when deferred conte
   );
 });
 
+test("Localization item bootstrap establishes Jobs projection before read fan-out", () => {
+  const editorSource = readRepoFile("src", "pages", "SubtitleEditorPage.tsx");
+  const bootstrapStart = editorSource.indexOf("setBusy(true);");
+  const jobsRead = editorSource.indexOf("refreshItemJobs()", bootstrapStart);
+  const fanOut = editorSource.indexOf("Promise.all([", bootstrapStart);
+  const fanOutEnd = editorSource.indexOf(".then(async ([nextItem, nextTracks])", fanOut);
+
+  assert.ok(bootstrapStart > 0 && jobsRead > bootstrapStart, "item bootstrap Jobs read must exist");
+  assert.ok(
+    jobsRead < fanOut,
+    "jobs_list_for_item must settle before the remaining editor reads fan out under host load",
+  );
+  assert.doesNotMatch(
+    editorSource.slice(fanOut, fanOutEnd),
+    /refreshItemJobs\(\)/,
+    "the protected Jobs read must not be reintroduced into the concurrent bootstrap fan-out",
+  );
+});
+
 test("Localization Studio does not render stale failed dub progress as active progress", () => {
   const appSource = readRepoFile("src", "App.tsx");
   const tauriSource = readRepoFile("src-tauri", "src", "lib.rs");

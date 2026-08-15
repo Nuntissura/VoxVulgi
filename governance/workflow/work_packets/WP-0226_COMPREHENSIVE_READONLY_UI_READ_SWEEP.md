@@ -2,7 +2,7 @@
 
 ## Status
 
-IN_PROGRESS
+DONE
 
 ## Base Scope
 
@@ -84,3 +84,7 @@ IN_PROGRESS
 ## Status Updates
 
 - 2026-05-17: Created from operator request "can we not do this for all panels?" after v0.1.23 freeze report confirmed Library / Video Archiver fix but exposed Jobs page as the next contention site. Ten engine read functions rewired to `db::open_readonly`. Five Jobs/Library Tauri commands instrumented with `InvokeTimer`. Writer instrumentation explicitly deferred to v0.1.25.
+- 2026-08-15: Current reconciliation kept this packet open. Governed v0.1.156 evidence shows `jobs_list` at 22/284 ms and `jobs_queue_control_get` at 6-22 ms, but current-host v0.1.153 reports recorded `jobs_list_for_item` at 824-986 ms, violating the 500 ms gate. Live read-only diagnosis on the 1.06 GB database (320,122 job rows) reproduced the exact base SQL at 381.68/384.26/389.24 ms for a one-row result; `EXPLAIN QUERY PLAN` reports `SCAN job USING INDEX idx_job_created`. The query filters `item_id=?` and orders `created_at_ms DESC`, but schema v49 has no index whose leftmost columns match that filter/order shape.
+- 2026-08-15: Current primary-source basis: SQLite's query-planner documentation states that one multi-column index can perform an equality search and satisfy the following `ORDER BY` column without a separate full scan/sort. Selected remediation is the additive index `job(item_id, created_at_ms DESC)` in schema v50 plus an exact query-plan regression. This preserves all job rows and changes no queue semantics. Source: `https://www.sqlite.org/queryplanner.html`, especially search-and-sort with a multi-column index.
+- 2026-08-15: Governed v0.1.157 migrated the canonical 320,122-row database to schema v50. Independent read-only proof selected `SEARCH job USING INDEX idx_job_item_created (item_id=?)`; five exact-query runs measured 0.040-0.100 ms versus the pre-fix 381.68-389.24 ms. Packaged editor remounts then measured `jobs_list_for_item` at 106, 16, 11, 319, 17, and 8 ms, but the first cold editor bootstrap was 604 ms because it launched this command concurrently with five other item reads (including a 659 ms `item_outputs`). The cold violation keeps the packet open. Remediation now makes the bounded Jobs projection the predecessor to the remaining read fan-out; the exact packaged cold-start gate must be rerun in the next governed build.
+- 2026-08-15: DONE in governed v0.1.160. A fresh headless process proved the cold editor `jobs_list_for_item` predecessor at 13 ms in v0.1.158. The repeatable v0.1.160 Diagnostics check then ran all five literal acceptance commands sequentially against a canonical library item. Fresh `vvfreeze.cmd` report `freeze_report_1786763342332.json` records `jobs_list` at 10/21/20/17/19 ms (max 21), `jobs_list_for_item` at 9/9/9/9 ms, `jobs_queue_control_get` at 9/8/11/8/10 ms (max 11), `jobs_runtime_settings_get` at 9/10/10/10 ms, and `library_get` at 9/8/10/9 ms. Full engine suite exited 0 with 544 tests, targeted frontend contracts passed 34/34, the production frontend build passed, and governed desktop/installer builds passed. Visual inspection of the completion notice and existing-card control found no overlap, clipping, extra card, or hidden state.

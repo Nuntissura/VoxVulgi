@@ -2724,7 +2724,13 @@ function LocalizationStudioHome({
                     >
                       Start localization run
                     </button>
-                    <button type="button" disabled={uiBusy} onClick={() => onOpenEditor(currentHomeItem.id)}>
+                    <button
+                      type="button"
+                      disabled={uiBusy}
+                      data-agent-safe-action="true"
+                      data-testid="localization-open-current-item"
+                      onClick={() => onOpenEditor(currentHomeItem.id)}
+                    >
                       Open current item
                     </button>
                     <button
