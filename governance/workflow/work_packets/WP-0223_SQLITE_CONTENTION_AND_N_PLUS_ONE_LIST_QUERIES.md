@@ -2,7 +2,7 @@
 
 ## Status
 
-IN_PROGRESS
+DONE
 
 ## Base Scope
 
@@ -92,3 +92,4 @@ IN_PROGRESS
 ## Status Updates
 
 - 2026-05-17: Created from operator approval after the v0.1.20 freeze report confirmed the slowness pattern (zero `freeze_detected`/`worker_alive`, dozens of multi-second `command_slow` rows pointing at subscription/library list queries). Ships in v0.1.21 alongside WP-0221's Worker install fix.
+- 2026-08-15: `DONE` after current-state reconciliation against governed v0.1.155/v0.1.156 proof. Source inspection confirms `db::open` still applies WAL plus `synchronous=NORMAL`, while `list_youtube_subscriptions` uses one read-only prepared SELECT with a correlated `GROUP_CONCAT` and no per-row group query. The full engine suite passed (538 passed, 4 ignored, 0 failed). Fresh packaged v0.1.155 trace rows recorded `youtube_subscriptions_list` at 16/23/13 ms, all below 500 ms and below the 100 ms target, while `library_list` also remained below the packet threshold after WP-0224's follow-up remediation. Governed v0.1.156 then passed frontend/Tauri checks and packaged successfully without changing the engine path. Proof: `product/desktop/build_target/tool_artifacts/wp_runs/WP-0223/20260815_0340_current_v0_1_156/summary.md`.

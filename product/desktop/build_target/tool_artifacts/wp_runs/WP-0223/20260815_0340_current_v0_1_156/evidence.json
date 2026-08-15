@@ -1,0 +1,27 @@
+{
+  "wp": "WP-0223",
+  "outcome": "PASS",
+  "current_app_version": "0.1.156",
+  "source": {
+    "wal_enabled": true,
+    "synchronous": "NORMAL",
+    "subscription_group_hydration": "single SELECT with correlated GROUP_CONCAT"
+  },
+  "engine_tests": {
+    "passed": 538,
+    "ignored": 4,
+    "failed": 0
+  },
+  "packaged_performance": {
+    "app_version": "0.1.155",
+    "report": "C:/Users/Ilja Smets/AppData/Roaming/com.voxvulgi.voxvulgi/diagnostics/traces/freeze_reports/freeze_report_1786755063248.json",
+    "youtube_subscriptions_list_elapsed_ms": [16, 23, 13],
+    "acceptance_threshold_ms": 500,
+    "target_ms": 100
+  },
+  "current_build": {
+    "result": "PASS",
+    "app_version": "0.1.156",
+    "log": "product/desktop/build_target/logs/build_desktop_target_20260815-031905_0_1_156.log"
+  }
+}
