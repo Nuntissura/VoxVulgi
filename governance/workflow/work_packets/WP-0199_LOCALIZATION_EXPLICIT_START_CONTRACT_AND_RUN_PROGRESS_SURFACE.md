@@ -3,7 +3,7 @@
 ## Metadata
 - ID: WP-0199
 - Owner: Codex
-- Status: REVIEW
+- Status: DONE
 - Created: 2026-04-24
 - Target milestone: Localization operator usability
 
@@ -47,3 +47,4 @@ Out of scope:
 
 - 2026-04-24: Created after operator smoke and live inspection showed Localization starts are hard to reason about, with implicit follow-on jobs and no trustworthy run-progress story on the main surface.
 - 2026-04-24: First implementation slice landed: Localization home now exposes an explicit `Start localization run` action, import completion no longer auto-opens the editor as hidden work proceeds, and current/recent items now show stage labels, progress bars, and failure excerpts directly on the Localization surface. Verification: `npm run build`, `cargo check`.
+- 2026-08-15: Closed DONE against packaged v0.1.169. A clean isolated home showed no source selected, `Start localization` disabled, and `Ready 0%`; an item-bound current surface separately showed stage/progress truth. Two focused current contracts prove import-only messaging and stage/progress/failure rendering. Closure proof: `product/desktop/build_target/tool_artifacts/wp_runs/WP-0199/20260815-193000-v0_1_169/summary.md`.

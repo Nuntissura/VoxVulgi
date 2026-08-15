@@ -62,7 +62,7 @@ test("Options sends the last canonical credential revision with every auth repla
   const tauri = readFileSync(join(desktopRoot, "src-tauri", "src", "lib.rs"), "utf8");
   const config = readFileSync(join(desktopRoot, "..", "engine", "src", "config.rs"), "utf8");
   assert.match(options, /authRevisionRef/);
-  assert.match(options, /if \(!authRevisionHydrated \|\| !expected\)[\s\S]*?credential status is not hydrated; reload Options before changing sign-in/);
+  assert.match(options, /if \(!authRevisionHydrated \|\| !expected\)[\s\S]*?YouTube sign-in status has not loaded; reload Options before changing sign-in/);
   assert.match(options, /expectedCredentialGeneration: expected\.generation/);
   assert.match(options, /expectedCredentialFingerprint: expected\.fingerprint/);
   assert.match(options, /async function replaceYoutubeAuth/);
