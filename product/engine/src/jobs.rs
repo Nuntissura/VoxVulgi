@@ -1799,6 +1799,13 @@ fn active_localization_import_for_path(
     let conn = db::open(paths)?;
     db::migrate(&conn)?;
 
+    active_localization_import_for_path_conn(&conn, canonical_path)
+}
+
+fn active_localization_import_for_path_conn(
+    conn: &rusqlite::Connection,
+    canonical_path: &str,
+) -> Result<Option<JobRow>> {
     let mut stmt = conn.prepare(
         r#"
 SELECT
@@ -1912,6 +1919,36 @@ fn enqueue_completed_import_reuse_job(
     Ok(job)
 }
 
+fn enqueue_new_localization_import_atomically(
+    paths: &AppPaths,
+    canonical_path: &str,
+    params_json: String,
+    batch_id: Option<String>,
+    track: JobTrack,
+) -> Result<JobRow> {
+    let mut conn = db::open(paths)?;
+    db::migrate(&conn)?;
+    let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
+    if let Some(existing) = active_localization_import_for_path_conn(&tx, canonical_path)? {
+        tx.commit()?;
+        return Ok(existing);
+    }
+    let id = Uuid::new_v4().to_string();
+    let row = enqueue_with_type_item_batch_track_and_id_conn(
+        &tx,
+        paths,
+        JobType::ImportLocal,
+        params_json,
+        None,
+        batch_id,
+        track,
+        id,
+    )?;
+    tx.commit()?;
+    let _ = subscriptions::refresh_subscription_activity_rollup_for_job(paths, &row.id);
+    Ok(row)
+}
+
 pub fn enqueue_import_local(
     paths: &AppPaths,
     path: String,
@@ -1945,7 +1982,7 @@ pub fn enqueue_import_local(
     }
 
     let params_json = serde_json::to_string(&ImportLocalParams {
-        path: canonical_path,
+        path: canonical_path.clone(),
         add_to_localization_workspace,
         apply_batch_on_import,
         reuse_existing_item: false,
@@ -1961,11 +1998,10 @@ pub fn enqueue_import_local(
     } else {
         JobTrack::OtherVideo
     };
-    enqueue_with_type_item_batch_and_track(
+    enqueue_new_localization_import_atomically(
         paths,
-        JobType::ImportLocal,
+        &canonical_path,
         params_json,
-        None,
         batch_id,
         track,
     )
@@ -8355,6 +8391,31 @@ fn enqueue_with_type_item_batch_track_and_id(
     let conn = db::open(paths)?;
     db::migrate(&conn)?;
 
+    let row = enqueue_with_type_item_batch_track_and_id_conn(
+        &conn,
+        paths,
+        job_type,
+        params_json,
+        item_id,
+        batch_id,
+        track,
+        id,
+    )?;
+    drop(conn);
+    let _ = subscriptions::refresh_subscription_activity_rollup_for_job(paths, &row.id);
+    Ok(row)
+}
+
+fn enqueue_with_type_item_batch_track_and_id_conn(
+    conn: &rusqlite::Connection,
+    paths: &AppPaths,
+    job_type: JobType,
+    params_json: String,
+    item_id: Option<String>,
+    batch_id: Option<String>,
+    track: JobTrack,
+    id: String,
+) -> Result<JobRow> {
     let created_at_ms = now_ms();
     let logs_path = paths
         .job_logs_dir()
@@ -8398,9 +8459,6 @@ INSERT INTO job (
             track.as_str()
         ],
     )?;
-    drop(conn);
-    let _ = subscriptions::refresh_subscription_activity_rollup_for_job(paths, &id);
-
     Ok(JobRow {
         id,
         item_id,
@@ -8421,6 +8479,56 @@ INSERT INTO job (
         retry_replacement_job_id: None,
         track: track.as_str().to_string(),
     })
+}
+
+fn enqueue_import_child_if_parent_active(
+    paths: &AppPaths,
+    parent_job_id: &str,
+    job_type: JobType,
+    params_json: String,
+    item_id: Option<String>,
+) -> Result<Option<JobRow>> {
+    let mut conn = db::open(paths)?;
+    db::migrate(&conn)?;
+    let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
+    let parent_batch: Option<Option<String>> = tx
+        .query_row(
+            "SELECT batch_id FROM job WHERE id=?1 AND status IN (?2, ?3)",
+            params![
+                parent_job_id,
+                JobStatus::Queued.as_str(),
+                JobStatus::Running.as_str()
+            ],
+            |row| row.get(0),
+        )
+        .optional()?;
+    let Some(parent_batch) = parent_batch else {
+        tx.commit()?;
+        return Ok(None);
+    };
+    let batch_id = parent_batch
+        .filter(|value| !value.trim().is_empty())
+        .unwrap_or_else(|| Uuid::new_v4().to_string());
+    tx.execute(
+        "UPDATE job SET batch_id=?1 WHERE id=?2 AND (batch_id IS NULL OR TRIM(batch_id)='')",
+        params![&batch_id, parent_job_id],
+    )?;
+
+    let track = JobTrack::for_type(&job_type);
+    let id = Uuid::new_v4().to_string();
+    let row = enqueue_with_type_item_batch_track_and_id_conn(
+        &tx,
+        paths,
+        job_type,
+        params_json,
+        item_id,
+        Some(batch_id),
+        track,
+        id,
+    )?;
+    tx.commit()?;
+    let _ = subscriptions::refresh_subscription_activity_rollup_for_job(paths, &row.id);
+    Ok(Some(row))
 }
 
 fn job_batch_id(paths: &AppPaths, job_id: &str) -> Result<Option<String>> {
@@ -10653,13 +10761,24 @@ fn execute_job(
                         batch_on_import: true,
                         pipeline: None,
                     })?;
-                    let _ = enqueue_with_type_item_and_batch_id(
+                    if enqueue_import_child_if_parent_active(
                         paths,
+                        job_id,
                         JobType::SeparateAudioSpleeter,
                         params_json,
                         Some(item.id.clone()),
-                        batch_id.clone(),
-                    )?;
+                    )?
+                    .is_none()
+                    {
+                        log_line(
+                            paths,
+                            job_id,
+                            "info",
+                            "import_local_canceled_before_downstream_insert",
+                            serde_json::json!({ "item_id": item.id }),
+                        )?;
+                        return Ok(());
+                    }
                 }
 
                 if needs_asr {
@@ -10670,13 +10789,24 @@ fn execute_job(
                         batch_on_import: true,
                         pipeline: None,
                     })?;
-                    let _ = enqueue_with_type_item_and_batch_id(
+                    if enqueue_import_child_if_parent_active(
                         paths,
+                        job_id,
                         JobType::AsrLocal,
                         params_json,
                         Some(item.id.clone()),
-                        batch_id.clone(),
-                    )?;
+                    )?
+                    .is_none()
+                    {
+                        log_line(
+                            paths,
+                            job_id,
+                            "info",
+                            "import_local_canceled_before_downstream_insert",
+                            serde_json::json!({ "item_id": item.id }),
+                        )?;
+                        return Ok(());
+                    }
                 }
             } else if any_enabled {
                 log_line(
@@ -31585,6 +31715,44 @@ EOF
     }
 
     #[test]
+    fn concurrent_localization_imports_share_one_active_same_path_job() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let paths = Arc::new(AppPaths::new(dir.path().to_path_buf()));
+        db::ensure_schema(&paths).expect("schema");
+        let media_path = dir.path().join("queen.mp4");
+        std::fs::write(&media_path, b"media").expect("media");
+        let media_path = media_path.to_string_lossy().to_string();
+        let barrier = Arc::new(std::sync::Barrier::new(2));
+
+        let handles = (0..2)
+            .map(|_| {
+                let paths = Arc::clone(&paths);
+                let barrier = Arc::clone(&barrier);
+                let media_path = media_path.clone();
+                thread::spawn(move || {
+                    barrier.wait();
+                    enqueue_import_local(&paths, media_path, true, false)
+                })
+            })
+            .collect::<Vec<_>>();
+        let rows = handles
+            .into_iter()
+            .map(|handle| handle.join().expect("thread").expect("enqueue"))
+            .collect::<Vec<_>>();
+
+        assert_eq!(rows[0].id, rows[1].id);
+        let conn = db::open(&paths).expect("open");
+        let active: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM job WHERE type='import_local' AND status IN ('queued', 'running')",
+                [],
+                |row| row.get(0),
+            )
+            .expect("active count");
+        assert_eq!(active, 1);
+    }
+
+    #[test]
     fn jobs_overview_is_bounded_current_work_with_canonical_counts() {
         let dir = tempfile::tempdir().expect("tempdir");
         let paths = AppPaths::new(dir.path().to_path_buf());
@@ -31823,6 +31991,48 @@ EOF
             .map(|job| job.status.clone())
             .expect("child row");
         assert_eq!(child_status, JobStatus::Canceled);
+    }
+
+    #[test]
+    fn canceled_import_cannot_insert_a_late_batch_child() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let paths = AppPaths::new(dir.path().to_path_buf());
+        db::ensure_schema(&paths).expect("schema");
+        let media_path = dir.path().join("queen.mp4");
+        std::fs::write(&media_path, b"media").expect("media");
+        let import =
+            enqueue_import_local(&paths, media_path.to_string_lossy().to_string(), true, true)
+                .expect("import");
+        assert!(import.batch_id.is_some());
+        seed_item_only(&paths, "item-1", "Item 1");
+        cancel_job(&paths, &import.id).expect("cancel");
+
+        let late = enqueue_import_child_if_parent_active(
+            &paths,
+            &import.id,
+            JobType::AsrLocal,
+            serde_json::to_string(&AsrLocalParams {
+                item_id: "item-1".to_string(),
+                lang: None,
+                model_id: "whispercpp-tiny".to_string(),
+                batch_on_import: true,
+                pipeline: None,
+            })
+            .expect("params"),
+            Some("item-1".to_string()),
+        )
+        .expect("guarded enqueue");
+
+        assert!(late.is_none());
+        let conn = db::open(&paths).expect("open");
+        let children: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM job WHERE batch_id=?1 AND id<>?2",
+                params![import.batch_id, import.id],
+                |row| row.get(0),
+            )
+            .expect("child count");
+        assert_eq!(children, 0);
     }
 
     // WP-0254: interrupted download work resumes on restart instead of being forgotten.
