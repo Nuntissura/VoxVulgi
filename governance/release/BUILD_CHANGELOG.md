@@ -1354,3 +1354,19 @@ This changelog tracks desktop installer builds produced by `governance/scripts/b
 - Artifacts:
   - `product/desktop/build_target/Current/release/bundle/nsis/VoxVulgi_0.1.166_x64-setup.exe`
 - Notes: WP-0206 restores per-item failed-run count and clear actions to the default setup-first Localization home while retaining non-destructive defaults.
+
+## 0.1.167 - 2026-08-15T07:45:26Z
+- Work Packets: `WP-0207`, `WP-0208`, `WP-0211`
+- Commit: `8f1c42e`
+- Offline Bundle ID: `offline_full_win64_20260814_082842`
+- Artifacts:
+  - `product/desktop/build_target/Current/release/bundle/nsis/VoxVulgi_0.1.167_x64-setup.exe`
+- Notes: WP-0211 finishes smart default-stage selection and legacy-anchor routing in the master-detail editor; WP-0207/WP-0208 workflow concepts are retained through the stage rail and selected-stage action strip.
+
+## 0.1.168 - 2026-08-15T07:56:16Z
+- Work Packets: `WP-0207`, `WP-0208`, `WP-0211`
+- Commit: `8f1c42e`
+- Offline Bundle ID: `offline_full_win64_20260814_082842`
+- Artifacts:
+  - `product/desktop/build_target/Current/release/bundle/nsis/VoxVulgi_0.1.168_x64-setup.exe`
+- Notes: WP-0211 master-detail closeout: smart default selection, legacy-anchor stage routing, all eight selected-stage controls, and zero unnamed audited controls across Captions and Files surfaces.

@@ -3,7 +3,8 @@
 ## Metadata
 - ID: WP-0208
 - Owner: Codex
-- Status: IN_PROGRESS
+- Status: SUPERSEDED
+- Superseded by: WP-0211
 - Created: 2026-04-25
 - Target milestone: Localization operator usability
 - Builds on: WP-0207
@@ -57,3 +58,4 @@ Out of scope (kept in their existing sections):
 ## Status updates
 
 - 2026-04-25: Created. Implementation pass started immediately after WP-0207.
+- 2026-08-15: Superseded by WP-0211's master-detail editor. The same ASR, translation, honorific, diarization, voice-plan, dub, mix, and MKV mux state and handlers are retained in the selected stage's action strip; the obsolete requirement to duplicate every control inside every simultaneously rendered workflow row was retired with the old panel shape.

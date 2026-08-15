@@ -3,7 +3,7 @@
 ## Metadata
 - ID: WP-0211
 - Owner: Codex
-- Status: IN_PROGRESS
+- Status: DONE
 - Created: 2026-04-26
 - Target milestone: Localization operator usability
 - Builds on: WP-0207, WP-0208
@@ -63,3 +63,5 @@ Out of scope (deferred):
 ## Status updates
 
 - 2026-04-26: Created. Implementation pass started.
+- 2026-08-15: Completed the master-detail closure in governed desktop v0.1.168. Added the first-incomplete-stage default, locked explicit operator selections, fixed legacy-anchor requests so they select the owning stage before scrolling, and named all audited track/artifact selectors.
+- 2026-08-15: Packaged headless proof used an isolated database and WebView profile. All eight rail stages selected successfully with their expected primary action or Files surface; every stage audit was untruncated, and the final v0.1.168 Files audit returned 190 elements with zero missing accessible names. `loc-backends` selected Dub and `loc-track` selected Captions. The exact v0.1.168 process was identity-checked and stopped after capture.

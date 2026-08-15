@@ -3,7 +3,8 @@
 ## Metadata
 - ID: WP-0207
 - Owner: Codex
-- Status: IN_PROGRESS
+- Status: SUPERSEDED
+- Superseded by: WP-0211
 - Created: 2026-04-25
 - Target milestone: Localization operator usability
 
@@ -54,3 +55,4 @@ Out of scope (explicitly deferred to follow-on WPs):
 ## Status updates
 
 - 2026-04-25: Created. Implementation pass started in parallel with WP-0205/0206.
+- 2026-08-15: Superseded by WP-0211's master-detail editor. The central workflow truth, stage readiness, run handlers, keyboard shortcuts, and legacy `loc-workflow` / `loc-run` routes are preserved in the eight-stage rail and selected-stage action strip; the obsolete combined-card and per-row `Open controls` layout is no longer a current acceptance surface.

@@ -1516,6 +1516,8 @@ export function SubtitleEditorPage({
   const [localizationRunQueueExportPack, setLocalizationRunQueueExportPack] = useState(false);
   // WP-0211: which stage's content is visible in the right pane.
   const [selectedStage, setSelectedStage] = useState<WorkspaceStageId>("captions");
+  const stageSelectionLockedRef = useRef(false);
+  const stageSelectionItemRef = useRef<string | null>(null);
   const [diarizeJobId, setDiarizeJobId] = useState<string | null>(null);
   const [diarizeJobStatus, setDiarizeJobStatus] = useState<JobStatus | null>(null);
   const [diarizeJobError, setDiarizeJobError] = useState<string | null>(null);
@@ -3876,6 +3878,24 @@ export function SubtitleEditorPage({
     [localizationRunStages],
   );
 
+  useEffect(() => {
+    if (stageSelectionItemRef.current !== itemId) {
+      stageSelectionItemRef.current = itemId;
+      stageSelectionLockedRef.current = false;
+    }
+    if (!visible || !itemId || stageSelectionLockedRef.current) return;
+    const firstIncompleteStage = WORKSPACE_STAGES.find((workspaceStage) => {
+      if (!workspaceStage.runStageId) return false;
+      return !localizationRunStages.find((runStage) => runStage.id === workspaceStage.runStageId)?.ready;
+    });
+    setSelectedStage(firstIncompleteStage?.id ?? "captions");
+  }, [itemId, localizationRunStages, visible]);
+
+  function selectWorkspaceStage(stage: WorkspaceStageId) {
+    stageSelectionLockedRef.current = true;
+    setSelectedStage(stage);
+  }
+
 
   function logDiagnosticsEvent(
     event: string,
@@ -3898,7 +3918,7 @@ export function SubtitleEditorPage({
     // right pane, then scroll once a frame has passed for layout to settle.
     const stage = LEGACY_ANCHOR_TO_STAGE[sectionId];
     if (stage && stage !== selectedStage) {
-      setSelectedStage(stage);
+      selectWorkspaceStage(stage);
       window.setTimeout(() => {
         const target = document.getElementById(sectionId);
         target?.scrollIntoView({ behavior: "smooth", block: "start" });
@@ -3954,7 +3974,7 @@ export function SubtitleEditorPage({
         e.preventDefault();
         const idx = parseInt(e.key) - 1;
         const stage = WORKSPACE_STAGES[idx]?.id;
-        if (stage) setSelectedStage(stage);
+        if (stage) selectWorkspaceStage(stage);
         return;
       }
     }
@@ -3965,15 +3985,15 @@ export function SubtitleEditorPage({
   useEffect(() => {
     if (!visible || !itemId) return;
     const request = navigationRequest;
-    const frame = window.requestAnimationFrame(() => {
-      const target =
-        request?.sectionId != null ? document.getElementById(request.sectionId) : rootSectionRef.current;
+    const sectionId = request?.sectionId ?? null;
+    const ownerStage = sectionId ? LEGACY_ANCHOR_TO_STAGE[sectionId] : null;
+    if (ownerStage) selectWorkspaceStage(ownerStage);
+    const timer = window.setTimeout(() => {
+      const target = sectionId ? document.getElementById(sectionId) : rootSectionRef.current;
       target?.scrollIntoView({ behavior: "smooth", block: "start" });
-      if (request) {
-        onNavigationConsumed?.(request.nonce);
-      }
-    });
-    return () => window.cancelAnimationFrame(frame);
+      if (request) onNavigationConsumed?.(request.nonce);
+    }, ownerStage ? 50 : 0);
+    return () => window.clearTimeout(timer);
   }, [itemId, navigationRequest, onNavigationConsumed, visible]);
 
   async function ensureEnglishLocalizationTrackSelected() {
@@ -6814,7 +6834,7 @@ export function SubtitleEditorPage({
                     type="button"
                     className={`loc-workspace-rail-stage${isSelected ? " is-selected" : ""}`}
                     aria-pressed={isSelected}
-                    onClick={() => setSelectedStage(stage.id)}
+                    onClick={() => selectWorkspaceStage(stage.id)}
                   >
                     <span className="loc-workspace-rail-stage-index">{idx + 1}</span>
                     <span className="loc-workspace-rail-stage-title">{stage.title}</span>
@@ -7110,7 +7130,7 @@ export function SubtitleEditorPage({
             <div className="loc-workspace-stage-hint">
               <strong>Speakers</strong> &mdash; diarization runs from the strip above. Per-speaker
               setup (references, Standard TTS) lives in the
-              {" "}<button type="button" onClick={() => setSelectedStage("voice_plan")}>Voice plan</button>{" "}
+              {" "}<button type="button" onClick={() => selectWorkspaceStage("voice_plan")}>Voice plan</button>{" "}
               stage. A dedicated Speakers surface (chips per speaker, diarization preview) is
               planned for a follow-up WP.
             </div>
@@ -7120,7 +7140,7 @@ export function SubtitleEditorPage({
               <strong>Dub</strong> &mdash; the run button above renders the voice-preserving dub.
               Backend strategy, benchmark lab, A/B preview, and per-speaker render mode currently
               live inside the
-              {" "}<button type="button" onClick={() => setSelectedStage("voice_plan")}>Voice plan</button>{" "}
+              {" "}<button type="button" onClick={() => selectWorkspaceStage("voice_plan")}>Voice plan</button>{" "}
               stage. A dedicated Dub surface is planned for a follow-up WP.
             </div>
           ) : null}
@@ -8045,6 +8065,7 @@ export function SubtitleEditorPage({
         <h2>Track <SectionHelp sectionId="loc-track" /></h2>
         <div className="row">
           <select
+            aria-label="Subtitle track"
             value={trackId ?? ""}
             disabled={busy || !trackOptions.length}
             onChange={(e) => {
@@ -8297,6 +8318,7 @@ export function SubtitleEditorPage({
           </label>
 
           <select
+            aria-label="Bilingual comparison track"
             value={bilingualTrackOverrideId}
             disabled={busy || !bilingualEnabled || !trackOptions.length}
             onChange={(e) => setBilingualTrackOverrideId(e.currentTarget.value)}
@@ -11357,6 +11379,7 @@ export function SubtitleEditorPage({
           <div className="row" style={{ marginTop: 0, flexWrap: "wrap", alignItems: "center" }}>
             <div style={{ fontSize: 12, opacity: 0.85 }}>Audio preview</div>
             <select
+              aria-label="Audio preview artifact"
               value={audioPreviewPath}
               disabled={busy}
               onChange={(e) => setAudioPreviewPath(e.currentTarget.value)}
