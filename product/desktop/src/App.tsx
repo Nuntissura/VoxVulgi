@@ -34,7 +34,13 @@ import { openPathBestEffort, revealPath } from "./lib/pathOpener";
 import { joinPath } from "./lib/pathUtils";
 import { jobTrackLabel } from "./lib/archiverRuntime";
 import { featureRootStatus, useSharedDownloadDirStatus } from "./lib/sharedDownloadDir";
-import { safeLocalStorageGet, safeLocalStorageSet } from "./lib/persist";
+import {
+  safeLocalStorageGet,
+  safeLocalStorageSet,
+  safeSessionStorageGet,
+  safeSessionStorageRemove,
+  safeSessionStorageSet,
+} from "./lib/persist";
 import { installFreezeDetector, setFreezeDetectorPage } from "./lib/freezeDetector";
 import {
   buildAgentUiAudit,
@@ -377,6 +383,14 @@ type LocalizationVoiceSetupStatus = {
   voice: LocalizationVoicePackStatus;
 };
 
+type LocalizationVoiceSetupEstimate = {
+  download_bytes: number;
+  reference_mbps: number;
+  min_minutes: number;
+  max_minutes: number;
+  basis: string;
+};
+
 type LocalizationSectionId =
   | "loc-library"
   | "loc-run"
@@ -415,6 +429,7 @@ const LOCALIZATION_SUBTITLE_OUTPUT_KEY = "voxvulgi.v1.localization_setup.subtitl
 const LOCALIZATION_DUB_OUTPUT_KEY = "voxvulgi.v1.localization_setup.dub_output";
 const LOCALIZATION_INCLUDE_SOURCE_COPY_KEY = "voxvulgi.v1.editor.export_include_source_copy";
 const LOCALIZATION_PIPELINE_PRESET_KEY = "voxvulgi.v1.localization.pipeline_preset_id";
+const VOICE_SETUP_LATER_SESSION_KEY = "voxvulgi.v1.localization.voice_setup_later";
 const SHELL_MODE_TOLERANCE_PX = 20;
 const INSTAGRAM_SUBSCRIPTION_HEARTBEAT_INTERVAL_MS = 300_000;
 const INSTAGRAM_SUBSCRIPTION_HEARTBEAT_INITIAL_DELAY_MS = 60_000;
@@ -457,6 +472,11 @@ const LOCALIZATION_HOME_HELP = {
     what: "Add a local media file to the Localization Studio workspace without automatically starting processing.",
     when: "When the source file is not already listed in current or recent work.",
     steps: ["Select a local media file", "Review the detected source language and speaker choices", "Start subtitles or the full dubbed workflow when ready"],
+  },
+  voiceSetup: {
+    what: "Prepare the local speech and voice-conversion files needed for English dubbing without leaving Localization Studio.",
+    when: "When Voice cloning says setup or repair is needed. Public offline-full installs normally have these files already; slim/development installs or damaged packs may need this step.",
+    steps: ["Review the manifest-derived size and time estimate", "Choose Set up now to queue a tracked job, or Set up later to keep using subtitles this session", "Watch progress here or in Jobs/Queue, then start the dub when readiness turns green"],
   },
   workflow: {
     what: "Explain the ordered stages from captions through review and export.",
@@ -547,6 +567,12 @@ function voiceSetupDetailText(status: LocalizationVoiceSetupStatus | null): stri
     return "The voice tools were installed before, but this machine is missing files or has an older package set. Repair queues a tracked setup job and keeps your media and preferences.";
   }
   return "One-time setup queues the local speech tools needed for English dubs. Subtitles can still run without this.";
+}
+
+function voiceSetupEstimateText(estimate: LocalizationVoiceSetupEstimate | null): string {
+  if (!estimate) return "Checking the setup size and time estimate...";
+  const gigabytes = estimate.download_bytes / 1_000_000_000;
+  return `Up to ${gigabytes.toFixed(gigabytes >= 10 ? 0 : 1)} GB for a slim/development download or repair. Allow ${estimate.min_minutes}–${estimate.max_minutes} minutes at ${estimate.reference_mbps} Mbps. Public offline-full installers normally include these files already.`;
 }
 
 function LocalizationStatusMeter({
@@ -960,6 +986,7 @@ function LocalizationStudioHome({
   onOpenEditor,
   onOpenEditorSection,
   onOpenJobs,
+  onOpenDiagnostics,
   onOpenOptions,
   currentEditorItemId = null,
   compact = false,
@@ -969,6 +996,7 @@ function LocalizationStudioHome({
   onOpenEditor: (itemId: string) => void;
   onOpenEditorSection: (itemId: string, sectionId: LocalizationSectionId | null) => void;
   onOpenJobs: () => void;
+  onOpenDiagnostics: () => void;
   onOpenOptions: () => void;
   currentEditorItemId?: string | null;
   compact?: boolean;
@@ -982,8 +1010,13 @@ function LocalizationStudioHome({
   const [notice, setNotice] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [voiceSetupStatus, setVoiceSetupStatus] = useState<LocalizationVoiceSetupStatus | null>(null);
+  const [voiceSetupEstimate, setVoiceSetupEstimate] = useState<LocalizationVoiceSetupEstimate | null>(null);
   const [voiceSetupStatusError, setVoiceSetupStatusError] = useState<string | null>(null);
   const [voiceSetupJob, setVoiceSetupJob] = useState<PendingImportJobRow | null>(null);
+  const [voiceSetupFailure, setVoiceSetupFailure] = useState<string | null>(null);
+  const [voiceSetupDeferred, setVoiceSetupDeferred] = useState(
+    () => safeSessionStorageGet(VOICE_SETUP_LATER_SESSION_KEY) === "1",
+  );
   const [recentItems, setRecentItems] = useState<HomeLibraryItem[]>([]);
   const [recentItemsBusy, setRecentItemsBusy] = useState(false);
   const [recentItemStatuses, setRecentItemStatuses] = useState<
@@ -1082,13 +1115,19 @@ function LocalizationStudioHome({
 
   const refreshVoiceSetupStatus = useCallback(async () => {
     try {
-      const [neural, voice] = await Promise.all([
+      const [neural, voice, estimate] = await Promise.all([
         invoke<LocalizationVoicePackStatus>("tools_tts_neural_local_v1_status"),
         invoke<LocalizationVoicePackStatus>("tools_tts_voice_preserving_local_v1_status"),
+        invoke<LocalizationVoiceSetupEstimate>("tools_phase2_packs_setup_estimate"),
       ]);
       const next = { neural, voice };
       setVoiceSetupStatus(next);
+      setVoiceSetupEstimate(estimate);
       setVoiceSetupStatusError(null);
+      if (voiceSetupReady(next)) {
+        safeSessionStorageRemove(VOICE_SETUP_LATER_SESSION_KEY);
+        setVoiceSetupDeferred(false);
+      }
       return next;
     } catch (e) {
       const message = String(e);
@@ -1140,6 +1179,9 @@ function LocalizationStudioHome({
     setVoicePackBusy(true);
     setError(null);
     setNotice(null);
+    setVoiceSetupFailure(null);
+    setVoiceSetupDeferred(false);
+    safeSessionStorageRemove(VOICE_SETUP_LATER_SESSION_KEY);
     try {
       const job = await invoke<PendingImportJobRow>("jobs_enqueue_install_phase2_packs_v1");
       setVoiceSetupJob(job);
@@ -1160,6 +1202,23 @@ function LocalizationStudioHome({
     }
   }
 
+  const deferVoiceCloningSetup = useCallback(() => {
+    safeSessionStorageSet(VOICE_SETUP_LATER_SESSION_KEY, "1");
+    setVoiceSetupDeferred(true);
+    setNotice("Voice cloning setup postponed for this app session. Subtitles still work; English dub remains unavailable until setup is ready.");
+  }, []);
+
+  useEffect(() => {
+    if (!pageVisible || voiceSetupDeferred || voiceSetupJob || voiceSetupReady(voiceSetupStatus)) return;
+    const handleVoiceSetupEscape = (event: KeyboardEvent) => {
+      if (event.key !== "Escape" || event.defaultPrevented) return;
+      event.preventDefault();
+      deferVoiceCloningSetup();
+    };
+    window.addEventListener("keydown", handleVoiceSetupEscape);
+    return () => window.removeEventListener("keydown", handleVoiceSetupEscape);
+  }, [deferVoiceCloningSetup, pageVisible, voiceSetupDeferred, voiceSetupJob, voiceSetupStatus]);
+
   async function refreshVoiceSetupJob() {
     const jobId = voiceSetupJob?.id;
     if (!jobId) return;
@@ -1171,10 +1230,13 @@ function LocalizationStudioHome({
     if (next.status === "succeeded") {
       await refreshVoiceSetupStatus();
       setNotice("Voice cloning setup finished. You can start English dub runs now.");
+      setVoiceSetupFailure(null);
       setVoiceSetupJob(null);
     } else if (next.status === "failed") {
       await refreshVoiceSetupStatus();
-      setError(next.error ? `Voice cloning setup failed: ${summarizeErrorMessage(next.error)}` : "Voice cloning setup failed.");
+      const message = next.error ? summarizeErrorMessage(next.error) : "No error detail was recorded.";
+      setVoiceSetupFailure(message);
+      setError(`Voice cloning setup failed: ${message}`);
       setVoiceSetupJob(null);
     } else if (next.status === "canceled") {
       setNotice("Voice cloning setup was canceled.");
@@ -1707,7 +1769,7 @@ function LocalizationStudioHome({
       ? "Checking..."
       : voiceSetupHasRepair
         ? "Repair voice cloning"
-        : "Set up voice cloning";
+        : "Set up now";
   const uiBusy = busy || localizationRunBusy || voicePackBusy || pipelinePresetBusy;
   const localizationRootDir = localizationRoot?.current_dir ?? localizationRoot?.default_dir ?? "";
   const currentExportDir = localizationExportDirForItem(localizationRootDir, currentHomeItem);
@@ -1943,14 +2005,45 @@ function LocalizationStudioHome({
             </button>
           </div>
 
-          {dubOutput === "en" || voiceSetupNeedsAction ? (
+          {dubOutput === "en" || voiceSetupNeedsAction ? voiceSetupDeferred && voiceSetupNeedsAction ? (
+            <div className="loc-setup-voice loc-setup-voice-deferred" role="status" data-testid="localization-voice-setup-deferred">
+              <div className="loc-setup-voice-main">
+                <div className="loc-setup-label">Voice cloning not set up</div>
+                <div className="loc-setup-path">Subtitles remain available. English dub stays blocked until the local voice tools are ready.</div>
+              </div>
+              <div className="loc-setup-actions">
+                <button
+                  type="button"
+                  data-agent-safe-action="true"
+                  onClick={() => {
+                    safeSessionStorageRemove(VOICE_SETUP_LATER_SESSION_KEY);
+                    setVoiceSetupDeferred(false);
+                  }}
+                >
+                  Set up now
+                </button>
+                <button type="button" onClick={onOpenDiagnostics}>Advanced setup options</button>
+              </div>
+            </div>
+          ) : (
             <div
               className={`loc-setup-voice ${voiceSetupIsReady ? "loc-setup-voice-ready" : "loc-setup-voice-needs-action"}`}
+              role="region"
+              aria-labelledby="localization-voice-setup-title"
+              data-testid="localization-voice-setup"
             >
               <div className="loc-setup-voice-main">
                 <div className="loc-setup-label">Voice cloning</div>
-                <div className="loc-setup-title">{voiceSetupActionText}</div>
+                <div className="loc-setup-title" id="localization-voice-setup-title">
+                  {voiceSetupActionText}
+                  <LocalizationHelpButton helpId="loc-home-voice-setup" content={LOCALIZATION_HOME_HELP.voiceSetup} />
+                </div>
                 <div className="loc-setup-path">{voiceSetupDetailText(voiceSetupStatus)}</div>
+                {!voiceSetupIsReady ? (
+                  <div className="loc-setup-hint" data-testid="localization-voice-setup-estimate">
+                    {voiceSetupEstimateText(voiceSetupEstimate)}
+                  </div>
+                ) : null}
                 {voiceSetupStatusError ? (
                   <div className="loc-setup-hint">Setup status could not be checked: {summarizeErrorMessage(voiceSetupStatusError)}</div>
                 ) : null}
@@ -1975,6 +2068,16 @@ function LocalizationStudioHome({
                     </div>
                   </div>
                 ) : null}
+                {voiceSetupFailure ? (
+                  <div className="loc-setup-recovery" role="alert">
+                    <strong>What to try next</strong>
+                    <span>{voiceSetupFailure}</span>
+                    <span>Check that the app-data drive has free space, then queue a tracked repair. Existing media and preferences are kept.</span>
+                    <button type="button" disabled={voiceSetupActionDisabled} onClick={() => void queueVoiceCloningSetup("repair")}>
+                      Repair voice cloning
+                    </button>
+                  </div>
+                ) : null}
               </div>
               <div className="loc-setup-actions">
                 {!voiceSetupIsReady ? (
@@ -1993,13 +2096,23 @@ function LocalizationStudioHome({
                     {voiceSetupButtonText}
                   </button>
                 ) : null}
+                {!voiceSetupIsReady && !voiceSetupJob ? (
+                  <button
+                    type="button"
+                    disabled={voicePackBusy}
+                    data-agent-safe-action="true"
+                    onClick={deferVoiceCloningSetup}
+                  >
+                    Set up later
+                  </button>
+                ) : null}
                 <button type="button" disabled={voicePackBusy} onClick={() => void refreshVoiceSetupStatus()}>
                   Refresh
                 </button>
                 <button type="button" disabled={voicePackBusy} onClick={onOpenJobs}>
                   Jobs/Queue
                 </button>
-                <button type="button" disabled={voicePackBusy} onClick={onOpenOptions}>
+                <button type="button" disabled={voicePackBusy} onClick={onOpenDiagnostics}>
                   Advanced setup options
                 </button>
               </div>
@@ -3761,6 +3874,7 @@ function App() {
               openLocalizationItem(nextItemId, sectionId)
             }
             onOpenJobs={() => switchPage("jobs")}
+            onOpenDiagnostics={() => switchPage("diagnostics")}
             onOpenOptions={() => switchPage("options")}
             currentEditorItemId={editorItemId}
           />
@@ -3790,6 +3904,7 @@ function App() {
             openLocalizationItem(nextItemId, sectionId)
           }
           onOpenJobs={() => switchPage("jobs")}
+          onOpenDiagnostics={() => switchPage("diagnostics")}
           onOpenOptions={() => switchPage("options")}
         />
       ),

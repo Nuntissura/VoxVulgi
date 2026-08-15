@@ -54,6 +54,21 @@ test("Windows headless startup hides without blocking the setup thread", () => {
   assert.match(rust, /if cli_agent_headless[\s\S]*?hide_agent_headless_window\(&window\)/);
 });
 
+test("headless startup supports an absolute isolated app-data root without changing normal launches", () => {
+  const rust = readRepoFile("src-tauri", "src", "lib.rs");
+  assert.match(rust, /VOXVULGI_AGENT_HEADLESS_BASE_DIR/);
+  assert.match(
+    rust,
+    /if !agent_headless \{[\s\S]{0,120}return Ok\(default_base_dir\)/,
+    "normal launches must ignore the agent-only override",
+  );
+  assert.match(rust, /override_dir\.is_absolute\(\)/);
+  assert.match(
+    rust,
+    /resolve_agent_headless_base_dir\([\s\S]{0,160}cli_agent_headless/,
+  );
+});
+
 test("Video Archiver workflow tabs and subscription rows expose semantic selection state", () => {
   const source = readRepoFile("src", "pages", "LibraryPage.tsx");
   const auditSource = readRepoFile("src", "lib", "agentUiAudit.ts");

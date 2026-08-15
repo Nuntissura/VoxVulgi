@@ -7,6 +7,7 @@ use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
+use std::sync::OnceLock;
 
 const PYTHON_COMMAND_TIMEOUT_SECS: u64 = 30 * 60;
 const PYTHON_POST_INSTALL_VERSION_CHECK_RETRIES: usize = 10;
@@ -4828,6 +4829,28 @@ pub struct Phase2PackPlanItem {
     pub estimated_bytes: Option<u64>,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Phase2PacksSetupEstimate {
+    pub schema_version: u32,
+    pub download_bytes: u64,
+    pub reference_mbps: u32,
+    pub min_minutes: u32,
+    pub max_minutes: u32,
+    pub basis: String,
+}
+
+pub fn phase2_packs_setup_estimate() -> Phase2PacksSetupEstimate {
+    static ESTIMATE: OnceLock<Phase2PacksSetupEstimate> = OnceLock::new();
+    ESTIMATE
+        .get_or_init(|| {
+            serde_json::from_str(include_str!(
+                "../resources/tooling/phase2_setup_estimate.json"
+            ))
+            .expect("Phase 2 setup estimate manifest must parse")
+        })
+        .clone()
+}
+
 pub fn python_toolchain_status(paths: &AppPaths) -> PythonToolchainStatus {
     let resolved = resolve_base_python(paths);
     let base_available = resolved.is_some();
@@ -7893,6 +7916,16 @@ mod tests {
         assert!(plan
             .iter()
             .any(|item| item.id == "voice_clone_cosyvoice_v1" && item.supported));
+    }
+
+    #[test]
+    fn phase2_setup_estimate_is_manifest_owned_and_coherent() {
+        let estimate = phase2_packs_setup_estimate();
+        assert_eq!(estimate.download_bytes, 3_000_000_000);
+        assert_eq!(estimate.reference_mbps, 100);
+        assert!(estimate.min_minutes > 0);
+        assert!(estimate.max_minutes >= estimate.min_minutes);
+        assert!(!estimate.basis.trim().is_empty());
     }
 
     #[test]

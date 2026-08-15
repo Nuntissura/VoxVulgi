@@ -1306,3 +1306,19 @@ This changelog tracks desktop installer builds produced by `governance/scripts/b
 - Artifacts:
   - `product/desktop/build_target/Current/release/bundle/nsis/VoxVulgi_0.1.160_x64-setup.exe`
 - Notes: Desktop target build via build_desktop_target.ps1.
+
+## 0.1.161 - 2026-08-15T04:04:14Z
+- Work Packets: `WP-0235`
+- Commit: `4a6ee10`
+- Offline Bundle ID: `offline_full_win64_20260814_082842`
+- Artifacts:
+  - `product/desktop/build_target/Current/release/bundle/nsis/VoxVulgi_0.1.161_x64-setup.exe`
+- Notes: Explicit first-run voice setup/repair gate with manifest-owned estimate, session-scoped Later/Escape behavior, durable Jobs progress, recovery guidance, and advanced diagnostics route. Public offline-full installs normally bypass the gate because bundled packs are ready.
+
+## 0.1.162 - 2026-08-15T04:18:17Z
+- Work Packets: `WP-0235`
+- Commit: `4a6ee10`
+- Offline Bundle ID: `offline_full_win64_20260814_082842`
+- Artifacts:
+  - `product/desktop/build_target/Current/release/bundle/nsis/VoxVulgi_0.1.162_x64-setup.exe`
+- Notes: Explicit first-run voice setup/repair gate with manifest-owned estimate, session-scoped Later/Escape behavior, durable Jobs progress, recovery guidance, advanced diagnostics route, and headless-only isolated state root for safe proof. Public offline-full installs normally bypass the gate because bundled packs are ready.

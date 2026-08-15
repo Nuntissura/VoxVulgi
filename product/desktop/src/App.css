@@ -604,6 +604,16 @@ code {
   min-width: 0;
 }
 
+.loc-setup-voice .loc-setup-title {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.loc-setup-voice-deferred {
+  align-items: center;
+}
+
 .loc-setup-voice-ready .loc-setup-title {
   color: #166534;
 }
@@ -619,6 +629,20 @@ code {
   margin-top: 4px;
   color: #526479;
   font-size: 0.82rem;
+}
+
+.loc-setup-recovery {
+  display: grid;
+  gap: 6px;
+  margin-top: 8px;
+  padding: 10px 12px;
+  border-left: 4px solid #b45309;
+  background: rgba(245, 158, 11, 0.08);
+  color: #713f12;
+}
+
+.loc-setup-recovery button {
+  justify-self: start;
 }
 
 .loc-setup-source-main {

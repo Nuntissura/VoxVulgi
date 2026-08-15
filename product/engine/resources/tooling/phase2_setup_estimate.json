@@ -1,0 +1,8 @@
+{
+  "schema_version": 1,
+  "download_bytes": 3000000000,
+  "reference_mbps": 100,
+  "min_minutes": 5,
+  "max_minutes": 15,
+  "basis": "Conservative end-to-end slim/dev repair estimate from WP-0235; public offline-full installs normally require zero download bytes."
+}

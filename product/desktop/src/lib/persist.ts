@@ -14,6 +14,30 @@ export function safeLocalStorageSet(key: string, value: string): void {
   }
 }
 
+export function safeSessionStorageGet(key: string): string | null {
+  try {
+    return window.sessionStorage.getItem(key);
+  } catch {
+    return null;
+  }
+}
+
+export function safeSessionStorageSet(key: string, value: string): void {
+  try {
+    window.sessionStorage.setItem(key, value);
+  } catch {
+    // Ignore storage errors (private mode / disabled / quota).
+  }
+}
+
+export function safeSessionStorageRemove(key: string): void {
+  try {
+    window.sessionStorage.removeItem(key);
+  } catch {
+    // Ignore storage errors (private mode / disabled / quota).
+  }
+}
+
 export type LocalStorageBaseline = {
   key: string;
   value: string | null;

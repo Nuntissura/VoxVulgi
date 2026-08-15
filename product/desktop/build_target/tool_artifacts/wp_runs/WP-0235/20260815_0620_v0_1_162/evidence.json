@@ -1,0 +1,45 @@
+{
+  "schema_version": 1,
+  "wp": "WP-0235",
+  "status": "IN_PROGRESS",
+  "app_version": "0.1.162",
+  "artifact": "product/desktop/build_target/Current/release/desktop.exe",
+  "agent_headless": true,
+  "isolated_base_dir": "product/desktop/build_target/tool_artifacts/wp_runs/WP-0235/isolated_runtime_20260815_0620/app_data_root",
+  "tests": {
+    "frontend_contracts_passed": 16,
+    "frontend_contracts_failed": 0,
+    "engine_estimate_tests_passed": 1,
+    "engine_estimate_tests_failed": 0,
+    "governed_build_passed": true,
+    "installer_built": true,
+    "payload_reused_bytes": 6161329153
+  },
+  "initial_audit": {
+    "request_id": "ui-1786767540873-1",
+    "total_candidates": 37,
+    "returned_elements": 37,
+    "missing_accessible_name_count": 0,
+    "full_setup_region": true,
+    "estimate_text": "Up to 3.0 GB for a slim/development download or repair. Allow 5–15 minutes at 100 Mbps.",
+    "set_up_later_safe_click": true
+  },
+  "deferred_audit": {
+    "request_id": "ui-1786767608775-5",
+    "missing_accessible_name_count": 0,
+    "deferred_region": true,
+    "full_setup_region": false,
+    "reversible_set_up_now_safe_click": true
+  },
+  "restart_audit": {
+    "full_setup_region_count": 1,
+    "deferred_region_count": 0,
+    "set_up_later_button_count": 1,
+    "missing_accessible_name_count": 0
+  },
+  "jobs_enqueued_during_proof": 0,
+  "remaining_dependencies": [
+    "WP-0236 per-pack repair primitive",
+    "WP-0230 truthful install-progress feed"
+  ]
+}

@@ -118,6 +118,8 @@ The app exposes a localhost-only HTTP API so agents can navigate pages, trigger 
 
 For quiet app-boundary verification, launch the desktop executable with `--agent-headless`. The WebView remains mounted for navigation, snapshots, and dumps, but its window is hidden before background work starts. Confirm the launch mode through `GET /agent/state`; `agent_headless` must be `true`, and `app_version` identifies the artifact under test.
 
+For a disposable headless state root, set `VOXVULGI_AGENT_HEADLESS_BASE_DIR` to an absolute directory before launch. The override is honored only with `--agent-headless`; the bridge sidecars, database, config, traces, and snapshots for that run use the isolated root, while normal launches always use the standard app-data directory.
+
 ### Discovery
 
 On startup the app writes two files:

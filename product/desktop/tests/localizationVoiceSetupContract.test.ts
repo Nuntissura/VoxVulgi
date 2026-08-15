@@ -50,6 +50,34 @@ test("Localization Studio entry checks voice-cloning pack readiness before dub r
   );
 });
 
+test("WP-0235 setup gate is explicit, session-scoped, keyboard dismissible, and manifest-estimated", () => {
+  const appSource = readRepoFile("src", "App.tsx");
+  const persistSource = readRepoFile("src", "lib", "persist.ts");
+  const tauriSource = readRepoFile("src-tauri", "src", "lib.rs");
+  const manifestSource = readRepoFile(
+    "..",
+    "engine",
+    "resources",
+    "tooling",
+    "phase2_setup_estimate.json",
+  );
+
+  assert.match(appSource, /tools_phase2_packs_setup_estimate/);
+  assert.match(tauriSource, /fn tools_phase2_packs_setup_estimate/);
+  assert.match(manifestSource, /"schema_version": 1[\s\S]{0,120}"download_bytes": 3000000000/);
+  assert.doesNotMatch(appSource, /About 3 GB download/);
+  assert.match(persistSource, /safeSessionStorageGet[\s\S]*safeSessionStorageSet[\s\S]*safeSessionStorageRemove/);
+  assert.match(appSource, /VOICE_SETUP_LATER_SESSION_KEY/);
+  assert.match(appSource, /event\.key !== "Escape"[\s\S]{0,180}deferVoiceCloningSetup/);
+  assert.match(appSource, /Set up later/);
+  assert.match(appSource, /data-testid="localization-voice-setup-deferred"[\s\S]*?Set up now/);
+  assert.match(appSource, /data-agent-safe-action="true"[\s\S]*?Set up now/);
+  assert.match(appSource, /data-agent-safe-action="true"[\s\S]*?deferVoiceCloningSetup/);
+  assert.match(appSource, /role="region"[\s\S]{0,120}aria-labelledby="localization-voice-setup-title"/);
+  assert.match(appSource, /What to try next[\s\S]{0,500}Repair voice cloning/);
+  assert.match(appSource, /onClick=\{onOpenDiagnostics\}>Advanced setup options<\/button>/);
+});
+
 test("Localization Studio readiness loads when page is visible even without window focus", () => {
   const appSource = readRepoFile("src", "App.tsx");
 

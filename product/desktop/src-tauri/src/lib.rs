@@ -53,6 +53,27 @@ static DIAGNOSTICS_TRACE_COMPRESSED_TOTAL: AtomicU64 = AtomicU64::new(0);
 static DIAGNOSTICS_ID_SEQUENCE: AtomicU64 = AtomicU64::new(1);
 static DIAGNOSTICS_SKEW_SELF_TEST_REQUESTED: AtomicBool = AtomicBool::new(false);
 static DIAGNOSTICS_CAPTURE_STATE: OnceLock<Mutex<DiagnosticsCaptureStatus>> = OnceLock::new();
+const AGENT_HEADLESS_BASE_DIR_ENV: &str = "VOXVULGI_AGENT_HEADLESS_BASE_DIR";
+
+fn resolve_agent_headless_base_dir(
+    default_base_dir: std::path::PathBuf,
+    agent_headless: bool,
+) -> Result<std::path::PathBuf, std::io::Error> {
+    if !agent_headless {
+        return Ok(default_base_dir);
+    }
+    let Some(raw) = std::env::var_os(AGENT_HEADLESS_BASE_DIR_ENV) else {
+        return Ok(default_base_dir);
+    };
+    let override_dir = std::path::PathBuf::from(raw);
+    if override_dir.as_os_str().is_empty() || !override_dir.is_absolute() {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            format!("{AGENT_HEADLESS_BASE_DIR_ENV} must be an absolute non-empty path"),
+        ));
+    }
+    Ok(override_dir)
+}
 #[cfg(test)]
 static DIAGNOSTICS_CAPTURE_TEST_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
 static AGENT_UI_REQUEST_SEQUENCE: AtomicU64 = AtomicU64::new(1);
@@ -10041,6 +10062,12 @@ fn tools_phase2_packs_install_plan() -> Vec<tools::Phase2PackPlanItem> {
 }
 
 #[tauri::command]
+fn tools_phase2_packs_setup_estimate(
+) -> tools::Phase2PacksSetupEstimate {
+    tools::phase2_packs_setup_estimate()
+}
+
+#[tauri::command]
 async fn tools_phase2_packs_install_latest_state(
     state: State<'_, AppState>,
 ) -> Result<Phase2InstallLatestState, String> {
@@ -14366,7 +14393,10 @@ pub fn run() {
                     hide_agent_headless_window(&window).map_err(std::io::Error::other)?;
                 }
             }
-            let base_dir = app.path().app_data_dir()?;
+            let base_dir = resolve_agent_headless_base_dir(
+                app.path().app_data_dir()?,
+                cli_agent_headless,
+            )?;
             let paths = AppPaths::new(AppPaths::normalize_base_dir(&base_dir));
             let _ = voxvulgi_engine::diagnostics::install_trace_sink(Arc::new(
                 |paths, event, level, details| {
@@ -14964,6 +14994,7 @@ pub fn run() {
             tools_python_portable_install,
             tools_python_portable_status,
             tools_phase2_packs_install_plan,
+            tools_phase2_packs_setup_estimate,
             tools_phase2_packs_install_latest_state,
             tools_pack_integrity_manifest_generate,
             tools_pack_integrity_manifest_status,
