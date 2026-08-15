@@ -1905,18 +1905,24 @@ export function DiagnosticsPage({ visible = true }: { visible?: boolean }) {
     }
   }
 
-  async function enqueueInstallPhase2Packs() {
+  async function enqueueInstallPhase2Packs(force = false) {
     const ok = await confirm(
-      "Install Voice cloning packages now?\n\nThis downloads large dependencies (multiple GB) and writes under app data. Installs only after this explicit click.",
-      { title: "Install Voice cloning packages", kind: "warning" },
+      force
+        ? "Force reinstall all voice cloning packages now?\n\nThis deliberately reruns every installer even when the packs are already present. It can take several minutes and writes under app data."
+        : "Install Voice cloning packages now?\n\nThis downloads large dependencies (multiple GB) and writes under app data. Installs only after this explicit click.",
+      { title: force ? "Force reinstall all packs" : "Install Voice cloning packages", kind: "warning" },
     );
     if (!ok) return;
 
     setBusy(true);
     setError(null);
-    setNotice("Queued Voice cloning packages installer. See progress below (updates while running).");
+    setNotice(
+      force
+        ? "Queued a forced reinstall of every voice cloning pack. See progress below."
+        : "Queued Voice cloning packages installer. Already-installed packs will be skipped; see progress below.",
+    );
     try {
-      await invoke("jobs_enqueue_install_phase2_packs_v1");
+      await invoke("jobs_enqueue_install_phase2_packs_v1", { force });
       await refresh();
     } catch (e) {
       setError(String(e));
@@ -4038,8 +4044,11 @@ export function DiagnosticsPage({ visible = true }: { visible?: boolean }) {
         </div>
 
         <div className="row" style={{ flexWrap: "wrap" }}>
-          <button type="button" disabled={busy} onClick={enqueueInstallPhase2Packs}>
+          <button type="button" disabled={busy} onClick={() => enqueueInstallPhase2Packs(false)}>
             Install Voice cloning packages
+          </button>
+          <button type="button" disabled={busy} onClick={() => enqueueInstallPhase2Packs(true)}>
+            Force reinstall all packs
           </button>
           <button type="button" disabled={busy} onClick={() => refresh()}>
             Refresh

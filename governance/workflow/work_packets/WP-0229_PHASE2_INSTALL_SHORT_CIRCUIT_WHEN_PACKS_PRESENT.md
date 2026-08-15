@@ -2,7 +2,7 @@
 
 ## Status
 
-BACKLOG
+IN_PROGRESS
 
 ## Base Scope
 
@@ -301,3 +301,6 @@ The existing "Install Voice cloning packages" button continues to call `enqueueI
 ## Status Updates
 
 - 2026-05-18: Created from operator request after discovering that `install_*_pack` functions are not short-circuit-idempotent. Backlog status; ready for implementation by a no-context model using the Implementation Plan above. Should ship in a future version (likely v0.1.27 or later) alongside the operator's voice-pack work, not as an emergency.
+- 2026-08-15: Revalidated against current source plus official pip 26.x install semantics and Tauri v2 command-argument documentation. Current Phase2 now includes CosyVoice 2, so the selected wrapper pattern must cover six packs. The newer WP-0227/WP-0245 prior-done gate must apply only when `force == false`; otherwise a force job would never reach the bare installers. Frontend handlers must pass explicit booleans through closures so React click events cannot become a truthy force value. Validation plan: focused Rust parameter/queue tests, frontend contract tests, serialized governed build, then the packet's installed-app short-circuit/force smoke.
+- 2026-08-15: Six installed-status wrappers, force-aware queue params, force-safe resume logic, Tauri propagation, and explicit normal/force Diagnostics actions implemented. Focused frontend contracts passed 21/21, TypeScript passed, focused Rust passed 1/1, desktop `cargo check --lib` passed, and full engine suite passed 542 with 4 explicit ignores. Status remains `IN_PROGRESS` until the governed build and installed-app normal-vs-force runtime/log smoke complete.
+- 2026-08-15: Governed desktop build `0.1.163` completed with the verified offline payload reused. The exact packaged executable passed hidden bridge identity/state checks and a Diagnostics semantic audit (115 candidates, 0 missing accessible names); visual inspection confirmed both distinct install controls are readable and non-overlapping. Proof: `product/desktop/build_target/tool_artifacts/wp_runs/WP-0229/20260815-0811_v0_1_163/summary.md`. Status remains `IN_PROGRESS` only because Acceptance Criterion 5 requires installed-app normal-versus-force execution/log proof, and neither heavy mutating action was run on the loaded host.

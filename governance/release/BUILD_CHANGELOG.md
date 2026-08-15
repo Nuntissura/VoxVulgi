@@ -1322,3 +1322,11 @@ This changelog tracks desktop installer builds produced by `governance/scripts/b
 - Artifacts:
   - `product/desktop/build_target/Current/release/bundle/nsis/VoxVulgi_0.1.162_x64-setup.exe`
 - Notes: Explicit first-run voice setup/repair gate with manifest-owned estimate, session-scoped Later/Escape behavior, durable Jobs progress, recovery guidance, advanced diagnostics route, and headless-only isolated state root for safe proof. Public offline-full installs normally bypass the gate because bundled packs are ready.
+
+## 0.1.163 - 2026-08-15T06:09:06Z
+- Work Packets: `WP-0229`
+- Commit: `004e44c`
+- Offline Bundle ID: `offline_full_win64_20260814_082842`
+- Artifacts:
+  - `product/desktop/build_target/Current/release/bundle/nsis/VoxVulgi_0.1.163_x64-setup.exe`
+- Notes: WP-0229 adds installed-pack short-circuiting for all six Phase2 packs plus explicit force routing and force-safe resume behavior.

@@ -848,6 +848,10 @@ struct ImportLocalParams {
 struct InstallPhase2PacksV1Params {
     #[serde(default)]
     resume_localization_run: Option<LocalizationRunRequest>,
+    /// WP-0229: bypass installed-status and prior-done short-circuits only for
+    /// an explicit operator repair request. Old queued rows deserialize false.
+    #[serde(default)]
+    force: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -1956,7 +1960,17 @@ pub fn enqueue_import_local(
 }
 
 pub fn enqueue_install_phase2_packs_v1(paths: &AppPaths) -> Result<JobRow> {
-    let params_json = serde_json::to_string(&InstallPhase2PacksV1Params::default())?;
+    enqueue_install_phase2_packs_v1_with_options(paths, false)
+}
+
+pub fn enqueue_install_phase2_packs_v1_with_options(
+    paths: &AppPaths,
+    force: bool,
+) -> Result<JobRow> {
+    let params_json = serde_json::to_string(&InstallPhase2PacksV1Params {
+        force,
+        ..InstallPhase2PacksV1Params::default()
+    })?;
     enqueue(paths, JobType::InstallPhase2PacksV1, params_json)
 }
 
@@ -2881,6 +2895,7 @@ fn queue_voice_setup_for_localization(
 ) -> Result<LocalizationContinuationOutcome> {
     let params_json = serde_json::to_string(&InstallPhase2PacksV1Params {
         resume_localization_run: Some(localization_resume_request_for_dub(&item.id, pipeline)),
+        force: false,
     })?;
     let queued_job = enqueue_with_type_item_and_batch_id(
         paths,
@@ -17244,7 +17259,7 @@ ORDER BY created_at_ms ASC
                 // Python environment after the bundled dependency set changes.
                 if let Some(prior) = prior_done_steps
                     .get(&item.id)
-                    .filter(|_| tools::phase2_pack_step_satisfied(paths, &item.id))
+                    .filter(|_| !p.force && tools::phase2_pack_step_satisfied(paths, &item.id))
                 {
                     steps.push(Phase2InstallStep {
                         id: item.id,
@@ -17344,32 +17359,58 @@ ORDER BY created_at_ms ASC
                     }
                     "spleeter" => {
                         append_log_line(&log_path, "install: spleeter pack");
-                        let _ = tools::install_spleeter_pack(paths)?;
+                        if p.force {
+                            let _ = tools::install_spleeter_pack(paths)?;
+                        } else {
+                            let _ = tools::install_spleeter_pack_if_needed(paths)?;
+                        }
                         Ok(())
                     }
                     "diarization" => {
                         append_log_line(&log_path, "install: diarization pack");
-                        let _ = tools::install_diarization_pack(paths)?;
+                        if p.force {
+                            let _ = tools::install_diarization_pack(paths)?;
+                        } else {
+                            let _ = tools::install_diarization_pack_if_needed(paths)?;
+                        }
                         Ok(())
                     }
                     "tts_preview" => {
                         append_log_line(&log_path, "install: tts preview pack");
-                        let _ = tools::install_tts_preview_pack(paths)?;
+                        if p.force {
+                            let _ = tools::install_tts_preview_pack(paths)?;
+                        } else {
+                            let _ = tools::install_tts_preview_pack_if_needed(paths)?;
+                        }
                         Ok(())
                     }
                     "tts_neural_local_v1" => {
                         append_log_line(&log_path, "install: neural tts local v1 pack");
-                        let _ = tools::install_tts_neural_local_v1_pack(paths)?;
+                        if p.force {
+                            let _ = tools::install_tts_neural_local_v1_pack(paths)?;
+                        } else {
+                            let _ = tools::install_tts_neural_local_v1_pack_if_needed(paths)?;
+                        }
                         Ok(())
                     }
                     "tts_voice_preserving_local_v1" => {
                         append_log_line(&log_path, "install: voice-preserving dub pack");
-                        let _ = tools::install_tts_voice_preserving_local_v1_pack(paths)?;
+                        if p.force {
+                            let _ = tools::install_tts_voice_preserving_local_v1_pack(paths)?;
+                        } else {
+                            let _ =
+                                tools::install_tts_voice_preserving_local_v1_pack_if_needed(paths)?;
+                        }
                         Ok(())
                     }
                     "voice_clone_cosyvoice_v1" => {
                         append_log_line(&log_path, "install: CosyVoice 2 voice-clone pack");
-                        let _ = tools::install_voice_clone_cosyvoice_v1_pack(paths)?;
+                        if p.force {
+                            let _ = tools::install_voice_clone_cosyvoice_v1_pack(paths)?;
+                        } else {
+                            let _ =
+                                tools::install_voice_clone_cosyvoice_v1_pack_if_needed(paths)?;
+                        }
                         Ok(())
                     }
                     other => Err(EngineError::InstallFailed(format!(
@@ -28588,6 +28629,27 @@ mod tests {
     use rusqlite::params;
     use std::net::TcpListener;
     use std::path::Path;
+
+    #[test]
+    fn phase2_install_force_is_explicit_and_legacy_safe() {
+        let legacy: InstallPhase2PacksV1Params =
+            serde_json::from_str("{}").expect("legacy params");
+        assert!(!legacy.force);
+
+        let dir = tempfile::tempdir().expect("tempdir");
+        let paths = AppPaths::new(dir.path().join("app"));
+        db::ensure_schema(&paths).expect("schema");
+        let normal = enqueue_install_phase2_packs_v1(&paths).expect("normal install job");
+        let normal_params: InstallPhase2PacksV1Params =
+            serde_json::from_str(&normal.params_json).expect("normal params");
+        assert!(!normal_params.force);
+
+        let forced = enqueue_install_phase2_packs_v1_with_options(&paths, true)
+            .expect("forced install job");
+        let forced_params: InstallPhase2PacksV1Params =
+            serde_json::from_str(&forced.params_json).expect("forced params");
+        assert!(forced_params.force);
+    }
 
     #[test]
     fn flat_provider_json_preserves_unicode_and_rejects_only_the_malformed_item() {

@@ -12654,8 +12654,10 @@ fn jobs_enqueue_import_local(
 #[tauri::command]
 fn jobs_enqueue_install_phase2_packs_v1(
     state: State<'_, AppState>,
+    force: Option<bool>,
 ) -> Result<jobs::JobRow, String> {
-    jobs::enqueue_install_phase2_packs_v1(&state.paths).map_err(|e| e.to_string())
+    jobs::enqueue_install_phase2_packs_v1_with_options(&state.paths, force.unwrap_or(false))
+        .map_err(|e| e.to_string())
 }
 
 #[tauri::command]

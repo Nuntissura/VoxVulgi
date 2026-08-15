@@ -6214,6 +6214,16 @@ pub struct DemucsPackStatus {
     pub demucs_version: Option<String>,
 }
 
+/// WP-0229: production Phase2 installs avoid rerunning pip and model warmup when
+/// the canonical pack status already proves the Spleeter pack is present.
+pub fn install_spleeter_pack_if_needed(paths: &AppPaths) -> Result<SpleeterPackStatus> {
+    let status = spleeter_pack_status(paths);
+    if status.installed {
+        return Ok(status);
+    }
+    install_spleeter_pack(paths)
+}
+
 pub fn demucs_pack_status(paths: &AppPaths) -> DemucsPackStatus {
     let venv_dir = paths.python_venv_dir();
     let venv_python = venv_python_path(&venv_dir);
@@ -6569,6 +6579,16 @@ pub struct TtsPreviewPackStatus {
     pub pyttsx3_version: Option<String>,
 }
 
+/// WP-0229: preserve the bare installer for explicit repair while normal
+/// Phase2 runs return immediately when the canonical status is satisfied.
+pub fn install_diarization_pack_if_needed(paths: &AppPaths) -> Result<DiarizationPackStatus> {
+    let status = diarization_pack_status(paths);
+    if status.installed {
+        return Ok(status);
+    }
+    install_diarization_pack(paths)
+}
+
 pub fn tts_preview_pack_status(paths: &AppPaths) -> TtsPreviewPackStatus {
     let venv_dir = paths.python_venv_dir();
     let venv_python = venv_python_path(&venv_dir);
@@ -6730,6 +6750,16 @@ fn file_is_nonempty(path: &std::path::Path) -> bool {
     std::fs::metadata(path)
         .map(|metadata| metadata.is_file() && metadata.len() > 0)
         .unwrap_or(false)
+}
+
+/// WP-0229: pyttsx3 setup is a no-op when the canonical preview-pack status is
+/// already installed; the bare function remains the force-repair path.
+pub fn install_tts_preview_pack_if_needed(paths: &AppPaths) -> Result<TtsPreviewPackStatus> {
+    let status = tts_preview_pack_status(paths);
+    if status.installed {
+        return Ok(status);
+    }
+    install_tts_preview_pack(paths)
 }
 
 /// Readiness for the CosyVoice 2 cross-lingual clone backend. Applies the same
@@ -7044,6 +7074,18 @@ pub fn install_voice_clone_cosyvoice_v1_pack(paths: &AppPaths) -> Result<CosyVoi
     Ok(status)
 }
 
+/// WP-0229 current-scope extension: CosyVoice joined the Phase2 plan after the
+/// original packet was authored and must obey the same no-op/force contract.
+pub fn install_voice_clone_cosyvoice_v1_pack_if_needed(
+    paths: &AppPaths,
+) -> Result<CosyVoicePackStatus> {
+    let status = cosyvoice_pack_status(paths);
+    if status.installed {
+        return Ok(status);
+    }
+    install_voice_clone_cosyvoice_v1_pack(paths)
+}
+
 pub fn tts_neural_local_v1_pack_status(paths: &AppPaths) -> TtsNeuralLocalV1PackStatus {
     let venv_dir = paths.python_venv_dir();
     let venv_python = venv_python_path(&venv_dir);
@@ -7286,6 +7328,18 @@ pub struct TtsVoicePreservingLocalV1PackStatus {
     pub expected_lockfile_sha: Option<String>,
     pub installed_lockfile_sha: Option<String>,
     pub version_mismatches: Vec<PythonPackageVersionMismatch>,
+}
+
+/// WP-0229: skip dependency resolution and Kokoro warmup only when the
+/// canonical neural-pack status is fully installed.
+pub fn install_tts_neural_local_v1_pack_if_needed(
+    paths: &AppPaths,
+) -> Result<TtsNeuralLocalV1PackStatus> {
+    let status = tts_neural_local_v1_pack_status(paths);
+    if status.installed {
+        return Ok(status);
+    }
+    install_tts_neural_local_v1_pack(paths)
 }
 
 pub fn tts_voice_preserving_local_v1_pack_status(
@@ -7635,6 +7689,18 @@ print("openvoice_converter_warmup_ok")
 pub struct Pyttsx3Voice {
     pub id: String,
     pub name: String,
+}
+
+/// WP-0229: the multi-condition voice-preserving status is the canonical
+/// short-circuit; explicit force repair continues to call the bare installer.
+pub fn install_tts_voice_preserving_local_v1_pack_if_needed(
+    paths: &AppPaths,
+) -> Result<TtsVoicePreservingLocalV1PackStatus> {
+    let status = tts_voice_preserving_local_v1_pack_status(paths);
+    if status.installed {
+        return Ok(status);
+    }
+    install_tts_voice_preserving_local_v1_pack(paths)
 }
 
 pub fn tts_preview_pyttsx3_list_voices(paths: &AppPaths) -> Result<Vec<Pyttsx3Voice>> {
