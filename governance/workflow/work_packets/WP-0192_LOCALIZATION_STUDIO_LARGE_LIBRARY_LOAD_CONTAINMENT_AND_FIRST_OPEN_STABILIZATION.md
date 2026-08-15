@@ -3,7 +3,7 @@
 ## Metadata
 - ID: WP-0192
 - Owner: Codex
-- Status: IN_PROGRESS
+- Status: DONE
 - Created: 2026-04-23
 - Target milestone: Desktop stability and operator usability
 
@@ -46,3 +46,4 @@ Out of scope:
 
 - 2026-04-23: Created after operator smoke showed Localization Studio freezing and flickering on first open against a `122k+` item library.
 - 2026-04-23: Implemented the first containment pass in `SubtitleEditorPage`: the page no longer hydrates the full library on first open, advanced voice data shifts into a deferred background load, and batch-library selection becomes explicit via a manual `Load items` action. `npm run build` and `cargo check` passed.
+- 2026-08-15: Closed against packaged v0.1.168 with a disposable database containing 122,001 `library_item` rows and 122,001 Localization workspace rows. The headless bridge became healthy in 1,268 ms and reported the exact editor item in 1,500 ms. The packaged editor rendered the current item, source track state, workflow stages, and enabled primary quick actions while the full workspace remained behind the explicit `Load items` action; `Select all listed` stayed disabled before that load. Focused desktop contracts passed 47/47. Evidence: `product/desktop/build_target/tool_artifacts/wp_runs/WP-0192/20260815-114612-v0_1_168/summary.md`.
