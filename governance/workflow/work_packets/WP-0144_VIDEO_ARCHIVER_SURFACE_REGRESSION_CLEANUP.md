@@ -3,7 +3,7 @@
 ## Metadata
 - ID: WP-0144
 - Owner: Codex
-- Status: BLOCKED
+- Status: DONE
 - Created: 2026-03-12
 - Target milestone: Post-0.1.6 smoke regression recovery
 
@@ -41,3 +41,4 @@ Out of scope:
 
 - 2026-03-12: Created from smoke finding `ST-013`.
 - 2026-03-12: Cut the shared import-control gate so Media Library keeps the import/ASR block but Video Archiver no longer renders the Localization Studio ingest controls; awaiting operator smoke on the cleaned archive surface.
+- 2026-08-15: DONE on governed packaged v0.1.168. Headless app-boundary audit returned 40/40 elements with zero missing names; the page exposes active-library context plus Single videos, Subscriptions, and Other websites, with zero Localization import/ASR/auto-run controls. Visual inspection at 800×600 passed and the focused workspace contract passed 6/6. Proof: `product/desktop/build_target/tool_artifacts/wp_runs/WP-0144/20260815_v0_1_168_headless/summary.md`.
