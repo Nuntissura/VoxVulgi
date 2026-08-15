@@ -1741,6 +1741,8 @@ struct DiagnosticsCaptureStatus {
     artifact_dir: Option<String>,
     #[serde(default)]
     root_span_id: Option<String>,
+    #[serde(default)]
+    active_panel_span_id: Option<String>,
 }
 
 impl Default for DiagnosticsCaptureStatus {
@@ -1757,6 +1759,7 @@ impl Default for DiagnosticsCaptureStatus {
             dropped_events: 0,
             artifact_dir: None,
             root_span_id: None,
+            active_panel_span_id: None,
         }
     }
 }
@@ -2411,11 +2414,15 @@ fn finalize_diagnostics_incident_manifest(
         return Ok(());
     };
     let incident_dir = std::path::PathBuf::from(artifact_dir);
+    let incident_trace_bytes = std::fs::metadata(incident_dir.join("trace.jsonl"))
+        .map(|metadata| metadata.len())
+        .unwrap_or(0);
     let manifest = serde_json::json!({
         "wp": "WP-0298",
         "incident_id": status.incident_id,
         "status": outcome,
         "trace_path": incident_dir.join("trace.jsonl").to_string_lossy(),
+        "incident_trace_bytes": incident_trace_bytes,
         "started_at_ms": status.started_at_ms,
         "finished_at_ms": now_epoch_ms_i64(),
         "capture": status,
@@ -2765,6 +2772,7 @@ fn diagnostics_capture_envelope(
         state.max_trace_bytes = DIAGNOSTICS_TRACE_NORMAL_MAX_BYTES;
         state.artifact_dir = None;
         state.root_span_id = None;
+        state.active_panel_span_id = None;
         if finalize_diagnostics_incident_manifest(&previous, "completed_expired").is_err() {
             record_diagnostics_persistence_failure();
         }
@@ -2852,11 +2860,16 @@ fn activate_panel_capture_before_navigation(
     });
     let (incident_id, _, _, activated_armed_capture) =
         diagnostics_capture_envelope(paths, "panel_switch", &details);
-    let capture_mode = diagnostics_capture_state()
-        .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner())
-        .mode
-        .clone();
+    let capture_mode = {
+        let mut state = diagnostics_capture_state()
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        if state.mode == "incident" {
+            state.active_panel_span_id = Some(panel_span_id.to_string());
+            persist_diagnostics_capture_state(paths, &state)?;
+        }
+        state.mode.clone()
+    };
     Ok(DiagnosticsPanelTransitionReceipt {
         incident_id,
         panel_span_id: panel_span_id.to_string(),
@@ -2894,6 +2907,7 @@ fn cancel_superseded_panel_capture(
     state.max_trace_bytes = DIAGNOSTICS_TRACE_INCIDENT_MAX_BYTES;
     state.artifact_dir = None;
     state.root_span_id = None;
+    state.active_panel_span_id = None;
     persist_diagnostics_capture_state(paths, &state)?;
     Ok(true)
 }
@@ -2928,16 +2942,20 @@ fn append_diagnostics_trace_row(
     let (incident_id, span_id, max_trace_bytes, _) =
         diagnostics_capture_envelope(paths, &event, &details);
     if incident_id.is_some() {
-        let root_span_id = diagnostics_capture_state()
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner())
-            .root_span_id
-            .clone();
-        if let (Some(root_span_id), Some(object)) = (root_span_id, details.as_object_mut()) {
-            if span_id.as_deref() != Some(root_span_id.as_str()) {
+        let parent_span_id = {
+            let state = diagnostics_capture_state()
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            state
+                .active_panel_span_id
+                .clone()
+                .or_else(|| state.root_span_id.clone())
+        };
+        if let (Some(parent_span_id), Some(object)) = (parent_span_id, details.as_object_mut()) {
+            if span_id.as_deref() != Some(parent_span_id.as_str()) {
                 object
                     .entry("parent_span_id".to_string())
-                    .or_insert(serde_json::Value::String(root_span_id));
+                    .or_insert(serde_json::Value::String(parent_span_id));
             }
         }
     }
@@ -3020,6 +3038,7 @@ fn append_diagnostics_trace_row(
                 "incident_id": incident_id,
                 "status": "capturing",
                 "trace_path": incident_path.to_string_lossy(),
+                "incident_trace_bytes": incident_bytes.saturating_add(line_bytes),
                 "updated_at_ms": now_epoch_ms_i64(),
                 "capture": capture_snapshot,
             });
@@ -4559,6 +4578,7 @@ mod tests {
             dropped_events: 0,
             artifact_dir: None,
             root_span_id: None,
+            active_panel_span_id: None,
         };
         persist_diagnostics_capture_state(&paths, &armed).expect("persist armed state");
         *diagnostics_capture_state()
@@ -4597,6 +4617,21 @@ mod tests {
         let dir = tempfile::tempdir().expect("tempdir");
         let paths = AppPaths::new(dir.path().to_path_buf());
         paths.ensure_dirs().expect("ensure dirs");
+        let legacy_state: DiagnosticsCaptureStatus = serde_json::from_value(serde_json::json!({
+            "mode": "normal",
+            "armed_trigger": null,
+            "incident_id": null,
+            "armed_at_ms": null,
+            "started_at_ms": null,
+            "expires_at_ms": null,
+            "max_trace_bytes": DIAGNOSTICS_TRACE_NORMAL_MAX_BYTES,
+            "trace_bytes": 0,
+            "dropped_events": 0,
+            "artifact_dir": null,
+            "root_span_id": null
+        }))
+        .expect("pre-active-panel capture state stays readable");
+        assert!(legacy_state.active_panel_span_id.is_none());
         let armed = DiagnosticsCaptureStatus {
             mode: "normal".to_string(),
             armed_trigger: Some("panel_switch".to_string()),
@@ -4644,6 +4679,55 @@ mod tests {
         assert_eq!(rows[0].incident_id.as_deref(), Some("incident-race"));
         assert_eq!(rows[0].span_id.as_deref(), Some("jobs-span-1"));
         assert_eq!(rows[0].details["parent_span_id"], "panel-41");
+
+        let second_activation = activate_panel_capture_before_navigation(
+            &paths,
+            "media_library",
+            42,
+            "panel-42",
+            None,
+        )
+        .expect("activate second panel inside incident");
+        assert!(!second_activation.activated_armed_capture);
+        let active = load_diagnostics_capture_state(&paths);
+        assert_eq!(active.root_span_id.as_deref(), Some("panel-41"));
+        assert_eq!(active.active_panel_span_id.as_deref(), Some("panel-42"));
+        append_diagnostics_trace_row(
+            &paths,
+            "command_phase".to_string(),
+            serde_json::json!({
+                "cmd": "library_query",
+                "phase": "db_open_prepare_step_map",
+                "request_id": "library-request-1",
+                "span_id": "library-span-1",
+            }),
+            "info".to_string(),
+        )
+        .expect("second panel command trace");
+        let rows = read_recent_diagnostics_trace_entries(&paths, 5).expect("read trace");
+        assert_eq!(rows.last().expect("last row").details["parent_span_id"], "panel-42");
+        let final_status = load_diagnostics_capture_state(&paths);
+        let incident_dir = std::path::PathBuf::from(
+            final_status
+                .artifact_dir
+                .as_deref()
+                .expect("incident artifact directory"),
+        );
+        finalize_diagnostics_incident_manifest(&final_status, "completed_test")
+            .expect("finalize incident manifest");
+        let manifest: serde_json::Value = serde_json::from_str(
+            &std::fs::read_to_string(incident_dir.join("manifest.json"))
+                .expect("read finalized manifest"),
+        )
+        .expect("parse finalized manifest");
+        assert_eq!(
+            manifest["incident_trace_bytes"].as_u64(),
+            Some(
+                std::fs::metadata(incident_dir.join("trace.jsonl"))
+                    .expect("incident trace metadata")
+                    .len()
+            )
+        );
         *diagnostics_capture_state()
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner()) = DiagnosticsCaptureStatus::default();
@@ -9211,6 +9295,7 @@ fn diagnostics_capture_arm(
         dropped_events: DIAGNOSTICS_TRACE_DROPPED_TOTAL.load(Ordering::Relaxed),
         artifact_dir: None,
         root_span_id: None,
+        active_panel_span_id: None,
     };
     persist_diagnostics_capture_state(&state.paths, &status)?;
     *diagnostics_capture_state()
