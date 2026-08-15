@@ -764,6 +764,9 @@ Subscription export JSON shape (v1):
 
 ### 6.5 Desktop shell interaction rules
 
+- On Windows, the main Tauri WebView2 window must disable native occlusion calculation and background renderer/timer suspension with the exact main-window arguments `--disable-features=msWebOOUI,msPdfOOUI,msSmartScreenProtection,CalculateNativeWinOcclusion --disable-backgrounding-occluded-windows --disable-renderer-backgrounding --disable-background-timer-throttling`. Because Tauri's `additionalBrowserArgs` override replaces wry defaults, `msWebOOUI`, `msPdfOOUI`, and `msSmartScreenProtection` must remain in the feature list.
+- This policy keeps the WebView main thread and Worker heartbeats scheduled when the frameless transparent window is backgrounded or occluded; it must not be replaced by focus-stealing keep-alives or periodic foreground activation. The accepted tradeoff is modestly higher idle resource use in exchange for preventing renderer suspension while native Rust remains alive.
+- Verification requires a config contract for every preserved/default and mitigation flag, a packaged headless load/snapshot check, and inspection of the live `msedgewebview2.exe` browser/renderer command lines to prove the arguments reached WebView2. Long-horizon idle/background soak evidence remains the operator-assisted regression check for the original multi-hour freeze class.
 - Drag-region behavior should be restricted to the intended chrome/background layer and must not swallow normal content interaction.
 - Corner-resize affordances should have a clear reachable hitbox inside the practical app bounds.
 - App movement should use an explicit move affordance or clearly bounded drag region so operators can distinguish shell movement from content interaction.

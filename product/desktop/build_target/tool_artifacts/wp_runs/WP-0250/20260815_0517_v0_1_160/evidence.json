@@ -1,0 +1,46 @@
+{
+  "wp": "WP-0250",
+  "app_version": "0.1.160",
+  "outcome": "PASS",
+  "captured_at": "2026-08-15T05:17:00+02:00",
+  "managed_executable": "product/desktop/build_target/Current/release/desktop.exe",
+  "host": {
+    "pid": 105340,
+    "agent_headless": true,
+    "bridge_port": 53569,
+    "state_responded": true,
+    "snapshot_rendered": true
+  },
+  "webview2": {
+    "browser_pid": 108404,
+    "renderer_pid": 94248,
+    "browser_complete_override": true,
+    "browser_disable_features": [
+      "msWebOOUI",
+      "msPdfOOUI",
+      "msSmartScreenProtection",
+      "CalculateNativeWinOcclusion"
+    ],
+    "browser_switches": [
+      "disable-backgrounding-occluded-windows",
+      "disable-renderer-backgrounding",
+      "disable-background-timer-throttling"
+    ],
+    "renderer_propagated": [
+      "CalculateNativeWinOcclusion",
+      "disable-background-timer-throttling"
+    ]
+  },
+  "contract_test": {
+    "command": "node --import tsx --test tests/freezeContainmentContract.test.ts",
+    "passed": 20,
+    "failed": 0
+  },
+  "heartbeat_report": {
+    "file": "freeze_report_1786763838572.json",
+    "recent_trace_count": 1000,
+    "main_thread_alive_rows": 58,
+    "worker_alive_rows": 58,
+    "long_horizon_soak_claimed": false
+  }
+}

@@ -2,7 +2,7 @@
 
 ## Status
 
-IN_PROGRESS
+DONE
 
 ## Owner
 
@@ -53,6 +53,9 @@ is why DB/command hardening never stopped the idle-in-background freezes.
   - Chromium docs, "Windows Native Window Occlusion Tracking" (`chromium/docs/windows_native_window_occlusion_tracking.md`): when a window is occluded/minimized, Chromium treats foreground tabs as backgrounded — "rendering stops, and JavaScript is throttled". Doc explicitly notes the occlusion cost "probably outweighs the benefits for other Chromium-based applications" (i.e., embedders should consider disabling it). Flags: `--disable-features=CalculateNativeWinOcclusion`, `--disable-backgrounding-occluded-windows`.
   - Tauri v2 config reference + issue tauri-apps/tauri#7692: `additionalBrowserArgs` **replaces** wry's default `--disable-features=msWebOOUI,msPdfOOUI,msSmartScreenProtection`; if set, those defaults must be re-included by hand.
   - Tauri issue tauri-apps/tauri#13092: setting `additionalBrowserArgs` in `tauri.conf.json` has caused blank/white-screen on *additional* webview windows; risk noted, mitigated here because VoxVulgi uses a single main window and we verify load post-build.
+- Primary-source and packaged-runtime recheck (2026-08-14):
+  - Chromium's `windows_native_window_occlusion_tracking.md` locates native occlusion calculation in the browser-side Aura/Windows root-HWND tracker; `content/public/common/content_switches.cc` defines `disable-backgrounding-occluded-windows` as the switch that disables backgrounding renders for occluded windows.
+  - The packaged v0.1.160 WebView2 root browser process carried the complete four-switch override. Its renderer child carried Chromium's propagated `CalculateNativeWinOcclusion` feature disable and `--disable-background-timer-throttling`, but not the browser-side `--disable-backgrounding-occluded-windows` or `--disable-renderer-backgrounding` switches. Acceptance criterion 4 was corrected to match Chromium's process boundary rather than requiring switches on a child process to which WebView2 does not propagate them.
 - Rejected options:
   - Disable hardware acceleration / `transparent:false` / add decorations — larger UX regression, not the root cause.
   - Native-side periodic `window.set_focus()` keep-alive — fights the OS, racy, and steals focus (violates the no-focus-steal build rule).
@@ -81,14 +84,14 @@ Out of scope:
 - R1: `additionalBrowserArgs` blank-screen bug (#13092). Mitigation: single main window only; verify the app loads after build (snapshot + bridge `/agent/state`).
 - R2: Dropping wry defaults by overriding. Mitigation: defaults re-included verbatim and asserted by the contract test.
 - R3: Slightly higher idle power/CPU from disabled occlusion savings. Mitigation: acceptable for a local-first production tool; documented in TECHNICAL_DESIGN.
-- R4: The flag set is necessary but the soak proof is long. Mitigation: interim proof inspects the live `msedgewebview2.exe` renderer command line to confirm the flags reached the renderer; full proof is an idle-background soak watching `main_thread_alive`/`worker_alive` survive occlusion.
+- R4: The flag set is necessary but the soak proof is long. Mitigation: interim proof inspects the live WebView2 browser process for the complete override and the renderer child for the arguments Chromium propagates; full proof is an idle-background soak watching `main_thread_alive`/`worker_alive` survive occlusion.
 
 ## Acceptance Criteria
 
 1. `tauri.conf.json` main window carries the exact `additionalBrowserArgs` string above.
 2. Config-contract test (RED before, GREEN after) asserts preserved defaults + every occlusion/background flag.
 3. Desktop build succeeds; app loads (no blank screen) — bridge `/agent/state` responds and a snapshot renders UI.
-4. The running `msedgewebview2.exe` renderer process command line includes `--disable-features=...CalculateNativeWinOcclusion` and `--disable-backgrounding-occluded-windows` (flags actually reached the renderer).
+4. The running root `msedgewebview2.exe` browser process command line includes the complete exact override, and its renderer child includes Chromium's propagated `CalculateNativeWinOcclusion` feature disable and `--disable-background-timer-throttling`. Browser-side switches are not required on the renderer child.
 5. Desktop semantic version incremented; BUILD_CHANGELOG entry added with WP-0250.
 
 ## Verification
@@ -96,5 +99,14 @@ Out of scope:
 - RED: contract test fails before `additionalBrowserArgs` is added.
 - GREEN: contract test passes after.
 - Build: `npm run build` (desktop) + `cargo test` (engine/tauri).
-- Runtime: launch, capture bridge `/agent/state` + a snapshot (load proof), and dump the `msedgewebview2.exe` command line (flag-reached-renderer proof).
+- Runtime: launch, capture bridge `/agent/state` + a snapshot (load proof), and dump the root browser plus renderer-child `msedgewebview2.exe` command lines (complete-override and propagation proof).
 - Soak (interim/operator-assisted, long-horizon): leave the app idle and backgrounded; confirm `main_thread_alive` + `worker_alive` keep ticking through occlusion in `diagnostics_trace.jsonl`. Documented as the canonical long-horizon proof since the freeze took ~5 h to manifest.
+
+## Completion Evidence (2026-08-15)
+
+- Governed desktop v0.1.160 and its NSIS installer already contain the exact WP-0250 configuration; version and changelog gates are present.
+- `node --import tsx --test tests/freezeContainmentContract.test.ts`: 20 passed, 0 failed.
+- Exact managed executable launched with `--agent-headless`; `/agent/state` returned v0.1.160 and a visually inspected Diagnostics snapshot rendered without the blank-screen regression.
+- Root WebView2 browser PID 108404 contained the complete override; renderer PID 94248 contained Chromium's propagated feature/timer subset.
+- Fresh `vvfreeze.cmd` report contained current main-thread and Worker heartbeat rows. The multi-hour operator-assisted soak remains explicitly unclaimed.
+- Proof bundle: `product/desktop/build_target/tool_artifacts/wp_runs/WP-0250/20260815_0517_v0_1_160/summary.md`.
