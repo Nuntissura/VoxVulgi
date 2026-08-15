@@ -1,10 +1,10 @@
 ---
 file_id: WP-0298-v1
 file_kind: work-packet
-updated_at: 2026-08-09
+updated_at: 2026-08-15
 ---
 
-<topic id="contract" status="in-progress" version="v1" wp="WP-0298" updated_at="2026-08-09">
+<topic id="contract" status="in-progress" version="v1" wp="WP-0298" updated_at="2026-08-15">
 
 # Work Packet: WP-0298 — Causal freeze performance boundary and diagnostic capture
 
@@ -53,6 +53,7 @@ Make job startup and panel navigation responsive on the exact large local databa
 - 2026-08-09: Created from direct source, live read-only database, trace, existing proof, and current external diagnostic research. No product code, user data, queue state, NAS media, or running process changed.
 - 2026-08-09: Implementation started in the first dependency-safe parallel wave; independent adversarial review is required before any completion claim.
 - 2026-08-15: Independent adversarial review completed at HIGH risk. The initial packaged v0.1.169 incident probe failed causal operation identity because Diagnostics issued download and enumeration protection commands with the same request/span pair. Source was remediated to create exactly two stable contexts, preserving correlation within each operation while separating the operations; focused contracts pass 5/5. Overall WP remains IN_PROGRESS pending a governed build of the remediation and the refinement's exact current-database/NAS panel/job-start reproduction.
+- 2026-08-15: Exact canonical-database panel proof advanced on packaged v0.1.169 with the 1,066,110,976-byte live database. A clean Options -> Media Library switch committed in 85 ms, mounted 964 controls/162 rows, recorded one 68 ms long task and zero Worker freezes while the asynchronous query completed in 3,105 ms. Separate html2canvas capture produced 1,091 ms and 339 ms freezes, proving capture self-interference must not be attributed to plain navigation. Proof: `product/desktop/build_target/tool_artifacts/wp_runs/WP-0298/20260815_large_live_db_v169/summary.md`. Remaining exact case: job start; remaining performance decision: reconcile/remediate the 3.1-7.7 second query cost against the refinement threshold.
 
 ## Independent adversarial review — 2026-08-15
 
