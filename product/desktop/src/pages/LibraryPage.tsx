@@ -5603,6 +5603,11 @@ export function LibraryPage({ mode = "all", visible = true }: LibraryPageProps) 
                             </span>
                           ) : null}
                         </dd>
+                        <dt>Already-downloaded tracking</dt>
+                        <dd>
+                          Stored by VoxVulgi separately from this target folder. Existing target-folder
+                          history is merged into the managed tracking state when needed.
+                        </dd>
                         <dt>Folder name</dt>
                         <dd>{sub.folder_map || "-"}</dd>
                         <dt>Preset</dt>

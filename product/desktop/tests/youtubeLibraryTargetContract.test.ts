@@ -43,6 +43,11 @@ test("YouTube subscription save previews and confirms existing library folders b
     /\{provider\}\/\{channel\}/,
     "subscription save must not reintroduce the provider folder layer",
   );
+  assert.match(
+    librarySource,
+    /Already-downloaded tracking[\s\S]*Stored by VoxVulgi separately from this target folder[\s\S]*Existing target-folder[\s\S]*history is merged into the managed tracking state/,
+    "subscription detail must distinguish its physical target from app-managed continuity state",
+  );
 });
 
 test("YouTube subscription output preview command is exposed through Tauri", () => {
