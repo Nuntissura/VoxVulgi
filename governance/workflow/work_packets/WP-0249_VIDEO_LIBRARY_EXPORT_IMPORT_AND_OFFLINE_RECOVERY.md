@@ -2,7 +2,7 @@
 
 ## Status
 
-REVIEW
+DONE
 
 ## Base Scope
 
@@ -93,3 +93,4 @@ REVIEW
 
 - 2026-06-04: Created from operator request to complete remaining library gaps after WP-0220 fixed NAS-shaped YouTube output folders.
 - 2026-06-04: Implemented metadata-only video-library bundle export/import, NAS-offline create/select-library prompt before YouTube batch queueing, metadata-only item copy/move, and subscription move/rebind. Verification passed: `cargo test --manifest-path product/engine/Cargo.toml --lib` (216/216), `npm run test:contracts` (67/67), `npm run build`, and `cargo check --manifest-path product/desktop/src-tauri/Cargo.toml`. Visual proof captured via bridge at `governance/snapshots/WP-0249/video_library_controls_live3_1780538584350.png`.
+- 2026-08-15: Promoted to DONE after current reconciliation. Four final-state frontend contracts passed, the disposable metadata-only bundle round-trip passed, the packaged v0.1.66 UI artifact was visually re-inspected, and hidden packaged v0.1.153 semantic inspection retained the complete library-management group. Proof: `product/desktop/build_target/tool_artifacts/wp_runs/WP-0249/20260815_board_reconciliation_v0_1_153/summary.md`.
