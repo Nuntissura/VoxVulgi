@@ -22147,6 +22147,36 @@ fn ytdlp_provider_metadata_observation(
     })
 }
 
+fn record_provider_metadata_item_rejection(
+    paths: &AppPaths,
+    job_id: Option<&str>,
+    line_number: usize,
+    error: &str,
+    raw_bytes: usize,
+) {
+    let payload = serde_json::json!({
+        "line_number": line_number,
+        "error": error,
+        "raw_bytes": raw_bytes,
+    });
+    if let Some(job_id) = job_id {
+        let _ = log_line(
+            paths,
+            job_id,
+            "error",
+            "provider_metadata_json_item_rejected",
+            payload,
+        );
+    } else {
+        append_engine_diagnostics_trace_row_best_effort(
+            paths,
+            "provider_metadata_json_item_rejected",
+            "error",
+            payload,
+        );
+    }
+}
+
 fn parse_ytdlp_flat_json_entries(
     paths: &AppPaths,
     stdout: &[u8],
@@ -22166,19 +22196,13 @@ fn parse_ytdlp_flat_json_entries(
             Ok(value) => value,
             Err(error) => {
                 malformed_count += 1;
-                if let Some(job_id) = job_id {
-                    let _ = log_line(
-                        paths,
-                        job_id,
-                        "error",
-                        "provider_metadata_json_item_rejected",
-                        serde_json::json!({
-                            "line_number": line_index + 1,
-                            "error": error.to_string(),
-                            "raw_bytes": raw_line.len(),
-                        }),
-                    );
-                }
+                record_provider_metadata_item_rejection(
+                    paths,
+                    job_id,
+                    line_index + 1,
+                    &error.to_string(),
+                    raw_line.len(),
+                );
                 continue;
             }
         };
@@ -22192,6 +22216,13 @@ fn parse_ytdlp_flat_json_entries(
             });
         let Some(entry_url) = entry_url else {
             malformed_count += 1;
+            record_provider_metadata_item_rejection(
+                paths,
+                job_id,
+                line_index + 1,
+                "structured metadata item has no usable URL",
+                raw_line.len(),
+            );
             continue;
         };
         let title = json_raw_non_empty(&value, "title");
@@ -28765,6 +28796,7 @@ mod tests {
         });
         let mut stdout = serde_json::to_vec(&first).expect("first");
         stdout.extend_from_slice(b"\n{\"id\":\"bad\",\"title\":\"broken\xff\"}\n");
+        stdout.extend_from_slice(b"{\"id\":\"missing-url\",\"title\":\"No URL\"}\n");
         stdout.extend_from_slice(&serde_json::to_vec(&second).expect("second"));
         stdout.push(b'\n');
 
@@ -28790,6 +28822,16 @@ mod tests {
         assert_eq!(stored.0, "한국어\t제목\n日本語 😀");
         assert_eq!(stored.1.as_deref(), Some("2026.07.04"));
         assert_eq!(stored.2.as_deref(), Some("subscription-ko"));
+        let rejection_log = std::fs::read_to_string(paths.job_logs_dir().join("job-json.jsonl"))
+            .expect("rejection log");
+        assert_eq!(
+            rejection_log
+                .lines()
+                .filter(|line| line.contains("provider_metadata_json_item_rejected"))
+                .count(),
+            2
+        );
+        assert!(rejection_log.contains("structured metadata item has no usable URL"));
     }
 
     #[test]
