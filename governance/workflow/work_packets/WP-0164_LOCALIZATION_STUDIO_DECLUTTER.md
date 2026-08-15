@@ -3,7 +3,7 @@
 ## Metadata
 - ID: WP-0164
 - Owner: Codex
-- Status: REVIEW
+- Status: SUPERSEDED
 - Created: 2026-04-08
 - Target milestone: UX Polish
 
@@ -34,3 +34,7 @@ Out of scope:
 ## Test / verification plan
 - Visual snapshot audit at 1400x900 and 800x600 showing grouped buttons and step indicator.
 - `npm run build` passes.
+
+## Status updates
+
+- 2026-08-15: SUPERSEDED by the accepted WP-0211 master-detail editor. WP-0211 removed the obsolete Workflow Map/card shape entirely and replaced it with one eight-stage rail plus one selected-stage pane, so WP-0164's grouped-button and Advanced Tools card acceptance surfaces no longer exist. The still-valid reusable-voice capture/save/apply simplification remains preserved in WP-0157 rather than being discarded or falsely closed here. Current structure proof: `product/desktop/build_target/tool_artifacts/wp_runs/WP-0211/20260815-0958_v0_1_168/summary.md`.
