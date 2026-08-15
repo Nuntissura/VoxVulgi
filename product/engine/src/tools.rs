@@ -6361,6 +6361,14 @@ fn validate_diarization_runtime(paths: &AppPaths, venv_python: &std::path::Path)
     )
 }
 
+fn diarization_pack_is_installed(
+    all_required_present: bool,
+    lockfile_runtime_ready: bool,
+    versions_ready: bool,
+) -> bool {
+    all_required_present && lockfile_runtime_ready && versions_ready
+}
+
 pub fn diarization_pack_status(paths: &AppPaths) -> DiarizationPackStatus {
     let venv_dir = paths.python_venv_dir();
     let venv_python = venv_python_path(&venv_dir);
@@ -6426,7 +6434,11 @@ pub fn diarization_pack_status(paths: &AppPaths) -> DiarizationPackStatus {
     let (_, installed_lockfile_sha) = pack_install_state_shas(paths, "diarization");
     let receipt_stale = !lockfile_ready && versions_ready && installed_lockfile_sha.is_some();
 
-    let installed = all_required_present;
+    let installed = diarization_pack_is_installed(
+        all_required_present,
+        lockfile_runtime_ready,
+        versions_ready,
+    );
     let repair_required = if installed {
         !lockfile_runtime_ready || !versions_ready
     } else {
@@ -8082,6 +8094,14 @@ mod tests {
                 "validation script should exercise {required}"
             );
         }
+    }
+
+    #[test]
+    fn diarization_pack_never_reports_installed_for_lockfile_version_drift() {
+        assert!(diarization_pack_is_installed(true, true, true));
+        assert!(!diarization_pack_is_installed(true, false, false));
+        assert!(!diarization_pack_is_installed(true, true, false));
+        assert!(!diarization_pack_is_installed(false, true, true));
     }
 
     #[test]
