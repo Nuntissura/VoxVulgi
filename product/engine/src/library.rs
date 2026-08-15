@@ -2059,29 +2059,24 @@ pub fn list_items(paths: &AppPaths, limit: usize, offset: usize) -> Result<Vec<L
     list_items_by_file_status(paths, limit, offset, Some("available"))
 }
 
-pub fn list_items_by_file_status(
-    paths: &AppPaths,
-    limit: usize,
-    offset: usize,
-    file_status: Option<&str>,
-) -> Result<Vec<LibraryItem>> {
-    // WP-0224: read-only connection bypasses the job-runner write queue so
-    // Library page mount stops blocking behind running jobs. Schema is
-    // already migrated by `db::ensure_schema` at startup, so we skip the
-    // per-call `migrate()` (it requires a writer anyway).
-    let conn = db::open_readonly(paths)?;
-
-    let normalized_status = match file_status.unwrap_or("available").trim() {
-        "available" => "available",
-        "operator_deleted" | "deleted" => "operator_deleted",
-        "all" => "all",
-        other => {
-            return Err(EngineError::InstallFailed(format!(
-                "unsupported library file status filter: {other}"
-            )))
-        }
+fn library_list_by_file_status_sql(normalized_status: &str) -> String {
+    let (predicate, order_by) = match normalized_status {
+        "available" => (
+            "library_item.file_status = 'available'",
+            "library_item.created_at_ms DESC",
+        ),
+        "operator_deleted" => (
+            "library_item.file_status IN ('operator_deleted', 'delete_pending')",
+            "library_item.created_at_ms DESC",
+        ),
+        "all" => (
+            "1 = 1",
+            "CASE WHEN library_item.file_status = 'available' THEN 0 ELSE 1 END ASC, \
+             library_item.created_at_ms DESC",
+        ),
+        _ => unreachable!("library status is normalized before SQL selection"),
     };
-    let mut stmt = conn.prepare(
+    format!(
         r#"
 SELECT
   library_item.id,
@@ -2107,20 +2102,40 @@ SELECT
   library_item.file_redownload_authorized_job_id
 FROM library_item
 LEFT JOIN library_download_lineage ON library_download_lineage.item_id = library_item.id
-WHERE
-  (?1 = 'all')
-  OR (?1 = 'available' AND library_item.file_status = 'available')
-  OR (?1 = 'operator_deleted' AND library_item.file_status IN ('operator_deleted', 'delete_pending'))
-ORDER BY
-  CASE WHEN library_item.file_status = 'available' THEN 0 ELSE 1 END ASC,
-  library_item.created_at_ms DESC
-LIMIT ?2 OFFSET ?3
+WHERE {predicate}
+ORDER BY {order_by}
+LIMIT ?1 OFFSET ?2
 "#,
-    )?;
+    )
+}
+
+pub fn list_items_by_file_status(
+    paths: &AppPaths,
+    limit: usize,
+    offset: usize,
+    file_status: Option<&str>,
+) -> Result<Vec<LibraryItem>> {
+    // WP-0224: read-only connection bypasses the job-runner write queue so
+    // Library page mount stops blocking behind running jobs. Schema is
+    // already migrated by `db::ensure_schema` at startup, so we skip the
+    // per-call `migrate()` (it requires a writer anyway).
+    let normalized_status = match file_status.unwrap_or("available").trim() {
+        "available" => "available",
+        "operator_deleted" | "deleted" => "operator_deleted",
+        "all" => "all",
+        other => {
+            return Err(EngineError::InstallFailed(format!(
+                "unsupported library file status filter: {other}"
+            )))
+        }
+    };
+    let conn = db::open_readonly(paths)?;
+    let sql = library_list_by_file_status_sql(normalized_status);
+    let mut stmt = conn.prepare(&sql)?;
 
     let mut items = stmt
         .query_map(
-            params![normalized_status, limit as i64, offset as i64],
+            params![limit as i64, offset as i64],
             library_item_from_lifecycle_lineage_row,
         )?
         .collect::<rusqlite::Result<Vec<_>>>()?;
@@ -4156,6 +4171,34 @@ mod tests {
     use super::*;
     use filetime::{set_file_mtime, FileTime};
     use rusqlite::params;
+
+    #[test]
+    fn available_library_list_uses_file_status_created_index() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let paths = AppPaths::new(dir.path().join("app"));
+        db::ensure_schema(&paths).expect("schema");
+        let conn = db::open_readonly(&paths).expect("readonly");
+        let sql = format!(
+            "EXPLAIN QUERY PLAN {}",
+            library_list_by_file_status_sql("available")
+        );
+        let mut statement = conn.prepare(&sql).expect("prepare plan");
+        let details = statement
+            .query_map(params![160_i64, 0_i64], |row| row.get::<_, String>(3))
+            .expect("query plan")
+            .collect::<rusqlite::Result<Vec<_>>>()
+            .expect("plan details");
+        let plan = details.join("\n");
+
+        assert!(
+            plan.contains("idx_library_item_file_status_created"),
+            "available list must use the lifecycle paging index; plan:\n{plan}"
+        );
+        assert!(
+            !plan.contains("SCAN library_item"),
+            "available list must not scan the full library; plan:\n{plan}"
+        );
+    }
 
     fn seed_present_observation(paths: &AppPaths, path: &str) {
         let conn = db::open(paths).expect("observation db");

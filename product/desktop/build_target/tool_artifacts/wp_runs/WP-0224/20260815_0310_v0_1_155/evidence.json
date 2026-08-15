@@ -1,0 +1,41 @@
+{
+  "wp": "WP-0224",
+  "outcome": "PASS",
+  "app_version": "0.1.155",
+  "bridge": {
+    "pid": 110312,
+    "port": 64611,
+    "started_at_ms": 1786755012516,
+    "agent_headless": true
+  },
+  "live_database": {
+    "library_item_rows": 144082,
+    "exact_engine_before_ms": [881, 911],
+    "exact_engine_after_ms": [13, 12, 12]
+  },
+  "packaged_trace": {
+    "report": "C:/Users/Ilja Smets/AppData/Roaming/com.voxvulgi.voxvulgi/diagnostics/traces/freeze_reports/freeze_report_1786755063248.json",
+    "library_list_elapsed_ms": [31, 110, 19, 30],
+    "youtube_subscriptions_list_elapsed_ms": [16, 23, 13],
+    "worker_alive_count": 2,
+    "main_thread_alive_count": 2,
+    "list_threshold_ms": 500
+  },
+  "tests": {
+    "frontend_contracts": { "passed": 24, "failed": 0 },
+    "focused_readonly_open": { "passed": 1, "failed": 0 },
+    "focused_query_plan": { "passed": 1, "failed": 0 },
+    "engine_unit_suite": { "passed": 538, "ignored": 4, "failed": 0 }
+  },
+  "build": {
+    "result": "PASS",
+    "log": "product/desktop/build_target/logs/build_desktop_target_20260815-023938_0_1_155.log",
+    "installer": "product/desktop/build_target/Current/release/bundle/nsis/VoxVulgi_0.1.155_x64-setup.exe",
+    "offline_bundle_id": "offline_full_win64_20260814_082842",
+    "offline_payload_bytes": 6161329153
+  },
+  "visual": {
+    "snapshot": "governance/snapshots/WP-0224/v0_1_155_instagram_archive_1786755097574.png",
+    "verdict": "PASS: readable mounted Instagram Archiver with no overlap, blank shell, or frozen state"
+  }
+}

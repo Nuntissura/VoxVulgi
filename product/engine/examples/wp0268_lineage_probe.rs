@@ -44,6 +44,7 @@ fn main() -> Result<()> {
     }
 
     let history = library::list_youtube_single_history(&paths, 10, 0, None, Some("desc"))?;
+    let unclassified_youtube_total = library::count_youtube_single_unclassified(&paths)?;
     let conn = db::open_readonly(&paths)?;
     let schema_version = conn
         .query_row(
@@ -96,7 +97,7 @@ WHERE lineage.service='youtube'
         schema_version,
         backfill_batches,
         canonical_youtube_single_total: history.canonical_total,
-        unclassified_youtube_total: history.unclassified_total,
+        unclassified_youtube_total,
         subscription_rows_in_single_history,
         mapped_subscription_rows_excluded_from_single_history,
         sample_single_item_ids: history.items.into_iter().map(|item| item.id).collect(),

@@ -1250,3 +1250,19 @@ This changelog tracks desktop installer builds produced by `governance/scripts/b
 - Artifacts:
   - `product/desktop/build_target/Current/release/bundle/nsis/VoxVulgi_0.1.153_x64-setup.exe`
 - Notes: Final clone UX wave with dedicated non-queueing clone readiness check, visually reviewed pitch-unavailable guidance, outcome diagnostics, canonical per-segment fallback review, visible full voice-plan routing, and seven-factor reference quality explanation. Built in place because an unidentified directory handle blocked archival while every file passed exclusive-open validation.
+
+## 0.1.154 - 2026-08-15T00:31:51Z
+- Work Packets: `WP-0224`
+- Commit: `4467f4e`
+- Offline Bundle ID: `offline_full_win64_20260814_082842`
+- Artifacts:
+  - `product/desktop/build_target/Current/release/bundle/nsis/VoxVulgi_0.1.154_x64-setup.exe`
+- Notes: Desktop target build via build_desktop_target.ps1.
+
+## 0.1.155 - 2026-08-15T00:49:56Z
+- Work Packets: `WP-0224`
+- Commit: `4467f4e`
+- Offline Bundle ID: `offline_full_win64_20260814_082842`
+- Artifacts:
+  - `product/desktop/build_target/Current/release/bundle/nsis/VoxVulgi_0.1.155_x64-setup.exe`
+- Notes: Desktop target build via build_desktop_target.ps1.

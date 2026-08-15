@@ -211,8 +211,6 @@ pub fn open(paths: &AppPaths) -> Result<Connection> {
 // callers must NOT call `db::migrate(&conn)` — the connection cannot write,
 // and the schema is already up to date when the app reaches the UI.
 pub fn open_readonly(paths: &AppPaths) -> Result<Connection> {
-    paths.ensure_dirs()?;
-
     let db_path = paths.db_dir().join("app.sqlite");
     let conn = Connection::open_with_flags(
         db_path,
@@ -2646,6 +2644,23 @@ mod tests {
     use super::*;
     use crate::paths::AppPaths;
     use rusqlite::{params, OptionalExtension};
+
+    #[test]
+    fn readonly_open_does_not_create_uninitialized_app_dirs() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let app_root = dir.path().join("uninitialized-app");
+        let paths = AppPaths::new(app_root.clone());
+
+        assert!(!app_root.exists());
+        assert!(
+            open_readonly(&paths).is_err(),
+            "read-only open must fail when startup has not created the database"
+        );
+        assert!(
+            !app_root.exists(),
+            "read-only callers must not create app directories as a side effect"
+        );
+    }
 
     #[test]
     fn migrate_adds_batch_id_for_legacy_job_table() {
