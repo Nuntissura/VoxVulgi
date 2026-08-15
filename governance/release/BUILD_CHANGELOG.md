@@ -1266,3 +1266,11 @@ This changelog tracks desktop installer builds produced by `governance/scripts/b
 - Artifacts:
   - `product/desktop/build_target/Current/release/bundle/nsis/VoxVulgi_0.1.155_x64-setup.exe`
 - Notes: Desktop target build via build_desktop_target.ps1.
+
+## 0.1.156 - 2026-08-15T01:26:11Z
+- Work Packets: `WP-0221`
+- Commit: `3c59403`
+- Offline Bundle ID: `offline_full_win64_20260814_082842`
+- Artifacts:
+  - `product/desktop/build_target/Current/release/bundle/nsis/VoxVulgi_0.1.156_x64-setup.exe`
+- Notes: Desktop target build via build_desktop_target.ps1.

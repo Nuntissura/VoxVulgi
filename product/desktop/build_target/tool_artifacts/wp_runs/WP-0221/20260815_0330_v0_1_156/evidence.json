@@ -1,0 +1,56 @@
+{
+  "wp": "WP-0221",
+  "outcome": "PASS",
+  "app_version": "0.1.156",
+  "bridge": {
+    "pid": 106304,
+    "port": 54137,
+    "started_at_ms": 1786757189179,
+    "agent_headless": true
+  },
+  "detector_events": {
+    "freeze_detected": {
+      "count": 1,
+      "gap_ms": 329,
+      "last_invoke": "diagnostics_freeze_self_test_arm",
+      "last_invoke_age_ms": 524,
+      "in_flight_invoke_count": 0
+    },
+    "freeze_recovered": {
+      "count": 1,
+      "total_freeze_ms": 671,
+      "last_invoke": "diagnostics_freeze_self_test_arm",
+      "last_invoke_age_ms": 866,
+      "in_flight_invoke_count": 0
+    },
+    "event_loop_skew": {
+      "count": 1,
+      "target_interval_ms": 250,
+      "actual_interval_ms": 1000,
+      "skew_ms": 750,
+      "self_test": true
+    },
+    "worker_alive_count": 2
+  },
+  "tests": {
+    "frontend_contract": { "passed": 19, "failed": 0 },
+    "tauri_serialized": { "passed": 45, "failed": 0 },
+    "frontend_production_build": "PASS",
+    "desktop_cargo_check": "PASS"
+  },
+  "build": {
+    "result": "PASS",
+    "log": "product/desktop/build_target/logs/build_desktop_target_20260815-031905_0_1_156.log",
+    "installer": "product/desktop/build_target/Current/release/bundle/nsis/VoxVulgi_0.1.156_x64-setup.exe",
+    "offline_bundle_id": "offline_full_win64_20260814_082842",
+    "offline_payload_bytes": 6161329153
+  },
+  "reports": {
+    "self_test": "C:/Users/Ilja Smets/AppData/Roaming/com.voxvulgi.voxvulgi/diagnostics/traces/freeze_reports/freeze_report_1786757250421.json",
+    "vvfreeze_cmd": "C:/Users/Ilja Smets/AppData/Roaming/com.voxvulgi.voxvulgi/diagnostics/traces/freeze_reports/freeze_report_1786757359535.json"
+  },
+  "visual": {
+    "snapshot": "governance/snapshots/WP-0221/v0_1_156_freeze_detect_recover_rows_1786757345855.png",
+    "verdict": "PASS: existing Freeze events subsection visibly renders event_loop_skew, freeze_recovered, and freeze_detected with readable details"
+  }
+}

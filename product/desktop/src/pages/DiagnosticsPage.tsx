@@ -1012,6 +1012,7 @@ export function DiagnosticsPage({ visible = true }: { visible?: boolean }) {
   const [error, setError] = useState<string | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
+  const [freezeSelfTestRunning, setFreezeSelfTestRunning] = useState(false);
   const [providerTitleRepairBusy, setProviderTitleRepairBusy] = useState(false);
   const [providerTitleRepair, setProviderTitleRepair] = useState<ProviderTitleRepairPageReceipt | null>(null);
   const [providerTitleRepairStatus, setProviderTitleRepairStatus] =
@@ -2178,6 +2179,36 @@ export function DiagnosticsPage({ visible = true }: { visible?: boolean }) {
     }
   }
 
+  async function runFreezeDetectorSelfTest() {
+    if (freezeSelfTestRunning) return;
+    setFreezeSelfTestRunning(true);
+    setError(null);
+    setNotice(
+      "Freeze detector self-test armed. The Diagnostics UI will pause deliberately for about 0.75 seconds.",
+    );
+    try {
+      await invoke<{
+        skew_test_armed: boolean;
+        already_pending: boolean;
+        injected_delay_ms: number;
+      }>("diagnostics_freeze_self_test_arm");
+      await new Promise<void>((resolve) => window.setTimeout(resolve, 100));
+      const blockStartedAt = performance.now();
+      while (performance.now() - blockStartedAt < 750) {
+        // Intentional bounded main-thread block: the Worker must detect this.
+      }
+      await new Promise<void>((resolve) => window.setTimeout(resolve, 1_200));
+      await refresh();
+      setNotice(
+        "Freeze detector self-test finished. The Freeze events table should show freeze_detected, freeze_recovered, and a self-test event_loop_skew row.",
+      );
+    } catch (e) {
+      setError(`Freeze detector self-test failed: ${String(e)}`);
+    } finally {
+      setFreezeSelfTestRunning(false);
+    }
+  }
+
   async function clearCache() {
     const ok = await confirm("Clear cache directory? This will not delete library media.", {
       title: "Clear cache",
@@ -3066,6 +3097,15 @@ export function DiagnosticsPage({ visible = true }: { visible?: boolean }) {
         <div className="row" style={{ flexWrap: "wrap", marginBottom: 6 }}>
           <button type="button" onClick={captureFreezeReport}>
             Capture freeze report now
+          </button>
+          <button
+            type="button"
+            data-testid="diagnostics-freeze-self-test"
+            data-agent-safe-action="true"
+            disabled={freezeSelfTestRunning}
+            onClick={runFreezeDetectorSelfTest}
+          >
+            {freezeSelfTestRunning ? "Running detector self-test…" : "Run detector self-test"}
           </button>
           <span style={{ color: "#6b7280", alignSelf: "center", fontSize: 13 }}>
             Or run <code>vvfreeze.cmd</code> from the repo root (works while the app is

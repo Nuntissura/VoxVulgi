@@ -84,7 +84,8 @@ function startLoop() {
   const tick = () => {
     try {
       const now = Date.now();
-      if (!inFreeze && lastSentPingId > lastReceivedPongId) {
+      const pingOutstanding = lastSentPingId > lastReceivedPongId;
+      if (!inFreeze && pingOutstanding) {
         const sincePing = now - lastSentAt;
         if (sincePing >= freezeThresholdMs) {
           inFreeze = true;
@@ -97,9 +98,14 @@ function startLoop() {
           });
         }
       }
-      lastSentPingId = nextPingId++;
-      lastSentAt = now;
-      (self as unknown as Worker).postMessage({ type: "ping", pingId: lastSentPingId });
+      // Keep one unanswered ping stable so its age can cross the freeze
+      // threshold. Replacing it every 100 ms makes a 250 ms freeze
+      // mathematically undetectable because `sincePing` never grows.
+      if (!pingOutstanding) {
+        lastSentPingId = nextPingId++;
+        lastSentAt = now;
+        (self as unknown as Worker).postMessage({ type: "ping", pingId: lastSentPingId });
+      }
       if (now - lastAliveAt >= WORKER_ALIVE_INTERVAL_MS) {
         lastAliveAt = now;
         postFreezeEvent("worker_alive" as never, {

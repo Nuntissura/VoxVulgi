@@ -51,6 +51,7 @@ static DIAGNOSTICS_TRACE_QUEUE_REJECTIONS_TOTAL: AtomicU64 = AtomicU64::new(0);
 static DIAGNOSTICS_TRACE_ROTATIONS_TOTAL: AtomicU64 = AtomicU64::new(0);
 static DIAGNOSTICS_TRACE_COMPRESSED_TOTAL: AtomicU64 = AtomicU64::new(0);
 static DIAGNOSTICS_ID_SEQUENCE: AtomicU64 = AtomicU64::new(1);
+static DIAGNOSTICS_SKEW_SELF_TEST_REQUESTED: AtomicBool = AtomicBool::new(false);
 static DIAGNOSTICS_CAPTURE_STATE: OnceLock<Mutex<DiagnosticsCaptureStatus>> = OnceLock::new();
 #[cfg(test)]
 static DIAGNOSTICS_CAPTURE_TEST_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
@@ -1115,10 +1116,13 @@ fn agent_handle_freeze_event(body: &str) -> (&'static str, String) {
         );
     }
 
-    let details = parsed
+    let mut details = parsed
         .get("details")
         .cloned()
         .unwrap_or(serde_json::Value::Null);
+    if event == "freeze_detected" || event == "freeze_recovered" {
+        enrich_freeze_event_invoke_context(&mut details);
+    }
     let level = parsed
         .get("level")
         .and_then(|v| v.as_str())
@@ -3187,6 +3191,91 @@ impl InvokePhaseRecorder {
 }
 
 static INVOKE_SEQUENCE: AtomicU64 = AtomicU64::new(1);
+const SKEW_SELF_TEST_DELAY_MS: u64 = 750;
+
+#[derive(Clone)]
+struct InvokeActivity {
+    name: &'static str,
+    invocation_id: u64,
+    started_at_ms: i64,
+    completed_at_ms: Option<i64>,
+}
+
+static ACTIVE_INVOKES: OnceLock<Mutex<std::collections::HashMap<u64, InvokeActivity>>> =
+    OnceLock::new();
+static LAST_INVOKE_ACTIVITY: OnceLock<Mutex<Option<InvokeActivity>>> = OnceLock::new();
+
+fn record_invoke_started(activity: InvokeActivity) {
+    ACTIVE_INVOKES
+        .get_or_init(|| Mutex::new(std::collections::HashMap::new()))
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .insert(activity.invocation_id, activity.clone());
+    *LAST_INVOKE_ACTIVITY
+        .get_or_init(|| Mutex::new(None))
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(activity);
+}
+
+fn record_invoke_completed(invocation_id: u64, completed_at_ms: i64) {
+    let completed = ACTIVE_INVOKES
+        .get_or_init(|| Mutex::new(std::collections::HashMap::new()))
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .remove(&invocation_id)
+        .map(|mut activity| {
+            activity.completed_at_ms = Some(completed_at_ms);
+            activity
+        });
+    if let Some(activity) = completed {
+        *LAST_INVOKE_ACTIVITY
+            .get_or_init(|| Mutex::new(None))
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(activity);
+    }
+}
+
+fn enrich_freeze_event_invoke_context(details: &mut serde_json::Value) {
+    if !details.is_object() {
+        *details = serde_json::json!({});
+    }
+    let now_ms = now_epoch_ms_i64();
+    let active = ACTIVE_INVOKES
+        .get_or_init(|| Mutex::new(std::collections::HashMap::new()))
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let in_flight_count = active.len();
+    let latest_active = active
+        .values()
+        .max_by_key(|activity| activity.started_at_ms)
+        .cloned();
+    drop(active);
+    let last_activity = latest_active.or_else(|| {
+        LAST_INVOKE_ACTIVITY
+            .get_or_init(|| Mutex::new(None))
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone()
+    });
+    let object = details.as_object_mut().expect("details normalized to object");
+    object.insert(
+        "in_flight_invoke_count".to_string(),
+        serde_json::json!(in_flight_count),
+    );
+    object.insert(
+        "last_invoke".to_string(),
+        last_activity.map_or(serde_json::Value::Null, |activity| {
+            serde_json::json!({
+                "cmd": activity.name,
+                "invocation_id": activity.invocation_id,
+                "started_at_ms": activity.started_at_ms,
+                "age_ms": now_ms.saturating_sub(activity.started_at_ms),
+                "in_flight": activity.completed_at_ms.is_none(),
+                "completed_at_ms": activity.completed_at_ms,
+            })
+        }),
+    );
+}
 
 impl InvokeTimer {
     fn start(paths: AppPaths, name: &'static str) -> Self {
@@ -3200,6 +3289,12 @@ impl InvokeTimer {
     ) -> Self {
         let invocation_id = INVOKE_SEQUENCE.fetch_add(1, Ordering::Relaxed);
         let started_at_ms = now_epoch_ms_i64();
+        record_invoke_started(InvokeActivity {
+            name,
+            invocation_id,
+            started_at_ms,
+            completed_at_ms: None,
+        });
         append_diagnostics_trace_row_best_effort(
             &paths,
             "command_started",
@@ -3241,6 +3336,7 @@ impl InvokeTimer {
 impl Drop for InvokeTimer {
     fn drop(&mut self) {
         let elapsed_ms = self.started.elapsed().as_millis() as u64;
+        record_invoke_completed(self.invocation_id, now_epoch_ms_i64());
         append_diagnostics_trace_row_best_effort(
             &self.paths,
             "command_completed",
@@ -3284,6 +3380,10 @@ fn spawn_event_loop_skew_heartbeat(paths: AppPaths) {
         let mut last = std::time::Instant::now();
         loop {
             std::thread::sleep(Duration::from_millis(TARGET_INTERVAL_MS));
+            let self_test = DIAGNOSTICS_SKEW_SELF_TEST_REQUESTED.swap(false, Ordering::SeqCst);
+            if self_test {
+                std::thread::sleep(Duration::from_millis(SKEW_SELF_TEST_DELAY_MS));
+            }
             let now = std::time::Instant::now();
             let elapsed_ms = now.duration_since(last).as_millis() as u64;
             last = now;
@@ -3296,6 +3396,7 @@ fn spawn_event_loop_skew_heartbeat(paths: AppPaths) {
                         "target_interval_ms": TARGET_INTERVAL_MS,
                         "actual_interval_ms": elapsed_ms,
                         "skew_ms": skew_ms,
+                        "self_test": self_test,
                     }),
                     "warn",
                 );
@@ -9229,6 +9330,26 @@ async fn diagnostics_trace_write_event(
     ))
 }
 
+#[derive(serde::Serialize)]
+struct DiagnosticsFreezeSelfTestReceipt {
+    skew_test_armed: bool,
+    already_pending: bool,
+    injected_delay_ms: u64,
+}
+
+#[tauri::command]
+fn diagnostics_freeze_self_test_arm(
+    state: State<'_, AppState>,
+) -> DiagnosticsFreezeSelfTestReceipt {
+    let _timer = InvokeTimer::start(state.paths.clone(), "diagnostics_freeze_self_test_arm");
+    let already_pending = DIAGNOSTICS_SKEW_SELF_TEST_REQUESTED.swap(true, Ordering::SeqCst);
+    DiagnosticsFreezeSelfTestReceipt {
+        skew_test_armed: true,
+        already_pending,
+        injected_delay_ms: SKEW_SELF_TEST_DELAY_MS,
+    }
+}
+
 #[tauri::command]
 async fn diagnostics_trace_recent(
     state: State<'_, AppState>,
@@ -14569,6 +14690,7 @@ pub fn run() {
             diagnostics_trace_dir_use_default,
             diagnostics_trace_recent,
             diagnostics_trace_write_event,
+            diagnostics_freeze_self_test_arm,
             agent_bridge_port,
             agent_freeze_dump_now,
             safe_mode_set,

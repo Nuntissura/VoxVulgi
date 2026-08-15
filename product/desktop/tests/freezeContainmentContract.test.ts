@@ -725,3 +725,37 @@ test("affected Tauri commands emit DB lock and busy trace events", () => {
     );
   }
 });
+
+test("freeze detector keeps one ping outstanding and exposes a reproducible self-test", () => {
+  const workerSource = readRepoFile("src", "lib", "freezeDetector.worker.ts");
+  const diagnosticsSource = readRepoFile("src", "pages", "DiagnosticsPage.tsx");
+  const tauriSource = readRepoFile("src-tauri", "src", "lib.rs");
+
+  assert.match(
+    workerSource,
+    /const\s+pingOutstanding\s*=\s*lastSentPingId\s*>\s*lastReceivedPongId/,
+    "the Worker must name and retain an unanswered ping",
+  );
+  assert.match(
+    workerSource,
+    /if\s*\(!pingOutstanding\)\s*\{[\s\S]{0,240}lastSentAt\s*=\s*now[\s\S]{0,180}postMessage/,
+    "a new ping timestamp may only be written after the prior ping was answered",
+  );
+  assert.match(
+    tauriSource,
+    /DIAGNOSTICS_SKEW_SELF_TEST_REQUESTED\.swap\(false,\s*Ordering::SeqCst\)[\s\S]{0,220}SKEW_SELF_TEST_DELAY_MS/,
+    "the real OS-thread heartbeat must consume the one-shot skew self-test request",
+  );
+  assert.match(
+    tauriSource,
+    /fn\s+enrich_freeze_event_invoke_context[\s\S]{0,2200}"in_flight_invoke_count"[\s\S]{0,600}"last_invoke"/,
+    "freeze rows must carry backend invoke count and last-invoke context",
+  );
+  assert.match(diagnosticsSource, /data-testid="diagnostics-freeze-self-test"/);
+  assert.match(diagnosticsSource, /data-agent-safe-action="true"/);
+  assert.match(
+    diagnosticsSource,
+    /while\s*\(performance\.now\(\)\s*-\s*blockStartedAt\s*<\s*750\)/,
+    "the self-test must use a fixed bounded main-thread block long enough to cross the detector threshold",
+  );
+});
