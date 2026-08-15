@@ -299,6 +299,12 @@ test("Options page provides responsive semantic navigation and removes card moun
   assert.doesNotMatch(source, /className="card"/);
 });
 
+test("desktop font scale exposes a stable accessible control name and value", () => {
+  const source = readFileSync(new URL("../src/pages/OptionsPage.tsx", import.meta.url), "utf8");
+  assert.match(source, /aria-label="Desktop font scale"/);
+  assert.match(source, /aria-valuetext=\{`\$\{fontScalePct\}%`\}/);
+});
+
 test("module reset proves fresh rollback baselines before invoking the first adapter", () => {
   const source = readRepoFile("src", "pages", "OptionsPage.tsx");
   const resetStart = source.indexOf("async function resetActiveOptionsModule()");

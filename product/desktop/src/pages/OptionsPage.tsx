@@ -3099,6 +3099,8 @@ export function OptionsPage() {
           <input
             id="options-setting-general-font-scale"
             data-testid="options-setting-general.font-scale"
+            aria-label="Desktop font scale"
+            aria-valuetext={`${fontScalePct}%`}
             type="range"
             min={MIN_FONT_SCALE_PCT}
             max={MAX_FONT_SCALE_PCT}
