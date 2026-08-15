@@ -1,0 +1,85 @@
+{
+  "schema_version": 1,
+  "job_id": "ce2b6fb6-0c12-4a70-82ee-258c20ac7551",
+  "started_at_ms": 1785910128471,
+  "updated_at_ms": 1785910150023,
+  "steps": [
+    {
+      "id": "portable_python_win64",
+      "title": "Portable Python (Windows x64)",
+      "status": "done",
+      "started_at_ms": 1777241424792,
+      "finished_at_ms": 1777241426049,
+      "estimated_bytes": null,
+      "delta_bytes": 0,
+      "error": null,
+      "log_path": "C:\\Users\\Ilja Smets\\AppData\\Roaming\\com.voxvulgi.voxvulgi\\logs\\install\\phase2\\ce2b6fb6-0c12-4a70-82ee-258c20ac7551\\portable_python_win64.log"
+    },
+    {
+      "id": "python_toolchain",
+      "title": "Python toolchain (venv)",
+      "status": "done",
+      "started_at_ms": 1779053083042,
+      "finished_at_ms": 1779053107103,
+      "estimated_bytes": null,
+      "delta_bytes": 74372251,
+      "error": null,
+      "log_path": "C:\\Users\\Ilja Smets\\AppData\\Roaming\\com.voxvulgi.voxvulgi\\logs\\install\\phase2\\ce2b6fb6-0c12-4a70-82ee-258c20ac7551\\python_toolchain.log"
+    },
+    {
+      "id": "spleeter",
+      "title": "Spleeter separation (baseline)",
+      "status": "done",
+      "started_at_ms": 1779061417893,
+      "finished_at_ms": 1779061987121,
+      "estimated_bytes": null,
+      "delta_bytes": -142663,
+      "error": null,
+      "log_path": "C:\\Users\\Ilja Smets\\AppData\\Roaming\\com.voxvulgi.voxvulgi\\logs\\install\\phase2\\ce2b6fb6-0c12-4a70-82ee-258c20ac7551\\spleeter.log"
+    },
+    {
+      "id": "diarization",
+      "title": "Diarization (baseline)",
+      "status": "done",
+      "started_at_ms": 1779061987545,
+      "finished_at_ms": 1779062028431,
+      "estimated_bytes": null,
+      "delta_bytes": 147611,
+      "error": null,
+      "log_path": "C:\\Users\\Ilja Smets\\AppData\\Roaming\\com.voxvulgi.voxvulgi\\logs\\install\\phase2\\ce2b6fb6-0c12-4a70-82ee-258c20ac7551\\diarization.log"
+    },
+    {
+      "id": "tts_preview",
+      "title": "TTS preview (system voices)",
+      "status": "done",
+      "started_at_ms": 1779062030010,
+      "finished_at_ms": 1779062084138,
+      "estimated_bytes": null,
+      "delta_bytes": 0,
+      "error": null,
+      "log_path": "C:\\Users\\Ilja Smets\\AppData\\Roaming\\com.voxvulgi.voxvulgi\\logs\\install\\phase2\\ce2b6fb6-0c12-4a70-82ee-258c20ac7551\\tts_preview.log"
+    },
+    {
+      "id": "tts_neural_local_v1",
+      "title": "Neural TTS local (Kokoro)",
+      "status": "done",
+      "started_at_ms": 1779162339039,
+      "finished_at_ms": 1779177363503,
+      "estimated_bytes": null,
+      "delta_bytes": -79401179,
+      "error": null,
+      "log_path": "C:\\Users\\Ilja Smets\\AppData\\Roaming\\com.voxvulgi.voxvulgi\\logs\\install\\phase2\\ce2b6fb6-0c12-4a70-82ee-258c20ac7551\\tts_neural_local_v1.log"
+    },
+    {
+      "id": "tts_voice_preserving_local_v1",
+      "title": "Voice-preserving dub (OpenVoice V2)",
+      "status": "running",
+      "started_at_ms": 1785910150023,
+      "finished_at_ms": null,
+      "estimated_bytes": null,
+      "delta_bytes": null,
+      "error": null,
+      "log_path": "C:\\Users\\Ilja Smets\\AppData\\Roaming\\com.voxvulgi.voxvulgi\\logs\\install\\phase2\\ce2b6fb6-0c12-4a70-82ee-258c20ac7551\\tts_voice_preserving_local_v1.log"
+    }
+  ]
+}

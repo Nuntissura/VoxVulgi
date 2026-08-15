@@ -1,0 +1,34 @@
+{
+  "wp": "WP-0228",
+  "app_version": "0.1.160",
+  "outcome": "PASS",
+  "contract_tests": {
+    "command": "node --import tsx --test tests/voicePackManualInstallContract.test.ts tests/localizationVoiceSetupContract.test.ts",
+    "passed": 10,
+    "failed": 0
+  },
+  "packaged_runtime": {
+    "pid": 97928,
+    "agent_headless": true,
+    "manual_install_button_enabled": true,
+    "manual_install_triggered": false,
+    "phase2_auto_install_enqueue_rows": 0,
+    "main_thread_alive_rows": 49,
+    "worker_alive_rows": 49
+  },
+  "canonical_install_states": [
+    {
+      "job_id": "47836c98-165f-4b7c-a665-6664313fd158",
+      "done": 7,
+      "running": 0,
+      "file": "phase2_completed_7_of_7.json"
+    },
+    {
+      "job_id": "ce2b6fb6-0c12-4a70-82ee-258c20ac7551",
+      "done": 6,
+      "running": 1,
+      "file": "phase2_latest.json"
+    }
+  ],
+  "resource_heavy_install_started": false
+}

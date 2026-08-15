@@ -2,7 +2,7 @@
 
 ## Status
 
-IN_PROGRESS
+DONE
 
 ## Base Scope
 
@@ -79,3 +79,4 @@ Remove the auto-enqueue spawn-thread block in `product/desktop/src-tauri/src/lib
 ## Status Updates
 
 - 2026-05-17: Emergency rollback created in direct response to operator report that v0.1.25 made the app unusable. Auto-enqueue removed; resume logic kept. Ships in v0.1.26.
+- 2026-08-15: Closed against current governed v0.1.160. Source contracts prove no startup auto-enqueue call remains, the operator confirmation gates the manual command, and only still-valid prior `done` steps are resumed. Canonical install receipts contain a post-rollback 7/7 completed run plus a later 6/7 interrupted state carried under a different job ID. A hidden packaged UI audit found the enabled manual button and visually confirmed the 6/7 resume state. Fresh trace: zero `phase2_auto_install_enqueue`, 49 main-thread heartbeats, 49 Worker heartbeats. Proof: `product/desktop/build_target/tool_artifacts/wp_runs/WP-0228/20260815_0534_v0_1_160/summary.md`.
