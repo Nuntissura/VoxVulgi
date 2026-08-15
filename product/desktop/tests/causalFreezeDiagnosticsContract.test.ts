@@ -111,3 +111,13 @@ test("request span and invocation identity survive every measured command phase"
     }
   }
 });
+
+test("YouTube protection diagnostics keep download and enumeration causally distinct", () => {
+  const diagnostics = readRepoFile("src", "pages", "DiagnosticsPage.tsx");
+  assert.match(
+    diagnostics,
+    /const protectionRequestStartedAt = Date\.now\(\);[\s\S]*?const protectionContexts = \{[\s\S]*?requestId: `diagnostics-youtube-protection-download-\$\{protectionGeneration\}-\$\{protectionRequestStartedAt\}`,[\s\S]*?spanId: "diagnostics-youtube-protection-download"[\s\S]*?requestId: `diagnostics-youtube-protection-enumeration-\$\{protectionGeneration\}-\$\{protectionRequestStartedAt\}`,[\s\S]*?spanId: "diagnostics-youtube-protection-enumeration"/,
+  );
+  assert.equal((diagnostics.match(/protectionContexts\.download/g) ?? []).length, 3);
+  assert.equal((diagnostics.match(/protectionContexts\.enumeration/g) ?? []).length, 3);
+});

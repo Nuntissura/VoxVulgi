@@ -52,5 +52,59 @@ Make job startup and panel navigation responsive on the exact large local databa
 
 - 2026-08-09: Created from direct source, live read-only database, trace, existing proof, and current external diagnostic research. No product code, user data, queue state, NAS media, or running process changed.
 - 2026-08-09: Implementation started in the first dependency-safe parallel wave; independent adversarial review is required before any completion claim.
+- 2026-08-15: Independent adversarial review completed at HIGH risk. The initial packaged v0.1.169 incident probe failed causal operation identity because Diagnostics issued download and enumeration protection commands with the same request/span pair. Source was remediated to create exactly two stable contexts, preserving correlation within each operation while separating the operations; focused contracts pass 5/5. Overall WP remains IN_PROGRESS pending a governed build of the remediation and the refinement's exact current-database/NAS panel/job-start reproduction.
+
+## Independent adversarial review — 2026-08-15
+
+### DIFF_ATTACK_SURFACES
+
+- Incident state/manifest writer versus restart loader/finalizer.
+- Frontend panel transition producer versus Tauri trace envelope and command-phase consumers.
+- Download versus enumeration protection operations sharing command names and formerly sharing causal identity.
+- Persistent media-observation writer/read cache versus path-rewrite invalidation and exact execution-boundary refresh.
+- Archive/activity event writers versus committed rollup readers and rebuild reconciliation.
+- Async panel requests versus page/query-generation supersession.
+- Bounded trace redaction/coalescing versus retained diagnostic meaning.
+
+### INDEPENDENT_CHECKS_RUN
+
+- Seeded an armed capture in an isolated v0.1.169 app root, launched the exact governed executable headlessly at BelowNormal priority, navigated through `/agent/navigate`, and directly inspected the canonical capture state, incident manifest, and JSONL trace.
+- Verified a crash/restart-style expired active capture normalizes to `mode: normal` and finalizes its existing manifest as `completed_expired` with 18,342 incident bytes.
+- Direct trace grouping exposed the download/enumeration identity collision; this check was not derived from the candidate tests.
+- Ran `governance/scripts/test_vv_watch.ps1`; its isolated watcher fixture passed and preserved the exact armed incident ID.
+- Ran the focused frontend suite; 19/19 passed after remediation.
+
+### COUNTERFACTUAL_CHECKS
+
+- If `activate_panel_capture_before_navigation` stopped activating before `setPage`, the destination's first Tauri commands would lose the incident parent span and exact panel attribution.
+- If `projectionGenerationRef`/query-key guards in `JobsPage.tsx` or `LibraryPage.tsx` were removed, an older delayed response could overwrite the current page/filter projection.
+- If `invalidate_media_path_observation_rewrite` stopped invalidating both old and replacement paths, relocation/rebind could retain a false availability observation until TTL/reconciliation.
+- If the two `protectionContexts` in `DiagnosticsPage.tsx` collapsed to one context, the incident trace could not attribute protection cost to download versus enumeration.
+
+### BOUNDARY_PROBES
+
+- Armed-state JSON -> startup loader -> panel transition -> incident state -> manifest/trace artifact passed on the packaged executable.
+- Active incident -> abrupt owned-process stop -> expired persisted state -> new packaged process -> `completed_expired` manifest passed.
+- Frontend request/span fields -> Tauri command started/phase/completed rows -> incident parent span passed; operation identity failed before remediation and is now source-contract protected.
+
+### NEGATIVE_PATH_CHECKS
+
+- Expired persisted incident state recovered without leaving capture mode pinned or losing the prior artifact.
+- Stale projection/error contracts passed: failed polls retain the last verified state rather than projecting false emptiness.
+- Shared diagnostics redaction vectors passed for proxy authorization, quoted headers, spaced secrets, and malformed authorization tuples.
+
+### INDEPENDENT_FINDINGS
+
+- FINDING-1 (medium, remediated in source): download and enumeration protection status/history/replay requests used one request/span context, so the trace could not distinguish the operation responsible for latency. `DiagnosticsPage.tsx` now creates one stable operation-specific context for each operation; `causalFreezeDiagnosticsContract.test.ts` prevents collapse or per-call request drift.
+
+### RESIDUAL_UNCERTAINTY
+
+- The remediation is not present in packaged v0.1.169; a subsequent governed build and packaged incident re-probe must show distinct operation request/span IDs.
+- Synthetic/isolated proof does not satisfy the packet's exact current 988 MB database, configured NAS, job-start, panel-switch, and any compositor-only reproduction gates.
+- Rust tests were not rerun during this review because foreign Cargo/rustc processes were already saturating the host; the current governed executable and prior checkpoint compile establish buildability only for the pre-remediation source.
+
+### Verdict
+
+Code-level adversarial verdict: PASS after the operation-identity remediation. Overall WP verdict: NOT DONE until the residual runtime/build gates pass.
 
 </topic>

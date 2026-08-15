@@ -1354,10 +1354,17 @@ export function DiagnosticsPage({ visible = true }: { visible?: boolean }) {
   const loadTraceSection = useCallback(async () => {
     const protectionGeneration = youtubeProtectionRequestRef.current + 1;
     youtubeProtectionRequestRef.current = protectionGeneration;
-    const protectionContext = {
-      requestId: `diagnostics-youtube-protection-${protectionGeneration}-${Date.now()}`,
-      spanId: "diagnostics-youtube-protection",
-    };
+    const protectionRequestStartedAt = Date.now();
+    const protectionContexts = {
+      download: {
+        requestId: `diagnostics-youtube-protection-download-${protectionGeneration}-${protectionRequestStartedAt}`,
+        spanId: "diagnostics-youtube-protection-download",
+      },
+      enumeration: {
+        requestId: `diagnostics-youtube-protection-enumeration-${protectionGeneration}-${protectionRequestStartedAt}`,
+        spanId: "diagnostics-youtube-protection-enumeration",
+      },
+    } as const;
     updateSectionStatus("trace", "loading");
     try {
       const [
@@ -1374,12 +1381,12 @@ export function DiagnosticsPage({ visible = true }: { visible?: boolean }) {
         invoke<DiagnosticsTraceDirStatus>("diagnostics_trace_dir_status"),
         invoke<DiagnosticsTraceEntry[]>("diagnostics_trace_recent", { limit: 120 }),
         invoke<DiagnosticsCaptureStatus>("diagnostics_capture_status"),
-        invoke<YoutubeProtectionDiagnosticsStatus>("youtube_protection_status_get", { operation: "download", ...protectionContext }),
-        invoke<YoutubeProtectionDiagnosticsStatus>("youtube_protection_status_get", { operation: "enumeration", ...protectionContext }),
-        invoke<YoutubeProtectionDiagnosticsHistory>("youtube_protection_history_get", { operation: "download", limit: 100, ...protectionContext }),
-        invoke<YoutubeProtectionDiagnosticsHistory>("youtube_protection_history_get", { operation: "enumeration", limit: 100, ...protectionContext }),
-        invoke<YoutubeProtectionReplayReceipt>("youtube_protection_history_replay", { operation: "download", limit: 100, ...protectionContext }),
-        invoke<YoutubeProtectionReplayReceipt>("youtube_protection_history_replay", { operation: "enumeration", limit: 100, ...protectionContext }),
+        invoke<YoutubeProtectionDiagnosticsStatus>("youtube_protection_status_get", { operation: "download", ...protectionContexts.download }),
+        invoke<YoutubeProtectionDiagnosticsStatus>("youtube_protection_status_get", { operation: "enumeration", ...protectionContexts.enumeration }),
+        invoke<YoutubeProtectionDiagnosticsHistory>("youtube_protection_history_get", { operation: "download", limit: 100, ...protectionContexts.download }),
+        invoke<YoutubeProtectionDiagnosticsHistory>("youtube_protection_history_get", { operation: "enumeration", limit: 100, ...protectionContexts.enumeration }),
+        invoke<YoutubeProtectionReplayReceipt>("youtube_protection_history_replay", { operation: "download", limit: 100, ...protectionContexts.download }),
+        invoke<YoutubeProtectionReplayReceipt>("youtube_protection_history_replay", { operation: "enumeration", limit: 100, ...protectionContexts.enumeration }),
       ]);
       startTransition(() => {
         setDiagnosticsTraceDir(nextDiagnosticsTraceDir);
