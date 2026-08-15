@@ -121,6 +121,9 @@ test("runtime persistence and command boundaries retain distinct rate concepts",
   assert.match(engine, /max_batches: usize/);
   assert.match(engine, /max_elapsed_ms: u64/);
   assert.match(engine, /runtime_epoch/);
+  assert.match(engine, /fn verified_bundled_ytdlp_identity/);
+  assert.match(engine, /status\.bundled_installed[\s\S]*?status\.ytdlp_path == status\.bundled_path[\s\S]*?pin\.file_bytes[\s\S]*?eq_ignore_ascii_case\(&pin\.sha256_hex\)/);
+  assert.doesNotMatch(engine, /yt_dlp_available: yt_dlp\.available/);
   assert.match(engine, /limit_rate: baseline\.limit_rate\.clone\(\)/);
   assert.match(engine, /throttled_rate: baseline\.throttled_rate\.clone\(\)/);
   assert.match(jobs, /append_yt_dlp_limit_rate_option/);

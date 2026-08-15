@@ -538,6 +538,27 @@ fn immutable_runtime_epoch_payload(
     })
 }
 
+fn verified_bundled_ytdlp_identity(
+    status: &crate::tools::YtDlpToolsStatus,
+    bundled_sha256_hex: Option<String>,
+    bundled_bytes: Option<u64>,
+) -> (bool, Option<String>, Option<String>) {
+    let pin = &crate::pinned_dependency_manifest::manifest().yt_dlp_windows;
+    let verified = status.available
+        && status.bundled_installed
+        && status.ytdlp_path == status.bundled_path
+        && status.ytdlp_version.as_deref() == Some(pin.version.as_str())
+        && bundled_bytes == Some(pin.file_bytes)
+        && bundled_sha256_hex
+            .as_deref()
+            .is_some_and(|actual| actual.eq_ignore_ascii_case(&pin.sha256_hex));
+    if verified {
+        (true, Some(pin.version.clone()), bundled_sha256_hex)
+    } else {
+        (false, None, None)
+    }
+}
+
 fn load_runtime_identity(paths: &AppPaths) -> CachedRuntimeIdentity {
     let stamps = capability_file_stamps(paths);
     let key = paths.base_dir.clone();
@@ -563,15 +584,25 @@ fn load_runtime_identity(paths: &AppPaths) -> CachedRuntimeIdentity {
     }
 
     let yt_dlp = crate::tools::ytdlp_tools_status(paths);
-    let yt_dlp_sha256_hex = if yt_dlp.bundled_installed {
+    let bundled_yt_dlp_sha256_hex = if yt_dlp.bundled_installed {
         sha256_path(Path::new(&yt_dlp.bundled_path))
     } else {
         None
     };
+    let bundled_yt_dlp_bytes = yt_dlp
+        .bundled_installed
+        .then(|| std::fs::metadata(&yt_dlp.bundled_path).ok().map(|value| value.len()))
+        .flatten();
+    let (yt_dlp_available, yt_dlp_version, yt_dlp_sha256_hex) =
+        verified_bundled_ytdlp_identity(
+            &yt_dlp,
+            bundled_yt_dlp_sha256_hex,
+            bundled_yt_dlp_bytes,
+        );
     let provider = crate::tools::youtube_po_provider_install_status(paths);
     let epoch_payload = immutable_runtime_epoch_payload(
-        yt_dlp.available,
-        yt_dlp.ytdlp_version.as_deref(),
+        yt_dlp_available,
+        yt_dlp_version.as_deref(),
         yt_dlp_sha256_hex.as_deref(),
         provider.node_version.as_deref(),
         provider.npm_version.as_deref(),
@@ -588,8 +619,8 @@ fn load_runtime_identity(paths: &AppPaths) -> CachedRuntimeIdentity {
         stamps,
         verified_at: std::time::Instant::now(),
         epoch: fingerprint(&serde_json::to_string(&epoch_payload).unwrap_or_default()),
-        yt_dlp_available: yt_dlp.available,
-        yt_dlp_version: yt_dlp.ytdlp_version,
+        yt_dlp_available,
+        yt_dlp_version,
         yt_dlp_sha256_hex,
         node_version: provider.node_version,
         npm_version: provider.npm_version,
@@ -2402,6 +2433,51 @@ mod tests {
             after_metadata_change + 1,
             "same-size/restored-mtime replacement must be reverified after the bounded TTL"
         );
+    }
+
+    #[test]
+    fn runtime_identity_rejects_unpinned_path_fallback_and_requires_exact_bundled_bytes() {
+        let pin = &crate::pinned_dependency_manifest::manifest().yt_dlp_windows;
+        let path_fallback = crate::tools::YtDlpToolsStatus {
+            available: true,
+            bundled_installed: false,
+            bundled_path: "C:/isolated/tools/yt-dlp/yt-dlp.exe".to_string(),
+            ytdlp_path: "yt-dlp".to_string(),
+            ytdlp_version: Some("2026.05.16.233954".to_string()),
+        };
+        assert_eq!(
+            verified_bundled_ytdlp_identity(&path_fallback, None, None),
+            (false, None, None),
+            "an executable found on PATH is never the protected bundled runtime",
+        );
+
+        let bundled = crate::tools::YtDlpToolsStatus {
+            available: true,
+            bundled_installed: true,
+            bundled_path: "C:/isolated/tools/yt-dlp/yt-dlp.exe".to_string(),
+            ytdlp_path: "C:/isolated/tools/yt-dlp/yt-dlp.exe".to_string(),
+            ytdlp_version: Some(pin.version.clone()),
+        };
+        assert_eq!(
+            verified_bundled_ytdlp_identity(
+                &bundled,
+                Some(pin.sha256_hex.to_ascii_lowercase()),
+                Some(pin.file_bytes),
+            ),
+            (true, Some(pin.version.clone()), Some(pin.sha256_hex.to_ascii_lowercase())),
+        );
+        assert!(!verified_bundled_ytdlp_identity(
+            &bundled,
+            Some("00".repeat(32)),
+            Some(pin.file_bytes),
+        )
+        .0);
+        assert!(!verified_bundled_ytdlp_identity(
+            &bundled,
+            Some(pin.sha256_hex.clone()),
+            Some(pin.file_bytes.saturating_sub(1)),
+        )
+        .0);
     }
 
     #[test]

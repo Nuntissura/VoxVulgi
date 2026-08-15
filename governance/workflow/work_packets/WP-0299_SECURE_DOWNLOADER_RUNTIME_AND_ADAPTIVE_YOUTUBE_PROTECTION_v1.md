@@ -52,6 +52,7 @@ Ship a secure current downloader runtime and an explainable adaptive YouTube con
 - 2026-08-09: Created from direct repo/runtime inspection and current yt-dlp release, security, YouTube pacing, PO-token, and option documentation. No product code or live queue changed.
 - 2026-08-10: Implementation started after WP-0298 boundary work reached remediation. Dependency/runtime, policy persistence, controller, command receipt, and operator-surface work remain proof-gated; no live queue or subscription canary has been authorized.
 - 2026-08-13: Non-owner adversarial review, part 1 (deterministic/code-level gates) — PASS. Reviewer did not author this code. Any prior review verdict is unrecoverable: the session holding it was closed, and no repo artifact recorded it, so this review was re-derived from source. Read-only; no product code changed.
+- 2026-08-15: Packaged v0.1.169 headless audit proved the adaptive Options and Diagnostics surfaces are readable, but exposed FINDING-2: the `Pinned downloader runtime` projection accepted a PATH fallback and displayed global nightly yt-dlp `2026.05.16.233954` even though no bundled runtime existed in the isolated root. Launch enforcement still failed closed, but status/epoch truth did not share that trust root. Source now reports availability/version/hash only when the bundled path matches the reviewed pin's executable path, version, byte size, and SHA-256. Staged payload independently remains exact `2026.07.04`, 18,226,085 bytes, SHA-256 `52FE3C26DCF71FBDC85B528589020BB0B8E383155CFA81B64DD447BBE35E24B8`. Focused source contract passes 5/5; Rust and new packaged proof remain pending while foreign compilation owns the host.
 
 # Review record: non-owner adversarial review, part 1 (2026-08-13)
 
@@ -75,6 +76,7 @@ Gates passed, with the evidence used:
 Findings:
 
 - FINDING-1 (low, closed 2026-08-14): `tools.rs::invalidate_provider_installed_identity` was the only deletion path for `provider_installed_identity` and was never called because no production provider-uninstall flow exists. The unreachable helper and its test-only invocation were removed. The database mutation guard and guarded-delete trigger remain as fail-closed schema authority for any future governed uninstall implementation. Fresh exact tests passed: `tools::tests::fresh_offline_adoption_is_atomic_idempotent_and_carrier_independent` and `db::tests::v48_provider_authority_rejects_illegal_sql_and_allows_governed_reinstall`.
+- FINDING-2 (medium, remediated in source 2026-08-15): `youtube_protection::load_runtime_identity` used generic `ytdlp_tools_status.available`, which includes a PATH fallback, for the protected runtime status/epoch. In an isolated packaged v0.1.169 headless root, Options therefore labeled global nightly `2026.05.16.233954` as the `Pinned downloader runtime` with hash unavailable. `verified_bundled_ytdlp_identity` now requires the bundled path itself plus exact pinned version, size, and SHA-256; an unpinned PATH tool is projected unavailable and protected work remains visibly held. A focused Rust test covers fallback, valid, bad-hash, and bad-size cases; current source contract passes.
 - NOT-A-FINDING (recorded so it is not re-raised): `tools.rs::read_provider_node_modules_integrity_receipt` is also uncalled, but that is correct by design. The receipt is documented in-code as an audit artifact and deliberately not an executable trust root; readiness requires a full-byte verification performed by the current process and held in the in-memory attestation map, so an attestation miss fails closed.
 
 Gates still open, all requiring runtime or app-boundary evidence that this review did not produce:
@@ -83,7 +85,7 @@ Gates still open, all requiring runtime or app-boundary evidence that this revie
 - Controlled exact-source canary.
 - Restart-safe baseline/overlay separation proven at the app boundary rather than in unit tests.
 - Canary recovery behavior end to end.
-- Settings, Options, and Diagnostics surfaces under headless audit.
+- Settings, Options, and Diagnostics surfaces under a new governed build, including truthful unavailable state without bundled bytes and exact `2026.07.04` state after offline hydration.
 - Governed target build, semantic version increment, changelog entry, and proof `summary.md`.
 
 WP-0299 must not be moved to DONE on the strength of this review. Part 1 clears the code-level and hard-predecessor gates only.
