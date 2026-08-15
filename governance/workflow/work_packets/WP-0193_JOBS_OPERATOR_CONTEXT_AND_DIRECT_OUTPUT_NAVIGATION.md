@@ -3,7 +3,7 @@
 ## Metadata
 - ID: WP-0193
 - Owner: Codex
-- Status: IN_PROGRESS
+- Status: DONE
 - Created: 2026-04-23
 - Target milestone: Desktop archive/operator usability
 
@@ -41,3 +41,4 @@ Out of scope:
 - 2026-04-23: Created after smoke feedback that Jobs is useful in principle but still does not tell the operator what failed rows correspond to or where completed outputs live.
 - 2026-04-23: Implemented a first operator-context pass in `JobsPage`: rows now resolve item titles/source URLs where possible, direct URL/import/subscription jobs show human-readable targets, batches summarize those targets, and non-item jobs expose direct target-root/source actions. `npm run build` passed.
 - 2026-04-24: Follow-on operator smoke says the page is still not sufficient for real troubleshooting when a queue is busy: rows still need clearer playlist/video/profile naming, more obvious current-stage meaning, and direct file/folder navigation for completed outputs so Jobs can serve as the operational command surface instead of only a raw trace list.
+- 2026-08-15: Closed against packaged v0.1.168. A disposable app database proved a failed `download_direct_url` row with no `item_id` still renders the cached title, exact source URL, target root, and enabled log/source/error/target-root/artifact controls. An isolated succeeded item-backed row rendered its human title, source URL, terminal outcome, and enabled log/source/output/artifact controls. The paired semantic audits reported zero missing accessible names and were not truncated; focused desktop contracts passed 31/31. Evidence: `product/desktop/build_target/tool_artifacts/wp_runs/WP-0193/20260815-113231-v0_1_168/summary.md`.
