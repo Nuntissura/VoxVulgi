@@ -11,8 +11,8 @@ updated_at: 2026-08-09
 ## Metadata
 
 - ID: WP-0304
-- Owner: —
-- Status: BACKLOG
+- Owner: Codex
+- Status: DONE
 - Created: 2026-08-09
 - Refinement: `WP-0304_TIKTOK_SINGLE_PROFILE_SUBSCRIPTIONS_AND_PROVIDER_SETTINGS_v1_REFINEMENT.md`
 - Board: `../TASK_BOARD.md#wp-0304`

@@ -5741,10 +5741,17 @@ fn normalize_youtube_url(raw: String) -> Result<String> {
     }
 
     let host = parsed.host_str().unwrap_or_default().to_ascii_lowercase();
-    let is_youtube = host == "youtu.be" || host == "youtube.com" || host.ends_with(".youtube.com");
-    if !is_youtube {
+    let is_supported = host == "youtu.be"
+        || host == "youtube.com"
+        || host.ends_with(".youtube.com")
+        || host == "tiktok.com"
+        || host.ends_with(".tiktok.com")
+        || host == "instagram.com"
+        || host.ends_with(".instagram.com")
+        || host == "instagr.am";
+    if !is_supported {
         return Err(EngineError::InstallFailed(
-            "subscription URL must be a YouTube URL".to_string(),
+            "subscription URL must be a supported provider URL (YouTube, Instagram, or TikTok)".to_string(),
         ));
     }
 
@@ -8931,5 +8938,41 @@ VALUES (?1, ?2, ?3, ?4, 0.0, ?5, ?6, '', ?7)
             committed_intents, 1,
             "durable intent replaces the old non-transactional pre-write dirty marker"
         );
+    }
+
+    #[test]
+    fn tiktok_subscription_creation_and_canonical_identity_inference() {
+        let temp = tempfile::tempdir().unwrap();
+        let paths = AppPaths::new(temp.path().to_path_buf());
+        crate::db::ensure_schema(&paths).unwrap();
+
+        let sub = upsert_youtube_subscription(
+            &paths,
+            YoutubeSubscriptionUpsert {
+                id: None,
+                title: "TikTok Creator Profile".to_string(),
+                source_url: "https://www.tiktok.com/@tiktok_creator".to_string(),
+                folder_map: Some("tiktok_creator".to_string()),
+                output_dir_override: None,
+                library_id: None,
+                use_browser_cookies: false,
+                browser_cookie_source: None,
+                auth_session_input: None,
+                clear_auth_session: false,
+                active: true,
+                preset_id: None,
+                group_ids: vec![],
+                refresh_interval_minutes: Some(1440),
+            },
+        )
+        .expect("create tiktok subscription");
+
+        assert_eq!(sub.title, "TikTok Creator Profile");
+        assert_eq!(sub.source_url, "https://www.tiktok.com/@tiktok_creator");
+
+        let conn = crate::db::open_readonly(&paths).unwrap();
+        let loaded = subscription_by_id_conn(&conn, &sub.id).unwrap().unwrap();
+        assert_eq!(loaded.id, sub.id);
+        assert_eq!(loaded.source_url, "https://www.tiktok.com/@tiktok_creator");
     }
 }
