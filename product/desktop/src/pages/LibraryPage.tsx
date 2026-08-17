@@ -1283,10 +1283,43 @@ export function LibraryPage({ mode = "all", visible = true }: LibraryPageProps) 
     return map;
   }, [videoLibraries]);
 
+  const [subscriptionProviderFilter, setSubscriptionProviderFilter] = useState<"all" | "youtube" | "instagram" | "tiktok">("all");
+  const [subscriptionStatusFilter, setSubscriptionStatusFilter] = useState<"all" | "normal" | "needs_attention" | "unavailable" | "deleted" | "paused">("all");
+  const [subscriptionSearch, setSubscriptionSearch] = useState<string>("");
+  const [subscriptionSort, setSubscriptionSort] = useState<"title_asc" | "title_desc" | "last_checked" | "count_desc">("title_asc");
+  const [subscriptionDetailTab, setSubscriptionDetailTab] = useState<"overview" | "media" | "activity" | "settings">("overview");
+
   const visibleSubscriptions = useMemo(() => {
-    if (!subscriptionGroupFilterId) return subscriptions;
-    return subscriptions.filter((sub) => sub.group_ids.includes(subscriptionGroupFilterId));
-  }, [subscriptionGroupFilterId, subscriptions]);
+    let list = subscriptions;
+    if (subscriptionGroupFilterId) {
+      list = list.filter((sub) => sub.group_ids.includes(subscriptionGroupFilterId));
+    }
+    if (subscriptionStatusFilter === "normal") {
+      list = list.filter((sub) => sub.source_status === "normal" && sub.active);
+    } else if (subscriptionStatusFilter === "needs_attention") {
+      list = list.filter((sub) => subscriptionAttentionBucket(sub) != null);
+    } else if (subscriptionStatusFilter === "unavailable") {
+      list = list.filter((sub) => sub.source_status === "unavailable");
+    } else if (subscriptionStatusFilter === "deleted") {
+      list = list.filter((sub) => sub.source_status === "deleted");
+    } else if (subscriptionStatusFilter === "paused") {
+      list = list.filter((sub) => !sub.active && sub.source_status !== "deleted");
+    }
+    if (subscriptionSearch.trim()) {
+      const q = subscriptionSearch.trim().toLowerCase();
+      list = list.filter((sub) => sub.title.toLowerCase().includes(q) || sub.source_url.toLowerCase().includes(q));
+    }
+    if (subscriptionSort === "title_asc") {
+      list = [...list].sort((a, b) => a.title.localeCompare(b.title));
+    } else if (subscriptionSort === "title_desc") {
+      list = [...list].sort((a, b) => b.title.localeCompare(a.title));
+    } else if (subscriptionSort === "last_checked") {
+      list = [...list].sort((a, b) => (b.last_checked_at_ms ?? 0) - (a.last_checked_at_ms ?? 0));
+    } else if (subscriptionSort === "count_desc") {
+      list = [...list].sort((a, b) => (archiveStats[b.id] ?? 0) - (archiveStats[a.id] ?? 0));
+    }
+    return list;
+  }, [subscriptionGroupFilterId, subscriptionStatusFilter, subscriptionSearch, subscriptionSort, subscriptions, archiveStats]);
 
   const activeSubscriptionCount = useMemo(
     () =>
@@ -4972,187 +5005,77 @@ export function LibraryPage({ mode = "all", visible = true }: LibraryPageProps) 
           id="video-archiver-subscriptions-panel"
           role={mode === "video_ingest" ? "tabpanel" : undefined}
         >
-        <h2>YouTube subscriptions</h2>
+        <h2>Subscriptions</h2>
         <div style={{ color: "#4b5563", marginBottom: 8 }}>
-          Save a channel or playlist so VoxVulgi checks it for new videos on its own. New videos are
-          saved to <code>{defaultSubscriptionDownloadsDir || "-"}</code> unless you pick another folder below.
+          Manage continuous channel and profile archiving across YouTube, Instagram, and TikTok with automated interval checking and deduplicated downloads.
         </div>
-        <div className="row">
-          <label style={{ display: "flex", alignItems: "center", gap: 8, flex: 1 }}>
-            <span>Title</span>
-            <input
-              value={subscriptionTitle}
-              disabled={busy}
-              onChange={(e) => setSubscriptionTitle(e.currentTarget.value)}
-              placeholder="My channel subscription"
-              style={{ width: "100%" }}
-            />
-          </label>
-          <label style={{ display: "flex", alignItems: "center", gap: 8, flex: 1 }}>
-            <span>YouTube URL</span>
-            <input
-              value={subscriptionUrl}
-              disabled={busy}
-              onChange={(e) => setSubscriptionUrl(e.currentTarget.value)}
-              placeholder="https://www.youtube.com/@channel/videos"
-              style={{ width: "100%" }}
-            />
-          </label>
-        </div>
-        <div className="row">
-          <label style={{ display: "flex", alignItems: "center", gap: 8, flex: 1 }}>
-            <span>Library</span>
+
+        {/* WP-0302: Unified toolbar for cross-provider filtering, status selection, sorting, search, and primary actions */}
+        <div className="sub-toolbar" aria-label="Subscription filters and controls">
+          <label style={{ display: "flex", alignItems: "center", gap: 6 }}>
+            <span style={{ fontSize: 12, fontWeight: 600, color: "#4b5563" }}>Provider:</span>
             <select
-              value={subscriptionLibraryId}
-              disabled={busy || videoLibraries.length === 0 || !!subscriptionOutputDirOverride.trim()}
-              onChange={(e) => setSubscriptionLibraryId(e.currentTarget.value)}
+              value={subscriptionProviderFilter}
+              disabled={busy}
+              onChange={(e) => setSubscriptionProviderFilter(e.currentTarget.value as any)}
             >
-              {videoLibraries.map((library) => (
-                <option key={library.id} value={library.id}>
-                  {library.name}{library.exists ? "" : " (missing)"}
+              <option value="all">All providers</option>
+              <option value="youtube">YouTube</option>
+              <option value="instagram">Instagram</option>
+              <option value="tiktok">TikTok</option>
+            </select>
+          </label>
+          <label style={{ display: "flex", alignItems: "center", gap: 6 }}>
+            <span style={{ fontSize: 12, fontWeight: 600, color: "#4b5563" }}>Status:</span>
+            <select
+              value={subscriptionStatusFilter}
+              disabled={busy}
+              onChange={(e) => setSubscriptionStatusFilter(e.currentTarget.value as any)}
+            >
+              <option value="all">All statuses</option>
+              <option value="normal">Normal</option>
+              <option value="needs_attention">Needs attention</option>
+              <option value="unavailable">Unavailable</option>
+              <option value="deleted">Deleted</option>
+              <option value="paused">Paused</option>
+            </select>
+          </label>
+          <label style={{ display: "flex", alignItems: "center", gap: 6 }}>
+            <span style={{ fontSize: 12, fontWeight: 600, color: "#4b5563" }}>Group:</span>
+            <select
+              value={subscriptionGroupFilterId}
+              disabled={busy}
+              onChange={(e) => setSubscriptionGroupFilterId(e.currentTarget.value)}
+            >
+              <option value="">All groups</option>
+              {subscriptionGroups.map((group) => (
+                <option key={group.id} value={group.id}>
+                  {group.name}
                 </option>
               ))}
             </select>
           </label>
-        </div>
-        <details>
-          <summary style={{ cursor: "pointer", color: "#4b5563", fontSize: 12 }}>
-            Folder options (optional)
-          </summary>
-          <div className="row" style={{ marginTop: 6 }}>
-            <label style={{ display: "flex", alignItems: "center", gap: 8, flex: 1 }}>
-              <span>Folder name</span>
-              <input
-                value={subscriptionFolderMap}
-                disabled={busy}
-                onChange={(e) => setSubscriptionFolderMap(e.currentTarget.value)}
-                placeholder="channel_map_name"
-                style={{ width: "100%" }}
-                title="Name of the subfolder these videos are saved into. Leave blank to use a folder named after the channel."
-              />
-            </label>
-            <label style={{ display: "flex", alignItems: "center", gap: 8, flex: 1 }}>
-              <span>Save to folder (optional)</span>
-              <input
-                value={subscriptionOutputDirOverride}
-                disabled={busy}
-                onChange={(e) => setSubscriptionOutputDirOverride(e.currentTarget.value)}
-                placeholder="Optional absolute folder path"
-                style={{ width: "100%" }}
-                title="Pick a specific folder for this subscription. Leave blank to use the default video folder."
-              />
-            </label>
-            <button type="button" disabled={busy} onClick={chooseSubscriptionOutputDir}>
-              Choose folder
-            </button>
-          </div>
-        </details>
-        <div className="row">
-          <label style={{ display: "flex", alignItems: "center", gap: 8 }}>
-            <input
-              type="checkbox"
-              checked={subscriptionActive}
-              disabled={
-                busy ||
-                subscriptions.find((candidate) => candidate.id === subscriptionEditId)
-                  ?.source_status === "deleted"
-              }
-              onChange={(e) => setSubscriptionActive(e.currentTarget.checked)}
-            />
-            <span>Active</span>
-          </label>
-          {subscriptions.find((candidate) => candidate.id === subscriptionEditId)?.source_status ===
-          "deleted" ? (
-            <span style={{ color: "#475569", fontSize: 12 }}>
-              Deleted status is retained while editing. Restore it from the detail pane to queue it again.
-            </span>
-          ) : null}
-          <label style={{ display: "flex", alignItems: "center", gap: 8 }}>
-            <span>Preset</span>
+          <label style={{ display: "flex", alignItems: "center", gap: 6 }}>
+            <span style={{ fontSize: 12, fontWeight: 600, color: "#4b5563" }}>Sort:</span>
             <select
-              value={subscriptionPresetId}
+              value={subscriptionSort}
               disabled={busy}
-              onChange={(e) => setSubscriptionPresetId(e.currentTarget.value)}
+              onChange={(e) => setSubscriptionSort(e.currentTarget.value as any)}
             >
-              <option value="">(Default preset)</option>
-              {(downloadPresets?.presets ?? []).map((preset) => (
-                <option key={preset.id} value={preset.id}>
-                  {preset.title}
-                </option>
-              ))}
+              <option value="title_asc">Title (A-Z)</option>
+              <option value="title_desc">Title (Z-A)</option>
+              <option value="last_checked">Recently checked</option>
+              <option value="count_desc">Most downloaded</option>
             </select>
           </label>
-          <label style={{ display: "flex", alignItems: "center", gap: 8 }}>
-            <span>Refresh every (hours)</span>
-            <input
-              type="number"
-              min={1}
-              max={Math.floor(maxSubscriptionRefreshIntervalMinutes / 60)}
-              step={1}
-              value={Math.round((subscriptionRefreshIntervalMinutes / 60) * 10) / 10}
-              disabled={busy}
-              onChange={(e) => {
-                // WP-0255: edited in hours; stored in minutes. Clamp to engine bounds.
-                const hours = Number(e.currentTarget.value);
-                const minutes = Number.isFinite(hours)
-                  ? Math.round(hours * 60)
-                  : minSubscriptionRefreshIntervalMinutes;
-                setSubscriptionRefreshIntervalMinutes(
-                  Math.max(
-                    minSubscriptionRefreshIntervalMinutes,
-                    Math.min(maxSubscriptionRefreshIntervalMinutes, minutes),
-                  ),
-                );
-              }}
-              style={{ width: 90 }}
-              title="How often this subscription is auto-checked for new videos. Stored in minutes; edited in hours."
-            />
-          </label>
-        </div>
-        {advancedMode ? (
-          <div className="row">
-            <span style={{ color: "#4b5563" }} title="Optional labels — tick the groups this subscription belongs to">
-              In groups
-            </span>
-            {subscriptionGroups.length ? (
-              subscriptionGroups.map((group) => (
-                <label key={group.id} style={{ display: "flex", alignItems: "center", gap: 6 }}>
-                  <input
-                    type="checkbox"
-                    checked={subscriptionGroupIds.includes(group.id)}
-                    disabled={busy}
-                    onChange={() => toggleSubscriptionGroup(group.id)}
-                  />
-                  <span>{group.name}</span>
-                </label>
-              ))
-            ) : (
-              <span style={{ color: "#4b5563" }}>No groups yet.</span>
-            )}
-          </div>
-        ) : null}
-        <div style={{ color: "#4b5563", marginTop: 6 }}>
-          <strong>Update all now</strong> checks every active subscription immediately.{" "}
-          <strong>Check due now</strong> only checks the ones past their refresh interval.{" "}
-          <strong>Reload list</strong> just refreshes this view — it never downloads.
-        </div>
-        <div className="row">
-          <button
-            type="button"
+          <input
+            type="search"
+            value={subscriptionSearch}
             disabled={busy}
-            onClick={saveSubscription}
-            title={subscriptionEditId ? "Save changes to this subscription." : "Add this subscription to your list."}
-          >
-            {subscriptionEditId ? "Update subscription" : "Save subscription"}
-          </button>
-          <button
-            type="button"
-            disabled={busy}
-            onClick={resetSubscriptionEditor}
-            title="Clears the add/edit form above (does not delete anything)."
-          >
-            Clear form
-          </button>
+            onChange={(e) => setSubscriptionSearch(e.currentTarget.value)}
+            placeholder="Search subscriptions..."
+            style={{ minWidth: 140, flex: 1 }}
+          />
           <button
             type="button"
             disabled={busy || allActiveSubscriptionCount === 0}
@@ -5166,43 +5089,20 @@ export function LibraryPage({ mode = "all", visible = true }: LibraryPageProps) 
           </button>
           <button
             type="button"
-            disabled={busy}
-            onClick={stopRecurringSubscriptions}
-            title="Pause recurring subscription syncing. One-off downloads keep running; paused work resumes on the next Update all or restart."
-          >
-            {recurringStopped ? "Stopped — Stop again" : "Stop"}
-          </button>
-          <button
-            type="button"
             disabled={busy || activeSubscriptionCount === 0}
             onClick={queueAllActiveSubscriptions}
             title="Check only the subscriptions whose interval has elapsed since their last check (respects the group filter)."
           >
             {subscriptionGroupFilterId ? "Check due in group" : "Check due now"} ({activeSubscriptionCount})
           </button>
-          {/* WP-0255: group the rarely-used import/export/migration buttons so the
-              subscription bar isn't a wall of buttons. */}
-          <details style={{ display: "inline-block" }}>
-            <summary style={{ cursor: "pointer", color: "#4b5563", fontSize: 12 }}>
-              Import / export &amp; migration
-            </summary>
-            <div className="row" style={{ marginTop: 6 }}>
-              <button type="button" disabled={busy} onClick={exportSubscriptionsJson}>
-                Export JSON
-              </button>
-              <button type="button" disabled={busy} onClick={importSubscriptionsJson}>
-                Import JSON
-              </button>
-              <button
-                type="button"
-                disabled={busy}
-                onClick={() => scanFolderSeedArchive()}
-                title="Scan a folder of videos you already downloaded so VoxVulgi knows not to download them again."
-              >
-                Mark existing videos as done
-              </button>
-            </div>
-          </details>
+          <button
+            type="button"
+            disabled={busy}
+            onClick={stopRecurringSubscriptions}
+            title="Pause recurring subscription syncing. One-off downloads keep running; paused work resumes on the next Update all or restart."
+          >
+            {recurringStopped ? "Stopped — Stop again" : "Stop"}
+          </button>
           <button
             type="button"
             disabled={busy}
@@ -5212,13 +5112,216 @@ export function LibraryPage({ mode = "all", visible = true }: LibraryPageProps) 
             Reload list
           </button>
         </div>
-        <div style={{ color: "#4b5563", marginTop: 8 }}>
+
+        {/* Add / Edit Subscription Form */}
+        <details open={!!subscriptionEditId} style={{ marginTop: 8, marginBottom: 8 }}>
+          <summary style={{ cursor: "pointer", fontWeight: 600, color: "#374151" }}>
+            {subscriptionEditId ? "Edit subscription" : "+ Add new subscription"}
+          </summary>
+          <div style={{ marginTop: 8, padding: 8, background: "rgba(255, 255, 255, 0.4)", borderRadius: 6, border: "1px solid var(--panel-border)" }}>
+            <div className="row">
+              <label style={{ display: "flex", alignItems: "center", gap: 8, flex: 1 }}>
+                <span>Title</span>
+                <input
+                  value={subscriptionTitle}
+                  disabled={busy}
+                  onChange={(e) => setSubscriptionTitle(e.currentTarget.value)}
+                  placeholder="My channel subscription"
+                  style={{ width: "100%" }}
+                />
+              </label>
+              <label style={{ display: "flex", alignItems: "center", gap: 8, flex: 1 }}>
+                <span>YouTube URL</span>
+                <input
+                  value={subscriptionUrl}
+                  disabled={busy}
+                  onChange={(e) => setSubscriptionUrl(e.currentTarget.value)}
+                  placeholder="https://www.youtube.com/@channel/videos"
+                  style={{ width: "100%" }}
+                />
+              </label>
+            </div>
+            <div className="row">
+              <label style={{ display: "flex", alignItems: "center", gap: 8, flex: 1 }}>
+                <span>Library</span>
+                <select
+                  value={subscriptionLibraryId}
+                  disabled={busy || videoLibraries.length === 0 || !!subscriptionOutputDirOverride.trim()}
+                  onChange={(e) => setSubscriptionLibraryId(e.currentTarget.value)}
+                >
+                  {videoLibraries.map((library) => (
+                    <option key={library.id} value={library.id}>
+                      {library.name}{library.exists ? "" : " (missing)"}
+                    </option>
+                  ))}
+                </select>
+              </label>
+            </div>
+            <details>
+              <summary style={{ cursor: "pointer", color: "#4b5563", fontSize: 12 }}>
+                Folder options (optional)
+              </summary>
+              <div className="row" style={{ marginTop: 6 }}>
+                <label style={{ display: "flex", alignItems: "center", gap: 8, flex: 1 }}>
+                  <span>Folder name</span>
+                  <input
+                    value={subscriptionFolderMap}
+                    disabled={busy}
+                    onChange={(e) => setSubscriptionFolderMap(e.currentTarget.value)}
+                    placeholder="channel_map_name"
+                    style={{ width: "100%" }}
+                    title="Name of the subfolder these videos are saved into. Leave blank to use a folder named after the channel."
+                  />
+                </label>
+                <label style={{ display: "flex", alignItems: "center", gap: 8, flex: 1 }}>
+                  <span>Save to folder (optional)</span>
+                  <input
+                    value={subscriptionOutputDirOverride}
+                    disabled={busy}
+                    onChange={(e) => setSubscriptionOutputDirOverride(e.currentTarget.value)}
+                    placeholder="Optional absolute folder path"
+                    style={{ width: "100%" }}
+                    title="Pick a specific folder for this subscription. Leave blank to use the default video folder."
+                  />
+                </label>
+                <button type="button" disabled={busy} onClick={chooseSubscriptionOutputDir}>
+                  Choose folder
+                </button>
+              </div>
+            </details>
+            <div className="row">
+              <label style={{ display: "flex", alignItems: "center", gap: 8 }}>
+                <input
+                  type="checkbox"
+                  checked={subscriptionActive}
+                  disabled={
+                    busy ||
+                    subscriptions.find((candidate) => candidate.id === subscriptionEditId)
+                      ?.source_status === "deleted"
+                  }
+                  onChange={(e) => setSubscriptionActive(e.currentTarget.checked)}
+                />
+                <span>Active</span>
+              </label>
+              {subscriptions.find((candidate) => candidate.id === subscriptionEditId)?.source_status ===
+              "deleted" ? (
+                <span style={{ color: "#475569", fontSize: 12 }}>
+                  Deleted status is retained while editing. Restore it from the detail pane to queue it again.
+                </span>
+              ) : null}
+              <label style={{ display: "flex", alignItems: "center", gap: 8 }}>
+                <span>Preset</span>
+                <select
+                  value={subscriptionPresetId}
+                  disabled={busy}
+                  onChange={(e) => setSubscriptionPresetId(e.currentTarget.value)}
+                >
+                  <option value="">(Default preset)</option>
+                  {(downloadPresets?.presets ?? []).map((preset) => (
+                    <option key={preset.id} value={preset.id}>
+                      {preset.title}
+                    </option>
+                  ))}
+                </select>
+              </label>
+              <label style={{ display: "flex", alignItems: "center", gap: 8 }}>
+                <span>Refresh every (hours)</span>
+                <input
+                  type="number"
+                  min={1}
+                  max={Math.floor(maxSubscriptionRefreshIntervalMinutes / 60)}
+                  step={1}
+                  value={Math.round((subscriptionRefreshIntervalMinutes / 60) * 10) / 10}
+                  disabled={busy}
+                  onChange={(e) => {
+                    const hours = Number(e.currentTarget.value);
+                    const minutes = Number.isFinite(hours)
+                      ? Math.round(hours * 60)
+                      : minSubscriptionRefreshIntervalMinutes;
+                    setSubscriptionRefreshIntervalMinutes(
+                      Math.max(
+                        minSubscriptionRefreshIntervalMinutes,
+                        Math.min(maxSubscriptionRefreshIntervalMinutes, minutes),
+                      ),
+                    );
+                  }}
+                  style={{ width: 90 }}
+                  title="How often this subscription is auto-checked for new videos. Stored in minutes; edited in hours."
+                />
+              </label>
+            </div>
+            {advancedMode ? (
+              <div className="row">
+                <span style={{ color: "#4b5563" }} title="Optional labels — tick the groups this subscription belongs to">
+                  In groups
+                </span>
+                {subscriptionGroups.length ? (
+                  subscriptionGroups.map((group) => (
+                    <label key={group.id} style={{ display: "flex", alignItems: "center", gap: 6 }}>
+                      <input
+                        type="checkbox"
+                        checked={subscriptionGroupIds.includes(group.id)}
+                        disabled={busy}
+                        onChange={() => toggleSubscriptionGroup(group.id)}
+                      />
+                      <span>{group.name}</span>
+                    </label>
+                  ))
+                ) : (
+                  <span style={{ color: "#4b5563" }}>No groups yet.</span>
+                )}
+              </div>
+            ) : null}
+            <div className="row" style={{ marginTop: 8 }}>
+              <button
+                type="button"
+                disabled={busy}
+                onClick={saveSubscription}
+                title={subscriptionEditId ? "Save changes to this subscription." : "Add this subscription to your list."}
+              >
+                {subscriptionEditId ? "Update subscription" : "Save subscription"}
+              </button>
+              <button
+                type="button"
+                disabled={busy}
+                onClick={resetSubscriptionEditor}
+                title="Clears the add/edit form above (does not delete anything)."
+              >
+                Clear form
+              </button>
+            </div>
+          </div>
+        </details>
+
+        {/* Import / Export and Migration */}
+        <details style={{ display: "inline-block", marginBottom: 8 }}>
+          <summary style={{ cursor: "pointer", color: "#4b5563", fontSize: 12 }}>
+            Import / export &amp; migration
+          </summary>
+          <div className="row" style={{ marginTop: 6 }}>
+            <button type="button" disabled={busy} onClick={exportSubscriptionsJson}>
+              Export JSON
+            </button>
+            <button type="button" disabled={busy} onClick={importSubscriptionsJson}>
+              Import JSON
+            </button>
+            <button
+              type="button"
+              disabled={busy}
+              onClick={() => scanFolderSeedArchive()}
+              title="Scan a folder of videos you already downloaded so VoxVulgi knows not to download them again."
+            >
+              Mark existing videos as done
+            </button>
+          </div>
+        </details>
+
+        <div style={{ color: "#4b5563", marginTop: 4 }}>
           Saved subscriptions: {subscriptions.length}
           {subscriptionGroupFilterId ? ` (filtered: ${groupNameById.get(subscriptionGroupFilterId) ?? "group"})` : ""}
         </div>
-        {/* WP-0255: all-subscriptions status strip (no card) so the operator always sees
-            overall state at a glance, then a master-detail manager that fits the window
-            (replaces the 15-column horizontally-scrolling table). */}
+
+        {/* All-subscriptions status strip */}
         <div className="sub-status-strip">
           <span className="sub-status-metric"><strong>{subscriptionOverview.total}</strong> subscriptions</span>
           <span className="sub-status-sep">·</span>
@@ -5229,16 +5332,11 @@ export function LibraryPage({ mode = "all", visible = true }: LibraryPageProps) 
             <strong>{subscriptionOverview.updating}</strong> queued to check · paced
           </span>
           <span className="sub-status-sep">·</span>
-          {/* WP-0264: per-kind breakdown replaces the bare "N need attention" — classify each
-              failing sub's stored error and show a compact count-by-state so the operator sees
-              sign-in vs handle-not-found vs rate-limit vs busy at a glance. */}
           {subscriptionOverview.errored ? (
             <span
               className="sub-status-metric sub-status-error"
               style={{ display: "inline-flex", alignItems: "center", gap: 6, flexWrap: "wrap" }}
             >
-              {/* WP: clickable — filters the list to the failing subs so the operator can see and
-                  fix exactly which ones need attention, instead of a dead count. */}
               <button
                 type="button"
                 style={attentionFilterButtonStyle(attentionFilter === "__all__", true)}
@@ -5287,6 +5385,7 @@ export function LibraryPage({ mode = "all", visible = true }: LibraryPageProps) 
           <span className="sub-status-sep">·</span>
           <span className="sub-status-metric">last sync {formatTimeAgo(subscriptionOverview.lastSync)}</span>
         </div>
+
         {Object.values(subscriptionProjectionState).some((state) => state === "stale" || state === "error") ? (
           <div data-testid="library-subscription-projection-state" role="status" className="sub-status-strip">
             {Object.values(subscriptionProjectionState).some((state) => state === "stale")
@@ -5294,8 +5393,8 @@ export function LibraryPage({ mode = "all", visible = true }: LibraryPageProps) 
               : "Subscription totals are unavailable; failed polls are not shown as empty results."}
           </div>
         ) : null}
-        {/* WP: toggle to show/hide the green "Checking for new videos" activity list. Hidden by
-            DEFAULT (operator found it noisy and it buried the subscription list); persisted. */}
+
+        {/* Processing list toggle */}
         <div style={{ display: "flex", justifyContent: "flex-end", margin: "2px 0 0" }}>
           <button
             type="button"
@@ -5323,10 +5422,7 @@ export function LibraryPage({ mode = "all", visible = true }: LibraryPageProps) 
             {hideProcessingList ? "Show activity list" : "Hide activity list"}
           </button>
         </div>
-        {/* WP-0261/WP: the green "Checking for new videos" list is REFRESH ONLY. A subscription
-            appears here while it is being enumerated/refreshed (active-refresh ids or the activity
-            feed's "checking" phase). Actual downloading now lives in the per-row/detail pill so this
-            list can never contradict the "Downloading" badge. */}
+
         {!hideProcessingList && (() => {
           const checkingIds = new Set<string>(activeRefreshSubIds);
           for (const a of Object.values(subActivity)) {
@@ -5352,99 +5448,99 @@ export function LibraryPage({ mode = "all", visible = true }: LibraryPageProps) 
             </div>
           );
         })()}
+
+        {/* Master-Detail Subscription Manager */}
         <div className="sub-manager">
           <div className="sub-list-pane">
             <div className="sub-list" role="listbox" aria-label="Subscriptions">
               {displayedSubscriptions.length ? (
                 renderedSubscriptions.map((sub) => {
-                const downloaded = archiveStats[sub.id] ?? 0;
-                const total = sub.upstream_total ?? null;
-                const isRefreshing = activeRefreshSubIds.has(sub.id);
-                const activity = resolveSubscriptionActivity(
-                  sub.id,
-                  isRefreshing,
-                  subDownloadActivity,
-                  subActivity,
-                );
-                const runState = subscriptionRunState(sub, activity);
-                const pres = subscriptionRunPresentation(runState);
-                const pct =
-                  total && total > 0 ? Math.min(100, Math.round((downloaded / total) * 100)) : null;
-                const selected = sub.id === selectedSubscriptionId;
-                const stateLabel = pres.label;
-                // WP-0261/WP: live counts derived from the resolved activity so the row text can
-                // never disagree with the pill (queued/running from the authoritative source;
-                // succeeded/current title from the activity feed when present).
-                const act = subActivity[sub.id];
-                const liveActive =
-                  activity.checking || activity.running > 0 || activity.queued > 0;
-                // WP-0264: classify the stored failure into a plain state chip + requirement,
-                // shown when the sub has failed and has an error to classify.
-                // WP: use the shared attention chip so a failing sub with NO stored error still
-                // gets an actionable "Unclassified" chip instead of rendering nothing.
-                const failure = subscriptionAttentionChip(sub);
-                const showFailureChip = failure != null;
-                return (
-                  <button
-                    type="button"
-                    role="option"
-                    key={sub.id}
-                    className={`sub-list-row${selected ? " sub-list-row-selected" : ""}`}
-                    onClick={() => setSelectedSubscriptionId(sub.id)}
-                    aria-selected={selected}
-                  >
-                    <div className="sub-list-main">
-                      <span className="sub-list-title" title={sub.title}>{sub.title}</span>
-                      <span className={`sub-pill ${pres.pillClassName}`} style={pres.pillStyle}>{stateLabel}</span>
-                    </div>
-                    <div className="sub-list-sub">
-                      <span className="sub-list-type">{inferSubscriptionType(sub.source_url)}</span>
-                      {sub.source_status === "deleted" ? (
-                        <span className="sub-list-inactive">deleted · not queued</span>
-                      ) : sub.source_status === "unavailable" ? (
-                        <span className="sub-list-inactive">URL unavailable</span>
-                      ) : !sub.active ? (
-                        <span className="sub-list-inactive">paused</span>
-                      ) : null}
-                      <span className="sub-list-count">
-                        {total != null ? `${downloaded} / ${total}` : `${downloaded} downloaded`}
-                        {sub.last_new_found ? ` · ${sub.last_new_found} new` : ""}
-                      </span>
-                    </div>
-                    {liveActive ? (
-                      <div className="sub-list-sub">
-                        <span className="sub-list-count">
-                          {runState === "checking"
-                            ? "Checking for new videos…"
-                            : runState === "waiting"
-                              ? `${activity.queued} queued · waiting to download`
-                              : `Queued ${activity.queued} · Running ${activity.running} · Done ${act?.succeeded ?? 0}`}
-                        </span>
-                        {runState === "downloading" && act?.current_title ? (
-                          <span className="sub-list-count" title={act.current_title}>
-                            Downloading: {act.current_title}
+                  const downloaded = archiveStats[sub.id] ?? 0;
+                  const total = sub.upstream_total ?? null;
+                  const isRefreshing = activeRefreshSubIds.has(sub.id);
+                  const activity = resolveSubscriptionActivity(
+                    sub.id,
+                    isRefreshing,
+                    subDownloadActivity,
+                    subActivity,
+                  );
+                  const runState = subscriptionRunState(sub, activity);
+                  const pres = subscriptionRunPresentation(runState);
+                  const pct =
+                    total && total > 0 ? Math.min(100, Math.round((downloaded / total) * 100)) : null;
+                  const selected = sub.id === selectedSubscriptionId;
+                  const stateLabel = pres.label;
+                  const act = subActivity[sub.id];
+                  const liveActive =
+                    activity.checking || activity.running > 0 || activity.queued > 0;
+                  const failure = subscriptionAttentionChip(sub);
+                  const showFailureChip = failure != null;
+                  return (
+                    <button
+                      type="button"
+                      role="option"
+                      key={sub.id}
+                      className={`sub-list-row${selected ? " sub-list-row-selected" : ""}`}
+                      onClick={() => setSelectedSubscriptionId(sub.id)}
+                      aria-selected={selected}
+                    >
+                      <div className="sub-list-main">
+                        <span className="sub-list-title" title={sub.title}>
+                          <span className="sub-provider-badge sub-provider-badge-youtube" style={{ marginRight: 6 }}>
+                            YouTube
                           </span>
+                          {sub.title}
+                        </span>
+                        <span className={`sub-pill ${pres.pillClassName}`} style={pres.pillStyle}>{stateLabel}</span>
+                      </div>
+                      <div className="sub-list-sub">
+                        <span className="sub-list-type">{inferSubscriptionType(sub.source_url)}</span>
+                        {sub.source_status === "deleted" ? (
+                          <span className="sub-list-inactive">deleted · not queued</span>
+                        ) : sub.source_status === "unavailable" ? (
+                          <span className="sub-list-inactive">URL unavailable</span>
+                        ) : !sub.active ? (
+                          <span className="sub-list-inactive">paused</span>
                         ) : null}
+                        <span className="sub-list-count">
+                          {total != null ? `${downloaded} / ${total}` : `${downloaded} downloaded`}
+                          {sub.last_new_found ? ` · ${sub.last_new_found} new` : ""}
+                        </span>
                       </div>
-                    ) : null}
-                    {showFailureChip && failure ? (
-                      <div
-                        className="sub-list-sub"
-                        style={{ alignItems: "center", gap: 6 }}
-                        title={sub.last_error_message ?? ""}
-                      >
-                        <span style={toneStyle(failure.tone)}>{failure.label}</span>
-                        <span className="sub-list-count">{failure.requirement}</span>
+                      {liveActive ? (
+                        <div className="sub-list-sub">
+                          <span className="sub-list-count">
+                            {runState === "checking"
+                              ? "Checking for new videos…"
+                              : runState === "waiting"
+                                ? `${activity.queued} queued · waiting to download`
+                                : `Queued ${activity.queued} · Running ${activity.running} · Done ${act?.succeeded ?? 0}`}
+                          </span>
+                          {runState === "downloading" && act?.current_title ? (
+                            <span className="sub-list-count" title={act.current_title}>
+                              Downloading: {act.current_title}
+                            </span>
+                          ) : null}
+                        </div>
+                      ) : null}
+                      {showFailureChip && failure ? (
+                        <div
+                          className="sub-list-sub"
+                          style={{ alignItems: "center", gap: 6 }}
+                          title={sub.last_error_message ?? ""}
+                        >
+                          <span style={toneStyle(failure.tone)}>{failure.label}</span>
+                          <span className="sub-list-count">{failure.requirement}</span>
+                        </div>
+                      ) : null}
+                      <div className="sub-bar">
+                        <div
+                          className={`sub-bar-fill ${pres.barClassName}`}
+                          style={{ ...pres.barStyle, width: `${pct ?? (downloaded > 0 ? 100 : 0)}%` }}
+                        />
                       </div>
-                    ) : null}
-                    <div className="sub-bar">
-                      <div
-                        className={`sub-bar-fill ${pres.barClassName}`}
-                        style={{ ...pres.barStyle, width: `${pct ?? (downloaded > 0 ? 100 : 0)}%` }}
-                      />
-                    </div>
-                  </button>
-                );
+                    </button>
+                  );
                 })
               ) : (
                 <div className="sub-list-empty">
@@ -5484,45 +5580,92 @@ export function LibraryPage({ mode = "all", visible = true }: LibraryPageProps) 
               </div>
             ) : null}
           </div>
+
+          {/* Subscription Detail Pane with 4 Tabs */}
           <div className="sub-detail">
-            {selectedSubscription
-              ? (() => {
-                  const sub = selectedSubscription;
-                  const boundLibrary = sub.library_id ? videoLibraryById.get(sub.library_id) : null;
-                  const subscriptionRoot = boundLibrary
-                    ? boundLibrary.root_path
-                    : defaultSubscriptionDownloadsDir;
-                  const target = describeRecurringTarget(
-                    sub.output_dir_override,
-                    subscriptionRoot,
-                    sub.folder_map,
-                  );
-                  const downloaded = archiveStats[sub.id] ?? 0;
-                  const total = sub.upstream_total ?? null;
-                  const isRefreshing = activeRefreshSubIds.has(sub.id);
-                  const activity = resolveSubscriptionActivity(
-                    sub.id,
-                    isRefreshing,
-                    subDownloadActivity,
-                    subActivity,
-                  );
-                  const runState = subscriptionRunState(sub, activity);
-                  const pres = subscriptionRunPresentation(runState);
-                  const stateLabel = pres.label;
-                  // WP-0261/WP: live counts derived from the resolved activity so the detail text
-                  // never disagrees with the pill or with Jobs.
-                  const act = subActivity[sub.id];
-                  const liveActive =
-                    activity.checking || activity.running > 0 || activity.queued > 0;
-                  // WP-0264: classified failure state for the selected sub (chip + requirement).
-                  const detailFailure = subscriptionAttentionChip(sub);
-                  const showDetailFailure = detailFailure != null;
-                  return (
-                    <>
-                      <div className="sub-detail-head">
-                        <span className="sub-detail-title">{sub.title}</span>
-                        <span className={`sub-pill ${pres.pillClassName}`} style={pres.pillStyle}>{stateLabel}</span>
-                      </div>
+            {selectedSubscription ? (() => {
+              const sub = selectedSubscription;
+              const boundLibrary = sub.library_id ? videoLibraryById.get(sub.library_id) : null;
+              const subscriptionRoot = boundLibrary
+                ? boundLibrary.root_path
+                : defaultSubscriptionDownloadsDir;
+              const target = describeRecurringTarget(
+                sub.output_dir_override,
+                subscriptionRoot,
+                sub.folder_map,
+              );
+              const downloaded = archiveStats[sub.id] ?? 0;
+              const total = sub.upstream_total ?? null;
+              const isRefreshing = activeRefreshSubIds.has(sub.id);
+              const activity = resolveSubscriptionActivity(
+                sub.id,
+                isRefreshing,
+                subDownloadActivity,
+                subActivity,
+              );
+              const runState = subscriptionRunState(sub, activity);
+              const pres = subscriptionRunPresentation(runState);
+              const stateLabel = pres.label;
+              const act = subActivity[sub.id];
+              const liveActive =
+                activity.checking || activity.running > 0 || activity.queued > 0;
+              const detailFailure = subscriptionAttentionChip(sub);
+              const showDetailFailure = detailFailure != null;
+
+              return (
+                <>
+                  <div className="sub-detail-head">
+                    <span className="sub-detail-title">{sub.title}</span>
+                    <span className={`sub-pill ${pres.pillClassName}`} style={pres.pillStyle}>{stateLabel}</span>
+                  </div>
+
+                  {/* 4 Detail Tabs: Overview, Media, Activity, Settings */}
+                  <div role="tablist" className="sub-detail-tabs" aria-label="Subscription details">
+                    <button
+                      type="button"
+                      role="tab"
+                      className={subscriptionDetailTab === "overview" ? "seg-on" : undefined}
+                      aria-pressed={subscriptionDetailTab === "overview"}
+                      aria-selected={subscriptionDetailTab === "overview"}
+                      onClick={() => setSubscriptionDetailTab("overview")}
+                    >
+                      Overview
+                    </button>
+                    <button
+                      type="button"
+                      role="tab"
+                      className={subscriptionDetailTab === "media" ? "seg-on" : undefined}
+                      aria-pressed={subscriptionDetailTab === "media"}
+                      aria-selected={subscriptionDetailTab === "media"}
+                      onClick={() => setSubscriptionDetailTab("media")}
+                    >
+                      Media ({downloaded})
+                    </button>
+                    <button
+                      type="button"
+                      role="tab"
+                      className={subscriptionDetailTab === "activity" ? "seg-on" : undefined}
+                      aria-pressed={subscriptionDetailTab === "activity"}
+                      aria-selected={subscriptionDetailTab === "activity"}
+                      onClick={() => setSubscriptionDetailTab("activity")}
+                    >
+                      Activity {liveActive ? "· active" : ""}
+                    </button>
+                    <button
+                      type="button"
+                      role="tab"
+                      className={subscriptionDetailTab === "settings" ? "seg-on" : undefined}
+                      aria-pressed={subscriptionDetailTab === "settings"}
+                      aria-selected={subscriptionDetailTab === "settings"}
+                      onClick={() => setSubscriptionDetailTab("settings")}
+                    >
+                      Settings
+                    </button>
+                  </div>
+
+                  {/* TAB 1: OVERVIEW */}
+                  {subscriptionDetailTab === "overview" ? (
+                    <div>
                       {showDetailFailure && detailFailure ? (
                         <div
                           className="sub-detail-progress"
@@ -5553,25 +5696,6 @@ export function LibraryPage({ mode = "all", visible = true }: LibraryPageProps) 
                           </>
                         )}
                       </div>
-                      {liveActive ? (
-                        <div className="sub-detail-progress">
-                          {runState === "checking" ? (
-                            "Checking for new videos…"
-                          ) : runState === "waiting" ? (
-                            <>
-                              <strong>{activity.queued}</strong> queued · waiting to download
-                            </>
-                          ) : (
-                            <>
-                              Queued <strong>{activity.queued}</strong> · Running <strong>{activity.running}</strong> · Done <strong>{act?.succeeded ?? 0}</strong>
-                              {act && act.failed > 0 ? <> · Failed <strong>{act.failed}</strong></> : null}
-                            </>
-                          )}
-                          {runState === "downloading" && act?.current_title ? (
-                            <div className="sub-detail-wrap">Downloading: {act.current_title}</div>
-                          ) : null}
-                        </div>
-                      ) : null}
                       <dl className="sub-detail-grid">
                         <dt>Type</dt>
                         <dd>
@@ -5705,254 +5829,262 @@ export function LibraryPage({ mode = "all", visible = true }: LibraryPageProps) 
                             : "Mark subscription deleted"}
                         </button>
                       </div>
-                      <div className="sub-detail-videos">
-                        {subscriptionVideosLoading ? (
-                          <div className="sub-detail-progress">loading videos…</div>
-                        ) : (
-                          <>
-                            <div className="sub-video-selection-toolbar" aria-label="Subscription video selection actions">
-                              <strong>
-                                {subscriptionVideoSelectedIds.size} selected
-                              </strong>
+                      <div style={{ color: "#64748b", fontSize: 12, marginTop: 8 }}>
+                        Preserved subscription safety: saved videos, subtitles, source memberships, metadata, and job history will be kept when marking deleted.
+                      </div>
+                    </div>
+                  ) : null}
+
+                  {/* TAB 2: MEDIA */}
+                  {subscriptionDetailTab === "media" ? (
+                    <div className="sub-detail-videos">
+                      {subscriptionVideosLoading ? (
+                        <div className="sub-detail-progress">loading videos…</div>
+                      ) : (
+                        <>
+                          <div className="sub-video-selection-toolbar" aria-label="Subscription video selection actions">
+                            <strong>
+                              {subscriptionVideoSelectedIds.size} selected
+                            </strong>
+                            <button
+                              type="button"
+                              data-agent-safe-action="true"
+                              disabled={
+                                busy ||
+                                subscriptionVideos.downloaded.length +
+                                  subscriptionVideos.deleted.length ===
+                                  0
+                              }
+                              onClick={() =>
+                                setSubscriptionVideoSelectedIds(
+                                  new Set(
+                                    [
+                                      ...subscriptionVideos.downloaded,
+                                      ...subscriptionVideos.deleted,
+                                    ].map((item) => item.id),
+                                  ),
+                                )
+                              }
+                            >
+                              Select loaded
+                            </button>
+                            <button
+                              type="button"
+                              data-agent-safe-action="true"
+                              disabled={busy || subscriptionVideoSelectedIds.size === 0}
+                              onClick={() => setSubscriptionVideoSelectedIds(new Set())}
+                            >
+                              Clear
+                            </button>
+                            <label>
+                              <span>Delete method</span>
+                              <select
+                                value={libraryFileDeleteMode}
+                                disabled={busy}
+                                onChange={(event) =>
+                                  setLibraryFileDeleteMode(
+                                    event.currentTarget.value as "trash" | "permanent",
+                                  )
+                                }
+                              >
+                                <option value="trash">Recycle Bin</option>
+                                <option value="permanent">Permanent</option>
+                              </select>
+                            </label>
+                            <button
+                              type="button"
+                              disabled={busy || subscriptionSelectedAvailableIds.length === 0}
+                              onClick={() =>
+                                deleteSelectedVideoFiles(
+                                  subscriptionSelectedAvailableIds,
+                                  "subscription",
+                                )
+                              }
+                            >
+                              Delete selected ({subscriptionSelectedAvailableIds.length})
+                            </button>
+                            <button
+                              type="button"
+                              disabled={busy || subscriptionSelectedDeletedIds.length === 0}
+                              onClick={() =>
+                                redownloadSelectedDeletedVideos(
+                                  subscriptionSelectedDeletedIds,
+                                  "subscription",
+                                )
+                              }
+                            >
+                              Redownload selected ({subscriptionSelectedDeletedIds.length})
+                            </button>
+                          </div>
+                          <section className="sub-video-section" aria-label="Still to download">
+                            <div className="sub-video-section-head">
+                              <strong>Still to download</strong>
+                              <span>
+                                Showing {Math.min(pendingVideoRenderLimit, subscriptionVideos.pending.length)}
+                                {" "}of {subscriptionVideos.pending.length} loaded rows ·{" "}
+                                {activity.queued} queued total
+                              </span>
+                            </div>
+                            {subscriptionVideos.pending.length ? (
+                              <ul className="sub-video-list">
+                                {subscriptionVideos.pending
+                                  .slice(0, pendingVideoRenderLimit)
+                                  .map((video, index) => (
+                                  <li
+                                    key={`pending-${index}-${video?.url ?? ""}`}
+                                    className="sub-video-row"
+                                  >
+                                    <span className="sub-video-status">Queued</span>
+                                    <span className="sub-video-title">
+                                      {video?.title || video?.url || "(untitled)"}
+                                    </span>
+                                  </li>
+                                ))}
+                              </ul>
+                            ) : (
+                              <div className="sub-video-empty">Nothing pending.</div>
+                            )}
+                            {pendingVideoRenderLimit < subscriptionVideos.pending.length ? (
                               <button
                                 type="button"
                                 data-agent-safe-action="true"
-                                disabled={
-                                  busy ||
-                                  subscriptionVideos.downloaded.length +
-                                    subscriptionVideos.deleted.length ===
-                                    0
-                                }
+                                className="sub-video-load-more"
                                 onClick={() =>
-                                  setSubscriptionVideoSelectedIds(
-                                    new Set(
-                                      [
-                                        ...subscriptionVideos.downloaded,
-                                        ...subscriptionVideos.deleted,
-                                      ].map((item) => item.id),
+                                  setPendingVideoRenderLimit((current) =>
+                                    Math.min(
+                                      current + SUBSCRIPTION_VIDEO_RENDER_STEP,
+                                      subscriptionVideos.pending.length,
                                     ),
                                   )
                                 }
                               >
-                                Select loaded
+                                Load {Math.min(
+                                  SUBSCRIPTION_VIDEO_RENDER_STEP,
+                                  subscriptionVideos.pending.length - pendingVideoRenderLimit,
+                                )} more pending videos
                               </button>
+                            ) : null}
+                          </section>
+                          <section className="sub-video-section" aria-label="Downloaded videos">
+                            <div className="sub-video-section-head">
+                              <strong>Downloaded</strong>
+                              <span>
+                                Showing {Math.min(
+                                  downloadedVideoRenderLimit,
+                                  subscriptionVideos.downloaded.length,
+                                )} of {subscriptionVideos.downloaded.length} loaded rows ·{" "}
+                                {downloaded} archived total
+                              </span>
+                            </div>
+                            {subscriptionVideos.downloaded.length ? (
+                              <ul className="sub-video-list">
+                                {subscriptionVideos.downloaded
+                                  .slice(0, downloadedVideoRenderLimit)
+                                  .map((item, index) => (
+                                  <li
+                                    key={item?.id ?? `downloaded-${index}`}
+                                    className="sub-video-row sub-video-row-with-thumb"
+                                    title={item?.title ?? ""}
+                                  >
+                                    <input
+                                      type="checkbox"
+                                      checked={subscriptionVideoSelectedIds.has(item.id)}
+                                      disabled={busy}
+                                      aria-label={`Select ${item.title || "downloaded video"}`}
+                                      onChange={() =>
+                                        toggleSelectedId(setSubscriptionVideoSelectedIds, item.id)
+                                      }
+                                    />
+                                    <ThumbnailPreview itemId={item.id} path={item.thumbnail_path} />
+                                    <span className="sub-video-title">
+                                      {item?.title || "(untitled)"}
+                                    </span>
+                                    <span className="sub-video-meta">{formatDuration(item.duration_ms)}</span>
+                                    <span className="sub-video-actions">
+                                      <button type="button" onClick={() => openMediaFile(item)}>
+                                        Open
+                                      </button>
+                                      <button type="button" onClick={() => revealMediaFile(item)}>
+                                        Folder
+                                      </button>
+                                    </span>
+                                  </li>
+                                ))}
+                              </ul>
+                            ) : (
+                              <div className="sub-video-empty">Nothing downloaded yet.</div>
+                            )}
+                            {downloadedVideoRenderLimit < subscriptionVideos.downloaded.length ? (
                               <button
                                 type="button"
                                 data-agent-safe-action="true"
-                                disabled={busy || subscriptionVideoSelectedIds.size === 0}
-                                onClick={() => setSubscriptionVideoSelectedIds(new Set())}
-                              >
-                                Clear
-                              </button>
-                              <label>
-                                <span>Delete method</span>
-                                <select
-                                  value={libraryFileDeleteMode}
-                                  disabled={busy}
-                                  onChange={(event) =>
-                                    setLibraryFileDeleteMode(
-                                      event.currentTarget.value as "trash" | "permanent",
-                                    )
-                                  }
-                                >
-                                  <option value="trash">Recycle Bin</option>
-                                  <option value="permanent">Permanent</option>
-                                </select>
-                              </label>
-                              <button
-                                type="button"
-                                disabled={busy || subscriptionSelectedAvailableIds.length === 0}
+                                className="sub-video-load-more"
                                 onClick={() =>
-                                  deleteSelectedVideoFiles(
-                                    subscriptionSelectedAvailableIds,
-                                    "subscription",
+                                  setDownloadedVideoRenderLimit((current) =>
+                                    Math.min(
+                                      current + SUBSCRIPTION_VIDEO_RENDER_STEP,
+                                      subscriptionVideos.downloaded.length,
+                                    ),
                                   )
                                 }
                               >
-                                Delete selected ({subscriptionSelectedAvailableIds.length})
-                              </button>
-                              <button
-                                type="button"
-                                disabled={busy || subscriptionSelectedDeletedIds.length === 0}
-                                onClick={() =>
-                                  redownloadSelectedDeletedVideos(
-                                    subscriptionSelectedDeletedIds,
-                                    "subscription",
-                                  )
-                                }
-                              >
-                                Redownload selected ({subscriptionSelectedDeletedIds.length})
-                              </button>
-                            </div>
-                            <section className="sub-video-section" aria-label="Still to download">
-                              <div className="sub-video-section-head">
-                                <strong>Still to download</strong>
-                                <span>
-                                  Showing {Math.min(pendingVideoRenderLimit, subscriptionVideos.pending.length)}
-                                  {" "}of {subscriptionVideos.pending.length} loaded rows ·{" "}
-                                  {activity.queued} queued total
-                                </span>
-                              </div>
-                              {subscriptionVideos.pending.length ? (
-                                <ul className="sub-video-list">
-                                  {subscriptionVideos.pending
-                                    .slice(0, pendingVideoRenderLimit)
-                                    .map((video, index) => (
-                                    <li
-                                      key={`pending-${index}-${video?.url ?? ""}`}
-                                      className="sub-video-row"
-                                    >
-                                      <span className="sub-video-status">Queued</span>
-                                      <span className="sub-video-title">
-                                        {video?.title || video?.url || "(untitled)"}
-                                      </span>
-                                    </li>
-                                  ))}
-                                </ul>
-                              ) : (
-                                <div className="sub-video-empty">Nothing pending.</div>
-                              )}
-                              {pendingVideoRenderLimit < subscriptionVideos.pending.length ? (
-                                <button
-                                  type="button"
-                                  data-agent-safe-action="true"
-                                  className="sub-video-load-more"
-                                  onClick={() =>
-                                    setPendingVideoRenderLimit((current) =>
-                                      Math.min(
-                                        current + SUBSCRIPTION_VIDEO_RENDER_STEP,
-                                        subscriptionVideos.pending.length,
-                                      ),
-                                    )
-                                  }
-                                >
-                                  Load {Math.min(
-                                    SUBSCRIPTION_VIDEO_RENDER_STEP,
-                                    subscriptionVideos.pending.length - pendingVideoRenderLimit,
-                                  )} more pending videos
-                                </button>
-                              ) : null}
-                            </section>
-                            <section className="sub-video-section" aria-label="Downloaded videos">
-                              <div className="sub-video-section-head">
-                                <strong>Downloaded</strong>
-                                <span>
-                                  Showing {Math.min(
+                                Load {Math.min(
+                                  SUBSCRIPTION_VIDEO_RENDER_STEP,
+                                  subscriptionVideos.downloaded.length -
                                     downloadedVideoRenderLimit,
-                                    subscriptionVideos.downloaded.length,
-                                  )} of {subscriptionVideos.downloaded.length} loaded rows ·{" "}
-                                  {downloaded} archived total
-                                </span>
-                              </div>
-                              {subscriptionVideos.downloaded.length ? (
-                                <ul className="sub-video-list">
-                                  {subscriptionVideos.downloaded
-                                    .slice(0, downloadedVideoRenderLimit)
-                                    .map((item, index) => (
+                                )} more downloaded videos
+                              </button>
+                            ) : null}
+                          </section>
+                          <section className="sub-video-section" aria-label="Deleted videos">
+                            <div className="sub-video-section-head">
+                              <strong>Deleted</strong>
+                              <span>
+                                Showing {Math.min(
+                                  deletedVideoRenderLimit,
+                                  subscriptionVideos.deleted.length,
+                                )} of {subscriptionVideos.deleted.length} loaded rows
+                              </span>
+                            </div>
+                            {subscriptionVideos.deleted.length ? (
+                              <ul className="sub-video-list">
+                                {subscriptionVideos.deleted
+                                  .slice(0, deletedVideoRenderLimit)
+                                  .map((item, index) => (
                                     <li
-                                      key={item?.id ?? `downloaded-${index}`}
-                                      className="sub-video-row sub-video-row-with-thumb"
+                                      key={item?.id ?? `deleted-${index}`}
+                                      className="sub-video-row sub-video-row-with-thumb sub-video-row-deleted"
                                       title={item?.title ?? ""}
                                     >
                                       <input
                                         type="checkbox"
                                         checked={subscriptionVideoSelectedIds.has(item.id)}
                                         disabled={busy}
-                                        aria-label={`Select ${item.title || "downloaded video"}`}
+                                        aria-label={`Select deleted video ${item.title || ""}`}
                                         onChange={() =>
-                                          toggleSelectedId(setSubscriptionVideoSelectedIds, item.id)
+                                          toggleSelectedId(
+                                            setSubscriptionVideoSelectedIds,
+                                            item.id,
+                                          )
                                         }
                                       />
-                                      <ThumbnailPreview itemId={item.id} path={item.thumbnail_path} />
+                                      <ThumbnailPreview
+                                        itemId={item.id}
+                                        path={item.thumbnail_path}
+                                      />
                                       <span className="sub-video-title">
-                                        {item?.title || "(untitled)"}
+                                        {item?.title || "(untitled)"} · Deleted
                                       </span>
-                                      <span className="sub-video-meta">{formatDuration(item.duration_ms)}</span>
-                                      <span className="sub-video-actions">
-                                        <button type="button" onClick={() => openMediaFile(item)}>
-                                          Open
-                                        </button>
-                                        <button type="button" onClick={() => revealMediaFile(item)}>
-                                          Folder
-                                        </button>
+                                      <span className="sub-video-meta">
+                                        {item.file_status === "delete_pending"
+                                          ? "Deletion needs review"
+                                          : item.file_delete_method === "trash"
+                                            ? "Recycle Bin"
+                                            : "Removed"}
                                       </span>
                                     </li>
                                   ))}
-                                </ul>
-                              ) : (
-                                <div className="sub-video-empty">Nothing downloaded yet.</div>
-                              )}
-                              {downloadedVideoRenderLimit < subscriptionVideos.downloaded.length ? (
-                                <button
-                                  type="button"
-                                  data-agent-safe-action="true"
-                                  className="sub-video-load-more"
-                                  onClick={() =>
-                                    setDownloadedVideoRenderLimit((current) =>
-                                      Math.min(
-                                        current + SUBSCRIPTION_VIDEO_RENDER_STEP,
-                                        subscriptionVideos.downloaded.length,
-                                      ),
-                                    )
-                                  }
-                                >
-                                  Load {Math.min(
-                                    SUBSCRIPTION_VIDEO_RENDER_STEP,
-                                    subscriptionVideos.downloaded.length -
-                                      downloadedVideoRenderLimit,
-                                  )} more downloaded videos
-                                </button>
-                              ) : null}
-                            </section>
-                            <section className="sub-video-section" aria-label="Deleted videos">
-                              <div className="sub-video-section-head">
-                                <strong>Deleted</strong>
-                                <span>
-                                  Showing {Math.min(
-                                    deletedVideoRenderLimit,
-                                    subscriptionVideos.deleted.length,
-                                  )} of {subscriptionVideos.deleted.length} loaded rows
-                                </span>
-                              </div>
-                              {subscriptionVideos.deleted.length ? (
-                                <ul className="sub-video-list">
-                                  {subscriptionVideos.deleted
-                                    .slice(0, deletedVideoRenderLimit)
-                                    .map((item, index) => (
-                                      <li
-                                        key={item?.id ?? `deleted-${index}`}
-                                        className="sub-video-row sub-video-row-with-thumb sub-video-row-deleted"
-                                        title={item?.title ?? ""}
-                                      >
-                                        <input
-                                          type="checkbox"
-                                          checked={subscriptionVideoSelectedIds.has(item.id)}
-                                          disabled={busy}
-                                          aria-label={`Select deleted video ${item.title || ""}`}
-                                          onChange={() =>
-                                            toggleSelectedId(
-                                              setSubscriptionVideoSelectedIds,
-                                              item.id,
-                                            )
-                                          }
-                                        />
-                                        <ThumbnailPreview
-                                          itemId={item.id}
-                                          path={item.thumbnail_path}
-                                        />
-                                        <span className="sub-video-title">
-                                          {item?.title || "(untitled)"} · Deleted
-                                        </span>
-                                        <span className="sub-video-meta">
-                                          {item.file_status === "delete_pending"
-                                            ? "Deletion needs review"
-                                            : item.file_delete_method === "trash"
-                                              ? "Recycle Bin"
-                                              : "Removed"}
-                                        </span>
-                                      </li>
-                                    ))}
-                                </ul>
+                              </ul>
                               ) : (
                                 <div className="sub-video-empty">
                                   No deleted videos. Deleted files stay here so you can explicitly
@@ -5983,16 +6115,106 @@ export function LibraryPage({ mode = "all", visible = true }: LibraryPageProps) 
                           </>
                         )}
                       </div>
-                    </>
-                  );
-                })()
-              : (
+                    ) : null}
+
+                    {/* TAB 3: ACTIVITY */}
+                    {subscriptionDetailTab === "activity" ? (
+                      <div style={{ marginTop: 8 }}>
+                        <div className="sub-detail-progress" style={{ padding: 10, background: "rgba(255, 255, 255, 0.4)", borderRadius: 6 }}>
+                          <div style={{ fontWeight: 600, marginBottom: 4 }}>
+                            Drain &amp; Sync Status: {stateLabel}
+                          </div>
+                          {liveActive ? (
+                            <div>
+                              {runState === "checking" ? (
+                                "Checking channel for new videos…"
+                              ) : runState === "waiting" ? (
+                                <>
+                                  <strong>{activity.queued}</strong> queued · waiting to download
+                                </>
+                              ) : (
+                                <>
+                                  Queued <strong>{activity.queued}</strong> · Running <strong>{activity.running}</strong> · Succeeded <strong>{act?.succeeded ?? 0}</strong>
+                                  {act && act.failed > 0 ? <> · Failed <strong>{act.failed}</strong></> : null}
+                                </>
+                              )}
+                              {runState === "downloading" && act?.current_title ? (
+                                <div className="sub-detail-wrap" style={{ marginTop: 4, fontStyle: "italic" }}>
+                                  Downloading: {act.current_title}
+                                </div>
+                              ) : null}
+                            </div>
+                          ) : (
+                            <div style={{ color: "#64748b" }}>
+                              No active refresh or download jobs in progress. Next scheduled check is governed by interval settings.
+                            </div>
+                          )}
+                        </div>
+                        <dl className="sub-detail-grid" style={{ marginTop: 12 }}>
+                          <dt>Last checked</dt>
+                          <dd>{sub.last_checked_at_ms ? `${new Date(sub.last_checked_at_ms).toLocaleString()} (${formatTimeAgo(sub.last_checked_at_ms)})` : "never"}</dd>
+                          <dt>Last queued</dt>
+                          <dd>{sub.last_queued_at_ms ? new Date(sub.last_queued_at_ms).toLocaleString() : "-"}</dd>
+                          <dt>Backoff status</dt>
+                          <dd>
+                            {sub.next_allowed_refresh_at_ms && sub.next_allowed_refresh_at_ms > Date.now()
+                              ? `retry allowed after ${new Date(sub.next_allowed_refresh_at_ms).toLocaleString()}`
+                              : "ready for refresh"}
+                          </dd>
+                        </dl>
+                      </div>
+                    ) : null}
+
+                    {/* TAB 4: SETTINGS */}
+                    {subscriptionDetailTab === "settings" ? (
+                      <div style={{ marginTop: 8 }}>
+                        <div className="row">
+                          <label style={{ display: "flex", alignItems: "center", gap: 8, flex: 1 }}>
+                            <span>Subfolder map name</span>
+                            <input
+                              value={sub.folder_map || ""}
+                              disabled={true}
+                              style={{ width: "100%" }}
+                            />
+                          </label>
+                        </div>
+                        <div className="row">
+                          <label style={{ display: "flex", alignItems: "center", gap: 8, flex: 1 }}>
+                            <span>Folder override</span>
+                            <input
+                              value={sub.output_dir_override || ""}
+                              disabled={true}
+                              style={{ width: "100%" }}
+                            />
+                          </label>
+                        </div>
+                        <div className="row">
+                          <label style={{ display: "flex", alignItems: "center", gap: 8 }}>
+                            <span>Refresh interval</span>
+                            <input
+                              value={formatRefreshIntervalHours(sub.refresh_interval_minutes)}
+                              disabled={true}
+                              style={{ width: 120 }}
+                            />
+                          </label>
+                          <button type="button" disabled={busy} onClick={() => editSubscription(sub)}>
+                            Edit in Form
+                          </button>
+                        </div>
+                        <div style={{ color: "#64748b", fontSize: 12, marginTop: 12 }}>
+                          Provider capabilities: Managed through <strong>Options → Video Archiver</strong>. Pacing, quality thresholds, format preferences, and session tokens apply automatically.
+                        </div>
+                      </div>
+                    ) : null}
+                  </>
+                );
+              })() : (
                 <div className="sub-detail-empty">
                   Select a subscription on the left to see its details and actions.
                 </div>
               )}
+            </div>
           </div>
-        </div>
         </div>
       ) : null}
 

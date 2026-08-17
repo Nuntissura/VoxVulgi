@@ -10,6 +10,12 @@ use std::path::{Path, PathBuf};
 use std::sync::OnceLock;
 
 const PYTHON_COMMAND_TIMEOUT_SECS: u64 = 30 * 60;
+// Hashed pack repairs can force-reinstall a full Torch-backed lock after a failed
+// or interrupted attempt (WP-0234). On a throttled connection that legitimately
+// exceeded the generic 30-minute command budget, even though pip had continued
+// making progress. Keep the normal command bound tight while allowing the
+// deterministic, hash-verified pack transaction enough time to finish.
+const PYTHON_LOCKFILE_INSTALL_TIMEOUT_SECS: u64 = 60 * 60;
 const PYTHON_POST_INSTALL_VERSION_CHECK_RETRIES: usize = 10;
 const PYTHON_POST_INSTALL_VERSION_CHECK_DELAY_MS: u64 = 2_000;
 
@@ -4396,11 +4402,12 @@ fn install_pack_from_lockfile(
         "-r",
         req_path_str.as_str(),
     ];
-    let mut result = run_python_checked(
+    let mut result = run_python_checked_with_timeout(
         paths,
         python,
         &args,
         &format!("{error_prefix}: pip install --require-hashes failed for {pack_name}"),
+        PYTHON_LOCKFILE_INSTALL_TIMEOUT_SECS,
     );
     if result.is_ok() {
         let mismatches = lockfile_source_pin_mismatches_with_retries(python, pack_name);
@@ -6434,11 +6441,7 @@ pub fn diarization_pack_status(paths: &AppPaths) -> DiarizationPackStatus {
     let (_, installed_lockfile_sha) = pack_install_state_shas(paths, "diarization");
     let receipt_stale = !lockfile_ready && versions_ready && installed_lockfile_sha.is_some();
 
-    let installed = diarization_pack_is_installed(
-        all_required_present,
-        lockfile_runtime_ready,
-        versions_ready,
-    );
+    let installed = all_required_present;
     let repair_required = if installed {
         !lockfile_runtime_ready || !versions_ready
     } else {

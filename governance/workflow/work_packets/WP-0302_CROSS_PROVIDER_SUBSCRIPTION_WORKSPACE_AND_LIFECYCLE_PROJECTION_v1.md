@@ -11,8 +11,8 @@ updated_at: 2026-08-09
 ## Metadata
 
 - ID: WP-0302
-- Owner: —
-- Status: BACKLOG
+- Owner: Codex
+- Status: DONE
 - Created: 2026-08-09
 - Refinement: `WP-0302_CROSS_PROVIDER_SUBSCRIPTION_WORKSPACE_AND_LIFECYCLE_PROJECTION_v1_REFINEMENT.md`
 - Board: `../TASK_BOARD.md#wp-0302`

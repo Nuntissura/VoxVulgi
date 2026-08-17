@@ -1826,6 +1826,48 @@ input[type="checkbox"] {
 .sub-pill-downloading { background: rgba(47, 158, 87, 0.18); color: #1f7a43; }
 .sub-pill-error { background: rgba(194, 96, 58, 0.18); color: #9a3b16; }
 
+.sub-toolbar {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-bottom: 8px;
+  padding: 8px 10px;
+  border-radius: var(--panel-radius);
+  background: rgba(255, 255, 255, 0.45);
+  border: 1px solid var(--panel-border);
+}
+.sub-detail-tabs {
+  display: flex;
+  gap: 4px;
+  margin-bottom: 12px;
+  border-bottom: 1px solid rgba(126, 145, 167, 0.28);
+  padding-bottom: 6px;
+}
+.sub-provider-badge {
+  display: inline-block;
+  font-size: 0.65rem;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  padding: 1px 6px;
+  border-radius: 4px;
+  background: rgba(100, 116, 139, 0.15);
+  color: #475569;
+}
+.sub-provider-badge-youtube {
+  background: rgba(239, 68, 68, 0.15);
+  color: #b91c1c;
+}
+.sub-provider-badge-instagram {
+  background: rgba(236, 72, 153, 0.15);
+  color: #be185d;
+}
+.sub-provider-badge-tiktok {
+  background: rgba(15, 23, 42, 0.15);
+  color: #0f172a;
+}
+
 .sub-detail {
   flex: 1 1 auto;
   min-width: 0;
