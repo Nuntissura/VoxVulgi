@@ -1394,3 +1394,11 @@ This changelog tracks desktop installer builds produced by `governance/scripts/b
 - Artifacts:
   - `product/desktop/build_target/Current/release/bundle/nsis/VoxVulgi_0.1.171_x64-setup.exe`
 - Notes: Fix offline bundle hydration readiness gate: require Node and YouTube PO provider binaries before skipping extraction
+
+## 0.1.172 - 2026-08-17T21:10:50Z
+- Work Packets: `WP-0147`, `WP-0302`, `WP-0303`, `WP-0304`, `WP-0305`
+- Commit: `a0d7d45`
+- Offline Bundle ID: `offline_full_win64_20260817_192327`
+- Artifacts:
+  - `product/desktop/build_target/Current/release/bundle/nsis/VoxVulgi_0.1.172_x64-setup.exe`
+- Notes: Enforce Node and YouTube PO Provider offline readiness and verified package assets
