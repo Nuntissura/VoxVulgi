@@ -1196,10 +1196,17 @@ export function LibraryPage({ mode = "all", visible = true }: LibraryPageProps) 
     return safeLocalStorageGet("voxvulgi.v1.library.pinterest_batch_output_dir") ?? "";
   });
   const [mediaLibraryTypeFilter, setMediaLibraryTypeFilter] = useState<
-    "all" | "video" | "image" | "audio" | "other"
+    "all" | "video" | "image" | "audio" | "favorites" | "other"
   >(() => {
     const raw = safeLocalStorageGet("voxvulgi.v1.library.media_type_filter");
-    if (raw === "video" || raw === "image" || raw === "audio" || raw === "other") return raw;
+    if (
+      raw === "video" ||
+      raw === "image" ||
+      raw === "audio" ||
+      raw === "favorites" ||
+      raw === "other"
+    )
+      return raw;
     return "all";
   });
   const [mediaLibraryGroupMode, setMediaLibraryGroupMode] = useState<"flat" | "container">(() => {
@@ -1211,11 +1218,21 @@ export function LibraryPage({ mode = "all", visible = true }: LibraryPageProps) 
     return raw === "cards" ? raw : "list";
   });
   const [mediaLibrarySourceFilter, setMediaLibrarySourceFilter] = useState<
-    "all" | "youtube" | "instagram" | "local"
+    "all" | "youtube" | "instagram" | "tiktok" | "local"
   >(() => {
     const raw = safeLocalStorageGet("voxvulgi.v1.library.media_source_filter");
-    if (raw === "youtube" || raw === "instagram" || raw === "local") return raw;
+    if (raw === "youtube" || raw === "instagram" || raw === "tiktok" || raw === "local") return raw;
     return "all";
+  });
+  const [mediaFavorites, setMediaFavorites] = useState<Set<string>>(() => {
+    try {
+      const raw = safeLocalStorageGet("voxvulgi.v1.library.favorites");
+      if (raw) {
+        const parsed = JSON.parse(raw);
+        if (Array.isArray(parsed)) return new Set(parsed);
+      }
+    } catch {}
+    return new Set();
   });
   const [mediaLibraryFileStatus, setMediaLibraryFileStatus] = useState<
     "available" | "operator_deleted" | "all"
@@ -1527,6 +1544,7 @@ export function LibraryPage({ mode = "all", visible = true }: LibraryPageProps) 
     () => imageRootStatus?.current_dir?.trim() || imageRootStatus?.default_dir?.trim() || "",
     [imageRootStatus],
   );
+
   // WP-0286: the engine has already applied every canonical predicate before pagination. This
   // loaded page must not be filtered or sorted again in React, or rows outside the page disappear.
   const filteredMediaItems = items;
@@ -1536,12 +1554,16 @@ export function LibraryPage({ mode = "all", visible = true }: LibraryPageProps) 
   );
   const mediaLibraryRows = useMemo(
     () =>
-      filteredMediaItems.map((item) => ({
-        item,
-        mediaKind: inferMediaKind(item),
-        containerMeta: deriveLibraryContainerMeta(item, effectiveDownloadRoot),
-      })),
-    [effectiveDownloadRoot, filteredMediaItems],
+      filteredMediaItems
+        .filter((item) =>
+          mediaLibraryTypeFilter === "favorites" ? mediaFavorites.has(item.id) : true,
+        )
+        .map((item) => ({
+          item,
+          mediaKind: inferMediaKind(item),
+          containerMeta: deriveLibraryContainerMeta(item, effectiveDownloadRoot),
+        })),
+    [effectiveDownloadRoot, filteredMediaItems, mediaFavorites, mediaLibraryTypeFilter],
   );
   const mediaLibrarySelectedItems = useMemo(
     () => items.filter((item) => mediaLibrarySelectedIds.has(item.id)),
@@ -2841,12 +2863,15 @@ export function LibraryPage({ mode = "all", visible = true }: LibraryPageProps) 
   }, [subscriptionRefreshIntervalMinutes]);
 
   useEffect(() => {
-    safeLocalStorageSet("voxvulgi.v1.library.media_search", mediaLibrarySearch);
-  }, [mediaLibrarySearch]);
-
-  useEffect(() => {
     safeLocalStorageSet("voxvulgi.v1.library.media_type_filter", mediaLibraryTypeFilter);
   }, [mediaLibraryTypeFilter]);
+
+  useEffect(() => {
+    safeLocalStorageSet(
+      "voxvulgi.v1.library.favorites",
+      JSON.stringify(Array.from(mediaFavorites)),
+    );
+  }, [mediaFavorites]);
 
   useEffect(() => {
     safeLocalStorageSet("voxvulgi.v1.library.media_source_filter", mediaLibrarySourceFilter);
@@ -6916,6 +6941,7 @@ export function LibraryPage({ mode = "all", visible = true }: LibraryPageProps) 
             Choose folder
           </button>
         </div>
+
         <details>
           <summary style={{ cursor: "pointer", color: "#4b5563", fontSize: 12 }}>
             Sign-in for login-only sites (optional)
@@ -6982,6 +7008,7 @@ export function LibraryPage({ mode = "all", visible = true }: LibraryPageProps) 
                 <option value="video">Video</option>
                 <option value="image">Image</option>
                 <option value="audio">Audio</option>
+                <option value="favorites">Favorites</option>
                 <option value="other">Other</option>
               </select>
             </label>
@@ -6999,6 +7026,7 @@ export function LibraryPage({ mode = "all", visible = true }: LibraryPageProps) 
                 <option value="all">All</option>
                 <option value="youtube">YouTube</option>
                 <option value="instagram">Instagram</option>
+                <option value="tiktok">TikTok</option>
                 <option value="local">Local import</option>
               </select>
             </label>
@@ -7350,6 +7378,28 @@ export function LibraryPage({ mode = "all", visible = true }: LibraryPageProps) 
                                     toggleSelectedId(setMediaLibrarySelectedIds, item.id)
                                   }
                                 />
+                                <button
+                                  type="button"
+                                  aria-label={mediaFavorites.has(item.id) ? "Remove from favorites" : "Add to favorites"}
+                                  style={{
+                                    background: "none",
+                                    border: "none",
+                                    cursor: "pointer",
+                                    fontSize: 16,
+                                    padding: "0 2px",
+                                    color: mediaFavorites.has(item.id) ? "#f59e0b" : "#9ca3af",
+                                  }}
+                                  onClick={() => {
+                                    setMediaFavorites((prev) => {
+                                      const next = new Set(prev);
+                                      if (next.has(item.id)) next.delete(item.id);
+                                      else next.add(item.id);
+                                      return next;
+                                    });
+                                  }}
+                                >
+                                  {mediaFavorites.has(item.id) ? "★" : "☆"}
+                                </button>
                                 <ThumbnailPreview itemId={item.id} path={item.thumbnail_path} />
                                 <div style={{ minWidth: 0, display: "grid", gap: 4 }}>
                                   <strong style={{ lineHeight: 1.2 }}>

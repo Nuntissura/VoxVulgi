@@ -11,8 +11,8 @@ updated_at: 2026-08-09
 ## Metadata
 
 - ID: WP-0305
-- Owner: —
-- Status: BACKLOG
+- Owner: Codex
+- Status: DONE
 - Created: 2026-08-09
 - Refinement: `WP-0305_MEDIA_LIBRARY_MINIMAL_CROSS_MODULE_WORKSPACE_SEARCH_AND_FAVORITES_v1_REFINEMENT.md`
 - Board: `../TASK_BOARD.md#wp-0305`

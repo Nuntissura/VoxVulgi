@@ -345,6 +345,53 @@ type MediaCleanupGroup = {
   }>;
 };
 
+type MediaCleanupReconciliationCandidate = {
+  candidate_id: string;
+  kind: string;
+  physical_path?: string | null;
+  library_item_id?: string | null;
+  library_path?: string | null;
+  evidence_kind: string;
+  evidence_value?: string | null;
+  disposition: string;
+  destination_library_item_id?: string | null;
+  error?: string | null;
+};
+
+type MediaCleanupReconciliationSummary = {
+  run_id: string;
+  candidates: MediaCleanupReconciliationCandidate[];
+  deterministic_relinks: number;
+  physical_files_to_index: number;
+  review_only: number;
+  applied: number;
+  failed: number;
+};
+
+type MediaCleanupVariant = {
+  variant_id: string;
+  service: string;
+  media_id: string;
+  member_paths: string[];
+  evidence: {
+    classification?: string;
+    metadata_complete?: boolean;
+    byte_confirmation_complete?: boolean;
+    members?: Array<{
+      path?: string;
+      size_bytes?: number;
+      byte_confirmed_group_id?: string | null;
+      duration_ms?: number | null;
+      width?: number | null;
+      height?: number | null;
+      container?: string | null;
+      video_codec?: string | null;
+      audio_codec?: string | null;
+    }>;
+  };
+  status: string;
+};
+
 type YoutubeQueueIdentityReconcilePage = {
   scanned_queued_jobs: number;
   canonical_youtube_jobs: number;
@@ -1133,6 +1180,9 @@ export function OptionsPage() {
   );
   const [cleanupRun, setCleanupRun] = useState<MediaCleanupRun | null>(null);
   const [cleanupGroups, setCleanupGroups] = useState<MediaCleanupGroup[]>([]);
+  const [cleanupReconciliation, setCleanupReconciliation] =
+    useState<MediaCleanupReconciliationSummary | null>(null);
+  const [cleanupVariants, setCleanupVariants] = useState<MediaCleanupVariant[]>([]);
   const [cleanupMessage, setCleanupMessage] = useState("");
   const [cleanupBusy, setCleanupBusy] = useState(false);
 
@@ -1234,6 +1284,8 @@ export function OptionsPage() {
         if (canceled) return;
         setCleanupRun(run);
         setCleanupGroups([]);
+        setCleanupReconciliation(null);
+        setCleanupVariants([]);
         if (run) {
           try {
             const baseline = persistOptionsLocalPreference("voxvulgi.v1.library.cleanup_run_id", run.id);
@@ -1254,10 +1306,37 @@ export function OptionsPage() {
             setCleanupMessage(`Cleanup run ${run.id} was recovered from the canonical backend. The browser shortcut could not be updated: ${message}`);
           }
         }
+        if (run?.stage === "reconciliation") {
+          return invoke<MediaCleanupReconciliationSummary>(
+            "media_cleanup_reconciliation_preview",
+            { runId: run.id },
+          ).then((summary) => {
+            if (!canceled) setCleanupReconciliation(summary);
+          });
+        }
+        if (run?.stage === "hashing") {
+          return invoke<MediaCleanupReconciliationSummary>(
+            "media_cleanup_reconciliation_preview",
+            { runId: run.id },
+          ).then((summary) => {
+            if (!canceled) setCleanupReconciliation(summary);
+          });
+        }
         if (run?.stage === "review" || run?.stage === "quarantine") {
-          return invoke<MediaCleanupGroup[]>("media_cleanup_groups", { runId: run.id }).then(
-            (groups) => { if (!canceled) setCleanupGroups(groups); },
-          );
+          return Promise.all([
+            invoke<MediaCleanupGroup[]>("media_cleanup_groups", { runId: run.id }),
+            invoke<MediaCleanupVariant[]>("media_cleanup_variants", { runId: run.id }),
+            invoke<MediaCleanupReconciliationSummary>(
+              "media_cleanup_reconciliation_preview",
+              { runId: run.id },
+            ),
+          ]).then(([groups, variants, reconciliation]) => {
+            if (!canceled) {
+              setCleanupGroups(groups);
+              setCleanupVariants(variants);
+              setCleanupReconciliation(reconciliation);
+            }
+          });
         }
         return undefined;
       })
@@ -1985,6 +2064,8 @@ export function OptionsPage() {
       });
       setCleanupRun(run);
       setCleanupGroups([]);
+      setCleanupReconciliation(null);
+      setCleanupVariants([]);
       try {
         const baseline = persistOptionsLocalPreference("voxvulgi.v1.library.cleanup_run_id", run.id);
         setLocalPreferenceBaselines((current) => ({
@@ -2028,19 +2109,68 @@ export function OptionsPage() {
       });
       const run = summary.run as MediaCleanupRun;
       setCleanupRun(run);
-      if (run.stage === "review") {
-        const groups = await invoke<MediaCleanupGroup[]>("media_cleanup_groups", {
-          runId: run.id,
-        });
-        setCleanupGroups(groups);
+      if (run.stage === "reconciliation") {
+        const reconciliation = await invoke<MediaCleanupReconciliationSummary>(
+          "media_cleanup_reconciliation_preview",
+          { runId: run.id },
+        );
+        setCleanupReconciliation(reconciliation);
         setCleanupMessage(
-          `Review ready: ${run.duplicate_groups} exact duplicate group(s), ${formatCleanupBytes(run.reclaimable_bytes)} potentially reclaimable. Nothing has moved.`,
+          `Reconciliation preview ready: ${reconciliation.deterministic_relinks} deterministic relink(s), ${reconciliation.physical_files_to_index} physical-only file(s) to index, and ${reconciliation.review_only} review-only row(s). Nothing has changed.`,
+        );
+      } else if (run.stage === "review") {
+        const [groups, variants, reconciliation] = await Promise.all([
+          invoke<MediaCleanupGroup[]>("media_cleanup_groups", { runId: run.id }),
+          invoke<MediaCleanupVariant[]>("media_cleanup_variants", { runId: run.id }),
+          invoke<MediaCleanupReconciliationSummary>(
+            "media_cleanup_reconciliation_preview",
+            { runId: run.id },
+          ),
+        ]);
+        setCleanupGroups(groups);
+        setCleanupVariants(variants);
+        setCleanupReconciliation(reconciliation);
+        setCleanupMessage(
+          `Review ready: ${run.duplicate_groups} exact duplicate group(s), ${variants.length} same-source variant group(s), ${formatCleanupBytes(run.reclaimable_bytes)} potentially reclaimable. Nothing has moved.`,
         );
       } else {
         setCleanupMessage(
           `${run.stage === "inventory" ? "Inventory" : "Hashing"} paused safely after ${summary.processed_files ?? 0} file(s). Continue when the PC has capacity.`,
         );
       }
+    } catch (error) {
+      setCleanupMessage(`Error: ${String(error)}`);
+    } finally {
+      setCleanupBusy(false);
+    }
+  }
+
+  async function applyCleanupReconciliation() {
+    if (!cleanupRun || cleanupRun.stage !== "reconciliation" || !cleanupReconciliation) return;
+    if (
+      !window.confirm(
+        `Apply ${cleanupReconciliation.deterministic_relinks} deterministic relink(s) and index ${cleanupReconciliation.physical_files_to_index} unmatched physical file(s)? Ambiguous and unavailable paths remain unchanged.`,
+      )
+    ) {
+      return;
+    }
+    setCleanupBusy(true);
+    setCleanupMessage("");
+    try {
+      const summary = await invoke<MediaCleanupReconciliationSummary>(
+        "media_cleanup_reconciliation_apply",
+        { runId: cleanupRun.id },
+      );
+      const run = await invoke<MediaCleanupRun | null>("media_cleanup_get", {
+        runId: cleanupRun.id,
+      });
+      setCleanupRun(run);
+      setCleanupReconciliation(summary);
+      setCleanupMessage(
+        summary.failed > 0
+          ? `Reconciliation needs attention: ${summary.applied} applied and ${summary.failed} failed. No ambiguous row was changed.`
+          : `Reconciliation applied ${summary.applied} safe action(s). ${summary.review_only} ambiguous or unresolved row(s) remain preserved for review; hashing can now continue.`,
+      );
     } catch (error) {
       setCleanupMessage(`Error: ${String(error)}`);
     } finally {
@@ -2109,12 +2239,19 @@ export function OptionsPage() {
     setCleanupBusy(true);
     try {
       const summary = await invoke<any>("media_cleanup_rollback", { runId: cleanupRun.id });
-      const run = await invoke<MediaCleanupRun | null>("media_cleanup_get", {
-        runId: cleanupRun.id,
-      });
+      const [run, reconciliation] = await Promise.all([
+        invoke<MediaCleanupRun | null>("media_cleanup_get", {
+          runId: cleanupRun.id,
+        }),
+        invoke<MediaCleanupReconciliationSummary>(
+          "media_cleanup_reconciliation_preview",
+          { runId: cleanupRun.id },
+        ),
+      ]);
       setCleanupRun(run);
+      setCleanupReconciliation(reconciliation);
       setCleanupMessage(
-        `Restored ${summary.applied_actions} file(s); ${summary.failed_actions} need attention.`,
+        `Restored ${summary.applied_actions} cleanup action(s); ${summary.failed_actions} need attention.`,
       );
     } catch (error) {
       setCleanupMessage(`Error: ${String(error)}`);
@@ -3646,6 +3783,19 @@ export function OptionsPage() {
                 disabled={
                   cleanupBusy ||
                   !cleanupRun ||
+                  cleanupRun.stage !== "reconciliation" ||
+                  !cleanupReconciliation
+                }
+                onClick={applyCleanupReconciliation}
+              >
+                Apply safe reconciliation
+              </button>
+              <button
+                type="button"
+                disabled={
+                  cleanupBusy ||
+                  !cleanupRun ||
+                  cleanupRun.stage !== "review" ||
                   !cleanupGroups.some((group) => group.decision === "approved")
                 }
                 onClick={applyCleanupGroups}
@@ -3657,7 +3807,8 @@ export function OptionsPage() {
                 disabled={
                   cleanupBusy ||
                   !cleanupRun ||
-                  !["applied", "attention"].includes(cleanupRun.status)
+                  (!["applied", "attention"].includes(cleanupRun.status) &&
+                    (cleanupReconciliation?.applied ?? 0) === 0)
                 }
                 onClick={rollbackCleanupRun}
               >
@@ -3682,6 +3833,80 @@ export function OptionsPage() {
                 {cleanupMessage}
               </div>
             ) : null}
+            {cleanupReconciliation ? (
+              <div className="table-wrap" style={{ maxHeight: 280, overflow: "auto" }}>
+                <table>
+                  <thead>
+                    <tr>
+                      <th>Reconciliation</th>
+                      <th>Evidence</th>
+                      <th>Physical path</th>
+                      <th>Library path</th>
+                      <th>Disposition</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {cleanupReconciliation.candidates.map((candidate) => (
+                      <tr key={candidate.candidate_id}>
+                        <td>{candidate.kind.replace(/_/g, " ")}</td>
+                        <td title={candidate.evidence_value ?? undefined}>
+                          {candidate.evidence_kind.replace(/_/g, " ")}
+                        </td>
+                        <td title={candidate.physical_path ?? undefined}>
+                          {candidate.physical_path ?? "—"}
+                        </td>
+                        <td title={candidate.library_path ?? undefined}>
+                          {candidate.library_path ?? "—"}
+                        </td>
+                        <td title={candidate.error ?? undefined}>
+                          {candidate.disposition.replace(/_/g, " ")}
+                          {candidate.error ? " · retry required" : ""}
+                        </td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            ) : null}
+            {cleanupVariants.length ? (
+              <div className="table-wrap" style={{ maxHeight: 320, overflow: "auto" }}>
+                <table>
+                  <thead>
+                    <tr>
+                      <th>Same-source variants</th>
+                      <th>Classification</th>
+                      <th>Codec / resolution / duration evidence</th>
+                      <th>Action</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {cleanupVariants.map((variant) => (
+                      <tr key={variant.variant_id}>
+                        <td title={`${variant.service}:${variant.media_id}`}>
+                          {variant.service}:{variant.media_id}
+                        </td>
+                        <td>
+                          {(variant.evidence.classification ?? "variant review").replace(
+                            /_/g,
+                            " ",
+                          )}
+                        </td>
+                        <td>
+                          {(variant.evidence.members ?? []).map((member) => (
+                            <div key={member.path} title={member.path}>
+                              {member.video_codec ?? "codec unknown"} · {member.width ?? "?"}×
+                              {member.height ?? "?"} · {member.duration_ms ?? "?"} ms ·{" "}
+                              {member.container ?? "container unknown"}
+                            </div>
+                          ))}
+                        </td>
+                        <td>Review only</td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            ) : null}
             {cleanupGroups.length ? (
               <div className="table-wrap" style={{ maxHeight: 420, overflow: "auto" }}>
                 <table>
@@ -3701,7 +3926,7 @@ export function OptionsPage() {
                         <td>
                           <select
                             value={group.keeper_path}
-                            disabled={cleanupBusy}
+                            disabled={cleanupBusy || cleanupRun?.stage !== "review"}
                             onChange={(event) =>
                               decideCleanupGroup(group, "pending", event.currentTarget.value)
                             }
@@ -3720,14 +3945,14 @@ export function OptionsPage() {
                           <div className="row">
                             <button
                               type="button"
-                              disabled={cleanupBusy}
+                              disabled={cleanupBusy || cleanupRun?.stage !== "review"}
                               onClick={() => decideCleanupGroup(group, "approved")}
                             >
                               Approve
                             </button>
                             <button
                               type="button"
-                              disabled={cleanupBusy}
+                              disabled={cleanupBusy || cleanupRun?.stage !== "review"}
                               onClick={() => decideCleanupGroup(group, "rejected")}
                             >
                               Keep all

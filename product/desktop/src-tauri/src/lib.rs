@@ -13316,12 +13316,55 @@ async fn media_cleanup_hash_advance(
 }
 
 #[tauri::command]
+async fn media_cleanup_reconciliation_preview(
+    state: State<'_, AppState>,
+    run_id: String,
+) -> Result<media_cleanup::MediaCleanupReconciliationSummary, String> {
+    let _timer = InvokeTimer::start(
+        state.paths.clone(),
+        "media_cleanup_reconciliation_preview",
+    );
+    let paths = state.paths.clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        media_cleanup::reconciliation_preview(&paths, &run_id).map_err(|e| e.to_string())
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
+#[tauri::command]
+async fn media_cleanup_reconciliation_apply(
+    state: State<'_, AppState>,
+    run_id: String,
+) -> Result<media_cleanup::MediaCleanupReconciliationSummary, String> {
+    let _timer = InvokeTimer::start(
+        state.paths.clone(),
+        "media_cleanup_reconciliation_apply",
+    );
+    let paths = state.paths.clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        media_cleanup::apply_reconciliation(&paths, &run_id).map_err(|e| e.to_string())
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
+#[tauri::command]
 fn media_cleanup_groups(
     state: State<'_, AppState>,
     run_id: String,
 ) -> Result<Vec<media_cleanup::MediaCleanupGroup>, String> {
     let _timer = InvokeTimer::start(state.paths.clone(), "media_cleanup_groups");
     media_cleanup::list_groups(&state.paths, &run_id).map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+fn media_cleanup_variants(
+    state: State<'_, AppState>,
+    run_id: String,
+) -> Result<Vec<media_cleanup::MediaCleanupVariant>, String> {
+    let _timer = InvokeTimer::start(state.paths.clone(), "media_cleanup_variants");
+    media_cleanup::list_variants(&state.paths, &run_id).map_err(|e| e.to_string())
 }
 
 #[tauri::command]
@@ -14974,8 +15017,11 @@ pub fn run() {
             media_cleanup_latest,
             media_cleanup_create,
             media_cleanup_inventory_advance,
+            media_cleanup_reconciliation_preview,
+            media_cleanup_reconciliation_apply,
             media_cleanup_hash_advance,
             media_cleanup_groups,
+            media_cleanup_variants,
             media_cleanup_group_decide,
             media_cleanup_apply,
             media_cleanup_rollback,

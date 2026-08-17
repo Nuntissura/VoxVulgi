@@ -2183,6 +2183,7 @@ pub fn query_items_page(
         "all" => "all",
         "youtube" => "youtube",
         "instagram" => "instagram",
+        "tiktok" => "tiktok",
         "local" => "local",
         other => {
             return Err(EngineError::InstallFailed(format!(
@@ -2222,6 +2223,7 @@ WITH identity_service AS (
     CASE
       WHEN SUM(CASE WHEN service='youtube' THEN 1 ELSE 0 END) > 0 THEN 'youtube'
       WHEN SUM(CASE WHEN service='instagram' THEN 1 ELSE 0 END) > 0 THEN 'instagram'
+      WHEN SUM(CASE WHEN service='tiktok' THEN 1 ELSE 0 END) > 0 THEN 'tiktok'
       ELSE MIN(service)
     END AS service
   FROM media_source_identity
@@ -2268,6 +2270,12 @@ canonical AS (
             OR instr(lower(li.source_type), 'instagram') > 0
           )
           THEN 'instagram'
+        WHEN lower(li.source_type) NOT IN ('local_file', 'import', '4kvdp_import')
+          AND (
+            instr(lower(li.source_uri), 'tiktok.com') > 0
+            OR instr(lower(li.source_type), 'tiktok') > 0
+          )
+          THEN 'tiktok'
         ELSE NULL
       END
     ) AS canonical_service,
@@ -3852,7 +3860,7 @@ fn import_media_file(
     Ok(item)
 }
 
-fn prepare_media_item(
+pub(crate) fn prepare_media_item(
     paths: &AppPaths,
     media_path: &Path,
     source_type: &str,
@@ -3953,7 +3961,10 @@ fn prepare_media_item(
     })
 }
 
-fn insert_library_item(conn: &rusqlite::Connection, item: &LibraryItem) -> Result<()> {
+pub(crate) fn insert_library_item(
+    conn: &rusqlite::Connection,
+    item: &LibraryItem,
+) -> Result<()> {
     // WP-0253 Item 2c: stamp the unified-library columns at insert so new items are
     // identical in shape to the backfilled legacy/new ones (single library going forward).
     let origin = if item.source_type == "url_direct" {
