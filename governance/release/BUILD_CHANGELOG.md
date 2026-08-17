@@ -1378,3 +1378,11 @@ This changelog tracks desktop installer builds produced by `governance/scripts/b
 - Artifacts:
   - `product/desktop/build_target/Current/release/bundle/nsis/VoxVulgi_0.1.169_x64-setup.exe`
 - Notes: Makes offline payload export interruption-resumable, restores Localization advanced deep-link routing and reveal behavior, and exposes accessible headless-verifiable desktop font-scale controls.
+
+## 0.1.170 - 2026-08-17T16:10:51Z
+- Work Packets: `WP-0147`, `WP-0302`, `WP-0303`, `WP-0304`, `WP-0305`
+- Commit: `67fdb47`
+- Offline Bundle ID: `offline_full_win64_20260815_151923`
+- Artifacts:
+  - `product/desktop/build_target/Current/release/bundle/nsis/VoxVulgi_0.1.170_x64-setup.exe`
+- Notes: Multi-Provider & Archiver: WP-0147, WP-0302, WP-0303, WP-0304, WP-0305
