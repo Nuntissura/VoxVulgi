@@ -55,7 +55,7 @@ test("agent UI audit includes app chrome while preserving stateful-only activati
 test("Windows headless startup hides without blocking the setup thread", () => {
   const rust = readRepoFile("src-tauri", "src", "lib.rs");
   const windowsHide = rust.match(
-    /#\[cfg\(target_os = "windows"\)\]\s*fn hide_agent_headless_window[\s\S]*?\n}\n/,
+    /#\[cfg\(target_os = "windows"\)\]\s*fn hide_agent_headless_window[\s\S]*?\r?\n\}\r?\n/,
   )?.[0];
   assert.ok(windowsHide, "Windows headless hide helper must exist");
   assert.match(windowsHide, /ShowWindowAsync\(hwnd, SW_HIDE\)/);

@@ -3866,11 +3866,13 @@ fn write_offline_bundle_marker(
     Ok(())
 }
 
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct OfflineBundleRuntimeReadyFlags {
     ffmpeg_installed: bool,
     ytdlp_available: bool,
     js_runtime_available: bool,
+    node_installed: bool,
+    youtube_po_provider_installed: bool,
     portable_python_installed: bool,
     venv_ready: bool,
     diarization_installed: bool,
@@ -3882,6 +3884,8 @@ fn offline_bundle_runtime_ready_from_flags(flags: OfflineBundleRuntimeReadyFlags
     flags.ffmpeg_installed
         && flags.ytdlp_available
         && flags.js_runtime_available
+        && flags.node_installed
+        && flags.youtube_po_provider_installed
         && flags.portable_python_installed
         && flags.venv_ready
         && flags.diarization_installed
@@ -3903,6 +3907,8 @@ fn offline_bundle_runtime_already_ready(paths: &AppPaths) -> bool {
         ffmpeg_installed: ffmpeg.installed,
         ytdlp_available: ytdlp.available,
         js_runtime_available: js_runtime.available,
+        node_installed: paths.node_exe().exists() && paths.node_npm_cmd().exists(),
+        youtube_po_provider_installed: paths.youtube_po_provider_entrypoint().exists(),
         portable_python_installed: portable_python.installed,
         venv_ready: python.venv_exists && python.venv_python_version.is_some(),
         diarization_installed: diarization.installed,
@@ -5530,6 +5536,8 @@ mod tests {
             ffmpeg_installed: true,
             ytdlp_available: true,
             js_runtime_available: true,
+            node_installed: true,
+            youtube_po_provider_installed: true,
             portable_python_installed: true,
             venv_ready: true,
             diarization_installed: true,
@@ -5552,6 +5560,14 @@ mod tests {
         let mut missing_python = ready;
         missing_python.venv_ready = false;
         assert!(!offline_bundle_runtime_ready_from_flags(missing_python));
+
+        let mut missing_node = ready;
+        missing_node.node_installed = false;
+        assert!(!offline_bundle_runtime_ready_from_flags(missing_node));
+
+        let mut missing_provider = ready;
+        missing_provider.youtube_po_provider_installed = false;
+        assert!(!offline_bundle_runtime_ready_from_flags(missing_provider));
     }
 
     #[test]
