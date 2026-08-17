@@ -3,7 +3,7 @@
 ## Metadata
 - ID: WP-0147
 - Owner: Codex
-- Status: BACKLOG
+- Status: DONE
 - Created: 2026-03-12
 - Target milestone: Post-0.1.6 smoke regression recovery
 
@@ -43,3 +43,4 @@ Out of scope:
 
 - 2026-03-12: Created from smoke note attached to `ST-019`.
 - 2026-03-25: Narrow implementation follow-on spun out as `WP-0160` after confirming that imported legacy subscriptions already preserve NAS folder overrides, but continuity state is still coupled to the output folder instead of VoxVulgi-managed state.
+- 2026-08-17: Completed folder media reconciliation and membership sync in `subscriptions.rs`. Unit test verified passing. Proof in `product/desktop/build_target/tool_artifacts/wp_runs/WP-0147/summary.md`.

@@ -4393,6 +4393,44 @@ pub fn youtube_subscription_archive_path(
     Ok(paths.youtube_subscription_archive_state_path(&sub.id))
 }
 
+pub fn extract_youtube_id_from_filename(filename: &str) -> Option<&str> {
+    let stem = if let Some(dot_idx) = filename.rfind('.') {
+        &filename[..dot_idx]
+    } else {
+        filename
+    };
+
+    if let Some(start) = stem.rfind('[') {
+        if let Some(end) = stem[start + 1..].find(']') {
+            let candidate = stem[start + 1..start + 1 + end].trim();
+            if candidate.len() == 11 && candidate.chars().all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-') {
+                return Some(candidate);
+            }
+        }
+    }
+
+    if let Some(hyphen_idx) = stem.rfind('-') {
+        let candidate = stem[hyphen_idx + 1..].trim();
+        if candidate.len() == 11 && candidate.chars().all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-') {
+            return Some(candidate);
+        }
+    }
+
+    if let Some(us_idx) = stem.rfind('_') {
+        let candidate = stem[us_idx + 1..].trim();
+        if candidate.len() == 11 && candidate.chars().all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-') {
+            return Some(candidate);
+        }
+    }
+
+    let candidate = stem.trim();
+    if candidate.len() == 11 && candidate.chars().all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-') {
+        return Some(candidate);
+    }
+
+    None
+}
+
 pub fn ensure_youtube_subscription_archive_state(
     paths: &AppPaths,
     sub: &YoutubeSubscriptionRow,
@@ -4401,15 +4439,74 @@ pub fn ensure_youtube_subscription_archive_state(
     if let Some(parent) = archive_path.parent() {
         std::fs::create_dir_all(parent)?;
     }
-    if !archive_path.exists() {
-        let legacy_path = legacy_output_youtube_subscription_archive_path(paths, sub)?;
-        if legacy_path != archive_path && legacy_path.exists() {
-            let legacy_ids = read_archive_file_ids(&legacy_path)?;
-            if !legacy_ids.is_empty() {
-                merge_archive_file(paths, &archive_path, &legacy_ids)?;
+
+    let mut discovered_ids: HashSet<String> = HashSet::new();
+
+    let legacy_path = legacy_output_youtube_subscription_archive_path(paths, sub)?;
+    if legacy_path != archive_path && legacy_path.exists() {
+        if let Ok(legacy_ids) = read_archive_file_ids(&legacy_path) {
+            discovered_ids.extend(legacy_ids);
+        }
+    }
+
+    // WP-0147: Check recorded media source memberships for this subscription
+    if let Ok(conn) = db::open_readonly(paths) {
+        if let Ok(mut stmt) = conn.prepare(
+            "SELECT media_id FROM media_source_membership WHERE source_subscription_id = ?1 AND service = 'youtube'"
+        ) {
+            if let Ok(rows) = stmt.query_map([&sub.id], |r| r.get::<_, String>(0)) {
+                for id in rows.flatten() {
+                    let trimmed = id.trim();
+                    if !trimmed.is_empty() {
+                        discovered_ids.insert(trimmed.to_string());
+                    }
+                }
             }
         }
     }
+
+    // WP-0147: Read-only scan of existing output folder for previously downloaded media
+    if let Ok(output_dir) = youtube_subscription_output_dir(paths, sub) {
+        if output_dir.is_dir() {
+            if let Ok(entries) = std::fs::read_dir(&output_dir) {
+                for entry in entries.flatten() {
+                    if let Ok(ft) = entry.file_type() {
+                        if ft.is_file() {
+                            if let Some(name) = entry.file_name().to_str() {
+                                let lower = name.to_ascii_lowercase();
+                                if lower.ends_with(".mkv") || lower.ends_with(".mp4") || lower.ends_with(".webm") || lower.ends_with(".ts") || lower.ends_with(".m4v") {
+                                    if let Some(vid) = extract_youtube_id_from_filename(name) {
+                                        discovered_ids.insert(vid.to_string());
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    if !discovered_ids.is_empty() {
+        let existing_ids = if archive_path.exists() {
+            read_archive_file_ids(&archive_path).unwrap_or_default()
+        } else {
+            HashSet::new()
+        };
+        let missing_ids: HashSet<String> = discovered_ids
+            .into_iter()
+            .filter(|id| !existing_ids.contains(id))
+            .collect();
+        if !missing_ids.is_empty() {
+            merge_archive_file(paths, &archive_path, &missing_ids)?;
+            for vid in &missing_ids {
+                let _ = record_youtube_archive_member(paths, &sub.id, vid);
+            }
+        }
+    } else if !archive_path.exists() {
+        std::fs::File::create(&archive_path)?;
+    }
+
     Ok(archive_path)
 }
 
@@ -6802,6 +6899,63 @@ CREATE TABLE IF NOT EXISTS url_description (
         assert!(legacy_archive_path.is_file());
         assert!(archived_ids.contains("dQw4w9WgXcQ"));
         assert!(archived_ids.contains("5NV6Rdv1a3I"));
+    }
+
+    #[test]
+    fn ensure_archive_state_reconciles_existing_folder_media_files_and_memberships() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let paths = AppPaths::new(dir.path().to_path_buf());
+        crate::db::ensure_schema(&paths).expect("schema");
+
+        let output_dir = dir.path().join("mapped_sub_folder");
+        std::fs::create_dir_all(&output_dir).expect("mkdir output dir");
+
+        // Seed some media files with video IDs in brackets and suffixes
+        std::fs::write(output_dir.join("Episode 1 [dQw4w9WgXcQ].mkv"), b"video1").expect("seed file 1");
+        std::fs::write(output_dir.join("Episode 2 - 5NV6Rdv1a3I.mp4"), b"video2").expect("seed file 2");
+        std::fs::write(output_dir.join("Loose Note.txt"), b"note").expect("seed note");
+
+        let sub = upsert_youtube_subscription(
+            &paths,
+            YoutubeSubscriptionUpsert {
+                id: None,
+                title: "Folder Recon Sub".to_string(),
+                source_url: "https://www.youtube.com/@recon/videos".to_string(),
+                folder_map: Some("mapped_sub_folder".to_string()),
+                output_dir_override: Some(output_dir.to_string_lossy().to_string()),
+                library_id: None,
+                use_browser_cookies: false,
+                browser_cookie_source: None,
+                auth_session_input: None,
+                clear_auth_session: false,
+                active: true,
+                preset_id: None,
+                group_ids: Vec::new(),
+                refresh_interval_minutes: Some(DEFAULT_REFRESH_INTERVAL_MINUTES),
+            },
+        )
+        .expect("upsert sub");
+
+        // Insert identity and membership in DB
+        let conn = crate::db::open(&paths).expect("db open");
+        conn.execute(
+            "INSERT INTO media_source_identity (service, media_id, canonical_url, created_at_ms, updated_at_ms) VALUES ('youtube', 'MEMB1111AAA', 'https://www.youtube.com/watch?v=MEMB1111AAA', 1, 1)",
+            [],
+        ).expect("insert identity");
+        conn.execute(
+            "INSERT INTO media_source_membership (service, media_id, source_subscription_id, source_kind, source_url_snapshot, source_title_snapshot, evidence_kind, created_at_ms, updated_at_ms) VALUES ('youtube', 'MEMB1111AAA', ?1, 'videos_page', 'https://youtube.com', 'Title', 'runtime', 1, 1)",
+            rusqlite::params![sub.id],
+        ).expect("insert membership");
+
+        let archive_path =
+            ensure_youtube_subscription_archive_state(&paths, &sub).expect("ensure archive state");
+        let archived_ids =
+            load_youtube_subscription_archive_ids(&paths, &sub).expect("load archived ids");
+
+        assert!(archive_path.is_file());
+        assert!(archived_ids.contains("dQw4w9WgXcQ"));
+        assert!(archived_ids.contains("5NV6Rdv1a3I"));
+        assert!(archived_ids.contains("MEMB1111AAA"));
     }
 
     #[test]
