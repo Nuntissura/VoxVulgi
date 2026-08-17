@@ -308,6 +308,9 @@ function inferProviderLabel(item: LibraryItem): string {
   if (sourceUri.includes("instagram.com") || sourceType.includes("instagram") || mediaPath.includes("\\instagram\\") || mediaPath.includes("/instagram/")) {
     return "Instagram";
   }
+  if (sourceUri.includes("tiktok.com") || sourceType.includes("tiktok") || mediaPath.includes("\\tiktok\\") || mediaPath.includes("/tiktok/")) {
+    return "TikTok";
+  }
   if (sourceUri.includes("pinterest.") || sourceType.includes("pinterest")) {
     return "Pinterest";
   }
@@ -317,8 +320,25 @@ function inferProviderLabel(item: LibraryItem): string {
   return sourceType || "Local file";
 }
 
-function inferSubscriptionType(url: string): "Channel" | "Shorts" | "Playlist" | "URL" {
+function inferSubscriptionProvider(url: string | null | undefined): "youtube" | "instagram" | "tiktok" | "other" {
+  if (!url) return "other";
+  const u = url.toLowerCase();
+  if (u.includes("youtube.com") || u.includes("youtu.be")) return "youtube";
+  if (u.includes("instagram.com") || u.includes("instagr.am")) return "instagram";
+  if (u.includes("tiktok.com")) return "tiktok";
+  return "other";
+}
+
+function inferSubscriptionType(url: string): "Channel" | "Shorts" | "Playlist" | "Profile" | "Reels" | "URL" {
   const lower = url.toLowerCase();
+  if (lower.includes("instagram.com") || lower.includes("instagr.am")) {
+    if (/\/reels?\b/.test(lower)) return "Reels";
+    return "Profile";
+  }
+  if (lower.includes("tiktok.com")) {
+    if (/\/video\b/.test(lower)) return "URL";
+    return "Profile";
+  }
   if (/\/shorts\b/.test(lower) || /\/@[^/]+\/shorts/.test(lower)) return "Shorts";
   if (/[?&]list=/.test(lower)) return "Playlist";
   if (/\/@/.test(lower) || /\/(?:channel|c|user)\//.test(lower)) return "Channel";
@@ -369,10 +389,6 @@ function formatRefreshIntervalHours(minutes: number): string {
   if (Number.isInteger(hours)) return `every ${hours}h`;
   return `every ${hours.toFixed(1)}h`;
 }
-
-// WP: honest per-subscription run state. The pill must NOT conflate refresh/enumeration with
-// actual downloading. Previously any active refresh was labelled "Downloading", so a subscription
-// that was only being checked (or had videos merely queued) lied about downloading while the right
 // pane and Jobs showed nothing. Truthful states:
 //   - "checking"    -> being refreshed/enumerated (activeRefreshSubIds or the activity "checking"
 //                      phase). Refresh only, NOT downloading.
@@ -5486,9 +5502,15 @@ export function LibraryPage({ mode = "all", visible = true }: LibraryPageProps) 
                     >
                       <div className="sub-list-main">
                         <span className="sub-list-title" title={sub.title}>
-                          <span className="sub-provider-badge sub-provider-badge-youtube" style={{ marginRight: 6 }}>
-                            YouTube
-                          </span>
+                          {(() => {
+                            const prov = inferSubscriptionProvider(sub.source_url);
+                            const provLabel = prov === "youtube" ? "YouTube" : prov === "instagram" ? "Instagram" : prov === "tiktok" ? "TikTok" : "Web";
+                            return (
+                              <span className={`sub-provider-badge sub-provider-badge-${prov}`} style={{ marginRight: 6 }}>
+                                {provLabel}
+                              </span>
+                            );
+                          })()}
                           {sub.title}
                         </span>
                         <span className={`sub-pill ${pres.pillClassName}`} style={pres.pillStyle}>{stateLabel}</span>

@@ -11,8 +11,8 @@ updated_at: 2026-08-09
 ## Metadata
 
 - ID: WP-0303
-- Owner: —
-- Status: BACKLOG
+- Owner: Codex
+- Status: DONE
 - Created: 2026-08-09
 - Refinement: `WP-0303_INSTAGRAM_PROVIDER_RECOVERY_INCREMENTAL_SUBSCRIPTIONS_AND_SETTINGS_v1_REFINEMENT.md`
 - Board: `../TASK_BOARD.md#wp-0303`

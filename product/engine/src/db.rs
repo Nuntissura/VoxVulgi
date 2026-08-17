@@ -3,7 +3,7 @@ use crate::Result;
 use rusqlite::{Connection, OpenFlags};
 use std::time::Duration;
 
-const CURRENT_SCHEMA_VERSION: u32 = 50;
+const CURRENT_SCHEMA_VERSION: u32 = 52;
 // WP-0258: raised from 750ms to 4000ms so read-only UI queries wait out a WAL
 // checkpoint instead of erroring "database is locked". Evidence: 47 subscription
 // refreshes failed with "database is locked" under DB contention.
@@ -180,8 +180,16 @@ const MIGRATION_STEPS: &[MigrationStep] = &[
         apply: apply_schema_v49,
     },
     MigrationStep {
-        version: CURRENT_SCHEMA_VERSION,
+        version: 50,
         apply: apply_schema_v50,
+    },
+    MigrationStep {
+        version: 51,
+        apply: apply_schema_v51,
+    },
+    MigrationStep {
+        version: CURRENT_SCHEMA_VERSION,
+        apply: apply_schema_v52,
     },
 ];
 
@@ -2642,7 +2650,70 @@ fn apply_schema_v50(conn: &Connection) -> Result<()> {
     Ok(())
 }
 
+fn apply_schema_v51(conn: &Connection) -> Result<()> {
+    // WP-0277: reconciliation and variant review are durable run artifacts. They must
+    // not be reconstructed from a filtered UI projection, and ambiguous evidence must
+    // survive restarts without being promoted into an automatic relink.
+    conn.execute_batch(
+        r#"
+CREATE TABLE IF NOT EXISTS media_cleanup_reconciliation_candidate (
+  run_id TEXT NOT NULL,
+  candidate_id TEXT NOT NULL,
+  kind TEXT NOT NULL,
+  physical_path TEXT,
+  library_item_id TEXT,
+  library_path TEXT,
+  evidence_kind TEXT NOT NULL,
+  evidence_value TEXT,
+  disposition TEXT NOT NULL,
+  destination_library_item_id TEXT,
+  error TEXT,
+  applied_at_ms INTEGER,
+  created_at_ms INTEGER NOT NULL,
+  updated_at_ms INTEGER NOT NULL,
+  PRIMARY KEY (run_id, candidate_id),
+  FOREIGN KEY (run_id) REFERENCES media_cleanup_run(id) ON DELETE CASCADE
+);
+CREATE INDEX IF NOT EXISTS idx_media_cleanup_reconciliation_run_disposition
+  ON media_cleanup_reconciliation_candidate(run_id, disposition, candidate_id);
+
+CREATE TABLE IF NOT EXISTS media_cleanup_variant (
+  run_id TEXT NOT NULL,
+  variant_id TEXT NOT NULL,
+  service TEXT NOT NULL,
+  media_id TEXT NOT NULL,
+  member_paths_json TEXT NOT NULL,
+  evidence_json TEXT NOT NULL,
+  status TEXT NOT NULL DEFAULT 'review_only',
+  created_at_ms INTEGER NOT NULL,
+  updated_at_ms INTEGER NOT NULL,
+  PRIMARY KEY (run_id, variant_id),
+  FOREIGN KEY (run_id) REFERENCES media_cleanup_run(id) ON DELETE CASCADE
+);
+CREATE INDEX IF NOT EXISTS idx_media_cleanup_variant_run_media
+  ON media_cleanup_variant(run_id, service, media_id, variant_id);
+"#,
+    )?;
+    Ok(())
+}
+
+fn apply_schema_v52(conn: &Connection) -> Result<()> {
+    // WP-0277: size and mtime are not a filesystem-object identity. Persist the native
+    // volume/file identifier captured during inventory so reconciliation refuses a replaced
+    // file even when its visible path, length, and timestamp were preserved.
+    ensure_column(conn, "media_cleanup_file", "file_identity", "TEXT")?;
+    Ok(())
+}
+
 fn ensure_column(conn: &Connection, table: &str, column: &str, column_def: &str) -> Result<()> {
+    let table_exists: bool = conn.query_row(
+        "SELECT COUNT(*) > 0 FROM sqlite_master WHERE type='table' AND name=?1",
+        [table],
+        |row| row.get(0),
+    )?;
+    if !table_exists {
+        return Ok(());
+    }
     let mut stmt = conn.prepare(&format!("PRAGMA table_info({table})"))?;
     let mut rows = stmt.query([])?;
     while let Some(row) = rows.next()? {
@@ -3104,6 +3175,42 @@ CREATE TABLE IF NOT EXISTS job (
             )
             .expect("meta schema version");
         assert_eq!(meta, CURRENT_SCHEMA_VERSION.to_string());
+    }
+
+    #[test]
+    fn migrate_v51_creates_durable_cleanup_reconciliation_surfaces() {
+        let conn = Connection::open_in_memory().expect("open");
+        migrate(&conn).expect("migrate");
+        let names = conn
+            .prepare(
+                "SELECT name FROM sqlite_master WHERE type='table' AND name IN ('media_cleanup_reconciliation_candidate','media_cleanup_variant') ORDER BY name",
+            )
+            .expect("prepare")
+            .query_map([], |row| row.get::<_, String>(0))
+            .expect("query")
+            .collect::<rusqlite::Result<Vec<_>>>()
+            .expect("collect");
+        assert_eq!(
+            names,
+            vec![
+                "media_cleanup_reconciliation_candidate".to_string(),
+                "media_cleanup_variant".to_string(),
+            ]
+        );
+    }
+
+    #[test]
+    fn migrate_v52_adds_cleanup_file_identity() {
+        let conn = Connection::open_in_memory().expect("open");
+        migrate(&conn).expect("migrate");
+        let columns = conn
+            .prepare("PRAGMA table_info(media_cleanup_file)")
+            .expect("prepare")
+            .query_map([], |row| row.get::<_, String>(1))
+            .expect("query")
+            .collect::<rusqlite::Result<Vec<_>>>()
+            .expect("collect");
+        assert!(columns.iter().any(|column| column == "file_identity"));
     }
 
     #[test]
