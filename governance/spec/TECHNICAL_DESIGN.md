@@ -81,16 +81,20 @@ Normative status (operator decision 2026-07-31; see PRODUCT_SPEC.md 8.1.8):
 
 Implementation notes (desktop):
 
-- The installer includes an `offline/` resource payload:
-  - `offline/manifest.json`
-  - `offline/payload.zip` (contains `tools/`, `models/`, and `cache/huggingface/`)
-- On first run, the app extracts the payload into the user app-data dir and writes a marker (`config/offline_bundle_applied_v1.json`) so it only applies once per bundle id.
-- Build policy: routine app builds and UI/backend verification should reuse an existing verified `src-tauri/offline/payload.zip` when bundled dependency inputs did not change. Payload refresh is required for explicit release/full-refresh builds, changed dependency inputs, missing/stale payloads, or operator-requested full dependency refreshes.
-- `offline/manifest.json` should carry payload byte size and SHA-256 when available, and startup hydration must verify those before extraction.
-- Bundled toolchain inputs should be tracked in a single pinned dependency manifest (`product/engine/resources/tooling/pinned_dependency_manifest.json`) so release provenance is reproducible and inspectable.
+- Desktop Windows packaging uses a two-tier strategy:
+  1. **Core App Installer (NSIS)**: Produces the per-machine application binary, uninstaller, shortcuts, and maintenance mode selector (Update / Reinstall / Full reinstall / Uninstall / Full uninstall).
+  2. **Full Offline Spanned Installer (Inno Setup 6)**: Wraps the core NSIS setup and disk-spans the full ~13 GB offline payload (tools, models, python, HF cache, CosyVoice). This bypasses the 2 GB 32-bit NSIS archive limit, lays down all dependencies directly into `%APPDATA%\com.voxvulgi.voxvulgi` with an informative progress bar, and rewrites the Python `pyvenv.cfg` paths automatically.
+- The installer payload contains:
+  - `tools/` (FFmpeg, yt-dlp, Node.js, YouTube PO Provider, portable Python)
+  - `models/` (Whisper, Demucs, etc.)
+  - `cache/huggingface/` (Kokoro, OpenVoice, CosyVoice, etc.)
+- On first run, the app validates the payload in the user app-data dir and writes a marker (`config/offline_bundle_applied_v1.json`) so it only applies once per bundle id.
+- Build policy: routine app builds and UI/backend verification should reuse an existing verified `src-tauri/offline` payload when bundled dependency inputs did not change. Payload refresh is required for explicit release/full-refresh builds, changed dependency inputs, missing/stale payloads, or operator-requested full dependency refreshes.
+- `offline/manifest.json` carries payload byte size and SHA-256 when available, and startup hydration verifies those before extraction.
+- Bundled toolchain inputs are tracked in a single pinned dependency manifest (`product/engine/resources/tooling/pinned_dependency_manifest.json`) so release provenance is reproducible and inspectable.
 - Mutable unpinned recovery installs remain available only behind an explicit local opt-in environment variable; release preparation must succeed without depending on them.
-- Third-party package patching should live in small tested Rust helper modules instead of large inline runtime patch scripts embedded in installer code paths.
-- Diagnostics should distinguish required, optional, demo/test, bundled, hydrated, and manually installable dependencies so the operator inventory matches the real runtime contract.
+- Third-party package patching lives in small tested Rust helper modules instead of large inline runtime patch scripts embedded in installer code paths.
+- Diagnostics distinguishes required, optional, demo/test, bundled, hydrated, and manually installable dependencies so the operator inventory matches the real runtime contract.
 
 ### 2.1.1 Installer maintenance mode clarity
 

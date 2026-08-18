@@ -30,9 +30,11 @@
   - `governance/spec/PRODUCT_SPEC.md`
   - `governance/spec/TECHNICAL_DESIGN.md`
 
-## Installer Payload Policy (Batteries-Included)
+## Installer Payload Policy (Batteries-Included & Inno Setup Packaging)
 
 - The public VoxVulgi installer must bundle ALL models and dependencies for the complete default localization pipeline: ASR model, diarization pack, separation pack, TTS/voice-conversion models with populated Hugging Face cache, portable Python with all pinned wheels, FFmpeg/ffprobe, and supporting tools.
+- To bypass the hard 2 GB 32-bit archive ceiling of NSIS without failing builds or discarding model weights, full offline distributions use **Inno Setup 6** (`governance/scripts/build_offline_full_installer.ps1` + `product/desktop/src-tauri/installer/VoxVulgi_offline_full.iss`).
+- Inno Setup wraps the core NSIS setup.exe (which handles Windows registration and uninstallation maintenance mode), disk-spans the full ~13 GB payload, installs dependencies directly into `%APPDATA%\com.voxvulgi.voxvulgi`, and rewrites portable Python `pyvenv.cfg` paths automatically.
 - First run must be able to complete the full default localization workflow (import -> captions -> translate -> dub -> export) fully offline with zero downloads.
 - Readiness/"ready" states must reflect verified bytes on disk, never network reachability, for the default path.
 - Non-technical users are the primary persona; no terminal, pip, or manual model steps may ever be required for the default path.

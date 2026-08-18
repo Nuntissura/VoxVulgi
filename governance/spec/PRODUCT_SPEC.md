@@ -549,6 +549,7 @@ Current implementation status:
 - Non-technical users are the primary persona: no terminal steps, no pip or dependency repair, and no manual model placement may ever be required for the default path.
 - Slim or developer installers without the full payload may exist for development purposes only and must not be the public download default.
 - Installer size is explicitly not a constraint (operator decision 2026-07-31): the audience is PC users who download videos and are assumed to have disk space for models; do not trade model quality or completeness for payload size.
+- Windows distribution architecture: To bypass the 2 GB 32-bit archive ceiling of NSIS without compromising the multi-gigabyte models and runtime dependencies, public full-offline releases are built with **Inno Setup 6** (spanned multi-GB setup wrapping the NSIS desktop executable and installing the full payload into `%APPDATA%\com.voxvulgi.voxvulgi` with automated `pyvenv.cfg` path rewriting).
 - This supersedes any earlier treatment of bundled wheels or bundled model weights as optional additions; backlog items WP-0237 (bundle wheels in installer) and WP-0238 (bundled model weights) are elevated from optional to spec-required direction.
 
 ### 8.1.9 Minimum-hardware contract and degradation tiers (operator decision 2026-08-01)

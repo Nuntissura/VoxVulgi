@@ -65,6 +65,16 @@ $iss = Join-Path $repoRoot 'product\desktop\src-tauri\installer\VoxVulgi_offline
 if (-not (Test-Path -LiteralPath $iss)) { throw "Inno script not found: $iss" }
 if (-not (Test-Path -LiteralPath $SetupExe)) { throw "App setup.exe not found: $SetupExe" }
 if (-not (Test-Path -LiteralPath $PayloadDir)) { throw "Payload dir not found: $PayloadDir" }
+if (-not (Test-Path -LiteralPath $OutputDir)) {
+  New-Item -ItemType Directory -Force -Path $OutputDir | Out-Null
+}
+
+$PayloadDir = (Resolve-Path -LiteralPath $PayloadDir).Path
+$CosyVoiceVenvDir = (Resolve-Path -LiteralPath $CosyVoiceVenvDir).Path
+$VoiceBackendsDir = (Resolve-Path -LiteralPath $VoiceBackendsDir).Path
+$SetupExe = (Resolve-Path -LiteralPath $SetupExe).Path
+$OutputDir = (Resolve-Path -LiteralPath $OutputDir).Path
+
 $expectedSetupName = "VoxVulgi_{0}_x64-setup.exe" -f $AppVersion
 if ((Get-Item -LiteralPath $SetupExe).Name -ne $expectedSetupName) {
   throw "App setup/version mismatch: expected $expectedSetupName for AppVersion $AppVersion, got $((Get-Item -LiteralPath $SetupExe).Name)"
@@ -100,7 +110,8 @@ $cosyRequiredFiles = @(
 )
 foreach ($path in $cosyRequiredFiles) {
   $item = Get-Item -LiteralPath $path -Force -ErrorAction SilentlyContinue
-  if (-not $item -or $item.PSIsContainer -or $item.Length -le 0 -or $item.LinkType) {
+  $allowEmpty = $path.EndsWith('__init__.py')
+  if (-not $item -or $item.PSIsContainer -or (-not $allowEmpty -and $item.Length -le 0) -or $item.LinkType) {
     throw "CosyVoice full-offline input is missing, empty, or still linked: $path"
   }
 }
@@ -264,7 +275,8 @@ $manifest = [ordered]@{
   files = @($artifacts | ForEach-Object { [ordered]@{ name = $_.Name; bytes = [int64]$_.Length } })
 }
 $manifestPath = Join-Path $OutputDir "$baseName.artifacts.json"
-($manifest | ConvertTo-Json -Depth 5) + "`n" | Set-Content -LiteralPath $manifestPath -Encoding utf8NoBOM
+$manifestJson = ($manifest | ConvertTo-Json -Depth 5) + "`n"
+[System.IO.File]::WriteAllText($manifestPath, $manifestJson, [System.Text.UTF8Encoding]::new($false))
 Write-Host ""
 Write-Host "OFFLINE INSTALLER SET BUILT: $OutputDir"
 Write-Host "Setup: $out"
