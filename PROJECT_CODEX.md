@@ -71,6 +71,9 @@ Pick the first real implementation WP from `governance/workflow/ROADMAP.md` and 
 
 ## 8) Installer mode policy (Windows)
 
+- Desktop Windows packaging uses a two-tier distribution strategy:
+  1. **Core App Installer (NSIS)**: Produces the per-machine application binary, uninstaller, shortcuts, and maintenance mode selector.
+  2. **Full Offline Spanned Installer (Inno Setup 6)**: Wraps the core NSIS setup and disk-spans the full ~13 GB offline payload (tools, models, python, HF cache, CosyVoice). This bypasses the 2 GB 32-bit NSIS archive limit, lays down all dependencies directly into `%APPDATA%\com.voxvulgi.voxvulgi` with an informative progress bar, and rewrites the Python `pyvenv.cfg` paths automatically (`governance/scripts/build_offline_full_installer.ps1`).
 - Use and preserve these maintenance labels in installer UX/copy:
   - `Update`
   - `Reinstall (keep preferences and options)`
@@ -80,8 +83,8 @@ Pick the first real implementation WP from `governance/workflow/ROADMAP.md` and 
 - Keep the keep-vs-full distinction explicit in the installer explainer page.
 - Every managed desktop installer build must increment semantic version.
 - Canonical source of truth:
-  - `governance/spec/PRODUCT_SPEC.md` (installer clarity requirement)
-  - `governance/spec/TECHNICAL_DESIGN.md` (installer maintenance mode implementation policy)
+  - `governance/spec/PRODUCT_SPEC.md` (sections 8.1.8 and 8.1.9)
+  - `governance/spec/TECHNICAL_DESIGN.md` (section 2.1)
 
 ## 9) Operator and agent diagnostics (WP-0221)
 
