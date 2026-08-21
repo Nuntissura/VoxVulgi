@@ -1,97 +1,254 @@
 [CmdletBinding()]
 param(
-  # Directory holding the validated default relocatable payload (tools/ models/ cache/),
-  # excluding the separately supplied CosyVoice venv and backend tree.
   [Parameter(Mandatory = $true)][string]$PayloadDir,
-  # Isolated CosyVoice Python venv added to the default payload.
   [Parameter(Mandatory = $true)][string]$CosyVoiceVenvDir,
-  # Vendored optional voice backends added to the default payload.
   [Parameter(Mandatory = $true)][string]$VoiceBackendsDir,
-  # The per-machine app installer (the NSIS setup.exe produced by build_desktop_target.ps1).
   [Parameter(Mandatory = $true)][string]$SetupExe,
-  # Where the spanned offline installer set is written.
   [Parameter(Mandatory = $true)][string]$OutputDir,
-  # Desktop semantic version this offline installer corresponds to.
   [Parameter(Mandatory = $true)][string]$AppVersion,
-  # Validate every thin-installer/default-payload/CosyVoice input without invoking ISCC.
   [switch]$ValidateInputsOnly,
-  # Resume only the guarded cleanup, artifact verification, and manifest write after ISCC
-  # already reported success but a prior wrapper was interrupted before finalization.
-  [switch]$FinalizeExistingArtifacts,
-  # Required with -FinalizeExistingArtifacts. The log tail must contain both ISCC's success
-  # marker and the exact versioned setup path being finalized.
-  [string]$SuccessfulCompileLog,
-  # Optional explicit ISCC.exe path; auto-discovered when omitted.
-  [string]$IsccPath
+  [switch]$RefreshPayloadArchives,
+  [string]$ArchiveCacheDir,
+  [string]$IsccPath,
+  [string]$SevenZipPath,
+  [string]$OscdimgPath
 )
 
-$ErrorActionPreference = "Stop"
+$ErrorActionPreference = 'Stop'
 
-if ($ValidateInputsOnly -and $FinalizeExistingArtifacts) {
-  throw "Use either -ValidateInputsOnly or -FinalizeExistingArtifacts, not both."
+function Get-IsccMajorVersion {
+  param([string]$Path)
+  $banner = (& $Path /? 2>&1 | Select-Object -First 1)
+  if (-not $banner -or "$banner" -notmatch '^Inno Setup ([0-9]+) Command-Line Compiler$') {
+    throw "Unable to identify the Inno Setup compiler version: $Path (banner: $banner)"
+  }
+  return [int]$Matches[1]
+}
+
+function Assert-IsccSupportsExtendedPaths {
+  param([string]$Path)
+  $major = Get-IsccMajorVersion -Path $Path
+  if ($major -lt 7) {
+    throw "Inno Setup 7 or newer is required because the offline Python payload contains installed paths beyond MAX_PATH. Found Inno Setup $major at: $Path."
+  }
+  return $Path
 }
 
 function Find-Iscc {
   param([string]$Explicit)
-  if ($Explicit -and (Test-Path -LiteralPath $Explicit)) { return $Explicit }
-  $candidates = @(
-    "$env:LOCALAPPDATA\Programs\Inno Setup 6\ISCC.exe",
-    "C:\Program Files (x86)\Inno Setup 6\ISCC.exe",
-    "C:\Program Files\Inno Setup 6\ISCC.exe"
-  )
-  foreach ($c in $candidates) { if (Test-Path -LiteralPath $c) { return $c } }
-  $cmd = Get-Command ISCC.exe -ErrorAction SilentlyContinue
-  if ($cmd) { return $cmd.Source }
-  throw "ISCC.exe (Inno Setup 6 compiler) not found. Install Inno Setup 6 (winget install JRSoftware.InnoSetup) or pass -IsccPath."
+  if ($Explicit) {
+    if (-not (Test-Path -LiteralPath $Explicit -PathType Leaf)) { throw "Explicit ISCC.exe path not found: $Explicit" }
+    return Assert-IsccSupportsExtendedPaths -Path (Resolve-Path -LiteralPath $Explicit).Path
+  }
+  foreach ($candidate in @(
+    "$env:LOCALAPPDATA\Programs\Inno Setup 7\ISCC.exe",
+    'C:\Program Files\Inno Setup 7\ISCC.exe',
+    'C:\Program Files (x86)\Inno Setup 7\ISCC.exe'
+  )) {
+    if (Test-Path -LiteralPath $candidate -PathType Leaf) { return Assert-IsccSupportsExtendedPaths -Path $candidate }
+  }
+  $command = Get-Command ISCC.exe -ErrorAction SilentlyContinue
+  if ($command) { return Assert-IsccSupportsExtendedPaths -Path $command.Source }
+  throw 'ISCC.exe (Inno Setup 7+) not found. Install Inno Setup 7 or pass -IsccPath.'
 }
 
-function Remove-InstallerJunctionOnly {
-  param([Parameter(Mandatory = $true)][string]$Path)
-  $item = Get-Item -LiteralPath $Path -Force -ErrorAction Stop
-  if (-not $item.PSIsContainer -or -not ($item.Attributes -band [System.IO.FileAttributes]::ReparsePoint) -or $item.LinkType -ne 'Junction') {
-    throw "Refusing link-only cleanup for non-junction installer staging entry: $Path"
+function Get-SevenZipVersion {
+  param([string]$Path)
+  $banner = (& $Path 2>&1 | Select-Object -First 2) -join ' '
+  if ($banner -notmatch '7-Zip[^0-9]*([0-9]+\.[0-9]+)') { throw "Unable to identify the 7-Zip version: $Path (banner: $banner)" }
+  return [ordered]@{ version = [version]$Matches[1]; banner = $banner }
+}
+
+function Assert-SevenZipVersion {
+  param([string]$Path)
+  $identity = Get-SevenZipVersion -Path $Path
+  if ($identity.version -lt [version]'26.02') { throw "7-Zip 26.02 or newer is required. Found $($identity.version) at: $Path" }
+  if ($identity.banner -notmatch '\(x64\)') { throw "The x64 full 7-Zip CLI is required for fast ISO verification and archive builds: $Path" }
+  return $Path
+}
+
+function Find-SevenZip {
+  param([string]$Explicit)
+  if ($Explicit) {
+    if (-not (Test-Path -LiteralPath $Explicit -PathType Leaf)) { throw "Explicit 7-Zip path not found: $Explicit" }
+    return Assert-SevenZipVersion -Path (Resolve-Path -LiteralPath $Explicit).Path
   }
-  # Windows PowerShell 5.1's Remove-Item prompts for -Recurse on a junction whose target is
-  # non-empty. Never recurse into these validated payload roots. Directory.Delete removes only
-  # the reparse-point directory; the target and all target content remain untouched.
-  [System.IO.Directory]::Delete($item.FullName)
-  if (Test-Path -LiteralPath $Path) {
-    throw "Installer staging junction cleanup did not remove the link: $Path"
+  foreach ($candidate in @(
+    "$env:ProgramFiles\7-Zip\7z.exe",
+    "${env:ProgramFiles(x86)}\7-Zip\7z.exe"
+  )) {
+    if ($candidate -and (Test-Path -LiteralPath $candidate -PathType Leaf)) { return Assert-SevenZipVersion -Path $candidate }
   }
+  $command = Get-Command 7z.exe -ErrorAction SilentlyContinue
+  if ($command) { return Assert-SevenZipVersion -Path $command.Source }
+  throw 'The full x64 7-Zip 26.02+ CLI was not found. Install it or pass -SevenZipPath.'
+}
+
+function Find-Oscdimg {
+  param([string]$Explicit)
+  if ($Explicit) {
+    if (-not (Test-Path -LiteralPath $Explicit -PathType Leaf)) { throw "Explicit Oscdimg path not found: $Explicit" }
+    return (Resolve-Path -LiteralPath $Explicit).Path
+  }
+  $command = Get-Command oscdimg.exe -ErrorAction SilentlyContinue
+  if ($command) { return $command.Source }
+  foreach ($root in @(
+    "$env:ProgramFiles\Windows Kits\10\Assessment and Deployment Kit\Deployment Tools",
+    "${env:ProgramFiles(x86)}\Windows Kits\10\Assessment and Deployment Kit\Deployment Tools"
+  )) {
+    foreach ($arch in 'amd64', 'x86') {
+      $candidate = Join-Path $root "$arch\Oscdimg\oscdimg.exe"
+      if (Test-Path -LiteralPath $candidate -PathType Leaf) { return $candidate }
+    }
+  }
+  throw 'Oscdimg.exe was not found. Install the Windows ADK Deployment Tools or pass -OscdimgPath.'
+}
+
+function Invoke-SevenZip {
+  param([string]$Executable, [string[]]$Arguments, [switch]$Capture)
+  if ($Capture) {
+    $output = & $Executable @Arguments 2>&1
+    if ($LASTEXITCODE -ne 0) { throw "7-Zip failed with exit code $LASTEXITCODE.`n$($output -join "`n")" }
+    return @($output | ForEach-Object { "$_" })
+  }
+  & $Executable @Arguments
+  if ($LASTEXITCODE -ne 0) { throw "7-Zip failed with exit code $LASTEXITCODE." }
+}
+
+function Get-SourceTreeDigest {
+  param([string]$SevenZip, [string]$Root)
+  Write-Host "Hashing source tree: $Root"
+  $output = Invoke-SevenZip -Executable $SevenZip -Arguments @('h', '-scrcSHA256', '-r', (Join-Path $Root '*')) -Capture
+  $joined = $output -join "`n"
+  if ($joined -notmatch 'SHA256\s+for data and names:\s*([0-9A-Fa-f]{64})') {
+    throw "7-Zip did not report the source-tree SHA256 for data and names: $Root"
+  }
+  return $Matches[1].ToLowerInvariant()
+}
+
+function Assert-ArchiveSafeAndValid {
+  param([string]$SevenZip, [string]$Archive)
+  Invoke-SevenZip -Executable $SevenZip -Arguments @('t', '-t7z', $Archive)
+  $listing = Invoke-SevenZip -Executable $SevenZip -Arguments @('l', '-slt', '-t7z', $Archive) -Capture
+  $resolvedArchive = (Resolve-Path -LiteralPath $Archive).Path
+  foreach ($line in $listing) {
+    if ($line -match '^(Symbolic Link|Hard Link)\s*=\s*(.+)$') { throw "Archive contains a link: $Archive ($line)" }
+    if ($line -notmatch '^Path\s*=\s*(.+)$') { continue }
+    $entry = $Matches[1].Trim()
+    if ($entry -eq $resolvedArchive -or $entry -eq ([System.IO.Path]::GetFileName($Archive))) { continue }
+    $normalized = $entry.Replace('/', '\')
+    if ($normalized.StartsWith('\') -or $normalized -match '^[A-Za-z]:' -or $normalized -match '(^|\\)\.\.(\\|$)') {
+      throw "Archive contains an unsafe path: $entry ($Archive)"
+    }
+  }
+}
+
+function Get-ArchiveUncompressedBytes {
+  param([string]$SevenZip, [string]$Archive)
+  $listing = Invoke-SevenZip -Executable $SevenZip -Arguments @('l', '-slt', '-t7z', $Archive) -Capture
+  [int64]$total = 0
+  foreach ($line in $listing) {
+    if ($line -match '^Size\s*=\s*([0-9]+)\s*$') { $total += [int64]$Matches[1] }
+  }
+  if ($total -le 0) { throw "Archive has no uncompressed payload bytes: $Archive" }
+  return $total
+}
+
+function Copy-OrHardLink {
+  param([string]$Source, [string]$Destination)
+  if (Test-Path -LiteralPath $Destination) { Remove-Item -LiteralPath $Destination -Force }
+  try { New-Item -ItemType HardLink -Path $Destination -Target $Source -ErrorAction Stop | Out-Null }
+  catch { Copy-Item -LiteralPath $Source -Destination $Destination -Force }
+}
+
+function New-OrReusePayloadArchive {
+  param(
+    [string]$SevenZip, [string]$Name, [string]$SourceRoot,
+    [string]$CacheRoot, [string]$StagePayloadRoot, [switch]$Refresh
+  )
+  $digest = Get-SourceTreeDigest -SevenZip $SevenZip -Root $SourceRoot
+  $cacheArchive = Join-Path $CacheRoot ("{0}_{1}.7z" -f $Name, $digest)
+  if ($Refresh -or -not (Test-Path -LiteralPath $cacheArchive -PathType Leaf)) {
+    $partial = "$cacheArchive.partial.$PID"
+    if (Test-Path -LiteralPath $partial) { Remove-Item -LiteralPath $partial -Force }
+    Write-Host "Creating non-solid fast archive: $Name"
+    try {
+      Invoke-SevenZip -Executable $SevenZip -Arguments @(
+        'a', '-t7z', '-mx=1', '-m0=LZMA2', '-ms=off', '-mmt=on', '-y', $partial, (Join-Path $SourceRoot '*')
+      )
+      Assert-ArchiveSafeAndValid -SevenZip $SevenZip -Archive $partial
+      Move-Item -LiteralPath $partial -Destination $cacheArchive -Force
+    } finally {
+      if (Test-Path -LiteralPath $partial) { Remove-Item -LiteralPath $partial -Force }
+    }
+  } else {
+    Write-Host "Reusing content-matched payload archive: $cacheArchive"
+    Assert-ArchiveSafeAndValid -SevenZip $SevenZip -Archive $cacheArchive
+  }
+  $stageArchive = Join-Path $StagePayloadRoot "$Name.7z"
+  Copy-OrHardLink -Source $cacheArchive -Destination $stageArchive
+  $item = Get-Item -LiteralPath $stageArchive
+  if ($item.Length -le 0) { throw "Payload archive is empty: $stageArchive" }
+  return [ordered]@{
+    name = $Name
+    source_id = $Name
+    source_sha256_data_and_names = $digest
+    file = "payload/$Name.7z"
+    archive_bytes = [int64]$item.Length
+    uncompressed_bytes = Get-ArchiveUncompressedBytes -SevenZip $SevenZip -Archive $stageArchive
+    sha256 = (Get-FileHash -Algorithm SHA256 -LiteralPath $stageArchive).Hash.ToLowerInvariant()
+  }
+}
+
+function Remove-ManagedWorkTree {
+  param([string]$Path, [string]$AllowedParent)
+  if (-not (Test-Path -LiteralPath $Path)) { return }
+  $resolvedPath = [System.IO.Path]::GetFullPath($Path).TrimEnd('\')
+  $resolvedParent = [System.IO.Path]::GetFullPath($AllowedParent).TrimEnd('\')
+  if (-not $resolvedPath.StartsWith("$resolvedParent\", [System.StringComparison]::OrdinalIgnoreCase)) {
+    throw "Refusing to delete installer work tree outside its managed parent: $resolvedPath"
+  }
+  if ([System.IO.Path]::GetFileName($resolvedPath) -notlike '.wp0308_iso_stage_*') {
+    throw "Refusing to delete an unexpected installer work tree: $resolvedPath"
+  }
+  Remove-Item -LiteralPath $resolvedPath -Recurse -Force
+}
+
+function Assert-IsoContents {
+  param([string]$SevenZip, [string]$Iso, [string[]]$RequiredPaths)
+  $listing = (Invoke-SevenZip -Executable $SevenZip -Arguments @('l', '-slt', $Iso) -Capture) -join "`n"
+  $normalizedListing = $listing.Replace('/', '\')
+  foreach ($required in $RequiredPaths) {
+    $normalizedRequired = $required.Replace('/', '\')
+    if ($normalizedListing -notmatch "(?m)^Path\s*=\s*$([regex]::Escape($normalizedRequired))\s*$") {
+      throw "ISO verification failed; required path is missing: $required"
+    }
+  }
+  if ($normalizedListing -match '(?im)^Path\s*=\s*.*\.bin\s*$') { throw 'ISO verification failed; legacy Inno .bin slices are present.' }
 }
 
 $repoRoot = (Resolve-Path (Join-Path $PSScriptRoot '..\..')).Path
 $iss = Join-Path $repoRoot 'product\desktop\src-tauri\installer\VoxVulgi_offline_full.iss'
-if (-not (Test-Path -LiteralPath $iss)) { throw "Inno script not found: $iss" }
-if (-not (Test-Path -LiteralPath $SetupExe)) { throw "App setup.exe not found: $SetupExe" }
-if (-not (Test-Path -LiteralPath $PayloadDir)) { throw "Payload dir not found: $PayloadDir" }
-if (-not (Test-Path -LiteralPath $OutputDir)) {
-  New-Item -ItemType Directory -Force -Path $OutputDir | Out-Null
+foreach ($requiredFile in @($iss, $SetupExe)) {
+  if (-not (Test-Path -LiteralPath $requiredFile -PathType Leaf)) { throw "Required file not found: $requiredFile" }
+}
+foreach ($requiredDir in @($PayloadDir, $CosyVoiceVenvDir, $VoiceBackendsDir)) {
+  if (-not (Test-Path -LiteralPath $requiredDir -PathType Container)) { throw "Required directory not found: $requiredDir" }
 }
 
 $PayloadDir = (Resolve-Path -LiteralPath $PayloadDir).Path
 $CosyVoiceVenvDir = (Resolve-Path -LiteralPath $CosyVoiceVenvDir).Path
 $VoiceBackendsDir = (Resolve-Path -LiteralPath $VoiceBackendsDir).Path
 $SetupExe = (Resolve-Path -LiteralPath $SetupExe).Path
+if (-not (Test-Path -LiteralPath $OutputDir)) { New-Item -ItemType Directory -Force -Path $OutputDir | Out-Null }
 $OutputDir = (Resolve-Path -LiteralPath $OutputDir).Path
 
 $expectedSetupName = "VoxVulgi_{0}_x64-setup.exe" -f $AppVersion
 if ((Get-Item -LiteralPath $SetupExe).Name -ne $expectedSetupName) {
   throw "App setup/version mismatch: expected $expectedSetupName for AppVersion $AppVersion, got $((Get-Item -LiteralPath $SetupExe).Name)"
 }
-
-# Payload sanity: the default pack roots and the Kokoro readiness triplet must be present
-# as REAL files (the whole reason this WP exists — dropped HF symlinks broke offline).
-foreach ($sub in 'tools', 'models', 'cache\huggingface') {
-  if (-not (Test-Path -LiteralPath (Join-Path $PayloadDir $sub))) {
-    throw "Payload missing required root: $sub (under $PayloadDir)"
-  }
-}
-if (-not (Test-Path -LiteralPath $CosyVoiceVenvDir -PathType Container)) {
-  throw "CosyVoice venv not found: $CosyVoiceVenvDir"
-}
-if (-not (Test-Path -LiteralPath $VoiceBackendsDir -PathType Container)) {
-  throw "Voice backends not found: $VoiceBackendsDir"
+foreach ($subdir in 'tools', 'models', 'cache\huggingface') {
+  if (-not (Test-Path -LiteralPath (Join-Path $PayloadDir $subdir) -PathType Container)) { throw "Payload missing required root: $subdir" }
 }
 $cosyRequiredFiles = @(
   (Join-Path $CosyVoiceVenvDir 'Scripts\python.exe'),
@@ -117,169 +274,111 @@ foreach ($path in $cosyRequiredFiles) {
 }
 $canonicalCosyWrapper = Join-Path $repoRoot 'product\engine\resources\tooling\voxvulgi_cosyvoice_render.py'
 $stagedCosyWrapper = Join-Path $VoiceBackendsDir 'cosyvoice\voxvulgi_cosyvoice_render.py'
-if ((Get-FileHash -Algorithm SHA256 -LiteralPath $canonicalCosyWrapper).Hash -ne
-    (Get-FileHash -Algorithm SHA256 -LiteralPath $stagedCosyWrapper).Hash) {
+if ((Get-FileHash -Algorithm SHA256 -LiteralPath $canonicalCosyWrapper).Hash -ne (Get-FileHash -Algorithm SHA256 -LiteralPath $stagedCosyWrapper).Hash) {
   throw "CosyVoice staged wrapper does not match the governed repository wrapper: $stagedCosyWrapper"
 }
-$kok = Join-Path $PayloadDir 'cache\huggingface\hub\models--hexgrad--Kokoro-82M'
-$sha = (Get-Content -LiteralPath (Join-Path $kok 'refs\main') -ErrorAction SilentlyContinue | Select-Object -First 1)
-if ($sha) { $sha = $sha.Trim() }
-$snap = Join-Path $kok "snapshots\$sha"
-foreach ($f in 'config.json', 'kokoro-v1_0.pth', 'voices\af_heart.pt') {
-  $p = Join-Path $snap $f
-  $it = Get-Item -LiteralPath $p -ErrorAction SilentlyContinue
-  if (-not $it -or $it.Length -le 0 -or $it.LinkType) {
-    throw "Kokoro cache not materialized as a real file: $f (exists=$([bool]$it), link=$($it.LinkType)). Rebuild the payload with robocopy so HF symlinks are dereferenced."
-  }
+$kokoroRoot = Join-Path $PayloadDir 'cache\huggingface\hub\models--hexgrad--Kokoro-82M'
+$kokoroSha = (Get-Content -LiteralPath (Join-Path $kokoroRoot 'refs\main') -ErrorAction SilentlyContinue | Select-Object -First 1)
+if ($kokoroSha) { $kokoroSha = $kokoroSha.Trim() }
+$kokoroSnapshot = Join-Path $kokoroRoot "snapshots\$kokoroSha"
+foreach ($relativeFile in 'config.json', 'kokoro-v1_0.pth', 'voices\af_heart.pt') {
+  $item = Get-Item -LiteralPath (Join-Path $kokoroSnapshot $relativeFile) -Force -ErrorAction SilentlyContinue
+  if (-not $item -or $item.Length -le 0 -or $item.LinkType) { throw "Kokoro cache not materialized as a real file: $relativeFile" }
 }
 
 if ($ValidateInputsOnly) {
-  Write-Host "FULL-OFFLINE INSTALLER INPUTS VALID"
+  Write-Host 'FULL-OFFLINE INSTALLER INPUTS VALID'
   Write-Host "App installer: $SetupExe"
   Write-Host "Default payload: $PayloadDir"
   Write-Host "CosyVoice venv: $CosyVoiceVenvDir"
-  Write-Host "CosyVoice backend: $VoiceBackendsDir"
-  Write-Host "Kokoro triplet: $sha"
-  Write-Host "CosyVoice venv, model, wrapper, and app-local wetext graph: verified"
+  Write-Host "Voice backends: $VoiceBackendsDir"
   return
 }
 
 $iscc = Find-Iscc -Explicit $IsccPath
-New-Item -ItemType Directory -Force -Path $OutputDir | Out-Null
+$sevenZip = Find-SevenZip -Explicit $SevenZipPath
+$oscdimg = Find-Oscdimg -Explicit $OscdimgPath
+if (-not $ArchiveCacheDir) { $ArchiveCacheDir = Join-Path $repoRoot 'product\desktop\build_target\offline_archive_cache' }
+if (-not (Test-Path -LiteralPath $ArchiveCacheDir)) { New-Item -ItemType Directory -Force -Path $ArchiveCacheDir | Out-Null }
+$ArchiveCacheDir = (Resolve-Path -LiteralPath $ArchiveCacheDir).Path
 
-# ISCC 6.7 still fails while opening source files whose absolute paths cross the
-# classic Windows path boundary. Both Node and Python dependency trees can do so
-# even though the eventual install paths are valid. Present the already-validated
-# inputs through short, repo-local directory junctions for compilation. Junction
-# removal does not modify or remove any target content.
-$junctionRoot = Join-Path $repoRoot '.inno_stage'
-$junctionTargets = [ordered]@{
-  p = (Resolve-Path -LiteralPath $PayloadDir).Path
-  c = (Resolve-Path -LiteralPath $CosyVoiceVenvDir).Path
-  v = (Resolve-Path -LiteralPath $VoiceBackendsDir).Path
-}
-$baseName = "VoxVulgi_{0}_x64_offline_full_setup" -f $AppVersion
-if ($FinalizeExistingArtifacts) {
-  if (-not $SuccessfulCompileLog -or -not (Test-Path -LiteralPath $SuccessfulCompileLog -PathType Leaf)) {
-    throw "-FinalizeExistingArtifacts requires -SuccessfulCompileLog pointing to the completed ISCC stdout log."
-  }
-  $expectedCompiledSetup = [System.IO.Path]::GetFullPath((Join-Path $OutputDir "$baseName.exe"))
-  $compileLogTail = Get-Content -LiteralPath $SuccessfulCompileLog -Tail 20 -ErrorAction Stop
-  if (-not ($compileLogTail | Select-String -SimpleMatch 'Successful compile (') -or
-      -not ($compileLogTail | Select-String -SimpleMatch $expectedCompiledSetup)) {
-    throw "Finalize refused: compile log tail does not prove successful ISCC output at $expectedCompiledSetup"
-  }
-}
+$stageRoot = Join-Path $OutputDir ('.wp0308_iso_stage_{0}' -f $PID)
+$isoRoot = Join-Path $stageRoot 'iso_root'
+$stagePayloadRoot = Join-Path $isoRoot 'payload'
+$isoName = "VoxVulgi_{0}_x64_offline_full.iso" -f $AppVersion
+$isoPath = Join-Path $OutputDir $isoName
+$artifactManifestPath = Join-Path $OutputDir ("VoxVulgi_{0}_x64_offline_full.artifacts.json" -f $AppVersion)
 $buildMutex = [System.Threading.Mutex]::new($false, 'Local\VoxVulgiOfflineInstallerBuild')
 $buildMutexAcquired = $false
 try {
-  try {
-    $buildMutexAcquired = $buildMutex.WaitOne(0)
-  } catch [System.Threading.AbandonedMutexException] {
-    # The previous compiler crashed; this process now owns the abandoned mutex and may
-    # validate/clean only the known junction entries below before rebuilding.
-    $buildMutexAcquired = $true
+  try { $buildMutexAcquired = $buildMutex.WaitOne(0) } catch [System.Threading.AbandonedMutexException] { $buildMutexAcquired = $true }
+  if (-not $buildMutexAcquired) { throw 'Another VoxVulgi full-offline installer build is already running.' }
+  Remove-ManagedWorkTree -Path $stageRoot -AllowedParent $OutputDir
+  New-Item -ItemType Directory -Force -Path $stagePayloadRoot | Out-Null
+  $archiveSpecs = @(
+    [ordered]@{ name = 'payload_tools'; root = (Join-Path $PayloadDir 'tools') },
+    [ordered]@{ name = 'payload_models'; root = (Join-Path $PayloadDir 'models') },
+    [ordered]@{ name = 'payload_huggingface'; root = (Join-Path $PayloadDir 'cache\huggingface') },
+    [ordered]@{ name = 'payload_cosyvoice_venv'; root = $CosyVoiceVenvDir },
+    [ordered]@{ name = 'payload_voice_backends'; root = $VoiceBackendsDir }
+  )
+  $archives = @()
+  foreach ($spec in $archiveSpecs) {
+    $archives += New-OrReusePayloadArchive -SevenZip $sevenZip -Name $spec.name -SourceRoot $spec.root -CacheRoot $ArchiveCacheDir -StagePayloadRoot $stagePayloadRoot -Refresh:$RefreshPayloadArchives
   }
-  if (-not $buildMutexAcquired) {
-    throw "Another VoxVulgi full-offline installer build already owns the short-path staging area."
+  $payloadManifest = [ordered]@{
+    schema_version = 1; wp = 'WP-0308'; app_version = $AppVersion
+    created_at_utc = (Get-Date).ToUniversalTime().ToString('yyyy-MM-ddTHH:mm:ssZ')
+    archive_format = '7z'; solid = $false; compression_profile = 'fast-lzma2'; archives = $archives
   }
-  if (Test-Path -LiteralPath $junctionRoot) {
-    $existing = Get-Item -LiteralPath $junctionRoot -Force
-    if ($existing.Attributes -band [System.IO.FileAttributes]::ReparsePoint) {
-      throw "Refusing unexpected reparse point at installer junction root: $junctionRoot"
-    }
-    Get-ChildItem -LiteralPath $junctionRoot -Force | ForEach-Object {
-      if (-not $junctionTargets.Contains($_.Name)) {
-        throw "Refusing unexpected installer staging entry: $($_.FullName)"
-      }
-      if (-not ($_.Attributes -band [System.IO.FileAttributes]::ReparsePoint)) {
-        throw "Refusing to clean non-junction installer staging entry: $($_.FullName)"
-      }
-      Remove-InstallerJunctionOnly -Path $_.FullName
-    }
-  } else {
-    New-Item -ItemType Directory -Path $junctionRoot | Out-Null
-  }
-  if ($FinalizeExistingArtifacts) {
-    Write-Host "Finalizing existing ISCC artifacts without recompiling: $baseName"
-  } else {
-    foreach ($entry in $junctionTargets.GetEnumerator()) {
-      New-Item -ItemType Junction -Path (Join-Path $junctionRoot $entry.Key) -Target $entry.Value | Out-Null
-    }
-    $compilePayloadDir = Join-Path $junctionRoot 'p'
-    $compileCosyVoiceDir = Join-Path $junctionRoot 'c'
-    $compileVoiceBackendsDir = Join-Path $junctionRoot 'v'
-    Get-ChildItem -LiteralPath $OutputDir -File -ErrorAction Stop | Where-Object {
-      $_.Name -eq "$baseName.exe" -or
-      $_.Name -eq "$baseName.artifacts.json" -or
-      $_.Name -like "$baseName-*.bin"
-    } | ForEach-Object {
-      Remove-Item -LiteralPath $_.FullName -Force
-    }
+  [System.IO.File]::WriteAllText(
+    (Join-Path $isoRoot 'payload_manifest.json'),
+    (($payloadManifest | ConvertTo-Json -Depth 8) + "`n"),
+    [System.Text.UTF8Encoding]::new($false)
+  )
+  $readme = "VoxVulgi $AppVersion - Full Offline Installer`r`n`r`nDouble-click Install_VoxVulgi.exe. No terminal, Python installation, model download,`r`nor manual payload extraction is required. Keep this ISO mounted until setup completes.`r`nThe full default localization pipeline is included for offline use.`r`n"
+  [System.IO.File]::WriteAllText((Join-Path $isoRoot 'README.txt'), $readme, [System.Text.UTF8Encoding]::new($false))
 
-    Write-Host "ISCC:       $iscc"
-    Write-Host "ISS:        $iss"
-    Write-Host "PayloadDir: $PayloadDir"
-    Write-Host "CosyVoice:  $CosyVoiceVenvDir"
-    Write-Host "Backends:   $VoiceBackendsDir"
-    Write-Host "SetupExe:   $SetupExe"
-    Write-Host "OutputDir:  $OutputDir"
-    Write-Host "AppVersion: $AppVersion"
-    Write-Host "Kokoro triplet verified as real files under snapshot $sha"
-    Write-Host "CosyVoice venv, model, wrapper, and app-local wetext graph verified."
-    Write-Host ""
-    Write-Host "Compiling (this is large: multi-GB payload -> setup.exe plus required .bin slices; expect many minutes)..."
+  $archiveByName = @{}
+  foreach ($archive in $archives) { $archiveByName[$archive.name] = $archive }
+  & $iscc "/DAppVersion=$AppVersion" "/DSetupExe=$SetupExe" "/DOutputDir=$isoRoot" `
+    "/DToolsArchiveBytes=$($archiveByName.payload_tools.uncompressed_bytes)" `
+    "/DModelsArchiveBytes=$($archiveByName.payload_models.uncompressed_bytes)" `
+    "/DHuggingFaceArchiveBytes=$($archiveByName.payload_huggingface.uncompressed_bytes)" `
+    "/DCosyVoiceVenvArchiveBytes=$($archiveByName.payload_cosyvoice_venv.uncompressed_bytes)" `
+    "/DVoiceBackendsArchiveBytes=$($archiveByName.payload_voice_backends.uncompressed_bytes)" `
+    "/DToolsArchiveSha256=$($archiveByName.payload_tools.sha256)" `
+    "/DModelsArchiveSha256=$($archiveByName.payload_models.sha256)" `
+    "/DHuggingFaceArchiveSha256=$($archiveByName.payload_huggingface.sha256)" `
+    "/DCosyVoiceVenvArchiveSha256=$($archiveByName.payload_cosyvoice_venv.sha256)" `
+    "/DVoiceBackendsArchiveSha256=$($archiveByName.payload_voice_backends.sha256)" $iss
+  if ($LASTEXITCODE -ne 0) { throw "ISCC failed with exit code $LASTEXITCODE" }
+  $installerPath = Join-Path $isoRoot 'Install_VoxVulgi.exe'
+  if (-not (Test-Path -LiteralPath $installerPath -PathType Leaf)) { throw "Inno wrapper not found after compilation: $installerPath" }
 
-    & $iscc `
-      "/DAppVersion=$AppVersion" `
-      "/DPayloadDir=$compilePayloadDir" `
-      "/DCosyVoiceVenvDir=$compileCosyVoiceDir" `
-      "/DVoiceBackendsDir=$compileVoiceBackendsDir" `
-      "/DSetupExe=$SetupExe" `
-      "/DOutputDir=$OutputDir" `
-      $iss
-    if ($LASTEXITCODE -ne 0) { throw "ISCC failed with exit code $LASTEXITCODE" }
+  if (Test-Path -LiteralPath $isoPath) { Remove-Item -LiteralPath $isoPath -Force }
+  & $oscdimg -m -o -u2 -udfver102 $isoRoot $isoPath
+  if ($LASTEXITCODE -ne 0) { throw "Oscdimg failed with exit code $LASTEXITCODE" }
+  if (-not (Test-Path -LiteralPath $isoPath -PathType Leaf)) { throw "ISO was not created: $isoPath" }
+  $requiredIsoPaths = @('Install_VoxVulgi.exe', 'README.txt', 'payload_manifest.json') + @($archives | ForEach-Object { $_.file })
+  Assert-IsoContents -SevenZip $sevenZip -Iso $isoPath -RequiredPaths $requiredIsoPaths
+
+  $isoItem = Get-Item -LiteralPath $isoPath
+  $artifactManifest = [ordered]@{
+    schema_version = 2; wp = 'WP-0308'; app_version = $AppVersion
+    created_at_utc = (Get-Date).ToUniversalTime().ToString('yyyy-MM-ddTHH:mm:ssZ')
+    public_artifact = $isoItem.Name; user_required_download_count = 1
+    bytes = [int64]$isoItem.Length
+    sha256 = (Get-FileHash -Algorithm SHA256 -LiteralPath $isoPath).Hash.ToLowerInvariant()
+    iso_format = 'UDF-1.02'; root_entrypoint = 'Install_VoxVulgi.exe'; payload = $archives
   }
+  [System.IO.File]::WriteAllText($artifactManifestPath, (($artifactManifest | ConvertTo-Json -Depth 8) + "`n"), [System.Text.UTF8Encoding]::new($false))
+  Write-Host ''
+  Write-Host "SINGLE-UNIT OFFLINE ISO BUILT: $isoPath"
+  Write-Host 'User-required downloads: 1'
+  Write-Host "Artifact manifest: $artifactManifestPath"
 } finally {
-  if ($buildMutexAcquired) {
-    foreach ($entry in $junctionTargets.GetEnumerator()) {
-      $junction = Join-Path $junctionRoot $entry.Key
-      if (Test-Path -LiteralPath $junction) {
-        Remove-InstallerJunctionOnly -Path $junction
-      }
-    }
-    if ((Test-Path -LiteralPath $junctionRoot) -and -not (Get-ChildItem -LiteralPath $junctionRoot -Force)) {
-      Remove-Item -LiteralPath $junctionRoot -Force
-    }
-    $buildMutex.ReleaseMutex()
-  }
+  Remove-ManagedWorkTree -Path $stageRoot -AllowedParent $OutputDir
+  if ($buildMutexAcquired) { $buildMutex.ReleaseMutex() }
   $buildMutex.Dispose()
 }
-
-$out = Join-Path $OutputDir ("$baseName.exe")
-if (-not (Test-Path -LiteralPath $out -PathType Leaf)) { throw "Compile reported success but setup executable was not found: $out" }
-$slices = @(Get-ChildItem -LiteralPath $OutputDir -File -Filter "$baseName-*.bin" | Sort-Object Name)
-if ($slices.Count -eq 0) { throw "Disk-spanned compile produced no payload slices beside: $out" }
-$artifacts = @((Get-Item -LiteralPath $out)) + $slices
-foreach ($artifact in $artifacts) {
-  if ($artifact.Length -le 0) { throw "Offline installer artifact is empty: $($artifact.FullName)" }
-}
-$totalBytes = [int64](($artifacts | Measure-Object -Property Length -Sum).Sum)
-$manifest = [ordered]@{
-  schema_version = 1
-  app_version = $AppVersion
-  created_at_utc = (Get-Date).ToUniversalTime().ToString('yyyy-MM-ddTHH:mm:ssZ')
-  setup_exe = (Get-Item -LiteralPath $out).Name
-  payload_slices = @($slices | ForEach-Object { $_.Name })
-  total_bytes = $totalBytes
-  files = @($artifacts | ForEach-Object { [ordered]@{ name = $_.Name; bytes = [int64]$_.Length } })
-}
-$manifestPath = Join-Path $OutputDir "$baseName.artifacts.json"
-$manifestJson = ($manifest | ConvertTo-Json -Depth 5) + "`n"
-[System.IO.File]::WriteAllText($manifestPath, $manifestJson, [System.Text.UTF8Encoding]::new($false))
-Write-Host ""
-Write-Host "OFFLINE INSTALLER SET BUILT: $OutputDir"
-Write-Host "Setup: $out"
-Write-Host "Slices: $($slices.Count)"
-Write-Host ("Total size: {0:n1} MB ({1:n2} GB)" -f ($totalBytes / 1MB), ($totalBytes / 1GB))
-Write-Host "Artifact manifest: $manifestPath"

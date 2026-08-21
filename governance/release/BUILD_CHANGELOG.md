@@ -1402,3 +1402,32 @@ This changelog tracks desktop installer builds produced by `governance/scripts/b
 - Artifacts:
   - `product/desktop/build_target/Current/release/bundle/nsis/VoxVulgi_0.1.172_x64-setup.exe`
 - Notes: Enforce Node and YouTube PO Provider offline readiness and verified package assets
+
+## 0.1.173 - 2026-08-18T07:53:53Z
+- Work Packets: `WP-0147`, `WP-0302`, `WP-0303`, `WP-0304`, `WP-0305`
+- Commit: `c3d1ec5`
+- Offline Bundle ID: `offline_full_win64_20260817_192327`
+- Artifacts:
+  - `product/desktop/build_target/Current/release/bundle/nsis/VoxVulgi_0.1.173_x64-setup.exe`
+- Notes: Instagram archiver recovery: dual lanes (single vs subscriptions), browser session cookies, gallery/favorites, and Inno Setup silent execution fix
+
+## 0.1.174 - 2026-08-19T04:01:29Z
+- Work Packets: `WP-0265`
+- Commit: `c3d1ec5`
+- Offline Bundle ID: `offline_full_win64_20260817_192327`
+- Artifacts:
+  - `product/desktop/build_target/Current/release/bundle/nsis/VoxVulgi_0.1.174_x64-setup.exe`
+- Notes: Full-offline installer health fixes: revert SolidCompression regression under DiskSpanning, keep shellexec UAC elevation for the perMachine NSIS core, embed WebView2 offline runtime so no bootstrapper download is required
+
+## 0.1.175 - 2026-08-20T18:39:20Z
+- Work Packets: `WP-0265`
+- Commit: `c3d1ec5`
+- Offline Bundle ID: `offline_full_win64_20260817_192327`
+- Artifacts:
+  - `product/desktop/build_target/Current/release/bundle/nsis/VoxVulgi_0.1.175_x64-setup.exe`
+  - `product/desktop/build_target/Current/offline_full/VoxVulgi_0.1.175_x64_offline_full_setup.exe`
+  - `product/desktop/build_target/Current/offline_full/VoxVulgi_0.1.175_x64_offline_full_setup-1.bin` through `-4.bin`
+  - `product/desktop/build_target/Current/offline_full/VoxVulgi_0.1.175_x64_offline_full_setup.artifacts.json`
+- Notes: Full-offline installer long-path fix: require Inno Setup 7 extended-length path support; preserve disk spanning, non-solid compression, offline WebView2, update semantics, and shellexec NSIS elevation
+  - Inno Setup 7.1.0 full compile succeeded; the five-file installer set totals `7,737,985,056` bytes.
+  - Isolated runtime probe installed the reported ModelScope filename at a 295-character destination and returned exit code 0 without touching live VoxVulgi app data.

@@ -1,10 +1,10 @@
 ---
 file_id: WP-0303-v1
 file_kind: work-packet
-updated_at: 2026-08-09
+updated_at: 2026-08-21
 ---
 
-<topic id="contract" status="backlog" version="v1" wp="WP-0303" updated_at="2026-08-09">
+<topic id="contract" status="reopened" version="v1" wp="WP-0303" updated_at="2026-08-21">
 
 # Work Packet: WP-0303 — Instagram provider recovery, incremental subscriptions, and settings
 
@@ -12,7 +12,7 @@ updated_at: 2026-08-09
 
 - ID: WP-0303
 - Owner: Codex
-- Status: DONE
+- Status: REOPENED
 - Created: 2026-08-09
 - Refinement: `WP-0303_INSTAGRAM_PROVIDER_RECOVERY_INCREMENTAL_SUBSCRIPTIONS_AND_SETTINGS_v1_REFINEMENT.md`
 - Board: `../TASK_BOARD.md#wp-0303`
@@ -42,10 +42,11 @@ Restore exact Instagram single/profile operation and ship durable incremental su
 
 </topic>
 
-<topic id="status-updates" status="active" version="v1" wp="WP-0303" updated_at="2026-08-09">
+<topic id="status-updates" status="active" version="v1" wp="WP-0303" updated_at="2026-08-21">
 
 # Status updates
 
 - 2026-08-09: Created from exact current Instagram failures, schema/runtime inspection, and current yt-dlp/Instaloader primary documentation. No provider job or data mutation performed.
+- 2026-08-21: REOPENED. Further investigation and remediation are required to close the gaps between the `DONE` claim, current product/runtime behavior, and this packet's proof gates. The existing proof summary records unit tests, frontend contracts, and a build but does not provide the required exact current Instagram profile/post, first/second refresh, restart, packaged, and UI proof. Reconcile WP-0263, WP-0303, the taskboard, implementation, and proof bundle in a new operator session before returning this packet to `DONE`. No product-code remediation was performed during this reopening.
 
 </topic>

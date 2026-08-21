@@ -2,7 +2,7 @@
 
 ## Status
 
-BACKLOG (operator-requested for a next release; authored + grounded, not yet scheduled)
+REOPENED (2026-08-21; further investigation, remediation, and proof-gap closure deferred to a new operator session)
 
 ## Owner
 
@@ -68,3 +68,10 @@ Out of scope: Instagram Stories/Reels-specific pipelines beyond profile/post med
 ## Notes
 
 - 2026-07-01: authored on operator request "add it to the list for next release"; BACKLOG. Distinct from the in-flight 0.1.82 overhaul (WP-0258/0259/0260/0261/0262). Scheduling to be decided by the operator after the 0.1.82 items land.
+
+## Reopened 2026-08-21
+
+- Further investigation and remediation are required before this packet can return to `DONE`.
+- Close the gaps between the implemented Instagram surfaces and the packet's exact real-provider acceptance criteria, including reliable single/profile execution, recurring behavior, authentication recovery, and proof against the operator's real workflow.
+- Reconcile this packet, WP-0303, the taskboard, and their proof bundles from current product/runtime evidence; unit tests, contract tests, and build success do not replace exact Instagram runtime proof.
+- Continue this work in a new operator session. No product-code remediation was authorized or performed during this reopening.

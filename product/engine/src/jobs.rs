@@ -21259,6 +21259,25 @@ fn run_command_output_with_control(
     job_id: Option<&str>,
     timeout_secs: u64,
 ) -> std::result::Result<std::process::Output, CommandRunError> {
+    run_command_output_with_control_inner(paths, cmd, job_id, timeout_secs, false)
+}
+
+fn run_yt_dlp_output_with_control(
+    paths: &AppPaths,
+    cmd: &mut std::process::Command,
+    job_id: Option<&str>,
+    timeout_secs: u64,
+) -> std::result::Result<std::process::Output, CommandRunError> {
+    run_command_output_with_control_inner(paths, cmd, job_id, timeout_secs, true)
+}
+
+fn run_command_output_with_control_inner(
+    paths: &AppPaths,
+    cmd: &mut std::process::Command,
+    job_id: Option<&str>,
+    timeout_secs: u64,
+    bind_yt_dlp_lifecycle: bool,
+) -> std::result::Result<std::process::Output, CommandRunError> {
     use std::io::ErrorKind;
     use std::process::Stdio;
     use std::time::Instant;
@@ -21267,6 +21286,15 @@ fn run_command_output_with_control(
     cmd.stderr(Stdio::piped());
 
     let mut child = cmd.spawn().map_err(CommandRunError::Spawn)?;
+    if bind_yt_dlp_lifecycle {
+        if let Err(error) = cmd::bind_yt_dlp_child_to_app_lifecycle(&child) {
+            kill_child_process_tree(&mut child);
+            return Err(CommandRunError::Spawn(std::io::Error::new(
+                error.kind(),
+                format!("could not bind yt-dlp to the VoxVulgi process lifecycle: {error}"),
+            )));
+        }
+    }
 
     let stdout = child.stdout.take().ok_or_else(|| {
         CommandRunError::Wait(std::io::Error::new(ErrorKind::Other, "stdout pipe missing"))
@@ -21918,7 +21946,7 @@ fn run_yt_dlp(
             None,
         );
         let launch_started = std::time::Instant::now();
-        match run_command_output_with_control(paths, &mut cmd, job_id, timeout_secs) {
+        match run_yt_dlp_output_with_control(paths, &mut cmd, job_id, timeout_secs) {
             Ok(output) => {
                 if output.status.success() {
                     emit_downloader_causal_event(

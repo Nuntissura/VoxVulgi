@@ -37,6 +37,19 @@ These rules apply to frontend builds, backend builds, desktop builds, installer 
 - Before starting a payload-refreshing build, state that it can be slow because it downloads, installs, verifies, and packages the local toolchain and models.
 - Payload refresh logs must show the active dependency/package/model stage clearly enough that a long run can be distinguished from a hang.
 
+## Single-Unit Offline Installer Build Gate (WP-0308)
+
+- [VV-BUILD-INSTALL-001] Every future public full-offline install/update build must publish one UDF ISO as the sole user-required artifact.
+- [VV-BUILD-INSTALL-002] The ISO must contain root `Install_VoxVulgi.exe`, `README.txt`, the payload manifest, and every governed non-solid payload archive; list and verify the completed ISO before publication.
+- [VV-BUILD-INSTALL-003] The installer definition must use Inno 7 native `external extractarchive` entries and must not compile raw recursive dependency trees or require public `setup-*.bin` slices.
+- [VV-BUILD-INSTALL-004] Archive builds must be content-fingerprinted and reused when inputs are unchanged; explicit archive refreshes must show current root, file count, source bytes, archive bytes, elapsed time, and verification state.
+- [VV-BUILD-INSTALL-005] Every archive must pass `7z t`, path-safety inventory, and destination-boundary checks before ISO creation.
+- [VV-BUILD-INSTALL-006] Every installer run must enable logging, continuously checkpoint `installer_<version>_latest.log`, and retain a timestamped final log under `%APPDATA%\com.voxvulgi.voxvulgi\diagnostics\installer` on success, failure, or cancellation.
+- [VV-BUILD-INSTALL-007] Release verification must prove at least 2x representative Python-tree extraction speed versus the legacy raw-file fixture and target at most 30 minutes for a full clean-profile offline install on the documented reference local-SSD machine with default security settings.
+- [VV-BUILD-INSTALL-008] The single canonical build procedure is `governance/release/OFFLINE_INSTALLER_BUILD_MANUAL.md`; read it before installer work and update it whenever installer inputs, commands, outputs, tools, proof gates, or recovery behavior changes.
+- [VV-BUILD-INSTALL-009] The durable log must cover wrapper identity, named payload phase boundaries, core-installer handoff, before/after installed state, observed registry and binary versions, verification result, failure reason, and terminal outcome.
+- [VV-BUILD-INSTALL-010] Refuse publication when the wrapper can report success without proving the expected core uninstall-registry version and installed main-binary file version.
+
 ## No More Cards
 
 - Do not introduce new card-based UI.

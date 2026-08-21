@@ -15188,6 +15188,7 @@ pub fn run() {
         .expect("error while building tauri application")
         .run(|_app_handle, event| {
             if let tauri::RunEvent::Exit = event {
+                let _ = voxvulgi_engine::cmd::shutdown_yt_dlp_children();
                 cancel_youtube_retention_worker();
                 signal_watcher_stop();
                 cleanup_agent_bridge_files();

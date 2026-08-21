@@ -73,7 +73,9 @@ Pick the first real implementation WP from `governance/workflow/ROADMAP.md` and 
 
 - Desktop Windows packaging uses a two-tier distribution strategy:
   1. **Core App Installer (NSIS)**: Produces the per-machine application binary, uninstaller, shortcuts, and maintenance mode selector.
-  2. **Full Offline Spanned Installer (Inno Setup 6)**: Wraps the core NSIS setup and disk-spans the full ~13 GB offline payload (tools, models, python, HF cache, CosyVoice). This bypasses the 2 GB 32-bit NSIS archive limit, lays down all dependencies directly into `%APPDATA%\com.voxvulgi.voxvulgi` with an informative progress bar, and rewrites the Python `pyvenv.cfg` paths automatically (`governance/scripts/build_offline_full_installer.ps1`).
+  2. **Single-unit Full Offline ISO (Inno Setup 7+)**: Produces one UDF ISO with root `Install_VoxVulgi.exe` and external non-solid payload archives extracted natively by Inno. No public companion `.bin` slices, manual archive extraction, terminal, Python/pip, or network step is allowed (`governance/scripts/build_offline_full_installer.ps1`).
+- The full-offline ISO is also the public updater: every public install AND update artifact carries the complete dependency payload (all models, portable Python, wheels, caches, tools), and an update must never require network downloads for the default path. Running it over an existing install performs `Update` semantics — settings and database preserved, dependency payload trees refreshed; only the explicit full actions remove user data.
+- Before creating any full-offline installer or updater, follow the single canonical no-context procedure in `governance/release/OFFLINE_INSTALLER_BUILD_MANUAL.md`. Normative gates are `[VV-INSTALL-001]` through `[VV-INSTALL-010]` in `AGENTS.md`, mirrored in `CLAUDE.md`, with architecture detail in `TECHNICAL_DESIGN.md` section 2.1.
 - Use and preserve these maintenance labels in installer UX/copy:
   - `Update`
   - `Reinstall (keep preferences and options)`

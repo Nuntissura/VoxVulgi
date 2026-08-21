@@ -1,10 +1,10 @@
 ---
 file_id: WP-0304-v1
 file_kind: work-packet
-updated_at: 2026-08-09
+updated_at: 2026-08-21
 ---
 
-<topic id="contract" status="backlog" version="v1" wp="WP-0304" updated_at="2026-08-09">
+<topic id="contract" status="reopened" version="v1" wp="WP-0304" updated_at="2026-08-21">
 
 # Work Packet: WP-0304 — TikTok single, profile subscriptions, and provider settings
 
@@ -12,7 +12,7 @@ updated_at: 2026-08-09
 
 - ID: WP-0304
 - Owner: Codex
-- Status: DONE
+- Status: REOPENED
 - Created: 2026-08-09
 - Refinement: `WP-0304_TIKTOK_SINGLE_PROFILE_SUBSCRIPTIONS_AND_PROVIDER_SETTINGS_v1_REFINEMENT.md`
 - Board: `../TASK_BOARD.md#wp-0304`
@@ -42,10 +42,11 @@ Add first-class TikTok single-video and recurring profile/channel archiving with
 
 </topic>
 
-<topic id="status-updates" status="active" version="v1" wp="WP-0304" updated_at="2026-08-09">
+<topic id="status-updates" status="active" version="v1" wp="WP-0304" updated_at="2026-08-21">
 
 # Status updates
 
 - 2026-08-09: Created from current repo/provider inspection and current yt-dlp TikTok extractor source. No product code, provider state, or operator data changed.
+- 2026-08-21: REOPENED. Further investigation and remediation are required to close the gaps between the `DONE` claim, current product code, and this packet's first-class TikTok contract. Current evidence shows generic TikTok URL/provider labeling and subscription acceptance, but the Options module remains unavailable, there is no dedicated TikTok execution track, the recurring path reuses the YouTube subscription machinery, and the proof bundle lacks the required exact single/profile/second-refresh/restart/packaged/UI evidence. Reconcile the taskboard, implementation, and proof bundle in a new operator session before returning this packet to `DONE`. No product-code remediation was performed during this reopening.
 
 </topic>
