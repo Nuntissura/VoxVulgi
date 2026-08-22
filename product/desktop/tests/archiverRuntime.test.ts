@@ -71,7 +71,10 @@ test("download direct job context prefers cached target title and keeps source u
 test("job track labels use only the durable scheduler vocabulary", () => {
   assert.equal(jobTrackLabel("youtube_single"), "YouTube single");
   assert.equal(jobTrackLabel("youtube_recurring"), "YouTube background");
-  assert.equal(jobTrackLabel("instagram"), "Instagram");
+  assert.equal(jobTrackLabel("instagram_single"), "Instagram single");
+  assert.equal(jobTrackLabel("instagram_recurring"), "Instagram background");
+  assert.equal(jobTrackLabel("tiktok_single"), "TikTok single");
+  assert.equal(jobTrackLabel("tiktok_recurring"), "TikTok background");
   assert.equal(jobTrackLabel("other_video"), "Other video");
   assert.equal(jobTrackLabel("image_archive"), "Image Archive");
   assert.equal(jobTrackLabel("localization"), "Localization");
@@ -85,13 +88,13 @@ test("direct job context keeps origin separate from persisted track", () => {
       id: "job-instagram",
       item_id: null,
       job_type: "download_direct_url",
-      track: "instagram",
+      track: "instagram_single",
       params_json: JSON.stringify({ url: "https://www.instagram.com/reel/example" }),
     },
     {},
   );
 
-  assert.equal(context.track_label, "Instagram");
+  assert.equal(context.track_label, "Instagram single");
   assert.equal(context.origin, "Direct download");
   assert.notEqual(context.origin, "Single video");
 });

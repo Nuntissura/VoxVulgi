@@ -116,6 +116,20 @@ fn run() -> Result<()> {
             println!("yt-dlp already installed (bundled).");
         }
 
+        let instagram_provider = tools::instagram_profile_provider_status(&paths);
+        if !instagram_provider.installed {
+            println!("installing pinned Instagram profile provider...");
+            let next = tools::install_instagram_profile_provider(&paths)?;
+            if !next.installed {
+                return Err(EngineError::InstallFailed(
+                    "Instagram profile provider install did not pass byte and version verification"
+                        .to_string(),
+                ));
+            }
+        } else {
+            println!("Instagram profile provider already installed and verified.");
+        }
+
         let js_runtime = tools::js_runtime_tools_status(&paths);
         if !js_runtime.bundled_deno_installed {
             println!("installing Deno JS runtime...");
@@ -275,6 +289,18 @@ fn run() -> Result<()> {
             }
         } else {
             println!("CosyVoice 2 pack already installed.");
+        }
+    }
+
+    #[cfg(windows)]
+    {
+        println!("installing pinned Instagram profile enumerator into bundled Python...");
+        let status = tools::install_instagram_profile_enumerator(&paths)?;
+        if !status.installed || !status.enumerator_ready {
+            return Err(EngineError::InstallFailed(
+                "Instagram profile enumerator did not pass offline readiness verification"
+                    .to_string(),
+            ));
         }
     }
 

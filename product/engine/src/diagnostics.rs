@@ -1051,10 +1051,20 @@ INSERT INTO job(
         for vector in vectors {
             let redacted = redact_free_text(&vector.input);
             for secret in vector.secrets {
-                assert!(!redacted.to_ascii_lowercase().contains(&secret.to_ascii_lowercase()), "secret leaked: {redacted}");
+                assert!(
+                    !redacted
+                        .to_ascii_lowercase()
+                        .contains(&secret.to_ascii_lowercase()),
+                    "secret leaked: {redacted}"
+                );
             }
             for context in vector.preserve {
-                assert!(redacted.to_ascii_lowercase().contains(&context.to_ascii_lowercase()), "context lost: {redacted}");
+                assert!(
+                    redacted
+                        .to_ascii_lowercase()
+                        .contains(&context.to_ascii_lowercase()),
+                    "context lost: {redacted}"
+                );
             }
             assert!(redacted.contains("<redacted>"));
         }

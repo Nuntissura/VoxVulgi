@@ -506,6 +506,181 @@ pub fn install_js_runtime_tools(paths: &AppPaths) -> Result<JsRuntimeToolsStatus
 }
 
 #[derive(Debug, Clone, Serialize)]
+pub struct InstagramProfileProviderStatus {
+    pub installed: bool,
+    pub enumerator_ready: bool,
+    pub version: String,
+    pub executable_path: String,
+    pub enumerator_script_path: String,
+    pub readiness_error: Option<String>,
+}
+
+const INSTAGRAM_PROFILE_ENUMERATOR_SCRIPT: &[u8] =
+    include_bytes!("../resources/tooling/instagram_profile_enumerator.py");
+
+fn instagram_profile_enumerator_version(paths: &AppPaths) -> Option<String> {
+    let python = python_venv_python_path(paths).ok()?;
+    let output = crate::cmd::command(python)
+        .args(["-c", "import instaloader; print(instaloader.__version__)"])
+        .output()
+        .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    String::from_utf8(output.stdout)
+        .ok()
+        .map(|value| value.trim().to_string())
+}
+
+pub fn instagram_profile_provider_status(paths: &AppPaths) -> InstagramProfileProviderStatus {
+    let pin = &pinned_dependency_manifest::manifest().instagram_profile_provider;
+    let executable = paths.instagram_profile_provider_exe();
+    let size_matches = std::fs::metadata(&executable)
+        .map(|metadata| metadata.len() == pin.executable_bytes)
+        .unwrap_or(false);
+    let hash_matches = size_matches
+        && file_sha256_hex(&executable)
+            .is_some_and(|hash| hash.eq_ignore_ascii_case(&pin.executable_sha256_hex));
+    let version_matches = hash_matches
+        && tool_version_first_line_with_arg(&executable, "--version")
+            .is_some_and(|version| version.trim() == pin.version);
+    let script = paths.instagram_profile_enumerator_script();
+    let script_matches = std::fs::read(&script)
+        .map(|bytes| bytes == INSTAGRAM_PROFILE_ENUMERATOR_SCRIPT)
+        .unwrap_or(false);
+    let enumerator_ready = script_matches
+        && instagram_profile_enumerator_version(paths)
+            .is_some_and(|version| version == pin.version);
+    InstagramProfileProviderStatus {
+        installed: version_matches,
+        enumerator_ready,
+        version: pin.version.clone(),
+        executable_path: executable.to_string_lossy().to_string(),
+        enumerator_script_path: script.to_string_lossy().to_string(),
+        readiness_error: if version_matches && enumerator_ready {
+            None
+        } else if !version_matches {
+            Some("the pinned Instagram profile provider is missing or failed byte/version verification; rebuild or repair the offline tooling payload".to_string())
+        } else {
+            Some("the pinned Instagram profile enumerator module/script is missing from the bundled Python environment; rebuild or repair the offline tooling payload".to_string())
+        },
+    }
+}
+
+#[cfg(windows)]
+pub fn install_instagram_profile_provider(
+    paths: &AppPaths,
+) -> Result<InstagramProfileProviderStatus> {
+    let current = instagram_profile_provider_status(paths);
+    if current.installed
+        && std::fs::read(paths.instagram_profile_enumerator_script())
+            .map(|bytes| bytes == INSTAGRAM_PROFILE_ENUMERATOR_SCRIPT)
+            .unwrap_or(false)
+    {
+        return Ok(current);
+    }
+    let pin = &pinned_dependency_manifest::manifest().instagram_profile_provider;
+    let install_dir = paths.instagram_profile_provider_dir();
+    std::fs::create_dir_all(&install_dir)?;
+    let archive = install_dir.join(format!("instaloader-{}.zip", pin.version));
+    download_verified_file(
+        &pin.url,
+        &archive,
+        pin.file_bytes,
+        &pin.sha256_hex,
+        "Instagram profile provider",
+    )?;
+    extract_zip_strip_prefix(&archive, &install_dir, "")?;
+    crate::persistence::atomic_write_bytes(
+        &paths.instagram_profile_enumerator_script(),
+        INSTAGRAM_PROFILE_ENUMERATOR_SCRIPT,
+    )?;
+    let status = instagram_profile_provider_status(paths);
+    if !status.installed {
+        return Err(EngineError::InstallFailed(
+            status.readiness_error.clone().unwrap_or_else(|| {
+                "Instagram profile provider verification failed after extraction".to_string()
+            }),
+        ));
+    }
+    crate::persistence::atomic_write_text(
+        &install_dir.join(".probe"),
+        &format!(
+            "OK\nversion={}\nsource={}\narchive_sha256={}\nexecutable_sha256={}\n",
+            pin.version, pin.source_label, pin.sha256_hex, pin.executable_sha256_hex
+        ),
+    )?;
+    let _ = generate_pack_integrity_manifest(paths);
+    Ok(status)
+}
+
+#[cfg(windows)]
+pub fn install_instagram_profile_enumerator(
+    paths: &AppPaths,
+) -> Result<InstagramProfileProviderStatus> {
+    let pin = &pinned_dependency_manifest::manifest().instagram_profile_enumerator;
+    let python = python_venv_python_path(paths)?;
+    let install_dir = paths.instagram_profile_provider_dir();
+    std::fs::create_dir_all(&install_dir)?;
+    crate::persistence::atomic_write_bytes(
+        &paths.instagram_profile_enumerator_script(),
+        INSTAGRAM_PROFILE_ENUMERATOR_SCRIPT,
+    )?;
+    let wheel = install_dir.join(format!("instaloader-{}-py3-none-any.whl", pin.version));
+    download_verified_file(
+        &pin.url,
+        &wheel,
+        pin.file_bytes,
+        &pin.sha256_hex,
+        "Instagram profile enumerator wheel",
+    )?;
+    run_python_checked(
+        paths,
+        &python,
+        &[
+            "-m",
+            "pip",
+            "install",
+            "--no-deps",
+            "--force-reinstall",
+            wheel.to_string_lossy().as_ref(),
+        ],
+        "Instagram profile enumerator wheel install failed",
+    )?;
+    let status = instagram_profile_provider_status(paths);
+    if !status.installed || !status.enumerator_ready {
+        return Err(EngineError::InstallFailed(
+            status.readiness_error.clone().unwrap_or_else(|| {
+                "Instagram profile enumerator verification failed after install".to_string()
+            }),
+        ));
+    }
+    let _ = generate_pack_integrity_manifest(paths);
+    Ok(status)
+}
+
+#[cfg(not(windows))]
+pub fn install_instagram_profile_provider(
+    _paths: &AppPaths,
+) -> Result<InstagramProfileProviderStatus> {
+    Err(EngineError::InstallFailed(
+        "the managed Instagram profile provider is currently packaged for Windows".to_string(),
+    ))
+}
+
+pub fn ensure_instagram_profile_provider(paths: &AppPaths) -> Result<std::path::PathBuf> {
+    let status = instagram_profile_provider_status(paths);
+    if status.installed && status.enumerator_ready {
+        return Ok(paths.instagram_profile_provider_exe());
+    }
+    Err(EngineError::InstallFailed(
+        status
+            .readiness_error
+            .unwrap_or_else(|| "Instagram profile provider is not ready".to_string()),
+    ))
+}
+
+#[derive(Debug, Clone, Serialize)]
 pub struct YoutubePoProviderInstallStatus {
     pub installed: bool,
     pub provider_version: String,
@@ -844,9 +1019,7 @@ fn authenticate_complete_provider_trees_against(
         commit_nonce: String::new(),
         install_generation: provider_install_generation(),
         node_directory_identity: provider_directory_identity(&paths.node_runtime_dir())?,
-        provider_directory_identity: provider_directory_identity(
-            &paths.youtube_po_provider_dir(),
-        )?,
+        provider_directory_identity: provider_directory_identity(&paths.youtube_po_provider_dir())?,
         node_tree_sha256: expected_node_tree_sha256.to_ascii_uppercase(),
         provider_tree_sha256: expected_provider_tree_sha256.to_ascii_uppercase(),
     })
@@ -885,7 +1058,8 @@ fn commit_adopted_provider_identity(
     verified: ProviderInstalledIdentity,
 ) -> Result<()> {
     if let Some(existing) = load_provider_installed_identity(paths)? {
-        let legacy_unbound = existing.lineage_attempt_id.is_empty() && existing.commit_nonce.is_empty();
+        let legacy_unbound =
+            existing.lineage_attempt_id.is_empty() && existing.commit_nonce.is_empty();
         if !legacy_unbound {
             if existing.install_generation == verified.install_generation
                 && existing.node_directory_identity == verified.node_directory_identity
@@ -1087,9 +1261,10 @@ fn reconcile_provider_lineage_before_verification(paths: &AppPaths) -> Result<()
     match authenticate_authoritative_installed_provider_identity(paths) {
         Ok(()) => Ok(()),
         Err(error) => {
-            let legacy_or_absent = load_provider_installed_identity(paths)?.is_none_or(|identity| {
-                identity.lineage_attempt_id.is_empty() && identity.commit_nonce.is_empty()
-            });
+            let legacy_or_absent =
+                load_provider_installed_identity(paths)?.is_none_or(|identity| {
+                    identity.lineage_attempt_id.is_empty() && identity.commit_nonce.is_empty()
+                });
             if !legacy_or_absent {
                 return Err(error);
             }
@@ -1623,7 +1798,9 @@ fn provider_lifecycle_allowlist_is_exact(package: &serde_json::Value) -> bool {
 
 fn provider_lock_matches_manifest(lock: &[u8], expected_sha256_hex: &str) -> bool {
     use sha2::Digest;
-    hex::encode_upper(sha2::Sha256::digest(lock)).eq_ignore_ascii_case(expected_sha256_hex)
+    let normalized = String::from_utf8_lossy(lock).replace("\r\n", "\n");
+    hex::encode_upper(sha2::Sha256::digest(normalized.as_bytes()))
+        .eq_ignore_ascii_case(expected_sha256_hex)
 }
 
 fn provider_npm_ci_args() -> [&'static str; 2] {
@@ -1680,8 +1857,7 @@ fn installed_provider_package_version(server_dir: &Path, name: &str) -> Option<S
 
 fn installed_provider_build_lifecycle_packages_are_exact(server_dir: &Path) -> bool {
     installed_provider_package_version(server_dir, "canvas").as_deref() == Some("3.2.3")
-        && installed_provider_package_version(server_dir, "@swc/core").as_deref()
-            == Some("1.15.47")
+        && installed_provider_package_version(server_dir, "@swc/core").as_deref() == Some("1.15.47")
 }
 
 fn installed_provider_runtime_lifecycle_packages_are_exact(server_dir: &Path) -> bool {
@@ -2015,12 +2191,21 @@ fn provider_directory_identity(path: &Path) -> Result<String> {
 
 #[cfg(windows)]
 fn provider_process_identity(pid: u32) -> Option<String> {
-    use windows_sys::Win32::Foundation::{CloseHandle, FILETIME};
+    use windows_sys::Win32::Foundation::{CloseHandle, FILETIME, STILL_ACTIVE};
     use windows_sys::Win32::System::Threading::{
-        GetProcessTimes, OpenProcess, PROCESS_QUERY_LIMITED_INFORMATION,
+        GetExitCodeProcess, GetProcessTimes, OpenProcess, PROCESS_QUERY_LIMITED_INFORMATION,
     };
     let handle = unsafe { OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, 0, pid) };
     if handle.is_null() {
+        return None;
+    }
+    let mut exit_code = 0u32;
+    let process_is_active = unsafe { GetExitCodeProcess(handle, &mut exit_code) } != 0
+        && exit_code == STILL_ACTIVE as u32;
+    if !process_is_active {
+        unsafe {
+            let _ = CloseHandle(handle);
+        }
         return None;
     }
     let mut created = std::mem::MaybeUninit::<FILETIME>::zeroed();
@@ -2389,9 +2574,14 @@ fn commit_provider_installed_identity(
     attempt_id: &str,
     stage_root: &Path,
 ) -> Result<ProviderIdentityCommitOutcome> {
-    commit_provider_installed_identity_with_receipt(paths, attempt_id, stage_root, |paths, attempt, root| {
-        write_provider_install_attempt_receipt(paths, attempt, root, "committed")
-    })
+    commit_provider_installed_identity_with_receipt(
+        paths,
+        attempt_id,
+        stage_root,
+        |paths, attempt, root| {
+            write_provider_install_attempt_receipt(paths, attempt, root, "committed")
+        },
+    )
 }
 
 fn commit_provider_installed_identity_with_receipt<W>(
@@ -2507,7 +2697,10 @@ fn load_provider_installed_identity(paths: &AppPaths) -> Result<Option<ProviderI
     }
 }
 
-fn managed_provider_replacement_archive_root(paths: &AppPaths, attempt_id: &str) -> Result<PathBuf> {
+fn managed_provider_replacement_archive_root(
+    paths: &AppPaths,
+    attempt_id: &str,
+) -> Result<PathBuf> {
     if !valid_provider_attempt_id(attempt_id) {
         return Err(EngineError::InstallFailed(
             "provider replacement archive rejected an invalid attempt ID".to_string(),
@@ -2658,14 +2851,11 @@ fn load_provider_install_lineage(paths: &AppPaths) -> Result<Option<ProviderInst
             })
         })?
         .collect::<rusqlite::Result<Vec<_>>>()?;
-    let single_settled_committed_owner = rows.len() == 1
-        && unresolved_lineage_count == 0
-        && rows[0].phase == "committed";
+    let single_settled_committed_owner =
+        rows.len() == 1 && unresolved_lineage_count == 0 && rows[0].phase == "committed";
     if rows.len() > 1
         || (rows.is_empty() && unresolved_lineage_count != 0)
-        || (!rows.is_empty()
-            && unresolved_lineage_count != 1
-            && !single_settled_committed_owner)
+        || (!rows.is_empty() && unresolved_lineage_count != 1 && !single_settled_committed_owner)
     {
         return Err(EngineError::InstallFailed(
             "provider install lineage has no unambiguous authoritative owner; explicit recovery is required"
@@ -3194,6 +3384,36 @@ where
         release_provider_install_owner(paths, &lineage.attempt_id)?;
         return Ok(());
     }
+    let replacement_archive =
+        managed_provider_replacement_archive_root(paths, &lineage.attempt_id)?;
+    if lineage.phase == "prepared"
+        && !stage_root.exists()
+        && !replacement_archive.exists()
+        && paths.node_runtime_dir().is_dir()
+        && paths.youtube_po_provider_dir().is_dir()
+    {
+        // The owner can die after claiming the durable singleton but before the existing,
+        // authenticated generation is moved into its replacement archive. In that exact state,
+        // the managed finals still belong to the previously committed identity; authenticate
+        // both trees before clearing only the never-started replacement attempt.
+        let installed_identity = load_provider_installed_identity(paths)?.ok_or_else(|| {
+            EngineError::InstallFailed(
+                "prepared provider recovery found managed finals without an installed identity"
+                    .to_string(),
+            )
+        })?;
+        authenticate_stored_managed_provider_identity_at(
+            paths,
+            &installed_identity,
+            &paths.node_runtime_dir(),
+            &paths.youtube_po_provider_dir(),
+        )?;
+        if receipt_path.exists() {
+            std::fs::remove_file(&receipt_path)?;
+        }
+        delete_provider_install_lineage(paths, &lineage.attempt_id)?;
+        return Ok(());
+    }
     let node_authorized = matches!(
         lineage.phase.as_str(),
         "node_publish_intent" | "node_published" | "provider_publish_intent" | "provider_published"
@@ -3559,7 +3779,8 @@ pub fn install_youtube_po_provider(paths: &AppPaths) -> Result<YoutubePoProvider
                 .to_string(),
         ));
     }
-    crate::persistence::atomic_write_text(&lock_path, embedded_lock)?;
+    let normalized_embedded_lock = embedded_lock.replace("\r\n", "\n");
+    crate::persistence::atomic_write_text(&lock_path, &normalized_embedded_lock)?;
     let lock_hash = file_sha256_hex(&lock_path).unwrap_or_default();
     if !lock_hash.eq_ignore_ascii_case(&provider_pin.derived_lock_sha256_hex) {
         return Err(EngineError::HashMismatch {
@@ -3630,9 +3851,10 @@ pub fn install_youtube_po_provider(paths: &AppPaths) -> Result<YoutubePoProvider
         )?,
         "provider production dependency prune",
     )?;
-    // npm is allowed to normalize package-lock.json during prune. The installed production
-    // tree is audited below, while the durable lock remains the exact reviewed repo resource.
-    crate::persistence::atomic_write_text(&lock_path, embedded_lock)?;
+    // npm is allowed to normalize package-lock.json during prune. Restore the same reviewed,
+    // LF-canonical lock bytes used by the manifest hash so a CRLF checkout cannot publish a
+    // different durable payload.
+    crate::persistence::atomic_write_text(&lock_path, &normalized_embedded_lock)?;
     let restored_lock_hash = file_sha256_hex(&lock_path).unwrap_or_default();
     if !restored_lock_hash.eq_ignore_ascii_case(&provider_pin.derived_lock_sha256_hex) {
         return Err(EngineError::HashMismatch {
@@ -7991,6 +8213,23 @@ fn run_python_checked_with_retries(
 mod tests {
     use super::*;
 
+    #[cfg(windows)]
+    #[test]
+    fn provider_process_identity_rejects_exited_process_with_retained_handle() {
+        let mut child = std::process::Command::new("cmd")
+            .args(["/d", "/c", "exit", "0"])
+            .spawn()
+            .expect("spawn short-lived process");
+        let pid = child.id();
+        assert!(provider_process_identity(pid).is_some());
+        child.wait().expect("wait for short-lived process");
+
+        assert!(
+            provider_process_identity(pid).is_none(),
+            "a retained handle must not make an exited process look active"
+        );
+    }
+
     #[test]
     fn phase2_plan_includes_managed_cosyvoice_pack() {
         let plan = phase2_packs_install_plan();
@@ -8061,8 +8300,11 @@ mod tests {
         assert!(complete.installed);
         assert!(complete.wetext_assets_present);
 
-        std::fs::write(backend.join("voxvulgi_cosyvoice_render.py"), b"stale wrapper")
-            .expect("stale wrapper fixture");
+        std::fs::write(
+            backend.join("voxvulgi_cosyvoice_render.py"),
+            b"stale wrapper",
+        )
+        .expect("stale wrapper fixture");
         let stale = cosyvoice_pack_status(&paths);
         assert!(!stale.installed);
         assert!(stale.render_script_present);
@@ -8191,8 +8433,7 @@ mod tests {
             &server
         ));
 
-        std::fs::remove_dir_all(server.join("node_modules").join("@swc").join("core"))
-            .unwrap();
+        std::fs::remove_dir_all(server.join("node_modules").join("@swc").join("core")).unwrap();
         assert!(!installed_provider_build_lifecycle_packages_are_exact(
             &server
         ));
@@ -8223,8 +8464,11 @@ mod tests {
         ));
         let server = base.join("server");
         std::fs::create_dir_all(server.join(".npm_cache").join("logs")).unwrap();
-        std::fs::write(server.join(".npm_cache").join("logs").join("run.log"), b"run")
-            .unwrap();
+        std::fs::write(
+            server.join(".npm_cache").join("logs").join("run.log"),
+            b"run",
+        )
+        .unwrap();
         std::fs::write(
             server.join("tsconfig.tsbuildinfo"),
             br#"{"fileNames":["../../ambient/node_modules/@types/react/index.d.ts"]}"#,
@@ -8585,7 +8829,10 @@ mod tests {
                             .expect("provider relative path")
                             .to_string_lossy()
                             .replace('\\', "/");
-                        result.insert(relative, file_sha256_hex(&path).expect("provider file hash"));
+                        result.insert(
+                            relative,
+                            file_sha256_hex(&path).expect("provider file hash"),
+                        );
                     } else {
                         panic!("unexpected provider tree entry: {}", path.display());
                     }
@@ -8625,7 +8872,10 @@ mod tests {
             baseline_hashes.len(),
             candidate_hashes.len()
         );
-        eprintln!("PROVIDER_NODE_MODULES_FILE_DIFFERENCES={}", differences.len());
+        eprintln!(
+            "PROVIDER_NODE_MODULES_FILE_DIFFERENCES={}",
+            differences.len()
+        );
         for (path, before, after) in differences {
             if before.is_none() || (before.is_some() && after.is_some()) {
                 eprintln!(
@@ -8908,14 +9158,89 @@ mod tests {
         )
         .unwrap();
         assert!(!stage_root.exists());
-        assert!(!managed_provider_replacement_archive_root(&paths, &attempt_id)
-            .unwrap()
-            .exists());
+        assert!(
+            !managed_provider_replacement_archive_root(&paths, &attempt_id)
+                .unwrap()
+                .exists()
+        );
         let conn = crate::db::open(&paths).unwrap();
         crate::db::migrate(&conn).unwrap();
         assert_eq!(
             conn.query_row(
                 "SELECT COUNT(*) FROM provider_install_owner WHERE attempt_id=?1",
+                rusqlite::params![attempt_id],
+                |row| row.get::<_, i64>(0),
+            )
+            .unwrap(),
+            0
+        );
+        let _ = std::fs::remove_dir_all(base);
+    }
+
+    #[test]
+    fn dead_prepared_owner_before_replacement_preserves_authenticated_installed_generation() {
+        let base = std::env::temp_dir().join(format!(
+            "vv_pre_replace_{}_{}",
+            std::process::id(),
+            &uuid::Uuid::new_v4().simple().to_string()[..8]
+        ));
+        let paths = AppPaths::new(base.clone());
+        let mut old_identity = synthetic_provider_destination(&paths);
+        old_identity.install_generation = "A".repeat(64);
+        commit_adopted_provider_identity(&paths, old_identity).unwrap();
+        let installed_before = load_provider_installed_identity(&paths).unwrap().unwrap();
+
+        let attempt_id = uuid::Uuid::new_v4().to_string();
+        let stage_root = paths
+            .tools_dir()
+            .join(format!("youtube_po_provider_stage_{attempt_id}"));
+        let token = provider_test_ownership_token();
+        claim_provider_install_owner(
+            &paths,
+            &attempt_id,
+            &stage_root,
+            &provider_ownership_token_digest(&token),
+            &random_provider_authority_nonce(),
+        )
+        .unwrap();
+
+        reconcile_interrupted_provider_install_with_checks(
+            &paths,
+            |_| panic!("the previously installed Node tree is authenticated by its identity"),
+            |_| panic!("the previously installed provider tree is authenticated by its identity"),
+            |_, _| panic!("the replacement attempt was never committed"),
+            |_| false,
+        )
+        .unwrap();
+
+        let installed_after = load_provider_installed_identity(&paths).unwrap().unwrap();
+        assert_eq!(
+            installed_after.lineage_attempt_id,
+            installed_before.lineage_attempt_id
+        );
+        assert_eq!(installed_after.commit_nonce, installed_before.commit_nonce);
+        authenticate_stored_managed_provider_identity_at(
+            &paths,
+            &installed_after,
+            &paths.node_runtime_dir(),
+            &paths.youtube_po_provider_dir(),
+        )
+        .unwrap();
+        assert!(!stage_root.exists());
+        let conn = crate::db::open(&paths).unwrap();
+        crate::db::migrate(&conn).unwrap();
+        assert_eq!(
+            conn.query_row(
+                "SELECT COUNT(*) FROM provider_install_owner WHERE attempt_id=?1",
+                rusqlite::params![attempt_id],
+                |row| row.get::<_, i64>(0),
+            )
+            .unwrap(),
+            0
+        );
+        assert_eq!(
+            conn.query_row(
+                "SELECT COUNT(*) FROM provider_install_lineage WHERE attempt_id=?1",
                 rusqlite::params![attempt_id],
                 |row| row.get::<_, i64>(0),
             )
@@ -9130,9 +9455,10 @@ mod tests {
                 "owner leaked after {boundary}"
             );
             assert_eq!(
-                conn.query_row("SELECT COUNT(*) FROM provider_install_lineage", [], |row| row
-                    .get::<_, i64>(0))
-                    .unwrap(),
+                conn.query_row("SELECT COUNT(*) FROM provider_install_lineage", [], |row| {
+                    row.get::<_, i64>(0)
+                })
+                .unwrap(),
                 0,
                 "lineage leaked after {boundary}"
             );
@@ -9170,8 +9496,7 @@ mod tests {
                 &uuid::Uuid::new_v4().simple().to_string()[..8]
             ));
             let paths = AppPaths::new(base.clone());
-            let (attempt_id, _token, stage_root) =
-                seed_provider_recovery_phase(&paths, "prepared");
+            let (attempt_id, _token, stage_root) = seed_provider_recovery_phase(&paths, "prepared");
             let node_stage = stage_root.join("node");
             let provider_stage = stage_root.join("provider");
             let final_node = paths.node_runtime_dir();
@@ -9234,18 +9559,21 @@ mod tests {
                 );
                 assert!(result.is_err());
                 assert!(!final_node.exists() && !final_provider.exists());
-                abort_owned_provider_install_after_complete_rollback(&paths, &attempt_id)
-                    .unwrap();
+                abort_owned_provider_install_after_complete_rollback(&paths, &attempt_id).unwrap();
                 drop(operation_guard);
             }
 
             let conn = crate::db::open(&paths).unwrap();
             crate::db::migrate(&conn).unwrap();
             let owner_count: i64 = conn
-                .query_row("SELECT COUNT(*) FROM provider_install_owner", [], |row| row.get(0))
+                .query_row("SELECT COUNT(*) FROM provider_install_owner", [], |row| {
+                    row.get(0)
+                })
                 .unwrap();
             let lineage_count: i64 = conn
-                .query_row("SELECT COUNT(*) FROM provider_install_lineage", [], |row| row.get(0))
+                .query_row("SELECT COUNT(*) FROM provider_install_lineage", [], |row| {
+                    row.get(0)
+                })
                 .unwrap();
             assert_eq!(owner_count, 0, "owner leaked at {boundary}");
             assert_eq!(lineage_count, 0, "lineage leaked at {boundary}");
@@ -9303,12 +9631,18 @@ mod tests {
         };
         assert_ne!(handle, INVALID_HANDLE_VALUE);
         reconcile_interrupted_provider_install(&paths).unwrap();
-        assert!(receipt.exists(), "locked audit receipt should be left for retry");
+        assert!(
+            receipt.exists(),
+            "locked audit receipt should be left for retry"
+        );
         unsafe {
             let _ = CloseHandle(handle);
         }
         reconcile_interrupted_provider_install(&paths).unwrap();
-        assert!(!receipt.exists(), "fresh retry should remove orphan receipt");
+        assert!(
+            !receipt.exists(),
+            "fresh retry should remove orphan receipt"
+        );
         assert!(load_provider_installed_identity(&paths).unwrap().is_some());
         let _ = std::fs::remove_dir_all(base);
     }
@@ -9755,8 +10089,7 @@ mod tests {
             let (_attempt_id, _token, _stage_root) =
                 seed_provider_recovery_phase(&paths, "committed");
             if mutation == "tampered" {
-                std::fs::write(paths.node_runtime_dir().join("node_fixture"), b"changed")
-                    .unwrap();
+                std::fs::write(paths.node_runtime_dir().join("node_fixture"), b"changed").unwrap();
             } else if mutation == "missing" {
                 std::fs::remove_dir_all(paths.youtube_po_provider_dir()).unwrap();
             }
@@ -9790,7 +10123,11 @@ mod tests {
                     row.get::<_, i64>(0)
                 })
                 .unwrap();
-            assert_eq!(owners, i64::from(mutation != "valid"), "mutation={mutation}");
+            assert_eq!(
+                owners,
+                i64::from(mutation != "valid"),
+                "mutation={mutation}"
+            );
             assert!(load_provider_installed_identity(&paths).unwrap().is_some());
             let _ = std::fs::remove_dir_all(base);
         }

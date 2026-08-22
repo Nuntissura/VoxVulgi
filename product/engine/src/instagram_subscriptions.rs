@@ -16,6 +16,7 @@ pub struct InstagramSubscriptionRow {
     pub id: String,
     pub title: String,
     pub source_url: String,
+    pub canonical_profile_id: Option<String>,
     pub folder_map: String,
     pub output_dir_override: Option<String>,
     pub use_browser_cookies: bool,
@@ -23,6 +24,25 @@ pub struct InstagramSubscriptionRow {
     pub auth_session_configured: bool,
     pub active: bool,
     pub refresh_interval_minutes: i64,
+    pub max_items_per_refresh: i64,
+    pub include_posts: bool,
+    pub include_reels: bool,
+    pub include_stories: bool,
+    pub last_attempt_at_ms: Option<i64>,
+    pub last_success_at_ms: Option<i64>,
+    pub last_error_at_ms: Option<i64>,
+    pub last_error: Option<String>,
+    pub consecutive_failures: i64,
+    pub next_allowed_refresh_at_ms: Option<i64>,
+    pub provider_name: String,
+    pub provider_version: Option<String>,
+    pub capability_epoch: i64,
+    pub last_failure_class: Option<String>,
+    pub last_failure_message_hash: Option<String>,
+    pub hold_reason: Option<String>,
+    pub consecutive_successes: i64,
+    pub last_canonical_discovery_count: i64,
+    pub cursor_json: Option<String>,
     pub last_queued_at_ms: Option<i64>,
     pub created_at_ms: i64,
     pub updated_at_ms: i64,
@@ -44,6 +64,14 @@ pub struct InstagramSubscriptionUpsert {
     pub clear_auth_session: bool,
     pub active: bool,
     pub refresh_interval_minutes: Option<i64>,
+    #[serde(default)]
+    pub max_items_per_refresh: Option<i64>,
+    #[serde(default = "default_true")]
+    pub include_posts: bool,
+    #[serde(default = "default_true")]
+    pub include_reels: bool,
+    #[serde(default)]
+    pub include_stories: bool,
 }
 
 pub fn list_instagram_subscriptions(paths: &AppPaths) -> Result<Vec<InstagramSubscriptionRow>> {
@@ -56,12 +84,32 @@ SELECT
   id,
   title,
   source_url,
+  canonical_profile_id,
   folder_map,
   output_dir_override,
   use_browser_cookies,
   browser_cookie_source,
   active,
   refresh_interval_minutes,
+  max_items_per_refresh,
+  include_posts,
+  include_reels,
+  include_stories,
+  last_attempt_at_ms,
+  last_success_at_ms,
+  last_error_at_ms,
+  last_error,
+  consecutive_failures,
+  next_allowed_refresh_at_ms,
+  provider_name,
+  provider_version,
+  capability_epoch,
+  last_failure_class,
+  last_failure_message_hash,
+  hold_reason,
+  consecutive_successes,
+  last_canonical_discovery_count,
+  cursor_json,
   last_queued_at_ms,
   created_at_ms,
   updated_at_ms
@@ -100,8 +148,14 @@ SET
   browser_cookie_source = ?6,
   active = ?7,
   refresh_interval_minutes = ?8,
-  updated_at_ms = ?9
-WHERE id = ?10
+  max_items_per_refresh = ?9,
+  include_posts = ?10,
+  include_reels = ?11,
+  include_stories = ?12,
+  hold_reason = NULL,
+  next_allowed_refresh_at_ms = NULL,
+  updated_at_ms = ?13
+WHERE id = ?14
 "#,
             params![
                 normalized.title,
@@ -112,6 +166,10 @@ WHERE id = ?10
                 normalized.browser_cookie_source,
                 bool_to_i64(normalized.active),
                 normalized.refresh_interval_minutes,
+                normalized.max_items_per_refresh,
+                bool_to_i64(normalized.include_posts),
+                bool_to_i64(normalized.include_reels),
+                bool_to_i64(normalized.include_stories),
                 now,
                 id,
             ],
@@ -133,10 +191,14 @@ INSERT INTO instagram_subscription (
   browser_cookie_source,
   active,
   refresh_interval_minutes,
+  max_items_per_refresh,
+  include_posts,
+  include_reels,
+  include_stories,
   last_queued_at_ms,
   created_at_ms,
   updated_at_ms
-) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, NULL, ?10, ?10)
+) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, NULL, ?14, ?14)
 ON CONFLICT(source_url) DO UPDATE SET
   title = excluded.title,
   folder_map = excluded.folder_map,
@@ -145,6 +207,12 @@ ON CONFLICT(source_url) DO UPDATE SET
   browser_cookie_source = excluded.browser_cookie_source,
   active = excluded.active,
   refresh_interval_minutes = excluded.refresh_interval_minutes,
+  max_items_per_refresh = excluded.max_items_per_refresh,
+  include_posts = excluded.include_posts,
+  include_reels = excluded.include_reels,
+  include_stories = excluded.include_stories,
+  hold_reason = NULL,
+  next_allowed_refresh_at_ms = NULL,
   updated_at_ms = excluded.updated_at_ms
 "#,
             params![
@@ -157,6 +225,10 @@ ON CONFLICT(source_url) DO UPDATE SET
                 normalized.browser_cookie_source,
                 bool_to_i64(normalized.active),
                 normalized.refresh_interval_minutes,
+                normalized.max_items_per_refresh,
+                bool_to_i64(normalized.include_posts),
+                bool_to_i64(normalized.include_reels),
+                bool_to_i64(normalized.include_stories),
                 now,
             ],
         )?;
@@ -179,8 +251,15 @@ ON CONFLICT(source_url) DO UPDATE SET
 pub fn delete_instagram_subscription(paths: &AppPaths, id: &str) -> Result<()> {
     let conn = db::open(paths)?;
     db::migrate(&conn)?;
-    conn.execute("DELETE FROM instagram_subscription WHERE id = ?1", [id])?;
-    jobs::remove_auth_cookie_secret_path(&paths.instagram_subscription_cookie_secret_path(id));
+    let changed = conn.execute(
+        "UPDATE instagram_subscription SET active=0,hold_reason='Archived by operator',next_allowed_refresh_at_ms=NULL,updated_at_ms=?1 WHERE id=?2",
+        params![now_ms(), id],
+    )?;
+    if changed == 0 {
+        return Err(EngineError::InstallFailed(format!(
+            "Instagram subscription not found: {id}"
+        )));
+    }
     Ok(())
 }
 
@@ -190,6 +269,11 @@ pub fn queue_instagram_subscription(paths: &AppPaths, id: &str) -> Result<Vec<jo
     let sub = subscription_by_id_conn(&conn, id)?.ok_or_else(|| {
         EngineError::InstallFailed(format!("instagram subscription not found: {id}"))
     })?;
+    if !sub.active {
+        return Err(EngineError::InstallFailed(
+            "Instagram subscription is archived; reactivate it before queueing".to_string(),
+        ));
+    }
     drop(conn);
     queue_subscription_internal(paths, &sub)
 }
@@ -234,7 +318,13 @@ fn queue_due_instagram_subscriptions_paced(
     // profile. `None` (never queued) sorts first.
     let mut candidates: Vec<InstagramSubscriptionRow> = rows
         .into_iter()
-        .filter(|sub| sub.active && (ignore_due_gate || is_subscription_due(sub, now)))
+        .filter(|sub| {
+            sub.active
+                && (ignore_due_gate
+                    || (sub.hold_reason.is_none()
+                        && sub.next_allowed_refresh_at_ms.unwrap_or(0) <= now
+                        && is_subscription_due(sub, now)))
+        })
         .collect();
     candidates.sort_by_key(|sub| sub.last_queued_at_ms.unwrap_or(i64::MIN));
 
@@ -257,9 +347,12 @@ pub fn instagram_subscription_output_dir(
         return Ok(out);
     }
 
-    let base_dir = paths.effective_download_dir()?;
+    let configured = crate::config::load_feature_storage_roots_config(paths)?;
+    let base_dir = configured
+        .instagram_root
+        .map(PathBuf::from)
+        .unwrap_or(paths.effective_download_dir()?.join("instagram"));
     Ok(base_dir
-        .join("instagram")
         .join("subscriptions")
         .join(sanitize_folder_map(&sub.folder_map)))
 }
@@ -271,23 +364,26 @@ fn queue_subscription_internal(
     let output_dir = instagram_subscription_output_dir(paths, sub)?
         .to_string_lossy()
         .to_string();
-    // WP-0263 auth precedence: explicit per-subscription cookie -> global Instagram cookie
-    // (Options) -> browser-cookie fallback. The per-sub secret (if set) wins; otherwise the
-    // run-time `DownloadDirectUrl` handler resolves the global Instagram cookie. Passing the
-    // per-sub cookie through here keeps the per-sub override optional but authoritative.
-    let auth_cookie = jobs::read_auth_cookie_secret_path(
-        &paths.instagram_subscription_cookie_secret_path(&sub.id),
-    );
-    // WP-0263 pillar 2b: route subscription downloads into the conservative recurring lane by
-    // stamping the subscription_id (mirrors the YouTube subscription-child routing).
-    let queued = jobs::enqueue_download_instagram_batch_with_subscription(
+    // Profile URLs do not go through yt-dlp: its current Instagram profile extractor is
+    // explicitly disabled upstream. Queue the dedicated pinned Instaloader refresh instead.
+    let browser_cookie_source = sub
+        .browser_cookie_source
+        .clone()
+        .or_else(|| jobs::resolve_global_instagram_browser_source(paths))
+        // Legacy rows only persisted the enable/disable bit. Preserve their historical Firefox
+        // default so an upgraded subscription does not silently lose its requested sign-in lane.
+        .or_else(|| sub.use_browser_cookies.then(|| "firefox".to_string()));
+    let queued = jobs::enqueue_instagram_subscription_refresh_v1(
         paths,
-        vec![sub.source_url.clone()],
-        auth_cookie,
-        Some(output_dir),
-        Some(sub.use_browser_cookies),
-        sub.browser_cookie_source.clone(),
-        Some(sub.id.clone()),
+        sub.id.clone(),
+        sub.title.clone(),
+        sub.source_url.clone(),
+        output_dir,
+        sub.max_items_per_refresh.max(1) as usize,
+        sub.include_posts,
+        sub.include_reels,
+        sub.include_stories,
+        browser_cookie_source,
     )?;
 
     let conn = db::open(paths)?;
@@ -301,7 +397,7 @@ fn queue_subscription_internal(
     // profile refresh by the conservative Instagram interval. Best-effort.
     let _ = jobs::record_instagram_enumeration_dispatch(paths);
 
-    Ok(queued)
+    Ok(vec![queued])
 }
 
 fn is_subscription_due(sub: &InstagramSubscriptionRow, now_ms_value: i64) -> bool {
@@ -376,6 +472,10 @@ fn normalize_upsert(
         clear_auth_session: req.clear_auth_session,
         active: req.active,
         refresh_interval_minutes: normalize_refresh_interval_minutes(req.refresh_interval_minutes),
+        max_items_per_refresh: req.max_items_per_refresh.unwrap_or(30).clamp(1, 500),
+        include_posts: req.include_posts,
+        include_reels: req.include_reels,
+        include_stories: req.include_stories,
         browser_cookie_source: normalize_instagram_browser_cookie_source(
             req.use_browser_cookies,
             req.browser_cookie_source.as_deref(),
@@ -404,6 +504,10 @@ fn normalize_refresh_interval_minutes(value: Option<i64>) -> i64 {
     value
         .unwrap_or(DEFAULT_REFRESH_INTERVAL_MINUTES)
         .clamp(MIN_REFRESH_INTERVAL_MINUTES, MAX_REFRESH_INTERVAL_MINUTES)
+}
+
+fn default_true() -> bool {
+    true
 }
 
 fn normalize_title(raw: String) -> Result<String> {
@@ -495,16 +599,36 @@ fn row_to_subscription(row: &rusqlite::Row<'_>) -> rusqlite::Result<InstagramSub
         id: row.get(0)?,
         title: row.get(1)?,
         source_url: row.get(2)?,
-        folder_map: row.get(3)?,
-        output_dir_override: row.get(4)?,
-        use_browser_cookies: i64_to_bool(row.get::<_, i64>(5)?),
-        browser_cookie_source: row.get(6)?,
+        canonical_profile_id: row.get(3)?,
+        folder_map: row.get(4)?,
+        output_dir_override: row.get(5)?,
+        use_browser_cookies: i64_to_bool(row.get::<_, i64>(6)?),
+        browser_cookie_source: row.get(7)?,
         auth_session_configured: false,
-        active: i64_to_bool(row.get::<_, i64>(7)?),
-        refresh_interval_minutes: row.get(8)?,
-        last_queued_at_ms: row.get(9)?,
-        created_at_ms: row.get(10)?,
-        updated_at_ms: row.get(11)?,
+        active: i64_to_bool(row.get::<_, i64>(8)?),
+        refresh_interval_minutes: row.get(9)?,
+        max_items_per_refresh: row.get(10)?,
+        include_posts: i64_to_bool(row.get::<_, i64>(11)?),
+        include_reels: i64_to_bool(row.get::<_, i64>(12)?),
+        include_stories: i64_to_bool(row.get::<_, i64>(13)?),
+        last_attempt_at_ms: row.get(14)?,
+        last_success_at_ms: row.get(15)?,
+        last_error_at_ms: row.get(16)?,
+        last_error: row.get(17)?,
+        consecutive_failures: row.get(18)?,
+        next_allowed_refresh_at_ms: row.get(19)?,
+        provider_name: row.get(20)?,
+        provider_version: row.get(21)?,
+        capability_epoch: row.get(22)?,
+        last_failure_class: row.get(23)?,
+        last_failure_message_hash: row.get(24)?,
+        hold_reason: row.get(25)?,
+        consecutive_successes: row.get(26)?,
+        last_canonical_discovery_count: row.get(27)?,
+        cursor_json: row.get(28)?,
+        last_queued_at_ms: row.get(29)?,
+        created_at_ms: row.get(30)?,
+        updated_at_ms: row.get(31)?,
     })
 }
 
@@ -518,12 +642,32 @@ SELECT
   id,
   title,
   source_url,
+  canonical_profile_id,
   folder_map,
   output_dir_override,
   use_browser_cookies,
   browser_cookie_source,
   active,
   refresh_interval_minutes,
+  max_items_per_refresh,
+  include_posts,
+  include_reels,
+  include_stories,
+  last_attempt_at_ms,
+  last_success_at_ms,
+  last_error_at_ms,
+  last_error,
+  consecutive_failures,
+  next_allowed_refresh_at_ms,
+  provider_name,
+  provider_version,
+  capability_epoch,
+  last_failure_class,
+  last_failure_message_hash,
+  hold_reason,
+  consecutive_successes,
+  last_canonical_discovery_count,
+  cursor_json,
   last_queued_at_ms,
   created_at_ms,
   updated_at_ms
@@ -546,12 +690,32 @@ SELECT
   id,
   title,
   source_url,
+  canonical_profile_id,
   folder_map,
   output_dir_override,
   use_browser_cookies,
   browser_cookie_source,
   active,
   refresh_interval_minutes,
+  max_items_per_refresh,
+  include_posts,
+  include_reels,
+  include_stories,
+  last_attempt_at_ms,
+  last_success_at_ms,
+  last_error_at_ms,
+  last_error,
+  consecutive_failures,
+  next_allowed_refresh_at_ms,
+  provider_name,
+  provider_version,
+  capability_epoch,
+  last_failure_class,
+  last_failure_message_hash,
+  hold_reason,
+  consecutive_successes,
+  last_canonical_discovery_count,
+  cursor_json,
   last_queued_at_ms,
   created_at_ms,
   updated_at_ms
@@ -596,6 +760,10 @@ struct NormalizedInstagramSubscriptionInput {
     clear_auth_session: bool,
     active: bool,
     refresh_interval_minutes: i64,
+    max_items_per_refresh: i64,
+    include_posts: bool,
+    include_reels: bool,
+    include_stories: bool,
 }
 
 #[cfg(test)]
@@ -625,6 +793,10 @@ mod tests {
                 clear_auth_session: false,
                 active: true,
                 refresh_interval_minutes: Some(60),
+                max_items_per_refresh: Some(30),
+                include_posts: true,
+                include_reels: true,
+                include_stories: false,
             },
         )
         .expect("upsert");
@@ -653,10 +825,33 @@ mod tests {
                 && output_dir.contains("example_profile"),
             "expected instagram subscription folder in output_dir, got {output_dir}"
         );
+        drop(conn);
+
+        delete_instagram_subscription(&paths, &sub.id).expect("archive subscription");
+        let archived = list_instagram_subscriptions(&paths).expect("list archived");
+        assert_eq!(
+            archived.len(),
+            1,
+            "archive must retain the subscription row"
+        );
+        assert!(!archived[0].active);
+        assert_eq!(
+            archived[0].hold_reason.as_deref(),
+            Some("Archived by operator")
+        );
+        assert!(
+            queue_instagram_subscription(&paths, &sub.id).is_err(),
+            "archived subscriptions must not enqueue work"
+        );
+        assert_eq!(
+            jobs::list_jobs(&paths, 10, 0).expect("retained jobs").len(),
+            1,
+            "archive must retain existing job history"
+        );
     }
 
     #[test]
-    fn upsert_saved_auth_session_persists_secret_and_attaches_to_jobs() {
+    fn legacy_saved_auth_session_remains_subscription_scoped() {
         let dir = tempfile::tempdir().expect("tempdir");
         let paths = AppPaths::new(dir.path().to_path_buf());
         crate::db::ensure_schema(&paths).expect("schema");
@@ -675,6 +870,10 @@ mod tests {
                 clear_auth_session: false,
                 active: true,
                 refresh_interval_minutes: Some(60),
+                max_items_per_refresh: Some(30),
+                include_posts: true,
+                include_reels: true,
+                include_stories: false,
             },
         )
         .expect("upsert");
@@ -690,10 +889,11 @@ mod tests {
         assert_eq!(stored, "sessionid=abc123");
 
         let queued = queue_instagram_subscription(&paths, &sub.id).expect("queue");
-        let job_secret =
-            jobs::read_auth_cookie_secret_path(&paths.job_cookie_secret_path(&queued[0].id))
-                .expect("job auth secret");
-        assert_eq!(job_secret, "sessionid=abc123");
+        assert_eq!(queued.len(), 1);
+        assert!(
+            !paths.job_cookie_secret_path(&queued[0].id).exists(),
+            "the pinned recurring profile provider uses a browser session and must not copy a raw cookie into a job"
+        );
     }
 
     #[test]
@@ -716,6 +916,10 @@ mod tests {
                 clear_auth_session: false,
                 active: true,
                 refresh_interval_minutes: Some(60),
+                max_items_per_refresh: Some(30),
+                include_posts: true,
+                include_reels: true,
+                include_stories: false,
             },
         )
         .expect("upsert");

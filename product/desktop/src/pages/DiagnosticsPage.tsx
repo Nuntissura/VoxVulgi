@@ -633,7 +633,16 @@ type DiagnosticsJobTrackStatusTotals = {
 };
 
 type DiagnosticsJobTrackRuntimeRow = DiagnosticsJobTrackStatusTotals & {
-  track: "youtube_single" | "youtube_recurring" | "instagram" | "other_video" | "image_archive" | "localization";
+  track:
+    | "youtube_single"
+    | "youtube_recurring"
+    | "instagram_single"
+    | "instagram_recurring"
+    | "tiktok_single"
+    | "tiktok_recurring"
+    | "other_video"
+    | "image_archive"
+    | "localization";
   configured_budget: number;
   effective_budget: number;
   paused: boolean;

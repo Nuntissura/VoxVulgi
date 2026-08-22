@@ -159,9 +159,8 @@ pub fn translate_doc_whisper_to_en(
     };
     let glossary_entries_sorted = glossary_entries_sorted(&glossary_entries);
     let glossary_prompt_entries = glossary_entries_for_source(&glossary_entries, source_doc);
-    let translation_style = normalize_translation_style(
-        options.translation_style.clone().unwrap_or_default(),
-    )?;
+    let translation_style =
+        normalize_translation_style(options.translation_style.clone().unwrap_or_default())?;
     let (translation_prompt, glossary_prompt_entry_count) =
         build_translation_prompt(&translation_style, &glossary_prompt_entries);
 
@@ -423,9 +422,7 @@ fn build_translation_prompt(
     let mut included = 0;
     if !glossary_entries.is_empty() {
         let heading = " Preferred exact terminology: ";
-        if prompt.chars().count() + heading.chars().count()
-            <= MAX_WHISPER_GLOSSARY_PROMPT_CHARS
-        {
+        if prompt.chars().count() + heading.chars().count() <= MAX_WHISPER_GLOSSARY_PROMPT_CHARS {
             prompt.push_str(heading);
             for entry in glossary_entries {
                 let context = entry
@@ -460,7 +457,9 @@ fn honorific_suffix_regex() -> &'static Regex {
 fn apply_translation_style(text: &str, settings: &TranslationStyleSettings) -> String {
     let mut styled = text.trim().to_string();
     if settings.honorific_mode == HonorificMode::Drop {
-        styled = honorific_suffix_regex().replace_all(&styled, "").to_string();
+        styled = honorific_suffix_regex()
+            .replace_all(&styled, "")
+            .to_string();
     }
     match settings.style {
         TranslationStyle::Formal => {
@@ -472,9 +471,7 @@ fn apply_translation_style(text: &str, settings: &TranslationStyleSettings) -> S
                     );
                 }
             }
-            if !styled.is_empty()
-                && !styled.ends_with(['.', '?', '!', '…'])
-            {
+            if !styled.is_empty() && !styled.ends_with(['.', '?', '!', '…']) {
                 styled.push('.');
             }
         }
@@ -1044,7 +1041,10 @@ mod tests {
         let (bounded_prompt, count) = build_translation_prompt(&long_custom, &entries);
         let bounded_prompt = bounded_prompt.expect("bounded custom prompt");
         assert!(bounded_prompt.starts_with("Omit Japanese and Korean honorific suffixes"));
-        assert_eq!(bounded_prompt.chars().count(), MAX_WHISPER_GLOSSARY_PROMPT_CHARS);
+        assert_eq!(
+            bounded_prompt.chars().count(),
+            MAX_WHISPER_GLOSSARY_PROMPT_CHARS
+        );
         assert_eq!(count, 0);
     }
 
@@ -1081,7 +1081,10 @@ mod tests {
         let dir = tempfile::tempdir().expect("tempdir");
         let paths = AppPaths::new(dir.path().join("app"));
         paths.ensure_dirs().expect("dirs");
-        assert_eq!(translation_style_load(&paths, "item-1").expect("load"), None);
+        assert_eq!(
+            translation_style_load(&paths, "item-1").expect("load"),
+            None
+        );
 
         let saved = translation_style_save(
             &paths,
@@ -1094,19 +1097,22 @@ mod tests {
             },
         )
         .expect("save");
-        assert_eq!(saved.custom_instruction.as_deref(), Some("terse broadcast English"));
+        assert_eq!(
+            saved.custom_instruction.as_deref(),
+            Some("terse broadcast English")
+        );
         assert_eq!(
             translation_style_load(&paths, "item-1").expect("reload"),
             Some(saved)
         );
-        assert_eq!(translation_style_load(&paths, "item-2").expect("other item"), None);
+        assert_eq!(
+            translation_style_load(&paths, "item-2").expect("other item"),
+            None
+        );
 
-        let traversal = translation_style_save(
-            &paths,
-            "../outside",
-            TranslationStyleSettings::default(),
-        )
-        .expect_err("path traversal must fail");
+        let traversal =
+            translation_style_save(&paths, "../outside", TranslationStyleSettings::default())
+                .expect_err("path traversal must fail");
         assert!(traversal.to_string().contains("invalid glossary item id"));
 
         let control = translation_style_save(
@@ -1119,7 +1125,9 @@ mod tests {
             },
         )
         .expect_err("control characters must fail");
-        assert!(control.to_string().contains("must not contain control characters"));
+        assert!(control
+            .to_string()
+            .contains("must not contain control characters"));
 
         let too_long = translation_style_save(
             &paths,

@@ -80,6 +80,9 @@ function Test-OfflineDirectoryPayloadArtifacts([string]$OfflineDir) {
     'tools\js_runtime\node\node.exe',
     'tools\js_runtime\node\npm.cmd',
     'tools\youtube_po_provider\server\build\main.js',
+    'tools\instagram_profile_provider\instaloader.exe',
+    'tools\instagram_profile_provider\instagram_profile_enumerator.py',
+    'tools\python\venv\Lib\site-packages\instaloader\__init__.py',
     'tools\python\portable\python.exe'
   )
   foreach ($relativePath in $requiredFiles) {

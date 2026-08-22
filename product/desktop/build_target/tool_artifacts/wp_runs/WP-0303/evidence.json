@@ -1,0 +1,47 @@
+{
+  "schema_version": 1,
+  "wp_id": "WP-0303",
+  "outcome": "done",
+  "verified_at": "2026-08-22",
+  "build": {
+    "app_version": "0.1.178",
+    "executable": "product/desktop/build_target/Current/release/desktop.exe",
+    "installer": "product/desktop/build_target/Current/release/bundle/nsis/VoxVulgi_0.1.178_x64-setup.exe",
+    "log": "product/desktop/build_target/logs/build_desktop_target_20260822-223147_0_1_178.log"
+  },
+  "runtime": {
+    "root": "product/desktop/build_target/tool_artifacts/wp_runs/WP-0303/runtime_20260822_v6/app_base",
+    "profile": "paty.adler",
+    "canonical_profile_id": "304219882",
+    "provider": "instaloader",
+    "provider_version": "4.15.3",
+    "canonical_identities": 7,
+    "metadata_rows": 7,
+    "memberships": 7,
+    "provider_subscription_items": 7,
+    "library_items": 7,
+    "lineage_rows": 7,
+    "orphan_metadata_rows": 0,
+    "single_transfers": 1,
+    "recurring_transfers": 6,
+    "refresh_jobs": 3,
+    "transfer_count_after_first": 7,
+    "transfer_count_after_second": 7,
+    "transfer_count_after_restart": 7,
+    "partial_capability_class": "authentication",
+    "partial_capability_hold": "Instagram authentication must be reconnected in Options"
+  },
+  "checks": {
+    "engine_serial": "581 passed; 0 failed; 4 ignored",
+    "tauri_serial": "46 passed; 0 failed",
+    "frontend_contracts": "251 passed; 0 failed",
+    "offline_payload_validation": "passed",
+    "headless_packaged_ui": "passed",
+    "semantic_missing_accessible_names": 0,
+    "visual_inspection": "passed"
+  },
+  "ui_evidence": {
+    "snapshot": "governance/snapshots/WP-0303_packaged_v0_1_178/instagram_auth_hold_archive_1787431142317.png",
+    "dump": "governance/snapshots/WP-0303_packaged_v0_1_178/instagram_auth_hold_archive_1787431142327.dump.json"
+  }
+}

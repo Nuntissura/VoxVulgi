@@ -13,6 +13,8 @@ pub struct PinnedDependencyManifest {
     #[serde(default)]
     pub lockfiles: BTreeMap<String, String>,
     pub yt_dlp_windows: YtDlpWindowsPin,
+    pub instagram_profile_provider: StandaloneZipToolPin,
+    pub instagram_profile_enumerator: PythonWheelPin,
     pub portable_python_windows: PortablePythonWindowsPin,
     pub deno_windows: DenoWindowsPin,
     pub node_windows: NodeWindowsPin,
@@ -27,6 +29,26 @@ pub struct PinnedDependencyManifest {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct YtDlpWindowsPin {
+    pub version: String,
+    pub url: String,
+    pub sha256_hex: String,
+    pub file_bytes: u64,
+    pub source_label: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct StandaloneZipToolPin {
+    pub version: String,
+    pub url: String,
+    pub sha256_hex: String,
+    pub file_bytes: u64,
+    pub executable_sha256_hex: String,
+    pub executable_bytes: u64,
+    pub source_label: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PythonWheelPin {
     pub version: String,
     pub url: String,
     pub sha256_hex: String,
@@ -194,6 +216,7 @@ mod tests {
             "VOXVULGI_ALLOW_UNPINNED_FALLBACK"
         );
         assert_eq!(manifest.yt_dlp_windows.version, "2026.07.04");
+        assert_eq!(manifest.instagram_profile_provider.version, "4.15.3");
         assert_eq!(
             manifest.yt_dlp_windows.sha256_hex,
             "52FE3C26DCF71FBDC85B528589020BB0B8E383155CFA81B64DD447BBE35E24B8"

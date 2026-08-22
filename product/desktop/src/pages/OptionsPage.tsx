@@ -14,10 +14,9 @@ import { safeLocalStorageGet, safeLocalStorageSet } from "../lib/persist";
 import {
   beginInstagramCapabilityEpoch,
   beginInstagramMutationEpoch,
-  applyIfCurrentInstagramMutation,
   invalidateInstagramCapabilityEpoch,
-  isCurrentInstagramCredentialRevision,
   isCurrentInstagramCapabilityEpoch,
+  isCurrentInstagramCredentialRevision,
   isCurrentInstagramMutationEpoch,
 } from "../lib/instagramCapabilityEpoch";
 import {
@@ -62,6 +61,13 @@ import {
   type ReconciledYoutubeAuthStatus,
   type YoutubeAuthStatusReceipt,
 } from "../lib/youtubeAuthStatus";
+import {
+  DEFAULT_INSTAGRAM_BROWSER_DRAFT,
+  projectInstagramBrowserStatus,
+  reconcileInstagramAuthStatus,
+  type InstagramAuthStatusReceipt,
+  type ReconciledInstagramAuthStatus,
+} from "../lib/instagramAuthStatus";
 import {
   featureRootStatus,
   refreshSharedDownloadDirStatus,
@@ -266,13 +272,6 @@ type OptionsCapabilityReceipt = {
   message: string;
 };
 
-type InstagramAuthStatusReceipt = {
-  configured: boolean;
-  credential_generation: number;
-  credential_fingerprint: string;
-  cleanup_warning: string | null;
-};
-
 type InstagramAuthPreflightReceipt = {
   ok: boolean;
   message: string;
@@ -284,7 +283,10 @@ type InstagramAuthPreflightReceipt = {
 type JobRuntimeSettings = {
   youtube_single: number;
   youtube_recurring: number;
-  instagram: number;
+  instagram_single: number;
+  instagram_recurring: number;
+  tiktok_single: number;
+  tiktok_recurring: number;
   other_video: number;
   image_archive: number;
   localization: number;
@@ -302,6 +304,38 @@ type JobTrackRuntimeRow = {
 
 type JobsTrackRuntimeSnapshot = {
   tracks: JobTrackRuntimeRow[];
+};
+
+type ProviderTransferPolicy = {
+  concurrent_fragments: number;
+  limit_rate: string | null;
+  sleep_interval_secs: number;
+  sleep_requests_secs: number;
+};
+
+type ProviderTransferSettings = {
+  schema_version: number;
+  instagram_single: ProviderTransferPolicy;
+  instagram_recurring: ProviderTransferPolicy;
+  tiktok_single: ProviderTransferPolicy;
+  tiktok_recurring: ProviderTransferPolicy;
+  tiktok_browser_cookie_source: string | null;
+  tiktok_api_hostname: string | null;
+  tiktok_app_info: string | null;
+  tiktok_device_id: string | null;
+};
+
+type InstagramProfileProviderStatus = {
+  installed: boolean;
+  enumerator_ready: boolean;
+  version: string;
+  readiness_error: string | null;
+};
+
+type YtDlpToolsStatus = {
+  available: boolean;
+  bundled_installed: boolean;
+  ytdlp_version: string | null;
 };
 
 type BatchOnImportRules = {
@@ -427,7 +461,10 @@ const DEFAULT_INSTAGRAM_AUTH_PREFLIGHT_URL = "https://www.instagram.com/instagra
 const DEFAULT_JOB_RUNTIME_SETTINGS: JobRuntimeSettings = {
   youtube_single: 1,
   youtube_recurring: 1,
-  instagram: 1,
+  instagram_single: 1,
+  instagram_recurring: 1,
+  tiktok_single: 1,
+  tiktok_recurring: 1,
   other_video: 2,
   image_archive: 1,
   localization: 1,
@@ -436,6 +473,17 @@ const DEFAULT_JOB_RUNTIME_SETTINGS: JobRuntimeSettings = {
 const DEFAULT_JOB_RUNTIME_DRAFT = Object.fromEntries(
   Object.entries(DEFAULT_JOB_RUNTIME_SETTINGS).map(([key, value]) => [key, String(value)]),
 ) as JobRuntimeDraft;
+const DEFAULT_PROVIDER_TRANSFER_SETTINGS: ProviderTransferSettings = {
+  schema_version: 1,
+  instagram_single: { concurrent_fragments: 2, limit_rate: null, sleep_interval_secs: 1, sleep_requests_secs: 1 },
+  instagram_recurring: { concurrent_fragments: 1, limit_rate: "4M", sleep_interval_secs: 3, sleep_requests_secs: 1 },
+  tiktok_single: { concurrent_fragments: 2, limit_rate: null, sleep_interval_secs: 0, sleep_requests_secs: 0 },
+  tiktok_recurring: { concurrent_fragments: 1, limit_rate: "6M", sleep_interval_secs: 2, sleep_requests_secs: 1 },
+  tiktok_browser_cookie_source: null,
+  tiktok_api_hostname: null,
+  tiktok_app_info: null,
+  tiktok_device_id: null,
+};
 const DEFAULT_BATCH_ON_IMPORT_RULES: BatchOnImportRules = {
   auto_asr: false,
   auto_translate: false,
@@ -446,7 +494,10 @@ const DEFAULT_BATCH_ON_IMPORT_RULES: BatchOnImportRules = {
 const JOB_SETTING_KEYS: Array<{ id: string; key: keyof JobRuntimeSettings }> = [
   { id: "jobs.budget-youtube-single", key: "youtube_single" },
   { id: "jobs.budget-youtube-recurring", key: "youtube_recurring" },
-  { id: "jobs.budget-instagram", key: "instagram" },
+  { id: "jobs.budget-instagram-single", key: "instagram_single" },
+  { id: "jobs.budget-instagram-recurring", key: "instagram_recurring" },
+  { id: "jobs.budget-tiktok-single", key: "tiktok_single" },
+  { id: "jobs.budget-tiktok-recurring", key: "tiktok_recurring" },
   { id: "jobs.budget-other-video", key: "other_video" },
   { id: "jobs.budget-image-archive", key: "image_archive" },
   { id: "jobs.budget-localization", key: "localization" },
@@ -658,13 +709,23 @@ export function OptionsPage() {
   const authRevisionRef = useRef<{ generation: number; fingerprint: string } | null>(null);
   const youtubeCapabilityEpochRef = useRef(0);
   const [authRevisionHydrated, setAuthRevisionHydrated] = useState(false);
-  // WP-0263: global Instagram sign-in (mirrors the YouTube auth block above). One cookie in
-  // Options is reused for every Instagram operation (single, subscription refresh, batch).
+  // Global Instagram sign-in (mirrors the YouTube auth block above with browser cookie support).
   const [igAuthJson, setIgAuthJson] = useState("");
   const [igAuthBusy, setIgAuthBusy] = useState(false);
   const [igAuthPreflightBusy, setIgAuthPreflightBusy] = useState(false);
   const [igAuthPreflightUrl, setIgAuthPreflightUrl] = useState(DEFAULT_INSTAGRAM_AUTH_PREFLIGHT_URL);
   const [igAuthMessage, setIgAuthMessage] = useState("");
+  const [igAuthResultState, setIgAuthResultState] = useState<"idle" | "success" | "failure">("idle");
+  const [igAuthOpenBusy, setIgAuthOpenBusy] = useState(false);
+  const [igAuthBrowserSource, setIgAuthBrowserSource] = useState(DEFAULT_INSTAGRAM_BROWSER_DRAFT);
+  const [igAuthBrowserDraftTouched, setIgAuthBrowserDraftTouched] = useState(false);
+  const [igAuthConnectedSource, setIgAuthConnectedSource] = useState<string | null>(null);
+  const [igAuthManualConfigured, setIgAuthManualConfigured] = useState(false);
+  const [igAuthBaselineBrowserSource, setIgAuthBaselineBrowserSource] = useState<string | null>(null);
+  const [igAuthBrowserBaselineAvailable, setIgAuthBrowserBaselineAvailable] = useState(false);
+  const [igAuthBrowserEffectiveAvailable, setIgAuthBrowserEffectiveAvailable] = useState(false);
+  const [igAuthLastVerifiedAtMs, setIgAuthLastVerifiedAtMs] = useState<number | null>(null);
+  const [igAuthReconnectRequiredAtMs, setIgAuthReconnectRequiredAtMs] = useState<number | null>(null);
   const [igAuthConfigured, setIgAuthConfigured] = useState(false);
   const [igAuthHydrationState, setIgAuthHydrationState] = useState<"loading" | "ready" | "unavailable">("loading");
   const instagramAuthRevisionRef = useRef<{ generation: number; fingerprint: string } | null>(null);
@@ -706,6 +767,12 @@ export function OptionsPage() {
   const [jobsRuntimeRows, setJobsRuntimeRows] = useState<Partial<Record<keyof JobRuntimeSettings, JobTrackRuntimeRow>> | null>(null);
   const [jobsBusy, setJobsBusy] = useState(false);
   const [jobsMessage, setJobsMessage] = useState("");
+  const [providerTransferSettings, setProviderTransferSettings] = useState<ProviderTransferSettings | null>(null);
+  const [providerTransferBaseline, setProviderTransferBaseline] = useState<ProviderTransferSettings | null>(null);
+  const [providerTransferBusy, setProviderTransferBusy] = useState(false);
+  const [providerTransferMessage, setProviderTransferMessage] = useState("");
+  const [instagramProviderStatus, setInstagramProviderStatus] = useState<InstagramProfileProviderStatus | null>(null);
+  const [providerYtDlpStatus, setProviderYtDlpStatus] = useState<YtDlpToolsStatus | null>(null);
   const [batchRules, setBatchRules] = useState<BatchOnImportRules>(DEFAULT_BATCH_ON_IMPORT_RULES);
   const [batchBaseline, setBatchBaseline] = useState<BatchOnImportRules | null>(null);
   const [diagnosticsTraceDir, setDiagnosticsTraceDir] = useState<DiagnosticsTraceDirStatus | null>(null);
@@ -1010,7 +1077,7 @@ export function OptionsPage() {
   }
 
   useEffect(() => {
-    if (activeModule !== "jobs") return;
+    if (!["jobs", "instagram_archiver", "tiktok_archiver"].includes(activeModule)) return;
     let canceled = false;
     setJobsBusy(true);
     invoke<JobsTrackRuntimeSnapshot>(optionsPersistenceAdapterContract("jobs_track_runtime").canonicalReaderRoute!)
@@ -1045,6 +1112,80 @@ export function OptionsPage() {
       .finally(() => { if (!canceled) setJobsBusy(false); });
     return () => { canceled = true; };
   }, [activeModule]);
+
+  useEffect(() => {
+    if (!["instagram_archiver", "tiktok_archiver"].includes(activeModule)) return;
+    let canceled = false;
+    setProviderTransferBusy(true);
+    setProviderTransferMessage("");
+    Promise.all([
+      invoke<ProviderTransferSettings>("provider_transfer_settings_get"),
+      invoke<YtDlpToolsStatus>("tools_ytdlp_status"),
+      activeModule === "instagram_archiver"
+        ? invoke<InstagramProfileProviderStatus>("tools_instagram_profile_provider_status")
+        : Promise.resolve(null),
+    ])
+      .then(([settings, ytdlp, instagramStatus]) => {
+        if (canceled) return;
+        setProviderTransferSettings(settings);
+        setProviderTransferBaseline(settings);
+        setProviderYtDlpStatus(ytdlp);
+        setInstagramProviderStatus(instagramStatus);
+      })
+      .catch((error) => {
+        if (canceled) return;
+        setProviderTransferSettings(null);
+        setProviderTransferBaseline(null);
+        setProviderYtDlpStatus(null);
+        if (activeModule === "instagram_archiver") setInstagramProviderStatus(null);
+        setProviderTransferMessage(`Error loading provider settings: ${String(error)}`);
+      })
+      .finally(() => { if (!canceled) setProviderTransferBusy(false); });
+    return () => { canceled = true; };
+  }, [activeModule]);
+
+  function updateProviderTransferPolicy(
+    key: "instagram_single" | "instagram_recurring" | "tiktok_single" | "tiktok_recurring",
+    patch: Partial<ProviderTransferPolicy>,
+  ) {
+    setProviderTransferSettings((current) => current ? {
+      ...current,
+      [key]: { ...current[key], ...patch },
+    } : current);
+  }
+
+  async function saveProviderTransferSettings() {
+    if (!providerTransferSettings) return;
+    setProviderTransferBusy(true);
+    setProviderTransferMessage("");
+    try {
+      const saved = await invoke<ProviderTransferSettings>("provider_transfer_settings_set", {
+        settings: providerTransferSettings,
+      });
+      setProviderTransferSettings(saved);
+      setProviderTransferBaseline(saved);
+      setProviderTransferMessage("Provider download limits saved and applied to new jobs.");
+    } catch (error) {
+      setProviderTransferMessage(`Error saving provider settings: ${String(error)}`);
+    } finally {
+      setProviderTransferBusy(false);
+    }
+  }
+
+  function resetProviderTransferDraft(provider: "instagram" | "tiktok") {
+    setProviderTransferSettings((current) => current ? {
+      ...current,
+      [`${provider}_single`]: { ...DEFAULT_PROVIDER_TRANSFER_SETTINGS[`${provider}_single`] },
+      [`${provider}_recurring`]: { ...DEFAULT_PROVIDER_TRANSFER_SETTINGS[`${provider}_recurring`] },
+      ...(provider === "tiktok" ? {
+        tiktok_browser_cookie_source: null,
+        tiktok_api_hostname: null,
+        tiktok_app_info: null,
+        tiktok_device_id: null,
+      } : {}),
+    } : current);
+    setProviderTransferMessage("Safe defaults restored in the draft. Save to apply them.");
+  }
 
   async function saveJobsRuntimeSettings(settingsOverride?: JobRuntimeSettings) {
     if (!jobsBaseline || JOB_SETTING_KEYS.some(({ key }) => jobsBaseline[key] == null)) {
@@ -1346,8 +1487,7 @@ export function OptionsPage() {
     return () => { canceled = true; };
   }, [activeModule]);
 
-  // WP-0263: reflect whether a global Instagram login is saved. The engine returns only
-  // { configured } — the cookie itself is never echoed back (it's stored as a secret).
+  // Reflect whether a global Instagram login / browser session is saved.
   useEffect(() => {
     if (activeModule !== "instagram_archiver") return;
     const hydrationEpoch = beginInstagramCapabilityEpoch(instagramCapabilityEpochRef);
@@ -1355,14 +1495,12 @@ export function OptionsPage() {
     invoke<InstagramAuthStatusReceipt>(optionsPersistenceAdapterContract("instagram_auth").canonicalReaderRoute!)
       .then((cfg) => {
         if (!isCurrentInstagramCapabilityEpoch(instagramCapabilityEpochRef, hydrationEpoch)) return;
-        setIgAuthConfigured(cfg.configured);
-        instagramAuthRevisionRef.current = {
-          generation: cfg.credential_generation,
-          fingerprint: cfg.credential_fingerprint,
-        };
-        setIgAuthHydrationState("ready");
-        const hydratedMessage = cfg.configured ? "An Instagram login is saved." : "No Instagram login is saved.";
-        setIgAuthMessage(cfg.cleanup_warning ? `${hydratedMessage} Warning: ${cfg.cleanup_warning}` : hydratedMessage);
+        setIgAuthJson("");
+        const next = applyInstagramAuthStatusReceipt(cfg);
+        setIgAuthResultState(next.reconnectRequiredAtMs ? "failure" : next.lastVerifiedAtMs ? "success" : "idle");
+        if (cfg.cleanup_warning) {
+          setIgAuthMessage(`Warning: ${cfg.cleanup_warning}`);
+        }
       })
       .catch((err) => {
         if (isCurrentInstagramCapabilityEpoch(instagramCapabilityEpochRef, hydrationEpoch)) {
@@ -1677,31 +1815,167 @@ export function OptionsPage() {
       ? "manual YouTube cookies"
       : "";
 
-  // WP-0263: save the global Instagram sign-in. The engine stores it as a secret and returns
-  // only { configured }; the payload key is `cookie` (a raw Cookie header or a cookie-JSON array).
-  async function saveInstagramAuth() {
+  function applyInstagramAuthStatusReceipt(receipt: InstagramAuthStatusReceipt): ReconciledInstagramAuthStatus {
+    const next = reconcileInstagramAuthStatus(receipt, igAuthBrowserSource);
+    setIgAuthBrowserSource(next.browserDraftSource);
+    setIgAuthBrowserDraftTouched(false);
+    setIgAuthBaselineBrowserSource(next.browserBaselineSource);
+    setIgAuthConnectedSource(next.browserEffectiveSource);
+    setIgAuthBrowserBaselineAvailable(next.browserBaselineAvailable);
+    setIgAuthBrowserEffectiveAvailable(next.browserEffectiveAvailable);
+    setIgAuthConfigured(next.configured);
+    setIgAuthManualConfigured(next.manualCookieConfigured);
+    setIgAuthLastVerifiedAtMs(next.lastVerifiedAtMs);
+    setIgAuthReconnectRequiredAtMs(next.reconnectRequiredAtMs);
+    instagramAuthRevisionRef.current = next.credentialGeneration != null && next.credentialFingerprint
+      ? { generation: next.credentialGeneration, fingerprint: next.credentialFingerprint }
+      : null;
+    setIgAuthHydrationState(instagramAuthRevisionRef.current != null ? "ready" : "unavailable");
+    return next;
+  }
+
+  async function replaceInstagramAuth(configValue: {
+    cookie: string | null;
+    browser_cookie_source: string | null;
+  }): Promise<InstagramAuthStatusReceipt> {
+    const expected = instagramAuthRevisionRef.current;
+    if (igAuthHydrationState !== "ready" || !expected) {
+      throw new Error("Instagram sign-in status has not loaded; reload Options before changing sign-in.");
+    }
+    try {
+      const saved = await invoke<InstagramAuthStatusReceipt>("config_instagram_auth_set", {
+        configValue: {
+          cookie: configValue.cookie,
+          browser_cookie_source: configValue.browser_cookie_source,
+        },
+        expectedCredentialGeneration: expected.generation,
+        expectedCredentialFingerprint: expected.fingerprint,
+      });
+      applyInstagramAuthStatusReceipt(saved);
+      return saved;
+    } catch (error) {
+      try {
+        const current = await invoke<InstagramAuthStatusReceipt>("config_instagram_auth_get");
+        applyInstagramAuthStatusReceipt(current);
+      } catch {
+        instagramAuthRevisionRef.current = null;
+        setIgAuthHydrationState("unavailable");
+      }
+      throw error;
+    }
+  }
+
+  function applyInstagramAuthPreflightResult(result: InstagramAuthPreflightReceipt, target: string) {
+    const message = result.message || (result.ok ? "Instagram accepted this session." : "Instagram did not accept this session.");
+    setIgAuthMessage(message);
+    setIgAuthResultState(result.ok ? "success" : "failure");
+    setIgAuthLastVerifiedAtMs(result.ok ? Date.now() : null);
+    setIgAuthReconnectRequiredAtMs(result.ok ? null : Date.now());
+    setCapabilityReceipt({
+      provider: "instagram",
+      status: result.ok ? "success" : "failure",
+      checkedAtMs: Date.now(),
+      target,
+      message,
+    });
+  }
+
+  async function openInstagramSignIn() {
+    setIgAuthOpenBusy(true);
+    setIgAuthMessage("");
+    try {
+      await invoke("instagram_auth_open_sign_in", { browserSource: igAuthBrowserSource });
+      setIgAuthMessage(
+        `${youtubeBrowserLabel(igAuthBrowserSource)} opened. Sign into Instagram, confirm you are logged in, then return here. If verification says the browser is locked, close it fully and retry.`,
+      );
+      setIgAuthResultState("idle");
+    } catch (e) {
+      setIgAuthMessage(String(e));
+      setIgAuthResultState("failure");
+    } finally {
+      setIgAuthOpenBusy(false);
+    }
+  }
+
+  async function connectInstagramBrowser() {
+    if (igAuthHydrationState !== "ready") {
+      setIgAuthMessage("Instagram credential status is unavailable. Reload Options before connecting.");
+      return;
+    }
+    const capabilityEpoch = beginInstagramCapabilityEpoch(instagramCapabilityEpochRef);
+    setIgAuthBusy(true);
+    setIgAuthPreflightBusy(true);
+    setIgAuthMessage(`Checking your ${igAuthBrowserSource} Instagram session...`);
+    const target = igAuthPreflightUrl.trim() || DEFAULT_INSTAGRAM_AUTH_PREFLIGHT_URL;
+    setCapabilityReceipt({ provider: "instagram", status: "running", checkedAtMs: Date.now(), target, message: `Testing ${youtubeBrowserLabel(igAuthBrowserSource)}…` });
+    try {
+      const saved = await replaceInstagramAuth({
+        cookie: null,
+        browser_cookie_source: igAuthBrowserSource,
+      });
+      if (!isCurrentInstagramCapabilityEpoch(instagramCapabilityEpochRef, capabilityEpoch)) return;
+      setIgAuthJson("");
+      const result = await invoke<InstagramAuthPreflightReceipt>("config_instagram_auth_preflight", {
+        url: igAuthPreflightUrl.trim() || null,
+      });
+      if (!isCurrentInstagramCapabilityEpoch(instagramCapabilityEpochRef, capabilityEpoch)) return;
+      applyInstagramAuthPreflightResult(result, target);
+      if (saved.cleanup_warning) {
+        setIgAuthMessage((current) => `${current} Warning: ${saved.cleanup_warning}`);
+      }
+    } catch (e) {
+      if (isCurrentInstagramCapabilityEpoch(instagramCapabilityEpochRef, capabilityEpoch)) {
+        const message = `Could not verify ${youtubeBrowserLabel(igAuthBrowserSource)}: ${String(e)}`;
+        setIgAuthMessage(message);
+        setIgAuthResultState("failure");
+        setCapabilityReceipt({ provider: "instagram", status: "failure", checkedAtMs: Date.now(), target, message });
+      }
+    } finally {
+      if (isCurrentInstagramCapabilityEpoch(instagramCapabilityEpochRef, capabilityEpoch)) {
+        setIgAuthBusy(false);
+        setIgAuthPreflightBusy(false);
+      }
+    }
+  }
+
+  async function saveInstagramManualAuth() {
     if (igAuthHydrationState !== "ready") {
       setIgAuthMessage("Instagram credential status is unavailable. Reload Options before saving.");
       return;
     }
-    markCapabilityReceiptStale("instagram", "Instagram credentials changed after this test.");
-    const operationEpoch = beginInstagramMutationEpoch(instagramMutationEpochRef);
+    const capabilityEpoch = beginInstagramCapabilityEpoch(instagramCapabilityEpochRef);
     setIgAuthBusy(true);
+    setIgAuthPreflightBusy(true);
     setIgAuthMessage("");
+    const target = igAuthPreflightUrl.trim() || DEFAULT_INSTAGRAM_AUTH_PREFLIGHT_URL;
+    setCapabilityReceipt({ provider: "instagram", status: "running", checkedAtMs: Date.now(), target, message: "Testing saved Instagram credentials…" });
     try {
-      const saved = await replaceInstagramAuth(igAuthJson.trim() || null, operationEpoch);
-      if (isCurrentInstagramMutationEpoch(instagramMutationEpochRef, operationEpoch)) {
-        const committedMessage = saved.configured ? "Saved your Instagram login." : "Cleared your Instagram login.";
-        setIgAuthMessage(saved.cleanup_warning ? `${committedMessage} Warning: ${saved.cleanup_warning}` : committedMessage);
-        setIgAuthConfigured(saved.configured);
-        setIgAuthJson("");
+      const saved = await replaceInstagramAuth({
+        cookie: igAuthJson,
+        browser_cookie_source: null,
+      });
+      if (!isCurrentInstagramCapabilityEpoch(instagramCapabilityEpochRef, capabilityEpoch)) return;
+      setIgAuthJson("");
+      const result = await invoke<InstagramAuthPreflightReceipt>("config_instagram_auth_preflight", {
+        url: igAuthPreflightUrl.trim() || null,
+      });
+      if (!isCurrentInstagramCapabilityEpoch(instagramCapabilityEpochRef, capabilityEpoch)) return;
+      applyInstagramAuthPreflightResult(result, target);
+      if (saved.cleanup_warning) {
+        setIgAuthMessage((current) => `${current} Warning: ${saved.cleanup_warning}`);
       }
     } catch (e) {
-      if (isCurrentInstagramMutationEpoch(instagramMutationEpochRef, operationEpoch)) {
-        setIgAuthMessage(`Error saving your login: ${String(e)}`);
+      if (isCurrentInstagramCapabilityEpoch(instagramCapabilityEpochRef, capabilityEpoch)) {
+        const message = `Error saving your login: ${String(e)}`;
+        setIgAuthMessage(message);
+        setIgAuthResultState("failure");
+        setCapabilityReceipt({ provider: "instagram", status: "failure", checkedAtMs: Date.now(), target, message });
       }
     } finally {
-      if (isCurrentInstagramMutationEpoch(instagramMutationEpochRef, operationEpoch)) setIgAuthBusy(false);
+      if (isCurrentInstagramCapabilityEpoch(instagramCapabilityEpochRef, capabilityEpoch)) {
+        setIgAuthBusy(false);
+        setIgAuthPreflightBusy(false);
+      }
     }
   }
 
@@ -1710,18 +1984,19 @@ export function OptionsPage() {
       setIgAuthMessage("Instagram credential status is unavailable. Reload Options before disconnecting.");
       return;
     }
-    markCapabilityReceiptStale("instagram", "Instagram credentials were disconnected after this test.");
     const operationEpoch = beginInstagramMutationEpoch(instagramMutationEpochRef);
     setIgAuthBusy(true);
     setIgAuthMessage("");
     try {
-      const saved = await replaceInstagramAuth(null, operationEpoch);
-      if (isCurrentInstagramMutationEpoch(instagramMutationEpochRef, operationEpoch)) {
-        setIgAuthJson("");
-        setIgAuthConfigured(false);
-        const committedMessage = "Cleared the saved Instagram login.";
-        setIgAuthMessage(saved.cleanup_warning ? `${committedMessage} Warning: ${saved.cleanup_warning}` : committedMessage);
-      }
+      const saved = await replaceInstagramAuth({
+        cookie: null,
+        browser_cookie_source: null,
+      });
+      if (!isCurrentInstagramMutationEpoch(instagramMutationEpochRef, operationEpoch)) return;
+      setIgAuthJson("");
+      setIgAuthResultState("idle");
+      markCapabilityReceiptStale("instagram", "Instagram credentials were disconnected after this test.");
+      setIgAuthMessage(`VoxVulgi is disconnected from Instagram. Your browser and account were not changed.${saved.cleanup_warning ? ` Warning: ${saved.cleanup_warning}` : ""}`);
     } catch (e) {
       if (isCurrentInstagramMutationEpoch(instagramMutationEpochRef, operationEpoch)) {
         setIgAuthMessage(`Error clearing your login: ${String(e)}`);
@@ -1731,52 +2006,6 @@ export function OptionsPage() {
     }
   }
 
-  async function replaceInstagramAuth(
-    cookie: string | null,
-    operationEpoch: number,
-  ): Promise<InstagramAuthStatusReceipt> {
-    const expected = instagramAuthRevisionRef.current;
-    if (igAuthHydrationState !== "ready" || !expected) {
-      throw new Error("Instagram sign-in status has not loaded; reload Options before changing sign-in.");
-    }
-    try {
-      const saved = await invoke<InstagramAuthStatusReceipt>("config_instagram_auth_set", {
-        configValue: { cookie },
-        expectedCredentialGeneration: expected.generation,
-        expectedCredentialFingerprint: expected.fingerprint,
-      });
-      applyIfCurrentInstagramMutation(instagramMutationEpochRef, operationEpoch, () => {
-        instagramAuthRevisionRef.current = {
-          generation: saved.credential_generation,
-          fingerprint: saved.credential_fingerprint,
-        };
-        setIgAuthConfigured(saved.configured);
-      });
-      return saved;
-    } catch (error) {
-      try {
-        const current = await invoke<InstagramAuthStatusReceipt>("config_instagram_auth_get");
-        applyIfCurrentInstagramMutation(instagramMutationEpochRef, operationEpoch, () => {
-          instagramAuthRevisionRef.current = {
-            generation: current.credential_generation,
-            fingerprint: current.credential_fingerprint,
-          };
-          setIgAuthConfigured(current.configured);
-          setIgAuthHydrationState("ready");
-        });
-      } catch {
-        applyIfCurrentInstagramMutation(instagramMutationEpochRef, operationEpoch, () => {
-          instagramAuthRevisionRef.current = null;
-          setIgAuthConfigured(false);
-          setIgAuthHydrationState("unavailable");
-        });
-      }
-      throw error;
-    }
-  }
-
-  // WP-0263: test the saved Instagram sign-in. Mirrors config_youtube_auth_preflight; kept
-  // deliberately slow/passive so Meta's anti-bot checks don't flag the account.
   async function runInstagramAuthPreflight() {
     if (igAuthHydrationState !== "ready") {
       setIgAuthMessage("Instagram credential status is unavailable. Reload Options before testing.");
@@ -1785,59 +2014,22 @@ export function OptionsPage() {
     setIgAuthPreflightBusy(true);
     setIgAuthMessage("");
     const capabilityEpoch = beginInstagramCapabilityEpoch(instagramCapabilityEpochRef);
+    const currentRevision = instagramAuthRevisionRef.current;
     const target = igAuthPreflightUrl.trim() || DEFAULT_INSTAGRAM_AUTH_PREFLIGHT_URL;
     setCapabilityReceipt({ provider: "instagram", status: "running", checkedAtMs: Date.now(), target, message: "Testing saved Instagram credentials…" });
     try {
       const result = await invoke<InstagramAuthPreflightReceipt>("config_instagram_auth_preflight", {
         url: igAuthPreflightUrl.trim() || null,
       });
-      const currentRevision = instagramAuthRevisionRef.current;
-      if (!isCurrentInstagramCredentialRevision(currentRevision, result)) {
-        throw new Error("Instagram credential preflight became stale because the saved credentials changed");
-      }
-      const message = result.message ||
-        (result.ok ? "Your Instagram login works." : "Your Instagram login didn't work.");
-      if (isCurrentInstagramCapabilityEpoch(instagramCapabilityEpochRef, capabilityEpoch)) {
-        setIgAuthMessage(message);
-        setCapabilityReceipt({
-          provider: "instagram",
-          status: result.ok ? "success" : "failure",
-          checkedAtMs: Date.now(),
-          target,
-          message,
-        });
-      }
+      if (!isCurrentInstagramCapabilityEpoch(instagramCapabilityEpochRef, capabilityEpoch)) return;
+      if (!isCurrentInstagramCredentialRevision(currentRevision, result)) return;
+      applyInstagramAuthPreflightResult(result, target);
     } catch (e) {
-      const staleRevision = String(e).includes("preflight became stale");
-      if (staleRevision && isCurrentInstagramCapabilityEpoch(instagramCapabilityEpochRef, capabilityEpoch)) {
-        try {
-          const current = await invoke<InstagramAuthStatusReceipt>("config_instagram_auth_get");
-          if (!isCurrentInstagramCapabilityEpoch(instagramCapabilityEpochRef, capabilityEpoch)) return;
-          instagramAuthRevisionRef.current = {
-            generation: current.credential_generation,
-            fingerprint: current.credential_fingerprint,
-          };
-          setIgAuthConfigured(current.configured);
-          setIgAuthHydrationState("ready");
-        } catch {
-          if (!isCurrentInstagramCapabilityEpoch(instagramCapabilityEpochRef, capabilityEpoch)) return;
-          instagramAuthRevisionRef.current = null;
-          setIgAuthConfigured(false);
-          setIgAuthHydrationState("unavailable");
-        }
-      }
-      const message = staleRevision
-        ? "Instagram sign-in test became stale because the saved credentials changed. Run it again."
-        : `Error testing your login: ${String(e)}`;
       if (isCurrentInstagramCapabilityEpoch(instagramCapabilityEpochRef, capabilityEpoch)) {
+        const message = `Error testing Instagram login: ${String(e)}`;
         setIgAuthMessage(message);
-        setCapabilityReceipt({
-          provider: "instagram",
-          status: staleRevision ? "stale" : "failure",
-          checkedAtMs: Date.now(),
-          target,
-          message,
-        });
+        setIgAuthResultState("failure");
+        setCapabilityReceipt({ provider: "instagram", status: "failure", checkedAtMs: Date.now(), target, message });
       }
     } finally {
       if (isCurrentInstagramCapabilityEpoch(instagramCapabilityEpochRef, capabilityEpoch)) {
@@ -1845,6 +2037,24 @@ export function OptionsPage() {
       }
     }
   }
+
+  const igAuthHasConfiguredSession = Boolean(igAuthConnectedSource || igAuthManualConfigured || igAuthJson.trim() || igAuthConfigured);
+  const igAuthNeedsReconnect =
+    Boolean(igAuthReconnectRequiredAtMs) || (igAuthHasConfiguredSession && igAuthResultState === "failure");
+  const igAuthShowsRecovery = igAuthNeedsReconnect || igAuthResultState === "failure";
+  const igAuthIsReady = igAuthHasConfiguredSession && !igAuthNeedsReconnect && Boolean(igAuthLastVerifiedAtMs);
+  const igAuthStatusState = igAuthIsReady
+    ? "ready"
+    : igAuthNeedsReconnect
+      ? "reconnect"
+      : igAuthHasConfiguredSession
+        ? "unchecked"
+        : "disconnected";
+  const igConfiguredAuthLabel = igAuthConnectedSource
+    ? youtubeBrowserLabel(igAuthConnectedSource)
+    : igAuthManualConfigured || igAuthJson.trim()
+      ? "manual Instagram cookies"
+      : "";
 
   async function chooseFolder(title: string) {
     const selected = await open({
@@ -2318,7 +2528,7 @@ export function OptionsPage() {
   const storageProjectionAvailable = downloadDir != null && !dirError;
   setProjection("general.shared-root", effectiveRoot, effectiveRoot, effectiveRoot, null, dirError, storageProjectionAvailable, storageProjectionAvailable);
   for (const feature of FEATURE_ROOTS) {
-    const modulePrefix = feature.key === "video" ? "video-archiver" : feature.key === "instagram" ? "instagram-archiver" : feature.key === "images" ? "image-archive" : "localization";
+    const modulePrefix = feature.key === "video" ? "video-archiver" : feature.key === "instagram" ? "instagram-archiver" : feature.key === "tiktok" ? "tiktok-archiver" : feature.key === "images" ? "image-archive" : "localization";
     const path = featureRootStatus(downloadDir, feature.key)?.current_dir ?? "";
     setProjection(`${modulePrefix}.storage-root`, path, path, path, null, dirError, storageProjectionAvailable, storageProjectionAvailable);
   }
@@ -2346,8 +2556,59 @@ export function OptionsPage() {
   );
   setProjection("video-archiver.youtube-manual-cookies", optionsCredentialDraftValue(authManualConfigured, Boolean(authJson.trim())), authManualConfigured, authManualConfigured, authJson.trim() ? "unsaved credential draft" : null, authJson.trim() ? "Credential replacement is not effective until saved." : null, authRevisionHydrated, authRevisionHydrated);
   setProjection("video-archiver.youtube-test-url", authPreflightUrl, DEFAULT_YOUTUBE_AUTH_PREFLIGHT_URL);
-  setProjection("instagram-archiver.auth-cookie", optionsCredentialDraftValue(igAuthConfigured, Boolean(igAuthJson.trim())), igAuthConfigured, igAuthConfigured, igAuthJson.trim() ? "unsaved credential draft" : null, igAuthJson.trim() ? "Credential replacement is not effective until saved." : null, igAuthHydrationState === "ready", igAuthHydrationState === "ready");
+  const instagramBrowserProjection = projectInstagramBrowserStatus({
+    browserDraftSource: igAuthBrowserSource,
+    browserBaselineSource: igAuthBaselineBrowserSource,
+    browserEffectiveSource: igAuthConnectedSource,
+    browserBaselineAvailable: igAuthBrowserBaselineAvailable,
+    browserEffectiveAvailable: igAuthBrowserEffectiveAvailable,
+    configured: igAuthConfigured,
+    manualCookieConfigured: igAuthManualConfigured,
+    lastVerifiedAtMs: igAuthLastVerifiedAtMs,
+    reconnectRequiredAtMs: igAuthReconnectRequiredAtMs,
+    credentialGeneration: instagramAuthRevisionRef.current?.generation ?? null,
+    credentialFingerprint: instagramAuthRevisionRef.current?.fingerprint ?? null,
+  }, igAuthBrowserDraftTouched);
+  setProjection(
+    "instagram-archiver.browser-session",
+    instagramBrowserProjection.draftValue,
+    instagramBrowserProjection.savedBaseline,
+    instagramBrowserProjection.effectiveRuntimeValue,
+    null,
+    null,
+    instagramBrowserProjection.savedBaselineAvailable,
+    instagramBrowserProjection.effectiveRuntimeAvailable,
+  );
+  setProjection("instagram-archiver.manual-cookies", optionsCredentialDraftValue(igAuthManualConfigured, Boolean(igAuthJson.trim())), igAuthManualConfigured, igAuthManualConfigured, igAuthJson.trim() ? "unsaved credential draft" : null, igAuthJson.trim() ? "Credential replacement is not effective until saved." : null, igAuthHydrationState === "ready", igAuthHydrationState === "ready");
   setProjection("instagram-archiver.test-url", igAuthPreflightUrl, DEFAULT_INSTAGRAM_AUTH_PREFLIGHT_URL);
+  for (const provider of ["instagram", "tiktok"] as const) {
+    for (const lane of ["single", "recurring"] as const) {
+      const key = `${provider}_${lane}` as const;
+      const draft = providerTransferSettings?.[key];
+      const baseline = providerTransferBaseline?.[key];
+      setProjection(`${provider}-archiver.transfer-${lane}-fragments`, draft?.concurrent_fragments ?? null, baseline?.concurrent_fragments ?? null, draft?.concurrent_fragments ?? null, null, providerTransferMessage || null, providerTransferBaseline != null, providerTransferSettings != null);
+      setProjection(`${provider}-archiver.transfer-${lane}-limit-rate`, draft?.limit_rate ?? "", baseline?.limit_rate ?? "", draft?.limit_rate ?? "", null, providerTransferMessage || null, providerTransferBaseline != null, providerTransferSettings != null);
+      setProjection(`${provider}-archiver.transfer-${lane}-sleep-interval`, draft?.sleep_interval_secs ?? null, baseline?.sleep_interval_secs ?? null, draft?.sleep_interval_secs ?? null, null, providerTransferMessage || null, providerTransferBaseline != null, providerTransferSettings != null);
+      setProjection(`${provider}-archiver.transfer-${lane}-sleep-requests`, draft?.sleep_requests_secs ?? null, baseline?.sleep_requests_secs ?? null, draft?.sleep_requests_secs ?? null, null, providerTransferMessage || null, providerTransferBaseline != null, providerTransferSettings != null);
+    }
+  }
+  for (const [id, key] of [
+    ["tiktok-archiver.browser-cookie-source", "tiktok_browser_cookie_source"],
+    ["tiktok-archiver.api-hostname", "tiktok_api_hostname"],
+    ["tiktok-archiver.app-info", "tiktok_app_info"],
+    ["tiktok-archiver.device-id", "tiktok_device_id"],
+  ] as const) {
+    setProjection(
+      id,
+      providerTransferSettings?.[key] ?? "",
+      providerTransferBaseline?.[key] ?? "",
+      providerTransferSettings?.[key] ?? "",
+      null,
+      providerTransferMessage || null,
+      providerTransferBaseline != null,
+      providerTransferSettings != null,
+    );
+  }
   setProjection("video-archiver.downloader-profile", inferredDownloaderProfile, inferredDownloaderProfile);
   const downloaderInputs: Array<[string, string, unknown]> = [
     ["video-archiver.downloader-concurrent-fragments", downloaderConcurrentFragments, defaultDownloaderPreset?.yt_dlp_concurrent_fragments],
@@ -2611,7 +2872,7 @@ export function OptionsPage() {
     }
     if (adapter === "feature_root") {
       for (const descriptor of descriptors) {
-        const featureKey: FeatureRootKey = descriptor.module === "video_archiver" ? "video" : descriptor.module === "instagram_archiver" ? "instagram" : descriptor.module === "image_archive" ? "images" : "localization";
+        const featureKey: FeatureRootKey = descriptor.module === "video_archiver" ? "video" : descriptor.module === "instagram_archiver" ? "instagram" : descriptor.module === "tiktok_archiver" ? "tiktok" : descriptor.module === "image_archive" ? "images" : "localization";
         await useDefaultFeatureDownloadDir(featureKey);
       }
       return "Module folder restored to the main folder.";
@@ -2625,13 +2886,12 @@ export function OptionsPage() {
     }
     if (adapter === "instagram_auth") {
       markCapabilityReceiptStale("instagram", "Instagram credentials were reset after this test.");
-      const mutationEpoch = beginInstagramMutationEpoch(instagramMutationEpochRef);
+      const operationEpoch = beginInstagramMutationEpoch(instagramMutationEpochRef);
       setIgAuthBusy(true);
       try {
-        const saved = await replaceInstagramAuth(null, mutationEpoch);
-        if (isCurrentInstagramMutationEpoch(instagramMutationEpochRef, mutationEpoch)) {
+        const saved = await replaceInstagramAuth({ cookie: null, browser_cookie_source: null });
+        if (isCurrentInstagramMutationEpoch(instagramMutationEpochRef, operationEpoch)) {
           setIgAuthJson("");
-          setIgAuthConfigured(saved.configured);
           setIgAuthMessage(saved.cleanup_warning
             ? `Instagram credentials disconnected. Warning: ${saved.cleanup_warning}`
             : "Instagram credentials disconnected.");
@@ -2640,7 +2900,7 @@ export function OptionsPage() {
           ? `Instagram credentials disconnected. Warning: ${saved.cleanup_warning}`
           : "Instagram credentials disconnected.";
       } finally {
-        if (isCurrentInstagramMutationEpoch(instagramMutationEpochRef, mutationEpoch)) setIgAuthBusy(false);
+        if (isCurrentInstagramMutationEpoch(instagramMutationEpochRef, operationEpoch)) setIgAuthBusy(false);
       }
     }
     if (adapter === "download_preset") {
@@ -2804,9 +3064,7 @@ export function OptionsPage() {
         if (activeModule === "instagram_archiver") {
           preflightAdapter = "instagram_auth";
           const freshAuth = await invoke<InstagramAuthStatusReceipt>("config_instagram_auth_get");
-          instagramAuthRevisionRef.current = { generation: freshAuth.credential_generation, fingerprint: freshAuth.credential_fingerprint };
-          setIgAuthConfigured(freshAuth.configured);
-          setIgAuthHydrationState("ready");
+          applyInstagramAuthStatusReceipt(freshAuth);
         }
         if (activeModule === "media_library") {
           preflightAdapter = "local_storage";
@@ -2879,7 +3137,7 @@ export function OptionsPage() {
         }
         if (adapter === "feature_root") {
           for (const descriptor of descriptors) {
-            const featureKey: FeatureRootKey = descriptor.module === "video_archiver" ? "video" : descriptor.module === "instagram_archiver" ? "instagram" : descriptor.module === "image_archive" ? "images" : "localization";
+            const featureKey: FeatureRootKey = descriptor.module === "video_archiver" ? "video" : descriptor.module === "instagram_archiver" ? "instagram" : descriptor.module === "tiktok_archiver" ? "tiktok" : descriptor.module === "image_archive" ? "images" : "localization";
             const previous = previousFeatureRoots.get(featureKey) ?? "";
             if (!previous || previous === previousEffectiveRoot) await useDefaultFeatureDownloadDir(featureKey);
             else await setFeatureDownloadDir(featureKey, previous);
@@ -2980,7 +3238,7 @@ export function OptionsPage() {
       <section
         className="options-setting-section"
         aria-labelledby={`options-${feature.key}-storage-heading`}
-        data-setting-id={`${feature.key === "video" ? "video-archiver" : feature.key === "instagram" ? "instagram-archiver" : feature.key === "images" ? "image-archive" : "localization"}.storage-root`}
+        data-setting-id={`${feature.key === "video" ? "video-archiver" : feature.key === "instagram" ? "instagram-archiver" : feature.key === "tiktok" ? "tiktok-archiver" : feature.key === "images" ? "image-archive" : "localization"}.storage-root`}
       >
         <h2 id={`options-${feature.key}-storage-heading`}>Storage</h2>
         <p>{feature.description}</p>
@@ -3011,6 +3269,162 @@ export function OptionsPage() {
             Open folder
           </button>
         </div>
+      </section>
+    );
+  }
+
+  function renderProviderTransferControls(provider: "instagram" | "tiktok") {
+    const label = provider === "instagram" ? "Instagram" : "TikTok";
+    const laneRows = (["single", "recurring"] as const).map((lane) => {
+      const key = `${provider}_${lane}` as const;
+      const policy = providerTransferSettings?.[key];
+      const laneLabel = lane === "single" ? "Single posts / videos" : "Profile subscriptions";
+      const idPrefix = `${provider}-archiver.transfer-${lane}`;
+      return (
+        <tr key={key}>
+          <th scope="row">{laneLabel}</th>
+          <td>
+            <input
+              data-setting-id={`${idPrefix}-fragments`}
+              data-testid={`options-setting-${idPrefix}-fragments`}
+              aria-label={`${laneLabel} pieces at once`}
+              type="number"
+              min={1}
+              max={32}
+              value={policy?.concurrent_fragments ?? ""}
+              disabled={providerTransferBusy || !policy}
+              onChange={(event) => updateProviderTransferPolicy(key, { concurrent_fragments: Number(event.currentTarget.value) })}
+            />
+          </td>
+          <td>
+            <input
+              data-setting-id={`${idPrefix}-limit-rate`}
+              data-testid={`options-setting-${idPrefix}-limit-rate`}
+              aria-label={`${laneLabel} maximum bandwidth`}
+              value={policy?.limit_rate ?? ""}
+              disabled={providerTransferBusy || !policy}
+              placeholder="No cap"
+              title="Examples: 750K, 4M, 1.5G. Blank means no bandwidth cap."
+              onChange={(event) => updateProviderTransferPolicy(key, { limit_rate: event.currentTarget.value || null })}
+            />
+          </td>
+          <td>
+            <input
+              data-setting-id={`${idPrefix}-sleep-interval`}
+              data-testid={`options-setting-${idPrefix}-sleep-interval`}
+              aria-label={`${laneLabel} delay between items`}
+              type="number"
+              min={0}
+              max={86400}
+              value={policy?.sleep_interval_secs ?? ""}
+              disabled={providerTransferBusy || !policy}
+              onChange={(event) => updateProviderTransferPolicy(key, { sleep_interval_secs: Number(event.currentTarget.value) })}
+            />
+          </td>
+          <td>
+            <input
+              data-setting-id={`${idPrefix}-sleep-requests`}
+              data-testid={`options-setting-${idPrefix}-sleep-requests`}
+              aria-label={`${laneLabel} request delay`}
+              type="number"
+              min={0}
+              max={10000}
+              value={policy?.sleep_requests_secs ?? ""}
+              disabled={providerTransferBusy || !policy}
+              onChange={(event) => updateProviderTransferPolicy(key, { sleep_requests_secs: Number(event.currentTarget.value) })}
+            />
+          </td>
+        </tr>
+      );
+    });
+    return (
+      <section className="options-setting-section" aria-labelledby={`options-${provider}-throughput-heading`}>
+        <h2 id={`options-${provider}-throughput-heading`}>{label} download throughput</h2>
+        <p>The two lanes are independent. Workers control how many jobs run; these controls cap and pace each download.</p>
+        <div className="kv">
+          <div className="k">Provider runtime</div>
+          <div className="v">
+            {provider === "instagram"
+              ? instagramProviderStatus?.installed && instagramProviderStatus.enumerator_ready
+                ? `Instaloader ${instagramProviderStatus.version} for profiles; yt-dlp ${providerYtDlpStatus?.ytdlp_version ?? "unknown"} for media`
+                : instagramProviderStatus?.readiness_error ?? "Status unavailable"
+              : providerYtDlpStatus?.available
+                ? `yt-dlp ${providerYtDlpStatus.ytdlp_version ?? "version unknown"}`
+                : "TikTok downloader unavailable"}
+          </div>
+        </div>
+        {provider === "tiktok" && providerTransferSettings ? (
+          <fieldset>
+            <legend>TikTok session and provider API</legend>
+            <p>These defaults apply to both lanes. A subscription-specific browser selection overrides the global browser session.</p>
+            <label>
+              Browser session
+              <select
+                data-setting-id="tiktok-archiver.browser-cookie-source"
+                data-testid="options-setting-tiktok-archiver.browser-cookie-source"
+                value={providerTransferSettings.tiktok_browser_cookie_source ?? ""}
+                disabled={providerTransferBusy}
+                onChange={(event) => setProviderTransferSettings((current) => current ? { ...current, tiktok_browser_cookie_source: event.currentTarget.value || null } : current)}
+              >
+                <option value="">Public access only</option>
+                <option value="firefox">Firefox</option>
+                <option value="chrome">Chrome</option>
+                <option value="edge">Edge</option>
+                <option value="opera">Opera</option>
+              </select>
+            </label>
+            <div className="options-grid">
+              <label>
+                API hostname (advanced)
+                <input
+                  data-setting-id="tiktok-archiver.api-hostname"
+                  data-testid="options-setting-tiktok-archiver.api-hostname"
+                  placeholder="Use yt-dlp default"
+                  value={providerTransferSettings.tiktok_api_hostname ?? ""}
+                  disabled={providerTransferBusy}
+                  onChange={(event) => setProviderTransferSettings((current) => current ? { ...current, tiktok_api_hostname: event.currentTarget.value || null } : current)}
+                />
+              </label>
+              <label>
+                App info (advanced)
+                <input
+                  data-setting-id="tiktok-archiver.app-info"
+                  data-testid="options-setting-tiktok-archiver.app-info"
+                  placeholder="Use yt-dlp default"
+                  value={providerTransferSettings.tiktok_app_info ?? ""}
+                  disabled={providerTransferBusy}
+                  onChange={(event) => setProviderTransferSettings((current) => current ? { ...current, tiktok_app_info: event.currentTarget.value || null } : current)}
+                />
+              </label>
+              <label>
+                Device ID (advanced)
+                <input
+                  data-setting-id="tiktok-archiver.device-id"
+                  data-testid="options-setting-tiktok-archiver.device-id"
+                  placeholder="Use yt-dlp default"
+                  value={providerTransferSettings.tiktok_device_id ?? ""}
+                  disabled={providerTransferBusy}
+                  onChange={(event) => setProviderTransferSettings((current) => current ? { ...current, tiktok_device_id: event.currentTarget.value || null } : current)}
+                />
+              </label>
+            </div>
+          </fieldset>
+        ) : null}
+        <div className="table-wrap">
+          <table>
+            <thead><tr><th>Lane</th><th>Pieces at once</th><th>Maximum bandwidth</th><th>Delay between items (sec)</th><th>Request delay (sec)</th></tr></thead>
+            <tbody>{laneRows}</tbody>
+          </table>
+        </div>
+        <div className="row">
+          <button type="button" disabled={providerTransferBusy || !providerTransferSettings} onClick={() => saveProviderTransferSettings().catch(() => undefined)}>
+            {providerTransferBusy ? "Saving…" : `Save ${label} provider settings`}
+          </button>
+          <button type="button" disabled={providerTransferBusy || !providerTransferSettings} onClick={() => resetProviderTransferDraft(provider)}>
+            Restore safe defaults
+          </button>
+        </div>
+        {providerTransferMessage ? <p role="status">{providerTransferMessage}</p> : null}
       </section>
     );
   }
@@ -3493,18 +3907,10 @@ export function OptionsPage() {
       <section className="options-setting-section" aria-labelledby="options-instagram-auth-heading">
         <h2 id="options-instagram-auth-heading">Instagram sign-in</h2>
         <div style={{ color: "#4b5563", marginTop: 6, marginBottom: 12 }}>
-          Save your Instagram login here so the app can reach profiles and posts that require you to
-          be signed in (private or age-restricted accounts). This one login is used for everything
-          Instagram &mdash; single downloads, subscriptions, and one-time batches &mdash; whenever a
-          download doesn&rsquo;t already have its own sign-in. After you paste and save your login,
-          click <strong>Test</strong> to make sure it works.
+          Connect your Instagram browser session so VoxVulgi can download posts, reels, and stories
+          from accounts and hashtags without encountering login walls.
         </div>
-        <div style={{ marginBottom: 8 }}>
-          <strong>How to get your login:</strong> Install the free &ldquo;Cookie Editor&rdquo;
-          browser add-on, open Instagram while signed in, and use its Export button. Paste what it
-          gives you into the box below (the exported text, or the path to the file it saved), then
-          click Save.
-        </div>
+
         <div
           style={{
             marginBottom: 12,
@@ -3519,31 +3925,151 @@ export function OptionsPage() {
           Instagram checking is intentionally slow and passive: Meta is strict about automation, so
           the app spaces out its checks and works one profile at a time to keep your account safe.
         </div>
-        <textarea
-          id="options-setting-instagram-auth-cookie"
-          data-testid="options-setting-instagram-archiver.auth-cookie"
-          style={{ width: "100%", height: 120, fontFamily: "monospace", fontSize: 13, marginBottom: 8 }}
-          placeholder="Paste your exported Instagram login here."
-          title="Paste the login your browser add-on exported, or a path to the file it saved. Only Instagram sign-in details are kept."
-          value={igAuthJson}
-          onChange={(e) => {
-            setIgAuthJson(e.target.value);
-            markCapabilityReceiptStale("instagram", "Credential draft changed after this test.");
-          }}
-          autoComplete="off"
-          spellCheck={false}
-          disabled={igAuthBusy || igAuthHydrationState !== "ready"}
-        />
-        {igAuthConfigured && !igAuthJson.trim() ? <p role="status">An Instagram credential is configured. Its saved value is redacted and is never loaded back into this field.</p> : null}
-        {igAuthMessage && <div style={{ marginBottom: 8, color: igAuthMessage.includes("Error") ? "red" : "green" }}>{igAuthMessage}</div>}
-        <div className="row">
-          <button type="button" disabled={igAuthBusy || igAuthHydrationState !== "ready"} onClick={saveInstagramAuth}>
-            Save Instagram login
-          </button>
-          <button type="button" disabled={igAuthBusy || igAuthHydrationState !== "ready"} onClick={clearInstagramAuth}>
-            Disconnect and clear
-          </button>
+
+        <div
+          className={`youtube-auth-status-banner youtube-auth-status-banner--${igAuthStatusState}`}
+          role="status"
+          aria-live="polite"
+        >
+          <strong>
+            {igAuthIsReady
+              ? "Ready"
+              : igAuthNeedsReconnect
+                ? "Sign-in required"
+                : igAuthHasConfiguredSession
+                  ? "Connected (not verified yet)"
+                  : "Not connected"}
+          </strong>
+          <span>
+            {igAuthIsReady
+              ? `Instagram accepted ${igConfiguredAuthLabel}. Last checked ${formatAuthCheckedAt(igAuthLastVerifiedAtMs)}.`
+              : igAuthNeedsReconnect
+                ? "Instagram rejected this session or VoxVulgi could not read it. Operations that need this account are held until sign-in passes again."
+                : igAuthHasConfiguredSession
+                  ? `${igConfiguredAuthLabel} is selected, but Instagram has not verified it in this version yet.`
+                  : "Complete the three steps below. New users do not need to export or paste cookies."}
+          </span>
         </div>
+
+        <ol className="youtube-auth-steps">
+          <li>
+            <div>
+              <strong>Choose the browser you use for Instagram</strong>
+              <span>VoxVulgi must read the same browser profile where you sign in.</span>
+            </div>
+            <select
+              id="options-setting-instagram-browser-session"
+              data-testid="options-setting-instagram-archiver.browser-session"
+              aria-label="Browser used for Instagram"
+              aria-invalid={isSettingInvalid("instagram-archiver.browser-session") || undefined}
+              value={igAuthBrowserSource}
+              onChange={(e) => {
+                setIgAuthBrowserSource(e.currentTarget.value);
+                setIgAuthBrowserDraftTouched(true);
+                markCapabilityReceiptStale("instagram", "Browser selection changed after this test.");
+              }}
+              disabled={igAuthHydrationState !== "ready" || igAuthBusy || igAuthPreflightBusy || igAuthOpenBusy}
+            >
+              <option value="firefox">Firefox</option>
+              <option value="chrome">Chrome</option>
+              <option value="edge">Microsoft Edge</option>
+              <option value="opera">Opera</option>
+            </select>
+          </li>
+          <li>
+            <div>
+              <strong>Sign into Instagram</strong>
+              <span>
+                In the browser, sign into Instagram and confirm that your feed loads. Then return here;
+                you can leave the browser open unless verification says it is locked.
+              </span>
+            </div>
+            <button type="button" disabled={igAuthOpenBusy} onClick={openInstagramSignIn}>
+              {igAuthOpenBusy ? "Opening..." : `Open Instagram in ${youtubeBrowserLabel(igAuthBrowserSource)}`}
+            </button>
+          </li>
+          <li>
+            <div>
+              <strong>Connect VoxVulgi</strong>
+              <span>This checks the selected signed-in browser directly. A guest result cannot pass.</span>
+            </div>
+            <button
+              type="button"
+              disabled={igAuthHydrationState !== "ready" || igAuthBusy || igAuthPreflightBusy || igAuthOpenBusy}
+              onClick={connectInstagramBrowser}
+            >
+              {igAuthBusy && igAuthPreflightBusy
+                ? "Checking sign-in..."
+                : igAuthNeedsReconnect
+                  ? "Try connection again"
+                  : "I've signed in — connect and test"}
+            </button>
+          </li>
+        </ol>
+
+        {igAuthShowsRecovery ? (
+          <div className="youtube-auth-recovery" role="alert">
+            <strong>How to fix the sign-in</strong>
+            <ol>
+              <li>Click <b>Open Instagram</b> above.</li>
+              <li>In {youtubeBrowserLabel(igAuthBrowserSource)}, sign out of Instagram and sign back in.</li>
+              <li>Confirm that your Instagram feed loads normally.</li>
+              <li>
+                Close every {youtubeBrowserLabel(igAuthBrowserSource)} window and any background
+                {" "}{youtubeBrowserLabel(igAuthBrowserSource)} process.
+              </li>
+              <li>Return here and click <b>Try connection again</b>.</li>
+            </ol>
+            <span>If it still fails, use the manual cookie fallback below.</span>
+          </div>
+        ) : null}
+
+        {igAuthMessage ? (
+          <details className="youtube-auth-detail" open={igAuthResultState === "failure"}>
+            <summary>{igAuthResultState === "failure" ? "Technical failure detail" : "Latest sign-in detail"}</summary>
+            <div>{igAuthMessage}</div>
+          </details>
+        ) : null}
+
+        {igAuthHasConfiguredSession ? (
+          <div className="row" style={{ marginTop: 8 }}>
+            <button type="button" disabled={igAuthHydrationState !== "ready" || igAuthBusy} onClick={clearInstagramAuth}>
+              Disconnect VoxVulgi
+            </button>
+          </div>
+        ) : null}
+
+        <details style={{ marginTop: 10 }}>
+          <summary style={{ cursor: "pointer", color: "#4b5563", fontSize: 13 }}>
+            Manual cookie import (advanced fallback)
+          </summary>
+          <div style={{ color: "#4b5563", marginTop: 8, marginBottom: 8, fontSize: 13 }}>
+            Use this only after browser session connection fails. Export Instagram-only cookies in
+            Netscape/cookies.txt or Cookie Editor JSON format, then paste the export or its file path.
+          </div>
+          <textarea
+            id="options-setting-instagram-manual-cookies"
+            data-testid="options-setting-instagram-archiver.manual-cookies"
+            style={{ width: "100%", height: 120, fontFamily: "monospace", fontSize: 13, marginBottom: 8 }}
+            placeholder="Paste your exported Instagram login or session cookie here."
+            title="Only Instagram sign-in details are kept. Saving this replaces the connected browser source."
+            value={igAuthJson}
+            onChange={(e) => {
+              setIgAuthJson(e.target.value);
+              markCapabilityReceiptStale("instagram", "Credential draft changed after this test.");
+            }}
+            autoComplete="off"
+            spellCheck={false}
+            disabled={igAuthBusy || igAuthHydrationState !== "ready"}
+          />
+          {igAuthManualConfigured && !igAuthJson.trim() ? <p role="status">A manual credential is configured. Its saved value is redacted and is never loaded back into this field.</p> : null}
+          <div className="row">
+            <button type="button" disabled={igAuthBusy || igAuthHydrationState !== "ready" || !igAuthJson.trim()} onClick={saveInstagramManualAuth}>
+              Save and test manual cookies
+            </button>
+          </div>
+        </details>
+
         <details style={{ marginTop: 12 }}>
           <summary style={{ cursor: "pointer", color: "#4b5563", fontSize: 13 }}>
             Test link (advanced)
@@ -3564,13 +4090,31 @@ export function OptionsPage() {
                 disabled={igAuthPreflightBusy || igAuthHydrationState !== "ready"}
               />
             </label>
+            <div className="row" style={{ marginTop: 8 }}>
+              <button
+                type="button"
+                disabled={igAuthPreflightBusy || igAuthHydrationState !== "ready"}
+                onClick={runInstagramAuthPreflight}
+              >
+                {igAuthPreflightBusy ? "Testing..." : "Test login now"}
+              </button>
+            </div>
           </div>
         </details>
-        <div className="row" style={{ marginTop: 8 }}>
-          <button type="button" disabled={igAuthBusy || igAuthPreflightBusy || igAuthHydrationState !== "ready"} onClick={runInstagramAuthPreflight}>
-            Test
-          </button>
+      </section>
+      {renderProviderTransferControls("instagram")}
+      <section className="options-setting-section" aria-labelledby="options-instagram-workers-heading">
+        <h2 id="options-instagram-workers-heading">Instagram queue workers</h2>
+        <p>Single posts, reels, and stories use a separate worker budget from background profile refreshes.</p>
+        <div className="options-settings-grid">
+          {(["instagram_single", "instagram_recurring"] as const).map((key) => {
+            const id = key === "instagram_single" ? "jobs.budget-instagram-single" : "jobs.budget-instagram-recurring";
+            const descriptor = optionsSettingById(id);
+            return <label key={key} htmlFor={`options-instagram-${key}`}><span>{descriptor.label}</span><input id={`options-instagram-${key}`} type="number" min={1} max={16} value={jobsDraft[key]} disabled={jobsBusy || !jobsBaseline} onChange={(event) => setJobsDraft((current) => ({ ...current, [key]: event.currentTarget.value }))} /></label>;
+          })}
         </div>
+        <div className="row"><button type="button" disabled={jobsBusy || !jobsBaseline} onClick={() => saveJobsRuntimeSettings().catch(() => undefined)}>{jobsBusy ? "Saving…" : "Save Instagram throughput"}</button></div>
+        {jobsMessage ? <p role="status">{jobsMessage}</p> : null}
       </section>
       </>
       ) : null}
@@ -4520,13 +5064,23 @@ export function OptionsPage() {
       {activeModule === "image_archive" ? renderFeatureRootSetting("images") : null}
 
       {activeModule === "tiktok_archiver" ? (
-        <section className="options-empty-module" aria-labelledby="options-tiktok-pending-heading">
-          <h2 id="options-tiktok-pending-heading">Settings are not available yet</h2>
-          <p>
-            The TikTok module destination is reserved so navigation will remain stable. Provider
-            settings will appear here only when TikTok downloading is implemented and can be tested.
-          </p>
-        </section>
+        <>
+          {renderFeatureRootSetting("tiktok")}
+          {renderProviderTransferControls("tiktok")}
+          <section className="options-setting-section" aria-labelledby="options-tiktok-workers-heading">
+            <h2 id="options-tiktok-workers-heading">TikTok queue workers</h2>
+            <p>Single videos and background profile refreshes have separate worker budgets.</p>
+            <div className="options-settings-grid">
+              {(["tiktok_single", "tiktok_recurring"] as const).map((key) => {
+                const id = key === "tiktok_single" ? "jobs.budget-tiktok-single" : "jobs.budget-tiktok-recurring";
+                const descriptor = optionsSettingById(id);
+                return <label key={key} htmlFor={`options-tiktok-${key}`}><span>{descriptor.label}</span><input id={`options-tiktok-${key}`} type="number" min={1} max={16} value={jobsDraft[key]} disabled={jobsBusy || !jobsBaseline} onChange={(event) => setJobsDraft((current) => ({ ...current, [key]: event.currentTarget.value }))} /></label>;
+              })}
+            </div>
+            <div className="row"><button type="button" disabled={jobsBusy || !jobsBaseline} onClick={() => saveJobsRuntimeSettings().catch(() => undefined)}>{jobsBusy ? "Saving…" : "Save TikTok throughput"}</button></div>
+            {jobsMessage ? <p role="status">{jobsMessage}</p> : null}
+          </section>
+        </>
       ) : null}
 
       {activeModule === "jobs" ? (

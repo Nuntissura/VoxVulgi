@@ -79,10 +79,7 @@ pub fn backend_catalog(paths: &AppPaths) -> VoiceBackendCatalog {
     let tier = performance.tier.clone();
     let cosy_pack = tools::cosyvoice_pack_status(paths);
     let cosy_status = if cosy_pack.installed {
-        (
-            "managed_ready".to_string(),
-            cosy_pack.status_detail.clone(),
-        )
+        ("managed_ready".to_string(), cosy_pack.status_detail.clone())
     } else {
         (
             "managed_missing_pack".to_string(),

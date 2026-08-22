@@ -1,10 +1,10 @@
 ---
 file_id: WP-0303-v1
 file_kind: work-packet
-updated_at: 2026-08-21
+updated_at: 2026-08-22
 ---
 
-<topic id="contract" status="reopened" version="v1" wp="WP-0303" updated_at="2026-08-21">
+<topic id="contract" status="done" version="v1" wp="WP-0303" updated_at="2026-08-22">
 
 # Work Packet: WP-0303 — Instagram provider recovery, incremental subscriptions, and settings
 
@@ -12,7 +12,7 @@ updated_at: 2026-08-21
 
 - ID: WP-0303
 - Owner: Codex
-- Status: REOPENED
+- Status: DONE
 - Created: 2026-08-09
 - Refinement: `WP-0303_INSTAGRAM_PROVIDER_RECOVERY_INCREMENTAL_SUBSCRIPTIONS_AND_SETTINGS_v1_REFINEMENT.md`
 - Board: `../TASK_BOARD.md#wp-0303`
@@ -42,11 +42,13 @@ Restore exact Instagram single/profile operation and ship durable incremental su
 
 </topic>
 
-<topic id="status-updates" status="active" version="v1" wp="WP-0303" updated_at="2026-08-21">
+<topic id="status-updates" status="done" version="v1" wp="WP-0303" updated_at="2026-08-22">
 
 # Status updates
 
 - 2026-08-09: Created from exact current Instagram failures, schema/runtime inspection, and current yt-dlp/Instaloader primary documentation. No provider job or data mutation performed.
 - 2026-08-21: REOPENED. Further investigation and remediation are required to close the gaps between the `DONE` claim, current product/runtime behavior, and this packet's proof gates. The existing proof summary records unit tests, frontend contracts, and a build but does not provide the required exact current Instagram profile/post, first/second refresh, restart, packaged, and UI proof. Reconcile WP-0263, WP-0303, the taskboard, implementation, and proof bundle in a new operator session before returning this packet to `DONE`. No product-code remediation was performed during this reopening.
+- 2026-08-22: Exact canonical `paty.adler` no-download probe reproduced the pinned yt-dlp `instagram:user Unable to extract data` failure. The provider-selection gate selected Instaloader 4.15.3 for bounded profile and post/reel structured resolution, governed direct-HTTP asset transfer, and the pinned yt-dlp path for Stories. Implementation resumed from the existing unfinished local branch.
+- 2026-08-22: DONE. Exact fresh runtime proof downloaded/imported one single Instagram video and six profile carousel assets, persisted seven canonical identities/metadata/memberships/lineages with zero orphan metadata, and held unauthenticated Reels/Stories capability failures as an actionable authentication state. Second refresh and post-restart refresh queued no duplicate transfers. Packaged v0.1.178 passed hidden app-boundary audit and visual inspection. Proof: `product/desktop/build_target/tool_artifacts/wp_runs/WP-0303/summary.md`.
 
 </topic>

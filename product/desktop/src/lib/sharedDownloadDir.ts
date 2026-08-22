@@ -9,7 +9,7 @@ export type DownloadDirStatus = {
   feature_roots: FeatureRootStatus[];
 };
 
-export type FeatureRootKey = "video" | "instagram" | "images" | "localization";
+export type FeatureRootKey = "video" | "instagram" | "tiktok" | "images" | "localization";
 
 export type FeatureRootStatus = {
   key: FeatureRootKey;

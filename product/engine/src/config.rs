@@ -19,6 +19,7 @@ const DEFAULT_DOWNLOAD_PATH_TEMPLATE: &str = "{channel}";
 const DEFAULT_DOWNLOAD_FORMAT_PREFERENCE: &str = "bv*+ba/b";
 const LEGACY_MP4_DOWNLOAD_FORMAT_PREFERENCE: &str = "bv*[ext=mp4]+ba[ext=m4a]/b[ext=mp4]/bv*+ba/b";
 static DOWNLOAD_PRESETS_CONFIG_WRITE_LOCK: Mutex<()> = Mutex::new(());
+static PROVIDER_TRANSFER_SETTINGS_WRITE_LOCK: Mutex<()> = Mutex::new(());
 static FEATURE_STORAGE_ROOTS_WRITE_LOCK: Mutex<()> = Mutex::new(());
 static LOCALIZATION_PIPELINE_PRESETS_WRITE_LOCK: Mutex<()> = Mutex::new(());
 
@@ -291,7 +292,9 @@ pub fn save_localization_pipeline_preset(
 ) -> Result<LocalizationPipelinePresetCatalog> {
     let _guard = LOCALIZATION_PIPELINE_PRESETS_WRITE_LOCK
         .lock()
-        .map_err(|_| EngineError::InstallFailed("localization preset writer lock is poisoned".to_string()))?;
+        .map_err(|_| {
+            EngineError::InstallFailed("localization preset writer lock is poisoned".to_string())
+        })?;
     if preset.id.trim().is_empty() {
         preset.id = format!("custom-{}", Uuid::new_v4());
     }
@@ -308,7 +311,11 @@ pub fn save_localization_pipeline_preset(
     } else {
         presets.push(preset);
     }
-    presets.sort_by(|left, right| left.name.cmp(&right.name).then_with(|| left.id.cmp(&right.id)));
+    presets.sort_by(|left, right| {
+        left.name
+            .cmp(&right.name)
+            .then_with(|| left.id.cmp(&right.id))
+    });
     save_custom_localization_pipeline_presets(paths, presets)?;
     load_localization_pipeline_presets(paths)
 }
@@ -319,7 +326,9 @@ pub fn delete_localization_pipeline_preset(
 ) -> Result<LocalizationPipelinePresetCatalog> {
     let _guard = LOCALIZATION_PIPELINE_PRESETS_WRITE_LOCK
         .lock()
-        .map_err(|_| EngineError::InstallFailed("localization preset writer lock is poisoned".to_string()))?;
+        .map_err(|_| {
+            EngineError::InstallFailed("localization preset writer lock is poisoned".to_string())
+        })?;
     let preset_id = preset_id.trim();
     if !preset_id.starts_with("custom-") {
         return Err(EngineError::InstallFailed(
@@ -376,7 +385,9 @@ pub fn apply_localization_pipeline_preset_to_item(
 ) -> Result<ItemLocalizationPipelinePreset> {
     let _guard = LOCALIZATION_PIPELINE_PRESETS_WRITE_LOCK
         .lock()
-        .map_err(|_| EngineError::InstallFailed("localization preset writer lock is poisoned".to_string()))?;
+        .map_err(|_| {
+            EngineError::InstallFailed("localization preset writer lock is poisoned".to_string())
+        })?;
     let item_id = validate_localization_preset_item_id(item_id)?;
     let preset = normalize_localization_pipeline_preset(preset)?;
     let applied = ItemLocalizationPipelinePreset {
@@ -399,9 +410,8 @@ pub fn load_item_localization_pipeline_preset(
     paths: &AppPaths,
     item_id: &str,
 ) -> Result<Option<ItemLocalizationPipelinePreset>> {
-    let path = paths.item_localization_pipeline_preset_path(
-        validate_localization_preset_item_id(item_id)?,
-    );
+    let path = paths
+        .item_localization_pipeline_preset_path(validate_localization_preset_item_id(item_id)?);
     if !path.exists() {
         return Ok(None);
     }
@@ -431,14 +441,15 @@ pub fn mark_item_localization_pipeline_voice_defaults_applied(
 ) -> Result<Option<ItemLocalizationPipelinePreset>> {
     let _guard = LOCALIZATION_PIPELINE_PRESETS_WRITE_LOCK
         .lock()
-        .map_err(|_| EngineError::InstallFailed("localization preset writer lock is poisoned".to_string()))?;
+        .map_err(|_| {
+            EngineError::InstallFailed("localization preset writer lock is poisoned".to_string())
+        })?;
     let Some(mut applied) = load_item_localization_pipeline_preset(paths, item_id)? else {
         return Ok(None);
     };
     applied.voice_defaults_applied = true;
-    let path = paths.item_localization_pipeline_preset_path(
-        validate_localization_preset_item_id(item_id)?,
-    );
+    let path = paths
+        .item_localization_pipeline_preset_path(validate_localization_preset_item_id(item_id)?);
     persistence::atomic_write_text(
         &path,
         &format!("{}\n", serde_json::to_string_pretty(&applied)?),
@@ -528,6 +539,8 @@ pub struct FeatureStorageRootsConfig {
     pub video_root: Option<String>,
     #[serde(default)]
     pub instagram_root: Option<String>,
+    #[serde(default)]
+    pub tiktok_root: Option<String>,
     #[serde(default)]
     pub image_root: Option<String>,
     #[serde(default)]
@@ -630,6 +643,7 @@ fn normalize_feature_storage_roots_config(
 ) -> FeatureStorageRootsConfig {
     config.video_root = normalize_optional_path(config.video_root);
     config.instagram_root = normalize_optional_path(config.instagram_root);
+    config.tiktok_root = normalize_optional_path(config.tiktok_root);
     config.image_root = normalize_optional_path(config.image_root);
     config.localization_root = normalize_optional_path(config.localization_root);
     config
@@ -763,6 +777,256 @@ where
     let next = update(current)?;
     save_download_presets_config_unlocked(paths, &next)?;
     load_download_presets_config_unlocked(paths)
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ProviderTransferPolicy {
+    pub concurrent_fragments: u32,
+    pub limit_rate: Option<String>,
+    pub sleep_interval_secs: u32,
+    pub sleep_requests_secs: u32,
+}
+
+impl ProviderTransferPolicy {
+    fn instagram_single_default() -> Self {
+        Self {
+            concurrent_fragments: 2,
+            limit_rate: None,
+            sleep_interval_secs: 1,
+            sleep_requests_secs: 1,
+        }
+    }
+
+    fn instagram_recurring_default() -> Self {
+        Self {
+            concurrent_fragments: 1,
+            limit_rate: Some("4M".to_string()),
+            sleep_interval_secs: 3,
+            sleep_requests_secs: 1,
+        }
+    }
+
+    fn tiktok_single_default() -> Self {
+        Self {
+            concurrent_fragments: 2,
+            limit_rate: None,
+            sleep_interval_secs: 0,
+            sleep_requests_secs: 0,
+        }
+    }
+
+    fn tiktok_recurring_default() -> Self {
+        Self {
+            concurrent_fragments: 1,
+            limit_rate: Some("6M".to_string()),
+            sleep_interval_secs: 2,
+            sleep_requests_secs: 1,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ProviderTransferSettings {
+    pub schema_version: u32,
+    pub instagram_single: ProviderTransferPolicy,
+    pub instagram_recurring: ProviderTransferPolicy,
+    pub tiktok_single: ProviderTransferPolicy,
+    pub tiktok_recurring: ProviderTransferPolicy,
+    #[serde(default)]
+    pub tiktok_browser_cookie_source: Option<String>,
+    #[serde(default)]
+    pub tiktok_api_hostname: Option<String>,
+    #[serde(default)]
+    pub tiktok_app_info: Option<String>,
+    #[serde(default)]
+    pub tiktok_device_id: Option<String>,
+}
+
+impl Default for ProviderTransferSettings {
+    fn default() -> Self {
+        Self {
+            schema_version: 1,
+            instagram_single: ProviderTransferPolicy::instagram_single_default(),
+            instagram_recurring: ProviderTransferPolicy::instagram_recurring_default(),
+            tiktok_single: ProviderTransferPolicy::tiktok_single_default(),
+            tiktok_recurring: ProviderTransferPolicy::tiktok_recurring_default(),
+            tiktok_browser_cookie_source: None,
+            tiktok_api_hostname: None,
+            tiktok_app_info: None,
+            tiktok_device_id: None,
+        }
+    }
+}
+
+impl ProviderTransferSettings {
+    pub fn policy_for_track(&self, track: &str) -> Option<&ProviderTransferPolicy> {
+        match track {
+            "instagram_single" => Some(&self.instagram_single),
+            "instagram_recurring" => Some(&self.instagram_recurring),
+            "tiktok_single" => Some(&self.tiktok_single),
+            "tiktok_recurring" => Some(&self.tiktok_recurring),
+            _ => None,
+        }
+    }
+}
+
+fn normalize_provider_limit_rate(value: Option<String>) -> Result<Option<String>> {
+    let Some(value) = value
+        .map(|raw| raw.trim().to_string())
+        .filter(|raw| !raw.is_empty())
+    else {
+        return Ok(None);
+    };
+    if value.len() > 16 {
+        return Err(EngineError::InstallFailed(
+            "provider bandwidth cap is too long".to_string(),
+        ));
+    }
+    let (number, suffix) = match value.chars().last() {
+        Some(last) if last.is_ascii_alphabetic() => (&value[..value.len() - 1], Some(last)),
+        _ => (value.as_str(), None),
+    };
+    if !suffix.is_none_or(|suffix| matches!(suffix.to_ascii_uppercase(), 'K' | 'M' | 'G'))
+        || number.is_empty()
+        || number.matches('.').count() > 1
+        || !number.chars().all(|ch| ch.is_ascii_digit() || ch == '.')
+        || number
+            .parse::<f64>()
+            .ok()
+            .is_none_or(|number| !number.is_finite() || number <= 0.0)
+    {
+        return Err(EngineError::InstallFailed(format!(
+            "invalid provider bandwidth cap '{value}'; use values such as 750K, 4M, or 1.5G"
+        )));
+    }
+    Ok(Some(match suffix {
+        Some(suffix) => format!("{}{}", number, suffix.to_ascii_uppercase()),
+        None => number.to_string(),
+    }))
+}
+
+fn normalize_provider_transfer_policy(
+    mut policy: ProviderTransferPolicy,
+) -> Result<ProviderTransferPolicy> {
+    if !(1..=32).contains(&policy.concurrent_fragments) {
+        return Err(EngineError::InstallFailed(
+            "provider concurrent fragments must be between 1 and 32".to_string(),
+        ));
+    }
+    if policy.sleep_interval_secs > 86_400 || policy.sleep_requests_secs > 10_000 {
+        return Err(EngineError::InstallFailed(
+            "provider pacing delay is outside the supported range".to_string(),
+        ));
+    }
+    policy.limit_rate = normalize_provider_limit_rate(policy.limit_rate)?;
+    Ok(policy)
+}
+
+fn normalize_provider_transfer_settings(
+    mut settings: ProviderTransferSettings,
+) -> Result<ProviderTransferSettings> {
+    if settings.schema_version != 1 {
+        return Err(EngineError::InstallFailed(format!(
+            "unsupported provider transfer settings schema {}",
+            settings.schema_version
+        )));
+    }
+    settings.instagram_single = normalize_provider_transfer_policy(settings.instagram_single)?;
+    settings.instagram_recurring =
+        normalize_provider_transfer_policy(settings.instagram_recurring)?;
+    settings.tiktok_single = normalize_provider_transfer_policy(settings.tiktok_single)?;
+    settings.tiktok_recurring = normalize_provider_transfer_policy(settings.tiktok_recurring)?;
+    settings.tiktok_browser_cookie_source = normalize_optional_provider_setting(
+        settings.tiktok_browser_cookie_source,
+        "TikTok browser cookie source",
+        32,
+        |value| matches!(value, "firefox" | "chrome" | "edge" | "opera"),
+    )?;
+    settings.tiktok_api_hostname = normalize_optional_provider_setting(
+        settings.tiktok_api_hostname,
+        "TikTok API hostname",
+        255,
+        |value| {
+            value
+                .chars()
+                .all(|ch| ch.is_ascii_alphanumeric() || matches!(ch, '.' | '-'))
+        },
+    )?;
+    settings.tiktok_app_info = normalize_optional_provider_setting(
+        settings.tiktok_app_info,
+        "TikTok app info",
+        500,
+        |value| !value.chars().any(|ch| matches!(ch, ';' | '\r' | '\n')),
+    )?;
+    settings.tiktok_device_id = normalize_optional_provider_setting(
+        settings.tiktok_device_id,
+        "TikTok device id",
+        128,
+        |value| {
+            value
+                .chars()
+                .all(|ch| ch.is_ascii_alphanumeric() || matches!(ch, '-' | '_'))
+        },
+    )?;
+    Ok(settings)
+}
+
+fn normalize_optional_provider_setting<F>(
+    value: Option<String>,
+    label: &str,
+    max_len: usize,
+    predicate: F,
+) -> Result<Option<String>>
+where
+    F: Fn(&str) -> bool,
+{
+    let Some(value) = value
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty())
+    else {
+        return Ok(None);
+    };
+    let normalized = if label == "TikTok browser cookie source" {
+        value.to_ascii_lowercase()
+    } else {
+        value
+    };
+    if normalized.len() > max_len || !predicate(&normalized) {
+        return Err(EngineError::InstallFailed(format!("invalid {label}")));
+    }
+    Ok(Some(normalized))
+}
+
+pub fn load_provider_transfer_settings(paths: &AppPaths) -> Result<ProviderTransferSettings> {
+    let path = paths.provider_transfer_settings_path();
+    if !path.exists() {
+        return Ok(ProviderTransferSettings::default());
+    }
+    let bytes = std::fs::read(&path)?;
+    let parsed = serde_json::from_slice::<ProviderTransferSettings>(&bytes).map_err(|error| {
+        EngineError::InstallFailed(format!(
+            "failed to parse provider transfer settings at {}: {error}",
+            path.to_string_lossy()
+        ))
+    })?;
+    normalize_provider_transfer_settings(parsed)
+}
+
+pub fn save_provider_transfer_settings(
+    paths: &AppPaths,
+    settings: &ProviderTransferSettings,
+) -> Result<ProviderTransferSettings> {
+    let _guard = PROVIDER_TRANSFER_SETTINGS_WRITE_LOCK.lock().map_err(|_| {
+        EngineError::InstallFailed("provider transfer settings writer lock is poisoned".to_string())
+    })?;
+    let normalized = normalize_provider_transfer_settings(settings.clone())?;
+    let path = paths.provider_transfer_settings_path();
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    let text = format!("{}\n", serde_json::to_string_pretty(&normalized)?);
+    persistence::atomic_write_text(&path, &text)?;
+    load_provider_transfer_settings(paths)
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -1396,7 +1660,10 @@ mod tests {
             Some(&initial.credential_fingerprint),
         )
         .expect("complete generation-zero revision");
-        assert_eq!(saved.netscape_cookie_json.as_deref(), Some("SID=complete-revision"));
+        assert_eq!(
+            saved.netscape_cookie_json.as_deref(),
+            Some("SID=complete-revision")
+        );
     }
 
     #[test]
@@ -1404,8 +1671,7 @@ mod tests {
         let dir = tempfile::tempdir().expect("tempdir");
         let paths = AppPaths::new(dir.path().join("app"));
         paths.ensure_dirs().expect("dirs");
-        replace_current_youtube_auth(&paths, manual_auth("SID=old"))
-            .expect("initial auth");
+        replace_current_youtube_auth(&paths, manual_auth("SID=old")).expect("initial auth");
         let stale = youtube_auth_revision(&paths).expect("stale revision");
 
         let disconnected = replace_youtube_auth_config(
@@ -1443,8 +1709,7 @@ mod tests {
         let dir = tempfile::tempdir().expect("tempdir");
         let paths = AppPaths::new(dir.path().join("app"));
         paths.ensure_dirs().expect("dirs");
-        replace_current_youtube_auth(&paths, manual_auth("SID=base"))
-            .expect("base auth");
+        replace_current_youtube_auth(&paths, manual_auth("SID=base")).expect("base auth");
         let revision = youtube_auth_revision(&paths).expect("revision");
         let barrier = std::sync::Arc::new(std::sync::Barrier::new(3));
         let handles: Vec<_> = ["SID=left", "SID=right"]
@@ -1483,14 +1748,13 @@ mod tests {
         let dir = tempfile::tempdir().expect("tempdir");
         let paths = AppPaths::new(dir.path().join("app"));
         paths.ensure_dirs().expect("dirs");
-        replace_current_youtube_auth(&paths, manual_auth("SID=observed"))
-            .expect("initial auth");
+        replace_current_youtube_auth(&paths, manual_auth("SID=observed")).expect("initial auth");
         load_youtube_auth_config(&paths).expect("operation observes credential");
 
         let replacement_paths = paths.clone();
         std::thread::spawn(move || {
             replace_current_youtube_auth(&replacement_paths, manual_auth("SID=replacement"))
-            .expect("replace credential");
+                .expect("replace credential");
         })
         .join()
         .expect("replacement thread");
@@ -1775,14 +2039,13 @@ mod tests {
             .clone();
         assert!(created.id.starts_with("custom-"));
         assert_eq!(created.name, "My show");
-        assert_eq!(created.default_voice_template_id.as_deref(), Some("template-1"));
+        assert_eq!(
+            created.default_voice_template_id.as_deref(),
+            Some("template-1")
+        );
 
-        let applied = apply_localization_pipeline_preset_to_item(
-            &paths,
-            "item-1",
-            created.clone(),
-        )
-        .expect("apply to item");
+        let applied = apply_localization_pipeline_preset_to_item(&paths, "item-1", created.clone())
+            .expect("apply to item");
         assert!(!applied.voice_defaults_applied);
         assert_eq!(
             load_item_localization_pipeline_preset(&paths, "item-1")
@@ -1803,7 +2066,10 @@ mod tests {
         updated.name = "My edited show".to_string();
         let catalog = save_localization_pipeline_preset(&paths, updated).expect("update");
         assert_eq!(catalog.presets.len(), 4);
-        assert!(catalog.presets.iter().any(|preset| preset.name == "My edited show"));
+        assert!(catalog
+            .presets
+            .iter()
+            .any(|preset| preset.name == "My edited show"));
 
         let catalog = delete_localization_pipeline_preset(&paths, &created.id).expect("delete");
         assert_eq!(catalog.presets.len(), 3);
@@ -1831,7 +2097,9 @@ mod tests {
             localization_pipeline_builtin_presets()[0].clone(),
         )
         .expect_err("item traversal must fail");
-        assert!(error.to_string().contains("invalid localization preset item id"));
+        assert!(error
+            .to_string()
+            .contains("invalid localization preset item id"));
 
         let mut unsafe_preset = localization_pipeline_builtin_presets()[0].clone();
         unsafe_preset.id = String::new();
@@ -1846,5 +2114,63 @@ mod tests {
         let error = save_localization_pipeline_preset(&paths, incomplete_custom)
             .expect_err("custom style without instruction must fail");
         assert!(error.to_string().contains("requires a custom instruction"));
+    }
+
+    #[test]
+    fn provider_transfer_settings_are_independent_validated_and_restart_durable() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let paths = AppPaths::new(dir.path().join("app"));
+        paths.ensure_dirs().expect("dirs");
+
+        let defaults = load_provider_transfer_settings(&paths).expect("defaults");
+        assert_eq!(defaults.instagram_single.concurrent_fragments, 2);
+        assert_eq!(
+            defaults.instagram_recurring.limit_rate.as_deref(),
+            Some("4M")
+        );
+        assert_eq!(defaults.tiktok_recurring.limit_rate.as_deref(), Some("6M"));
+
+        let mut changed = defaults.clone();
+        changed.instagram_single.concurrent_fragments = 7;
+        changed.instagram_single.limit_rate = Some("1.5g".to_string());
+        changed.instagram_recurring.sleep_interval_secs = 17;
+        changed.tiktok_single.limit_rate = Some("750k".to_string());
+        changed.tiktok_recurring.sleep_requests_secs = 9;
+        changed.tiktok_browser_cookie_source = Some("Firefox".to_string());
+        changed.tiktok_api_hostname = Some("api16-normal-c-useast1a.tiktokv.com".to_string());
+        changed.tiktok_device_id = Some("stable_device_01".to_string());
+        let saved = save_provider_transfer_settings(&paths, &changed).expect("save");
+        assert_eq!(saved.instagram_single.limit_rate.as_deref(), Some("1.5G"));
+        assert_eq!(saved.tiktok_single.limit_rate.as_deref(), Some("750K"));
+        assert_eq!(
+            saved.tiktok_browser_cookie_source.as_deref(),
+            Some("firefox")
+        );
+
+        let restarted = AppPaths::new(dir.path().join("app"));
+        assert_eq!(
+            load_provider_transfer_settings(&restarted).expect("restart load"),
+            saved
+        );
+
+        let mut invalid = saved.clone();
+        invalid.instagram_recurring.concurrent_fragments = 0;
+        assert!(save_provider_transfer_settings(&paths, &invalid).is_err());
+        assert_eq!(
+            load_provider_transfer_settings(&paths).expect("unchanged"),
+            saved
+        );
+
+        invalid = saved.clone();
+        invalid.tiktok_recurring.limit_rate = Some("4M;bad".to_string());
+        assert!(save_provider_transfer_settings(&paths, &invalid).is_err());
+        assert_eq!(
+            load_provider_transfer_settings(&paths).expect("still unchanged"),
+            saved
+        );
+
+        invalid = saved.clone();
+        invalid.tiktok_api_hostname = Some("https://unsafe.example".to_string());
+        assert!(save_provider_transfer_settings(&paths, &invalid).is_err());
     }
 }

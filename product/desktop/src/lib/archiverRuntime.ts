@@ -12,7 +12,10 @@ export type ArchiverMediaKind = "video" | "image" | "audio" | "other";
 export type CanonicalJobTrack =
   | "youtube_single"
   | "youtube_recurring"
-  | "instagram"
+  | "instagram_single"
+  | "instagram_recurring"
+  | "tiktok_single"
+  | "tiktok_recurring"
   | "other_video"
   | "image_archive"
   | "localization";
@@ -25,8 +28,14 @@ export function jobTrackLabel(track: string | null | undefined): string {
       return "YouTube single";
     case "youtube_recurring":
       return "YouTube background";
-    case "instagram":
-      return "Instagram";
+    case "instagram_single":
+      return "Instagram single";
+    case "instagram_recurring":
+      return "Instagram background";
+    case "tiktok_single":
+      return "TikTok single";
+    case "tiktok_recurring":
+      return "TikTok background";
     case "other_video":
       return "Other video";
     case "image_archive":

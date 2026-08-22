@@ -202,7 +202,10 @@ type JobQueueControlState = {
 type JobRuntimeSettings = {
   youtube_single: number;
   youtube_recurring: number;
-  instagram: number;
+  instagram_single: number;
+  instagram_recurring: number;
+  tiktok_single: number;
+  tiktok_recurring: number;
   other_video: number;
   image_archive: number;
   localization: number;
@@ -390,7 +393,10 @@ const NO_SUMMARY_ID = "__unclassified_jobs__";
 const CANONICAL_JOB_TRACKS: CanonicalJobTrack[] = [
   "youtube_single",
   "youtube_recurring",
-  "instagram",
+  "instagram_single",
+  "instagram_recurring",
+  "tiktok_single",
+  "tiktok_recurring",
   "other_video",
   "image_archive",
   "localization",
@@ -422,7 +428,10 @@ function trackSettingsFromRuntime(snapshot: JobsTrackRuntimeSnapshot): JobRuntim
   return {
     youtube_single: byTrack.get("youtube_single")!.configured_budget,
     youtube_recurring: byTrack.get("youtube_recurring")!.configured_budget,
-    instagram: byTrack.get("instagram")!.configured_budget,
+    instagram_single: byTrack.get("instagram_single")!.configured_budget,
+    instagram_recurring: byTrack.get("instagram_recurring")!.configured_budget,
+    tiktok_single: byTrack.get("tiktok_single")!.configured_budget,
+    tiktok_recurring: byTrack.get("tiktok_recurring")!.configured_budget,
     other_video: byTrack.get("other_video")!.configured_budget,
     image_archive: byTrack.get("image_archive")!.configured_budget,
     localization: byTrack.get("localization")!.configured_budget,

@@ -3,7 +3,7 @@ use crate::Result;
 use rusqlite::{Connection, OpenFlags};
 use std::time::Duration;
 
-const CURRENT_SCHEMA_VERSION: u32 = 52;
+const CURRENT_SCHEMA_VERSION: u32 = 54;
 // WP-0258: raised from 750ms to 4000ms so read-only UI queries wait out a WAL
 // checkpoint instead of erroring "database is locked". Evidence: 47 subscription
 // refreshes failed with "database is locked" under DB contention.
@@ -188,8 +188,16 @@ const MIGRATION_STEPS: &[MigrationStep] = &[
         apply: apply_schema_v51,
     },
     MigrationStep {
-        version: CURRENT_SCHEMA_VERSION,
+        version: 52,
         apply: apply_schema_v52,
+    },
+    MigrationStep {
+        version: 53,
+        apply: apply_schema_v53,
+    },
+    MigrationStep {
+        version: CURRENT_SCHEMA_VERSION,
+        apply: apply_schema_v54,
     },
 ];
 
@@ -567,6 +575,36 @@ CREATE TABLE IF NOT EXISTS instagram_subscription (
 
 CREATE INDEX IF NOT EXISTS idx_instagram_subscription_active_updated
   ON instagram_subscription(active, updated_at_ms);
+
+CREATE TABLE IF NOT EXISTS tiktok_subscription (
+  id TEXT PRIMARY KEY,
+  title TEXT NOT NULL,
+  source_url TEXT NOT NULL UNIQUE,
+  canonical_profile_id TEXT,
+  folder_map TEXT NOT NULL,
+  output_dir_override TEXT,
+  use_browser_cookies INTEGER NOT NULL DEFAULT 0,
+  browser_cookie_source TEXT,
+  active INTEGER NOT NULL DEFAULT 1,
+  refresh_interval_minutes INTEGER NOT NULL DEFAULT 60,
+  max_items_per_refresh INTEGER NOT NULL DEFAULT 30,
+  last_queued_at_ms INTEGER,
+  last_attempt_at_ms INTEGER,
+  last_success_at_ms INTEGER,
+  last_error_at_ms INTEGER,
+  last_error TEXT,
+  consecutive_failures INTEGER NOT NULL DEFAULT 0,
+  next_allowed_refresh_at_ms INTEGER,
+  provider_name TEXT NOT NULL DEFAULT 'yt-dlp',
+  provider_version TEXT,
+  capability_epoch INTEGER NOT NULL DEFAULT 1,
+  cursor_json TEXT,
+  created_at_ms INTEGER NOT NULL,
+  updated_at_ms INTEGER NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_tiktok_subscription_active_updated
+  ON tiktok_subscription(active, updated_at_ms);
 
 CREATE TABLE IF NOT EXISTS job (
   id TEXT PRIMARY KEY,
@@ -2705,6 +2743,120 @@ fn apply_schema_v52(conn: &Connection) -> Result<()> {
     Ok(())
 }
 
+fn apply_schema_v53(conn: &Connection) -> Result<()> {
+    // WP-0303/WP-0304: Instagram and TikTok are first-class two-lane providers. The
+    // migration is strictly additive and preserves every existing subscription/job row.
+    for (column, definition) in [
+        ("canonical_profile_id", "TEXT"),
+        ("max_items_per_refresh", "INTEGER NOT NULL DEFAULT 30"),
+        ("include_posts", "INTEGER NOT NULL DEFAULT 1"),
+        ("include_reels", "INTEGER NOT NULL DEFAULT 1"),
+        ("include_stories", "INTEGER NOT NULL DEFAULT 0"),
+        ("last_attempt_at_ms", "INTEGER"),
+        ("last_success_at_ms", "INTEGER"),
+        ("last_error_at_ms", "INTEGER"),
+        ("last_error", "TEXT"),
+        ("consecutive_failures", "INTEGER NOT NULL DEFAULT 0"),
+        ("next_allowed_refresh_at_ms", "INTEGER"),
+        ("provider_name", "TEXT NOT NULL DEFAULT 'instaloader'"),
+        ("provider_version", "TEXT"),
+        ("capability_epoch", "INTEGER NOT NULL DEFAULT 1"),
+        ("cursor_json", "TEXT"),
+    ] {
+        ensure_column(conn, "instagram_subscription", column, definition)?;
+    }
+    conn.execute_batch(
+        r#"
+CREATE TABLE IF NOT EXISTS tiktok_subscription (
+  id TEXT PRIMARY KEY,
+  title TEXT NOT NULL,
+  source_url TEXT NOT NULL UNIQUE,
+  canonical_profile_id TEXT,
+  folder_map TEXT NOT NULL,
+  output_dir_override TEXT,
+  use_browser_cookies INTEGER NOT NULL DEFAULT 0,
+  browser_cookie_source TEXT,
+  active INTEGER NOT NULL DEFAULT 1,
+  refresh_interval_minutes INTEGER NOT NULL DEFAULT 60,
+  max_items_per_refresh INTEGER NOT NULL DEFAULT 30,
+  last_queued_at_ms INTEGER,
+  last_attempt_at_ms INTEGER,
+  last_success_at_ms INTEGER,
+  last_error_at_ms INTEGER,
+  last_error TEXT,
+  consecutive_failures INTEGER NOT NULL DEFAULT 0,
+  next_allowed_refresh_at_ms INTEGER,
+  provider_name TEXT NOT NULL DEFAULT 'yt-dlp',
+  provider_version TEXT,
+  capability_epoch INTEGER NOT NULL DEFAULT 1,
+  cursor_json TEXT,
+  created_at_ms INTEGER NOT NULL,
+  updated_at_ms INTEGER NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_tiktok_subscription_active_updated
+  ON tiktok_subscription(active, updated_at_ms);
+
+CREATE TABLE IF NOT EXISTS provider_subscription_item (
+  service TEXT NOT NULL,
+  subscription_id TEXT NOT NULL,
+  media_id TEXT NOT NULL,
+  source_url TEXT NOT NULL,
+  title TEXT,
+  published_at_ms INTEGER,
+  state TEXT NOT NULL DEFAULT 'discovered',
+  job_id TEXT,
+  library_item_id TEXT,
+  discovered_at_ms INTEGER NOT NULL,
+  queued_at_ms INTEGER,
+  materialized_at_ms INTEGER,
+  updated_at_ms INTEGER NOT NULL,
+  PRIMARY KEY (service, subscription_id, media_id)
+);
+CREATE INDEX IF NOT EXISTS idx_provider_subscription_item_state
+  ON provider_subscription_item(service, subscription_id, state, updated_at_ms);
+"#,
+    )?;
+    let job_table_exists = conn.query_row(
+        "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type='table' AND name='job')",
+        [],
+        |row| row.get::<_, bool>(0),
+    )?;
+    if job_table_exists {
+        conn.execute_batch(
+            r#"
+UPDATE job
+SET track = CASE
+  WHEN json_extract(params_json, '$.subscription_id') IS NOT NULL
+    THEN 'instagram_recurring'
+  ELSE 'instagram_single'
+END
+WHERE track = 'instagram';
+"#,
+        )?;
+    }
+    Ok(())
+}
+
+fn apply_schema_v54(conn: &Connection) -> Result<()> {
+    // WP-0303/WP-0304: provider lifecycle truth must distinguish actionable failure classes,
+    // durable holds, and successful recovery without replacing existing subscription state.
+    for table in ["instagram_subscription", "tiktok_subscription"] {
+        for (column, definition) in [
+            ("last_failure_class", "TEXT"),
+            ("last_failure_message_hash", "TEXT"),
+            ("hold_reason", "TEXT"),
+            ("consecutive_successes", "INTEGER NOT NULL DEFAULT 0"),
+            (
+                "last_canonical_discovery_count",
+                "INTEGER NOT NULL DEFAULT 0",
+            ),
+        ] {
+            ensure_column(conn, table, column, definition)?;
+        }
+    }
+    Ok(())
+}
+
 fn ensure_column(conn: &Connection, table: &str, column: &str, column_def: &str) -> Result<()> {
     let table_exists: bool = conn.query_row(
         "SELECT COUNT(*) > 0 FROM sqlite_master WHERE type='table' AND name=?1",
@@ -3235,7 +3387,9 @@ LIMIT ?2 OFFSET ?3
 "#,
             )
             .expect("prepare query plan")
-            .query_map(params!["item-1", 100_i64, 0_i64], |row| row.get::<_, String>(3))
+            .query_map(params!["item-1", 100_i64, 0_i64], |row| {
+                row.get::<_, String>(3)
+            })
             .expect("query plan")
             .collect::<rusqlite::Result<Vec<_>>>()
             .expect("collect query plan");
@@ -3722,7 +3876,14 @@ CREATE INDEX idx_media_availability_refresh
                node_directory_identity,provider_directory_identity,node_tree_sha256,
                provider_tree_sha256,committed_at_ms
              ) VALUES(1,'attempt-v48',?1,?2,?3,?4,?5,?6,1)",
-            rusqlite::params![nonce, generation, node_id, provider_id, node_root, provider_root],
+            rusqlite::params![
+                nonce,
+                generation,
+                node_id,
+                provider_id,
+                node_root,
+                provider_root
+            ],
         )
         .expect("exact committed identity");
         let blank_update_error = conn
@@ -3732,9 +3893,9 @@ CREATE INDEX idx_media_availability_refresh
             )
             .expect_err("blank installed nonce update must fail closed");
         assert!(
-            blank_update_error
-                .to_string()
-                .contains("provider installed identity update requires exact committed lineage nonce"),
+            blank_update_error.to_string().contains(
+                "provider installed identity update requires exact committed lineage nonce"
+            ),
             "unexpected trigger: {blank_update_error}"
         );
         assert!(
@@ -3746,7 +3907,10 @@ CREATE INDEX idx_media_availability_refresh
             "installed identity cannot be retargeted away from exact committed lineage"
         );
         assert!(conn
-            .execute("DELETE FROM provider_installed_identity WHERE singleton=1", [])
+            .execute(
+                "DELETE FROM provider_installed_identity WHERE singleton=1",
+                []
+            )
             .is_err());
         assert!(conn
             .execute(
@@ -3761,8 +3925,11 @@ CREATE INDEX idx_media_availability_refresh
             [&nonce],
         )
         .expect("governed uninstall guard");
-        conn.execute("DELETE FROM provider_installed_identity WHERE singleton=1", [])
-            .expect("governed identity deletion");
+        conn.execute(
+            "DELETE FROM provider_installed_identity WHERE singleton=1",
+            [],
+        )
+        .expect("governed identity deletion");
         conn.execute(
             "DELETE FROM provider_install_lineage WHERE attempt_id='attempt-v48'",
             [],

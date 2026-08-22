@@ -551,6 +551,7 @@ fn agent_handle_navigate(body: &str) -> (&'static str, String) {
         "localization",
         "video_ingest",
         "instagram_archive",
+        "tiktok_archive",
         "image_archive",
         "media_library",
         "jobs",
@@ -1297,8 +1298,8 @@ use voxvulgi_engine::models::ModelStore;
 use voxvulgi_engine::paths::AppPaths;
 use voxvulgi_engine::{
     config, db, diagnostics, instagram_subscriptions, jobs, library, media_cleanup,
-    provider_metadata, root_rebind, speakers, subscriptions, subtitle_tracks, subtitles, tools,
-    translate, video_libraries,
+    provider_metadata, root_rebind, speakers, subscriptions, subtitle_tracks, subtitles,
+    tiktok_subscriptions, tools, translate, video_libraries,
     voice_backend_adapters, voice_backends, voice_benchmarks, voice_cast_packs, voice_cleanup,
     voice_library, voice_plans, voice_reference_candidates, voice_reference_curation,
     voice_templates,
@@ -5736,6 +5737,7 @@ mod tests {
             &config::FeatureStorageRootsConfig {
                 video_root: Some(override_dir.to_string_lossy().to_string()),
                 instagram_root: None,
+                tiktok_root: None,
                 image_root: None,
                 localization_root: None,
             },
@@ -5796,7 +5798,7 @@ mod tests {
             bridge, expected,
             "bridge must not project a different truth"
         );
-        assert_eq!(bridge["tracks"].as_array().map(Vec::len), Some(6));
+        assert_eq!(bridge["tracks"].as_array().map(Vec::len), Some(9));
         assert_eq!(bridge["tracks"][0]["track"], "youtube_single");
         assert!(bridge["tracks"][0].get("configured_budget").is_some());
         assert!(bridge["tracks"][0].get("total").is_some());
@@ -5855,14 +5857,17 @@ mod tests {
         let markdown_text = std::fs::read_to_string(&export.markdown_path).expect("markdown");
         assert!(json_text.contains("\"feature_health\""));
         assert!(json_text.contains("\"jobs_tracks\""));
-        assert_eq!(snapshot.jobs_tracks.tracks.len(), 6);
+        assert_eq!(snapshot.jobs_tracks.tracks.len(), 9);
         assert!(markdown_text.contains("# VoxVulgi app-state snapshot"));
         assert!(markdown_text.contains("## Feature health"));
         assert!(markdown_text.contains("## Scheduler tracks"));
         for track in [
             "youtube_single",
             "youtube_recurring",
-            "instagram",
+            "instagram_single",
+            "instagram_recurring",
+            "tiktok_single",
+            "tiktok_recurring",
             "other_video",
             "image_archive",
             "localization",
@@ -6008,7 +6013,7 @@ mod tests {
 
 fn ensure_media_output_layout(root: &std::path::Path) -> Result<(), String> {
     std::fs::create_dir_all(root).map_err(|e| e.to_string())?;
-    for sub in ["video", "instagram", "images", "localization"] {
+    for sub in ["video", "instagram", "tiktok", "images", "localization"] {
         std::fs::create_dir_all(root.join(sub)).map_err(|e| e.to_string())?;
     }
     Ok(())
@@ -6018,6 +6023,7 @@ fn feature_root_default_dir(base_root: &std::path::Path, key: &str) -> std::path
     match key {
         "video" => base_root.join("video"),
         "instagram" => base_root.join("instagram"),
+        "tiktok" => base_root.join("tiktok"),
         "images" => base_root.join("images"),
         "localization" => base_root.join("localization").join("en"),
         _ => base_root.to_path_buf(),
@@ -6028,6 +6034,7 @@ fn feature_root_label(key: &str) -> &'static str {
     match key {
         "video" => "Video Archiver",
         "instagram" => "Instagram Archiver",
+        "tiktok" => "TikTok Archiver",
         "images" => "Image Archive",
         "localization" => "Localization Studio exports",
         _ => "Feature",
@@ -6042,6 +6049,7 @@ fn set_feature_root_override(
     match feature {
         "video" => roots.video_root = value,
         "instagram" => roots.instagram_root = value,
+        "tiktok" => roots.tiktok_root = value,
         "images" => roots.image_root = value,
         "localization" => roots.localization_root = value,
         _ => return Err(format!("unknown storage feature: {feature}")),
@@ -6076,6 +6084,7 @@ fn build_download_dir_status(paths: &AppPaths) -> Result<DownloadDirStatus, Stri
     let feature_roots = [
         ("video", feature_roots_config.video_root.clone()),
         ("instagram", feature_roots_config.instagram_root.clone()),
+        ("tiktok", feature_roots_config.tiktok_root.clone()),
         ("images", feature_roots_config.image_root.clone()),
         (
             "localization",
@@ -6767,7 +6776,10 @@ fn render_diagnostics_app_state_snapshot_markdown(
         let track_name = match track.track {
             jobs::JobTrack::YoutubeSingle => "youtube_single",
             jobs::JobTrack::YoutubeRecurring => "youtube_recurring",
-            jobs::JobTrack::Instagram => "instagram",
+            jobs::JobTrack::InstagramSingle => "instagram_single",
+            jobs::JobTrack::InstagramRecurring => "instagram_recurring",
+            jobs::JobTrack::TiktokSingle => "tiktok_single",
+            jobs::JobTrack::TiktokRecurring => "tiktok_recurring",
             jobs::JobTrack::OtherVideo => "other_video",
             jobs::JobTrack::ImageArchive => "image_archive",
             jobs::JobTrack::Localization => "localization",
@@ -9879,25 +9891,33 @@ fn youtube_browser_windows_candidates(browser_source: &str) -> Vec<std::path::Pa
     candidates
 }
 
+const INSTAGRAM_SIGN_IN_URL: &str = "https://www.instagram.com/";
+
+#[derive(Debug, serde::Serialize)]
+struct InstagramSignInLaunchResult {
+    browser_source: String,
+    url: String,
+}
+
 #[cfg(windows)]
-fn launch_youtube_sign_in_in_browser(browser_source: &str) -> Result<(), String> {
+fn launch_sign_in_in_browser(browser_source: &str, url: &str) -> Result<(), String> {
     let executable = youtube_browser_windows_candidates(browser_source)
         .into_iter()
         .find(|path| path.is_file())
         .ok_or_else(|| {
             format!(
-                "Could not find {browser_source} on this computer. Open youtube.com in that browser yourself, sign in, then return here."
+                "Could not find {browser_source} on this computer. Open {url} in that browser yourself, sign in, then return here."
             )
         })?;
     std::process::Command::new(&executable)
-        .arg(YOUTUBE_SIGN_IN_URL)
+        .arg(url)
         .spawn()
         .map_err(|err| format!("Could not open {}: {err}", executable.display()))?;
     Ok(())
 }
 
 #[cfg(target_os = "macos")]
-fn launch_youtube_sign_in_in_browser(browser_source: &str) -> Result<(), String> {
+fn launch_sign_in_in_browser(browser_source: &str, url: &str) -> Result<(), String> {
     let app = match browser_source {
         "firefox" => "Firefox",
         "chrome" => "Google Chrome",
@@ -9906,14 +9926,14 @@ fn launch_youtube_sign_in_in_browser(browser_source: &str) -> Result<(), String>
         _ => return Err(format!("Unsupported browser: {browser_source}")),
     };
     std::process::Command::new("open")
-        .args(["-a", app, YOUTUBE_SIGN_IN_URL])
+        .args(["-a", app, url])
         .spawn()
         .map_err(|err| format!("Could not open {app}: {err}"))?;
     Ok(())
 }
 
 #[cfg(all(unix, not(target_os = "macos")))]
-fn launch_youtube_sign_in_in_browser(browser_source: &str) -> Result<(), String> {
+fn launch_sign_in_in_browser(browser_source: &str, url: &str) -> Result<(), String> {
     let executable = match browser_source {
         "firefox" => "firefox",
         "chrome" => "google-chrome",
@@ -9922,10 +9942,25 @@ fn launch_youtube_sign_in_in_browser(browser_source: &str) -> Result<(), String>
         _ => return Err(format!("Unsupported browser: {browser_source}")),
     };
     std::process::Command::new(executable)
-        .arg(YOUTUBE_SIGN_IN_URL)
+        .arg(url)
         .spawn()
         .map_err(|err| format!("Could not open {executable}: {err}"))?;
     Ok(())
+}
+
+#[cfg(windows)]
+fn launch_youtube_sign_in_in_browser(browser_source: &str) -> Result<(), String> {
+    launch_sign_in_in_browser(browser_source, YOUTUBE_SIGN_IN_URL)
+}
+
+#[cfg(target_os = "macos")]
+fn launch_youtube_sign_in_in_browser(browser_source: &str) -> Result<(), String> {
+    launch_sign_in_in_browser(browser_source, YOUTUBE_SIGN_IN_URL)
+}
+
+#[cfg(all(unix, not(target_os = "macos")))]
+fn launch_youtube_sign_in_in_browser(browser_source: &str) -> Result<(), String> {
+    launch_sign_in_in_browser(browser_source, YOUTUBE_SIGN_IN_URL)
 }
 
 #[tauri::command]
@@ -9937,6 +9972,18 @@ fn youtube_auth_open_sign_in(browser_source: String) -> Result<YoutubeSignInLaun
     Ok(YoutubeSignInLaunchResult {
         browser_source,
         url: YOUTUBE_SIGN_IN_URL.to_string(),
+    })
+}
+
+#[tauri::command]
+fn instagram_auth_open_sign_in(browser_source: String) -> Result<InstagramSignInLaunchResult, String> {
+    let browser_source = jobs::normalize_browser_cookie_source(Some(&browser_source))
+        .map_err(|err| err.to_string())?
+        .ok_or_else(|| "Choose a supported browser first.".to_string())?;
+    launch_sign_in_in_browser(&browser_source, INSTAGRAM_SIGN_IN_URL)?;
+    Ok(InstagramSignInLaunchResult {
+        browser_source,
+        url: INSTAGRAM_SIGN_IN_URL.to_string(),
     })
 }
 
@@ -9957,25 +10004,28 @@ fn config_youtube_auth_preflight(
 
 /// Frontend->backend payload for `config_instagram_auth_set`. `cookie` is the pasted Instagram
 /// session cookie (a `Cookie:` header string, or a browser-extension cookie JSON array — the
-/// engine normalizes both). Empty/omitted clears the saved global Instagram cookie.
+/// engine normalizes both). `browser_cookie_source` is the browser to read session cookies from.
 #[derive(Debug, Clone, serde::Deserialize)]
 struct InstagramAuthConfigInput {
     #[serde(default)]
     cookie: Option<String>,
+    #[serde(default)]
+    browser_cookie_source: Option<String>,
 }
 
 /// Backend->frontend status for `config_instagram_auth_get` / `config_instagram_auth_set`.
-/// The secret itself is never returned; only whether a global Instagram cookie is configured.
+/// The secret itself is never returned; only whether a global Instagram cookie or browser session is configured.
 #[derive(Debug, Clone, serde::Serialize)]
 struct InstagramAuthConfigStatus {
     configured: bool,
+    manual_cookie_configured: bool,
+    browser_cookie_source: Option<String>,
     credential_generation: u64,
     credential_fingerprint: String,
     cleanup_warning: Option<String>,
 }
 
-/// Whether a global Instagram cookie is configured. Mirrors `config_youtube_auth_get`, but
-/// never returns the secret to the frontend — only the `configured` flag.
+/// Whether a global Instagram cookie or browser session is configured. Mirrors `config_youtube_auth_get`.
 #[tauri::command]
 fn config_instagram_auth_get(
     state: State<'_, AppState>,
@@ -9984,15 +10034,15 @@ fn config_instagram_auth_get(
         .map_err(|e| jobs::redact_auth_credential_locators(&e.to_string()))?;
     Ok(InstagramAuthConfigStatus {
         configured: revision.configured,
+        manual_cookie_configured: revision.manual_cookie_configured,
+        browser_cookie_source: revision.browser_cookie_source,
         credential_generation: revision.credential_generation,
         credential_fingerprint: revision.credential_fingerprint,
         cleanup_warning: revision.cleanup_warning,
     })
 }
 
-/// Save (or clear, when `config_value.cookie` is empty/omitted) the global Instagram cookie.
-/// Mirrors `config_youtube_auth_set`: normalizes + stores the secret, then clears any armed
-/// Instagram auth block so a fresh login lets the fleet retry immediately.
+/// Save (or clear) the global Instagram session.
 #[tauri::command]
 fn config_instagram_auth_set(
     state: State<'_, AppState>,
@@ -10003,19 +10053,22 @@ fn config_instagram_auth_set(
     let revision = jobs::replace_global_instagram_auth_cookie(
         &state.paths,
         config_value.cookie,
+        config_value.browser_cookie_source,
         expected_credential_generation,
         expected_credential_fingerprint.as_deref(),
     )
         .map_err(|e| jobs::redact_auth_credential_locators(&e.to_string()))?;
     Ok(InstagramAuthConfigStatus {
         configured: revision.configured,
+        manual_cookie_configured: revision.manual_cookie_configured,
+        browser_cookie_source: revision.browser_cookie_source,
         credential_generation: revision.credential_generation,
         credential_fingerprint: revision.credential_fingerprint,
         cleanup_warning: revision.cleanup_warning,
     })
 }
 
-/// "Test saved Instagram cookies" — mirrors `config_youtube_auth_preflight`.
+/// "Test saved Instagram session" — mirrors `config_youtube_auth_preflight`.
 #[tauri::command]
 fn config_instagram_auth_preflight(
     state: State<'_, AppState>,
@@ -12367,6 +12420,57 @@ fn instagram_subscriptions_output_dir(
 }
 
 #[tauri::command]
+async fn tools_instagram_profile_provider_status(
+    state: State<'_, AppState>,
+) -> Result<tools::InstagramProfileProviderStatus, String> {
+    let paths = state.paths.clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        Ok(tools::instagram_profile_provider_status(&paths))
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
+#[tauri::command]
+fn tiktok_subscriptions_list(
+    state: State<'_, AppState>,
+) -> Result<Vec<tiktok_subscriptions::TiktokSubscriptionRow>, String> {
+    tiktok_subscriptions::list_tiktok_subscriptions(&state.paths).map_err(|e| {
+        trace_database_command_error(&state.paths, "tiktok_subscriptions_list", e.to_string())
+    })
+}
+
+#[tauri::command]
+fn tiktok_subscriptions_upsert(
+    state: State<'_, AppState>,
+    subscription: tiktok_subscriptions::TiktokSubscriptionUpsert,
+) -> Result<tiktok_subscriptions::TiktokSubscriptionRow, String> {
+    tiktok_subscriptions::upsert_tiktok_subscription(&state.paths, subscription)
+        .map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+fn tiktok_subscriptions_delete(state: State<'_, AppState>, id: String) -> Result<(), String> {
+    tiktok_subscriptions::delete_tiktok_subscription(&state.paths, &id).map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+fn tiktok_subscriptions_queue_one(
+    state: State<'_, AppState>,
+    id: String,
+) -> Result<Vec<jobs::JobRow>, String> {
+    tiktok_subscriptions::queue_tiktok_subscription(&state.paths, &id).map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+fn tiktok_subscriptions_queue_all_active(
+    state: State<'_, AppState>,
+) -> Result<Vec<jobs::JobRow>, String> {
+    tiktok_subscriptions::queue_all_active_tiktok_subscriptions(&state.paths)
+        .map_err(|e| e.to_string())
+}
+
+#[tauri::command]
 fn download_presets_get(
     state: State<'_, AppState>,
 ) -> Result<config::DownloadPresetsConfig, String> {
@@ -12801,6 +12905,42 @@ fn jobs_enqueue_instagram_batch(
     browser_cookie_source: Option<String>,
 ) -> Result<Vec<jobs::JobRow>, String> {
     jobs::enqueue_download_instagram_batch(
+        &state.paths,
+        urls,
+        auth_cookie,
+        output_dir,
+        use_browser_cookies,
+        browser_cookie_source,
+    )
+    .map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+fn provider_transfer_settings_get(
+    state: State<'_, AppState>,
+) -> Result<config::ProviderTransferSettings, String> {
+    config::load_provider_transfer_settings(&state.paths).map_err(|error| error.to_string())
+}
+
+#[tauri::command]
+fn provider_transfer_settings_set(
+    state: State<'_, AppState>,
+    settings: config::ProviderTransferSettings,
+) -> Result<config::ProviderTransferSettings, String> {
+    config::save_provider_transfer_settings(&state.paths, &settings)
+        .map_err(|error| error.to_string())
+}
+
+#[tauri::command]
+fn jobs_enqueue_tiktok_batch(
+    state: State<'_, AppState>,
+    urls: Vec<String>,
+    auth_cookie: Option<String>,
+    output_dir: Option<String>,
+    use_browser_cookies: Option<bool>,
+    browser_cookie_source: Option<String>,
+) -> Result<Vec<jobs::JobRow>, String> {
+    jobs::enqueue_download_tiktok_batch(
         &state.paths,
         urls,
         auth_cookie,
@@ -14914,6 +15054,7 @@ pub fn run() {
             config_youtube_auth_preflight,
             config_youtube_auth_set,
             config_instagram_auth_get,
+            instagram_auth_open_sign_in,
             config_instagram_auth_preflight,
             config_instagram_auth_set,
             config_diarization_optional_clear_token,
@@ -14924,6 +15065,8 @@ pub fn run() {
             download_presets_import_json,
             download_presets_catalog_set,
             download_presets_default_safety_patch,
+            provider_transfer_settings_get,
+            provider_transfer_settings_set,
             library_get,
             library_list,
             library_query,
@@ -14980,6 +15123,11 @@ pub fn run() {
             instagram_subscriptions_queue_one,
             instagram_subscriptions_queue_all_active,
             instagram_subscriptions_output_dir,
+            tiktok_subscriptions_list,
+            tiktok_subscriptions_upsert,
+            tiktok_subscriptions_delete,
+            tiktok_subscriptions_queue_one,
+            tiktok_subscriptions_queue_all_active,
             jobs_cancel,
             jobs_cancel_all,
             jobs_backfill_titles_for_batch,
@@ -14995,6 +15143,7 @@ pub fn run() {
             library_canonical_source_replace,
             library_canonical_record_remove,
             jobs_enqueue_instagram_batch,
+            jobs_enqueue_tiktok_batch,
             jobs_enqueue_image_batch,
             jobs_enqueue_import_local,
             jobs_enqueue_install_phase2_packs_v1,
@@ -15163,6 +15312,7 @@ pub fn run() {
             tools_tts_voice_preserving_local_v1_status,
             tools_ytdlp_install,
             tools_ytdlp_status,
+            tools_instagram_profile_provider_status,
             window_close,
             window_minimize,
             window_start_drag,

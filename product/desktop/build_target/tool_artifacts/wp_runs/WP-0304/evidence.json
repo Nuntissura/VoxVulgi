@@ -1,0 +1,47 @@
+{
+  "schema_version": 1,
+  "wp_id": "WP-0304",
+  "outcome": "done",
+  "verified_at": "2026-08-22",
+  "build": {
+    "app_version": "0.1.178",
+    "executable": "product/desktop/build_target/Current/release/desktop.exe",
+    "installer": "product/desktop/build_target/Current/release/bundle/nsis/VoxVulgi_0.1.178_x64-setup.exe",
+    "log": "product/desktop/build_target/logs/build_desktop_target_20260822-223147_0_1_178.log"
+  },
+  "runtime": {
+    "root": "product/desktop/build_target/tool_artifacts/wp_runs/WP-0304/runtime_20260822_v4/app_base",
+    "profile": "https://www.tiktok.com/@tiktok",
+    "canonical_profile_id": "MS4wLjABAAAAv7iSuuXDJGDvJkmH_vz1qkDZYo1apxgzaxdBSeIuPiM",
+    "provider": "yt-dlp",
+    "provider_version": "2026.07.04",
+    "canonical_identities": 2,
+    "metadata_rows": 2,
+    "memberships": 2,
+    "provider_subscription_items": 2,
+    "library_items": 2,
+    "lineage_rows": 2,
+    "orphan_metadata_rows": 0,
+    "noncanonical_bare_metadata_rows": 0,
+    "single_transfers": 1,
+    "recurring_transfers": 1,
+    "refresh_jobs": 3,
+    "transfer_count_after_first": 2,
+    "transfer_count_after_second": 2,
+    "transfer_count_after_restart": 2,
+    "mkv_files": 2
+  },
+  "checks": {
+    "engine_serial": "581 passed; 0 failed; 4 ignored",
+    "tauri_serial": "46 passed; 0 failed",
+    "frontend_contracts": "251 passed; 0 failed",
+    "offline_payload_validation": "passed",
+    "headless_packaged_ui": "passed",
+    "semantic_missing_accessible_names": 0,
+    "visual_inspection": "passed"
+  },
+  "ui_evidence": {
+    "snapshot": "governance/snapshots/WP-0304_packaged_v0_1_178/tiktok_profile_subscription_1787431194427.png",
+    "dump": "governance/snapshots/WP-0304_packaged_v0_1_178/tiktok_profile_subscription_1787431194437.dump.json"
+  }
+}

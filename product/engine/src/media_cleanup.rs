@@ -257,7 +257,7 @@ pub fn advance_inventory(
             processed_files: 0,
             remaining_inventory_entries: serde_json::from_str::<Vec<String>>(&row.0)
                 .unwrap_or_default()
-            .len(),
+                .len(),
         });
     }
     if cleanup_active_job_count(&conn)? > 0 {
@@ -532,14 +532,11 @@ pub fn apply_reconciliation(
             };
             let tx = begin_cleanup_apply_transaction(&mut conn)?;
             verify_inventoried_file_unchanged(&tx, run_id, physical_path)?;
-            let current_existing = library_items_for_media_path(
-                paths,
-                &tx,
-                &canonical_path_string,
-            )?
-            .into_iter()
-            .next()
-            .map(|item| item.library_item_id);
+            let current_existing =
+                library_items_for_media_path(paths, &tx, &canonical_path_string)?
+                    .into_iter()
+                    .next()
+                    .map(|item| item.library_item_id);
             let item_id = if let Some(item_id) = current_existing {
                 item_id
             } else {
@@ -628,7 +625,9 @@ fn prepare_reconciliation_candidates(
 
     let mut library_stmt = conn.prepare("SELECT id,media_path FROM library_item ORDER BY id")?;
     let base_library_rows = library_stmt
-        .query_map([], |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)))?
+        .query_map([], |row| {
+            Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+        })?
         .collect::<rusqlite::Result<Vec<_>>>()?;
     let mut identity_stmt = conn.prepare(
         "SELECT media_id FROM media_source_identity WHERE service='youtube' AND library_item_id=?1 ORDER BY media_id",
@@ -651,7 +650,10 @@ fn prepare_reconciliation_candidates(
 
     let mut physical_by_youtube: HashMap<String, Vec<String>> = HashMap::new();
     let mut physical_by_filename: HashMap<String, Vec<String>> = HashMap::new();
-    for row in physical_rows.iter().filter(|row| row.library_item_id.is_none()) {
+    for row in physical_rows
+        .iter()
+        .filter(|row| row.library_item_id.is_none())
+    {
         if let Some(media_id) = row.youtube_id.as_ref() {
             physical_by_youtube
                 .entry(media_id.clone())
@@ -685,7 +687,10 @@ fn prepare_reconciliation_candidates(
     let mut matched_library_items = HashSet::new();
     let mut ambiguous_library_items = HashSet::new();
     let now = now_ms();
-    for row in physical_rows.iter().filter(|row| row.library_item_id.is_none()) {
+    for row in physical_rows
+        .iter()
+        .filter(|row| row.library_item_id.is_none())
+    {
         let (evidence_kind, evidence_value, candidates, physical_matches) = row
             .youtube_id
             .as_ref()
@@ -717,7 +722,8 @@ fn prepare_reconciliation_candidates(
         let unique_library = (candidates.len() == 1 && physical_matches == 1)
             .then(|| library_rows.iter().find(|item| item.id == candidates[0]))
             .flatten();
-        let (library_item_id, library_path, kind, disposition) = if let Some(item) = unique_library {
+        let (library_item_id, library_path, kind, disposition) = if let Some(item) = unique_library
+        {
             matched_library_items.insert(item.id.clone());
             if row.file_identity.is_none() {
                 (
@@ -802,7 +808,9 @@ fn prepare_reconciliation_candidates(
         .filter(|row| !matched_library_items.contains(&row.id))
     {
         let library_keys = path_identity_keys(paths, &row.media_path);
-        let inventoried = library_keys.iter().any(|key| inventoried_keys.contains(key));
+        let inventoried = library_keys
+            .iter()
+            .any(|key| inventoried_keys.contains(key));
         let observation = conn
             .query_row(
                 "SELECT state FROM media_availability_observation WHERE path=?1 AND invalidated_at_ms IS NULL ORDER BY observed_at_ms DESC LIMIT 1",
@@ -976,8 +984,7 @@ fn path_within_roots(paths: &AppPaths, candidate: &str, roots: &[String]) -> boo
     roots.iter().any(|root| {
         path_identity_keys(paths, root).iter().any(|root_key| {
             candidate_keys.iter().any(|candidate_key| {
-                candidate_key == root_key
-                    || candidate_key.starts_with(&(root_key.clone() + "\\"))
+                candidate_key == root_key || candidate_key.starts_with(&(root_key.clone() + "\\"))
             })
         })
     })
@@ -1021,9 +1028,8 @@ fn verify_inventoried_file_unchanged(
 fn native_file_identity(path: &Path) -> Result<String> {
     let file = File::open(path)?;
     let mut info: BY_HANDLE_FILE_INFORMATION = unsafe { std::mem::zeroed() };
-    let succeeded = unsafe {
-        GetFileInformationByHandle(file.as_raw_handle() as _, &mut info as *mut _)
-    };
+    let succeeded =
+        unsafe { GetFileInformationByHandle(file.as_raw_handle() as _, &mut info as *mut _) };
     if succeeded == 0 {
         return Err(std::io::Error::last_os_error().into());
     }
@@ -1231,8 +1237,7 @@ pub fn list_variants(paths: &AppPaths, run_id: &str) -> Result<Vec<MediaCleanupV
                 service: row.get(1)?,
                 media_id: row.get(2)?,
                 member_paths: serde_json::from_str(&member_paths_json).unwrap_or_default(),
-                evidence: serde_json::from_str(&evidence_json)
-                    .unwrap_or(serde_json::Value::Null),
+                evidence: serde_json::from_str(&evidence_json).unwrap_or(serde_json::Value::Null),
                 status: row.get(5)?,
             })
         })?
@@ -1589,9 +1594,7 @@ ORDER BY created_at_ms DESC
                 drop(tx);
                 let mut compensation_error = None;
                 if quarantine_exists && source.exists() && !quarantine.exists() {
-                    if let Err(error) =
-                        move_verified(&source, &quarantine, action.6, &action.7)
-                    {
+                    if let Err(error) = move_verified(&source, &quarantine, action.6, &action.7) {
                         compensation_error = Some(error);
                     }
                 }
@@ -2380,7 +2383,10 @@ ORDER BY
         }
 
         let mut duplicate_cluster_index = 0_usize;
-        for cluster in byte_clusters.into_iter().filter(|cluster| cluster.len() > 1) {
+        for cluster in byte_clusters
+            .into_iter()
+            .filter(|cluster| cluster.len() > 1)
+        {
             let group_id = if duplicate_cluster_index == 0 {
                 format!("sha256:{hash}")
             } else {
@@ -2528,9 +2534,15 @@ ORDER BY lower(f.path)
                     .is_some_and(|value| !value.is_null())
             });
         let metadata_complete = members.iter().all(|member| {
-            member.get("duration_ms").is_some_and(|value| !value.is_null())
-                && member.get("container").is_some_and(|value| !value.is_null())
-                && member.get("video_codec").is_some_and(|value| !value.is_null())
+            member
+                .get("duration_ms")
+                .is_some_and(|value| !value.is_null())
+                && member
+                    .get("container")
+                    .is_some_and(|value| !value.is_null())
+                && member
+                    .get("video_codec")
+                    .is_some_and(|value| !value.is_null())
         });
         let evidence = serde_json::json!({
             "classification": if full_hash_count == members.len()
@@ -3138,12 +3150,9 @@ mod tests {
         let media_root = dir.path().join("media");
         std::fs::create_dir_all(&media_root).expect("media root");
         std::fs::write(media_root.join("single.mkv"), b"single-media").expect("media");
-        let run = create_inventory_run(
-            &paths,
-            vec![media_root.to_string_lossy().to_string()],
-            None,
-        )
-        .expect("run");
+        let run =
+            create_inventory_run(&paths, vec![media_root.to_string_lossy().to_string()], None)
+                .expect("run");
         let conn = db::open(&paths).expect("db");
         conn.execute(
             "INSERT INTO meta(key,value) VALUES('jobs_queue_paused','1') ON CONFLICT(key) DO UPDATE SET value='1'",
@@ -3222,19 +3231,13 @@ mod tests {
         std::fs::create_dir_all(&media_root).expect("media root");
 
         assert!(latest_run(&paths).expect("empty lookup").is_none());
-        let first = create_inventory_run(
-            &paths,
-            vec![media_root.to_string_lossy().to_string()],
-            None,
-        )
-        .expect("first run");
+        let first =
+            create_inventory_run(&paths, vec![media_root.to_string_lossy().to_string()], None)
+                .expect("first run");
         std::thread::sleep(std::time::Duration::from_millis(2));
-        let second = create_inventory_run(
-            &paths,
-            vec![media_root.to_string_lossy().to_string()],
-            None,
-        )
-        .expect("second run");
+        let second =
+            create_inventory_run(&paths, vec![media_root.to_string_lossy().to_string()], None)
+                .expect("second run");
 
         let restarted_paths = AppPaths::new(app_root);
         let recovered = latest_run(&restarted_paths)
@@ -3294,12 +3297,9 @@ mod tests {
         .expect("missing identity");
         drop(conn);
 
-        let run = create_inventory_run(
-            &paths,
-            vec![media_root.to_string_lossy().to_string()],
-            None,
-        )
-        .expect("run");
+        let run =
+            create_inventory_run(&paths, vec![media_root.to_string_lossy().to_string()], None)
+                .expect("run");
         while get_run(&paths, &run.id)
             .expect("run")
             .expect("run exists")
@@ -3353,7 +3353,10 @@ mod tests {
                 |row| row.get(0),
             )
             .expect("relinked path");
-        assert!(paths_equivalent(&relinked_path, &recovered.to_string_lossy()));
+        assert!(paths_equivalent(
+            &relinked_path,
+            &recovered.to_string_lossy()
+        ));
         assert_eq!(
             library_items_for_media_path(&paths, &conn, &unmatched.to_string_lossy())
                 .expect("indexed unmatched rows")
@@ -3411,12 +3414,9 @@ mod tests {
         .expect("missing identity");
         drop(conn);
 
-        let run = create_inventory_run(
-            &paths,
-            vec![media_root.to_string_lossy().to_string()],
-            None,
-        )
-        .expect("run");
+        let run =
+            create_inventory_run(&paths, vec![media_root.to_string_lossy().to_string()], None)
+                .expect("run");
         while get_run(&paths, &run.id)
             .expect("run")
             .expect("run exists")
@@ -3461,7 +3461,10 @@ mod tests {
                 |row| row.get(0),
             )
             .expect("retry relinked path");
-        assert!(paths_equivalent(&relinked_path, &recovered.to_string_lossy()));
+        assert!(paths_equivalent(
+            &relinked_path,
+            &recovered.to_string_lossy()
+        ));
     }
 
     #[test]
@@ -3485,12 +3488,9 @@ mod tests {
             &std::fs::metadata(&physical).expect("original metadata"),
         );
 
-        let run = create_inventory_run(
-            &paths,
-            vec![media_root.to_string_lossy().to_string()],
-            None,
-        )
-        .expect("run");
+        let run =
+            create_inventory_run(&paths, vec![media_root.to_string_lossy().to_string()], None)
+                .expect("run");
         while get_run(&paths, &run.id)
             .expect("run")
             .expect("run exists")
@@ -3506,7 +3506,9 @@ mod tests {
         std::fs::write(&physical, b"replaced-bytes").expect("replacement physical");
         filetime::set_file_mtime(&physical, original_mtime).expect("restore visible mtime");
         assert_eq!(
-            std::fs::metadata(&physical).expect("replacement metadata").len(),
+            std::fs::metadata(&physical)
+                .expect("replacement metadata")
+                .len(),
             b"original-bytes".len() as u64
         );
 
@@ -3544,10 +3546,7 @@ mod tests {
             .expect("pause queue");
         let media_root = dir.path().join("media");
         std::fs::create_dir_all(&media_root).expect("media root");
-        for name in [
-            "first - dQw4w9WgXcQ.mkv",
-            "second - dQw4w9WgXcQ.mkv",
-        ] {
+        for name in ["first - dQw4w9WgXcQ.mkv", "second - dQw4w9WgXcQ.mkv"] {
             std::fs::write(media_root.join(name), name.as_bytes()).expect("physical variant");
         }
         let missing = media_root.join("old - dQw4w9WgXcQ.mkv");
@@ -3563,12 +3562,9 @@ mod tests {
         )
         .expect("ambiguous identity");
         drop(conn);
-        let run = create_inventory_run(
-            &paths,
-            vec![media_root.to_string_lossy().to_string()],
-            None,
-        )
-        .expect("run");
+        let run =
+            create_inventory_run(&paths, vec![media_root.to_string_lossy().to_string()], None)
+                .expect("run");
         while get_run(&paths, &run.id)
             .expect("run")
             .expect("run exists")
@@ -4182,7 +4178,8 @@ END;
             &paths,
             vec![media_root.to_string_lossy().to_string()],
             Some(quarantine.to_string_lossy().to_string()),
-        ).unwrap();
+        )
+        .unwrap();
         advance_to_review(&paths, &run.id);
         let group = list_groups(&paths, &run.id).unwrap().remove(0);
         set_group_decision(
@@ -4191,7 +4188,8 @@ END;
             &group.group_id,
             "approved",
             Some(&keeper.to_string_lossy()),
-        ).unwrap();
+        )
+        .unwrap();
         let conn = db::open(&paths).unwrap();
         conn.execute_batch(
             "CREATE TRIGGER force_attention_metadata_failure BEFORE UPDATE OF media_path ON library_item WHEN OLD.id='attention-source' BEGIN SELECT RAISE(ABORT,'forced attention metadata failure'); END;",
@@ -4202,7 +4200,10 @@ END;
         let summary = apply_approved_groups(&paths, &run.id).expect("attention summary");
         FORCE_CLEANUP_APPLY_COMPENSATION_FAILURE.with(|flag| flag.set(false));
         assert_eq!(summary.failed_actions, 1);
-        assert!(!duplicate.exists(), "forced compensation failure leaves source absent");
+        assert!(
+            !duplicate.exists(),
+            "forced compensation failure leaves source absent"
+        );
 
         let restarted = db::open(&paths).expect("restart db");
         let (status, quarantine_path): (String, String) = restarted.query_row(
@@ -4213,11 +4214,13 @@ END;
         assert_eq!(status, "attention");
         assert!(Path::new(&quarantine_path).is_file());
         for path in [duplicate.to_string_lossy().to_string(), quarantine_path] {
-            let invalidated: Option<i64> = restarted.query_row(
-                "SELECT invalidated_at_ms FROM media_availability_observation WHERE path=?1",
-                [&path],
-                |row| row.get(0),
-            ).expect("durable invalidation row");
+            let invalidated: Option<i64> = restarted
+                .query_row(
+                    "SELECT invalidated_at_ms FROM media_availability_observation WHERE path=?1",
+                    [&path],
+                    |row| row.get(0),
+                )
+                .expect("durable invalidation row");
             assert!(invalidated.is_some(), "restart must not trust {path}");
         }
     }
@@ -4233,12 +4236,9 @@ END;
         let right = media_root.join("right.mkv");
         std::fs::write(&left, b"aaaa").expect("left bytes");
         std::fs::write(&right, b"bbbb").expect("right bytes");
-        let run = create_inventory_run(
-            &paths,
-            vec![media_root.to_string_lossy().to_string()],
-            None,
-        )
-        .expect("run");
+        let run =
+            create_inventory_run(&paths, vec![media_root.to_string_lossy().to_string()], None)
+                .expect("run");
         let conn = db::open(&paths).expect("db");
         for path in [&left, &right] {
             conn.execute(

@@ -1431,3 +1431,19 @@ This changelog tracks desktop installer builds produced by `governance/scripts/b
 - Notes: Full-offline installer long-path fix: require Inno Setup 7 extended-length path support; preserve disk spanning, non-solid compression, offline WebView2, update semantics, and shellexec NSIS elevation
   - Inno Setup 7.1.0 full compile succeeded; the five-file installer set totals `7,737,985,056` bytes.
   - Isolated runtime probe installed the reported ModelScope filename at a 295-character destination and returned exit code 0 without touching live VoxVulgi app data.
+
+## 0.1.177 - 2026-08-22T20:29:20Z
+- Work Packets: `WP-0303`, `WP-0304`
+- Commit: `11d61bb`
+- Offline Bundle ID: `offline_full_win64_20260822_201543`
+- Artifacts:
+  - `product/desktop/build_target/Current/release/bundle/nsis/VoxVulgi_0.1.177_x64-setup.exe`
+- Notes: Instagram and TikTok provider refactors with canonical metadata, restart-safe dedupe, bounded failure holds, non-destructive subscription archive semantics, and verified Windows provider-install recovery.
+
+## 0.1.178 - 2026-08-22T20:38:19Z
+- Work Packets: `WP-0303`, `WP-0304`
+- Commit: `11d61bb`
+- Offline Bundle ID: `offline_full_win64_20260822_201543`
+- Artifacts:
+  - `product/desktop/build_target/Current/release/bundle/nsis/VoxVulgi_0.1.178_x64-setup.exe`
+- Notes: Final Instagram and TikTok provider refactors; packaged visual audit correction aligns Instagram subscription action label with non-destructive archive semantics.

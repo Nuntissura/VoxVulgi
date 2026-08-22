@@ -345,7 +345,8 @@ fn discover_manifest_candidates(
         let Some(backend_name) = backend_dir.file_name().and_then(|value| value.to_str()) else {
             continue;
         };
-        if let Some(spec) = load_manifest_candidate(paths, item_id, item_dir, track_id, backend_name, None)?
+        if let Some(spec) =
+            load_manifest_candidate(paths, item_id, item_dir, track_id, backend_name, None)?
         {
             out.push(spec);
         }
@@ -364,9 +365,14 @@ fn discover_manifest_candidates(
             let Some(label) = variant_path.file_name().and_then(|value| value.to_str()) else {
                 continue;
             };
-            if let Some(spec) =
-                load_manifest_candidate(paths, item_id, item_dir, track_id, backend_name, Some(label))?
-            {
+            if let Some(spec) = load_manifest_candidate(
+                paths,
+                item_id,
+                item_dir,
+                track_id,
+                backend_name,
+                Some(label),
+            )? {
                 out.push(spec);
             }
         }
@@ -1513,7 +1519,10 @@ mod tests {
     #[test]
     fn managed_clone_backends_have_distinct_benchmark_labels() {
         assert_eq!(backend_display_name("cosyvoice"), "CosyVoice 2");
-        assert_eq!(backend_display_name("openvoice_v2"), "OpenVoice V2 + Kokoro");
+        assert_eq!(
+            backend_display_name("openvoice_v2"),
+            "OpenVoice V2 + Kokoro"
+        );
     }
 
     fn seed_active_preview_lineage(
@@ -1599,14 +1608,13 @@ mod tests {
         let missing_dir = tempfile::tempdir().expect("missing tempdir");
         let missing_paths = AppPaths::new(missing_dir.path().join("app"));
         missing_paths.ensure_dirs().expect("missing dirs");
-        let (missing_dub, _) =
-            seed_active_preview_lineage(
-                &missing_paths,
-                "missing-item",
-                b"trusted-bytes",
-                None,
-                "committed",
-            );
+        let (missing_dub, _) = seed_active_preview_lineage(
+            &missing_paths,
+            "missing-item",
+            b"trusted-bytes",
+            None,
+            "committed",
+        );
         assert!(localization_preview_ready_for_benchmark(
             &missing_paths,
             "missing-item",
@@ -1698,8 +1706,7 @@ mod tests {
         .expect("write variant manifest");
 
         let candidates =
-            discover_manifest_candidates(&paths, "item-1", &item_dir, "track-1")
-                .expect("discover");
+            discover_manifest_candidates(&paths, "item-1", &item_dir, "track-1").expect("discover");
         assert_eq!(candidates.len(), 2);
         assert_eq!(candidates[0].backend_id, "dub_voice_preserving_v1");
         assert_eq!(candidates[1].variant_label.as_deref(), Some("alt_a"));

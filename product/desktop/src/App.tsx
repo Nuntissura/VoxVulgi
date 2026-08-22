@@ -205,6 +205,7 @@ type AppPage =
   | "localization"
   | "video_ingest"
   | "instagram_archive"
+  | "tiktok_archive"
   | "image_archive"
   | "media_library"
   | "jobs"
@@ -819,6 +820,7 @@ function parseStoredPage(raw: string | null): AppPage {
     case "localization":
     case "video_ingest":
     case "instagram_archive":
+    case "tiktok_archive":
     case "image_archive":
     case "media_library":
     case "jobs":
@@ -3952,6 +3954,13 @@ function App() {
           onOpenOptions={() => switchPage("options")}
         />
       ),
+      tiktok_archive: (
+        <LibraryPage
+          mode="tiktok_archive"
+          visible={page === "tiktok_archive"}
+          onOpenOptions={() => switchPage("options")}
+        />
+      ),
       image_archive: (
         <LibraryPage
           mode="image_archive"
@@ -4057,6 +4066,13 @@ function App() {
                   type="button"
                 >
                   Instagram Archiver
+                </button>
+                <button
+                  className={page === "tiktok_archive" ? "active" : ""}
+                  onClick={() => switchPage("tiktok_archive")}
+                  type="button"
+                >
+                  TikTok Archiver
                 </button>
                 <button
                   className={page === "image_archive" ? "active" : ""}

@@ -693,6 +693,7 @@ export type LibraryPageMode =
   | "all"
   | "video_ingest"
   | "instagram_archive"
+  | "tiktok_archive"
   | "image_archive"
   | "media_library";
 
@@ -859,6 +860,7 @@ type InstagramSubscriptionRow = {
   id: string;
   title: string;
   source_url: string;
+  canonical_profile_id: string | null;
   folder_map: string;
   output_dir_override: string | null;
   use_browser_cookies: boolean;
@@ -866,6 +868,25 @@ type InstagramSubscriptionRow = {
   auth_session_configured: boolean;
   active: boolean;
   refresh_interval_minutes: number;
+  max_items_per_refresh: number;
+  include_posts: boolean;
+  include_reels: boolean;
+  include_stories: boolean;
+  last_attempt_at_ms: number | null;
+  last_success_at_ms: number | null;
+  last_error_at_ms: number | null;
+  last_error: string | null;
+  consecutive_failures: number;
+  next_allowed_refresh_at_ms: number | null;
+  provider_name: string;
+  provider_version: string | null;
+  capability_epoch: number;
+  last_failure_class: string | null;
+  last_failure_message_hash: string | null;
+  hold_reason: string | null;
+  consecutive_successes: number;
+  last_canonical_discovery_count: number;
+  cursor_json: string | null;
   last_queued_at_ms: number | null;
   created_at_ms: number;
   updated_at_ms: number;
@@ -883,6 +904,50 @@ type InstagramSubscriptionUpsert = {
   clear_auth_session?: boolean;
   active: boolean;
   refresh_interval_minutes: number | null;
+  max_items_per_refresh: number | null;
+  include_posts: boolean;
+  include_reels: boolean;
+  include_stories: boolean;
+};
+
+type TiktokSubscriptionRow = {
+  id: string;
+  title: string;
+  source_url: string;
+  folder_map: string;
+  output_dir_override: string | null;
+  use_browser_cookies: boolean;
+  browser_cookie_source: string | null;
+  active: boolean;
+  refresh_interval_minutes: number;
+  max_items_per_refresh: number;
+  last_queued_at_ms: number | null;
+  last_success_at_ms: number | null;
+  last_error: string | null;
+  consecutive_failures: number;
+  provider_name: string;
+  provider_version: string | null;
+  capability_epoch: number;
+  last_failure_class: string | null;
+  last_failure_message_hash: string | null;
+  hold_reason: string | null;
+  consecutive_successes: number;
+  last_canonical_discovery_count: number;
+  next_allowed_refresh_at_ms: number | null;
+  cursor_json: string | null;
+};
+
+type TiktokSubscriptionUpsert = {
+  id: string | null;
+  title: string;
+  source_url: string;
+  folder_map: string | null;
+  output_dir_override: string | null;
+  use_browser_cookies: boolean;
+  browser_cookie_source: string | null;
+  active: boolean;
+  refresh_interval_minutes: number | null;
+  max_items_per_refresh: number | null;
 };
 
 type DownloadPreset = {
@@ -941,6 +1006,7 @@ export function LibraryPage({ mode = "all", visible = true }: LibraryPageProps) 
   const maxSubscriptionRefreshIntervalMinutes = 10080;
   const showVideoIngest = mode === "all" || mode === "video_ingest";
   const showInstagramArchive = mode === "all" || mode === "instagram_archive";
+  const showTiktokArchive = mode === "all" || mode === "tiktok_archive";
   const showImageArchive = mode === "all" || mode === "image_archive";
   const showMediaLibrary = mode === "all" || mode === "media_library";
   const showImportControls = showMediaLibrary;
@@ -951,6 +1017,8 @@ export function LibraryPage({ mode = "all", visible = true }: LibraryPageProps) 
       ? "Video Archiver"
       : mode === "instagram_archive"
         ? "Instagram Archiver"
+        : mode === "tiktok_archive"
+          ? "TikTok Archiver"
         : mode === "image_archive"
           ? "Image Archive"
           : mode === "media_library"
@@ -981,6 +1049,7 @@ export function LibraryPage({ mode = "all", visible = true }: LibraryPageProps) 
   const [instagramSubscriptions, setInstagramSubscriptions] = useState<InstagramSubscriptionRow[]>(
     [],
   );
+  const [tiktokSubscriptions, setTiktokSubscriptions] = useState<TiktokSubscriptionRow[]>([]);
   const [subscriptionGroups, setSubscriptionGroups] = useState<YoutubeSubscriptionGroupRow[]>([]);
   const [archiveStats, setArchiveStats] = useState<Record<string, number>>({});
   // WP-0261: live "what's being processed" per subscription (keyed by subscription_id).
@@ -1051,6 +1120,20 @@ export function LibraryPage({ mode = "all", visible = true }: LibraryPageProps) 
       DEFAULT_BROWSER_COOKIE_SOURCE
     );
   });
+  const [instagramArchiverTab, setInstagramArchiverTab] = useState<
+    "posts_single" | "subscriptions" | "gallery"
+  >(() => {
+    const raw = safeLocalStorageGet("voxvulgi.v1.library.instagram_archiver_tab");
+    if (raw === "subscriptions" || raw === "gallery") return raw;
+    return "posts_single";
+  });
+  const [instagramGalleryProfileFilter, setInstagramGalleryProfileFilter] = useState<string>(() => {
+    return safeLocalStorageGet("voxvulgi.v1.library.instagram_gallery_profile_filter") ?? "";
+  });
+  const [instagramGalleryFavoritesOnly, setInstagramGalleryFavoritesOnly] = useState<boolean>(() => {
+    return safeLocalStorageGet("voxvulgi.v1.library.instagram_gallery_favorites_only") === "1";
+  });
+  const [instagramGallerySearch, setInstagramGallerySearch] = useState<string>("");
   const [instagramSubscriptionEditId, setInstagramSubscriptionEditId] = useState<string | null>(
     null,
   );
@@ -1083,12 +1166,6 @@ export function LibraryPage({ mode = "all", visible = true }: LibraryPageProps) 
         ) || DEFAULT_BROWSER_COOKIE_SOURCE
       );
     });
-  const [instagramSubscriptionAuthSessionInput, setInstagramSubscriptionAuthSessionInput] =
-    useState("");
-  const [instagramSubscriptionClearAuthSession, setInstagramSubscriptionClearAuthSession] =
-    useState(false);
-  const [instagramSubscriptionAuthSessionConfigured, setInstagramSubscriptionAuthSessionConfigured] =
-    useState(false);
   const [instagramSubscriptionActive, setInstagramSubscriptionActive] = useState(() => {
     const raw = safeLocalStorageGet("voxvulgi.v1.library.instagram_subscription_active");
     return raw === null ? true : raw === "1";
@@ -1107,6 +1184,25 @@ export function LibraryPage({ mode = "all", visible = true }: LibraryPageProps) 
       }
       return 180;
     });
+  const [instagramSubscriptionMaxItems, setInstagramSubscriptionMaxItems] = useState(30);
+  const [instagramSubscriptionIncludePosts, setInstagramSubscriptionIncludePosts] = useState(true);
+  const [instagramSubscriptionIncludeReels, setInstagramSubscriptionIncludeReels] = useState(true);
+  const [instagramSubscriptionIncludeStories, setInstagramSubscriptionIncludeStories] = useState(false);
+  const [tiktokArchiverTab, setTiktokArchiverTab] = useState<"single" | "subscriptions">("single");
+  const [tiktokBatchText, setTiktokBatchText] = useState("");
+  const [tiktokBatchOutputDir, setTiktokBatchOutputDir] = useState("");
+  const [tiktokBatchUseBrowserCookies, setTiktokBatchUseBrowserCookies] = useState(false);
+  const [tiktokBatchBrowserCookieSource, setTiktokBatchBrowserCookieSource] = useState(DEFAULT_BROWSER_COOKIE_SOURCE);
+  const [tiktokSubscriptionEditId, setTiktokSubscriptionEditId] = useState<string | null>(null);
+  const [tiktokSubscriptionTitle, setTiktokSubscriptionTitle] = useState("");
+  const [tiktokSubscriptionUrl, setTiktokSubscriptionUrl] = useState("");
+  const [tiktokSubscriptionFolderMap, setTiktokSubscriptionFolderMap] = useState("");
+  const [tiktokSubscriptionOutputDir, setTiktokSubscriptionOutputDir] = useState("");
+  const [tiktokSubscriptionUseBrowserCookies, setTiktokSubscriptionUseBrowserCookies] = useState(false);
+  const [tiktokSubscriptionBrowserCookieSource, setTiktokSubscriptionBrowserCookieSource] = useState(DEFAULT_BROWSER_COOKIE_SOURCE);
+  const [tiktokSubscriptionActive, setTiktokSubscriptionActive] = useState(true);
+  const [tiktokSubscriptionRefreshMinutes, setTiktokSubscriptionRefreshMinutes] = useState(180);
+  const [tiktokSubscriptionMaxItems, setTiktokSubscriptionMaxItems] = useState(30);
   const [imageBatchUrlsText, setImageBatchUrlsText] = useState("");
   const [imageBatchMaxPages, setImageBatchMaxPages] = useState(() => {
     const raw = safeLocalStorageGet("voxvulgi.v1.library.image_batch_max_pages");
@@ -1651,6 +1747,40 @@ export function LibraryPage({ mode = "all", visible = true }: LibraryPageProps) 
     () => items.filter((item) => isInstagramLibraryItem(item)).slice(0, 10),
     [items],
   );
+  const instagramGalleryItems = useMemo(() => {
+    const selectedSub = instagramGalleryProfileFilter
+      ? instagramSubscriptions.find((sub) => sub.id === instagramGalleryProfileFilter)
+      : null;
+    const profileNeedles = selectedSub
+      ? [
+          selectedSub.title?.toLowerCase().trim(),
+          selectedSub.source_url?.toLowerCase().trim(),
+          selectedSub.folder_map?.toLowerCase().trim(),
+        ].filter(Boolean) as string[]
+      : [];
+
+    return items.filter((item) => {
+      if (!isInstagramLibraryItem(item)) return false;
+      if (instagramGalleryFavoritesOnly && !mediaFavorites.has(item.id)) return false;
+      if (profileNeedles.length > 0) {
+        const title = (item.title || "").toLowerCase();
+        const uri = (item.source_uri || "").toLowerCase();
+        const path = (item.media_path || "").toLowerCase();
+        const matchesProfile = profileNeedles.some(
+          (needle) => needle && (title.includes(needle) || uri.includes(needle) || path.includes(needle)),
+        );
+        if (!matchesProfile) return false;
+      }
+      if (instagramGallerySearch.trim()) {
+        const q = instagramGallerySearch.trim().toLowerCase();
+        const matchesTitle = item.title?.toLowerCase().includes(q);
+        const matchesUri = item.source_uri?.toLowerCase().includes(q);
+        const matchesPath = item.media_path?.toLowerCase().includes(q);
+        if (!matchesTitle && !matchesUri && !matchesPath) return false;
+      }
+      return true;
+    });
+  }, [items, instagramGalleryFavoritesOnly, mediaFavorites, instagramGalleryProfileFilter, instagramSubscriptions, instagramGallerySearch]);
   const youtubeSingleActivityQueryKey = [
     visible,
     showVideoIngest,
@@ -1851,10 +1981,11 @@ export function LibraryPage({ mode = "all", visible = true }: LibraryPageProps) 
     void diagnosticsTrace("frontend_request_started", { request_id: requestId, span_id: requestId, pane: "library" });
     setError(null);
     const wantsYoutubeSingleHistory = showVideoIngest && videoArchiverTab === "youtube_single";
-    const wantsItems = showMediaLibrary || showInstagramArchive || wantsYoutubeSingleHistory;
+    const wantsItems = showMediaLibrary || showInstagramArchive || showTiktokArchive || wantsYoutubeSingleHistory;
     const wantsVideo = showVideoIngest;
     const wantsSubscriptions = wantsVideo && videoArchiverTab === "youtube_recurring";
     const wantsInstagram = showInstagramArchive;
+    const wantsTiktok = showTiktokArchive;
     const wantsBatchRules = showImportControls;
     const [
       nextItemsResult,
@@ -1864,6 +1995,7 @@ export function LibraryPage({ mode = "all", visible = true }: LibraryPageProps) 
       nextPresets,
       nextVideoLibraries,
       nextInstagramSubscriptions,
+      nextTiktokSubscriptions,
     ] = await Promise.all([
       wantsYoutubeSingleHistory && !showMediaLibrary && !showInstagramArchive
         ? invoke<YoutubeSingleHistoryPage>("library_youtube_single_history", {
@@ -1911,6 +2043,9 @@ export function LibraryPage({ mode = "all", visible = true }: LibraryPageProps) 
       wantsInstagram
         ? invoke<InstagramSubscriptionRow[]>("instagram_subscriptions_list").catch(() => null)
         : Promise.resolve(null),
+      wantsTiktok
+        ? invoke<TiktokSubscriptionRow[]>("tiktok_subscriptions_list").catch(() => null)
+        : Promise.resolve(null),
     ]);
     void diagnosticsTrace("frontend_receive", { request_id: requestId, span_id: requestId, pane: "library" });
     if (refreshEpoch !== refreshEpochRef.current) { void diagnosticsTrace("frontend_request_stale", { request_id: requestId, span_id: requestId, pane: "library" }, "warn"); return; }
@@ -1946,6 +2081,7 @@ export function LibraryPage({ mode = "all", visible = true }: LibraryPageProps) 
     if (nextGroups) setSubscriptionGroups(nextGroups);
     if (nextVideoLibraries) setVideoLibraries(nextVideoLibraries);
     if (nextInstagramSubscriptions) setInstagramSubscriptions(nextInstagramSubscriptions);
+    if (nextTiktokSubscriptions) setTiktokSubscriptions(nextTiktokSubscriptions);
     if (nextPresets) {
       setDownloadPresets(nextPresets);
       setUrlBatchPresetId((current) => current || nextPresets.default_preset_id || "");
@@ -1969,6 +2105,7 @@ export function LibraryPage({ mode = "all", visible = true }: LibraryPageProps) 
     mediaLibraryTypeFilter,
     showImportControls,
     showInstagramArchive,
+    showTiktokArchive,
     showMediaLibrary,
     showVideoIngest,
     markSubscriptionProjectionFailure,
@@ -2856,6 +2993,18 @@ export function LibraryPage({ mode = "all", visible = true }: LibraryPageProps) 
   }, [subscriptionActive]);
 
   useEffect(() => {
+    safeLocalStorageSet("voxvulgi.v1.library.instagram_archiver_tab", instagramArchiverTab);
+  }, [instagramArchiverTab]);
+
+  useEffect(() => {
+    safeLocalStorageSet("voxvulgi.v1.library.instagram_gallery_profile_filter", instagramGalleryProfileFilter);
+  }, [instagramGalleryProfileFilter]);
+
+  useEffect(() => {
+    safeLocalStorageSet("voxvulgi.v1.library.instagram_gallery_favorites_only", instagramGalleryFavoritesOnly ? "1" : "0");
+  }, [instagramGalleryFavoritesOnly]);
+
+  useEffect(() => {
     safeLocalStorageSet(
       "voxvulgi.v1.library.youtube_subscription_refresh_interval_minutes",
       String(subscriptionRefreshIntervalMinutes),
@@ -3252,6 +3401,33 @@ export function LibraryPage({ mode = "all", visible = true }: LibraryPageProps) 
     }
   }
 
+  async function enqueueTiktokBatch() {
+    setBusy(true);
+    setError(null);
+    setNotice(null);
+    try {
+      const urls = tiktokBatchText.split(/[\s,;]+/).map((value) => value.trim()).filter(Boolean);
+      if (!urls.length) throw new Error("Enter at least one TikTok video URL.");
+      if (urls.length > maxBatchUrls) throw new Error(`Too many TikTok URLs. Maximum ${maxBatchUrls}.`);
+      const queued = await invoke<EnqueuedJobReceipt[]>("jobs_enqueue_tiktok_batch", {
+        urls,
+        authCookie: null,
+        outputDir: tiktokBatchOutputDir.trim() || null,
+        useBrowserCookies: tiktokBatchUseBrowserCookies,
+        browserCookieSource: tiktokBatchUseBrowserCookies
+          ? tiktokBatchBrowserCookieSource.trim() || DEFAULT_BROWSER_COOKIE_SOURCE
+          : null,
+      });
+      setTiktokBatchText("");
+      setNotice(`Queued ${queued.length} TikTok single job${queued.length === 1 ? "" : "s"}.`);
+      await refresh();
+    } catch (e) {
+      setError(String(e));
+    } finally {
+      setBusy(false);
+    }
+  }
+
   async function enqueueImageBatch() {
     setBusy(true);
     setError(null);
@@ -3637,11 +3813,12 @@ export function LibraryPage({ mode = "all", visible = true }: LibraryPageProps) 
     setInstagramSubscriptionOutputDirOverride("");
     setInstagramSubscriptionUseBrowserCookies(false);
     setInstagramSubscriptionBrowserCookieSource(DEFAULT_BROWSER_COOKIE_SOURCE);
-    setInstagramSubscriptionAuthSessionInput("");
-    setInstagramSubscriptionClearAuthSession(false);
-    setInstagramSubscriptionAuthSessionConfigured(false);
     setInstagramSubscriptionActive(true);
     setInstagramSubscriptionRefreshIntervalMinutes(180);
+    setInstagramSubscriptionMaxItems(30);
+    setInstagramSubscriptionIncludePosts(true);
+    setInstagramSubscriptionIncludeReels(true);
+    setInstagramSubscriptionIncludeStories(false);
   }
 
   function editInstagramSubscription(sub: InstagramSubscriptionRow) {
@@ -3654,11 +3831,12 @@ export function LibraryPage({ mode = "all", visible = true }: LibraryPageProps) 
     setInstagramSubscriptionBrowserCookieSource(
       sub.browser_cookie_source || DEFAULT_BROWSER_COOKIE_SOURCE,
     );
-    setInstagramSubscriptionAuthSessionInput("");
-    setInstagramSubscriptionClearAuthSession(false);
-    setInstagramSubscriptionAuthSessionConfigured(sub.auth_session_configured);
     setInstagramSubscriptionActive(sub.active);
     setInstagramSubscriptionRefreshIntervalMinutes(sub.refresh_interval_minutes);
+    setInstagramSubscriptionMaxItems(sub.max_items_per_refresh);
+    setInstagramSubscriptionIncludePosts(sub.include_posts);
+    setInstagramSubscriptionIncludeReels(sub.include_reels);
+    setInstagramSubscriptionIncludeStories(sub.include_stories);
   }
 
   async function saveInstagramSubscription() {
@@ -3676,8 +3854,8 @@ export function LibraryPage({ mode = "all", visible = true }: LibraryPageProps) 
         browser_cookie_source: instagramSubscriptionUseBrowserCookies
           ? instagramSubscriptionBrowserCookieSource.trim() || DEFAULT_BROWSER_COOKIE_SOURCE
           : null,
-        auth_session_input: instagramSubscriptionAuthSessionInput.trim() || null,
-        clear_auth_session: instagramSubscriptionClearAuthSession,
+        auth_session_input: null,
+        clear_auth_session: false,
         active: instagramSubscriptionActive,
         refresh_interval_minutes: Math.max(
           minSubscriptionRefreshIntervalMinutes,
@@ -3686,6 +3864,10 @@ export function LibraryPage({ mode = "all", visible = true }: LibraryPageProps) 
             Math.round(instagramSubscriptionRefreshIntervalMinutes),
           ),
         ),
+        max_items_per_refresh: Math.max(1, Math.min(500, Math.round(instagramSubscriptionMaxItems))),
+        include_posts: instagramSubscriptionIncludePosts,
+        include_reels: instagramSubscriptionIncludeReels,
+        include_stories: instagramSubscriptionIncludeStories,
       };
       if (!payload.title) throw new Error("Instagram subscription title is required.");
       if (!payload.source_url) throw new Error("Instagram subscription URL is required.");
@@ -3711,7 +3893,7 @@ export function LibraryPage({ mode = "all", visible = true }: LibraryPageProps) 
       if (instagramSubscriptionEditId === id) {
         resetInstagramSubscriptionEditor();
       }
-      setNotice("Instagram subscription deleted.");
+      setNotice("Instagram subscription archived. Its history and media were retained.");
       await refresh();
     } catch (e) {
       setError(String(e));
@@ -3770,6 +3952,107 @@ export function LibraryPage({ mode = "all", visible = true }: LibraryPageProps) 
           ? `Instagram subscription folder: ${opened.path}`
           : `Instagram subscription folder revealed in file explorer: ${opened.path}`,
       );
+    } catch (e) {
+      setError(String(e));
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  function resetTiktokSubscriptionEditor() {
+    setTiktokSubscriptionEditId(null);
+    setTiktokSubscriptionTitle("");
+    setTiktokSubscriptionUrl("");
+    setTiktokSubscriptionFolderMap("");
+    setTiktokSubscriptionOutputDir("");
+    setTiktokSubscriptionUseBrowserCookies(false);
+    setTiktokSubscriptionBrowserCookieSource(DEFAULT_BROWSER_COOKIE_SOURCE);
+    setTiktokSubscriptionActive(true);
+    setTiktokSubscriptionRefreshMinutes(180);
+    setTiktokSubscriptionMaxItems(30);
+  }
+
+  function editTiktokSubscription(sub: TiktokSubscriptionRow) {
+    setTiktokSubscriptionEditId(sub.id);
+    setTiktokSubscriptionTitle(sub.title);
+    setTiktokSubscriptionUrl(sub.source_url);
+    setTiktokSubscriptionFolderMap(sub.folder_map);
+    setTiktokSubscriptionOutputDir(sub.output_dir_override ?? "");
+    setTiktokSubscriptionUseBrowserCookies(sub.use_browser_cookies);
+    setTiktokSubscriptionBrowserCookieSource(sub.browser_cookie_source || DEFAULT_BROWSER_COOKIE_SOURCE);
+    setTiktokSubscriptionActive(sub.active);
+    setTiktokSubscriptionRefreshMinutes(sub.refresh_interval_minutes);
+    setTiktokSubscriptionMaxItems(sub.max_items_per_refresh);
+  }
+
+  async function saveTiktokSubscription() {
+    setBusy(true);
+    setError(null);
+    setNotice(null);
+    try {
+      const payload: TiktokSubscriptionUpsert = {
+        id: tiktokSubscriptionEditId,
+        title: tiktokSubscriptionTitle.trim(),
+        source_url: tiktokSubscriptionUrl.trim(),
+        folder_map: tiktokSubscriptionFolderMap.trim() || null,
+        output_dir_override: tiktokSubscriptionOutputDir.trim() || null,
+        use_browser_cookies: tiktokSubscriptionUseBrowserCookies,
+        browser_cookie_source: tiktokSubscriptionUseBrowserCookies
+          ? tiktokSubscriptionBrowserCookieSource.trim() || DEFAULT_BROWSER_COOKIE_SOURCE
+          : null,
+        active: tiktokSubscriptionActive,
+        refresh_interval_minutes: Math.max(5, Math.min(10080, Math.round(tiktokSubscriptionRefreshMinutes))),
+        max_items_per_refresh: Math.max(1, Math.min(500, Math.round(tiktokSubscriptionMaxItems))),
+      };
+      if (!payload.title) throw new Error("TikTok subscription title is required.");
+      if (!payload.source_url) throw new Error("TikTok profile URL is required.");
+      const saved = await invoke<TiktokSubscriptionRow>("tiktok_subscriptions_upsert", { subscription: payload });
+      setNotice(`Saved TikTok subscription: ${saved.title}`);
+      resetTiktokSubscriptionEditor();
+      await refresh();
+    } catch (e) {
+      setError(String(e));
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function queueTiktokSubscription(id: string) {
+    setBusy(true);
+    setError(null);
+    try {
+      const queued = await invoke<EnqueuedJobReceipt[]>("tiktok_subscriptions_queue_one", { id });
+      setNotice(`Queued ${queued.length} TikTok subscription refresh job${queued.length === 1 ? "" : "s"}.`);
+      await refresh();
+    } catch (e) {
+      setError(String(e));
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function queueAllTiktokSubscriptions() {
+    setBusy(true);
+    setError(null);
+    try {
+      const queued = await invoke<EnqueuedJobReceipt[]>("tiktok_subscriptions_queue_all_active");
+      setNotice(`Queued ${queued.length} due TikTok profile refresh job${queued.length === 1 ? "" : "s"}.`);
+      await refresh();
+    } catch (e) {
+      setError(String(e));
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function deleteTiktokSubscription(id: string) {
+    setBusy(true);
+    setError(null);
+    try {
+      await invoke("tiktok_subscriptions_delete", { id });
+      if (tiktokSubscriptionEditId === id) resetTiktokSubscriptionEditor();
+      setNotice("TikTok subscription archived. Its history and media were retained.");
+      await refresh();
     } catch (e) {
       setError(String(e));
     } finally {
@@ -4320,7 +4603,47 @@ export function LibraryPage({ mode = "all", visible = true }: LibraryPageProps) 
         </div>
       ) : null}
 
-      {showInstagramArchive || showImageArchive ? (
+      {mode === "instagram_archive" ? (
+        <div
+          className="segmented archiver-workflow-tabs"
+          role="tablist"
+          aria-label="Instagram Archiver workflow"
+        >
+          <button
+            type="button"
+            role="tab"
+            className={instagramArchiverTab === "posts_single" ? "seg-on" : undefined}
+            aria-pressed={instagramArchiverTab === "posts_single"}
+            aria-selected={instagramArchiverTab === "posts_single"}
+            aria-controls="instagram-archiver-single-panel"
+            onClick={() => setInstagramArchiverTab("posts_single")}
+          >
+            Posts, stories &amp; reels
+          </button>
+          <button
+            type="button"
+            role="tab"
+            className={instagramArchiverTab === "subscriptions" ? "seg-on" : undefined}
+            aria-pressed={instagramArchiverTab === "subscriptions"}
+            aria-selected={instagramArchiverTab === "subscriptions"}
+            aria-controls="instagram-archiver-subscriptions-panel"
+            onClick={() => setInstagramArchiverTab("subscriptions")}
+          >
+            Subscriptions
+          </button>
+          <button
+            type="button"
+            role="tab"
+            className={instagramArchiverTab === "gallery" ? "seg-on" : undefined}
+            aria-pressed={instagramArchiverTab === "gallery"}
+            aria-selected={instagramArchiverTab === "gallery"}
+            aria-controls="instagram-archiver-gallery-panel"
+            onClick={() => setInstagramArchiverTab("gallery")}
+          >
+            Gallery
+          </button>
+        </div>
+      ) : showInstagramArchive || showImageArchive ? (
         <div className="card segmented" style={{ display: "flex", alignItems: "center", gap: 12 }}>
           <strong>View mode:</strong>
           <button
@@ -4922,7 +5245,7 @@ export function LibraryPage({ mode = "all", visible = true }: LibraryPageProps) 
                           Set default
                         </button>
                         <button type="button" disabled={busy} onClick={() => deletePreset(preset.id)}>
-                          Delete
+                          Archive
                         </button>
                       </div>
                     </td>
@@ -6264,429 +6587,18 @@ export function LibraryPage({ mode = "all", visible = true }: LibraryPageProps) 
           </div>
         </div>
       ) : null}
-
-      {showInstagramArchive ? (
-        <div className="card">
-        <h2>Recent Instagram media</h2>
-        <div style={{ color: "#4b5563", marginBottom: 8 }}>
-          Latest 10 Instagram items already indexed in the library. Thumbnails are shown without
-          crop framing so posts, stories, and reels are easier to inspect quickly.
-        </div>
-        {recentInstagramItems.length ? (
-          <div
-            style={{
-              display: "grid",
-              gap: 12,
-              gridTemplateColumns: "repeat(auto-fill, minmax(170px, 1fr))",
-            }}
-          >
-            {recentInstagramItems.map((item) => (
-              <article
-                key={item.id}
-                style={{
-                  display: "grid",
-                  gap: 10,
-                  padding: 12,
-                  borderRadius: 10,
-                  border: "1px solid rgba(126, 145, 167, 0.3)",
-                  background: "linear-gradient(154deg, #edf2f7 0%, #dce3eb 54%, #c9d2dc 100%)",
-                }}
-              >
-                <ThumbnailPreview
-                  itemId={item.id}
-                  path={item.thumbnail_path}
-                  fit="contain"
-                  width={146}
-                  height={146}
-                />
-                <strong style={{ lineHeight: 1.2 }}>{item.title}</strong>
-                {titleProvenanceLabel(item.title_provenance) ? (
-                  <div style={{ color: "#4b5563", fontSize: 12 }}>
-                    {titleProvenanceLabel(item.title_provenance)}
-                    {item.title_problem ? ` · ${item.title_problem.replace(/_/g, " ")}` : ""}
-                  </div>
-                ) : null}
-                <div style={{ color: "#4b5563", fontSize: 12, wordBreak: "break-word" }}>
-                  {item.media_path}
-                </div>
-                <div className="row" style={{ marginTop: 0 }}>
-                  <button type="button" disabled={busy} onClick={() => openMediaFile(item)}>
-                    Open file
-                  </button>
-                  <button type="button" disabled={busy} onClick={() => revealMediaFile(item)}>
-                    Open folder
-                  </button>
-                </div>
-              </article>
-            ))}
-          </div>
-        ) : (
-          <div style={{ color: "#4b5563" }}>
-            No Instagram items are indexed yet. Queue a batch or a saved subscription first.
-          </div>
-        )}
-        </div>
-      ) : null}
-
-      {showInstagramArchive && advancedMode ? (
-        <div className="card">
-        <h2>Instagram subscriptions</h2>
-        {/* WP-0263: Instagram subscription manager brought to parity with the Video Archiver
-            (master-detail + status strip + plain copy). The global Instagram sign-in in Options
-            is used by default, so a per-subscription sign-in is now an optional override. */}
-        <div style={{ color: "#4b5563", marginBottom: 8 }}>
-          Save an Instagram profile so VoxVulgi checks it for new posts on its own. To save a profile
-          just once instead, use the one-time batch below. Checking runs slowly and one profile at a
-          time &mdash; Meta is strict about automation, so this is kept deliberately passive.
-        </div>
+      {/* Single posts lane: batch ingest form + recent Instagram media */}
+      {showInstagramArchive && (mode !== "instagram_archive" || instagramArchiverTab === "posts_single") ? (
+        <>
         <div
-          style={{
-            marginBottom: 10,
-            padding: "8px 10px",
-            borderRadius: 8,
-            background: "rgba(75, 123, 176, 0.10)",
-            color: "#2b557d",
-            fontSize: 13,
-          }}
+          className="card"
+          id={mode === "instagram_archive" ? "instagram-archiver-single-panel" : undefined}
+          role={mode === "instagram_archive" ? "tabpanel" : undefined}
         >
-          Your Instagram sign-in is now saved once in <strong>Options &rarr; Instagram sign-in</strong>{" "}
-          and reused for every profile here. You only need the per-subscription sign-in below if a
-          particular profile needs a different login.
-        </div>
-        <div className="row">
-          <label style={{ display: "flex", alignItems: "center", gap: 8, flex: 1 }}>
-            <span>Title</span>
-            <input
-              value={instagramSubscriptionTitle}
-              disabled={busy}
-              onChange={(e) => setInstagramSubscriptionTitle(e.currentTarget.value)}
-              placeholder="Main profile archive"
-              style={{ width: "100%" }}
-            />
-          </label>
-          <label style={{ display: "flex", alignItems: "center", gap: 8, flex: 1 }}>
-            <span>Instagram URL</span>
-            <input
-              value={instagramSubscriptionUrl}
-              disabled={busy}
-              onChange={(e) => setInstagramSubscriptionUrl(e.currentTarget.value)}
-              placeholder="https://www.instagram.com/example/"
-              style={{ width: "100%" }}
-            />
-          </label>
-        </div>
-        <details>
-          <summary style={{ cursor: "pointer", color: "#4b5563", fontSize: 12 }}>
-            Folder options (optional)
-          </summary>
-          <div className="row" style={{ marginTop: 6 }}>
-            <label style={{ display: "flex", alignItems: "center", gap: 8, flex: 1 }}>
-              <span>Folder name</span>
-              <input
-                value={instagramSubscriptionFolderMap}
-                disabled={busy}
-                onChange={(e) => setInstagramSubscriptionFolderMap(e.currentTarget.value)}
-                placeholder="example_profile"
-                style={{ width: "100%" }}
-                title="Name of the subfolder these posts are saved into. Leave blank to use a folder named after the profile."
-              />
-            </label>
-            <label style={{ display: "flex", alignItems: "center", gap: 8, flex: 1 }}>
-              <span>Save to folder (optional)</span>
-              <input
-                value={instagramSubscriptionOutputDirOverride}
-                disabled={busy}
-                onChange={(e) => setInstagramSubscriptionOutputDirOverride(e.currentTarget.value)}
-                placeholder="Optional absolute folder path"
-                style={{ width: "100%" }}
-                title="Pick a specific folder for this profile. Leave blank to use the default Instagram folder."
-              />
-            </label>
-            <button type="button" disabled={busy} onClick={chooseInstagramSubscriptionOutputDir}>
-              Choose folder
-            </button>
-          </div>
-        </details>
-        {/* WP-0263: per-subscription sign-in is now an OPTIONAL override (the global Options
-            cookie is the primary path), so it lives behind a details toggle. */}
-        <details>
-          <summary style={{ cursor: "pointer", color: "#4b5563", fontSize: 12 }}>
-            Use a different sign-in for this profile (optional)
-          </summary>
-          <div style={{ display: "grid", gap: 6, marginTop: 10 }}>
-            <span title="Only needed if this profile needs a different login than the one saved in Options.">
-              Saved sign-in for this profile (optional)
-            </span>
-            <textarea
-              value={instagramSubscriptionAuthSessionInput}
-              disabled={busy}
-              onChange={(e) => {
-                setInstagramSubscriptionAuthSessionInput(e.currentTarget.value);
-                if (e.currentTarget.value.trim()) {
-                  setInstagramSubscriptionClearAuthSession(false);
-                }
-              }}
-              placeholder="Paste your saved Instagram sign-in, or the path to a sign-in file"
-              rows={3}
-              style={{ width: "100%", boxSizing: "border-box", resize: "vertical" }}
-            />
-            <div style={{ color: "#4b5563" }}>
-              {instagramSubscriptionAuthSessionConfigured
-                ? "This profile has its own saved sign-in. Leave this blank to keep it, paste a new value to replace it, or clear it below."
-                : "Leave blank to use the global Instagram sign-in from Options. Fill this in only if this profile needs a different login."}
-            </div>
-          </div>
-          <div className="row" style={{ marginTop: 8 }}>
-            <label style={{ display: "flex", alignItems: "center", gap: 8 }}>
-              <input
-                type="checkbox"
-                checked={instagramSubscriptionUseBrowserCookies}
-                disabled={busy}
-                onChange={(e) => {
-                  const checked = e.currentTarget.checked;
-                  setInstagramSubscriptionUseBrowserCookies(checked);
-                  if (checked && !instagramSubscriptionBrowserCookieSource.trim()) {
-                    setInstagramSubscriptionBrowserCookieSource(DEFAULT_BROWSER_COOKIE_SOURCE);
-                  }
-                }}
-                title="Use your existing browser sign-in so VoxVulgi can open profiles that require a login."
-              />
-              <span>Use my browser sign-in</span>
-            </label>
-            <label style={{ display: "flex", alignItems: "center", gap: 8 }}>
-              <span>Browser</span>
-              <select
-                value={instagramSubscriptionBrowserCookieSource}
-                disabled={busy || !instagramSubscriptionUseBrowserCookies}
-                onChange={(e) => setInstagramSubscriptionBrowserCookieSource(e.currentTarget.value)}
-                title="Which browser to read your Instagram sign-in from."
-              >
-                {browserCookieSourceOptions.map((option) => (
-                  <option key={option.value} value={option.value}>
-                    {option.label}
-                  </option>
-                ))}
-              </select>
-            </label>
-            <label style={{ display: "flex", alignItems: "center", gap: 8 }}>
-              <input
-                type="checkbox"
-                checked={instagramSubscriptionClearAuthSession}
-                disabled={
-                  busy ||
-                  (!instagramSubscriptionAuthSessionConfigured &&
-                    !instagramSubscriptionAuthSessionInput.trim())
-                }
-                onChange={(e) => setInstagramSubscriptionClearAuthSession(e.currentTarget.checked)}
-              />
-              <span>Clear this profile&rsquo;s sign-in on save</span>
-            </label>
-          </div>
-        </details>
-        <div className="row">
-          <label style={{ display: "flex", alignItems: "center", gap: 8 }}>
-            <input
-              type="checkbox"
-              checked={instagramSubscriptionActive}
-              disabled={busy}
-              onChange={(e) => setInstagramSubscriptionActive(e.currentTarget.checked)}
-            />
-            <span>Active</span>
-          </label>
-          <label style={{ display: "flex", alignItems: "center", gap: 8 }}>
-            <span>Refresh every (hours)</span>
-            <input
-              type="number"
-              min={1}
-              max={Math.floor(maxSubscriptionRefreshIntervalMinutes / 60)}
-              step={1}
-              value={Math.round((instagramSubscriptionRefreshIntervalMinutes / 60) * 10) / 10}
-              disabled={busy}
-              onChange={(e) => {
-                // WP-0263: edited in hours; stored in minutes (parity with YouTube). Clamp to
-                // engine bounds.
-                const hours = Number(e.currentTarget.value);
-                const minutes = Number.isFinite(hours)
-                  ? Math.round(hours * 60)
-                  : minSubscriptionRefreshIntervalMinutes;
-                setInstagramSubscriptionRefreshIntervalMinutes(
-                  Math.max(
-                    minSubscriptionRefreshIntervalMinutes,
-                    Math.min(maxSubscriptionRefreshIntervalMinutes, minutes),
-                  ),
-                );
-              }}
-              style={{ width: 90 }}
-              title="How often this profile is auto-checked for new posts. Kept conservative for Meta's anti-bot rules. Stored in minutes; edited in hours."
-            />
-          </label>
-        </div>
-        <div style={{ color: "#4b5563", marginTop: 6 }}>
-          <strong>Save subscription</strong> adds or updates this profile.{" "}
-          <strong>Check due now</strong> only checks the ones past their refresh interval.{" "}
-          New posts appear in Jobs.
-        </div>
-        <div className="row">
-          <button
-            type="button"
-            disabled={busy}
-            onClick={saveInstagramSubscription}
-            title={instagramSubscriptionEditId ? "Save changes to this profile." : "Add this profile to your list."}
-          >
-            {instagramSubscriptionEditId ? "Update subscription" : "Save subscription"}
-          </button>
-          <button
-            type="button"
-            disabled={busy}
-            onClick={resetInstagramSubscriptionEditor}
-            title="Clears the add/edit form above (does not delete anything)."
-          >
-            Clear form
-          </button>
-          <button
-            type="button"
-            disabled={busy || activeInstagramSubscriptionCount === 0}
-            onClick={queueAllActiveInstagramSubscriptions}
-            title="Check only the profiles whose interval has elapsed since their last check."
-          >
-            Check due now ({activeInstagramSubscriptionCount})
-          </button>
-          <button
-            type="button"
-            disabled={busy}
-            onClick={() => refresh()}
-            title="Reload this list from the local database. Does not contact Instagram or download anything."
-          >
-            Reload list
-          </button>
-        </div>
-        <div style={{ color: "#4b5563", marginTop: 8 }}>
-          Saved Instagram subscriptions: {instagramSubscriptions.length}. Default folder root:
-          {" "}
-          <code>{defaultInstagramSubscriptionDownloadsDir || "instagram/subscriptions"}</code>
-        </div>
-        {/* WP-0263: all-subscriptions status strip (reuses the YouTube manager's classes) so the
-            operator always sees overall Instagram state at a glance. */}
-        <div className="sub-status-strip">
-          <span className="sub-status-metric"><strong>{instagramSubscriptionOverview.total}</strong> profiles</span>
-          <span className="sub-status-sep">·</span>
-          <span className="sub-status-metric"><strong>{instagramSubscriptionOverview.active}</strong> active</span>
-          <span className="sub-status-sep">·</span>
-          <span className="sub-status-metric">last check {formatTimeAgo(instagramSubscriptionOverview.lastSync)}</span>
-        </div>
-        {/* WP-0263: master-detail manager mirroring the YouTube subscription surface. Instagram
-            rows carry fewer fields, so progress/backoff/preset/groups rows are omitted. */}
-        <div className="sub-manager">
-          <div className="sub-list" role="listbox" aria-label="Instagram subscriptions">
-            {instagramSubscriptions.length ? (
-              instagramSubscriptions.map((sub) => {
-                const selected = sub.id === selectedInstagramSubscriptionId;
-                const runState: "idle" = "idle";
-                const stateLabel = sub.active ? "Idle" : "Paused";
-                return (
-                  <button
-                    type="button"
-                    role="option"
-                    key={sub.id}
-                    className={`sub-list-row${selected ? " sub-list-row-selected" : ""}`}
-                    onClick={() => setSelectedInstagramSubscriptionId(sub.id)}
-                    aria-selected={selected}
-                  >
-                    <div className="sub-list-main">
-                      <span className="sub-list-title" title={sub.title}>{sub.title}</span>
-                      <span className={`sub-pill sub-pill-${runState}`}>{stateLabel}</span>
-                    </div>
-                    <div className="sub-list-sub">
-                      <span className="sub-list-type">Instagram</span>
-                      {!sub.active ? <span className="sub-list-inactive">paused</span> : null}
-                      <span className="sub-list-count">
-                        {sub.last_queued_at_ms ? `checked ${formatTimeAgo(sub.last_queued_at_ms)}` : "never checked"}
-                      </span>
-                    </div>
-                  </button>
-                );
-              })
-            ) : (
-              <div className="sub-list-empty">No Instagram subscriptions yet. Add one with the form above.</div>
-            )}
-          </div>
-          <div className="sub-detail">
-            {selectedInstagramSubscription
-              ? (() => {
-                  const sub = selectedInstagramSubscription;
-                  const target = describeRecurringTarget(
-                    sub.output_dir_override,
-                    defaultInstagramSubscriptionDownloadsDir,
-                    sub.folder_map,
-                  );
-                  const runState: "idle" = "idle";
-                  const stateLabel = sub.active ? "Idle" : "Paused";
-                  return (
-                    <>
-                      <div className="sub-detail-head">
-                        <span className="sub-detail-title">{sub.title}</span>
-                        <span className={`sub-pill sub-pill-${runState}`}>{stateLabel}</span>
-                      </div>
-                      <div className="sub-detail-progress">
-                        {sub.last_queued_at_ms
-                          ? <>Last checked <strong>{formatTimeAgo(sub.last_queued_at_ms)}</strong>. New posts appear in Jobs.</>
-                          : <>Not checked yet. Use <strong>Queue now</strong> or wait for the next passive check.</>}
-                      </div>
-                      <dl className="sub-detail-grid">
-                        <dt>Type</dt>
-                        <dd>Instagram profile{sub.active ? "" : " (paused)"}</dd>
-                        <dt>URL</dt>
-                        <dd className="sub-detail-wrap">{sub.source_url}</dd>
-                        <dt>Target</dt>
-                        <dd className="sub-detail-wrap">
-                          {target.mode}{target.path ? ` — ${target.path}` : ""}
-                        </dd>
-                        <dt>Folder name</dt>
-                        <dd>{sub.folder_map || "-"}</dd>
-                        <dt>Sign-in</dt>
-                        <dd>{sub.auth_session_configured ? "own sign-in saved for this profile" : "uses global Options sign-in"}</dd>
-                        <dt>Refresh</dt>
-                        <dd>{formatRefreshIntervalHours(sub.refresh_interval_minutes)}</dd>
-                        <dt>Last queued</dt>
-                        <dd>{sub.last_queued_at_ms ? new Date(sub.last_queued_at_ms).toLocaleString() : "-"}</dd>
-                      </dl>
-                      <div className="row sub-detail-actions">
-                        <button type="button" disabled={busy} onClick={() => queueInstagramSubscription(sub.id)}>
-                          Queue now
-                        </button>
-                        <button type="button" disabled={busy} onClick={() => editInstagramSubscription(sub)}>
-                          Edit
-                        </button>
-                        <button
-                          type="button"
-                          disabled={busy}
-                          onClick={() => openInstagramSubscriptionFolder(sub.id)}
-                        >
-                          Open folder
-                        </button>
-                        <button type="button" disabled={busy} onClick={() => deleteInstagramSubscription(sub.id)}>
-                          Delete
-                        </button>
-                      </div>
-                    </>
-                  );
-                })()
-              : (
-                <div className="sub-detail-empty">
-                  Select a profile on the left to see its details and actions.
-                </div>
-              )}
-          </div>
-        </div>
-        </div>
-      ) : null}
-
-      {showInstagramArchive ? (
-        <div className="card">
-        <h2>Instagram Archiver batch</h2>
+        <h2>Instagram posts, stories and reels</h2>
         <div style={{ color: "#4b5563", marginBottom: 8 }}>
-          Paste Instagram post, reel, or profile links to save them once. For private accounts, add
-          your sign-in below. To keep a profile updated over time, add it as a subscription above instead.
+          Paste individual Instagram post, story, or reel links to save them once. For private accounts,
+          use your connected browser sign-in. To keep a complete profile updated over time, add it in the <strong>Subscriptions</strong> tab.
         </div>
         <textarea
           value={instagramBatchText}
@@ -6730,9 +6642,8 @@ export function LibraryPage({ mode = "all", visible = true }: LibraryPageProps) 
                     setInstagramBatchBrowserCookieSource(DEFAULT_BROWSER_COOKIE_SOURCE);
                   }
                 }}
-                title="Use your existing browser sign-in as a backup way to open posts that require a login."
               />
-              <span>Use my browser sign-in</span>
+              <span>Use browser cookies (fallback)</span>
             </label>
             <label style={{ display: "flex", alignItems: "center", gap: 8 }}>
               <span>Browser</span>
@@ -6740,11 +6651,10 @@ export function LibraryPage({ mode = "all", visible = true }: LibraryPageProps) 
                 value={instagramBatchBrowserCookieSource}
                 disabled={busy || !instagramBatchUseBrowserCookies}
                 onChange={(e) => setInstagramBatchBrowserCookieSource(e.currentTarget.value)}
-                title="Which browser to read your Instagram sign-in from."
               >
-                {browserCookieSourceOptions.map((option) => (
-                  <option key={option.value} value={option.value}>
-                    {option.label}
+                {browserCookieSourceOptions.filter((opt) => opt.value !== "").map((opt) => (
+                  <option key={opt.value} value={opt.value}>
+                    {opt.label}
                   </option>
                 ))}
               </select>
@@ -6782,6 +6692,670 @@ export function LibraryPage({ mode = "all", visible = true }: LibraryPageProps) 
             Queue Instagram batch ({parsedInstagramUrlCount})
           </button>
         </div>
+        </div>
+
+        <div className="card">
+        <h2>Recent Instagram media</h2>
+        <div style={{ color: "#4b5563", marginBottom: 8 }}>
+          Latest 10 Instagram items already indexed in the library. Thumbnails are shown without
+          crop framing so posts, stories, and reels are easier to inspect quickly. Star items with ★ to save them to your Favorites gallery.
+        </div>
+        {recentInstagramItems.length ? (
+          <div
+            style={{
+              display: "grid",
+              gap: 12,
+              gridTemplateColumns: "repeat(auto-fill, minmax(170px, 1fr))",
+            }}
+          >
+            {recentInstagramItems.map((item) => {
+              const isFav = mediaFavorites.has(item.id);
+              return (
+              <article
+                key={item.id}
+                style={{
+                  display: "grid",
+                  gap: 10,
+                  padding: 12,
+                  borderRadius: 10,
+                  border: "1px solid rgba(126, 145, 167, 0.3)",
+                  background: "linear-gradient(154deg, #edf2f7 0%, #dce3eb 54%, #c9d2dc 100%)",
+                  position: "relative",
+                }}
+              >
+                <div style={{ position: "relative", width: 146, height: 146 }}>
+                  <ThumbnailPreview
+                    itemId={item.id}
+                    path={item.thumbnail_path}
+                    fit="contain"
+                    width={146}
+                    height={146}
+                  />
+                  <button
+                    type="button"
+                    aria-label={isFav ? "Remove from favorites" : "Add to favorites"}
+                    title={isFav ? "Remove from favorites" : "Mark as favorite"}
+                    style={{
+                      position: "absolute",
+                      top: 4,
+                      right: 4,
+                      background: "rgba(0, 0, 0, 0.6)",
+                      border: "none",
+                      borderRadius: 6,
+                      cursor: "pointer",
+                      fontSize: 16,
+                      lineHeight: "1",
+                      padding: "3px 6px",
+                      color: isFav ? "#f59e0b" : "#e5e7eb",
+                    }}
+                    onClick={() => {
+                      setMediaFavorites((prev) => {
+                        const next = new Set(prev);
+                        if (next.has(item.id)) next.delete(item.id);
+                        else next.add(item.id);
+                        return next;
+                      });
+                    }}
+                  >
+                    {isFav ? "★" : "☆"}
+                  </button>
+                </div>
+                <strong style={{ lineHeight: 1.2 }}>{item.title}</strong>
+                {titleProvenanceLabel(item.title_provenance) ? (
+                  <div style={{ color: "#4b5563", fontSize: 12 }}>
+                    {titleProvenanceLabel(item.title_provenance)}
+                    {item.title_problem ? ` · ${item.title_problem.replace(/_/g, " ")}` : ""}
+                  </div>
+                ) : null}
+                <div style={{ color: "#4b5563", fontSize: 12, wordBreak: "break-word" }}>
+                  {item.media_path}
+                </div>
+                <div className="row" style={{ marginTop: 0 }}>
+                  <button type="button" disabled={busy} onClick={() => openMediaFile(item)}>
+                    Open file
+                  </button>
+                  <button type="button" disabled={busy} onClick={() => revealMediaFile(item)}>
+                    Open folder
+                  </button>
+                </div>
+              </article>
+            );
+          })}
+          </div>
+        ) : (
+          <div style={{ color: "#4b5563" }}>
+            No Instagram items are indexed yet. Queue a batch or a saved subscription first.
+          </div>
+        )}
+        </div>
+        </>
+      ) : null}
+
+      {/* Subscriptions lane */}
+      {showInstagramArchive && (mode !== "instagram_archive" ? advancedMode : instagramArchiverTab === "subscriptions") ? (
+        <div
+          className="card"
+          id={mode === "instagram_archive" ? "instagram-archiver-subscriptions-panel" : undefined}
+          role={mode === "instagram_archive" ? "tabpanel" : undefined}
+        >
+        <h2>Instagram subscriptions</h2>
+        {/* Recurring profiles use the pinned profile provider and a browser session. */}
+        <div style={{ color: "#4b5563", marginBottom: 8 }}>
+          Save an Instagram profile so VoxVulgi checks it for new posts on its own. To save an
+          individual post, story, or reel just once instead, use the first lane. Checking runs slowly and one profile at a
+          time &mdash; Meta is strict about automation, so this is kept deliberately passive.
+        </div>
+        <div
+          style={{
+            marginBottom: 10,
+            padding: "8px 10px",
+            borderRadius: 8,
+            background: "rgba(75, 123, 176, 0.10)",
+            color: "#2b557d",
+            fontSize: 13,
+          }}
+        >
+          Your connected Instagram browser in <strong>Options &rarr; Instagram sign-in</strong>{" "}
+          is used automatically. You can select a different signed-in browser for one profile below.
+        </div>
+        <div className="row" style={{ alignItems: "flex-end" }}>
+          <label style={{ display: "grid", gap: 6, flex: 2 }}>
+            <span>Profile name or label</span>
+            <input
+              value={instagramSubscriptionTitle}
+              disabled={busy}
+              onChange={(e) => setInstagramSubscriptionTitle(e.currentTarget.value)}
+              placeholder="e.g. Creator Name"
+            />
+          </label>
+          <label style={{ display: "grid", gap: 6, flex: 3 }}>
+            <span>Instagram profile link</span>
+            <input
+              value={instagramSubscriptionUrl}
+              disabled={busy}
+              onChange={(e) => setInstagramSubscriptionUrl(e.currentTarget.value)}
+              placeholder="https://www.instagram.com/username/"
+            />
+          </label>
+          <button
+            type="button"
+            disabled={busy || !instagramSubscriptionUrl.trim()}
+            onClick={saveInstagramSubscription}
+          >
+            {instagramSubscriptionEditId ? "Save changes" : "Add subscription"}
+          </button>
+          {instagramSubscriptionEditId ? (
+            <button type="button" disabled={busy} onClick={resetInstagramSubscriptionEditor}>
+              Cancel
+            </button>
+          ) : null}
+        </div>
+        <details style={{ marginTop: 8 }}>
+          <summary style={{ cursor: "pointer", color: "#4b5563", fontSize: 13 }}>
+            Extra options (folder, browser, media types, check schedule)
+          </summary>
+          <div className="row" style={{ marginTop: 8, flexWrap: "wrap", gap: 12 }}>
+            <label style={{ display: "grid", gap: 6, minWidth: 200, flex: 1 }}>
+              <span>Folder name inside downloads</span>
+              <input
+                value={instagramSubscriptionFolderMap}
+                disabled={busy}
+                onChange={(e) => setInstagramSubscriptionFolderMap(e.currentTarget.value)}
+                placeholder="Subfolder name (defaults to profile name)"
+              />
+            </label>
+            <div style={{ display: "grid", gap: 6, minWidth: 240, flex: 1 }}>
+              <span>Save to folder (overrides default)</span>
+              <div style={{ display: "flex", gap: 6 }}>
+                <input
+                  style={{ flex: 1 }}
+                  value={instagramSubscriptionOutputDirOverride}
+                  disabled={busy}
+                  onChange={(e) =>
+                    setInstagramSubscriptionOutputDirOverride(e.currentTarget.value)
+                  }
+                  placeholder={defaultInstagramSubscriptionDownloadsDir || "Optional absolute folder path"}
+                />
+                <button
+                  type="button"
+                  disabled={busy}
+                  onClick={chooseInstagramSubscriptionOutputDir}
+                >
+                  Browse...
+                </button>
+              </div>
+            </div>
+            <label style={{ display: "grid", gap: 6, minWidth: 160 }}>
+              <span>Check for new posts</span>
+              <select
+                value={instagramSubscriptionRefreshIntervalMinutes}
+                disabled={busy}
+                onChange={(e) =>
+                  setInstagramSubscriptionRefreshIntervalMinutes(Number(e.currentTarget.value))
+                }
+              >
+                <option value={30}>Every 30 minutes</option>
+                <option value={60}>Every hour</option>
+                <option value={120}>Every 2 hours</option>
+                <option value={360}>Every 6 hours</option>
+                <option value={720}>Every 12 hours</option>
+                <option value={1440}>Once a day</option>
+              </select>
+            </label>
+            <label style={{ display: "grid", gap: 6, minWidth: 160 }}>
+              <span>Most recent items per refresh</span>
+              <input type="number" min={1} max={500} value={instagramSubscriptionMaxItems} disabled={busy} onChange={(e) => setInstagramSubscriptionMaxItems(Number(e.currentTarget.value))} />
+            </label>
+            <label style={{ display: "flex", alignItems: "center", gap: 8 }}><input type="checkbox" checked={instagramSubscriptionIncludePosts} disabled={busy} onChange={(e) => setInstagramSubscriptionIncludePosts(e.currentTarget.checked)} />Posts</label>
+            <label style={{ display: "flex", alignItems: "center", gap: 8 }}><input type="checkbox" checked={instagramSubscriptionIncludeReels} disabled={busy} onChange={(e) => setInstagramSubscriptionIncludeReels(e.currentTarget.checked)} />Reels</label>
+            <label style={{ display: "flex", alignItems: "center", gap: 8 }}><input type="checkbox" checked={instagramSubscriptionIncludeStories} disabled={busy} onChange={(e) => setInstagramSubscriptionIncludeStories(e.currentTarget.checked)} />Stories</label>
+            <label style={{ display: "flex", alignItems: "center", gap: 8, minWidth: 160 }}>
+              <input
+                type="checkbox"
+                checked={instagramSubscriptionActive}
+                disabled={busy}
+                onChange={(e) => setInstagramSubscriptionActive(e.currentTarget.checked)}
+              />
+              <span>Active</span>
+            </label>
+          </div>
+          <div className="row" style={{ marginTop: 8 }}>
+            <label style={{ display: "flex", alignItems: "center", gap: 8 }}>
+              <input
+                type="checkbox"
+                checked={instagramSubscriptionUseBrowserCookies}
+                disabled={busy}
+                onChange={(e) => {
+                  const checked = e.currentTarget.checked;
+                  setInstagramSubscriptionUseBrowserCookies(checked);
+                  if (checked && !instagramSubscriptionBrowserCookieSource.trim()) {
+                    setInstagramSubscriptionBrowserCookieSource(DEFAULT_BROWSER_COOKIE_SOURCE);
+                  }
+                }}
+              />
+              <span>Use a profile-specific browser sign-in</span>
+            </label>
+            <label style={{ display: "flex", alignItems: "center", gap: 8 }}>
+              <span>Browser</span>
+              <select
+                value={instagramSubscriptionBrowserCookieSource}
+                disabled={busy || !instagramSubscriptionUseBrowserCookies}
+                onChange={(e) =>
+                  setInstagramSubscriptionBrowserCookieSource(e.currentTarget.value)
+                }
+              >
+                {browserCookieSourceOptions.filter((opt) => opt.value !== "").map((opt) => (
+                  <option key={opt.value} value={opt.value}>
+                    {opt.label}
+                  </option>
+                ))}
+              </select>
+            </label>
+          </div>
+        </details>
+
+        {/* Master-detail subscription list */}
+        <div style={{ marginTop: 14 }}>
+          {/* Status strip */}
+          <div className="sub-overview-strip" role="region" aria-label="Instagram subscription status summary">
+            <span className="sub-overview-pill">
+              <strong>{instagramSubscriptionOverview.total}</strong> {instagramSubscriptionOverview.total === 1 ? "subscription" : "subscriptions"}
+            </span>
+            <span className="sub-overview-pill">
+              <strong>{activeInstagramSubscriptionCount}</strong> active
+            </span>
+            {activeRefreshSubIds.size > 0 ? (
+              <span className="sub-overview-pill sub-overview-pill--updating">
+                <span className="sub-status-dot sub-status-dot--updating" aria-hidden="true" />
+                <strong>{activeRefreshSubIds.size}</strong> checking
+              </span>
+            ) : null}
+            {instagramSubscriptionOverview.lastSync ? (
+              <span className="sub-overview-last-sync">
+                Last check: {new Date(instagramSubscriptionOverview.lastSync).toLocaleTimeString()}
+              </span>
+            ) : null}
+            <div className="sub-overview-actions">
+              <button
+                type="button"
+                className="sub-refresh-all-btn"
+                disabled={busy || !activeInstagramSubscriptionCount}
+                onClick={queueAllActiveInstagramSubscriptions}
+                title="Check every active Instagram subscription for new posts now"
+              >
+                Check all now
+              </button>
+            </div>
+          </div>
+
+          <div className="sub-master-detail" style={{ marginTop: 10 }}>
+            {/* Master: list */}
+            <div className="sub-master-list" role="listbox" aria-label="Instagram subscriptions">
+              {instagramSubscriptions.length ? (
+                instagramSubscriptions.map((sub) => {
+                  const isSelected = sub.id === selectedInstagramSubscriptionId;
+                  const isUpdating = activeRefreshSubIds.has(sub.id);
+                  return (
+                    <div
+                      key={sub.id}
+                      role="option"
+                      aria-selected={isSelected}
+                      tabIndex={0}
+                      className={`sub-master-row ${isSelected ? "sub-master-row--selected" : ""} ${isUpdating ? "sub-master-row--updating" : ""}`}
+                      onClick={() => setSelectedInstagramSubscriptionId(sub.id)}
+                      onKeyDown={(e) => {
+                        if (e.key === "Enter" || e.key === " ") {
+                          e.preventDefault();
+                          setSelectedInstagramSubscriptionId(sub.id);
+                        }
+                      }}
+                    >
+                      <span
+                        className={`sub-status-dot ${isUpdating ? "sub-status-dot--updating" : sub.active ? "sub-status-dot--active" : "sub-status-dot--paused"}`}
+                        title={isUpdating ? "Checking now" : sub.active ? "Active" : "Paused"}
+                        aria-hidden="true"
+                      />
+                      <div className="sub-master-row-main">
+                        <strong className="sub-master-title">{sub.title || sub.source_url}</strong>
+                        <span className="sub-master-url">{sub.source_url}</span>
+                      </div>
+                    </div>
+                  );
+                })
+              ) : (
+                <div style={{ padding: "16px 12px", color: "#4b5563", fontSize: 13 }}>
+                  No Instagram subscriptions yet. Add an Instagram profile link above.
+                </div>
+              )}
+            </div>
+
+            {/* Detail: selected subscription panel */}
+            <div className="sub-detail-panel" role="region" aria-label="Subscription details">
+              {selectedInstagramSubscription ? (
+                (() => {
+                  const sub = selectedInstagramSubscription;
+                  const isUpdating = activeRefreshSubIds.has(sub.id);
+                  return (
+                    <>
+                      <div className="sub-detail-header">
+                        <div className="sub-detail-title-block">
+                          <h3>{sub.title || sub.source_url}</h3>
+                          <a
+                            href={sub.source_url}
+                            target="_blank"
+                            rel="noreferrer"
+                            className="sub-detail-url-link"
+                          >
+                            {sub.source_url} &rarr;
+                          </a>
+                        </div>
+                        <div className="sub-detail-badge-group">
+                          <span className={`sub-status-badge ${sub.active ? "sub-status-badge--active" : "sub-status-badge--paused"}`}>
+                            {sub.active ? "Active" : "Paused"}
+                          </span>
+                          {isUpdating ? (
+                            <span className="sub-status-badge sub-status-badge--updating">
+                              Checking now
+                            </span>
+                          ) : null}
+                          {sub.hold_reason ? (
+                            <span className="sub-status-badge" style={{ background: "rgba(185, 28, 28, 0.12)", color: "#991b1b" }}>
+                              Needs attention
+                            </span>
+                          ) : null}
+                          {sub.auth_session_configured ? (
+                            <span className="sub-status-badge" style={{ background: "rgba(22, 101, 52, 0.10)", color: "#166534" }}>
+                              Custom sign-in
+                            </span>
+                          ) : (
+                            <span className="sub-status-badge" style={{ background: "rgba(75, 123, 176, 0.10)", color: "#2b557d" }}>
+                              Options sign-in
+                            </span>
+                          )}
+                        </div>
+                      </div>
+
+                      <dl className="sub-detail-meta-grid">
+                        <div>
+                          <dt>Folder name</dt>
+                          <dd><code>{sub.folder_map || sub.title || "—"}</code></dd>
+                        </div>
+                        <div>
+                          <dt>Folder location</dt>
+                          <dd>
+                            <code>
+                              {sub.output_dir_override || defaultInstagramDownloadsDir || "Default Instagram folder"}
+                            </code>
+                          </dd>
+                        </div>
+                        <div>
+                          <dt>Check frequency</dt>
+                          <dd>Every {sub.refresh_interval_minutes} minutes</dd>
+                        </div>
+                        <div>
+                          <dt>Last queued</dt>
+                          <dd>{sub.last_queued_at_ms ? new Date(sub.last_queued_at_ms).toLocaleString() : "Never"}</dd>
+                        </div>
+                        <div>
+                          <dt>Provider</dt>
+                          <dd>{sub.provider_name}{sub.provider_version ? ` ${sub.provider_version}` : ""} · capability {sub.capability_epoch}</dd>
+                        </div>
+                        <div>
+                          <dt>Last successful check</dt>
+                          <dd>{sub.last_success_at_ms ? new Date(sub.last_success_at_ms).toLocaleString() : "Never"}</dd>
+                        </div>
+                        <div>
+                          <dt>Last discovery</dt>
+                          <dd>{sub.last_canonical_discovery_count} canonical item{sub.last_canonical_discovery_count === 1 ? "" : "s"} · checkpoint {sub.cursor_json ? "saved" : "not established"}</dd>
+                        </div>
+                        <div>
+                          <dt>Canonical profile</dt>
+                          <dd><code>{sub.canonical_profile_id || "Not resolved yet"}</code></dd>
+                        </div>
+                      </dl>
+                      {sub.hold_reason ? (
+                        <div className="error-inline" role="alert">
+                          <strong>{sub.last_failure_class || "provider failure"}:</strong> {sub.hold_reason}
+                          {sub.last_error ? <div>{sub.last_error}</div> : null}
+                        </div>
+                      ) : sub.last_error ? (
+                        <div className="error-inline"><strong>{sub.last_failure_class || "last refresh error"}:</strong> {sub.last_error}</div>
+                      ) : null}
+                      <div className="row sub-detail-actions">
+                        <button type="button" disabled={busy} onClick={() => queueInstagramSubscription(sub.id)}>
+                          Queue now
+                        </button>
+                        <button type="button" disabled={busy} onClick={() => editInstagramSubscription(sub)}>
+                          Edit
+                        </button>
+                        <button
+                          type="button"
+                          disabled={busy}
+                          onClick={() => openInstagramSubscriptionFolder(sub.id)}
+                        >
+                          Open folder
+                        </button>
+                        <button type="button" disabled={busy} onClick={() => deleteInstagramSubscription(sub.id)}>
+                          Archive
+                        </button>
+                      </div>
+                    </>
+                  );
+                })()
+              ) : (
+                <div className="sub-detail-empty">
+                  Select a profile on the left to see its details and actions.
+                </div>
+              )}
+            </div>
+          </div>
+        </div>
+        </div>
+      ) : null}
+
+      {/* Gallery lane: dedicated Instagram gallery with subscription filter and favorites */}
+      {showInstagramArchive && (mode !== "instagram_archive" || instagramArchiverTab === "gallery") ? (
+        <div
+          className="card"
+          id={mode === "instagram_archive" ? "instagram-archiver-gallery-panel" : undefined}
+          role={mode === "instagram_archive" ? "tabpanel" : undefined}
+        >
+          <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", flexWrap: "wrap", gap: 10, marginBottom: 12 }}>
+            <div>
+              <h2 style={{ margin: 0 }}>Instagram Gallery</h2>
+              <div style={{ color: "#4b5563", fontSize: 13, marginTop: 2 }}>
+                Browse your archived Instagram media by subscription, or filter for your starred favorites (★).
+              </div>
+            </div>
+            <div style={{ display: "flex", gap: 8, alignItems: "center", flexWrap: "wrap" }}>
+              <select
+                aria-label="Filter by Instagram profile"
+                value={instagramGalleryProfileFilter}
+                onChange={(e) => setInstagramGalleryProfileFilter(e.currentTarget.value)}
+                style={{ padding: "6px 10px", borderRadius: 6 }}
+              >
+                <option value="">All profiles ({instagramSubscriptions.length} subscriptions)</option>
+                {instagramSubscriptions.map((sub) => (
+                  <option key={sub.id} value={sub.id}>
+                    {sub.title || sub.source_url}
+                  </option>
+                ))}
+              </select>
+              <button
+                type="button"
+                className={instagramGalleryFavoritesOnly ? "seg-on" : undefined}
+                aria-pressed={instagramGalleryFavoritesOnly}
+                onClick={() => setInstagramGalleryFavoritesOnly(!instagramGalleryFavoritesOnly)}
+                style={{
+                  padding: "6px 12px",
+                  fontWeight: 600,
+                  color: instagramGalleryFavoritesOnly ? "#d97706" : undefined,
+                }}
+              >
+                ★ Favorites only
+              </button>
+              <input
+                type="search"
+                placeholder="Search captions..."
+                value={instagramGallerySearch}
+                onChange={(e) => setInstagramGallerySearch(e.currentTarget.value)}
+                style={{ padding: "6px 10px", width: 180 }}
+              />
+              <span style={{ color: "#6b7280", fontSize: 12 }}>
+                {instagramGalleryItems.length} {instagramGalleryItems.length === 1 ? "post" : "posts"}
+              </span>
+            </div>
+          </div>
+
+          {instagramGalleryItems.length ? (
+            <div
+              style={{
+                display: "grid",
+                gap: 16,
+                gridTemplateColumns: "repeat(auto-fill, minmax(200px, 1fr))",
+              }}
+            >
+              {instagramGalleryItems.map((item) => {
+                const isFav = mediaFavorites.has(item.id);
+                return (
+                  <article
+                    key={item.id}
+                    style={{
+                      display: "grid",
+                      gap: 8,
+                      padding: 12,
+                      borderRadius: 10,
+                      border: "1px solid rgba(126, 145, 167, 0.3)",
+                      background: "linear-gradient(154deg, #edf2f7 0%, #dce3eb 54%, #c9d2dc 100%)",
+                      position: "relative",
+                    }}
+                  >
+                    <div style={{ position: "relative", width: "100%", height: 180, overflow: "hidden", borderRadius: 6, background: "#000" }}>
+                      <ThumbnailPreview
+                        itemId={item.id}
+                        path={item.thumbnail_path}
+                        fit="contain"
+                        width={200}
+                        height={180}
+                      />
+                      <button
+                        type="button"
+                        aria-label={isFav ? "Remove from favorites" : "Add to favorites"}
+                        title={isFav ? "Remove from favorites" : "Mark as favorite"}
+                        style={{
+                          position: "absolute",
+                          top: 6,
+                          right: 6,
+                          background: "rgba(0, 0, 0, 0.6)",
+                          border: "none",
+                          borderRadius: 6,
+                          cursor: "pointer",
+                          fontSize: 18,
+                          lineHeight: "1",
+                          padding: "4px 8px",
+                          color: isFav ? "#f59e0b" : "#e5e7eb",
+                        }}
+                        onClick={() => {
+                          setMediaFavorites((prev) => {
+                            const next = new Set(prev);
+                            if (next.has(item.id)) next.delete(item.id);
+                            else next.add(item.id);
+                            return next;
+                          });
+                        }}
+                      >
+                        {isFav ? "★" : "☆"}
+                      </button>
+                    </div>
+                    <strong style={{ lineHeight: 1.25, fontSize: 13, minHeight: 32, overflow: "hidden", textOverflow: "ellipsis", display: "-webkit-box", WebkitLineClamp: 2, WebkitBoxOrient: "vertical" }}>
+                      {item.title || "Instagram Post"}
+                    </strong>
+                    <div style={{ color: "#4b5563", fontSize: 11, wordBreak: "break-word", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+                      {item.media_path}
+                    </div>
+                    <div className="row" style={{ marginTop: 2, gap: 6 }}>
+                      <button type="button" disabled={busy} onClick={() => openMediaFile(item)} style={{ flex: 1, padding: "4px 8px", fontSize: 12 }}>
+                        Open
+                      </button>
+                      <button type="button" disabled={busy} onClick={() => revealMediaFile(item)} style={{ flex: 1, padding: "4px 8px", fontSize: 12 }}>
+                        Folder
+                      </button>
+                    </div>
+                  </article>
+                );
+              })}
+            </div>
+          ) : (
+            <div style={{ color: "#4b5563", padding: "24px 0", textAlign: "center" }}>
+              {instagramGalleryFavoritesOnly
+                ? "No favorite Instagram posts found. Star posts with ★ in the gallery or recent downloads to see them here."
+                : instagramGalleryProfileFilter
+                  ? "No media found for the selected Instagram profile."
+                  : "No Instagram media archived yet. Download single posts or add subscriptions to populate your gallery."}
+            </div>
+          )}
+        </div>
+      ) : null}
+
+      {showTiktokArchive ? (
+        <div className="archiver-workspace" data-testid="tiktok-archiver-workspace">
+          <div className="segmented archiver-workflow-tabs" role="tablist" aria-label="TikTok Archiver workflow">
+            <button type="button" role="tab" className={tiktokArchiverTab === "single" ? "seg-on" : undefined} aria-selected={tiktokArchiverTab === "single"} onClick={() => setTiktokArchiverTab("single")}>Single videos</button>
+            <button type="button" role="tab" className={tiktokArchiverTab === "subscriptions" ? "seg-on" : undefined} aria-selected={tiktokArchiverTab === "subscriptions"} onClick={() => setTiktokArchiverTab("subscriptions")}>Profile subscriptions</button>
+          </div>
+
+          {tiktokArchiverTab === "single" ? (
+            <div role="tabpanel" style={{ marginTop: 16 }}>
+              <h2>TikTok single videos</h2>
+              <p>Paste one or more TikTok video links. These run in the independent TikTok single lane.</p>
+              <textarea value={tiktokBatchText} onChange={(event) => setTiktokBatchText(event.currentTarget.value)} rows={5} disabled={busy} placeholder={"https://www.tiktok.com/@creator/video/1234567890"} style={{ width: "100%", boxSizing: "border-box" }} />
+              <div className="row">
+                <label style={{ flex: 1 }}>Save to folder (optional)<input value={tiktokBatchOutputDir} onChange={(event) => setTiktokBatchOutputDir(event.currentTarget.value)} disabled={busy} style={{ width: "100%" }} /></label>
+                <label style={{ display: "flex", alignItems: "center", gap: 8 }}><input type="checkbox" checked={tiktokBatchUseBrowserCookies} onChange={(event) => setTiktokBatchUseBrowserCookies(event.currentTarget.checked)} disabled={busy} />Use browser sign-in</label>
+                {tiktokBatchUseBrowserCookies ? <select value={tiktokBatchBrowserCookieSource} onChange={(event) => setTiktokBatchBrowserCookieSource(event.currentTarget.value)}><option value="firefox">Firefox</option><option value="chrome">Chrome</option><option value="edge">Edge</option><option value="opera">Opera</option></select> : null}
+                <button type="button" disabled={busy || !tiktokBatchText.trim()} onClick={enqueueTiktokBatch}>Queue TikTok videos</button>
+              </div>
+            </div>
+          ) : (
+            <div role="tabpanel" style={{ marginTop: 16 }}>
+              <div className="row" style={{ justifyContent: "space-between" }}>
+                <div><h2>TikTok profile subscriptions</h2><p>Saved profiles refresh in the independent TikTok background lane.</p></div>
+                <button type="button" disabled={busy} onClick={queueAllTiktokSubscriptions}>Queue due profiles</button>
+              </div>
+              <div className="row">
+                <label style={{ flex: 1 }}>Name<input value={tiktokSubscriptionTitle} onChange={(event) => setTiktokSubscriptionTitle(event.currentTarget.value)} style={{ width: "100%" }} /></label>
+                <label style={{ flex: 2 }}>Profile link<input value={tiktokSubscriptionUrl} onChange={(event) => setTiktokSubscriptionUrl(event.currentTarget.value)} placeholder="https://www.tiktok.com/@creator" style={{ width: "100%" }} /></label>
+              </div>
+              <div className="row">
+                <label>Check every (minutes)<input type="number" min={5} max={10080} value={tiktokSubscriptionRefreshMinutes} onChange={(event) => setTiktokSubscriptionRefreshMinutes(Number(event.currentTarget.value))} /></label>
+                <label>Most recent videos per refresh<input type="number" min={1} max={500} value={tiktokSubscriptionMaxItems} onChange={(event) => setTiktokSubscriptionMaxItems(Number(event.currentTarget.value))} /></label>
+                <label>Folder name<input value={tiktokSubscriptionFolderMap} onChange={(event) => setTiktokSubscriptionFolderMap(event.currentTarget.value)} /></label>
+                <label style={{ flex: 1 }}>Save to folder (optional)<input value={tiktokSubscriptionOutputDir} onChange={(event) => setTiktokSubscriptionOutputDir(event.currentTarget.value)} style={{ width: "100%" }} /></label>
+              </div>
+              <div className="row">
+                <label style={{ display: "flex", alignItems: "center", gap: 8 }}><input type="checkbox" checked={tiktokSubscriptionActive} onChange={(event) => setTiktokSubscriptionActive(event.currentTarget.checked)} />Active</label>
+                <label style={{ display: "flex", alignItems: "center", gap: 8 }}><input type="checkbox" checked={tiktokSubscriptionUseBrowserCookies} onChange={(event) => setTiktokSubscriptionUseBrowserCookies(event.currentTarget.checked)} />Use browser sign-in</label>
+                {tiktokSubscriptionUseBrowserCookies ? <select value={tiktokSubscriptionBrowserCookieSource} onChange={(event) => setTiktokSubscriptionBrowserCookieSource(event.currentTarget.value)}><option value="firefox">Firefox</option><option value="chrome">Chrome</option><option value="edge">Edge</option><option value="opera">Opera</option></select> : null}
+                <button type="button" disabled={busy} onClick={saveTiktokSubscription}>{tiktokSubscriptionEditId ? "Save changes" : "Add profile"}</button>
+                {tiktokSubscriptionEditId ? <button type="button" disabled={busy} onClick={resetTiktokSubscriptionEditor}>Cancel edit</button> : null}
+              </div>
+              <div style={{ display: "grid", gap: 8, marginTop: 16 }}>
+                {tiktokSubscriptions.length ? tiktokSubscriptions.map((sub) => (
+                  <div key={sub.id} className="row" style={{ justifyContent: "space-between", borderTop: "1px solid rgba(126,145,167,.3)", paddingTop: 10 }}>
+                    <div style={{ minWidth: 0, flex: 1 }}>
+                      <strong>{sub.title}</strong>
+                      <div style={{ color: "#4b5563", overflow: "hidden", textOverflow: "ellipsis" }}>{sub.source_url}</div>
+                      <small>{sub.active ? "Active" : "Paused"} · every {sub.refresh_interval_minutes} min · cap {sub.max_items_per_refresh} · {sub.provider_name}{sub.provider_version ? ` ${sub.provider_version}` : ""} · last discovery {sub.last_canonical_discovery_count} · checkpoint {sub.cursor_json ? "saved" : "not established"}</small>
+                      {sub.hold_reason ? <div className="error-inline" role="alert"><strong>{sub.last_failure_class || "provider failure"}:</strong> {sub.hold_reason}</div> : sub.last_error ? <div className="error-inline"><strong>{sub.last_failure_class || "last refresh error"}:</strong> {sub.last_error}</div> : null}
+                    </div>
+                    <button type="button" disabled={busy} onClick={() => queueTiktokSubscription(sub.id)}>Queue now</button>
+                    <button type="button" disabled={busy} onClick={() => editTiktokSubscription(sub)}>Edit</button>
+                    <button type="button" disabled={busy} onClick={() => deleteTiktokSubscription(sub.id)}>Archive</button>
+                  </div>
+                )) : <p>No TikTok profile subscriptions yet.</p>}
+              </div>
+            </div>
+          )}
         </div>
       ) : null}
 

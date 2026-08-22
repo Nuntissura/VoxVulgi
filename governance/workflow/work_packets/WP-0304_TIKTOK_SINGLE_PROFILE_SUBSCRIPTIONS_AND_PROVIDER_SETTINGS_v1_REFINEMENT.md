@@ -1,7 +1,7 @@
 ---
 file_id: WP-0304-REFINEMENT-v1
 file_kind: work-packet-refinement
-updated_at: 2026-08-09
+updated_at: 2026-08-22
 ---
 
 <topic id="operator-request-and-verified-state" status="active" version="v1" wp="WP-0304" updated_at="2026-08-09">
@@ -32,13 +32,14 @@ updated_at: 2026-08-09
 
 </topic>
 
-<topic id="research-basis-and-selected-design" status="active" version="v1" wp="WP-0304" updated_at="2026-08-09">
+<topic id="research-basis-and-selected-design" status="active" version="v1" wp="WP-0304" updated_at="2026-08-22">
 
 # Sources checked
 
 - Current VoxVulgi provider/job/config/schema/identity/membership/library/subscription source and relevant WPs.
 - Current yt-dlp TikTok extractor source, including single/user extractors and provider arguments: `https://github.com/yt-dlp/yt-dlp/blob/master/yt_dlp/extractor/tiktok.py`.
 - yt-dlp current release and option/plugin contracts: `https://github.com/yt-dlp/yt-dlp/releases/tag/2026.07.04` and `https://github.com/yt-dlp/yt-dlp/blob/master/README.md`.
+- Current pinned-release source rechecked 2026-08-22: TikTok single and user/profile extractors remain separate; the extractor exposes provider-specific `api_hostname`, `app_info`, and `device_id` arguments and returns stable video/uploader/channel IDs. Current upstream issues continue to distinguish individual-video success from profile/API pagination failures, so separate capability receipts remain mandatory.
 
 # Provider adapter contract
 

@@ -15,6 +15,22 @@
     "file_bytes": 18226085,
     "source_label": "github:yt-dlp/yt-dlp"
   },
+  "instagram_profile_provider": {
+    "version": "4.15.3",
+    "url": "https://github.com/instaloader/instaloader/releases/download/v4.15.3/instaloader-v4.15.3-windows-standalone.zip",
+    "sha256_hex": "F91EE705F04C2C679B43E7E2EA90ED279AF2CEF83A84EF733CBD958564C06FB4",
+    "file_bytes": 14118612,
+    "executable_sha256_hex": "3973F1B27202350AD1769DA2CF0482806093E14DB6FE24E36D43D6823C749007",
+    "executable_bytes": 14544442,
+    "source_label": "github:instaloader/instaloader"
+  },
+  "instagram_profile_enumerator": {
+    "version": "4.15.3",
+    "url": "https://files.pythonhosted.org/packages/25/1e/bdccba210e5681fa3f7490d35e7561c8bb1c4adc0ecb35ac0c06286cdd9b/instaloader-4.15.3-py3-none-any.whl",
+    "sha256_hex": "17E25115A65923BCDC1A5A0F58D90728D96718EF129A753656A3EF75443A272B",
+    "file_bytes": 70830,
+    "source_label": "pypi:instaloader"
+  },
   "portable_python_windows": {
     "version": "3.11.9",
     "url": "https://www.nuget.org/api/v2/package/python/3.11.9",

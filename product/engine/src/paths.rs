@@ -122,11 +122,13 @@ impl AppPaths {
     }
 
     pub fn item_translation_style_path(&self, item_id: &str) -> PathBuf {
-        self.derived_item_dir(item_id).join("translation_style.json")
+        self.derived_item_dir(item_id)
+            .join("translation_style.json")
     }
 
     pub fn item_localization_pipeline_preset_path(&self, item_id: &str) -> PathBuf {
-        self.derived_item_dir(item_id).join("localization_pipeline_preset.json")
+        self.derived_item_dir(item_id)
+            .join("localization_pipeline_preset.json")
     }
 
     pub fn voice_backend_adapters_path(&self) -> PathBuf {
@@ -527,6 +529,23 @@ impl AppPaths {
         self.base_dir.join("tools")
     }
 
+    pub fn instagram_profile_provider_dir(&self) -> PathBuf {
+        self.tools_dir().join("instagram_profile_provider")
+    }
+
+    pub fn instagram_profile_provider_exe(&self) -> PathBuf {
+        let mut path = self.instagram_profile_provider_dir().join("instaloader");
+        if cfg!(windows) {
+            path.set_extension("exe");
+        }
+        path
+    }
+
+    pub fn instagram_profile_enumerator_script(&self) -> PathBuf {
+        self.instagram_profile_provider_dir()
+            .join("instagram_profile_enumerator.py")
+    }
+
     pub fn python_toolchain_dir(&self) -> PathBuf {
         self.tools_dir().join("python")
     }
@@ -646,6 +665,10 @@ impl AppPaths {
 
     pub fn download_presets_config_path(&self) -> PathBuf {
         self.config_dir().join("download_presets.json")
+    }
+
+    pub fn provider_transfer_settings_path(&self) -> PathBuf {
+        self.config_dir().join("provider_transfer_settings.json")
     }
 
     pub fn feature_storage_roots_config_path(&self) -> PathBuf {

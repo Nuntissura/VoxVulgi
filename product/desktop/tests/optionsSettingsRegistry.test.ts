@@ -40,9 +40,10 @@ test("Options registry exposes every governed module with stable unique settings
   assert.deepEqual(validateOptionsSettingsRegistry(), []);
   assert.equal(new Set(OPTIONS_SETTINGS_REGISTRY.map((setting) => setting.id)).size, OPTIONS_SETTINGS_REGISTRY.length);
   assert.ok(settingsForOptionsModule("video_archiver").length >= 10);
-  assert.equal(settingsForOptionsModule("jobs").length, 6);
+  assert.equal(settingsForOptionsModule("jobs").length, 9);
   assert.equal(settingsForOptionsModule("diagnostics").length, 6);
-  assert.equal(settingsForOptionsModule("tiktok_archiver").length, 0);
+  assert.equal(settingsForOptionsModule("instagram_archiver").length, 12);
+  assert.equal(settingsForOptionsModule("tiktok_archiver").length, 13);
 });
 
 test("registry rejects an available module with no governed settings", () => {
@@ -161,7 +162,7 @@ test("runtime projection is authoritative for validation, dirty state, effective
 
   for (const descriptorId of [
     "video-archiver.youtube-manual-cookies",
-    "instagram-archiver.auth-cookie",
+    "instagram-archiver.manual-cookies",
   ]) {
     const descriptor = optionsSettingById(descriptorId);
     const replacement = projectOptionsSettingRuntime(descriptor, {
@@ -278,7 +279,7 @@ test("Options page provides responsive semantic navigation and removes card moun
   assert.match(source, /status: "running"/);
   assert.match(source, /data-testid="options-setting-media-library\.cleanup-run"/);
   assert.match(source, /"video-archiver\.pacing-recurring-interval", enumerationAdaptiveEnabled[\s\S]*?effectiveRecurringPacingInterval/);
-  assert.match(source, /markCapabilityReceiptStale\("instagram", "Instagram credentials changed after this test\."\)/);
+  assert.match(source, /markCapabilityReceiptStale\("instagram", "(?:Instagram credentials|Credential draft|Browser selection) changed after this test\."\)/);
   assert.match(source, /markCapabilityReceiptStale\("instagram", "Instagram credentials were disconnected after this test\."\)/);
   assert.doesNotMatch(source, /useEffect\(\(\) => \{\s*persistLocalPreferenceDraft/);
   assert.match(source, /pacingHydrationState !== "ready"/);

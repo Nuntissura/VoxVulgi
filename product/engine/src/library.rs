@@ -267,7 +267,14 @@ fn observe_media_path_fresh_with_causal(
                 probe_started_at_ms,
                 generation,
             );
-            emit_media_path_probe_completed(paths, causal, generation, observation, "root_alias_resolution_failed", now.elapsed());
+            emit_media_path_probe_completed(
+                paths,
+                causal,
+                generation,
+                observation,
+                "root_alias_resolution_failed",
+                now.elapsed(),
+            );
             return observation;
         }
     };
@@ -290,7 +297,14 @@ fn observe_media_path_fresh_with_causal(
         probe_started_at_ms,
         generation,
     );
-    emit_media_path_probe_completed(paths, causal, generation, observation, "nas_bounded_worker_pool", now.elapsed());
+    emit_media_path_probe_completed(
+        paths,
+        causal,
+        generation,
+        observation,
+        "nas_bounded_worker_pool",
+        now.elapsed(),
+    );
     observation
 }
 
@@ -321,7 +335,14 @@ fn emit_media_path_probe_completed(
     crate::diagnostics::emit_trace_event(
         paths,
         "media_path_probe_completed",
-        if matches!(observation, MediaPathObservation::Unreachable | MediaPathObservation::Slow) { "warn" } else { "info" },
+        if matches!(
+            observation,
+            MediaPathObservation::Unreachable | MediaPathObservation::Slow
+        ) {
+            "warn"
+        } else {
+            "info"
+        },
         media_path_probe_details(causal, generation, source, Some(duration), Some(result)),
     );
 }
@@ -383,10 +404,7 @@ pub(crate) fn persist_media_path_observation_rewrite_invalidation(
     Ok(())
 }
 
-pub(crate) fn invalidate_media_path_observation_rewrite_memory(
-    old_path: &str,
-    new_path: &str,
-) {
+pub(crate) fn invalidate_media_path_observation_rewrite_memory(old_path: &str, new_path: &str) {
     invalidate_media_path_observation_memory(old_path);
     if !old_path.eq_ignore_ascii_case(new_path) {
         invalidate_media_path_observation_memory(new_path);
@@ -526,6 +544,10 @@ pub fn canonical_media_source(raw_url: &str) -> Option<CanonicalMediaSource> {
         .to_ascii_lowercase();
     parsed.set_host(Some(&host)).ok()?;
     if host == "instagram.com" || host.ends_with(".instagram.com") {
+        let asset_index = parsed
+            .query_pairs()
+            .find(|(key, _)| key == "vv_asset")
+            .and_then(|(_, value)| value.parse::<usize>().ok());
         let segments = parsed
             .path_segments()
             .map(|parts| parts.filter(|part| !part.is_empty()).collect::<Vec<_>>())
@@ -537,21 +559,40 @@ pub fn canonical_media_source(raw_url: &str) -> Option<CanonicalMediaSource> {
             )
         {
             let shortcode = segments[1].to_string();
+            let media_id = asset_index
+                .map(|index| format!("post:{shortcode}:asset:{index}"))
+                .unwrap_or_else(|| format!("post:{shortcode}"));
+            let canonical_url = asset_index
+                .map(|index| format!("https://www.instagram.com/p/{shortcode}/?vv_asset={index}"))
+                .unwrap_or_else(|| format!("https://www.instagram.com/p/{shortcode}/"));
             return Some(CanonicalMediaSource {
                 service: "instagram".to_string(),
-                media_id: format!("post:{shortcode}"),
-                canonical_url: format!("https://www.instagram.com/p/{shortcode}/"),
+                media_id,
+                canonical_url,
             });
         }
         if segments.len() >= 3 && segments[0].eq_ignore_ascii_case("stories") {
             let story_id = segments[2].to_string();
+            let media_id = asset_index
+                .map(|index| format!("story:{story_id}:asset:{index}"))
+                .unwrap_or_else(|| format!("story:{story_id}"));
+            let canonical_url = asset_index
+                .map(|index| {
+                    format!(
+                        "https://www.instagram.com/stories/{}/{story_id}/?vv_asset={index}",
+                        segments[1]
+                    )
+                })
+                .unwrap_or_else(|| {
+                    format!(
+                        "https://www.instagram.com/stories/{}/{story_id}/",
+                        segments[1]
+                    )
+                });
             return Some(CanonicalMediaSource {
                 service: "instagram".to_string(),
-                media_id: format!("story:{story_id}"),
-                canonical_url: format!(
-                    "https://www.instagram.com/stories/{}/{story_id}/",
-                    segments[1]
-                ),
+                media_id,
+                canonical_url,
             });
         }
         if let Some(profile) = segments.first() {
@@ -560,6 +601,44 @@ pub fn canonical_media_source(raw_url: &str) -> Option<CanonicalMediaSource> {
                 service: "instagram".to_string(),
                 media_id: format!("profile:{profile}"),
                 canonical_url: format!("https://www.instagram.com/{profile}/"),
+            });
+        }
+    }
+    if host == "tiktok.com" || host.ends_with(".tiktok.com") {
+        let segments = parsed
+            .path_segments()
+            .map(|parts| parts.filter(|part| !part.is_empty()).collect::<Vec<_>>())
+            .unwrap_or_default();
+        if let Some(video_index) = segments
+            .iter()
+            .position(|segment| segment.eq_ignore_ascii_case("video"))
+        {
+            if let Some(video_id) = segments.get(video_index + 1) {
+                let video_id = video_id.trim();
+                if !video_id.is_empty() {
+                    let handle = segments
+                        .first()
+                        .copied()
+                        .filter(|segment| segment.starts_with('@'))
+                        .unwrap_or("@video");
+                    return Some(CanonicalMediaSource {
+                        service: "tiktok".to_string(),
+                        media_id: format!("video:{video_id}"),
+                        canonical_url: format!("https://www.tiktok.com/{handle}/video/{video_id}"),
+                    });
+                }
+            }
+        }
+        if let Some(handle) = segments
+            .first()
+            .copied()
+            .filter(|segment| segment.starts_with('@') && segment.len() > 1)
+        {
+            let handle = handle.to_ascii_lowercase();
+            return Some(CanonicalMediaSource {
+                service: "tiktok".to_string(),
+                media_id: format!("profile:{}", handle.trim_start_matches('@')),
+                canonical_url: format!("https://www.tiktok.com/{handle}"),
             });
         }
     }
@@ -654,27 +733,43 @@ fn upsert_source_membership_conn(
     source_subscription_id: Option<&str>,
     evidence_kind: &str,
 ) -> Result<()> {
-    if source.service != "youtube" {
-        return Ok(());
-    }
     let Some(subscription_id) = source_subscription_id
         .map(str::trim)
         .filter(|value| !value.is_empty())
     else {
         return Ok(());
     };
-    let subscription = conn
-        .query_row(
-            "SELECT source_url, title FROM youtube_subscription WHERE id=?1",
-            [subscription_id],
-            |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)),
-        )
-        .optional()?;
+    let subscription = match source.service.as_str() {
+        "youtube" => conn
+            .query_row(
+                "SELECT source_url, title FROM youtube_subscription WHERE id=?1",
+                [subscription_id],
+                |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)),
+            )
+            .optional()?,
+        "instagram" => conn
+            .query_row(
+                "SELECT source_url, title FROM instagram_subscription WHERE id=?1",
+                [subscription_id],
+                |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)),
+            )
+            .optional()?,
+        "tiktok" => conn
+            .query_row(
+                "SELECT source_url, title FROM tiktok_subscription WHERE id=?1",
+                [subscription_id],
+                |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)),
+            )
+            .optional()?,
+        _ => None,
+    };
     let Some((source_url, source_title)) = subscription else {
         return Ok(());
     };
     let lower = source_url.trim().to_ascii_lowercase();
-    let source_kind = if lower.contains("/playlist") || lower.contains("list=") {
+    let source_kind = if matches!(source.service.as_str(), "instagram" | "tiktok") {
+        "profile_page"
+    } else if lower.contains("/playlist") || lower.contains("list=") {
         "playlist"
     } else if lower.trim_end_matches('/').ends_with("/shorts") {
         "shorts_page"
@@ -732,7 +827,9 @@ WHERE service=?6 AND media_id=?7 AND source_subscription_id=?8
 
 fn source_membership_kind(source_url: &str, source: &CanonicalMediaSource) -> &'static str {
     let lower = source_url.trim().to_ascii_lowercase();
-    if lower.contains("/playlist") || lower.contains("list=") {
+    if matches!(source.service.as_str(), "instagram" | "tiktok") {
+        "profile_page"
+    } else if lower.contains("/playlist") || lower.contains("list=") {
         "playlist"
     } else if lower.trim_end_matches('/').ends_with("/shorts") {
         "shorts_page"
@@ -894,6 +991,102 @@ INSERT OR IGNORE INTO media_source_membership (
         ],
     )?;
     Ok(source)
+}
+
+/// Persist provider discovery and source membership before queue suppression. This makes a
+/// profile refresh replay-safe even when an item is already present, actively downloading, or
+/// operator-deleted: discovery remains attributable without changing the item's lifecycle.
+pub fn record_provider_subscription_discovery(
+    paths: &AppPaths,
+    source_url: &str,
+    source_subscription_id: &str,
+    source_page_url: &str,
+    source_title: &str,
+    title: Option<&str>,
+    published_at_ms: Option<i64>,
+) -> Result<CanonicalMediaSource> {
+    let source = canonical_media_source(source_url).ok_or_else(|| {
+        EngineError::InstallFailed("discovered URL has no canonical media identity".to_string())
+    })?;
+    let mut conn = db::open(paths)?;
+    db::migrate(&conn)?;
+    let tx = conn.transaction()?;
+    ensure_source_identity_row_conn(&tx, &source, source_url)?;
+    let now = now_ms();
+    tx.execute(
+        r#"
+INSERT INTO provider_subscription_item (
+  service, subscription_id, media_id, source_url, title, published_at_ms,
+  state, discovered_at_ms, updated_at_ms
+) VALUES (?1, ?2, ?3, ?4, ?5, ?6, 'discovered', ?7, ?7)
+ON CONFLICT(service, subscription_id, media_id) DO UPDATE SET
+  source_url=excluded.source_url,
+  title=COALESCE(excluded.title, provider_subscription_item.title),
+  published_at_ms=COALESCE(excluded.published_at_ms, provider_subscription_item.published_at_ms),
+  discovered_at_ms=excluded.discovered_at_ms,
+  state=CASE
+    WHEN provider_subscription_item.state IN ('queued','materialized') THEN provider_subscription_item.state
+    ELSE 'discovered'
+  END,
+  updated_at_ms=excluded.updated_at_ms
+"#,
+        params![
+            source.service,
+            source_subscription_id,
+            source.media_id,
+            source_url,
+            title,
+            published_at_ms,
+            now
+        ],
+    )?;
+    let membership_kind = if matches!(source.service.as_str(), "instagram" | "tiktok") {
+        "profile_page"
+    } else {
+        source_membership_kind(source_page_url, &source)
+    };
+    tx.execute(
+        r#"
+INSERT INTO media_source_membership (
+  service, media_id, source_subscription_id, source_kind, source_url_snapshot,
+  source_title_snapshot, evidence_kind, created_at_ms, updated_at_ms
+) VALUES (?1, ?2, ?3, ?4, ?5, ?6, 'provider_discovery', ?7, ?7)
+ON CONFLICT(service, media_id, source_subscription_id) DO UPDATE SET
+  source_kind=excluded.source_kind,
+  source_url_snapshot=excluded.source_url_snapshot,
+  source_title_snapshot=excluded.source_title_snapshot,
+  evidence_kind=excluded.evidence_kind,
+  updated_at_ms=excluded.updated_at_ms
+"#,
+        params![
+            source.service,
+            source.media_id,
+            source_subscription_id,
+            membership_kind,
+            source_page_url,
+            source_title,
+            now
+        ],
+    )?;
+    tx.commit()?;
+    Ok(source)
+}
+
+pub fn mark_provider_subscription_item_queued(
+    paths: &AppPaths,
+    service: &str,
+    subscription_id: &str,
+    media_id: &str,
+    job_id: &str,
+) -> Result<()> {
+    let conn = db::open(paths)?;
+    db::migrate(&conn)?;
+    let now = now_ms();
+    conn.execute(
+        "UPDATE provider_subscription_item SET state='queued',job_id=?1,queued_at_ms=?2,updated_at_ms=?2 WHERE service=?3 AND subscription_id=?4 AND media_id=?5 AND state<>'materialized'",
+        params![job_id, now, service, subscription_id, media_id],
+    )?;
+    Ok(())
 }
 
 fn clear_stale_source_claim_conn(
@@ -1259,11 +1452,7 @@ pub fn relocate_canonical_media(
         ));
     }
     if let Some(previous_path) = previous_path {
-        persist_media_path_observation_rewrite_invalidation(
-            &tx,
-            &previous_path,
-            &canonical_text,
-        )?;
+        persist_media_path_observation_rewrite_invalidation(&tx, &previous_path, &canonical_text)?;
         tx.execute(
             "UPDATE media_source_identity SET repair_state='ready', last_error=NULL, updated_at_ms=?1 WHERE library_item_id=?2",
             params![now_ms(), item_id.trim()],
@@ -2771,7 +2960,38 @@ pub fn classify_direct_download_execution(
         return Some(DownloadLineageClassification {
             service: "instagram".to_string(),
             origin_kind: origin_kind.to_string(),
-            work_track: "instagram".to_string(),
+            work_track: if is_subscription {
+                "instagram_recurring"
+            } else {
+                "instagram_single"
+            }
+            .to_string(),
+        });
+    }
+
+    let is_tiktok = host == "tiktok.com"
+        || host == "www.tiktok.com"
+        || host == "m.tiktok.com"
+        || host == "vm.tiktok.com"
+        || host == "vt.tiktok.com"
+        || host.ends_with(".tiktok.com");
+    if is_tiktok {
+        let origin_kind = if is_subscription {
+            "subscription"
+        } else if path.contains("/video/") {
+            "single"
+        } else {
+            "profile"
+        };
+        return Some(DownloadLineageClassification {
+            service: "tiktok".to_string(),
+            origin_kind: origin_kind.to_string(),
+            work_track: if is_subscription {
+                "tiktok_recurring"
+            } else {
+                "tiktok_single"
+            }
+            .to_string(),
         });
     }
 
@@ -3146,7 +3366,7 @@ fn sha256_of_file(path: &Path) -> std::io::Result<String> {
             break;
         }
         hasher.update(&buf[..n]);
-    };
+    }
     Ok(format!("{:x}", hasher.finalize()))
 }
 
@@ -3263,11 +3483,7 @@ pub fn resync_local_fallback_downloads(paths: &AppPaths) -> Result<FallbackResyn
                     "UPDATE library_item SET media_path=?1 WHERE id=?2",
                     params![&target_str, id],
                 )?;
-                persist_media_path_observation_rewrite_invalidation(
-                    &tx,
-                    &media_path,
-                    &target_str,
-                )?;
+                persist_media_path_observation_rewrite_invalidation(&tx, &media_path, &target_str)?;
                 tx.commit()?;
                 invalidate_media_path_observation_rewrite_memory(&media_path, &target_str);
                 let _ = std::fs::remove_file(&src);
@@ -3361,10 +3577,9 @@ ON CONFLICT(id) DO UPDATE SET
     };
     tx.commit()?;
     match previous_path {
-        Some(previous_path) => invalidate_media_path_observation_rewrite_memory(
-            &previous_path,
-            &item.media_path,
-        ),
+        Some(previous_path) => {
+            invalidate_media_path_observation_rewrite_memory(&previous_path, &item.media_path)
+        }
         None => invalidate_media_path_observation_memory(&item.media_path),
     };
     Ok(())
@@ -3813,6 +4028,12 @@ WHERE service=?4 AND media_id=?5
             lineage.source_subscription_id.as_deref(),
             "voxvulgi_download",
         )?;
+        if let Some(subscription_id) = lineage.source_subscription_id.as_deref() {
+            tx.execute(
+                "UPDATE provider_subscription_item SET state='materialized',library_item_id=?1,materialized_at_ms=?2,updated_at_ms=?2 WHERE service=?3 AND subscription_id=?4 AND media_id=?5",
+                params![item.id, now_ms(), source.service, subscription_id, source.media_id],
+            )?;
+        }
     }
     match previous_media_path.as_deref() {
         Some(previous_path) => persist_media_path_observation_rewrite_invalidation(
@@ -3825,10 +4046,9 @@ WHERE service=?4 AND media_id=?5
     tx.commit()?;
 
     match previous_media_path {
-        Some(previous_path) => invalidate_media_path_observation_rewrite_memory(
-            &previous_path,
-            &item.media_path,
-        ),
+        Some(previous_path) => {
+            invalidate_media_path_observation_rewrite_memory(&previous_path, &item.media_path)
+        }
         None => invalidate_media_path_observation_memory(&item.media_path),
     };
 
@@ -3961,10 +4181,7 @@ pub(crate) fn prepare_media_item(
     })
 }
 
-pub(crate) fn insert_library_item(
-    conn: &rusqlite::Connection,
-    item: &LibraryItem,
-) -> Result<()> {
+pub(crate) fn insert_library_item(conn: &rusqlite::Connection, item: &LibraryItem) -> Result<()> {
     // WP-0253 Item 2c: stamp the unified-library columns at insert so new items are
     // identical in shape to the backfilled legacy/new ones (single library going forward).
     let origin = if item.source_type == "url_direct" {
@@ -4334,7 +4551,44 @@ INSERT INTO job (
             classify_direct_download_execution("https://www.instagram.com/reel/ABC123/", None)
                 .expect("instagram classification");
         assert_eq!(instagram.service, "instagram");
-        assert_eq!(instagram.work_track, "instagram");
+        assert_eq!(instagram.work_track, "instagram_single");
+
+        let tiktok = classify_direct_download_execution(
+            "https://www.tiktok.com/@creator/video/7481234567890123456",
+            Some("tiktok-subscription"),
+        )
+        .expect("tiktok classification");
+        assert_eq!(tiktok.service, "tiktok");
+        assert_eq!(tiktok.origin_kind, "subscription");
+        assert_eq!(tiktok.work_track, "tiktok_recurring");
+    }
+
+    #[test]
+    fn canonical_tiktok_identity_uses_stable_video_id_not_mutable_handle() {
+        let first = canonical_media_source(
+            "https://www.tiktok.com/@old_handle/video/7481234567890123456?lang=en",
+        )
+        .expect("first identity");
+        let renamed =
+            canonical_media_source("https://www.tiktok.com/@new_handle/video/7481234567890123456")
+                .expect("renamed identity");
+        assert_eq!(first.service, "tiktok");
+        assert_eq!(first.media_id, "video:7481234567890123456");
+        assert_eq!(first.media_id, renamed.media_id);
+    }
+
+    #[test]
+    fn canonical_instagram_carousel_assets_are_stable_and_distinct() {
+        let first = canonical_media_source("https://www.instagram.com/p/ABC123/?vv_asset=0")
+            .expect("first asset");
+        let second = canonical_media_source(
+            "https://instagram.com/reel/ABC123/?vv_asset=1&utm_source=share",
+        )
+        .expect("second asset");
+        assert_eq!(first.service, "instagram");
+        assert_eq!(first.media_id, "post:ABC123:asset:0");
+        assert_eq!(second.media_id, "post:ABC123:asset:1");
+        assert_ne!(first.media_id, second.media_id);
     }
 
     #[test]
@@ -5544,7 +5798,10 @@ INSERT INTO media_source_identity (
         let target_root = dir.path().join("target_root");
         std::fs::create_dir_all(&source_root).unwrap();
         std::fs::create_dir_all(&target_root).unwrap();
-        let source_path = source_root.join("transfer.mkv").to_string_lossy().to_string();
+        let source_path = source_root
+            .join("transfer.mkv")
+            .to_string_lossy()
+            .to_string();
         let target_path = replace_root_prefix(
             &source_path,
             &source_root.to_string_lossy(),
@@ -5660,7 +5917,11 @@ fn media_observation_invalidation_failure_is_truthful_and_keeps_memory_generatio
     let dir = tempfile::tempdir().expect("tempdir");
     let paths = AppPaths::new(dir.path().join("app_data"));
     db::ensure_schema(&paths).expect("schema");
-    let media_text = dir.path().join("durable-invalidation.mkv").to_string_lossy().to_string();
+    let media_text = dir
+        .path()
+        .join("durable-invalidation.mkv")
+        .to_string_lossy()
+        .to_string();
     let conn = db::open(&paths).expect("observation db");
     conn.execute(
         "INSERT INTO media_availability_observation(path,state,observed_at_ms,source,duration_ms,next_refresh_at_ms,invalidated_at_ms) VALUES(?1,'present',1,'fixture',1,9999999999999,NULL) ON CONFLICT(path) DO UPDATE SET state='present',observed_at_ms=1,source='fixture',duration_ms=1,next_refresh_at_ms=9999999999999,invalidated_at_ms=NULL",

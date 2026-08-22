@@ -22,6 +22,7 @@ pub mod speakers;
 pub mod subscriptions;
 pub mod subtitle_tracks;
 pub mod subtitles;
+pub mod tiktok_subscriptions;
 pub mod tools;
 pub mod translate;
 pub mod vendor_patches;

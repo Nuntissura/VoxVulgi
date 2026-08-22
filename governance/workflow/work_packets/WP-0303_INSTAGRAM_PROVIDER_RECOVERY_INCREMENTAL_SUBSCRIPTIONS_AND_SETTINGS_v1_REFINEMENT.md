@@ -1,10 +1,10 @@
 ---
 file_id: WP-0303-REFINEMENT-v1
 file_kind: work-packet-refinement
-updated_at: 2026-08-09
+updated_at: 2026-08-22
 ---
 
-<topic id="operator-request-and-verified-state" status="active" version="v1" wp="WP-0303" updated_at="2026-08-09">
+<topic id="operator-request-and-verified-state" status="active" version="v1" wp="WP-0303" updated_at="2026-08-22">
 
 # Operator request
 
@@ -20,6 +20,7 @@ updated_at: 2026-08-09
 - The current taskboard marks WP-0263 Instagram parity `DONE`, while the current exact runtime case fails. This packet is a regression/recovery contract; it preserves useful WP-0263 behavior but does not accept its old completion as current runtime proof.
 - yt-dlp `2026.07.04` contains an Instagram extractor rework and invalid-cookie detection, so updating and retesting the exact profile is the minimum first remediation.
 - Instaloader 4.15.3 includes profile-resolution and post-metadata fixes and supports incremental archive behavior through `--fast-update`/`--latest-stamps`, resumable/session use, and browser cookie input. It is a candidate, not an automatic replacement before comparative proof.
+- 2026-08-22 exact bounded no-download comparison: the bundled pinned yt-dlp `2026.07.04` returned `[instagram:user] paty.adler: Unable to extract data` and exit `1`. The same release's `InstagramUserIE` is explicitly `_WORKING = False`, while its individual post/reel and story extractors remain implemented.
 
 # Authority and dependencies
 
@@ -34,7 +35,7 @@ updated_at: 2026-08-09
 
 </topic>
 
-<topic id="research-basis-and-selected-design" status="active" version="v1" wp="WP-0303" updated_at="2026-08-09">
+<topic id="research-basis-and-selected-design" status="active" version="v1" wp="WP-0303" updated_at="2026-08-22">
 
 # Sources checked
 
@@ -45,13 +46,14 @@ updated_at: 2026-08-09
 - Instaloader 4.15.3 release: `https://github.com/instaloader/instaloader/releases/tag/v4.15.3`.
 - Instaloader incremental/cookie options: `https://instaloader.github.io/cli-options.html`.
 - Instaloader basic/session usage: `https://instaloader.github.io/basic-usage.html`.
+- Exact current canonical target probe against the bundled pinned yt-dlp `2026.07.04`: `--ignore-config --no-download --flat-playlist --playlist-end 2 --dump-single-json https://www.instagram.com/paty.adler/`; observed exit `1` and `instagram:user Unable to extract data` on 2026-08-22.
 
 # Provider selection gate
 
 1. Update/pin yt-dlp through WP-0299 and run the exact failing profile plus exact public single post/reel probes with captured version/args/outcome.
 2. If updated yt-dlp passes profile enumeration and incremental repeat behavior, keep it as selected provider and retain Instaloader as evaluated fallback only.
 3. If updated yt-dlp profile enumeration fails or is not incrementally reliable, package/pin Instaloader plus dependencies and compare exact profile enumeration, canonical IDs/metadata, second-run dedupe, session behavior, rate/challenge behavior, offline runtime availability, and output mapping.
-4. Select provider per operation if evidence supports it: profile/subscription enumeration may use Instaloader while exact post/reel transfer uses yt-dlp. One canonical Instagram media ID prevents duplicates across adapters.
+4. Selected 2026-08-22: profile/subscription and post/reel structured resolution use pinned Instaloader 4.15.3 because the exact yt-dlp profile gate failed and upstream marks the profile extractor non-working. Resolved post/reel assets transfer through the governed direct-HTTP path; story URLs retain the pinned yt-dlp path. One canonical Instagram media ID prevents duplicates across adapters and carousel assets remain distinct.
 5. Persist selected provider and version/capability epoch; adapter changes do not discard cursors/history or re-download canonical present media.
 
 # Provider adapter contract

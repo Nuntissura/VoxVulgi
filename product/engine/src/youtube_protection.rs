@@ -591,14 +591,14 @@ fn load_runtime_identity(paths: &AppPaths) -> CachedRuntimeIdentity {
     };
     let bundled_yt_dlp_bytes = yt_dlp
         .bundled_installed
-        .then(|| std::fs::metadata(&yt_dlp.bundled_path).ok().map(|value| value.len()))
+        .then(|| {
+            std::fs::metadata(&yt_dlp.bundled_path)
+                .ok()
+                .map(|value| value.len())
+        })
         .flatten();
     let (yt_dlp_available, yt_dlp_version, yt_dlp_sha256_hex) =
-        verified_bundled_ytdlp_identity(
-            &yt_dlp,
-            bundled_yt_dlp_sha256_hex,
-            bundled_yt_dlp_bytes,
-        );
+        verified_bundled_ytdlp_identity(&yt_dlp, bundled_yt_dlp_sha256_hex, bundled_yt_dlp_bytes);
     let provider = crate::tools::youtube_po_provider_install_status(paths);
     let epoch_payload = immutable_runtime_epoch_payload(
         yt_dlp_available,
@@ -670,7 +670,8 @@ pub fn runtime_capabilities(paths: &AppPaths) -> DownloaderRuntimeCapabilities {
         provider_lock_sha256_hex: identity.provider_lock_sha256_hex,
         provider_node_modules_sha256_hex: identity.provider_node_modules_sha256_hex,
         provider_node_modules_verified_at_ms: identity.provider_node_modules_verified_at_ms,
-        provider_node_modules_integrity_verifying: identity.provider_node_modules_integrity_verifying,
+        provider_node_modules_integrity_verifying: identity
+            .provider_node_modules_integrity_verifying,
         provider_error: provider_runtime.error.or(identity.provider_error),
     }
 }
@@ -861,7 +862,11 @@ pub fn reset_tuning_with_generation(
     paths: &AppPaths,
     mutation_generation: u64,
 ) -> Result<YoutubeProtectionTuning> {
-    set_tuning_with_generation(paths, YoutubeProtectionTuning::default(), mutation_generation)
+    set_tuning_with_generation(
+        paths,
+        YoutubeProtectionTuning::default(),
+        mutation_generation,
+    )
 }
 
 pub fn reset_tuning(paths: &AppPaths) -> Result<YoutubeProtectionTuning> {
@@ -876,9 +881,7 @@ pub fn effective_policy(
     effective_policy_with_tuning(baseline, state, now_ms, &YoutubeProtectionTuning::default())
 }
 
-pub fn baseline_effective_policy(
-    baseline: &DownloaderBaselinePolicy,
-) -> DownloaderEffectivePolicy {
+pub fn baseline_effective_policy(baseline: &DownloaderBaselinePolicy) -> DownloaderEffectivePolicy {
     DownloaderEffectivePolicy {
         mode: DownloaderPolicyMode::Normal,
         concurrent_fragments: baseline.concurrent_fragments.max(1),
@@ -1426,7 +1429,9 @@ pub fn record_observation(
     )?;
     compact_outcomes_batch_conn(
         &tx,
-        input.occurred_at_ms.saturating_sub(tuning.raw_retention_ms()),
+        input
+            .occurred_at_ms
+            .saturating_sub(tuning.raw_retention_ms()),
         RAW_RETENTION_BATCH_SIZE,
     )?;
     tx.commit()?;
@@ -2111,7 +2116,16 @@ fn reset_policy_history_internal(
             |row| Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)?, row.get::<_, i64>(2)?, row.get::<_, i64>(3)?, row.get::<_, i64>(4)?, row.get::<_, i64>(5)?, row.get::<_, i64>(6)?, row.get::<_, i64>(7)?)),
         )
         .optional()?;
-    let (reset_id, outcome_max_rowid, transition_max_rowid, mut outcomes_deleted, mut transitions_deleted, rollups_deleted, states_deleted, leases_deleted) = if let Some(row) = existing {
+    let (
+        reset_id,
+        outcome_max_rowid,
+        transition_max_rowid,
+        mut outcomes_deleted,
+        mut transitions_deleted,
+        rollups_deleted,
+        states_deleted,
+        leases_deleted,
+    ) = if let Some(row) = existing {
         row
     } else {
         let reset_id = Uuid::new_v4().to_string();
@@ -2133,7 +2147,16 @@ fn reset_policy_history_internal(
         tx.execute(
             "INSERT INTO downloader_history_reset(reset_id,provider,operation,auth_fingerprint,runtime_epoch,outcome_max_rowid,transition_max_rowid,rollups_deleted,states_deleted,leases_deleted) VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10)",
             params![reset_id, provider, operation, auth_fingerprint, runtime_epoch, outcome_max_rowid, transition_max_rowid, rollups_deleted, states_deleted, leases_deleted])?;
-        (reset_id, outcome_max_rowid, transition_max_rowid, 0, 0, rollups_deleted, states_deleted, leases_deleted)
+        (
+            reset_id,
+            outcome_max_rowid,
+            transition_max_rowid,
+            0,
+            0,
+            rollups_deleted,
+            states_deleted,
+            leases_deleted,
+        )
     };
     outcomes_deleted += tx.execute(
         "DELETE FROM downloader_outcome WHERE rowid IN (SELECT rowid FROM downloader_outcome WHERE provider=?1 AND operation=?2 AND auth_fingerprint=?3 AND runtime_epoch=?4 AND rowid<=?5 ORDER BY rowid LIMIT 1000)",
@@ -2153,7 +2176,10 @@ fn reset_policy_history_internal(
             "UPDATE downloader_history_reset SET outcomes_deleted=?2,transitions_deleted=?3 WHERE reset_id=?1",
             params![reset_id, outcomes_deleted, transitions_deleted])?;
     } else {
-        tx.execute("DELETE FROM downloader_history_reset WHERE reset_id=?1", [&reset_id])?;
+        tx.execute(
+            "DELETE FROM downloader_history_reset WHERE reset_id=?1",
+            [&reset_id],
+        )?;
     }
     tx.commit()?;
     Ok(DownloaderHistoryResetReceipt {
@@ -2423,8 +2449,7 @@ mod tests {
             let mut cache = runtime_identity_cache().lock().unwrap();
             let cached = cache.get_mut(&paths.base_dir).expect("cached identity");
             cached.stamps = current_stamps;
-            cached.verified_at =
-                std::time::Instant::now() - std::time::Duration::from_secs(6);
+            cached.verified_at = std::time::Instant::now() - std::time::Duration::from_secs(6);
         }
         let after_metadata_change = cache_misses();
         let _ = runtime_epoch_for_paths(&paths);
@@ -2464,7 +2489,11 @@ mod tests {
                 Some(pin.sha256_hex.to_ascii_lowercase()),
                 Some(pin.file_bytes),
             ),
-            (true, Some(pin.version.clone()), Some(pin.sha256_hex.to_ascii_lowercase())),
+            (
+                true,
+                Some(pin.version.clone()),
+                Some(pin.sha256_hex.to_ascii_lowercase())
+            ),
         );
         assert!(!verified_bundled_ytdlp_identity(
             &bundled,
@@ -2472,12 +2501,14 @@ mod tests {
             Some(pin.file_bytes),
         )
         .0);
-        assert!(!verified_bundled_ytdlp_identity(
-            &bundled,
-            Some(pin.sha256_hex.clone()),
-            Some(pin.file_bytes.saturating_sub(1)),
-        )
-        .0);
+        assert!(
+            !verified_bundled_ytdlp_identity(
+                &bundled,
+                Some(pin.sha256_hex.clone()),
+                Some(pin.file_bytes.saturating_sub(1)),
+            )
+            .0
+        );
     }
 
     #[test]
@@ -2578,8 +2609,18 @@ mod tests {
         .expect("initial state");
         let effective = baseline_effective_policy(&baseline);
         for (target, outcome, duration_ms, at) in [
-            ("video-a", DownloaderOutcomeClass::RateLimited, 125_i64, 1_000_i64),
-            ("video-b", DownloaderOutcomeClass::Success, 375_i64, 2_000_i64),
+            (
+                "video-a",
+                DownloaderOutcomeClass::RateLimited,
+                125_i64,
+                1_000_i64,
+            ),
+            (
+                "video-b",
+                DownloaderOutcomeClass::Success,
+                375_i64,
+                2_000_i64,
+            ),
         ] {
             let observed = record_observation(
                 &paths,
@@ -2632,7 +2673,12 @@ mod tests {
             .query_row(
                 "SELECT COALESCE(SUM(duration_ms_total),0) FROM downloader_outcome_rollup \
                  WHERE provider=?1 AND operation=?2 AND auth_fingerprint=?3 AND runtime_epoch=?4",
-                params![PROVIDER_YOUTUBE, OPERATION_DOWNLOAD, "auth-passive", "epoch-passive"],
+                params![
+                    PROVIDER_YOUTUBE,
+                    OPERATION_DOWNLOAD,
+                    "auth-passive",
+                    "epoch-passive"
+                ],
                 |row| row.get(0),
             )
             .expect("duration rollup");
@@ -2954,30 +3000,40 @@ mod tests {
         let mut conn = db::open(&paths).expect("db");
         db::migrate(&conn).expect("migrate");
         let baseline_json = serde_json::to_string(&baseline()).unwrap();
-        let effective_json = serde_json::to_string(&baseline_effective_policy(&baseline())).unwrap();
+        let effective_json =
+            serde_json::to_string(&baseline_effective_policy(&baseline())).unwrap();
         let tx = conn.transaction().expect("seed transaction");
         {
             let mut statement = tx.prepare(
                 "INSERT INTO downloader_outcome(id,provider,operation,target_fingerprint,auth_fingerprint,runtime_epoch,baseline_policy_json,effective_policy_json,occurred_at_ms,outcome_class) VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10)",
             ).expect("seed statement");
             for index in 0..=RAW_RETENTION_BATCH_SIZE {
-                statement.execute(params![
-                    format!("expired-{index:04}"), PROVIDER_YOUTUBE, OPERATION_DOWNLOAD,
-                    format!("target-{index:04}"), "auth", "epoch", baseline_json,
-                    effective_json, 1_i64, DownloaderOutcomeClass::Unknown.as_str(),
-                ]).expect("seed outcome");
+                statement
+                    .execute(params![
+                        format!("expired-{index:04}"),
+                        PROVIDER_YOUTUBE,
+                        OPERATION_DOWNLOAD,
+                        format!("target-{index:04}"),
+                        "auth",
+                        "epoch",
+                        baseline_json,
+                        effective_json,
+                        1_i64,
+                        DownloaderOutcomeClass::Unknown.as_str(),
+                    ])
+                    .expect("seed outcome");
             }
         }
         tx.commit().expect("seed commit");
 
-        let interrupted = drain_expired_outcomes(&paths, i64::MAX, 25, 1, 1_000)
-            .expect("bounded drain");
+        let interrupted =
+            drain_expired_outcomes(&paths, i64::MAX, 25, 1, 1_000).expect("bounded drain");
         assert_eq!(interrupted.batches, 1);
         assert_eq!(interrupted.deleted, RAW_RETENTION_BATCH_SIZE as u64);
         assert!(interrupted.has_more && !interrupted.complete);
 
-        let resumed = drain_expired_outcomes(&paths, i64::MAX, 25, 8, 1_000)
-            .expect("resumed drain");
+        let resumed =
+            drain_expired_outcomes(&paths, i64::MAX, 25, 8, 1_000).expect("resumed drain");
         assert_eq!(resumed.deleted, 1);
         assert!(resumed.complete && !resumed.has_more);
     }
@@ -2988,16 +3044,26 @@ mod tests {
         let mut conn = db::open(&paths).expect("db");
         db::migrate(&conn).expect("migrate");
         let baseline_json = serde_json::to_string(&baseline()).unwrap();
-        let effective_json = serde_json::to_string(&baseline_effective_policy(&baseline())).unwrap();
+        let effective_json =
+            serde_json::to_string(&baseline_effective_policy(&baseline())).unwrap();
         let tx = conn.transaction().expect("seed transaction");
         {
             let mut statement = tx.prepare(
                 "INSERT INTO downloader_outcome(id,provider,operation,target_fingerprint,auth_fingerprint,runtime_epoch,baseline_policy_json,effective_policy_json,occurred_at_ms,outcome_class) VALUES(?1,?2,?3,?4,?5,?6,?7,?8,1,'unknown')",
             ).unwrap();
             for index in 0..(RAW_RETENTION_BATCH_SIZE * 3 + 1) {
-                statement.execute(params![format!("bounded-{index:05}"), PROVIDER_YOUTUBE,
-                    OPERATION_DOWNLOAD, format!("target-{index:05}"), "auth", "epoch",
-                    baseline_json, effective_json]).unwrap();
+                statement
+                    .execute(params![
+                        format!("bounded-{index:05}"),
+                        PROVIDER_YOUTUBE,
+                        OPERATION_DOWNLOAD,
+                        format!("target-{index:05}"),
+                        "auth",
+                        "epoch",
+                        baseline_json,
+                        effective_json
+                    ])
+                    .unwrap();
             }
         }
         tx.commit().unwrap();
@@ -3022,11 +3088,21 @@ mod tests {
                 "INSERT INTO downloader_outcome(id,provider,operation,target_fingerprint,auth_fingerprint,runtime_epoch,baseline_policy_json,effective_policy_json,occurred_at_ms,outcome_class) VALUES(?1,?2,?3,?4,?5,?6,?7,?8,1,'unknown')",
             ).unwrap();
             let baseline_json = serde_json::to_string(&baseline()).unwrap();
-            let effective_json = serde_json::to_string(&baseline_effective_policy(&baseline())).unwrap();
+            let effective_json =
+                serde_json::to_string(&baseline_effective_policy(&baseline())).unwrap();
             for index in 0..(RAW_RETENTION_BATCH_SIZE + 1) {
-                statement.execute(params![format!("time-budget-{index:05}"), PROVIDER_YOUTUBE,
-                    OPERATION_DOWNLOAD, format!("target-{index:05}"), "auth", "epoch",
-                    baseline_json, effective_json]).unwrap();
+                statement
+                    .execute(params![
+                        format!("time-budget-{index:05}"),
+                        PROVIDER_YOUTUBE,
+                        OPERATION_DOWNLOAD,
+                        format!("target-{index:05}"),
+                        "auth",
+                        "epoch",
+                        baseline_json,
+                        effective_json
+                    ])
+                    .unwrap();
             }
         }
         tx.commit().unwrap();
@@ -3489,7 +3565,9 @@ mod tests {
         assert!(second.has_more);
         assert!(second_elapsed < std::time::Duration::from_secs(10));
         let retained: i64 = conn
-            .query_row("SELECT COUNT(*) FROM downloader_outcome", [], |row| row.get(0))
+            .query_row("SELECT COUNT(*) FROM downloader_outcome", [], |row| {
+                row.get(0)
+            })
             .expect("retained count");
         assert_eq!(
             retained,
@@ -3509,12 +3587,9 @@ mod tests {
         let saved = set_tuning_with_generation(&paths, YoutubeProtectionTuning::default(), 100)
             .expect("first durable generation");
         drop(saved);
-        assert!(set_tuning_with_generation(
-            &paths,
-            YoutubeProtectionTuning::default(),
-            99
-        )
-        .is_err());
+        assert!(
+            set_tuning_with_generation(&paths, YoutubeProtectionTuning::default(), 99).is_err()
+        );
 
         let mut conn = db::open(&paths).expect("open rollback probe");
         let tx = conn
@@ -3530,13 +3605,13 @@ mod tests {
                 |row| row.get(0),
             )
             .expect("rollback count");
-        assert_eq!(persisted, 0, "failed/rolled-back mutations cannot consume generation");
-        assert!(set_tuning_with_generation(
-            &paths,
-            YoutubeProtectionTuning::default(),
-            101
-        )
-        .is_ok());
+        assert_eq!(
+            persisted, 0,
+            "failed/rolled-back mutations cannot consume generation"
+        );
+        assert!(
+            set_tuning_with_generation(&paths, YoutubeProtectionTuning::default(), 101).is_ok()
+        );
     }
 
     #[test]
@@ -3584,6 +3659,10 @@ mod tests {
         assert!(reopened.pending);
         assert_eq!(reopened.consecutive_failures, 3);
         persist_retention_continuation(&paths, false, 0).expect("complete");
-        assert!(!retention_continuation(&paths).expect("reopen complete").pending);
+        assert!(
+            !retention_continuation(&paths)
+                .expect("reopen complete")
+                .pending
+        );
     }
 }

@@ -18,7 +18,10 @@ test("Jobs exposes a backend-filtered canonical source selector", () => {
   for (const track of [
     "youtube_single",
     "youtube_recurring",
-    "instagram",
+    "instagram_single",
+    "instagram_recurring",
+    "tiktok_single",
+    "tiktok_recurring",
     "other_video",
     "image_archive",
     "localization",

@@ -462,7 +462,10 @@ test("Jobs tracks use persisted scheduler truth rather than a global concurrency
   for (const track of [
     "youtube_single",
     "youtube_recurring",
-    "instagram",
+    "instagram_single",
+    "instagram_recurring",
+    "tiktok_single",
+    "tiktok_recurring",
     "other_video",
     "image_archive",
     "localization",
@@ -501,7 +504,10 @@ test("Jobs tracks use persisted scheduler truth rather than a global concurrency
   );
   assert.match(jobsSource, /countForJobsView\(selectedOverviewCounts, primaryView\)/);
   assert.match(jobsSource, /jobTrackLabel\(job\.track\)/);
-  assert.match(runtimeSource, /case "instagram":[\s\S]{0,80}return "Instagram"/);
+  assert.match(runtimeSource, /case "instagram_single":[\s\S]{0,80}return "Instagram single"/);
+  assert.match(runtimeSource, /case "instagram_recurring":[\s\S]{0,80}return "Instagram background"/);
+  assert.match(runtimeSource, /case "tiktok_single":[\s\S]{0,80}return "TikTok single"/);
+  assert.match(runtimeSource, /case "tiktok_recurring":[\s\S]{0,80}return "TikTok background"/);
   assert.match(runtimeSource, /case "other_video":[\s\S]{0,80}return "Other video"/);
   assert.match(librarySource, /type EnqueuedJobReceipt[\s\S]{0,180}track\?:/);
   assert.match(librarySource, /summarizeEnqueuedTracks\(queued\)/);
