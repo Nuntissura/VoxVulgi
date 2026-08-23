@@ -244,11 +244,20 @@ The monitor is out-of-process and writes to:
 
 Each run includes:
 
-- `samples.jsonl` with Windows process responsiveness, process tree, heavy child processes, bridge health/state, read-only DB probe, bounded NAS root path probe, Python package state, and latest freeze-report summary.
-- `summary.json` for machine reading.
-- `summary.md` for quick human/agent triage.
+- `samples.jsonl` with Windows process responsiveness, process tree, heavy child processes, bridge health/state, startup-phase state/errors, read-only DB probe, bounded NAS root path probe, Python package state, and latest freeze-report summary.
+- `summary.json` for machine reading, including cross-sample process/bridge lifecycle transitions, stale-report provenance, startup database-lock errors, and incomplete startup phases.
+- `summary.md` for quick human/agent triage with the same lifecycle and startup-failure signals.
+
+The watcher reads startup trace state before probing SQLite. While a live `db_schema` phase is pending or running, it suppresses its DB probe and records the suppression reason so observation cannot add lock pressure to startup migration.
 
 Use `vvwatch.cmd` when the app itself may be frozen or when evidence must distinguish app UI hangs from DB locks, child process fan-out, bridge stalls, NAS stalls, and Python environment drift.
+
+## Database-First Desktop Startup
+
+- [VV-STARTUP-001] Desktop schema migration and default-video-library initialization are hard predecessors to the agent bridge, offline-bundle hydration, watcher supervision, job runners, subscription auto-sync, and every other runtime background component that can access SQLite.
+- [VV-STARTUP-002] Do not move a SQLite reader or writer ahead of the database-ready startup gate; startup speed work must preserve database-first ordering.
+- [VV-STARTUP-003] A schema/default-library initialization failure must emit a `db_schema` startup error before setup exits.
+- [VV-STARTUP-004] Changes to desktop startup ordering must retain the focused database-ready and background-order regression tests and must be verified at the packaged headless app boundary.
 
 ## [OPERATOR-AUTHORITY] Operator Authority Over Pace, Scope, and Stopping
 

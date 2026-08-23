@@ -1447,3 +1447,11 @@ This changelog tracks desktop installer builds produced by `governance/scripts/b
 - Artifacts:
   - `product/desktop/build_target/Current/release/bundle/nsis/VoxVulgi_0.1.178_x64-setup.exe`
 - Notes: Final Instagram and TikTok provider refactors; packaged visual audit correction aligns Instagram subscription action label with non-destructive archive semantics.
+
+## 0.1.179 - 2026-08-23T01:19:44Z
+- Work Packets: `WP-0309`, `WP-0310`
+- Commit: `ecd4437`
+- Offline Bundle ID: `offline_full_win64_20260822_201543`
+- Artifacts:
+  - `product/desktop/build_target/Current/release/bundle/nsis/VoxVulgi_0.1.179_x64-setup.exe`
+- Notes: Database-first startup serializes schema/default-library readiness before bridge, offline hydration, watcher supervision, and runtime background work; vvwatch startup diagnostics hardened.

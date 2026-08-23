@@ -1126,6 +1126,13 @@ function Get-TraceSummary([string]$AppDir, $CurrentProcessPid, $ProcessStartedAt
         correlation_matched = $false
         frontend_long_task_count = 0
         frontend_long_task_max_ms = 0
+        startup_phase_event_count = 0
+        startup_phase_error_count = 0
+        startup_database_lock_error_count = 0
+        startup_phase_errors = @()
+        startup_latest_phases = @()
+        startup_incomplete_phases = @()
+        startup_schema_running = $false
         error = $null
     }
     if (-not $summary.exists) {
@@ -1137,8 +1144,11 @@ function Get-TraceSummary([string]$AppDir, $CurrentProcessPid, $ProcessStartedAt
             $r = Get-Content -LiteralPath $report -Raw | ConvertFrom-Json
             $summary.app_version = $r.app_version
             $summary.report_pid = $r.pid
-            if ($null -ne $CurrentProcessPid -and $null -ne $r.pid) {
-                $summary.report_stale = ([int]$r.pid -ne [int]$CurrentProcessPid)
+            if ($null -ne $r.pid) {
+                $summary.report_stale = (
+                    $null -eq $CurrentProcessPid -or
+                    [int]$r.pid -ne [int]$CurrentProcessPid
+                )
             }
             $summary.current_page = $r.agent_state.current_page
             $traceRows = @($r.recent_trace)
@@ -1157,6 +1167,45 @@ function Get-TraceSummary([string]$AppDir, $CurrentProcessPid, $ProcessStartedAt
             $counts[$g.Name] = $g.Count
         }
         $summary.event_counts = $counts
+        $startupRows = @(
+            $traceRows |
+                Where-Object { $_.event -eq "startup_phase" } |
+                Sort-Object { [int64]$_.ts_ms }
+        )
+        $summary.startup_phase_event_count = $startupRows.Count
+        $latestStartupByPhase = [ordered]@{}
+        foreach ($row in $startupRows) {
+            $phaseId = [string]$row.details.phase_id
+            if ([string]::IsNullOrWhiteSpace($phaseId)) { continue }
+            $latestStartupByPhase[$phaseId] = [pscustomobject]@{
+                phase_id = $phaseId
+                label = [string]$row.details.label
+                state = [string]$row.details.state
+                error = if ($null -ne $row.details.error) { [string]$row.details.error } else { $null }
+                ts_ms = [int64]$row.ts_ms
+            }
+        }
+        $summary.startup_latest_phases = @($latestStartupByPhase.Values)
+        $summary.startup_phase_errors = @(
+            $summary.startup_latest_phases |
+                Where-Object {
+                    $_.state -eq "error" -or
+                    -not [string]::IsNullOrWhiteSpace([string]$_.error)
+                }
+        )
+        $summary.startup_phase_error_count = $summary.startup_phase_errors.Count
+        $summary.startup_database_lock_error_count = @(
+            $summary.startup_phase_errors |
+                Where-Object { [string]$_.error -match '(?i)database.*(?:locked|busy)|(?:locked|busy).*database' }
+        ).Count
+        $summary.startup_incomplete_phases = @(
+            $summary.startup_latest_phases |
+                Where-Object { $_.state -in @("pending", "running") }
+        )
+        $summary.startup_schema_running = @(
+            $summary.startup_incomplete_phases |
+                Where-Object { $_.phase_id -eq "db_schema" }
+        ).Count -gt 0
         $summary.top_slow_commands = @(
             $traceRows |
                 Where-Object { $_.event -eq "command_slow" } |
@@ -1167,7 +1216,9 @@ function Get-TraceSummary([string]$AppDir, $CurrentProcessPid, $ProcessStartedAt
         $commandEvents = @(
             $traceRows |
                 Where-Object { $_.event -in @("command_started", "command_completed") } |
-                Sort-Object ts_ms
+                Sort-Object `
+                    @{ Expression = { [int64]$_.ts_ms }; Ascending = $true },
+                    @{ Expression = { if ($_.event -eq "command_started") { 0 } else { 1 } }; Ascending = $true }
         )
         $activeCommands = @{}
         $maxOverlap = 0
@@ -1328,7 +1379,21 @@ function New-Sample(
     $probeDurations.bridge_probe_ms = [int]$probeSw.ElapsedMilliseconds
 
     $probeSw.Restart()
-    $dbProbe = if ($HeavyProbe) {
+    $trace = Get-TraceSummary -AppDir $AppDir -CurrentProcessPid $tree.root.pid -ProcessStartedAtMs $bridge.started_at_ms -CorrelationIncidentId $CorrelationIncidentId
+    $probeSw.Stop()
+    $probeDurations.trace_probe_ms = [int]$probeSw.ElapsedMilliseconds
+
+    $liveSchemaMigration = $null -ne $tree.root -and [bool]$trace.startup_schema_running
+    $probeSw.Restart()
+    $dbProbe = if ($HeavyProbe -and $liveSchemaMigration) {
+        [ordered]@{
+            skipped = $true
+            ok = $false
+            timed_out = $false
+            roots = @()
+            error = "suppressed because startup schema migration is running"
+        }
+    } elseif ($HeavyProbe) {
         Invoke-DbProbe -AppDir $AppDir
     } else {
         [ordered]@{
@@ -1349,11 +1414,6 @@ function New-Sample(
     }
     $probeSw.Stop()
     $probeDurations.path_probe_ms = [int]$probeSw.ElapsedMilliseconds
-
-    $probeSw.Restart()
-    $trace = Get-TraceSummary -AppDir $AppDir -CurrentProcessPid $tree.root.pid -ProcessStartedAtMs $bridge.started_at_ms -CorrelationIncidentId $CorrelationIncidentId
-    $probeSw.Stop()
-    $probeDurations.trace_probe_ms = [int]$probeSw.ElapsedMilliseconds
 
     $probeSw.Restart()
     $hostPressure = if ($HeavyProbe) {
@@ -1396,6 +1456,9 @@ function Write-Summary([string]$RunDir, [object[]]$Samples, [hashtable]$Metadata
     $bridgeFailures = @($Samples | Where-Object { -not $_.bridge.probe.health_ok }).Count
     $heavySamples = @($Samples | Where-Object { $_.process.heavy_descendant_count -gt 0 }).Count
     $dbTimeouts = @($Samples | Where-Object { $_.db.timed_out }).Count
+    $dbSchemaSuppressed = @(
+        $Samples | Where-Object { $_.db.error -eq "suppressed because startup schema migration is running" }
+    ).Count
     $pathTimeouts = 0
     foreach ($sample in $Samples) {
         $pathTimeouts += @($sample.path_probe | Where-Object { $_.timed_out }).Count
@@ -1430,8 +1493,63 @@ function Write-Summary([string]$RunDir, [object[]]$Samples, [hashtable]$Metadata
     }
 
     $latestTrace = if ($Samples.Count -gt 0) { $Samples[-1].trace } else { $null }
-    $latestProcessRoot = if ($Samples.Count -gt 0) { $Samples[-1].process.root } else { $null }
-    $latestBridgeState = if ($Samples.Count -gt 0) { $Samples[-1].bridge.probe.state } else { $null }
+    $terminalProcessRoot = if ($Samples.Count -gt 0) { $Samples[-1].process.root } else { $null }
+    $latestObservedProcessSample = $Samples |
+        Where-Object { $null -ne $_.process.root } |
+        Select-Object -Last 1
+    $latestLiveBridgeSample = $Samples |
+        Where-Object { $_.bridge.probe.health_ok -and $null -ne $_.bridge.probe.state } |
+        Select-Object -Last 1
+    $latestProcessRoot = if ($latestObservedProcessSample) { $latestObservedProcessSample.process.root } else { $null }
+    $latestBridgeState = if ($latestLiveBridgeSample) { $latestLiveBridgeSample.bridge.probe.state } else { $null }
+    $observedProcessPids = @(
+        $Samples |
+            Where-Object { $null -ne $_.process.root -and $null -ne $_.process.root.pid } |
+            ForEach-Object { [int]$_.process.root.pid } |
+            Sort-Object -Unique
+    )
+    $observedBridgePids = @(
+        $Samples |
+            Where-Object { $null -ne $_.bridge.file.pid } |
+            ForEach-Object { [int]$_.bridge.file.pid } |
+            Sort-Object -Unique
+    )
+    $launchTransitions = [Collections.Generic.List[object]]::new()
+    $exitTransitions = [Collections.Generic.List[object]]::new()
+    $previousPid = $null
+    foreach ($sample in $Samples) {
+        $currentPid = if ($sample.process.root -and $null -ne $sample.process.root.pid) {
+            [int]$sample.process.root.pid
+        } else {
+            $null
+        }
+        if ($null -eq $previousPid -and $null -ne $currentPid) {
+            $launchTransitions.Add([pscustomobject]@{
+                pid = $currentPid
+                sample_index = [int]$sample.sample_index
+                ts_ms = [int64]$sample.ts_ms
+            })
+        } elseif ($null -ne $previousPid -and ($null -eq $currentPid -or $currentPid -ne $previousPid)) {
+            $exitTransitions.Add([pscustomobject]@{
+                pid = [int]$previousPid
+                observed_absent_at_sample = [int]$sample.sample_index
+                observed_absent_at_ms = [int64]$sample.ts_ms
+                replacement_pid = $currentPid
+            })
+        }
+        $previousPid = $currentPid
+    }
+    $processLifecycle = [ordered]@{
+        observed_process_pids = $observedProcessPids
+        observed_bridge_pids = $observedBridgePids
+        process_present_sample_count = @($Samples | Where-Object { $null -ne $_.process.root }).Count
+        stale_bridge_sample_count = @($Samples | Where-Object { $_.bridge.file.stale }).Count
+        launch_transitions = @($launchTransitions)
+        exit_transitions = @($exitTransitions)
+        terminal_process_pid = if ($terminalProcessRoot) { $terminalProcessRoot.pid } else { $null }
+        terminal_bridge_pid = if ($Samples.Count -gt 0) { $Samples[-1].bridge.file.pid } else { $null }
+        terminal_bridge_pid_alive = if ($Samples.Count -gt 0) { $Samples[-1].bridge.file.pid_alive } else { $false }
+    }
     $repoDesktopVersion = if ($Metadata.repo_desktop_version) { [string]$Metadata.repo_desktop_version } else { $null }
     $liveAppVersion = if ($latestBridgeState -and $latestBridgeState.app_version) {
         [string]$latestBridgeState.app_version
@@ -1471,7 +1589,9 @@ function Write-Summary([string]$RunDir, [object[]]$Samples, [hashtable]$Metadata
         bridge_failure_samples = $bridgeFailures
         heavy_child_process_samples = $heavySamples
         db_timeout_samples = $dbTimeouts
+        db_probe_suppressed_schema_samples = $dbSchemaSuppressed
         path_timeout_count = $pathTimeouts
+        process_lifecycle = $processLifecycle
         wpr_capability = $Metadata.wpr_capability
         latest_trace = $latestTrace
         python_environment = if ($Samples.Count -gt 0) { $Samples[0].python_environment } else { $null }
@@ -1500,13 +1620,18 @@ function Write-Summary([string]$RunDir, [object[]]$Samples, [hashtable]$Metadata
     $null = $md.AppendLine("- Bridge failure samples: $bridgeFailures")
     $null = $md.AppendLine("- Heavy child process samples: $heavySamples")
     $null = $md.AppendLine("- DB timeout samples: $dbTimeouts")
+    $null = $md.AppendLine("- DB probes suppressed during schema migration: $dbSchemaSuppressed")
     $null = $md.AppendLine("- Path timeout count: $pathTimeouts")
+    $null = $md.AppendLine("- Observed app PIDs: $(@($summary.process_lifecycle.observed_process_pids) -join ', ')")
+    $null = $md.AppendLine("- Observed bridge PIDs: $(@($summary.process_lifecycle.observed_bridge_pids) -join ', ')")
+    $null = $md.AppendLine("- Process launch/exit transitions: $(@($summary.process_lifecycle.launch_transitions).Count) / $(@($summary.process_lifecycle.exit_transitions).Count)")
+    $null = $md.AppendLine("- Stale bridge samples: $($summary.process_lifecycle.stale_bridge_sample_count)")
     $null = $md.AppendLine("- WPR/WebView2 capability ready: $($summary.wpr_capability.available) ($($summary.wpr_capability.reason))")
     if ($summary.app_version_mismatch) {
         $null = $md.AppendLine("- App version mismatch: live app/executable version differs from the repo under test; rebuild or reinstall before treating UI evidence as current.")
     }
     if ($latestTrace -and $latestTrace.report_stale) {
-        $null = $md.AppendLine("- Stale freeze report: report pid $($latestTrace.report_pid) differs from live app pid $($latestTrace.current_process_pid)")
+        $null = $md.AppendLine("- Stale freeze report: report pid $($latestTrace.report_pid) has no matching live app pid (current=$($latestTrace.current_process_pid))")
     }
     if ($summary.python_environment -and $summary.python_environment.packages) {
         $null = $md.AppendLine()
@@ -1557,6 +1682,24 @@ function Write-Summary([string]$RunDir, [object[]]$Samples, [hashtable]$Metadata
         $null = $md.AppendLine("## Top Slow Commands From Latest App Freeze Report")
         foreach ($row in @($latestTrace.top_slow_commands | Select-Object -First 8)) {
             $null = $md.AppendLine("- $($row.cmd): $($row.elapsed_ms) ms")
+        }
+    }
+    if ($latestTrace) {
+        $null = $md.AppendLine()
+        $null = $md.AppendLine("## Startup Lifecycle")
+        $null = $md.AppendLine("- Startup phase events: $($latestTrace.startup_phase_event_count)")
+        $null = $md.AppendLine("- Startup phase errors: $($latestTrace.startup_phase_error_count)")
+        $null = $md.AppendLine("- Startup database lock errors: $($latestTrace.startup_database_lock_error_count)")
+        $incompletePhaseText = @(
+            $latestTrace.startup_incomplete_phases |
+                ForEach-Object { "$($_.phase_id)=$($_.state)" }
+        ) -join ", "
+        $null = $md.AppendLine("- Incomplete startup phases: $incompletePhaseText")
+        foreach ($row in @($latestTrace.startup_phase_errors)) {
+            $null = $md.AppendLine("- Startup error $($row.phase_id): $($row.error)")
+        }
+        foreach ($row in @($summary.process_lifecycle.exit_transitions)) {
+            $null = $md.AppendLine("- Process exit observed: pid=$($row.pid), absent_at_sample=$($row.observed_absent_at_sample), replacement_pid=$($row.replacement_pid)")
         }
     }
     if ($latestTrace) {
@@ -1691,7 +1834,15 @@ do {
         $page = $sample.bridge.probe.state.current_page
         $heavy = $sample.process.heavy_descendant_count
         $responding = if ($root) { $root.responding } else { $false }
-        Write-Host ("sample {0}: responding={1} page={2} bridge={3} heavy_children={4}" -f $samples.Count, $responding, $page, $sample.bridge.probe.health_ok, $heavy)
+        $startupErrors = [int]$sample.trace.startup_phase_error_count
+        $startupIncomplete = @($sample.trace.startup_incomplete_phases | ForEach-Object { "$($_.phase_id)=$($_.state)" }) -join ","
+        Write-Host ("sample {0}: responding={1} page={2} bridge={3} heavy_children={4} startup_errors={5} startup_incomplete={6}" -f $samples.Count, $responding, $page, $sample.bridge.probe.health_ok, $heavy, $startupErrors, $startupIncomplete)
+        if ($samples.Count -gt 1) {
+            $previousRoot = $samples[$samples.Count - 2].process.root
+            if ($previousRoot -and (-not $root -or [int]$root.pid -ne [int]$previousRoot.pid)) {
+                Write-Warning ("process exit observed: pid={0} absent_at_sample={1} replacement_pid={2}" -f $previousRoot.pid, $sample.sample_index, $(if ($root) { $root.pid } else { $null }))
+            }
+        }
     }
     $nextDue = $nextDue.AddSeconds($IntervalSeconds)
     $now = Get-Date

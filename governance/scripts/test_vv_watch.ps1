@@ -38,6 +38,10 @@ try {
     Assert-True ($scriptSource -match "webview_descendants") "vv_watch.ps1 must inventory WebView2 renderer descendants separately"
     Assert-True ($scriptSource -match "incident_event_count") "vv_watch.ps1 must correlate internal trace rows by incident id"
     Assert-True ($scriptSource -match "function Get-BoundedDiagnosticsTraceRows") "vv_watch.ps1 must read a bounded set of rotated generations"
+    Assert-True ($scriptSource -match "startup_phase_errors") "vvwatch must summarize startup phase errors"
+    Assert-True ($scriptSource -match "startup_incomplete_phases") "vvwatch must summarize incomplete startup phases"
+    Assert-True ($scriptSource -match "process_lifecycle") "vvwatch must retain process lifecycle evidence across samples"
+    Assert-True ($scriptSource -match "schema migration is running") "vvwatch must suppress DB probes while schema migration is running"
     Assert-True ($scriptSource -match 'incidents\\\{0\}\\trace\.jsonl') "vvwatch must read the app-owned active incident artifact"
     Assert-True ($scriptSource -match '\$maxCompressedGenerationBytes = 8MB') "vvwatch must bound compressed historical trace work on the sampling path"
     Assert-True ($scriptSource -match 'if \(\$recentLines\.Count -lt \$Limit\)') "vvwatch must skip historical generations when current/incident tails already satisfy the bounded read"
@@ -60,7 +64,29 @@ try {
         ts_ms = [DateTimeOffset]::UtcNow.ToUnixTimeMilliseconds(); event = "rotated_generation_fixture"; level = "info";
         details = @{}; incident_id = $null; span_id = $null
     } | ConvertTo-Json -Compress -Depth 6) + "`n")
-    Write-Utf8NoBomFile -Path (Join-Path $traceDir "diagnostics_trace.jsonl") -Content ""
+    $fixtureStartedAtMs = [DateTimeOffset]::UtcNow.ToUnixTimeMilliseconds() - 1000
+    $fixtureRows = @(
+        @{ ts_ms = $fixtureStartedAtMs + 10; event = "startup_phase"; level = "info"; details = @{ phase_id = "app_dirs"; label = "App data + output layout"; state = "ready"; error = $null } },
+        @{ ts_ms = $fixtureStartedAtMs + 20; event = "startup_phase"; level = "info"; details = @{ phase_id = "db_schema"; label = "Database schema"; state = "running"; error = $null } },
+        @{ ts_ms = $fixtureStartedAtMs + 30; event = "startup_phase"; level = "error"; details = @{ phase_id = "offline_bundle"; label = "Offline bundle hydration"; state = "error"; error = "database error: database is locked" } },
+        @{ ts_ms = $fixtureStartedAtMs + 40; event = "command_started"; level = "info"; details = @{ invocation_id = 1; cmd = "startup_status" } },
+        @{ ts_ms = $fixtureStartedAtMs + 40; event = "command_completed"; level = "info"; details = @{ invocation_id = 1; cmd = "startup_status"; elapsed_ms = 0 } }
+    )
+    Write-Utf8NoBomFile -Path (Join-Path $traceDir "diagnostics_trace.jsonl") -Content ((@($fixtureRows | ForEach-Object { $_ | ConvertTo-Json -Compress -Depth 6 }) -join "`n") + "`n")
+    $freezeReportDir = Join-Path $traceDir "freeze_reports"
+    New-Item -ItemType Directory -Path $freezeReportDir -Force | Out-Null
+    Write-Utf8NoBomFile -Path (Join-Path $freezeReportDir "freeze_report_latest.json") -Content ((@{
+        app_version = "0.1.169"
+        pid = 424242
+        agent_state = @{ current_page = "media_library" }
+        recent_trace = $fixtureRows
+    } | ConvertTo-Json -Compress -Depth 8) + "`n")
+    Write-Utf8NoBomFile -Path (Join-Path $appDir "agent_bridge.json") -Content ((@{
+        pid = 424242
+        port = 9
+        started_at_ms = $fixtureStartedAtMs
+    } | ConvertTo-Json -Compress) + "`n")
+    Write-Utf8NoBomFile -Path (Join-Path $appDir "agent_bridge_port.txt") -Content "9`n"
 
     & powershell.exe -NoLogo -NoProfile -ExecutionPolicy Bypass -File $scriptPath `
         -SelfTest `
@@ -118,8 +144,84 @@ try {
     Assert-True ($summary.incident_id -eq $armedIncidentId) "Armed -> watch -> trigger correlation did not preserve the exact incident id"
     Assert-True ([int]$summary.latest_trace.incident_event_count -ge 1) "active incident artifact was not included in the trace summary"
     Assert-True ([int]$summary.latest_trace.event_counts.rotated_generation_fixture -ge 1) "bounded rotated generation was not included in the trace summary"
+    Assert-True ([bool]$summary.latest_trace.report_stale) "dead freeze-report PID must be stale when no live app process exists"
+    Assert-True ([string]::IsNullOrWhiteSpace([string]$summary.live_app_version)) "stale freeze-report version must not become live_app_version"
+    Assert-True ([int]$summary.latest_trace.startup_phase_error_count -eq 1) "startup error fixture was not summarized"
+    Assert-True ([int]$summary.latest_trace.startup_database_lock_error_count -eq 1) "startup database-lock fixture was not classified"
+    Assert-True (@($summary.latest_trace.startup_incomplete_phases | Where-Object { $_.phase_id -eq "db_schema" }).Count -eq 1) "running db_schema fixture was not reported as incomplete"
+    Assert-True ([int]$summary.latest_trace.command_incomplete_count -eq 0) "same-timestamp command completion must sort after its start"
+    Assert-True ([int]$summary.process_lifecycle.stale_bridge_sample_count -ge 1) "stale bridge lifecycle evidence was not retained"
+    Assert-True (@($summary.process_lifecycle.observed_bridge_pids) -contains 424242) "stale bridge PID was not retained in lifecycle summary"
     Assert-True ($null -ne $summary.wpr_capability) "Summary missing WPR capability receipt"
     Assert-True (Test-Path -LiteralPath (Join-Path $runDir "wpr_capability.json") -PathType Leaf) "Missing wpr_capability.json"
+
+    # A live process with db_schema still running must suppress the external DB probe so the
+    # diagnostic reader cannot perturb the schema-write boundary it is trying to observe.
+    $schemaWatchRoot = Join-Path $tmpRoot "schema_probe_suppression"
+    New-Item -ItemType Directory -Path $schemaWatchRoot -Force | Out-Null
+    $schemaStartedAtMs = [DateTimeOffset]::UtcNow.ToUnixTimeMilliseconds() - 100
+    Write-Utf8NoBomFile -Path (Join-Path $traceDir "diagnostics_trace.jsonl") -Content ((@{
+        ts_ms = $schemaStartedAtMs + 10
+        event = "startup_phase"
+        level = "info"
+        details = @{ phase_id = "db_schema"; label = "Database schema"; state = "running"; error = $null }
+    } | ConvertTo-Json -Compress -Depth 6) + "`n")
+    Write-Utf8NoBomFile -Path (Join-Path $appDir "agent_bridge.json") -Content ((@{
+        pid = $PID
+        port = 9
+        started_at_ms = $schemaStartedAtMs
+    } | ConvertTo-Json -Compress) + "`n")
+    & powershell.exe -NoLogo -NoProfile -ExecutionPolicy Bypass -File $scriptPath `
+        -SelfTest -DurationSeconds 2 -IntervalSeconds 1 -OutputRoot $schemaWatchRoot `
+        -AppDataDir $appDir -ProcessName "voxvulgi-no-name-fallback" -NoPathProbe -Quiet
+    if ($LASTEXITCODE -ne 0) { throw "schema suppression self-test exited with $LASTEXITCODE" }
+    $schemaRun = @(Get-ChildItem -LiteralPath $schemaWatchRoot -Directory)[0]
+    $schemaSamples = @(Get-Content -LiteralPath (Join-Path $schemaRun.FullName "samples.jsonl") | ForEach-Object { $_ | ConvertFrom-Json })
+    Assert-True ($schemaSamples.Count -ge 1) "schema suppression run produced no samples"
+    Assert-True ([bool]$schemaSamples[0].db.skipped) "schema-running sample did not skip DB probe"
+    Assert-True ($schemaSamples[0].db.error -eq "suppressed because startup schema migration is running") "schema-running DB suppression reason is missing"
+
+    # A process present in one sample and absent in the next must survive into the summary even
+    # though the terminal sample has no root process.
+    $lifecycleWatchRoot = Join-Path $tmpRoot "process_lifecycle"
+    New-Item -ItemType Directory -Path $lifecycleWatchRoot -Force | Out-Null
+    Write-Utf8NoBomFile -Path (Join-Path $traceDir "diagnostics_trace.jsonl") -Content ((@{
+        ts_ms = $schemaStartedAtMs + 20
+        event = "startup_phase"
+        level = "info"
+        details = @{ phase_id = "db_schema"; label = "Database schema"; state = "ready"; error = $null }
+    } | ConvertTo-Json -Compress -Depth 6) + "`n")
+    Write-Utf8NoBomFile -Path (Join-Path $appDir "agent_bridge.json") -Content ((@{
+        pid = $PID
+        port = 9
+        started_at_ms = $schemaStartedAtMs
+    } | ConvertTo-Json -Compress) + "`n")
+    $sidecarPath = Join-Path $appDir "agent_bridge.json"
+    $lifecycleJob = Start-Job -ScriptBlock {
+        param($WatchRoot, $BridgePath, $StartedAtMs)
+        $deadline = (Get-Date).AddSeconds(15)
+        do {
+            $sampleFile = Get-ChildItem -LiteralPath $WatchRoot -Filter samples.jsonl -File -Recurse -ErrorAction SilentlyContinue | Select-Object -First 1
+            if ($sampleFile -and @(Get-Content -LiteralPath $sampleFile.FullName -ErrorAction SilentlyContinue).Count -ge 1) { break }
+            Start-Sleep -Milliseconds 50
+        } while ((Get-Date) -lt $deadline)
+        if (-not $sampleFile) { throw "lifecycle sample did not appear before deadline" }
+        [System.IO.File]::WriteAllText($BridgePath, ((@{ pid = 424242; port = 9; started_at_ms = $StartedAtMs } | ConvertTo-Json -Compress) + "`n"), (New-Object System.Text.UTF8Encoding($false)))
+    } -ArgumentList $lifecycleWatchRoot,$sidecarPath,$schemaStartedAtMs
+    try {
+        & powershell.exe -NoLogo -NoProfile -ExecutionPolicy Bypass -File $scriptPath `
+            -SelfTest -DurationSeconds 8 -IntervalSeconds 1 -OutputRoot $lifecycleWatchRoot `
+            -AppDataDir $appDir -ProcessName "voxvulgi-no-name-fallback" -NoPathProbe -Quiet
+        if ($LASTEXITCODE -ne 0) { throw "lifecycle self-test exited with $LASTEXITCODE" }
+    } finally {
+        Wait-Job -Job $lifecycleJob | Out-Null
+        Receive-Job -Job $lifecycleJob -ErrorAction Stop | Out-Null
+        Remove-Job -Job $lifecycleJob -Force
+    }
+    $lifecycleRun = @(Get-ChildItem -LiteralPath $lifecycleWatchRoot -Directory)[0]
+    $lifecycleSummary = Get-Content -LiteralPath (Join-Path $lifecycleRun.FullName "summary.json") -Raw | ConvertFrom-Json
+    Assert-True (@($lifecycleSummary.process_lifecycle.observed_process_pids) -contains $PID) "lifecycle summary lost the observed process PID"
+    Assert-True (@($lifecycleSummary.process_lifecycle.exit_transitions | Where-Object { $_.pid -eq $PID }).Count -eq 1) "lifecycle summary did not retain the observed process exit"
 
     # Exact inverse ordering: watch begins unmatched, then the app arms while the chunk is live.
     $lateWatchRoot = Join-Path $tmpRoot "watch_before_arm"

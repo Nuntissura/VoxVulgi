@@ -3583,6 +3583,37 @@ fn set_startup_phase(
     );
 }
 
+#[derive(Debug)]
+struct StartupDatabaseReady;
+
+fn ensure_startup_database_ready(
+    paths: &AppPaths,
+    startup: &Arc<Mutex<StartupTracker>>,
+) -> voxvulgi_engine::Result<StartupDatabaseReady> {
+    set_startup_phase(startup, paths, "db_schema", "running", None);
+    let result = (|| -> voxvulgi_engine::Result<()> {
+        db::ensure_schema(paths)?;
+        video_libraries::ensure_default_video_library(paths)?;
+        Ok(())
+    })();
+    match result {
+        Ok(()) => {
+            set_startup_phase(startup, paths, "db_schema", "ready", None);
+            Ok(StartupDatabaseReady)
+        }
+        Err(error) => {
+            set_startup_phase(
+                startup,
+                paths,
+                "db_schema",
+                "error",
+                Some(error.to_string()),
+            );
+            Err(error)
+        }
+    }
+}
+
 fn is_safe_relative_path(path: &std::path::Path) -> bool {
     !path.components().any(|c| {
         matches!(
@@ -5687,6 +5718,52 @@ mod tests {
         assert!(!runtime_background_work_enabled(true, false));
         assert!(!runtime_background_work_enabled(false, true));
         assert!(!runtime_background_work_enabled(true, true));
+    }
+
+    #[test]
+    fn startup_database_gate_initializes_schema_and_reports_ready() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let paths = AppPaths::new(dir.path().to_path_buf());
+        paths.ensure_dirs().expect("app dirs");
+        let startup = Arc::new(Mutex::new(StartupTracker::new()));
+
+        let _ready = ensure_startup_database_ready(&paths, &startup).expect("database ready");
+
+        assert!(paths.db_dir().join("app.sqlite").is_file());
+        let tracker = startup.lock().expect("startup tracker");
+        let schema = tracker
+            .phases
+            .iter()
+            .find(|phase| phase.id == "db_schema")
+            .expect("db_schema phase");
+        assert_eq!(schema.state, "ready");
+        assert!(schema.error.is_none());
+    }
+
+    #[test]
+    fn desktop_setup_keeps_database_gate_before_background_surfaces() {
+        let source = include_str!("lib.rs");
+        let run_source = source
+            .split_once("pub fn run()")
+            .expect("desktop run source")
+            .1;
+        let database_gate = run_source
+            .find("let _database_ready = ensure_startup_database_ready")
+            .expect("database-ready gate");
+        for marker in [
+            "spawn_agent_bridge(&AppPaths::normalize_base_dir(&base_dir))",
+            "set_startup_phase(&startup, &paths, \"offline_bundle\", \"pending\"",
+            "spawn_watcher_supervisor(&resource_dir, &base_dir)",
+            "jobs::JobRunner::start(paths.clone())",
+        ] {
+            let background_surface = run_source
+                .find(marker)
+                .unwrap_or_else(|| panic!("missing startup background marker: {marker}"));
+            assert!(
+                database_gate < background_surface,
+                "database-ready gate must precede {marker}"
+            );
+        }
     }
 
     #[test]
@@ -14691,7 +14768,6 @@ pub fn run() {
             ));
             let startup = Arc::new(Mutex::new(StartupTracker::new()));
             let _ = AGENT_APP_HANDLE.set(app.handle().clone());
-            spawn_agent_bridge(&AppPaths::normalize_base_dir(&base_dir));
             set_startup_phase(&startup, &paths, "app_dirs", "running", None);
             paths.ensure_dirs()?;
             // WP-0298: restore an armed/active bounded incident capture before any
@@ -14699,6 +14775,14 @@ pub fn run() {
             // diagnostics_capture_status/the trace envelope.
             let _ = load_diagnostics_capture_state(&paths);
             set_startup_phase(&startup, &paths, "app_dirs", "ready", None);
+
+            // WP-0310: schema migration is the hard predecessor for every background
+            // surface. Do not expose the bridge or start hydration/supervision until
+            // this gate succeeds; those components can otherwise contend for SQLite
+            // during first launch after an update.
+            let _database_ready = ensure_startup_database_ready(&paths, &startup)?;
+            spawn_agent_bridge(&AppPaths::normalize_base_dir(&base_dir));
+
             let cli_safe_mode = cli_args.iter().any(|value| value.trim() == "--safe-mode");
             let persisted_safe_mode = config::load_safe_mode_config(&paths)
                 .map(|value| value.enabled)
@@ -14804,10 +14888,6 @@ pub fn run() {
                     }
                 }
             }
-            set_startup_phase(&startup, &paths, "db_schema", "running", None);
-            db::ensure_schema(&paths)?;
-            video_libraries::ensure_default_video_library(&paths)?;
-            set_startup_phase(&startup, &paths, "db_schema", "ready", None);
             if runtime_background_work {
                 let archive_reconcile_paths = paths.clone();
                 std::thread::Builder::new()
