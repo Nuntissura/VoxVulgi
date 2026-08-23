@@ -1,7 +1,7 @@
 ---
 file_id: WP-0298-REFINEMENT-v1
 file_kind: work-packet-refinement
-updated_at: 2026-08-09
+updated_at: 2026-08-23
 ---
 
 <topic id="operator-request-and-verified-state" status="active" version="v1" wp="WP-0298" updated_at="2026-08-09">
@@ -13,7 +13,9 @@ updated_at: 2026-08-09
 - Upgrade internal Diagnostics and `vvwatch` until freezes, slowdowns, bottlenecks, and causes can be distinguished without operator guesswork.
 - Provide an operator-facing settings/tool surface for bounded performance capture.
 
-# Verified current state
+# Verified state as of 2026-08-09
+
+- The database size/schema/counts below are a dated incident snapshot, not current topology. The 2026-08-23 inventory in WP-0312/WP-0315 supersedes those mutable fields with a schema-v54 snapshot above 1.1 GB; the dated latency/trace observations remain historical evidence.
 
 - The canonical SQLite database is local at `%APPDATA%\com.voxvulgi.voxvulgi\db\app.sqlite`; it is not stored on the NAS.
 - The inspected database is 988,893,184 bytes, schema version 31, WAL mode, with 315,716 jobs and 141,117 library items.
@@ -40,7 +42,26 @@ updated_at: 2026-08-09
 
 - In scope: causal instrumentation, bounded incident capture, trace rotation, `vvwatch` correlation, panel/job-start performance boundaries, persistent media-observation state, archive/activity rollups, stale-request cancellation, and exact measured remediation.
 - In scope: settings under Diagnostics for normal versus incident capture and arming the next job-start/panel-switch capture.
+- Safety boundary: every agent-started headless process uses a preflighted owned absolute `VOXVULGI_AGENT_HEADLESS_BASE_DIR`; every agent-started normal-window process runs only in an owned disposable VM/snapshot; and agent-initiated job-start/write scenarios use a verified clone or disposable app-data/output root with independent canonical reconciliation on that isolated state. Exact current-profile panel/job proof attaches only to an already operator-started case; the agent does not launch, navigate, click, start, queue, mutate, or stop it. If agent initiation on the current profile is genuinely indispensable, stop and obtain separate explicit operator authority naming the unchanged case, expected rows/files/outputs, and before/after independent canonical reconciliation.
 - Non-goals: moving the SQLite database, moving/deleting NAS media, deleting job history, altering queue semantics, closing operator processes, always-on heavyweight ETW capture, or treating a faster synthetic database as proof for the operator case.
+
+</topic>
+
+<topic id="corrected-evidence-and-successor-boundaries-2026-08-23" status="active" version="v1" wp="WP-0298" updated_at="2026-08-23">
+
+# Corrected evidence and successor boundaries — 2026-08-23
+
+- Governed v0.1.179 packaged trace evidence now distinguishes the download and enumeration protection operations with separate request/span identities. That closes the residual operation-identity build/re-probe item recorded on 2026-08-15.
+- WP-0310's database-first startup gate passed before background startup components. It is a completed hard predecessor and must not be reopened or moved later for performance.
+- Offline hydration started at 1787456942629 and reached `ready` at 1787457518594, a duration of 575,965 ms. Worker heartbeat payload generation and main-thread heartbeat ticks continued during the apparent trace gap and were persisted after hydration. Any older implication that hydration never terminated or the Worker died is superseded by this exact evidence.
+- The governed normal-window watch at `watch_20260823-055128` observed 127 of 127 native-window not-responding samples while all bridge probes succeeded for the same PID. It also observed command overlap, heavy Python capability probes, database-probe timeouts, and host/sample scheduling lag. These are parallel observations. No causal arrow among them is established without the successor packets' receipts.
+- The 2026-08-15 v0.1.169 large-database headless run launched an agent-controlled process against canonical operator app data. Its proof summary is now marked `historical-only` and invalidated for current-profile/non-mutation closure. Its timings may inform hypotheses and observer-cost accounting, but it cannot satisfy WP-0298, WP-0314, or WP-0315 proof; fresh current-profile panel evidence must be passive observation of an already operator-started process.
+- WP-0311 owns Diagnostics/Options demand orchestration, backend command lifetime, protection projection, and Torch/Demucs semantic single-flight.
+- WP-0312 owns the SQLite runtime boundary, bounded reader/writer admission, startup-only migration, operation registry, WAL health, and lock-candidate attribution. It retains SQLite.
+- WP-0313 owns offline hydration/provider-verification single-flight and scheduling plus source-emitted/native-received/durably-persisted heartbeat timing.
+- WP-0314 owns native-window/WebView2 process liveness and bounded WPR/ETW attribution, followed only by an evidence-selected remediation.
+- WP-0315 owns an isolated SurrealDB 3.2.4 + RocksDB shadow benchmark and decision. It is not a freeze fix, does not block WP-0298 remediation, and cannot authorize production migration.
+- WP-0298 remains the umbrella integration/closure owner for fresh agent-observation-only panel evidence from an already operator-started process, isolated job-start write proof, agent-observation-only evidence of an operator-initiated exact current database/NAS job, and final incident reproduction. Successor packets must hand their canonical proof back to WP-0298 rather than declaring the overall freeze closed independently.
 
 </topic>
 
@@ -67,7 +88,7 @@ updated_at: 2026-08-09
 
 - `diagnostics_trace.jsonl`, `InvokeTimer`, Worker heartbeat, freeze-event ingress, freeze dump/report, `/agent/state`, `/agent/dump`, `/agent/snapshot`, `/agent/ui_audit`, and `/agent/ui_action`.
 - `vvwatch.cmd` and `governance/scripts/vv_watch.ps1`.
-- Existing read-only SQLite connection, job/track projections, media-path timeout/cache, archive state, and headless startup mutation skips.
+- Existing read-only SQLite connection, job/track projections, media-path timeout/cache, archive state, supported headless disposable-base override, and post-database background-work skips. Headless without the override can still initialize/migrate canonical app data and is not a safe proof path.
 
 # Rejected options
 
@@ -90,7 +111,7 @@ updated_at: 2026-08-09
 8. Add Diagnostics `Normal` and `Incident` capture modes plus `Arm next job start` and `Arm next panel switch`; show remaining duration, artifact location, size limit, and capture status.
 9. Rotate/compress internal traces by size and age; retain bounded incident artifacts and compact aggregates. Expose sampling/drop/rotation state.
 10. Extend `vvwatch` with incident IDs, WebView process tree/renderer responsiveness, process I/O, DB probe phase, NAS probe latency, and optional operator-triggered WPR/ETW instructions/receipt when tooling is installed.
-11. Reproduce the exact current database/NAS job-start and panel-switch cases, identify the dominant phase from correlated evidence, and apply only the measured query/storage/render remediation.
+11. Reproduce agent-driven database/NAS panel switching and job start on a verified clone/disposable headless root or disposable normal-window VM. Obtain exact current-profile panel/job timing only by observing an already operator-started case without agent launch, navigation, mutation, or stop, or stop for the separate explicit authority/reconciliation gate above. Identify the dominant phase from correlated evidence and apply only the measured query/storage/render remediation.
 
 </topic>
 
@@ -125,8 +146,8 @@ updated_at: 2026-08-09
   - Control: optional capability check; internal/`vvwatch` capture remains complete enough to state which layer is unresolved.
   - Verify: installed and unavailable paths, with no false `ready` state.
 - Risk: headless proof does not reproduce compositor behavior.
-  - Control: headless proof covers data/navigation contract; exact operator-visible freeze additionally requires a controlled normal-window incident capture or explicit unresolved label.
-  - Verify: separate proof receipts for headless and normal-window paths.
+  - Control: disposable-root headless proof covers data/navigation contract; agent-driven normal-window proof runs only in an owned disposable VM/snapshot; exact current-profile freeze evidence additionally requires observation of an already operator-started normal-window incident or an explicit unresolved label.
+  - Verify: separate resolved-root/VM/operator-initiation proof receipts for headless, agent-driven normal-window, and current-profile observation paths.
 
 # Microtask plan
 
@@ -137,16 +158,16 @@ updated_at: 2026-08-09
 5. Implement archive/activity rollups plus rebuild/reconciliation.
 6. Add stale-request cancellation/guards and phase-level timing.
 7. Extend `vvwatch` and optional WebView2 ETW/WPR capability/receipt.
-8. Run exact live database/NAS panel-switch and job-start incident captures; remediate measured hot paths.
-9. Build, headless-audit, normal-window reproduce where required, and write proof bundle.
+8. Observe the exact current-profile panel-switch and job-start incident only on an already operator-started process, plus run isolated-clone/disposable-root agent-driven panel/job write capture; record initiator/root identity and remediate measured hot paths. Do not launch, navigate, mutate, stop, or initiate a live canonical job without the separate explicit authority/reconciliation gate.
+9. Build; headless-audit only with a preflighted owned absolute `VOXVULGI_AGENT_HEADLESS_BASE_DIR`; run agent-driven normal-window reproduction only in an owned disposable VM/snapshot; and write the proof bundle.
 
 # Acceptance and proof gates
 
 - No inspected primary panel waits synchronously for full NAS/path probing, archive-file recount, or all-history job aggregation.
 - Correlated evidence distinguishes UI long task/render, bridge wait, SQLite phase, NAS phase, child launch, WebView process state, and host pressure for one incident.
-- Current exact panel/job-start cases have named expected and observed conditions with commands/receipts; any remaining compositor-only path is explicitly unresolved rather than declared fixed.
+- Current exact panel/job-start cases have named expected/observed conditions, initiator, canonical-versus-disposable root, commands/receipts, and before/after reconciliation where mutation was explicitly authorized; any remaining compositor-only path is explicitly unresolved rather than declared fixed.
 - Trace storage obeys tested size/age limits and retains incident manifests plus durable aggregates.
 - Persistent observation and rollup rebuilds reconcile to canonical state with no library/subscription/job deletion.
-- Focused Rust/frontend tests, TypeScript build, relevant engine suite, governed semantic-version build, changelog, quiet headless audits/snapshots/dumps, concurrent `vvwatch`, and proof `summary.md` pass.
+- Focused Rust/frontend tests, TypeScript build, relevant engine suite, governed semantic-version build, changelog, quiet headless audits/snapshots/dumps with the owned disposable base-dir override, disposable-VM normal-window evidence, concurrent `vvwatch`, operator-initiation receipts for current-profile observation, and proof `summary.md` pass.
 
 </topic>
