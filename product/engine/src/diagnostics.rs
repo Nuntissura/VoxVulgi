@@ -438,8 +438,7 @@ fn export_db_and_jobs(
     paths: &AppPaths,
     jobs_limit: usize,
 ) -> Result<(BundleDbInfo, Vec<BundleJobRow>)> {
-    let conn = db::open(paths)?;
-    db::migrate(&conn)?;
+    let conn = db::open_readonly(paths)?;
 
     let schema_version = Some(db::schema_user_version(&conn)?);
 

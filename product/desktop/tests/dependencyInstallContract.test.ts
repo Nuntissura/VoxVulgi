@@ -181,8 +181,14 @@ test("lockfile installs retry post-install metadata checks under filesystem lag"
 
 test("python installer commands have a hard timeout and kill hung child processes", () => {
   const toolsSource = readRepoFile("..", "engine", "src", "tools.rs");
+  const commandSource = readRepoFile("..", "engine", "src", "cmd.rs");
   const wrapper = functionBlock(toolsSource, "run_python_checked");
   const block = functionBlock(toolsSource, "run_python_checked_with_timeout");
+  const ownedRunner = functionBlock(commandSource, "run_owned_output_with_pid");
+  const ytDlpSpawner = functionBlock(commandSource, "spawn_yt_dlp_child_to_app_lifecycle");
+  const jobsSource = readRepoFile("..", "engine", "src", "jobs.rs");
+  const ytDlpRunner = functionBlock(jobsSource, "run_command_output_with_control_inner");
+  const treeTerminator = functionBlock(commandSource, "terminate_child_process_tree");
 
   assert.match(
     toolsSource,
@@ -196,13 +202,35 @@ test("python installer commands have a hard timeout and kill hung child processe
   );
   assert.match(
     block,
-    /spawn\(\)/,
-    "run_python_checked must spawn the process so it can enforce a timeout",
+    /run_owned_output[\s\S]*Duration::from_secs\(timeout_secs\)/,
+    "run_python_checked must delegate process ownership and its exact timeout to the shared runner",
   );
   assert.match(
-    block,
-    /kill\(\)/,
-    "run_python_checked must kill hung child processes after timeout",
+    ownedRunner,
+    /configure_owned_launch\(command\)[\s\S]*command\.spawn\(\)/,
+    "the shared owned-process runner must suspend the process at launch before lifecycle assignment",
+  );
+  assert.match(commandSource, /CREATE_SUSPENDED/);
+  assert.match(ownedRunner, /job\.assign\(&child\)[\s\S]*resume_owned_child\(&child\)/);
+  assert.match(
+    ytDlpSpawner,
+    /configure_owned_launch\(command\)[\s\S]*command\.spawn\(\)[\s\S]*bind_yt_dlp_child_to_app_lifecycle\(&child\)[\s\S]*resume_owned_child\(&child\)/,
+    "yt-dlp must be suspended before spawn, lifecycle-bound before execution, and resumed only after assignment",
+  );
+  assert.match(
+    ytDlpRunner,
+    /if bind_yt_dlp_lifecycle[\s\S]*spawn_yt_dlp_child_to_app_lifecycle\(cmd\)/,
+    "the yt-dlp job runner must use the suspended lifecycle-bound spawn path",
+  );
+  assert.match(
+    ownedRunner,
+    /terminate_child_process_tree\(&mut child\)/,
+    "the shared owned-process runner must terminate hung process trees after timeout or cancellation",
+  );
+  assert.match(
+    treeTerminator,
+    /child\.wait\(\)/,
+    "the shared owned-process runner must reap the direct child after termination",
   );
 });
 
@@ -286,12 +314,23 @@ test("startup offline bundle skips payload walk when localization runtime is alr
 test("voice-preserving status checks OpenVoice runtime availability without importing heavy modules", () => {
   const toolsSource = readRepoFile("..", "engine", "src", "tools.rs");
   const block = functionBlock(toolsSource, "tts_voice_preserving_local_v1_pack_status");
+  const moduleProbeBlock = functionBlock(toolsSource, "python_module_available");
   const statusPinBlock = functionBlock(toolsSource, "status_pin_names");
 
   assert.match(
     toolsSource,
     /fn python_module_available/,
     "status checks need a fast importlib.util.find_spec helper instead of importing runtime modules",
+  );
+  assert.match(
+    moduleProbeBlock,
+    /owned_output\(\)/,
+    "job-reachable Python module probes must use the bounded cancelable owned-process runner",
+  );
+  assert.doesNotMatch(
+    moduleProbeBlock,
+    /\.status\(\)/,
+    "job-reachable Python module probes must not bypass timeout, cancellation, and child reaping",
   );
   assert.match(
     block,

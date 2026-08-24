@@ -114,10 +114,14 @@ test("request span and invocation identity survive every measured command phase"
 
 test("YouTube protection diagnostics keep download and enumeration causally distinct", () => {
   const diagnostics = readRepoFile("src", "pages", "DiagnosticsPage.tsx");
+  const snapshot = readRepoFile("src", "lib", "youtubeProtectionSnapshot.ts");
+  assert.match(diagnostics, /loadYoutubeProtectionSnapshot<YoutubeProtectionDiagnosticsStatus, YoutubeProtectionDiagnosticsHistory>\("diagnostics", 100\)/);
   assert.match(
-    diagnostics,
-    /const protectionRequestStartedAt = Date\.now\(\);[\s\S]*?const protectionContexts = \{[\s\S]*?requestId: `diagnostics-youtube-protection-download-\$\{protectionGeneration\}-\$\{protectionRequestStartedAt\}`,[\s\S]*?spanId: "diagnostics-youtube-protection-download"[\s\S]*?requestId: `diagnostics-youtube-protection-enumeration-\$\{protectionGeneration\}-\$\{protectionRequestStartedAt\}`,[\s\S]*?spanId: "diagnostics-youtube-protection-enumeration"/,
+    snapshot,
+    /requestId: `\$\{owner\}-youtube-protection-download-\$\{suffix\}`,[\s\S]*?spanId: `\$\{owner\}-youtube-protection-download`[\s\S]*?requestId: `\$\{owner\}-youtube-protection-enumeration-\$\{suffix\}`,[\s\S]*?spanId: `\$\{owner\}-youtube-protection-enumeration`/,
   );
-  assert.equal((diagnostics.match(/protectionContexts\.download/g) ?? []).length, 3);
-  assert.equal((diagnostics.match(/protectionContexts\.enumeration/g) ?? []).length, 3);
+  assert.equal((snapshot.match(/contexts\.download/g) ?? []).length, 2);
+  assert.equal((snapshot.match(/contexts\.enumeration/g) ?? []).length, 2);
+  assert.match(snapshot, /downloadRequestId: contexts\.download\.requestId/);
+  assert.match(snapshot, /enumerationRequestId: contexts\.enumeration\.requestId/);
 });

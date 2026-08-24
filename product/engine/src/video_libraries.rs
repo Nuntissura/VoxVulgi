@@ -90,8 +90,7 @@ ORDER BY active DESC, updated_at_ms DESC, name COLLATE NOCASE
 }
 
 pub fn ensure_default_video_library(paths: &AppPaths) -> Result<()> {
-    let conn = db::open(paths)?;
-    db::migrate(&conn)?;
+    let conn = db::write_context(paths)?;
     ensure_default_video_library_conn(paths, &conn)
 }
 
@@ -128,8 +127,7 @@ WHERE id = ?1
 }
 
 pub fn upsert_video_library(paths: &AppPaths, req: VideoLibraryUpsert) -> Result<VideoLibraryRow> {
-    let conn = db::open(paths)?;
-    db::migrate(&conn)?;
+    let conn = db::write_context(paths)?;
     let name = normalize_library_name(req.name)?;
     let root = normalize_library_root(req.root_path)?;
     let now = now_ms();
@@ -174,8 +172,7 @@ ON CONFLICT(root_path) DO UPDATE SET
 }
 
 pub fn set_active_video_library(paths: &AppPaths, id: &str) -> Result<VideoLibraryRow> {
-    let conn = db::open(paths)?;
-    db::migrate(&conn)?;
+    let conn = db::write_context(paths)?;
     let exists: Option<i64> = conn
         .query_row(
             "SELECT active FROM video_library WHERE id = ?1",
@@ -201,8 +198,7 @@ pub fn set_active_video_library(paths: &AppPaths, id: &str) -> Result<VideoLibra
 }
 
 pub fn remove_video_library(paths: &AppPaths, id: &str) -> Result<Vec<VideoLibraryRow>> {
-    let conn = db::open(paths)?;
-    db::migrate(&conn)?;
+    let conn = db::write_context(paths)?;
     conn.execute("DELETE FROM video_library WHERE id = ?1", params![id])?;
 
     let selected_id = active_video_library_id_conn(&conn)?;
@@ -392,8 +388,7 @@ pub fn transfer_video_library_metadata(
                 "copying saved subscriptions is not supported because subscription source URLs are unique; use move for subscriptions".to_string(),
             ));
         }
-        let conn = db::open(paths)?;
-        db::migrate(&conn)?;
+        let conn = db::write_context(paths)?;
         subscriptions_moved = conn.execute(
             "UPDATE youtube_subscription SET library_id = ?1, updated_at_ms = ?2 WHERE library_id = ?3",
             params![&target.id, now_ms(), &source.id],

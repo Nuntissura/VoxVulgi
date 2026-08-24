@@ -1,10 +1,196 @@
 use std::ffi::OsStr;
+use std::io::Read;
 use std::process::Command;
+use std::process::Stdio;
+use std::time::{Duration, Instant};
 
 pub fn command(program: impl AsRef<OsStr>) -> Command {
     let mut cmd = Command::new(program);
     configure_for_background(&mut cmd);
     cmd
+}
+
+/// Terminate a VoxVulgi-owned child and its descendants, then reap the direct child.
+/// Callers must only pass children they started themselves.
+pub fn terminate_child_process_tree(child: &mut std::process::Child) {
+    #[cfg(windows)]
+    {
+        let pid = child.id().to_string();
+        if let Ok(mut taskkill) = command("taskkill")
+            .args(["/PID", &pid, "/T", "/F"])
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+        {
+            let deadline = Instant::now() + Duration::from_secs(2);
+            loop {
+                match taskkill.try_wait() {
+                    Ok(Some(_)) => break,
+                    Ok(None) if Instant::now() < deadline => {
+                        std::thread::sleep(Duration::from_millis(25));
+                    }
+                    _ => {
+                        let _ = taskkill.kill();
+                        let _ = taskkill.wait();
+                        break;
+                    }
+                }
+            }
+        }
+    }
+
+    let _ = child.kill();
+    let _ = child.wait();
+}
+
+/// Run an owned child with bounded lifetime, cooperative cancellation, complete pipe draining,
+/// descendant-tree termination, and direct-child reaping.
+pub fn run_owned_output<F>(
+    command: &mut Command,
+    timeout: Duration,
+    should_cancel: F,
+) -> std::io::Result<std::process::Output>
+where
+    F: FnMut() -> bool,
+{
+    run_owned_output_with_pid(command, timeout, should_cancel).map(|(output, _)| output)
+}
+
+/// Variant of [`run_owned_output`] that returns the direct child PID for diagnostics.
+pub fn run_owned_output_with_pid<F>(
+    command: &mut Command,
+    timeout: Duration,
+    mut should_cancel: F,
+) -> std::io::Result<(std::process::Output, u32)>
+where
+    F: FnMut() -> bool,
+{
+    command.stdout(Stdio::piped()).stderr(Stdio::piped());
+    configure_owned_launch(command);
+    let mut child = command.spawn()?;
+    let child_pid = child.id();
+    #[cfg(windows)]
+    let lifecycle_job = match WindowsChildLifecycleJob::new().and_then(|job| {
+        job.assign(&child)?;
+        Ok(job)
+    }) {
+        Ok(job) => job,
+        Err(error) => {
+            terminate_child_process_tree(&mut child);
+            return Err(std::io::Error::other(format!(
+                "failed to bind owned child pid {child_pid} to its lifecycle job: {error}"
+            )));
+        }
+    };
+    #[cfg(windows)]
+    if let Err(error) = resume_owned_child(&child) {
+        let _ = lifecycle_job.terminate_all();
+        terminate_child_process_tree(&mut child);
+        return Err(std::io::Error::other(format!(
+            "failed to resume owned child pid {child_pid} after lifecycle assignment: {error}"
+        )));
+    }
+    let stdout = child
+        .stdout
+        .take()
+        .ok_or_else(|| std::io::Error::other("owned child stdout pipe missing"))?;
+    let stderr = child
+        .stderr
+        .take()
+        .ok_or_else(|| std::io::Error::other("owned child stderr pipe missing"))?;
+    let (stdout_sender, stdout_receiver) = std::sync::mpsc::sync_channel(1);
+    let (stderr_sender, stderr_receiver) = std::sync::mpsc::sync_channel(1);
+    std::thread::spawn(move || {
+        let mut bytes = Vec::new();
+        let _ = std::io::BufReader::new(stdout).read_to_end(&mut bytes);
+        let _ = stdout_sender.send(bytes);
+    });
+    std::thread::spawn(move || {
+        let mut bytes = Vec::new();
+        let _ = std::io::BufReader::new(stderr).read_to_end(&mut bytes);
+        let _ = stderr_sender.send(bytes);
+    });
+    let started = Instant::now();
+    loop {
+        let cancellation = should_cancel();
+        let timed_out = timeout > Duration::ZERO && started.elapsed() >= timeout;
+        if cancellation || timed_out {
+            #[cfg(windows)]
+            let _ = lifecycle_job.terminate_all();
+            terminate_child_process_tree(&mut child);
+            let pipe_deadline = Instant::now() + Duration::from_secs(2);
+            let _ = stdout_receiver
+                .recv_timeout(pipe_deadline.saturating_duration_since(Instant::now()));
+            let _ = stderr_receiver
+                .recv_timeout(pipe_deadline.saturating_duration_since(Instant::now()));
+            return Err(std::io::Error::new(
+                if timed_out {
+                    std::io::ErrorKind::TimedOut
+                } else {
+                    std::io::ErrorKind::Interrupted
+                },
+                if timed_out {
+                    format!(
+                        "owned child pid {child_pid} timed out after {} ms and was terminated",
+                        timeout.as_millis()
+                    )
+                } else {
+                    format!("owned child pid {child_pid} was canceled and terminated")
+                },
+            ));
+        }
+        match child.try_wait() {
+            Ok(Some(status)) => {
+                // A direct child can exit after spawning an inheriting descendant. Terminate the
+                // per-command job before joining pipe readers so an inherited pipe cannot hold the
+                // worker forever after its nominal command has completed.
+                #[cfg(windows)]
+                let _ = lifecycle_job.terminate_all();
+                let pipe_deadline = Instant::now() + Duration::from_secs(5);
+                let stdout = stdout_receiver
+                    .recv_timeout(pipe_deadline.saturating_duration_since(Instant::now()))
+                    .map_err(|_| {
+                        std::io::Error::new(
+                            std::io::ErrorKind::TimedOut,
+                            format!(
+                                "owned child pid {child_pid} exited but its stdout pipe did not close after descendant termination"
+                            ),
+                        )
+                    })?;
+                let stderr = stderr_receiver
+                    .recv_timeout(pipe_deadline.saturating_duration_since(Instant::now()))
+                    .map_err(|_| {
+                        std::io::Error::new(
+                            std::io::ErrorKind::TimedOut,
+                            format!(
+                                "owned child pid {child_pid} exited but its stderr pipe did not close after descendant termination"
+                            ),
+                        )
+                    })?;
+                return Ok((
+                    std::process::Output {
+                        status,
+                        stdout,
+                        stderr,
+                    },
+                    child_pid,
+                ));
+            }
+            Ok(None) => std::thread::sleep(Duration::from_millis(25)),
+            Err(error) => {
+                #[cfg(windows)]
+                let _ = lifecycle_job.terminate_all();
+                terminate_child_process_tree(&mut child);
+                let pipe_deadline = Instant::now() + Duration::from_secs(2);
+                let _ = stdout_receiver
+                    .recv_timeout(pipe_deadline.saturating_duration_since(Instant::now()));
+                let _ = stderr_receiver
+                    .recv_timeout(pipe_deadline.saturating_duration_since(Instant::now()));
+                return Err(error);
+            }
+        }
+    }
 }
 
 #[cfg(windows)]
@@ -18,6 +204,69 @@ fn configure_for_background(cmd: &mut Command) {
 
 #[cfg(not(windows))]
 fn configure_for_background(_cmd: &mut Command) {}
+
+#[cfg(windows)]
+fn configure_owned_launch(cmd: &mut Command) {
+    use std::os::windows::process::CommandExt;
+    use windows_sys::Win32::System::Threading::CREATE_SUSPENDED;
+
+    const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+    cmd.creation_flags(CREATE_NO_WINDOW | CREATE_SUSPENDED);
+}
+
+#[cfg(not(windows))]
+fn configure_owned_launch(_cmd: &mut Command) {}
+
+#[cfg(windows)]
+fn resume_owned_child(child: &std::process::Child) -> std::io::Result<()> {
+    use windows_sys::Win32::Foundation::{CloseHandle, INVALID_HANDLE_VALUE};
+    use windows_sys::Win32::System::Diagnostics::ToolHelp::{
+        CreateToolhelp32Snapshot, Thread32First, Thread32Next, TH32CS_SNAPTHREAD, THREADENTRY32,
+    };
+    use windows_sys::Win32::System::Threading::{OpenThread, ResumeThread, THREAD_SUSPEND_RESUME};
+
+    unsafe {
+        let snapshot = CreateToolhelp32Snapshot(TH32CS_SNAPTHREAD, 0);
+        if snapshot == INVALID_HANDLE_VALUE {
+            return Err(std::io::Error::last_os_error());
+        }
+        let mut entry: THREADENTRY32 = std::mem::zeroed();
+        entry.dwSize = std::mem::size_of::<THREADENTRY32>() as u32;
+        let mut found_thread_id = None;
+        if Thread32First(snapshot, &mut entry) != 0 {
+            loop {
+                if entry.th32OwnerProcessID == child.id() {
+                    found_thread_id = Some(entry.th32ThreadID);
+                    break;
+                }
+                if Thread32Next(snapshot, &mut entry) == 0 {
+                    break;
+                }
+            }
+        }
+        let _ = CloseHandle(snapshot);
+        let thread_id = found_thread_id.ok_or_else(|| {
+            std::io::Error::new(
+                std::io::ErrorKind::NotFound,
+                format!(
+                    "suspended primary thread for pid {} was not found",
+                    child.id()
+                ),
+            )
+        })?;
+        let thread = OpenThread(THREAD_SUSPEND_RESUME, 0, thread_id);
+        if thread.is_null() {
+            return Err(std::io::Error::last_os_error());
+        }
+        let resume_result = ResumeThread(thread);
+        let resume_error = (resume_result == u32::MAX).then(std::io::Error::last_os_error);
+        let _ = CloseHandle(thread);
+        match resume_error {
+            Some(error) => Err(error),
+            None => Ok(()),
+        }
+    }
+}
 
 #[cfg(windows)]
 struct WindowsChildLifecycleJob {
@@ -138,6 +387,37 @@ pub fn bind_yt_dlp_child_to_app_lifecycle(_child: &std::process::Child) -> std::
     Ok(())
 }
 
+/// Spawn a yt-dlp process suspended, bind it to the process-wide lifecycle job, and only then
+/// allow it to execute. The suspended launch closes the window in which yt-dlp could create an
+/// inheriting descendant before Windows has assigned the direct child to the app-owned job.
+pub fn spawn_yt_dlp_child_to_app_lifecycle(
+    command: &mut Command,
+) -> std::io::Result<std::process::Child> {
+    configure_owned_launch(command);
+    let mut child = command.spawn()?;
+    let child_pid = child.id();
+    if let Err(error) = bind_yt_dlp_child_to_app_lifecycle(&child) {
+        terminate_child_process_tree(&mut child);
+        return Err(std::io::Error::new(
+            error.kind(),
+            format!(
+                "failed to bind suspended yt-dlp child pid {child_pid} to the VoxVulgi process lifecycle: {error}"
+            ),
+        ));
+    }
+    #[cfg(windows)]
+    if let Err(error) = resume_owned_child(&child) {
+        terminate_child_process_tree(&mut child);
+        return Err(std::io::Error::new(
+            error.kind(),
+            format!(
+                "failed to resume yt-dlp child pid {child_pid} after lifecycle assignment: {error}"
+            ),
+        ));
+    }
+    Ok(child)
+}
+
 /// Stop every yt-dlp process owned by this VoxVulgi instance and reject late shutdown-time
 /// spawns. The Job Object handle remains valid until process exit so crash cleanup stays armed.
 #[cfg(windows)]
@@ -200,6 +480,32 @@ mod tests {
         }
     }
 
+    struct DescendantCleanup {
+        pid_path: std::path::PathBuf,
+    }
+
+    impl Drop for DescendantCleanup {
+        fn drop(&mut self) {
+            use windows_sys::Win32::Foundation::CloseHandle;
+            use windows_sys::Win32::System::Threading::{
+                OpenProcess, TerminateProcess, PROCESS_TERMINATE,
+            };
+
+            if let Ok(pid_text) = std::fs::read_to_string(&self.pid_path) {
+                if let Ok(pid) = pid_text.trim().parse::<u32>() {
+                    unsafe {
+                        let handle = OpenProcess(PROCESS_TERMINATE, 0, pid);
+                        if !handle.is_null() {
+                            let _ = TerminateProcess(handle, 1);
+                            let _ = CloseHandle(handle);
+                        }
+                    }
+                }
+            }
+            let _ = std::fs::remove_file(&self.pid_path);
+        }
+    }
+
     fn sleeping_child() -> std::process::Child {
         command("ping.exe")
             .args(["-n", "60", "127.0.0.1"])
@@ -226,6 +532,123 @@ mod tests {
         job.assign(&child).expect("assign lifecycle probe");
         job.terminate_all().expect("terminate lifecycle job");
         wait_for_terminated(&mut child);
+    }
+
+    #[test]
+    fn immediate_inheriting_descendant_helper() {
+        let Ok(pid_path) = std::env::var("VOXVULGI_IMMEDIATE_DESCENDANT_PID_PATH") else {
+            return;
+        };
+        let descendant = command("ping.exe")
+            .args(["-n", "60", "127.0.0.1"])
+            .spawn()
+            .expect("spawn immediate inheriting descendant");
+        std::fs::write(pid_path, descendant.id().to_string())
+            .expect("publish immediate descendant PID");
+    }
+
+    #[test]
+    fn owned_output_terminates_inheriting_descendant_before_pipe_drain() {
+        let pid_path = std::env::temp_dir().join(format!(
+            "voxvulgi_owned_descendant_{}_{}.pid",
+            std::process::id(),
+            uuid::Uuid::new_v4()
+        ));
+        let _cleanup = DescendantCleanup {
+            pid_path: pid_path.clone(),
+        };
+        let mut command = command(std::env::current_exe().expect("current test executable"));
+        command
+            .args([
+                "--exact",
+                "cmd::tests::immediate_inheriting_descendant_helper",
+                "--nocapture",
+            ])
+            .env("VOXVULGI_IMMEDIATE_DESCENDANT_PID_PATH", &pid_path);
+        let started = Instant::now();
+        let output = run_owned_output(&mut command, Duration::from_secs(10), || false)
+            .expect("owned parent and inheriting descendant must settle within the bound");
+        assert!(output.status.success());
+        assert!(started.elapsed() < Duration::from_secs(15));
+        let descendant_pid = std::fs::read_to_string(&pid_path)
+            .expect("parent must publish descendant PID")
+            .trim()
+            .parse::<u32>()
+            .expect("parse descendant PID");
+        wait_for_pid_terminated(descendant_pid);
+    }
+
+    #[test]
+    fn yt_dlp_app_lifecycle_immediate_descendant_helper() {
+        let Ok(pid_path) = std::env::var("VOXVULGI_YTDLP_LIFECYCLE_DESCENDANT_PID_PATH") else {
+            return;
+        };
+        let mut command = command(std::env::current_exe().expect("current test executable"));
+        command
+            .args([
+                "--exact",
+                "cmd::tests::immediate_inheriting_descendant_helper",
+                "--nocapture",
+            ])
+            .env("VOXVULGI_IMMEDIATE_DESCENDANT_PID_PATH", &pid_path)
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null());
+        let mut child = spawn_yt_dlp_child_to_app_lifecycle(&mut command)
+            .expect("spawn suspended lifecycle-bound yt-dlp stand-in");
+        let status = child.wait().expect("wait for yt-dlp stand-in");
+        assert!(
+            status.success(),
+            "yt-dlp stand-in must publish its descendant"
+        );
+        std::thread::sleep(Duration::from_secs(60));
+        panic!("yt-dlp lifecycle owner helper was not terminated by its parent test");
+    }
+
+    #[test]
+    fn yt_dlp_suspended_launch_contains_immediate_descendant_after_owner_abort() {
+        let pid_path = std::env::temp_dir().join(format!(
+            "voxvulgi_yt_dlp_descendant_{}_{}.pid",
+            std::process::id(),
+            uuid::Uuid::new_v4()
+        ));
+        let _cleanup = DescendantCleanup {
+            pid_path: pid_path.clone(),
+        };
+        let mut helper =
+            std::process::Command::new(std::env::current_exe().expect("current test exe"))
+                .args([
+                    "--exact",
+                    "cmd::tests::yt_dlp_app_lifecycle_immediate_descendant_helper",
+                    "--nocapture",
+                ])
+                .env("VOXVULGI_YTDLP_LIFECYCLE_DESCENDANT_PID_PATH", &pid_path)
+                .stdin(Stdio::null())
+                .stdout(Stdio::null())
+                .stderr(Stdio::null())
+                .spawn()
+                .expect("run yt-dlp lifecycle owner helper");
+        let deadline = Instant::now() + Duration::from_secs(10);
+        while !pid_path.is_file() {
+            assert!(
+                Instant::now() < deadline,
+                "yt-dlp lifecycle helper did not publish its immediate descendant PID"
+            );
+            std::thread::sleep(Duration::from_millis(25));
+        }
+        let descendant_pid = std::fs::read_to_string(&pid_path)
+            .expect("read yt-dlp descendant PID")
+            .trim()
+            .parse::<u32>()
+            .expect("parse yt-dlp descendant PID");
+        helper
+            .kill()
+            .expect("abruptly terminate yt-dlp lifecycle owner");
+        let status = helper
+            .wait()
+            .expect("wait for terminated yt-dlp lifecycle owner");
+        assert!(!status.success(), "lifecycle owner must terminate abruptly");
+        wait_for_pid_terminated(descendant_pid);
     }
 
     #[test]

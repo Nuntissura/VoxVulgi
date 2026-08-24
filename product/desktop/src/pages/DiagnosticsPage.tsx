@@ -2,7 +2,19 @@ import { startTransition, useCallback, useEffect, useMemo, useRef, useState } fr
 import { invoke } from "@tauri-apps/api/core";
 import { confirm, open, save } from "@tauri-apps/plugin-dialog";
 import { usePageActivity, usePollingLoop } from "../lib/activity";
+import {
+  DemandSupersededError,
+  aggregateDiagnosticsSectionSnapshots,
+  createDemandGeneration,
+  demandGenerationOwnsCommit,
+  diagnosticsDemandCoordinator,
+  type DemandGeneration,
+  type DiagnosticsDemandSnapshot,
+  type DiagnosticsOperationId,
+  type DiagnosticsResultTruth,
+} from "../lib/diagnosticsDemandCoordinator";
 import { copyPathToClipboard, openPathBestEffort, revealPath as revealFilesystemPath } from "../lib/pathOpener";
+import { loadYoutubeProtectionSnapshot } from "../lib/youtubeProtectionSnapshot";
 import { RootRebindControl } from "../components/RootRebindControl";
 
 type DiagnosticsInfo = {
@@ -116,6 +128,13 @@ type SpleeterPackStatus = {
 type DemucsPackStatus = {
   installed: boolean;
   demucs_version: string | null;
+  verified_at_ms: number;
+  source_identity: string;
+  freshness: string;
+  shared_flight: boolean;
+  child_pid: number | null;
+  probe_state: string;
+  probe_error: string | null;
 };
 
 type DiarizationPackStatus = {
@@ -434,6 +453,19 @@ type PerformanceTierStatus = {
   recommended_separation_backend: string;
   recommended_diarization_backend: string;
   recommended_tts_vc_device: string;
+  verified_at_ms: number;
+  source_identity: string;
+  freshness: string;
+  shared_flight: boolean;
+  child_pid: number | null;
+  probe_state: string;
+  probe_error: string | null;
+};
+
+type VoiceBackendsSnapshot = {
+  catalog: VoiceBackendCatalog;
+  recommendation: VoiceBackendRecommendation;
+  performanceTier: PerformanceTierStatus;
 };
 
 type LicensingReportResult = {
@@ -740,12 +772,134 @@ type DiagnosticsAppStateSnapshotExport = {
   markdown_bytes: number;
 };
 
+type DatabaseMode = "read" | "write" | "maintenance";
+type DatabasePriority = "foreground" | "background" | "maintenance";
+
+type ActiveDatabaseOperation = {
+  operation_id: number;
+  lane: string;
+  operation: string;
+  request_id: string | null;
+  mode: DatabaseMode;
+  priority: DatabasePriority;
+  enqueued_at_ms: number;
+  admitted_at_ms: number | null;
+  queue_wait_ms: number | null;
+  worker_id: string | null;
+  batch_identity: string | null;
+  transaction_behavior: string | null;
+  phase_ms: Record<string, number>;
+  row_count: number | null;
+};
+
+type DatabaseOperationReceipt = {
+  operation_id: number;
+  lane: string;
+  operation: string;
+  request_id: string | null;
+  mode: DatabaseMode;
+  priority: DatabasePriority;
+  enqueued_at_ms: number;
+  admitted_at_ms: number | null;
+  finished_at_ms: number;
+  queue_wait_ms: number | null;
+  execution_ms: number | null;
+  retry_count: number;
+  outcome: string;
+  batch_identity: string | null;
+  transaction_behavior: string | null;
+  phase_ms: Record<string, number>;
+  row_count: number | null;
+};
+
+type DatabaseRuntimeStatus = {
+  snapshot: {
+    database_path: string;
+    writer_capacity: number;
+    waiting_writers: number;
+    writer_active: boolean;
+    read_executor_limit: number;
+    read_admission_capacity: number;
+    active_readers: number;
+    waiting_readers: number;
+    shutting_down: boolean;
+    active_operations: ActiveDatabaseOperation[];
+    recent_receipts: DatabaseOperationReceipt[];
+  };
+  wal_health: {
+    database_path: string;
+    wal_path: string;
+    wal_bytes: number;
+    shm_bytes: number;
+    active_readers: number;
+    writer_active: boolean;
+    waiting_writers: number;
+    oldest_reader_age_ms: number | null;
+    long_reader_candidates: ActiveDatabaseOperation[];
+    last_checkpoint: {
+      mode: string;
+      busy: number;
+      log_frames: number;
+      checkpointed_frames: number;
+      elapsed_ms: number;
+    } | null;
+  };
+  contract: {
+    writer_queue_capacity: number;
+    writer_admission_timeout_ms: number;
+    writer_fairness_policy: string;
+    writer_batch_max_operations: number;
+    read_executor_limit: number;
+    read_admission_capacity: number;
+    read_admission_timeout_ms: number;
+    long_reader_warning_ms: number;
+    shutdown_drain_timeout_ms: number;
+    checkpoint_policy: string;
+    cancellation_policy: string;
+    idempotent_retry_limit: number;
+    operation_receipt_capacity: number;
+  };
+};
+
+type WalCheckpointReceipt = {
+  mode: string;
+  busy: number;
+  log_frames: number;
+  checkpointed_frames: number;
+  elapsed_ms: number;
+};
+
 type DiagnosticsSectionKey = "build" | "tools" | "phase2" | "storage" | "jobs" | "trace";
-type DiagnosticsSectionState = "idle" | "loading" | "ready" | "failed";
+type DiagnosticsSectionState = "idle" | "queued" | "loading" | "ready" | "stale" | "failed";
 type DiagnosticsSectionStatus = {
   state: DiagnosticsSectionState;
   error: string | null;
+  verified_at_ms: number | null;
+  freshness_ms: number;
+  shared: boolean;
 };
+
+function emptySectionOperationStatuses(): Record<DiagnosticsSectionKey, Record<string, DiagnosticsDemandSnapshot>> {
+  return { build: {}, tools: {}, phase2: {}, storage: {}, jobs: {}, trace: {} };
+}
+
+function capabilityProbeResultTruth(status: PerformanceTierStatus | DemucsPackStatus): DiagnosticsResultTruth {
+  const verifiedAtMs = status.verified_at_ms > 0 ? status.verified_at_ms : null;
+  if (status.freshness.startsWith("stale")) {
+    return { state: "stale", verifiedAtMs, error: status.probe_error };
+  }
+  if (["failed", "timeout", "superseded"].includes(status.probe_state)) {
+    return { state: "failed", verifiedAtMs, error: status.probe_error ?? `Probe ${status.probe_state}` };
+  }
+  return { state: "ready", verifiedAtMs, error: null };
+}
+
+function capabilityProbeProvenance(status: PerformanceTierStatus | DemucsPackStatus): string {
+  const pid = status.child_pid ? ` · child PID ${status.child_pid}` : "";
+  const shared = status.shared_flight ? " · shared flight" : "";
+  const verified = status.verified_at_ms > 0 ? ` · verified ${formatTs(status.verified_at_ms)}` : " · not verified";
+  return `${status.probe_state} · ${status.freshness}${verified}${pid}${shared} · source ${status.source_identity}`;
+}
 
 function formatBytes(bytes: number): string {
   if (!Number.isFinite(bytes)) return "-";
@@ -959,6 +1113,15 @@ function defaultAdapterConfig(template: VoiceBackendAdapterTemplate): VoiceBacke
 export function DiagnosticsPage({ visible = true }: { visible?: boolean }) {
   const pageActive = usePageActivity(visible);
   const youtubeProtectionRequestRef = useRef(0);
+  const demandGenerationRef = useRef<DemandGeneration | null>(null);
+  const sectionDemandActiveRef = useRef<Record<DiagnosticsSectionKey, number>>({
+    build: 0,
+    tools: 0,
+    phase2: 0,
+    storage: 0,
+    jobs: 0,
+    trace: 0,
+  });
   const [info, setInfo] = useState<DiagnosticsInfo | null>(null);
   const [startup, setStartup] = useState<StartupStatus | null>(null);
   const [inventory, setInventory] = useState<ModelInventory | null>(null);
@@ -1004,14 +1167,18 @@ export function DiagnosticsPage({ visible = true }: { visible?: boolean }) {
   const [diagnosticsTraceDir, setDiagnosticsTraceDir] =
     useState<DiagnosticsTraceDirStatus | null>(null);
   const [recentTrace, setRecentTrace] = useState<DiagnosticsTraceEntry[]>([]);
+  const [databaseRuntime, setDatabaseRuntime] = useState<DatabaseRuntimeStatus | null>(null);
+  const [databaseCheckpoint, setDatabaseCheckpoint] = useState<WalCheckpointReceipt | null>(null);
+  const [databaseCheckpointBusy, setDatabaseCheckpointBusy] = useState(false);
   const [youtubeProtectionDiagnostics, setYoutubeProtectionDiagnostics] = useState<{
     download: YoutubeProtectionDiagnosticsStatus;
     enumeration: YoutubeProtectionDiagnosticsStatus;
     downloadHistory: YoutubeProtectionDiagnosticsHistory;
     enumerationHistory: YoutubeProtectionDiagnosticsHistory;
-    downloadReplay: YoutubeProtectionReplayReceipt;
-    enumerationReplay: YoutubeProtectionReplayReceipt;
+    downloadReplay: YoutubeProtectionReplayReceipt | null;
+    enumerationReplay: YoutubeProtectionReplayReceipt | null;
   } | null>(null);
+  const [protectionReplayBusy, setProtectionReplayBusy] = useState(false);
   const [diagnosticsCapture, setDiagnosticsCapture] =
     useState<DiagnosticsCaptureStatus | null>(null);
   const [appStateSnapshot, setAppStateSnapshot] = useState<DiagnosticsAppStateSnapshot | null>(null);
@@ -1030,255 +1197,185 @@ export function DiagnosticsPage({ visible = true }: { visible?: boolean }) {
   const providerTitleRepairRunRef = useRef(0);
   const [snapshotBusy, setSnapshotBusy] = useState(false);
   const [sectionStatus, setSectionStatus] = useState<Record<DiagnosticsSectionKey, DiagnosticsSectionStatus>>({
-    build: { state: "idle", error: null },
-    tools: { state: "idle", error: null },
-    phase2: { state: "idle", error: null },
-    storage: { state: "idle", error: null },
-    jobs: { state: "idle", error: null },
-    trace: { state: "idle", error: null },
+    build: { state: "idle", error: null, verified_at_ms: null, freshness_ms: 0, shared: false },
+    tools: { state: "idle", error: null, verified_at_ms: null, freshness_ms: 0, shared: false },
+    phase2: { state: "idle", error: null, verified_at_ms: null, freshness_ms: 0, shared: false },
+    storage: { state: "idle", error: null, verified_at_ms: null, freshness_ms: 0, shared: false },
+    jobs: { state: "idle", error: null, verified_at_ms: null, freshness_ms: 0, shared: false },
+    trace: { state: "idle", error: null, verified_at_ms: null, freshness_ms: 0, shared: false },
   });
+  const sectionOperationStatusRef = useRef<Record<DiagnosticsSectionKey, Record<string, DiagnosticsDemandSnapshot>>>(
+    emptySectionOperationStatuses(),
+  );
+
+  const updateDemandSectionStatus = useCallback(
+    (key: DiagnosticsSectionKey, operationId: DiagnosticsOperationId, snapshot: DiagnosticsDemandSnapshot) => {
+      if (demandGenerationRef.current?.id !== snapshot.generation) return;
+      const operations = sectionOperationStatusRef.current[key];
+      operations[operationId] = snapshot;
+      const aggregate = aggregateDiagnosticsSectionSnapshots(Object.values(operations));
+      setSectionStatus((prev) => ({
+        ...prev,
+        [key]: aggregate,
+      }));
+    },
+    [],
+  );
 
   const updateSectionStatus = useCallback(
-    (key: DiagnosticsSectionKey, state: DiagnosticsSectionState, sectionError: string | null = null) => {
+    (
+      key: DiagnosticsSectionKey,
+      state: DiagnosticsSectionState,
+      sectionError: string | null = null,
+      demand?: DiagnosticsDemandSnapshot,
+    ) => {
       setSectionStatus((prev) => ({
         ...prev,
         [key]: {
           state,
           error: sectionError,
+          verified_at_ms: demand?.verified_at_ms ?? prev[key].verified_at_ms,
+          freshness_ms: demand?.freshness_ms ?? prev[key].freshness_ms,
+          shared: demand?.shared ?? false,
         },
       }));
     },
     [],
   );
 
-  const refresh = useCallback(async () => {
-    setError(null);
-    (["build", "tools", "phase2", "storage", "jobs", "trace"] as DiagnosticsSectionKey[]).forEach(
-      (key) => updateSectionStatus(key, "loading"),
-    );
-    try {
-      const [
-        nextInfo,
-        nextStartup,
-        nextInventory,
-        nextFfmpeg,
-        nextYtdlp,
-        nextJsRuntime,
-        nextPython,
-        nextPortablePython,
-        nextPhase2Plan,
-        nextPhase2Latest,
-        nextSpleeter,
-        nextDemucs,
-        nextDiarization,
-        nextTtsPreview,
-        nextTtsNeuralLocalV1,
-        nextTtsVoicePreservingLocalV1,
-        nextVoiceBackendCatalog,
-        nextVoiceBackendAdapters,
-        nextVoiceBackendRecommendation,
-        nextIntegrity,
-        nextPerfTier,
-        nextBatchRules,
-        nextDiarizationOptional,
-        nextStorage,
-        nextThumbnailCache,
-        nextPolicy,
-        nextArtifactRetentionPolicy,
-        nextDiagnosticsTraceDir,
-        nextRecentTrace,
-        nextJobs,
-      ] = await Promise.all([
-        invoke<DiagnosticsInfo>("diagnostics_info"),
-        invoke<StartupStatus>("startup_status"),
-        invoke<ModelInventory>("models_inventory"),
-        invoke<FfmpegToolsStatus>("tools_ffmpeg_status"),
-        invoke<YtDlpToolsStatus>("tools_ytdlp_status"),
-        invoke<JsRuntimeToolsStatus>("tools_js_runtime_status"),
-        invoke<PythonToolchainStatus>("tools_python_status"),
-        invoke<PortablePythonStatus>("tools_python_portable_status"),
-        invoke<Phase2PackPlanItem[]>("tools_phase2_packs_install_plan"),
-        invoke<Phase2InstallLatestState>("tools_phase2_packs_install_latest_state"),
-        invoke<SpleeterPackStatus>("tools_spleeter_status"),
-        invoke<DemucsPackStatus>("tools_demucs_status"),
-        invoke<DiarizationPackStatus>("tools_diarization_status"),
-        invoke<TtsPreviewPackStatus>("tools_tts_preview_status"),
-        invoke<TtsNeuralLocalV1PackStatus>("tools_tts_neural_local_v1_status"),
-        invoke<TtsVoicePreservingLocalV1PackStatus>("tools_tts_voice_preserving_local_v1_status"),
-        invoke<VoiceBackendCatalog>("voice_backends_catalog"),
-        invoke<VoiceBackendAdapterDetail[]>("voice_backend_adapters_list"),
-        invoke<VoiceBackendRecommendation>("voice_backends_recommend"),
-        invoke<PackIntegrityManifestStatus>("tools_pack_integrity_manifest_status"),
-        invoke<PerformanceTierStatus>("tools_performance_tier_status"),
-        invoke<BatchOnImportRules>("config_batch_on_import_get"),
-        invoke<OptionalDiarizationBackendStatus>("config_diarization_optional_status"),
-        invoke<StorageBreakdown>("diagnostics_storage_breakdown"),
-        invoke<ThumbnailCacheStatus>("diagnostics_thumbnail_cache_status"),
-        invoke<JobLogRetentionPolicy>("jobs_log_retention_policy"),
-        invoke<ItemArtifactRetentionPolicy>("jobs_item_artifact_retention_policy"),
-        invoke<DiagnosticsTraceDirStatus>("diagnostics_trace_dir_status"),
-        invoke<DiagnosticsTraceEntry[]>("diagnostics_trace_recent", { limit: 120 }),
-        invoke<JobRow[]>("jobs_list", { limit: 200, offset: 0 }),
-      ]);
-      startTransition(() => {
-        setInfo(nextInfo);
-        setStartup(nextStartup);
-        setInventory(nextInventory);
-        setFfmpeg(nextFfmpeg);
-        setYtdlp(nextYtdlp);
-        setJsRuntime(nextJsRuntime);
-        setPython(nextPython);
-        setPortablePython(nextPortablePython);
-        setPhase2Plan(nextPhase2Plan);
-        setPhase2Latest(nextPhase2Latest);
-        setSpleeter(nextSpleeter);
-        setDemucs(nextDemucs);
-        setDiarization(nextDiarization);
-        setTtsPreview(nextTtsPreview);
-        setTtsNeuralLocalV1(nextTtsNeuralLocalV1);
-        setTtsVoicePreservingLocalV1(nextTtsVoicePreservingLocalV1);
-        setVoiceBackendCatalog(nextVoiceBackendCatalog);
-        setVoiceBackendAdapters(nextVoiceBackendAdapters);
-        setVoiceBackendAdapterDrafts((prev) => {
-          const next: Record<string, VoiceBackendAdapterConfig> = { ...prev };
-          for (const detail of nextVoiceBackendAdapters) {
-            if (!next[detail.template.backend_id]) {
-              next[detail.template.backend_id] = detail.config
-                ? { ...detail.config }
-                : defaultAdapterConfig(detail.template);
-            }
-          }
-          return next;
+  const requestDemand = useCallback(
+    async <T,>(
+      operationId: DiagnosticsOperationId,
+      run: (signal: AbortSignal) => Promise<T>,
+      section: DiagnosticsSectionKey,
+      force = false,
+      resultTruth?: (value: T) => DiagnosticsResultTruth,
+    ) => {
+      const generation = demandGenerationRef.current;
+      if (!generation || generation.canceled) throw new DemandSupersededError("Diagnostics page is not active");
+      sectionDemandActiveRef.current[section] += 1;
+      try {
+        const result = await diagnosticsDemandCoordinator.request(operationId, generation, run, {
+          force,
+          onState: (snapshot) => updateDemandSectionStatus(section, operationId, snapshot),
+          resultTruth: resultTruth as ((value: unknown) => DiagnosticsResultTruth) | undefined,
         });
-        setVoiceBackendRecipeSelection((prev) => {
-          const next = { ...prev };
-          for (const detail of nextVoiceBackendAdapters) {
-            if (!next[detail.template.backend_id] && detail.template.starter_recipes.length) {
-              next[detail.template.backend_id] = detail.template.starter_recipes[0].recipe_id;
-            }
-          }
-          return next;
-        });
-        setVoiceBackendRecommendation(nextVoiceBackendRecommendation);
-        setIntegrity(nextIntegrity);
-        setPerfTier(nextPerfTier);
-        setBatchRules(nextBatchRules);
-        setDiarizationOptional(nextDiarizationOptional);
-        setDiarizationOptionalDraft((prev) => prev ?? nextDiarizationOptional.config);
-        setStorage(nextStorage);
-        setThumbnailCache(nextThumbnailCache);
-        setPolicy(nextPolicy);
-        setArtifactRetentionPolicy(nextArtifactRetentionPolicy);
-        setDiagnosticsTraceDir(nextDiagnosticsTraceDir);
-        setRecentTrace(nextRecentTrace);
-        setJobs(nextJobs);
-        (["build", "tools", "phase2", "storage", "jobs", "trace"] as DiagnosticsSectionKey[]).forEach(
-          (key) => updateSectionStatus(key, "ready"),
-        );
-      });
-    } catch (e) {
-      (["build", "tools", "phase2", "storage", "jobs", "trace"] as DiagnosticsSectionKey[]).forEach(
-        (key) => updateSectionStatus(key, "failed", String(e)),
-      );
-      throw e;
-    }
-  }, [updateSectionStatus]);
+        if (!demandGenerationOwnsCommit(demandGenerationRef.current, generation)) {
+          throw new DemandSupersededError("Diagnostics result lost page ownership before commit");
+        }
+        return { ...result, generation };
+      } finally {
+        sectionDemandActiveRef.current[section] = Math.max(0, sectionDemandActiveRef.current[section] - 1);
+      }
+    },
+    [updateDemandSectionStatus],
+  );
 
-  const loadBuildSection = useCallback(async () => {
-    updateSectionStatus("build", "loading");
+  const commitDemandResult = useCallback((generation: DemandGeneration, commit: () => void) => {
+    startTransition(() => {
+      if (!demandGenerationOwnsCommit(demandGenerationRef.current, generation)) return;
+      commit();
+    });
+  }, []);
+
+  const loadBuildSection = useCallback(async (force = false) => {
     try {
-      const [nextInfo, nextStartup, nextInventory, nextBatchRules, nextDiarizationOptional, nextPolicy] =
-        await Promise.all([
-          invoke<DiagnosticsInfo>("diagnostics_info"),
-          invoke<StartupStatus>("startup_status"),
-          invoke<ModelInventory>("models_inventory"),
-          invoke<BatchOnImportRules>("config_batch_on_import_get"),
-          invoke<OptionalDiarizationBackendStatus>("config_diarization_optional_status"),
-          invoke<JobLogRetentionPolicy>("jobs_log_retention_policy"),
-        ]);
-      startTransition(() => {
-        setInfo(nextInfo);
-        setStartup(nextStartup);
-        setInventory(nextInventory);
-        setBatchRules(nextBatchRules);
-        setDiarizationOptional(nextDiarizationOptional);
-        setDiarizationOptionalDraft((prev) => prev ?? nextDiarizationOptional.config);
-        setPolicy(nextPolicy);
-        updateSectionStatus("build", "ready");
+      const { value, generation } = await requestDemand("diagnostics.build", async () => ({
+        nextInfo: await invoke<DiagnosticsInfo>("diagnostics_info"),
+        nextStartup: await invoke<StartupStatus>("startup_status"),
+        nextInventory: await invoke<ModelInventory>("models_inventory"),
+        nextBatchRules: await invoke<BatchOnImportRules>("config_batch_on_import_get"),
+        nextDiarizationOptional: await invoke<OptionalDiarizationBackendStatus>("config_diarization_optional_status"),
+        nextPolicy: await invoke<JobLogRetentionPolicy>("jobs_log_retention_policy"),
+      }), "build", force);
+      commitDemandResult(generation, () => {
+        setInfo(value.nextInfo);
+        setStartup(value.nextStartup);
+        setInventory(value.nextInventory);
+        setBatchRules(value.nextBatchRules);
+        setDiarizationOptional(value.nextDiarizationOptional);
+        setDiarizationOptionalDraft((prev) => prev ?? value.nextDiarizationOptional.config);
+        setPolicy(value.nextPolicy);
       });
     } catch (e) {
+      if (e instanceof DemandSupersededError) return;
       updateSectionStatus("build", "failed", String(e));
       setError((prev) => prev ?? String(e));
     }
-  }, [updateSectionStatus]);
+  }, [commitDemandResult, requestDemand, updateSectionStatus]);
 
-  const loadToolsCoreSection = useCallback(async () => {
-    updateSectionStatus("tools", "loading");
+  const loadToolsCoreSection = useCallback(async (force = false) => {
     try {
-      const [
-        nextFfmpeg,
-        nextYtdlp,
-        nextJsRuntime,
-        nextPython,
-        nextPortablePython,
-        nextIntegrity,
-        nextPerfTier,
-      ] = await Promise.all([
-        invoke<FfmpegToolsStatus>("tools_ffmpeg_status"),
-        invoke<YtDlpToolsStatus>("tools_ytdlp_status"),
-        invoke<JsRuntimeToolsStatus>("tools_js_runtime_status"),
-        invoke<PythonToolchainStatus>("tools_python_status"),
-        invoke<PortablePythonStatus>("tools_python_portable_status"),
-        invoke<PackIntegrityManifestStatus>("tools_pack_integrity_manifest_status"),
-        invoke<PerformanceTierStatus>("tools_performance_tier_status"),
+      const [core, performance] = await Promise.all([
+        requestDemand("diagnostics.tools-core", async () => ({
+          nextFfmpeg: await invoke<FfmpegToolsStatus>("tools_ffmpeg_status"),
+          nextYtdlp: await invoke<YtDlpToolsStatus>("tools_ytdlp_status"),
+          nextJsRuntime: await invoke<JsRuntimeToolsStatus>("tools_js_runtime_status"),
+          nextPython: await invoke<PythonToolchainStatus>("tools_python_status"),
+          nextPortablePython: await invoke<PortablePythonStatus>("tools_python_portable_status"),
+          nextIntegrity: await invoke<PackIntegrityManifestStatus>("tools_pack_integrity_manifest_status"),
+        }), "tools", force),
+        requestDemand(
+          "capability.performance-tier",
+          () => invoke<PerformanceTierStatus>("tools_performance_tier_status"),
+          "tools",
+          force,
+          capabilityProbeResultTruth,
+        ),
       ]);
-      startTransition(() => {
-        setFfmpeg(nextFfmpeg);
-        setYtdlp(nextYtdlp);
-        setJsRuntime(nextJsRuntime);
-        setPython(nextPython);
-        setPortablePython(nextPortablePython);
-        setIntegrity(nextIntegrity);
-        setPerfTier(nextPerfTier);
-        updateSectionStatus("tools", "ready");
+      commitDemandResult(core.generation, () => {
+        setFfmpeg(core.value.nextFfmpeg);
+        setYtdlp(core.value.nextYtdlp);
+        setJsRuntime(core.value.nextJsRuntime);
+        setPython(core.value.nextPython);
+        setPortablePython(core.value.nextPortablePython);
+        setIntegrity(core.value.nextIntegrity);
+        setPerfTier(performance.value);
       });
     } catch (e) {
+      if (e instanceof DemandSupersededError) return;
       updateSectionStatus("tools", "failed", String(e));
       setError((prev) => prev ?? String(e));
     }
-  }, [updateSectionStatus]);
+  }, [commitDemandResult, requestDemand, updateSectionStatus]);
 
-  const loadToolsSupplementalData = useCallback(async () => {
+  const loadToolsSupplementalData = useCallback(async (force = false) => {
     try {
-      const [
+      const [supplemental, demucsStatus] = await Promise.all([
+        requestDemand("capability.voice-backends", async () => ({
+          nextSpleeter: await invoke<SpleeterPackStatus>("tools_spleeter_status"),
+          nextDiarization: await invoke<DiarizationPackStatus>("tools_diarization_status"),
+          nextTtsPreview: await invoke<TtsPreviewPackStatus>("tools_tts_preview_status"),
+          nextTtsNeuralLocalV1: await invoke<TtsNeuralLocalV1PackStatus>("tools_tts_neural_local_v1_status"),
+          nextTtsVoicePreservingLocalV1: await invoke<TtsVoicePreservingLocalV1PackStatus>("tools_tts_voice_preserving_local_v1_status"),
+          nextVoiceBackendsSnapshot: await invoke<VoiceBackendsSnapshot>("voice_backends_snapshot"),
+          nextVoiceBackendAdapters: await invoke<VoiceBackendAdapterDetail[]>("voice_backend_adapters_list"),
+        }), "tools", force, (value) => capabilityProbeResultTruth(value.nextVoiceBackendsSnapshot.performanceTier)),
+        requestDemand(
+          "capability.demucs",
+          () => invoke<DemucsPackStatus>("tools_demucs_status"),
+          "tools",
+          force,
+          capabilityProbeResultTruth,
+        ),
+      ]);
+      const {
         nextSpleeter,
-        nextDemucs,
         nextDiarization,
         nextTtsPreview,
         nextTtsNeuralLocalV1,
         nextTtsVoicePreservingLocalV1,
-        nextVoiceBackendCatalog,
+        nextVoiceBackendsSnapshot,
         nextVoiceBackendAdapters,
-        nextVoiceBackendRecommendation,
-      ] = await Promise.all([
-        invoke<SpleeterPackStatus>("tools_spleeter_status"),
-        invoke<DemucsPackStatus>("tools_demucs_status"),
-        invoke<DiarizationPackStatus>("tools_diarization_status"),
-        invoke<TtsPreviewPackStatus>("tools_tts_preview_status"),
-        invoke<TtsNeuralLocalV1PackStatus>("tools_tts_neural_local_v1_status"),
-        invoke<TtsVoicePreservingLocalV1PackStatus>("tools_tts_voice_preserving_local_v1_status"),
-        invoke<VoiceBackendCatalog>("voice_backends_catalog"),
-        invoke<VoiceBackendAdapterDetail[]>("voice_backend_adapters_list"),
-        invoke<VoiceBackendRecommendation>("voice_backends_recommend"),
-      ]);
-      startTransition(() => {
+      } = supplemental.value;
+      commitDemandResult(supplemental.generation, () => {
         setSpleeter(nextSpleeter);
-        setDemucs(nextDemucs);
+        setDemucs(demucsStatus.value);
         setDiarization(nextDiarization);
         setTtsPreview(nextTtsPreview);
         setTtsNeuralLocalV1(nextTtsNeuralLocalV1);
         setTtsVoicePreservingLocalV1(nextTtsVoicePreservingLocalV1);
-        setVoiceBackendCatalog(nextVoiceBackendCatalog);
+        setVoiceBackendCatalog(nextVoiceBackendsSnapshot.catalog);
         setVoiceBackendAdapters(nextVoiceBackendAdapters);
         setVoiceBackendAdapterDrafts((prev) => {
           const next: Record<string, VoiceBackendAdapterConfig> = { ...prev };
@@ -1300,164 +1397,237 @@ export function DiagnosticsPage({ visible = true }: { visible?: boolean }) {
           }
           return next;
         });
-        setVoiceBackendRecommendation(nextVoiceBackendRecommendation);
-      });
-    } catch {
-      // Keep the core tool section usable even if optional pack/adapter probes fail.
-    }
-  }, []);
-
-  const loadToolsSection = useCallback(async () => {
-    await loadToolsCoreSection();
-    await loadToolsSupplementalData();
-  }, [loadToolsCoreSection, loadToolsSupplementalData]);
-
-  const loadPhase2Section = useCallback(async () => {
-    updateSectionStatus("phase2", "loading");
-    try {
-      const [nextPhase2Plan, nextPhase2Latest] = await Promise.all([
-        invoke<Phase2PackPlanItem[]>("tools_phase2_packs_install_plan"),
-        invoke<Phase2InstallLatestState>("tools_phase2_packs_install_latest_state"),
-      ]);
-      startTransition(() => {
-        setPhase2Plan(nextPhase2Plan);
-        setPhase2Latest(nextPhase2Latest);
-        updateSectionStatus("phase2", "ready");
+        setVoiceBackendRecommendation(nextVoiceBackendsSnapshot.recommendation);
       });
     } catch (e) {
+      if (e instanceof DemandSupersededError) return;
+      // Keep the core tool section usable even if optional pack/adapter probes fail.
+    }
+  }, [commitDemandResult, requestDemand]);
+
+  const loadToolsSection = useCallback(async (force = false) => {
+    await loadToolsCoreSection(force);
+    await loadToolsSupplementalData(force);
+  }, [loadToolsCoreSection, loadToolsSupplementalData]);
+
+  const loadPhase2Section = useCallback(async (force = false) => {
+    try {
+      const { value, generation } = await requestDemand("diagnostics.phase2", async () => ({
+        nextPhase2Plan: await invoke<Phase2PackPlanItem[]>("tools_phase2_packs_install_plan"),
+        nextPhase2Latest: await invoke<Phase2InstallLatestState>("tools_phase2_packs_install_latest_state"),
+      }), "phase2", force);
+      commitDemandResult(generation, () => {
+        setPhase2Plan(value.nextPhase2Plan);
+        setPhase2Latest(value.nextPhase2Latest);
+      });
+    } catch (e) {
+      if (e instanceof DemandSupersededError) return;
       updateSectionStatus("phase2", "failed", String(e));
       setError((prev) => prev ?? String(e));
     }
-  }, [updateSectionStatus]);
+  }, [commitDemandResult, requestDemand, updateSectionStatus]);
 
-  const loadStorageSection = useCallback(async () => {
-    updateSectionStatus("storage", "loading");
+  const loadStorageSection = useCallback(async (force = false) => {
     try {
-      const [
-        nextStorage,
-        nextThumbnailCache,
-        nextPolicy,
-        nextArtifactRetentionPolicy,
-        nextProviderTitleRepairStatus,
-      ] = await Promise.all([
-        invoke<StorageBreakdown>("diagnostics_storage_breakdown"),
-        invoke<ThumbnailCacheStatus>("diagnostics_thumbnail_cache_status"),
-        invoke<JobLogRetentionPolicy>("jobs_log_retention_policy"),
-        invoke<ItemArtifactRetentionPolicy>("jobs_item_artifact_retention_policy"),
-        invoke<ProviderTitleRepairStatus>("provider_metadata_repair_status"),
-      ]);
-      startTransition(() => {
-        setStorage(nextStorage);
-        setThumbnailCache(nextThumbnailCache);
-        setPolicy(nextPolicy);
-        setArtifactRetentionPolicy(nextArtifactRetentionPolicy);
-        setProviderTitleRepairStatus(nextProviderTitleRepairStatus);
-        updateSectionStatus("storage", "ready");
+      const { value, generation } = await requestDemand("diagnostics.storage", async () => ({
+        nextStorage: await invoke<StorageBreakdown>("diagnostics_storage_breakdown"),
+        nextThumbnailCache: await invoke<ThumbnailCacheStatus>("diagnostics_thumbnail_cache_status"),
+        nextPolicy: await invoke<JobLogRetentionPolicy>("jobs_log_retention_policy"),
+        nextArtifactRetentionPolicy: await invoke<ItemArtifactRetentionPolicy>("jobs_item_artifact_retention_policy"),
+        nextProviderTitleRepairStatus: await invoke<ProviderTitleRepairStatus>("provider_metadata_repair_status"),
+      }), "storage", force);
+      commitDemandResult(generation, () => {
+        setStorage(value.nextStorage);
+        setThumbnailCache(value.nextThumbnailCache);
+        setPolicy(value.nextPolicy);
+        setArtifactRetentionPolicy(value.nextArtifactRetentionPolicy);
+        setProviderTitleRepairStatus(value.nextProviderTitleRepairStatus);
       });
     } catch (e) {
+      if (e instanceof DemandSupersededError) return;
       updateSectionStatus("storage", "failed", String(e));
       setError((prev) => prev ?? String(e));
     }
-  }, [updateSectionStatus]);
+  }, [commitDemandResult, requestDemand, updateSectionStatus]);
 
-  const loadTraceSection = useCallback(async () => {
+  const loadTraceSection = useCallback(async (force = false) => {
     const protectionGeneration = youtubeProtectionRequestRef.current + 1;
     youtubeProtectionRequestRef.current = protectionGeneration;
-    const protectionRequestStartedAt = Date.now();
-    const protectionContexts = {
-      download: {
-        requestId: `diagnostics-youtube-protection-download-${protectionGeneration}-${protectionRequestStartedAt}`,
-        spanId: "diagnostics-youtube-protection-download",
-      },
-      enumeration: {
-        requestId: `diagnostics-youtube-protection-enumeration-${protectionGeneration}-${protectionRequestStartedAt}`,
-        spanId: "diagnostics-youtube-protection-enumeration",
-      },
-    } as const;
-    updateSectionStatus("trace", "loading");
     try {
-      const [
-        nextDiagnosticsTraceDir,
-        nextRecentTrace,
-        nextDiagnosticsCapture,
-        downloadProtection,
-        enumerationProtection,
-        downloadHistory,
-        enumerationHistory,
-        downloadReplay,
-        enumerationReplay,
-      ] = await Promise.all([
-        invoke<DiagnosticsTraceDirStatus>("diagnostics_trace_dir_status"),
-        invoke<DiagnosticsTraceEntry[]>("diagnostics_trace_recent", { limit: 120 }),
-        invoke<DiagnosticsCaptureStatus>("diagnostics_capture_status"),
-        invoke<YoutubeProtectionDiagnosticsStatus>("youtube_protection_status_get", { operation: "download", ...protectionContexts.download }),
-        invoke<YoutubeProtectionDiagnosticsStatus>("youtube_protection_status_get", { operation: "enumeration", ...protectionContexts.enumeration }),
-        invoke<YoutubeProtectionDiagnosticsHistory>("youtube_protection_history_get", { operation: "download", limit: 100, ...protectionContexts.download }),
-        invoke<YoutubeProtectionDiagnosticsHistory>("youtube_protection_history_get", { operation: "enumeration", limit: 100, ...protectionContexts.enumeration }),
-        invoke<YoutubeProtectionReplayReceipt>("youtube_protection_history_replay", { operation: "download", limit: 100, ...protectionContexts.download }),
-        invoke<YoutubeProtectionReplayReceipt>("youtube_protection_history_replay", { operation: "enumeration", limit: 100, ...protectionContexts.enumeration }),
+      const [traceResult, protectionResult] = await Promise.all([
+        requestDemand("diagnostics.trace", async () => ({
+          nextDiagnosticsTraceDir: await invoke<DiagnosticsTraceDirStatus>("diagnostics_trace_dir_status"),
+          nextRecentTrace: await invoke<DiagnosticsTraceEntry[]>("diagnostics_trace_recent", { limit: 120 }),
+          nextDiagnosticsCapture: await invoke<DiagnosticsCaptureStatus>("diagnostics_capture_status"),
+          nextDatabaseRuntime: await invoke<DatabaseRuntimeStatus>("database_runtime_status"),
+        }), "trace", force),
+        requestDemand(
+          "protection.snapshot",
+          () => loadYoutubeProtectionSnapshot<YoutubeProtectionDiagnosticsStatus, YoutubeProtectionDiagnosticsHistory>("diagnostics", 100),
+          "trace",
+          force,
+        ),
       ]);
-      startTransition(() => {
-        setDiagnosticsTraceDir(nextDiagnosticsTraceDir);
-        setRecentTrace(nextRecentTrace);
-        setDiagnosticsCapture(nextDiagnosticsCapture);
+      commitDemandResult(traceResult.generation, () => {
+        setDiagnosticsTraceDir(traceResult.value.nextDiagnosticsTraceDir);
+        setRecentTrace(traceResult.value.nextRecentTrace);
+        setDiagnosticsCapture(traceResult.value.nextDiagnosticsCapture);
+        setDatabaseRuntime(traceResult.value.nextDatabaseRuntime);
         if (youtubeProtectionRequestRef.current === protectionGeneration) {
           setYoutubeProtectionDiagnostics({
-            download: downloadProtection,
-            enumeration: enumerationProtection,
-            downloadHistory,
-            enumerationHistory,
-            downloadReplay,
-            enumerationReplay,
+            download: protectionResult.value.download,
+            enumeration: protectionResult.value.enumeration,
+            downloadHistory: protectionResult.value.downloadHistory,
+            enumerationHistory: protectionResult.value.enumerationHistory,
+            downloadReplay: null,
+            enumerationReplay: null,
           });
         }
-        updateSectionStatus("trace", "ready");
       });
     } catch (e) {
+      if (e instanceof DemandSupersededError) return;
       updateSectionStatus("trace", "failed", String(e));
       setError((prev) => prev ?? String(e));
     }
-  }, [updateSectionStatus]);
+  }, [commitDemandResult, requestDemand, updateSectionStatus]);
 
-  const loadJobsSection = useCallback(async () => {
-    updateSectionStatus("jobs", "loading");
+  const replayYoutubeProtectionHistory = useCallback(async () => {
+    const replayGeneration = youtubeProtectionRequestRef.current;
+    const startedAtMs = Date.now();
+    setProtectionReplayBusy(true);
+    setError(null);
     try {
-      const nextJobs = await invoke<JobRow[]>("jobs_list", { limit: 200, offset: 0 });
-      startTransition(() => {
+      const { value } = await requestDemand("protection.history-replay", async (signal) => {
+        const downloadReplay = await invoke<YoutubeProtectionReplayReceipt>("youtube_protection_history_replay", {
+          operation: "download",
+          limit: 100,
+          requestId: `diagnostics-youtube-protection-replay-download-${replayGeneration}-${startedAtMs}`,
+          spanId: "diagnostics-youtube-protection-replay-download",
+        });
+        if (signal.aborted) throw new DemandSupersededError("Protection replay superseded after download checkpoint");
+        const enumerationReplay = await invoke<YoutubeProtectionReplayReceipt>("youtube_protection_history_replay", {
+          operation: "enumeration",
+          limit: 100,
+          requestId: `diagnostics-youtube-protection-replay-enumeration-${replayGeneration}-${startedAtMs}`,
+          spanId: "diagnostics-youtube-protection-replay-enumeration",
+        });
+        return { downloadReplay, enumerationReplay };
+      }, "trace", true);
+      if (youtubeProtectionRequestRef.current !== replayGeneration) return;
+      setYoutubeProtectionDiagnostics((current) => current ? {
+        ...current,
+        downloadReplay: value.downloadReplay,
+        enumerationReplay: value.enumerationReplay,
+      } : current);
+    } catch (e) {
+      if (!(e instanceof DemandSupersededError)) setError(String(e));
+    } finally {
+      if (youtubeProtectionRequestRef.current === replayGeneration) setProtectionReplayBusy(false);
+    }
+  }, [requestDemand]);
+
+  const runPassiveDatabaseCheckpoint = useCallback(async () => {
+    setDatabaseCheckpointBusy(true);
+    setError(null);
+    try {
+      const receipt = await invoke<WalCheckpointReceipt>("database_checkpoint_passive");
+      const nextRuntime = await invoke<DatabaseRuntimeStatus>("database_runtime_status");
+      setDatabaseCheckpoint(receipt);
+      setDatabaseRuntime(nextRuntime);
+      setNotice(receipt.busy === 0
+        ? `Passive database checkpoint completed: ${receipt.checkpointed_frames} of ${receipt.log_frames} WAL frames checkpointed.`
+        : `Passive database checkpoint remained busy: ${receipt.checkpointed_frames} of ${receipt.log_frames} WAL frames checkpointed. SQLite did not identify the holder.`);
+    } catch (e) {
+      setError(String(e));
+    } finally {
+      setDatabaseCheckpointBusy(false);
+    }
+  }, []);
+
+  const loadJobsSection = useCallback(async (force = false) => {
+    try {
+      const { value: nextJobs, generation } = await requestDemand(
+        "diagnostics.jobs",
+        () => invoke<JobRow[]>("jobs_list", { limit: 200, offset: 0 }),
+        "jobs",
+        force,
+      );
+      commitDemandResult(generation, () => {
         setJobs(nextJobs);
-        updateSectionStatus("jobs", "ready");
       });
     } catch (e) {
+      if (e instanceof DemandSupersededError) return;
       updateSectionStatus("jobs", "failed", String(e));
       setError((prev) => prev ?? String(e));
     }
-  }, [updateSectionStatus]);
+  }, [commitDemandResult, requestDemand, updateSectionStatus]);
+
+  const sectionDemandLoaders = useMemo(
+    () => new Map<DiagnosticsSectionKey, (force?: boolean) => Promise<void>>([
+      ["build", loadBuildSection],
+      ["tools", loadToolsSection],
+      ["phase2", loadPhase2Section],
+      ["storage", loadStorageSection],
+      ["trace", loadTraceSection],
+      ["jobs", loadJobsSection],
+    ]),
+    [loadBuildSection, loadJobsSection, loadPhase2Section, loadStorageSection, loadToolsSection, loadTraceSection],
+  );
+
+  const refresh = useCallback(async () => {
+    setError(null);
+    await Promise.all([...sectionDemandLoaders.values()].map((loadSection) => loadSection(true)));
+  }, [sectionDemandLoaders]);
 
   useEffect(() => {
     if (!visible) return;
+    const generation = createDemandGeneration("diagnostics");
+    demandGenerationRef.current = generation;
+    sectionOperationStatusRef.current = emptySectionOperationStatuses();
     setError(null);
-    const timers: number[] = [];
-    const buildRaf = window.requestAnimationFrame(() => void loadBuildSection());
-    timers.push(window.setTimeout(() => void loadToolsCoreSection(), 0));
-    timers.push(window.setTimeout(() => void loadToolsSupplementalData(), 220));
-    timers.push(window.setTimeout(() => void loadPhase2Section(), 40));
-    timers.push(window.setTimeout(() => void loadStorageSection(), 80));
-    timers.push(window.setTimeout(() => void loadTraceSection(), 120));
-    timers.push(window.setTimeout(() => void loadJobsSection(), 160));
+    setProtectionReplayBusy(false);
+    setSectionStatus((current) => Object.fromEntries(
+      Object.entries(current).map(([key, status]) => [
+        key,
+        {
+          ...status,
+          state: status.verified_at_ms ? "stale" : "idle",
+          error: null,
+          shared: false,
+        },
+      ]),
+    ) as Record<DiagnosticsSectionKey, DiagnosticsSectionStatus>);
+    void loadBuildSection();
+    const observer = typeof IntersectionObserver === "undefined"
+      ? null
+      : new IntersectionObserver((entries) => {
+        for (const entry of entries) {
+          if (!entry.isIntersecting) continue;
+          const section = (entry.target as HTMLElement).dataset.diagnosticsDemandSection as DiagnosticsSectionKey | undefined;
+          if (!section) continue;
+          observer?.unobserve(entry.target);
+          void sectionDemandLoaders.get(section)?.();
+        }
+      }, { rootMargin: "320px 0px" });
+    for (const [elementId, section] of [
+      ["diag-tools", "tools"],
+      ["diag-phase2", "phase2"],
+      ["diag-storage", "storage"],
+      ["diag-trace", "trace"],
+      ["diag-failures", "jobs"],
+    ] as const) {
+      const element = document.getElementById(elementId);
+      if (!element || !observer) continue;
+      element.dataset.diagnosticsDemandSection = section;
+      observer.observe(element);
+    }
     return () => {
-      window.cancelAnimationFrame(buildRaf);
-      timers.forEach((id) => window.clearTimeout(id));
+      observer?.disconnect();
+      youtubeProtectionRequestRef.current += 1;
+      diagnosticsDemandCoordinator.cancelGeneration(generation);
+      if (demandGenerationRef.current === generation) demandGenerationRef.current = null;
     };
-  }, [
-    visible,
-    loadBuildSection,
-    loadJobsSection,
-    loadPhase2Section,
-    loadStorageSection,
-    loadToolsCoreSection,
-    loadToolsSupplementalData,
-    loadTraceSection,
-  ]);
+  }, [visible, loadBuildSection, sectionDemandLoaders]);
 
   const modelGroups = useMemo(() => {
     const models = inventory?.models ?? [];
@@ -1480,13 +1650,17 @@ export function DiagnosticsPage({ visible = true }: { visible?: boolean }) {
     const total = entries.length || 1;
     const ready = entries.filter((entry) => entry.state === "ready").length;
     const loading = entries.filter((entry) => entry.state === "loading").length;
+    const queued = entries.filter((entry) => entry.state === "queued").length;
+    const stale = entries.filter((entry) => entry.state === "stale").length;
     const failed = entries.filter((entry) => entry.state === "failed").length;
     return {
       total,
       ready,
       loading,
+      queued,
+      stale,
       failed,
-      progressPct: Math.min(1, (ready + loading * 0.35) / total),
+      progressPct: Math.min(1, (ready + stale * 0.8 + loading * 0.35 + queued * 0.15) / total),
     };
   }, [sectionStatus]);
 
@@ -2665,8 +2839,8 @@ export function DiagnosticsPage({ visible = true }: { visible?: boolean }) {
           </div>
         </div>
         <div style={{ color: "#4b5563", marginBottom: 8 }}>
-          Diagnostics ready: {sectionProgress.ready}/{sectionProgress.total}. Loading:{" "}
-          {sectionProgress.loading}. Failed: {sectionProgress.failed}. Startup progress:{" "}
+          Diagnostics ready: {sectionProgress.ready}/{sectionProgress.total}. Queued: {sectionProgress.queued}. Loading:{" "}
+          {sectionProgress.loading}. Stale: {sectionProgress.stale}. Failed: {sectionProgress.failed}. Startup progress:{" "}
           {startup ? `${Math.round((startup.progress_pct ?? 0) * 100)}%` : "-"}.
         </div>
         <div className="table-wrap">
@@ -2675,7 +2849,9 @@ export function DiagnosticsPage({ visible = true }: { visible?: boolean }) {
               <tr>
                 <th>Section</th>
                 <th>Status</th>
+                <th>Freshness</th>
                 <th>Error</th>
+                <th>Action</th>
               </tr>
             </thead>
             <tbody>
@@ -2683,7 +2859,22 @@ export function DiagnosticsPage({ visible = true }: { visible?: boolean }) {
                 <tr key={key}>
                   <td>{label}</td>
                   <td>{sectionStatus[key].state}</td>
+                  <td>
+                    {sectionStatus[key].verified_at_ms
+                      ? `${formatTs(sectionStatus[key].verified_at_ms)} · ${Math.round(sectionStatus[key].freshness_ms / 1000)}s${sectionStatus[key].shared ? " · shared" : ""}`
+                      : "not verified"}
+                  </td>
                   <td>{sectionStatus[key].error ?? "-"}</td>
+                  <td>
+                    <button
+                      type="button"
+                      data-agent-safe-action="true"
+                      disabled={sectionStatus[key].state === "queued" || sectionStatus[key].state === "loading"}
+                      onClick={() => void sectionDemandLoaders.get(key)?.(true)}
+                    >
+                      {sectionStatus[key].verified_at_ms ? "Refresh" : "Load"}
+                    </button>
+                  </td>
                 </tr>
               ))}
             </tbody>
@@ -2787,7 +2978,7 @@ export function DiagnosticsPage({ visible = true }: { visible?: boolean }) {
           <button type="button" disabled={busy || !info?.db_path} onClick={revealDbFile}>
             Reveal DB file
           </button>
-          <button type="button" disabled={busy} onClick={() => refresh()}>
+          <button type="button" disabled={busy} onClick={() => void loadBuildSection(true)}>
             Refresh
           </button>
         </div>
@@ -2916,7 +3107,7 @@ export function DiagnosticsPage({ visible = true }: { visible?: boolean }) {
         ) : null}
       </div>
 
-      <div className="card">
+      <div className="card" id="diag-trace">
         <h2>YouTube protection diagnostics</h2>
         <div style={{ color: "#4b5563" }}>
           Read-only adaptive-policy evidence for the current authenticated runtime epoch. Counts are
@@ -2977,7 +3168,7 @@ export function DiagnosticsPage({ visible = true }: { visible?: boolean }) {
                   <div className="kv">
                     <div className="k">Evidence and replay</div>
                     <div className="v">
-                      {`${history.raw_total} retained raw rows · ${history.rollup_event_total} rollup events · ${history.transition_total} transitions · ${history.unknown_total} durable unknown · ${replay.events_replayed} bounded rows replayed · replay final ${replay.final_mode}`}
+                      {`${history.raw_total} retained raw rows · ${history.rollup_event_total} rollup events · ${history.transition_total} transitions · ${history.unknown_total} durable unknown · ${replay ? `${replay.events_replayed} explicitly replayed · replay final ${replay.final_mode}` : "history replay not run automatically"}`}
                     </div>
                   </div>
                   <div className="kv">
@@ -2991,9 +3182,155 @@ export function DiagnosticsPage({ visible = true }: { visible?: boolean }) {
                 </div>
               );
             })}
+            <div className="row" style={{ flexWrap: "wrap" }}>
+              <button
+                type="button"
+                disabled={protectionReplayBusy || sectionStatus.trace.state === "queued" || sectionStatus.trace.state === "loading"}
+                onClick={() => void replayYoutubeProtectionHistory()}
+              >
+                {protectionReplayBusy ? "Replaying bounded history…" : "Replay bounded history"}
+              </button>
+              <span style={{ color: "#4b5563" }}>
+                Explicit incident action; ordinary Diagnostics loading reads the bounded snapshot only.
+              </span>
+            </div>
           </>
         ) : (
           <div role="status">Protection evidence is loading or unavailable.</div>
+        )}
+
+        <h2>Database runtime</h2>
+        <div data-testid="database-runtime-diagnostics" style={{ color: "#4b5563" }}>
+          This is the live bounded SQLite access service, not a database scan. Automatic Diagnostics
+          loading reads only in-memory admission/operation state plus WAL and shared-memory file sizes;
+          it never runs a checkpoint. A passive checkpoint is explicit maintenance and may report busy
+          without identifying a lock holder.
+        </div>
+        {databaseRuntime ? (
+          <>
+            <div className="kv">
+              <div className="k">Canonical database</div>
+              <div className="v"><code>{databaseRuntime.snapshot.database_path}</code></div>
+            </div>
+            <div className="kv">
+              <div className="k">Writer admission</div>
+              <div className="v">
+                {databaseRuntime.snapshot.writer_active ? "active" : "idle"}
+                {` · ${databaseRuntime.snapshot.waiting_writers} waiting of ${databaseRuntime.contract.writer_queue_capacity}`}
+                {` · ${databaseRuntime.contract.writer_admission_timeout_ms} ms admission timeout`}
+                {` · ${databaseRuntime.contract.writer_fairness_policy.replace(/_/g, " ")}`}
+              </div>
+            </div>
+            <div className="kv">
+              <div className="k">Read admission</div>
+              <div className="v">
+                {`${databaseRuntime.snapshot.active_readers} active · ${databaseRuntime.snapshot.waiting_readers} waiting`}
+                {` · ${databaseRuntime.contract.read_executor_limit} executors`}
+                {` · queue ${databaseRuntime.contract.read_admission_capacity}`}
+                {` · ${databaseRuntime.contract.read_admission_timeout_ms} ms admission timeout`}
+              </div>
+            </div>
+            <div className="kv">
+              <div className="k">WAL health</div>
+              <div className="v">
+                {`${formatBytes(databaseRuntime.wal_health.wal_bytes)} WAL · ${formatBytes(databaseRuntime.wal_health.shm_bytes)} shared memory`}
+                {` · oldest reader ${databaseRuntime.wal_health.oldest_reader_age_ms === null ? "none" : `${databaseRuntime.wal_health.oldest_reader_age_ms} ms`}`}
+                {` · ${databaseRuntime.wal_health.long_reader_candidates.length} long-reader candidate(s)`}
+                {` · ${databaseRuntime.contract.checkpoint_policy.replace(/_/g, " ")}`}
+              </div>
+            </div>
+            <div className="kv">
+              <div className="k">Shutdown and receipts</div>
+              <div className="v">
+                {`${databaseRuntime.contract.shutdown_drain_timeout_ms} ms drain`}
+                {` · ${databaseRuntime.contract.operation_receipt_capacity} retained receipts`}
+                {` · ${databaseRuntime.snapshot.shutting_down ? "shutdown in progress" : "accepting work"}`}
+              </div>
+            </div>
+            <div className="row" style={{ flexWrap: "wrap" }}>
+              <button
+                type="button"
+                data-testid="database-passive-checkpoint"
+                disabled={databaseCheckpointBusy || databaseRuntime.snapshot.shutting_down}
+                onClick={() => void runPassiveDatabaseCheckpoint()}
+              >
+                {databaseCheckpointBusy ? "Running passive checkpoint…" : "Run passive WAL checkpoint"}
+              </button>
+              <span style={{ color: "#4b5563" }}>
+                Maintenance action; it does not delete canonical records or infer which process holds a lock.
+              </span>
+            </div>
+            {databaseCheckpoint ? (
+              <div className="kv" data-testid="database-checkpoint-receipt">
+                <div className="k">Last explicit checkpoint</div>
+                <div className="v">
+                  {`${databaseCheckpoint.busy === 0 ? "completed" : "busy"} · ${databaseCheckpoint.checkpointed_frames}/${databaseCheckpoint.log_frames} frames · ${databaseCheckpoint.elapsed_ms} ms`}
+                </div>
+              </div>
+            ) : null}
+            {databaseRuntime.snapshot.active_operations.length ? (
+              <div className="table-wrap" style={{ marginTop: 10 }}>
+                <table data-testid="database-active-operations">
+                  <thead>
+                    <tr>
+                      <th>Active operation</th>
+                      <th>Lane / mode</th>
+                      <th>Queue wait</th>
+                      <th>Transaction</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {databaseRuntime.snapshot.active_operations.map((operation) => (
+                      <tr key={operation.operation_id}>
+                        <td>{operation.operation}</td>
+                        <td>{operation.lane} / {operation.mode}</td>
+                        <td>{operation.queue_wait_ms ?? 0} ms</td>
+                        <td>{operation.transaction_behavior ?? "not started"}</td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            ) : (
+              <div role="status">No database operation was active when this snapshot was captured.</div>
+            )}
+            <div className="table-wrap" style={{ marginTop: 10 }}>
+              <table data-testid="database-recent-operation-receipts">
+                <thead>
+                  <tr>
+                    <th>Recent operation</th>
+                    <th>Lane / mode</th>
+                    <th>Queue / execution</th>
+                    <th>Outcome</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {databaseRuntime.snapshot.recent_receipts.length ? (
+                    databaseRuntime.snapshot.recent_receipts.slice(-8).reverse().map((receipt) => (
+                      <tr key={receipt.operation_id}>
+                        <td>{receipt.operation}</td>
+                        <td>{receipt.lane} / {receipt.mode}</td>
+                        <td>{receipt.queue_wait_ms ?? 0} ms / {receipt.execution_ms ?? 0} ms</td>
+                        <td>
+                          {receipt.outcome}{receipt.retry_count ? ` · ${receipt.retry_count} retries` : ""}
+                          <br />
+                          <small>
+                            {receipt.transaction_behavior ?? "no transaction"}
+                            {` · rows ${receipt.row_count ?? "not recorded"}`}
+                            {` · phases ${Object.entries(receipt.phase_ms).map(([phase, elapsed]) => `${phase}=${elapsed}ms`).join(", ") || "none"}`}
+                          </small>
+                        </td>
+                      </tr>
+                    ))
+                  ) : (
+                    <tr><td colSpan={4}>No completed database-operation receipts yet.</td></tr>
+                  )}
+                </tbody>
+              </table>
+            </div>
+          </>
+        ) : (
+          <div role="status">Database runtime status is loading or unavailable.</div>
         )}
 
         <h2>Diagnostics trace</h2>
@@ -3373,6 +3710,8 @@ export function DiagnosticsPage({ visible = true }: { visible?: boolean }) {
           <div className="k">demucs</div>
           <div className="v">{demucs?.demucs_version ?? "-"}</div>
         </div>
+        {demucs ? <div className="muted">Demucs probe: {capabilityProbeProvenance(demucs)}</div> : null}
+        {demucs?.probe_error ? <div className="muted">Demucs probe failed: {demucs.probe_error}</div> : null}
 
         <div className="kv">
           <div className="k">Diarization (baseline)</div>
@@ -4046,7 +4385,7 @@ export function DiagnosticsPage({ visible = true }: { visible?: boolean }) {
               ? "Repair voice-preserving TTS pack"
               : "Install voice-preserving TTS pack"}
           </button>
-          <button type="button" disabled={busy} onClick={() => refresh()}>
+          <button type="button" disabled={busy} onClick={() => void loadToolsSection(true)}>
             Refresh
           </button>
         </div>
@@ -4066,7 +4405,7 @@ export function DiagnosticsPage({ visible = true }: { visible?: boolean }) {
           <button type="button" disabled={busy} onClick={() => enqueueInstallPhase2Packs(true)}>
             Force reinstall all packs
           </button>
-          <button type="button" disabled={busy} onClick={() => refresh()}>
+          <button type="button" disabled={busy} onClick={() => void loadPhase2Section(true)}>
             Refresh
           </button>
           <button
@@ -4260,7 +4599,7 @@ export function DiagnosticsPage({ visible = true }: { visible?: boolean }) {
           <button
             type="button"
             disabled={busy}
-            onClick={() => refresh()}
+            onClick={() => void loadBuildSection(true)}
             title="Reload the current settings from your computer."
           >
             Refresh
@@ -4523,6 +4862,8 @@ export function DiagnosticsPage({ visible = true }: { visible?: boolean }) {
                 : "no"}
           </div>
         </div>
+        {perfTier ? <div className="muted">Performance probe: {capabilityProbeProvenance(perfTier)}</div> : null}
+        {perfTier?.probe_error ? <div className="muted">Performance probe failed: {perfTier.probe_error}</div> : null}
         <div className="kv">
           <div className="k">Recommended separation</div>
           <div className="v">{perfTier?.recommended_separation_backend ?? "-"}</div>
@@ -4662,7 +5003,7 @@ export function DiagnosticsPage({ visible = true }: { visible?: boolean }) {
         </div>
 
         <div className="row">
-          <button type="button" disabled={busy} onClick={() => refresh()}>
+          <button type="button" disabled={busy} onClick={() => void loadStorageSection(true)}>
             Refresh
           </button>
           <button type="button" disabled={busy} onClick={clearCache}>
@@ -4822,7 +5163,7 @@ export function DiagnosticsPage({ visible = true }: { visible?: boolean }) {
         </div>
 
         <div className="row">
-          <button type="button" disabled={busy} onClick={() => refresh()}>
+          <button type="button" disabled={busy} onClick={() => void loadBuildSection(true)}>
             Refresh
           </button>
         </div>

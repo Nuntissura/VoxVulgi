@@ -46,8 +46,7 @@ pub struct VoiceCastPackApplyMapping {
 }
 
 pub fn list_voice_cast_packs(paths: &AppPaths) -> Result<Vec<VoiceCastPack>> {
-    let conn = db::open(paths)?;
-    db::migrate(&conn)?;
+    let conn = db::open_readonly(paths)?;
 
     let mut stmt = conn.prepare(
         r#"
@@ -105,8 +104,7 @@ pub fn get_voice_cast_pack(paths: &AppPaths, pack_id: &str) -> Result<VoiceCastP
         return Err(EngineError::InstallFailed("pack_id is empty".to_string()));
     }
 
-    let conn = db::open(paths)?;
-    db::migrate(&conn)?;
+    let conn = db::open_readonly(paths)?;
 
     let pack = conn.query_row(
         r#"
@@ -223,8 +221,7 @@ pub fn create_voice_cast_pack_from_template(
     let now = now_ms();
     let mut used_role_keys = HashSet::new();
 
-    let mut conn = db::open(paths)?;
-    db::migrate(&conn)?;
+    let mut conn = db::write_context(paths)?;
     let tx = conn.transaction()?;
     tx.execute(
         r#"
@@ -333,8 +330,7 @@ pub fn update_voice_cast_pack(
         return Err(EngineError::InstallFailed("pack_id is empty".to_string()));
     }
 
-    let mut conn = db::open(paths)?;
-    db::migrate(&conn)?;
+    let mut conn = db::write_context(paths)?;
     let tx = conn.transaction()?;
     let updated = tx.execute(
         "UPDATE voice_cast_pack SET name=?2, updated_at_ms=?3 WHERE id=?1",
@@ -380,8 +376,7 @@ pub fn delete_voice_cast_pack(paths: &AppPaths, pack_id: &str) -> Result<()> {
         return Err(EngineError::InstallFailed("pack_id is empty".to_string()));
     }
 
-    let mut conn = db::open(paths)?;
-    db::migrate(&conn)?;
+    let mut conn = db::write_context(paths)?;
     let tx = conn.transaction()?;
     tx.execute(
         "DELETE FROM voice_cast_pack_role WHERE pack_id=?1",
@@ -527,8 +522,7 @@ fn set_voice_cast_pack_voice_plan_default(
         return Err(EngineError::InstallFailed("pack_id is empty".to_string()));
     }
 
-    let mut conn = db::open(paths)?;
-    db::migrate(&conn)?;
+    let mut conn = db::write_context(paths)?;
     let tx = conn.transaction()?;
     let now = now_ms();
     let updated = tx.execute(

@@ -4,15 +4,15 @@ file_kind: work_packet
 updated_at: 2026-08-23
 ---
 
-<topic id="contract" status="backlog" version="v1" wp="WP-0313" updated_at="2026-08-23">
+<topic id="contract" status="in-progress" version="v1" wp="WP-0313" updated_at="2026-08-23">
 
 # Work Packet: WP-0313 — Offline hydration scheduling, attestation, and startup observability
 
 ## Metadata
 
 - ID: WP-0313
-- Owner: —
-- Status: BACKLOG
+- Owner: Codex
+- Status: IN_PROGRESS
 - Created: 2026-08-23
 - Refinement: `WP-0313_OFFLINE_HYDRATION_SCHEDULING_ATTESTATION_AND_STARTUP_OBSERVABILITY_v1_REFINEMENT.md`
 - Board: `../TASK_BOARD.md`
@@ -65,11 +65,14 @@ Preserve full verified-byte offline provider readiness while making hydration on
 
 </topic>
 
-<topic id="status-updates" status="active" version="v1" wp="WP-0313" updated_at="2026-08-23">
+<topic id="status-updates" status="active" version="v1" wp="WP-0313" updated_at="2026-08-24">
 
 # Status updates
 
 - 2026-08-23: Created after reconciling the stale watcher cutoff with the later governed v0.1.179 terminal trace and embedded heartbeat generation times. The refinement explicitly retracts permanent-hang and dead-Worker claims. No product code, payload, app data, or process changed.
 - 2026-08-23: Status is BACKLOG pending later implementation.
+- 2026-08-23: Implementation began. Added shared provider-verification flights, event-driven progress/readiness, source-identity invalidation, fresh-process attestation, and emitted/received/queued/persisted/acknowledged heartbeat timing. Governed v0.1.180 disposable-root packaged headless proof showed exact 5,873-file/85,488,791-byte verification and five concurrent requests joining one scan. Status remains IN_PROGRESS because the exact complete-payload timing/resource/provider-execution gate and disposable-VM normal-window proof are unavailable.
+- 2026-08-24: The integrated implementation shipped into governed v0.1.181. A disposable packaged headless launch independently confirmed the expected version, healthy bridge, hidden-agent mode, Diagnostics navigation, semantic audit, snapshot, and dump without using the operator profile. The prior v0.1.180 exact provider scan proof remains the provider-verification evidence; status remains `IN_PROGRESS` because complete-payload timing/resource/provider execution and disposable-VM normal-window gates remain open.
+- 2026-08-24: Governed v0.1.182 passed all six complete offline-pack warmup probes and independently launched the exact packaged EXE against an isolated headless base. The bridge proved `agent_headless=true`, `app_version=0.1.182`, Diagnostics navigation, 123/123 semantic candidates with zero missing accessible names, structural interaction, snapshots, and dumps. Headless mode intentionally skipped hydration, so the v0.1.180 disposable-root provider scan remains the exact provider-attestation proof; complete-payload timing/resource/provider execution and disposable-VM normal-window gates remain open.
 
 </topic>

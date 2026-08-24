@@ -76,8 +76,7 @@ pub fn list_voice_library_profiles(
     paths: &AppPaths,
     kind: Option<&str>,
 ) -> Result<Vec<VoiceLibraryProfile>> {
-    let conn = db::open(paths)?;
-    db::migrate(&conn)?;
+    let conn = db::open_readonly(paths)?;
 
     let kind = normalize_profile_kind_opt(kind)?;
     let sql = if kind.is_some() {
@@ -189,8 +188,7 @@ pub fn get_voice_library_profile(
         ));
     }
 
-    let conn = db::open(paths)?;
-    db::migrate(&conn)?;
+    let conn = db::open_readonly(paths)?;
     let references = list_references(&conn, profile_id)?;
     let profile = conn.query_row(
         r#"
@@ -268,8 +266,7 @@ pub fn create_voice_library_profile(
     let profile_id = Uuid::new_v4().to_string();
     std::fs::create_dir_all(paths.voice_library_profile_refs_dir(&profile_id))?;
 
-    let mut conn = db::open(paths)?;
-    db::migrate(&conn)?;
+    let mut conn = db::write_context(paths)?;
     let now = now_ms();
     let tx = conn.transaction()?;
     tx.execute(
@@ -302,6 +299,7 @@ INSERT INTO voice_library_profile (
         ],
     )?;
     tx.commit()?;
+    drop(conn);
 
     get_voice_library_profile(paths, &profile_id)
 }
@@ -339,8 +337,7 @@ pub fn create_voice_library_profile_from_item_speaker(
     let references =
         copy_profile_references(&refs_dir, &item_speaker.tts_voice_profile_paths, None)?;
 
-    let mut conn = db::open(paths)?;
-    db::migrate(&conn)?;
+    let mut conn = db::write_context(paths)?;
     let tx = conn.transaction()?;
     let now = now_ms();
     insert_profile_row(
@@ -354,6 +351,7 @@ pub fn create_voice_library_profile_from_item_speaker(
         now,
     )?;
     tx.commit()?;
+    drop(conn);
 
     get_voice_library_profile(paths, &profile_id)
 }
@@ -369,8 +367,7 @@ pub fn update_voice_library_profile(
             "profile_id is empty".to_string(),
         ));
     }
-    let mut conn = db::open(paths)?;
-    db::migrate(&conn)?;
+    let mut conn = db::write_context(paths)?;
     let tx = conn.transaction()?;
     let now = now_ms();
     let updated = tx.execute(
@@ -409,6 +406,7 @@ WHERE id=?1
         )));
     }
     tx.commit()?;
+    drop(conn);
     get_voice_library_profile(paths, profile_id)
 }
 
@@ -437,8 +435,7 @@ pub fn add_voice_library_reference(
         .next()
         .ok_or_else(|| EngineError::InstallFailed("reference copy failed".to_string()))?;
 
-    let mut conn = db::open(paths)?;
-    db::migrate(&conn)?;
+    let mut conn = db::write_context(paths)?;
     let tx = conn.transaction()?;
     insert_reference_row(&tx, profile_id, &reference)?;
     refresh_profile_reference_cache(&tx, profile_id)?;
@@ -447,6 +444,7 @@ pub fn add_voice_library_reference(
         params![profile_id, now_ms()],
     )?;
     tx.commit()?;
+    drop(conn);
     get_voice_library_profile(paths, profile_id)
 }
 
@@ -462,8 +460,7 @@ pub fn remove_voice_library_reference(
             "profile_id or reference_id is empty".to_string(),
         ));
     }
-    let mut conn = db::open(paths)?;
-    db::migrate(&conn)?;
+    let mut conn = db::write_context(paths)?;
     let tx = conn.transaction()?;
     let path: String = tx.query_row(
         "SELECT path FROM voice_library_reference WHERE profile_id=?1 AND reference_id=?2",
@@ -480,6 +477,7 @@ pub fn remove_voice_library_reference(
         params![profile_id, now_ms()],
     )?;
     tx.commit()?;
+    drop(conn);
 
     let path = Path::new(&path);
     if path.exists() {
@@ -495,8 +493,7 @@ pub fn delete_voice_library_profile(paths: &AppPaths, profile_id: &str) -> Resul
             "profile_id is empty".to_string(),
         ));
     }
-    let mut conn = db::open(paths)?;
-    db::migrate(&conn)?;
+    let mut conn = db::write_context(paths)?;
     let tx = conn.transaction()?;
     tx.execute(
         "DELETE FROM voice_library_reference WHERE profile_id=?1",
@@ -507,6 +504,7 @@ pub fn delete_voice_library_profile(paths: &AppPaths, profile_id: &str) -> Resul
         params![profile_id],
     )?;
     tx.commit()?;
+    drop(conn);
 
     let profile_dir = paths.voice_library_profile_dir(profile_id);
     if profile_dir.exists() {
@@ -611,8 +609,7 @@ pub fn fork_voice_library_profile(
             .collect::<Vec<_>>(),
         None,
     )?;
-    let mut conn = db::open(paths)?;
-    db::migrate(&conn)?;
+    let mut conn = db::write_context(paths)?;
     let tx = conn.transaction()?;
     let now = now_ms();
     let source_setting = speakers::ItemSpeakerSetting {

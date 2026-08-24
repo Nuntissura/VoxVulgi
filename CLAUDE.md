@@ -36,11 +36,11 @@
 - To bypass the hard 2 GB 32-bit archive ceiling of NSIS without failing builds or discarding model weights, full offline distributions use **Inno Setup 7 or newer** (`governance/scripts/build_offline_full_installer.ps1` + `product/desktop/src-tauri/installer/VoxVulgi_offline_full.iss`); Inno 7 extended-length path support is required for the bundled Python payload and the build must reject Inno 6.
 - [VV-INSTALL-001] Every future public full-offline install/update release is one user-downloadable UDF ISO; no companion `.bin` slice or separately downloaded payload file may be required.
 - [VV-INSTALL-002] The ISO root must expose one obvious `Install_VoxVulgi.exe` entrypoint; non-technical users must not need a terminal, archive tool, Python/pip command, or manual model/dependency step.
-- [VV-INSTALL-003] Inno Setup wraps the core NSIS setup.exe and extracts the complete payload directly from external non-solid `.7z` archives inside the ISO into `%APPDATA%\com.voxvulgi.voxvulgi`; raw recursive dependency-tree entries and public Inno disk slices are forbidden.
+- [VV-INSTALL-003] Inno Setup wraps the core NSIS setup.exe and extracts the complete payload directly from external bounded-solid `.7z` archives using a 64 MiB solid block inside the ISO into `%APPDATA%\com.voxvulgi.voxvulgi`; raw recursive dependency-tree entries and public Inno disk slices are forbidden.
 - [VV-INSTALL-004] Preserve `ArchiveExtraction=enhanced/nopassword`, `DiskSpanning=no`, `SolidCompression=no`, Inno 7 extended paths, and the perMachine NSIS `[Run]` `shellexec` elevation handoff.
 - [VV-INSTALL-005] Every installer run must continuously checkpoint `installer_<version>_latest.log` and retain a timestamped final log under `%APPDATA%\com.voxvulgi.voxvulgi\diagnostics\installer` on success, failure, or cancellation.
 - [VV-INSTALL-006] The governed build must test archive integrity/path safety, list/verify ISO contents, and refuse publication unless the ISO is the sole public user-required artifact with every expected payload archive present.
-- [VV-INSTALL-007] Installer performance is release-gated: the representative Python-tree archive fixture must be at least 2x faster than the legacy raw-file fixture, and the full clean-profile offline install target is at most 30 minutes on the documented reference local-SSD machine with default security settings.
+- [VV-INSTALL-007] Installer performance is release-gated: the representative Python-tree archive fixture must be at least 2x faster than the legacy raw-file fixture. The canonical 64 MiB bounded-solid fixture passed at 2.128x (222.717 s raw median versus 104.677 s archive median, with identical output-tree SHA-256); this fixture proof does not replace the still-required full clean-profile offline install target of at most 30 minutes on the documented reference local-SSD machine with default security settings.
 - [VV-INSTALL-008] Before creating any full-offline installer or updater, read and follow the single canonical no-context procedure at `governance/release/OFFLINE_INSTALLER_BUILD_MANUAL.md`; do not create or rely on a second installer build guide.
 - [VV-INSTALL-009] Installer logs must record wrapper start/source/expected version, every named payload phase start and completion, core-installer launch and return, pre-install and post-install registry state, observed install path and binary version, post-install verification, failure reason, and terminal outcome.
 - [VV-INSTALL-010] The wrapper must not report success unless the core installer produced the expected uninstall-registry version and an installed main binary whose file version matches the release; verification failure must fail the installation and preserve the log.
@@ -162,6 +162,8 @@ A timed-out health check on a stale port file is the most common false-negative 
 | `POST` | `/agent/subscription_status` | `{"id":"<subscription-id>","status":"deleted"}` | Headless-only, explicit assistant mutation for the manual subscription lifecycle status. Accepted statuses are `deleted` and `normal`; the engine attributes the action to `assistant`, preserves subscription/video/metadata/history records, and returns the updated row plus canceled refresh-job count. Automatic failures cannot call this path. (WP-0282) |
 | `POST` | `/agent/freeze_event` | `{"event":"freeze_detected","details":{...},"level":"warn"}` | Worker-only ingress used by the freeze detector. Accepted `event` values: `freeze_detected`, `freeze_recovered`, `worker_alive` (the v0.1.20 liveness heartbeat, fires every 30 s). Appends a row to `diagnostics_trace.jsonl`. Returns `{"status":"ok"}`. (WP-0221) |
 | `POST` | `/agent/freeze_dump` | `{"limit":1000,"note":"..."}` | Bundles app version, pid, bridge port, agent state, and the recent trace tail into a single JSON report. Writes a timestamped file plus `freeze_report_latest.json` under the trace dir's `freeze_reports/` subfolder. Returns `{"path","latest_path","trace_rows_included"}`. Runs on the bridge thread, so it works even when the WebView is frozen. (WP-0221) |
+| `POST` | `/agent/provider_verify` | — | Headless-only. Starts the single current-process full-byte YouTube provider verification flight against the disposable headless app-data root and returns immediately. (WP-0313) |
+| `GET` | `/agent/provider_verify` | — | Headless-only. Returns the shared provider verification progress/scan count and current attested readiness while bridge health stays independently probeable. (WP-0313) |
 
 ### Example (from a terminal or agent script)
 
@@ -258,6 +260,14 @@ Use `vvwatch.cmd` when the app itself may be frozen or when evidence must distin
 - [VV-STARTUP-002] Do not move a SQLite reader or writer ahead of the database-ready startup gate; startup speed work must preserve database-first ordering.
 - [VV-STARTUP-003] A schema/default-library initialization failure must emit a `db_schema` startup error before setup exits.
 - [VV-STARTUP-004] Changes to desktop startup ordering must retain the focused database-ready and background-order regression tests and must be verified at the packaged headless app boundary.
+
+## Bounded Desktop Database Runtime
+
+- [VV-DBRUNTIME-001] After startup schema readiness, production app-database access must use the shared `AppDatabase` runtime; bare read-write opens and post-ready migrations are forbidden outside the exact reviewed exception registry.
+- [VV-DBRUNTIME-002] Reads use bounded read-only admission; writes use bounded FIFO serialized admission with explicit timeout, overload, cancellation-before-admission, terminal receipts, and no silently dropped admitted write.
+- [VV-DBRUNTIME-003] Filesystem, NAS, network, hashing, and child-process work must occur outside database writer admission unless an existing invariant is explicitly documented and proven.
+- [VV-DBRUNTIME-004] Diagnostics may load runtime/WAL health read-only; passive checkpoint is an explicit operator action and busy attribution must distinguish internal candidates from external-or-unknown ownership.
+- [VV-DBRUNTIME-005] Shutdown must stop and join owned job-runner workers before the database drain, reconcile admitted operations, and flush the bounded diagnostics trace queue.
 
 ## [OPERATOR-AUTHORITY] Operator Authority Over Pace, Scope, and Stopping
 

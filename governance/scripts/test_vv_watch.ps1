@@ -40,6 +40,10 @@ try {
     Assert-True ($scriptSource -match "function Get-BoundedDiagnosticsTraceRows") "vv_watch.ps1 must read a bounded set of rotated generations"
     Assert-True ($scriptSource -match "startup_phase_errors") "vvwatch must summarize startup phase errors"
     Assert-True ($scriptSource -match "startup_incomplete_phases") "vvwatch must summarize incomplete startup phases"
+    Assert-True ($scriptSource -match "startup_hydration_latest") "vvwatch must summarize revisioned hydration progress"
+    Assert-True ($scriptSource -match "heartbeat_persist_to_source_ack_max_ms") "vvwatch must summarize heartbeat delivery boundaries"
+    Assert-True ($scriptSource -match "database_contention_internal_count") "vvwatch must separate admitted internal contention candidates"
+    Assert-True ($scriptSource -match "database_contention_external_or_unknown_count") "vvwatch must preserve external-or-unknown contention"
     Assert-True ($scriptSource -match "process_lifecycle") "vvwatch must retain process lifecycle evidence across samples"
     Assert-True ($scriptSource -match "schema migration is running") "vvwatch must suppress DB probes while schema migration is running"
     Assert-True ($scriptSource -match 'incidents\\\{0\}\\trace\.jsonl') "vvwatch must read the app-owned active incident artifact"
@@ -69,6 +73,9 @@ try {
         @{ ts_ms = $fixtureStartedAtMs + 10; event = "startup_phase"; level = "info"; details = @{ phase_id = "app_dirs"; label = "App data + output layout"; state = "ready"; error = $null } },
         @{ ts_ms = $fixtureStartedAtMs + 20; event = "startup_phase"; level = "info"; details = @{ phase_id = "db_schema"; label = "Database schema"; state = "running"; error = $null } },
         @{ ts_ms = $fixtureStartedAtMs + 30; event = "startup_phase"; level = "error"; details = @{ phase_id = "offline_bundle"; label = "Offline bundle hydration"; state = "error"; error = "database error: database is locked" } },
+        @{ ts_ms = $fixtureStartedAtMs + 31; event = "startup_hydration_progress"; level = "info"; details = @{ revision = 5; phase_id = "provider_tree_verify"; label = "Provider tree verification"; state = "running"; error = $null } },
+        @{ ts_ms = $fixtureStartedAtMs + 32; event = "heartbeat_source_acknowledged"; level = "info"; details = @{ source = "worker"; sequence = 1; emitted_at_ms = $fixtureStartedAtMs + 20; received_at_ms = $fixtureStartedAtMs + 22; persisted_at_ms = $fixtureStartedAtMs + 24; source_acknowledged_at_ms = $fixtureStartedAtMs + 25; queue_dwell_ms = 2; late = $false; duplicate = $false; queue_overflow = $false } },
+        @{ ts_ms = $fixtureStartedAtMs + 33; event = "heartbeat_source_acknowledged"; level = "warn"; details = @{ source = "main_thread"; sequence = 2; emitted_at_ms = $fixtureStartedAtMs + 30; received_at_ms = $fixtureStartedAtMs + 31; persisted_at_ms = $null; source_acknowledged_at_ms = $null; queue_dwell_ms = $null; acknowledgement_stage = "queued"; late = $false; duplicate = $false; queue_overflow = $false } },
         @{ ts_ms = $fixtureStartedAtMs + 40; event = "command_started"; level = "info"; details = @{ invocation_id = 1; cmd = "startup_status" } },
         @{ ts_ms = $fixtureStartedAtMs + 40; event = "command_completed"; level = "info"; details = @{ invocation_id = 1; cmd = "startup_status"; elapsed_ms = 0 } }
     )
@@ -149,6 +156,10 @@ try {
     Assert-True ([int]$summary.latest_trace.startup_phase_error_count -eq 1) "startup error fixture was not summarized"
     Assert-True ([int]$summary.latest_trace.startup_database_lock_error_count -eq 1) "startup database-lock fixture was not classified"
     Assert-True (@($summary.latest_trace.startup_incomplete_phases | Where-Object { $_.phase_id -eq "db_schema" }).Count -eq 1) "running db_schema fixture was not reported as incomplete"
+    Assert-True ([int]$summary.latest_trace.startup_hydration_latest.revision -eq 5) "latest hydration revision was not summarized"
+    Assert-True ([int]$summary.latest_trace.heartbeat_worker_ack_count -eq 1) "worker heartbeat acknowledgement was not summarized"
+    Assert-True ([int]$summary.latest_trace.heartbeat_emit_to_receive_max_ms -eq 2) "heartbeat emitted-to-receive latency was not reconciled"
+    Assert-True ([int]$summary.latest_trace.heartbeat_persist_to_source_ack_max_ms -eq 1) "queued heartbeat acknowledgement with null persistence fields distorted latency"
     Assert-True ([int]$summary.latest_trace.command_incomplete_count -eq 0) "same-timestamp command completion must sort after its start"
     Assert-True ([int]$summary.process_lifecycle.stale_bridge_sample_count -ge 1) "stale bridge lifecycle evidence was not retained"
     Assert-True (@($summary.process_lifecycle.observed_bridge_pids) -contains 424242) "stale bridge PID was not retained in lifecycle summary"

@@ -21,6 +21,9 @@ pub enum EngineError {
     #[error("database error: {0}")]
     Database(#[from] rusqlite::Error),
 
+    #[error("database runtime error: {0}")]
+    DatabaseRuntime(String),
+
     #[error("io error: {0}")]
     Io(#[from] std::io::Error),
 

@@ -48,12 +48,17 @@ static DIAGNOSTICS_TRACE_DROPPED_PENDING: AtomicU64 = AtomicU64::new(0);
 static DIAGNOSTICS_TRACE_DROPPED_TOTAL: AtomicU64 = AtomicU64::new(0);
 static DIAGNOSTICS_TRACE_ASYNC_WRITE_FAILURES_TOTAL: AtomicU64 = AtomicU64::new(0);
 static DIAGNOSTICS_TRACE_QUEUE_REJECTIONS_TOTAL: AtomicU64 = AtomicU64::new(0);
+static HEARTBEAT_DUPLICATES_TOTAL: AtomicU64 = AtomicU64::new(0);
+static HEARTBEAT_LATE_TOTAL: AtomicU64 = AtomicU64::new(0);
+static HEARTBEAT_LAST_SEQUENCE: OnceLock<Mutex<std::collections::HashMap<String, u64>>> =
+    OnceLock::new();
 static DIAGNOSTICS_TRACE_ROTATIONS_TOTAL: AtomicU64 = AtomicU64::new(0);
 static DIAGNOSTICS_TRACE_COMPRESSED_TOTAL: AtomicU64 = AtomicU64::new(0);
 static DIAGNOSTICS_ID_SEQUENCE: AtomicU64 = AtomicU64::new(1);
 static DIAGNOSTICS_SKEW_SELF_TEST_REQUESTED: AtomicBool = AtomicBool::new(false);
 static DIAGNOSTICS_CAPTURE_STATE: OnceLock<Mutex<DiagnosticsCaptureStatus>> = OnceLock::new();
 const AGENT_HEADLESS_BASE_DIR_ENV: &str = "VOXVULGI_AGENT_HEADLESS_BASE_DIR";
+const STARTUP_STATUS_EVENT: &str = "voxvulgi://startup-status";
 
 fn resolve_agent_headless_base_dir(
     default_base_dir: std::path::PathBuf,
@@ -411,6 +416,7 @@ fn handle_agent_request(stream: &mut std::net::TcpStream) {
             // producer used by the Jobs controls and diagnostics instead of grouping rendered
             // rows or duplicating gate calculations on the bridge thread.
             ("GET", "/agent/jobs_tracks") => agent_handle_jobs_tracks(),
+            ("GET", "/agent/provider_verify") => agent_handle_provider_verify_status(),
             ("POST", "/agent/navigate") => agent_handle_navigate(&body_str),
             ("POST", "/agent/snapshot") => agent_handle_snapshot(&body_str),
             ("POST", "/agent/dump") => agent_handle_dump(&body_str),
@@ -419,6 +425,7 @@ fn handle_agent_request(stream: &mut std::net::TcpStream) {
             ("POST", "/agent/subscription_status") => agent_handle_subscription_status(&body_str),
             ("POST", "/agent/freeze_event") => agent_handle_freeze_event(&body_str),
             ("POST", "/agent/freeze_dump") => agent_handle_freeze_dump(&body_str),
+            ("POST", "/agent/provider_verify") => agent_handle_provider_verify_start(),
             _ => ("404 Not Found", r#"{"error":"not found"}"#.to_string()),
         }
     };
@@ -434,6 +441,173 @@ fn handle_agent_request(stream: &mut std::net::TcpStream) {
     );
     let _ = stream.write_all(response.as_bytes());
     let _ = stream.flush();
+}
+
+fn agent_headless_app_paths() -> Result<AppPaths, (&'static str, String)> {
+    let bridge = agent_bridge_state()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    if !bridge.agent_headless {
+        return Err((
+            "403 Forbidden",
+            r#"{"error":"provider verification bridge is headless-only"}"#.to_string(),
+        ));
+    }
+    drop(bridge);
+    let app = AGENT_APP_HANDLE.get().ok_or_else(|| {
+        (
+            "503 Service Unavailable",
+            r#"{"error":"app handle unavailable"}"#.to_string(),
+        )
+    })?;
+    let state = app.try_state::<AppState>().ok_or_else(|| {
+        (
+            "503 Service Unavailable",
+            r#"{"error":"app state unavailable"}"#.to_string(),
+        )
+    })?;
+    Ok(state.paths.clone())
+}
+
+static AGENT_PROVIDER_VERIFY_WORKER_ACTIVE: std::sync::atomic::AtomicBool =
+    std::sync::atomic::AtomicBool::new(false);
+static AGENT_PROVIDER_VERIFY_FLIGHT_ID: std::sync::atomic::AtomicU64 =
+    std::sync::atomic::AtomicU64::new(0);
+static AGENT_PROVIDER_VERIFY_REQUEST_COUNT: std::sync::atomic::AtomicU64 =
+    std::sync::atomic::AtomicU64::new(0);
+static AGENT_PROVIDER_VERIFY_ADMISSION_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+
+struct AgentProviderVerifyFlightGuard {
+    flight_id: u64,
+}
+
+impl Drop for AgentProviderVerifyFlightGuard {
+    fn drop(&mut self) {
+        AGENT_PROVIDER_VERIFY_WORKER_ACTIVE.store(false, std::sync::atomic::Ordering::Release);
+    }
+}
+
+enum AgentProviderVerifyAdmission {
+    Owner {
+        guard: AgentProviderVerifyFlightGuard,
+        request_count: u64,
+    },
+    Joined {
+        flight_id: u64,
+        request_count: u64,
+    },
+}
+
+fn admit_agent_provider_verify_flight() -> AgentProviderVerifyAdmission {
+    let _admission = AGENT_PROVIDER_VERIFY_ADMISSION_LOCK
+        .get_or_init(|| Mutex::new(()))
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let request_count = AGENT_PROVIDER_VERIFY_REQUEST_COUNT
+        .fetch_add(1, std::sync::atomic::Ordering::AcqRel)
+        .saturating_add(1);
+    if AGENT_PROVIDER_VERIFY_WORKER_ACTIVE
+        .compare_exchange(
+            false,
+            true,
+            std::sync::atomic::Ordering::AcqRel,
+            std::sync::atomic::Ordering::Acquire,
+        )
+        .is_ok()
+    {
+        let flight_id = AGENT_PROVIDER_VERIFY_FLIGHT_ID
+            .fetch_add(1, std::sync::atomic::Ordering::AcqRel)
+            .saturating_add(1);
+        AgentProviderVerifyAdmission::Owner {
+            guard: AgentProviderVerifyFlightGuard { flight_id },
+            request_count,
+        }
+    } else {
+        AgentProviderVerifyAdmission::Joined {
+            flight_id: AGENT_PROVIDER_VERIFY_FLIGHT_ID.load(std::sync::atomic::Ordering::Acquire),
+            request_count,
+        }
+    }
+}
+
+fn agent_handle_provider_verify_start() -> (&'static str, String) {
+    let paths = match agent_headless_app_paths() {
+        Ok(paths) => paths,
+        Err(response) => return response,
+    };
+    match admit_agent_provider_verify_flight() {
+        AgentProviderVerifyAdmission::Joined {
+            flight_id,
+            request_count,
+        } => (
+            "202 Accepted",
+            serde_json::json!({
+                "status":"joined_flight",
+                "flight_id": flight_id,
+                "request_count": request_count,
+                "worker_active": true,
+            })
+            .to_string(),
+        ),
+        AgentProviderVerifyAdmission::Owner {
+            guard,
+            request_count,
+        } => {
+            let flight_id = guard.flight_id;
+            std::thread::Builder::new()
+                .name("voxvulgi-agent-provider-verify".to_string())
+                .spawn(move || {
+                    let _guard = guard;
+                    let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                        tools::verify_youtube_po_provider_node_modules(&paths)
+                    }));
+                })
+                .map(|_| {
+                    (
+                        "202 Accepted",
+                        serde_json::json!({
+                            "status":"verification_requested",
+                            "flight_id": flight_id,
+                            "request_count": request_count,
+                            "worker_active": true,
+                        })
+                        .to_string(),
+                    )
+                })
+                .unwrap_or_else(|error| {
+                    (
+                        "500 Internal Server Error",
+                        serde_json::json!({
+                            "error":error.to_string(),
+                            "flight_id": flight_id,
+                            "request_count": request_count,
+                            "worker_active": false,
+                        })
+                        .to_string(),
+                    )
+                })
+        }
+    }
+}
+
+fn agent_handle_provider_verify_status() -> (&'static str, String) {
+    let paths = match agent_headless_app_paths() {
+        Ok(paths) => paths,
+        Err(response) => return response,
+    };
+    (
+        "200 OK",
+        serde_json::json!({
+            "progress": tools::youtube_po_provider_verification_progress(&paths),
+            "status": tools::youtube_po_provider_install_status(&paths),
+            "bridge_flight": {
+                "worker_active": AGENT_PROVIDER_VERIFY_WORKER_ACTIVE.load(std::sync::atomic::Ordering::Acquire),
+                "flight_id": AGENT_PROVIDER_VERIFY_FLIGHT_ID.load(std::sync::atomic::Ordering::Acquire),
+                "request_count": AGENT_PROVIDER_VERIFY_REQUEST_COUNT.load(std::sync::atomic::Ordering::Acquire),
+            },
+        })
+        .to_string(),
+    )
 }
 
 fn return_dummy_stream() -> std::net::TcpStream {
@@ -1130,11 +1304,14 @@ fn agent_handle_freeze_event(body: &str) -> (&'static str, String) {
         .filter(|s| !s.is_empty())
         .unwrap_or("freeze_detected")
         .to_string();
-    if event != "freeze_detected" && event != "freeze_recovered" && event != "worker_alive" {
+    if event != "freeze_detected"
+        && event != "freeze_recovered"
+        && event != "worker_alive"
+        && event != "heartbeat_source_acknowledged"
+    {
         return (
             "400 Bad Request",
-            r#"{"error":"event must be freeze_detected, freeze_recovered, or worker_alive"}"#
-                .to_string(),
+            r#"{"error":"unsupported freeze/heartbeat event"}"#.to_string(),
         );
     }
 
@@ -1145,6 +1322,9 @@ fn agent_handle_freeze_event(body: &str) -> (&'static str, String) {
     if event == "freeze_detected" || event == "freeze_recovered" {
         enrich_freeze_event_invoke_context(&mut details);
     }
+    if event == "worker_alive" {
+        enrich_heartbeat_ingress(&event, &mut details);
+    }
     let level = parsed
         .get("level")
         .and_then(|v| v.as_str())
@@ -1154,11 +1334,108 @@ fn agent_handle_freeze_event(body: &str) -> (&'static str, String) {
 
     if let Some(app) = AGENT_APP_HANDLE.get() {
         if let Some(state) = app.try_state::<AppState>() {
-            append_diagnostics_trace_row_best_effort(&state.paths, &event, details, &level);
+            let wait_for_persistence = matches!(
+                event.as_str(),
+                "worker_alive" | "heartbeat_source_acknowledged"
+            );
+            let receipt = append_diagnostics_trace_row_with_ack(
+                &state.paths,
+                &event,
+                details,
+                &level,
+                wait_for_persistence,
+            );
+            return match serde_json::to_string(&receipt) {
+                Ok(body) => ("200 OK", body),
+                Err(error) => (
+                    "500 Internal Server Error",
+                    serde_json::json!({ "error": error.to_string() }).to_string(),
+                ),
+            };
         }
     }
 
-    ("200 OK", r#"{"status":"ok"}"#.to_string())
+    (
+        "503 Service Unavailable",
+        r#"{"error":"app state unavailable"}"#.to_string(),
+    )
+}
+
+fn enrich_heartbeat_ingress(event: &str, details: &mut serde_json::Value) {
+    let received_at_ms = now_epoch_ms_i64();
+    let Some(object) = details.as_object_mut() else {
+        *details = serde_json::json!({
+            "source": event,
+            "received_at_ms": received_at_ms,
+            "outcome": "invalid_details",
+        });
+        return;
+    };
+    let source = object
+        .get("source")
+        .and_then(serde_json::Value::as_str)
+        .unwrap_or(event)
+        .to_string();
+    let source_instance = object
+        .get("source_instance")
+        .and_then(serde_json::Value::as_str)
+        .filter(|value| !value.trim().is_empty())
+        .unwrap_or("legacy")
+        .to_string();
+    let sequence_key = format!("{source}:{source_instance}");
+    let sequence = object
+        .get("sequence")
+        .or_else(|| object.get("tick"))
+        .and_then(serde_json::Value::as_u64);
+    let emitted_at_ms = object
+        .get("emitted_at_ms")
+        .and_then(serde_json::Value::as_i64);
+    let mut duplicate = false;
+    let mut sequence_gap = 0_u64;
+    if let Some(sequence) = sequence {
+        let mut last_by_source = HEARTBEAT_LAST_SEQUENCE
+            .get_or_init(|| Mutex::new(std::collections::HashMap::new()))
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if let Some(previous) = last_by_source.get(&sequence_key).copied() {
+            duplicate = sequence <= previous;
+            sequence_gap = sequence.saturating_sub(previous.saturating_add(1));
+        }
+        if !duplicate {
+            last_by_source.insert(sequence_key, sequence);
+        }
+    }
+    if duplicate {
+        HEARTBEAT_DUPLICATES_TOTAL.fetch_add(1, Ordering::Relaxed);
+    }
+    let late = emitted_at_ms.is_some_and(|emitted| received_at_ms.saturating_sub(emitted) > 60_000);
+    if late {
+        HEARTBEAT_LATE_TOTAL.fetch_add(1, Ordering::Relaxed);
+    }
+    object.insert("source".to_string(), serde_json::json!(source));
+    object.insert(
+        "source_instance".to_string(),
+        serde_json::json!(source_instance),
+    );
+    object.insert(
+        "received_at_ms".to_string(),
+        serde_json::json!(received_at_ms),
+    );
+    object.insert("duplicate".to_string(), serde_json::json!(duplicate));
+    object.insert("sequence_gap".to_string(), serde_json::json!(sequence_gap));
+    object.insert("late".to_string(), serde_json::json!(late));
+    object.insert(
+        "duplicates_total".to_string(),
+        serde_json::json!(HEARTBEAT_DUPLICATES_TOTAL.load(Ordering::Relaxed)),
+    );
+    object.insert(
+        "late_total".to_string(),
+        serde_json::json!(HEARTBEAT_LATE_TOTAL.load(Ordering::Relaxed)),
+    );
+    object.insert(
+        "clock_source".to_string(),
+        serde_json::json!("source_wall_clock_and_native_wall_clock_sequence_ordered"),
+    );
 }
 
 // WP-0221: Freeze report bundling. POSTed by `vvfreeze.cmd` (or the Diagnostics
@@ -1299,10 +1576,9 @@ use voxvulgi_engine::paths::AppPaths;
 use voxvulgi_engine::{
     config, db, diagnostics, instagram_subscriptions, jobs, library, media_cleanup,
     provider_metadata, root_rebind, speakers, subscriptions, subtitle_tracks, subtitles,
-    tiktok_subscriptions, tools, translate, video_libraries,
-    voice_backend_adapters, voice_backends, voice_benchmarks, voice_cast_packs, voice_cleanup,
-    voice_library, voice_plans, voice_reference_candidates, voice_reference_curation,
-    voice_templates,
+    tiktok_subscriptions, tools, translate, video_libraries, voice_backend_adapters,
+    voice_backends, voice_benchmarks, voice_cast_packs, voice_cleanup, voice_library, voice_plans,
+    voice_reference_candidates, voice_reference_curation, voice_templates,
 };
 
 #[derive(Debug, Clone, serde::Deserialize)]
@@ -1400,6 +1676,7 @@ struct ArtifactVoiceCloneMeta {
 #[derive(Debug, Clone)]
 struct AppState {
     paths: AppPaths,
+    database: db::AppDatabase,
     runner: Option<jobs::JobRunnerHandle>,
     safe_mode_enabled: Arc<AtomicBool>,
     safe_mode_cli: bool,
@@ -1427,8 +1704,34 @@ struct DiagnosticsInfo {
     engine_version: String,
 }
 
+#[derive(Debug, Clone, serde::Serialize)]
+struct DatabaseRuntimeContract {
+    writer_queue_capacity: usize,
+    writer_admission_timeout_ms: u64,
+    writer_fairness_policy: &'static str,
+    writer_batch_max_operations: usize,
+    read_executor_limit: usize,
+    read_admission_capacity: usize,
+    read_admission_timeout_ms: u64,
+    long_reader_warning_ms: u64,
+    shutdown_drain_timeout_ms: u64,
+    checkpoint_policy: &'static str,
+    cancellation_policy: &'static str,
+    idempotent_retry_limit: u32,
+    operation_receipt_capacity: usize,
+}
+
+#[derive(Debug, Clone, serde::Serialize)]
+struct DatabaseRuntimeStatus {
+    snapshot: db::DatabaseRuntimeSnapshot,
+    wal_health: db::WalHealth,
+    contract: DatabaseRuntimeContract,
+}
+
 #[derive(Debug, Clone)]
 struct StartupTracker {
+    revision: u64,
+    updated_at_ms: i64,
     offline_bundle_state: String,
     offline_bundle_started_at_ms: Option<i64>,
     offline_bundle_finished_at_ms: Option<i64>,
@@ -1436,11 +1739,14 @@ struct StartupTracker {
     progress_pct: f32,
     active_phase_id: Option<String>,
     phases: Vec<StartupPhase>,
+    hydration: OfflineHydrationProgress,
 }
 
 impl StartupTracker {
     fn new() -> Self {
         Self {
+            revision: 0,
+            updated_at_ms: now_epoch_ms_i64(),
             offline_bundle_state: "not_started".to_string(),
             offline_bundle_started_at_ms: None,
             offline_bundle_finished_at_ms: None,
@@ -1453,11 +1759,22 @@ impl StartupTracker {
                 StartupPhase::new("job_runner", "Job runner"),
                 StartupPhase::new("offline_bundle", "Offline bundle hydration"),
             ],
+            hydration: OfflineHydrationProgress::new(),
         }
     }
 
     fn set_phase_state(&mut self, phase_id: &str, state: &str, error: Option<String>) {
+        if phase_id == "offline_bundle"
+            && matches!(
+                self.offline_bundle_state.as_str(),
+                "ready" | "error" | "skipped_safe_mode"
+            )
+        {
+            return;
+        }
         let now = now_epoch_ms_i64();
+        self.revision = self.revision.saturating_add(1);
+        self.updated_at_ms = now;
         if let Some(phase) = self.phases.iter_mut().find(|phase| phase.id == phase_id) {
             phase.state = state.to_string();
             if matches!(state, "pending" | "running") {
@@ -1513,6 +1830,148 @@ impl StartupTracker {
             .find(|phase| matches!(phase.state.as_str(), "running" | "pending"))
             .map(|phase| phase.id.clone());
     }
+
+    fn set_hydration_progress(
+        &mut self,
+        phase_id: &str,
+        state: &str,
+        files_planned: Option<u64>,
+        files_completed: Option<u64>,
+        bytes_planned: Option<u64>,
+        bytes_completed: Option<u64>,
+        error: Option<String>,
+    ) {
+        if self.hydration.terminal_outcome.is_some() {
+            return;
+        }
+        let now = now_epoch_ms_i64();
+        self.revision = self.revision.saturating_add(1);
+        self.updated_at_ms = now;
+        self.hydration.revision = self.revision;
+        self.hydration.phase_id = phase_id.to_string();
+        self.hydration.phase_label = hydration_phase_label(phase_id).to_string();
+        self.hydration.state = state.to_string();
+        self.hydration.files_planned = files_planned;
+        self.hydration.files_completed = files_completed;
+        self.hydration.bytes_planned = bytes_planned;
+        self.hydration.bytes_completed = bytes_completed;
+        self.hydration.updated_at_ms = now;
+        self.hydration.error = error;
+        self.hydration.admission_state = if matches!(phase_id, "ready" | "error" | "skipped") {
+            "terminal"
+        } else if state == "running" {
+            "checkpointed_active"
+        } else {
+            state
+        }
+        .to_string();
+        self.hydration.held_reason = None;
+        if matches!(phase_id, "ready" | "error" | "skipped") {
+            self.hydration.terminal_outcome = Some(phase_id.to_string());
+        } else {
+            self.hydration.terminal_outcome = None;
+        }
+    }
+
+    fn apply_provider_progress(&mut self, progress: &tools::ProviderVerificationProgress) {
+        if self.hydration.terminal_outcome.is_some() {
+            return;
+        }
+        let now = now_epoch_ms_i64();
+        self.revision = self.revision.saturating_add(1);
+        self.updated_at_ms = now;
+        self.hydration.revision = self.revision;
+        self.hydration.phase_id = progress.phase.clone();
+        self.hydration.phase_label = hydration_phase_label(&progress.phase).to_string();
+        self.hydration.state = progress.state.clone();
+        self.hydration.files_completed = Some(progress.files_completed);
+        self.hydration.files_planned = progress.files_planned;
+        self.hydration.bytes_completed = Some(progress.bytes_completed);
+        self.hydration.bytes_planned = progress.bytes_planned;
+        self.hydration.provider_scan_count = Some(progress.scan_count);
+        self.hydration.updated_at_ms = now;
+        self.hydration.error = progress.error.clone();
+        self.hydration.provider_revision = Some(progress.revision);
+        self.hydration.provider_source_identity = Some(progress.source_identity.clone());
+        self.hydration.provider_updated_at_ms = Some(progress.updated_at_ms);
+        self.hydration.provider_progress_fresh = now
+            .saturating_sub(progress.updated_at_ms)
+            .clamp(0, i64::MAX)
+            <= 5_000;
+        self.hydration.admission_state = if progress.foreground_pressure_active {
+            "foreground_yielding"
+        } else if progress.state == "running" {
+            "checkpointed_active"
+        } else {
+            progress.state.as_str()
+        }
+        .to_string();
+        self.hydration.held_reason = progress.held_reason.clone();
+        self.hydration.resource_policy = progress.resource_policy.clone();
+    }
+}
+
+fn hydration_phase_label(phase_id: &str) -> &'static str {
+    match phase_id {
+        "bundle_discovery" => "Bundle discovery",
+        "bundle_application" => "Bundle application",
+        "provider_manifest_load" => "Provider manifest load",
+        "provider_tree_verify" => "Provider tree verification",
+        "provider_attestation_publish" => "Provider attestation publication",
+        "ready" => "Hydration ready",
+        "error" => "Hydration error",
+        "skipped" => "Hydration skipped",
+        _ => "Offline hydration",
+    }
+}
+
+#[derive(Debug, Clone, serde::Serialize)]
+struct OfflineHydrationProgress {
+    revision: u64,
+    phase_id: String,
+    phase_label: String,
+    state: String,
+    files_planned: Option<u64>,
+    files_completed: Option<u64>,
+    bytes_planned: Option<u64>,
+    provider_scan_count: Option<u64>,
+    bytes_completed: Option<u64>,
+    updated_at_ms: i64,
+    terminal_outcome: Option<String>,
+    error: Option<String>,
+    provider_revision: Option<u64>,
+    provider_source_identity: Option<String>,
+    provider_updated_at_ms: Option<i64>,
+    provider_progress_fresh: bool,
+    admission_state: String,
+    held_reason: Option<String>,
+    resource_policy: String,
+}
+
+impl OfflineHydrationProgress {
+    fn new() -> Self {
+        Self {
+            revision: 0,
+            phase_id: "bundle_discovery".to_string(),
+            phase_label: hydration_phase_label("bundle_discovery").to_string(),
+            state: "pending".to_string(),
+            files_planned: None,
+            files_completed: None,
+            bytes_planned: None,
+            provider_scan_count: None,
+            bytes_completed: None,
+            updated_at_ms: now_epoch_ms_i64(),
+            terminal_outcome: None,
+            error: None,
+            provider_revision: None,
+            provider_source_identity: None,
+            provider_updated_at_ms: None,
+            provider_progress_fresh: false,
+            admission_state: "pending".to_string(),
+            held_reason: None,
+            resource_policy: "single_flight_32_file_yield_256_file_1ms_checkpoint".to_string(),
+        }
+    }
 }
 
 #[derive(Debug, Clone, serde::Serialize)]
@@ -1540,6 +1999,8 @@ impl StartupPhase {
 
 #[derive(Debug, Clone, serde::Serialize)]
 struct StartupStatus {
+    revision: u64,
+    updated_at_ms: i64,
     offline_bundle_state: String,
     offline_bundle_started_at_ms: Option<i64>,
     offline_bundle_finished_at_ms: Option<i64>,
@@ -1547,6 +2008,7 @@ struct StartupStatus {
     progress_pct: f32,
     active_phase_id: Option<String>,
     phases: Vec<StartupPhase>,
+    hydration: OfflineHydrationProgress,
 }
 
 #[derive(Debug, Clone, serde::Serialize)]
@@ -1770,6 +2232,17 @@ struct DiagnosticsTraceWriteRequest {
     event: String,
     details: serde_json::Value,
     level: String,
+    received_at_ms: i64,
+    enqueued_at_ms: i64,
+    persistence_ack: Option<SyncSender<DiagnosticsTracePersistReceipt>>,
+    barrier_ack: Option<SyncSender<()>>,
+}
+
+#[derive(Debug, Clone)]
+struct DiagnosticsTracePersistReceipt {
+    persisted: bool,
+    persisted_at_ms: i64,
+    queue_dwell_ms: i64,
 }
 
 #[derive(Debug, Clone, serde::Serialize)]
@@ -1778,6 +2251,19 @@ struct DiagnosticsTraceEnqueueReceipt {
     dropped_events_total: u64,
     async_write_failures_total: u64,
     pending_loss_events: u64,
+    received_at_ms: i64,
+    enqueued_at_ms: i64,
+    persisted_at_ms: Option<i64>,
+    acknowledged_at_ms: i64,
+    acknowledgement_stage: String,
+    queue_dwell_ms: Option<i64>,
+    outcome: String,
+    queue_overflow: bool,
+    heartbeat_duplicates_total: u64,
+    heartbeat_late_total: u64,
+    duplicate: bool,
+    late: bool,
+    sequence_gap: u64,
 }
 
 #[derive(Debug, Clone, serde::Serialize)]
@@ -2198,13 +2684,16 @@ fn redact_diagnostics_value(value: serde_json::Value) -> serde_json::Value {
             )
         }
         fn authorization_name(value: &str) -> bool {
-            matches!(value
-                .trim()
-                .trim_start_matches('-')
-                .trim_end_matches(':')
-                .trim_matches(['\'', '"'])
-                .to_ascii_lowercase()
-                .as_str(), "authorization" | "proxy-authorization")
+            matches!(
+                value
+                    .trim()
+                    .trim_start_matches('-')
+                    .trim_end_matches(':')
+                    .trim_matches(['\'', '"'])
+                    .to_ascii_lowercase()
+                    .as_str(),
+                "authorization" | "proxy-authorization"
+            )
         }
         fn authorization_scheme(value: &str) -> bool {
             matches!(
@@ -2219,16 +2708,21 @@ fn redact_diagnostics_value(value: serde_json::Value) -> serde_json::Value {
         }
         static QUOTED_HEADER_AUTH_RE: OnceLock<regex::Regex> = OnceLock::new();
         static AUTH_TUPLE_RE: OnceLock<regex::Regex> = OnceLock::new();
-        let quoted_header_auth_re = QUOTED_HEADER_AUTH_RE.get_or_init(|| regex::Regex::new(
-            r#"(?i)(--header(?:=|\s+))(["'])(\s*(?:proxy-)?authorization\s*:)\s*[^"']*(["'])"#,
-        ).expect("valid quoted header redaction regex"));
+        let quoted_header_auth_re = QUOTED_HEADER_AUTH_RE.get_or_init(|| {
+            regex::Regex::new(
+                r#"(?i)(--header(?:=|\s+))(["'])(\s*(?:proxy-)?authorization\s*:)\s*[^"']*(["'])"#,
+            )
+            .expect("valid quoted header redaction regex")
+        });
         let input = quoted_header_auth_re
             .replace_all(&input, "$1$2$3 <redacted>$4")
             .to_string();
         let auth_tuple_re = AUTH_TUPLE_RE.get_or_init(|| regex::Regex::new(
             r#"(?i)\b((?:proxy-)?authorization)\b\s*[:=]\s*(?:bearer|basic)\s+(?:"[^"]*"|'[^']*'|[^\s,;:=]+)"#,
         ).expect("valid authorization tuple regex"));
-        let input = auth_tuple_re.replace_all(&input, "$1: <redacted>").to_string();
+        let input = auth_tuple_re
+            .replace_all(&input, "$1: <redacted>")
+            .to_string();
         let mut out = Vec::new();
         let mut redact_next = false;
         // 0 = none, 1 = authorization value or scheme, 2 = credential after a scheme.
@@ -2535,14 +3029,20 @@ fn reconcile_diagnostics_trace_rotation(path: &std::path::Path) -> Result<(), St
         let legacy = path.with_file_name(format!("diagnostics_trace.{index}.jsonl"));
         if legacy.exists() {
             let generation_id = diagnostics_unique_id(&format!("legacy-{index}"));
-            std::fs::rename(&legacy, trace_generation_path(path, &generation_id, "jsonl"))
-                .map_err(|e| e.to_string())?;
+            std::fs::rename(
+                &legacy,
+                trace_generation_path(path, &generation_id, "jsonl"),
+            )
+            .map_err(|e| e.to_string())?;
         }
         let legacy_zip = path.with_file_name(format!("diagnostics_trace.{index}.zip"));
         if legacy_zip.exists() {
             let generation_id = diagnostics_unique_id(&format!("legacy-zip-{index}"));
-            std::fs::rename(&legacy_zip, trace_generation_path(path, &generation_id, "zip"))
-                .map_err(|e| e.to_string())?;
+            std::fs::rename(
+                &legacy_zip,
+                trace_generation_path(path, &generation_id, "zip"),
+            )
+            .map_err(|e| e.to_string())?;
         }
     }
 
@@ -2556,8 +3056,14 @@ fn reconcile_diagnostics_trace_rotation(path: &std::path::Path) -> Result<(), St
     prune_trace_generations(path)
 }
 
-fn trace_generation_path(path: &std::path::Path, generation_id: &str, extension: &str) -> std::path::PathBuf {
-    path.with_file_name(format!("diagnostics_trace.generation.{generation_id}.{extension}"))
+fn trace_generation_path(
+    path: &std::path::Path,
+    generation_id: &str,
+    extension: &str,
+) -> std::path::PathBuf {
+    path.with_file_name(format!(
+        "diagnostics_trace.generation.{generation_id}.{extension}"
+    ))
 }
 
 fn trace_generation_id(path: &std::path::Path, extension: &str) -> Option<String> {
@@ -2567,8 +3073,13 @@ fn trace_generation_id(path: &std::path::Path, extension: &str) -> Option<String
         .map(str::to_string)
 }
 
-fn trace_generation_files(path: &std::path::Path, extension: &str) -> Result<Vec<std::path::PathBuf>, String> {
-    let Some(parent) = path.parent() else { return Ok(Vec::new()); };
+fn trace_generation_files(
+    path: &std::path::Path,
+    extension: &str,
+) -> Result<Vec<std::path::PathBuf>, String> {
+    let Some(parent) = path.parent() else {
+        return Ok(Vec::new());
+    };
     let mut files = std::fs::read_dir(parent)
         .map_err(|e| e.to_string())?
         .filter_map(Result::ok)
@@ -2576,7 +3087,10 @@ fn trace_generation_files(path: &std::path::Path, extension: &str) -> Result<Vec
         .filter(|candidate| trace_generation_id(candidate, extension).is_some())
         .collect::<Vec<_>>();
     files.sort_by_key(|candidate| {
-        candidate.metadata().ok().and_then(|meta| meta.modified().ok())
+        candidate
+            .metadata()
+            .ok()
+            .and_then(|meta| meta.modified().ok())
     });
     Ok(files)
 }
@@ -2598,9 +3112,17 @@ fn finalize_trace_generation(path: &std::path::Path, generation_id: &str) -> Res
 fn prune_trace_generations(path: &std::path::Path) -> Result<(), String> {
     let mut generations = trace_generation_files(path, "zip")?;
     generations.sort_by_key(|candidate| {
-        std::cmp::Reverse(candidate.metadata().ok().and_then(|meta| meta.modified().ok()))
+        std::cmp::Reverse(
+            candidate
+                .metadata()
+                .ok()
+                .and_then(|meta| meta.modified().ok()),
+        )
     });
-    for old in generations.into_iter().skip(DIAGNOSTICS_TRACE_RETAINED_FILES) {
+    for old in generations
+        .into_iter()
+        .skip(DIAGNOSTICS_TRACE_RETAINED_FILES)
+    {
         std::fs::remove_file(old).map_err(|e| e.to_string())?;
     }
     Ok(())
@@ -2665,7 +3187,11 @@ fn merge_rotated_trace_aggregate(
     let merged = aggregate
         .get("merged_generations")
         .and_then(|value| value.as_array())
-        .map(|values| values.iter().any(|value| value.as_str() == Some(generation_id)))
+        .map(|values| {
+            values
+                .iter()
+                .any(|value| value.as_str() == Some(generation_id))
+        })
         .unwrap_or(false);
     if merged {
         return Ok(());
@@ -3108,17 +3634,56 @@ fn diagnostics_trace_queue() -> &'static SyncSender<DiagnosticsTraceWriteRequest
         std::thread::Builder::new()
             .name("voxvulgi-diagnostics-writer".to_string())
             .spawn(move || {
-                while let Ok(request) = receiver.recv() {
+                while let Ok(mut request) = receiver.recv() {
+                    if let Some(barrier) = request.barrier_ack.take() {
+                        let _ = barrier.try_send(());
+                        continue;
+                    }
                     flush_pending_diagnostics_loss_receipt(&request.paths);
-                    if append_diagnostics_trace_row(
+                    let write_started_at_ms = now_epoch_ms_i64();
+                    let queue_dwell_ms = write_started_at_ms.saturating_sub(request.enqueued_at_ms);
+                    if matches!(request.event.as_str(), "main_thread_alive" | "worker_alive") {
+                        if let Some(details) = request.details.as_object_mut() {
+                            details.insert(
+                                "received_at_ms".to_string(),
+                                serde_json::json!(request.received_at_ms),
+                            );
+                            details.insert(
+                                "enqueued_at_ms".to_string(),
+                                serde_json::json!(request.enqueued_at_ms),
+                            );
+                            details.insert(
+                                "persistence_started_at_ms".to_string(),
+                                serde_json::json!(write_started_at_ms),
+                            );
+                            details.insert(
+                                "queue_dwell_ms".to_string(),
+                                serde_json::json!(queue_dwell_ms),
+                            );
+                            details.insert(
+                                "acknowledgement_stage".to_string(),
+                                serde_json::json!("persisted"),
+                            );
+                            details.insert("outcome".to_string(), serde_json::json!("persisted"));
+                        }
+                    }
+                    let persisted = append_diagnostics_trace_row(
                         &request.paths,
                         request.event,
                         request.details,
                         request.level,
                     )
-                    .is_err()
-                    {
+                    .is_ok();
+                    let persisted_at_ms = now_epoch_ms_i64();
+                    if !persisted {
                         record_diagnostics_persistence_failure();
+                    }
+                    if let Some(ack) = request.persistence_ack {
+                        let _ = ack.try_send(DiagnosticsTracePersistReceipt {
+                            persisted,
+                            persisted_at_ms,
+                            queue_dwell_ms,
+                        });
                     }
                 }
             })
@@ -3127,17 +3692,88 @@ fn diagnostics_trace_queue() -> &'static SyncSender<DiagnosticsTraceWriteRequest
     })
 }
 
+fn flush_diagnostics_trace_queue(paths: &AppPaths, timeout: Duration) -> Result<(), String> {
+    let deadline = std::time::Instant::now() + timeout;
+    let (ack_sender, ack_receiver) = sync_channel::<()>(1);
+    let mut request = DiagnosticsTraceWriteRequest {
+        paths: paths.clone(),
+        event: "diagnostics_flush_barrier".to_string(),
+        details: serde_json::Value::Null,
+        level: "info".to_string(),
+        received_at_ms: now_epoch_ms_i64(),
+        enqueued_at_ms: now_epoch_ms_i64(),
+        persistence_ack: None,
+        barrier_ack: Some(ack_sender),
+    };
+    loop {
+        match diagnostics_trace_queue().try_send(request) {
+            Ok(()) => break,
+            Err(TrySendError::Full(returned)) => {
+                if std::time::Instant::now() >= deadline {
+                    return Err("diagnostics trace flush barrier admission timed out".to_string());
+                }
+                request = returned;
+                std::thread::sleep(Duration::from_millis(5));
+            }
+            Err(TrySendError::Disconnected(_)) => {
+                return Err("diagnostics trace writer is disconnected".to_string())
+            }
+        }
+    }
+    let remaining = deadline.saturating_duration_since(std::time::Instant::now());
+    ack_receiver
+        .recv_timeout(remaining)
+        .map_err(|_| "diagnostics trace flush barrier acknowledgement timed out".to_string())
+}
+
 fn append_diagnostics_trace_row_best_effort(
     paths: &AppPaths,
     event: &str,
     details: serde_json::Value,
     level: &str,
 ) -> DiagnosticsTraceEnqueueReceipt {
+    append_diagnostics_trace_row_with_ack(paths, event, details, level, false)
+}
+
+fn append_diagnostics_trace_row_with_ack(
+    paths: &AppPaths,
+    event: &str,
+    details: serde_json::Value,
+    level: &str,
+    wait_for_persistence: bool,
+) -> DiagnosticsTraceEnqueueReceipt {
+    let received_at_ms = details
+        .get("received_at_ms")
+        .and_then(serde_json::Value::as_i64)
+        .unwrap_or_else(now_epoch_ms_i64);
+    let enqueued_at_ms = now_epoch_ms_i64();
+    let duplicate = details
+        .get("duplicate")
+        .and_then(serde_json::Value::as_bool)
+        .unwrap_or(false);
+    let late = details
+        .get("late")
+        .and_then(serde_json::Value::as_bool)
+        .unwrap_or(false);
+    let sequence_gap = details
+        .get("sequence_gap")
+        .and_then(serde_json::Value::as_u64)
+        .unwrap_or(0);
+    let (ack_sender, ack_receiver) = if wait_for_persistence {
+        let (sender, receiver) = sync_channel::<DiagnosticsTracePersistReceipt>(1);
+        (Some(sender), Some(receiver))
+    } else {
+        (None, None)
+    };
     let request = DiagnosticsTraceWriteRequest {
         paths: paths.clone(),
         event: event.to_string(),
         details,
         level: level.to_string(),
+        received_at_ms,
+        enqueued_at_ms,
+        persistence_ack: ack_sender,
+        barrier_ack: None,
     };
     let accepted = match diagnostics_trace_queue().try_send(request) {
         Ok(()) => true,
@@ -3146,12 +3782,54 @@ fn append_diagnostics_trace_row_best_effort(
             false
         }
     };
+    let persist_receipt = if accepted {
+        ack_receiver.and_then(|receiver| receiver.recv_timeout(Duration::from_secs(2)).ok())
+    } else {
+        None
+    };
+    let acknowledged_at_ms = now_epoch_ms_i64();
+    let persisted_at_ms = persist_receipt
+        .as_ref()
+        .map(|receipt| receipt.persisted_at_ms);
+    let queue_dwell_ms = persist_receipt
+        .as_ref()
+        .map(|receipt| receipt.queue_dwell_ms);
+    let persisted = persist_receipt
+        .as_ref()
+        .is_some_and(|receipt| receipt.persisted);
+    let acknowledgement_stage = if persisted {
+        "persisted"
+    } else if accepted {
+        "queued"
+    } else {
+        "rejected"
+    };
+    let outcome = if persisted {
+        "persisted"
+    } else if accepted {
+        "queued"
+    } else {
+        "overflow"
+    };
     DiagnosticsTraceEnqueueReceipt {
         accepted,
         dropped_events_total: DIAGNOSTICS_TRACE_DROPPED_TOTAL.load(Ordering::Relaxed),
         async_write_failures_total: DIAGNOSTICS_TRACE_ASYNC_WRITE_FAILURES_TOTAL
             .load(Ordering::Relaxed),
         pending_loss_events: DIAGNOSTICS_TRACE_DROPPED_PENDING.load(Ordering::Relaxed),
+        received_at_ms,
+        enqueued_at_ms,
+        persisted_at_ms,
+        acknowledged_at_ms,
+        acknowledgement_stage: acknowledgement_stage.to_string(),
+        queue_dwell_ms,
+        outcome: outcome.to_string(),
+        queue_overflow: !accepted,
+        heartbeat_duplicates_total: HEARTBEAT_DUPLICATES_TOTAL.load(Ordering::Relaxed),
+        heartbeat_late_total: HEARTBEAT_LATE_TOTAL.load(Ordering::Relaxed),
+        duplicate,
+        late,
+        sequence_gap,
     }
 }
 
@@ -3176,12 +3854,16 @@ fn trace_database_command_error(
     };
 
     if let Some(event) = event {
+        let contention = db::AppDatabase::for_paths(paths)
+            .ok()
+            .map(|database| database.contention_snapshot());
         append_diagnostics_trace_row_best_effort(
             paths,
             event,
             serde_json::json!({
                 "cmd": command,
                 "error": message,
+                "contention": contention,
             }),
             "warn",
         );
@@ -3298,7 +3980,9 @@ fn enrich_freeze_event_invoke_context(details: &mut serde_json::Value) {
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .clone()
     });
-    let object = details.as_object_mut().expect("details normalized to object");
+    let object = details
+        .as_object_mut()
+        .expect("details normalized to object");
     object.insert(
         "in_flight_invoke_count".to_string(),
         serde_json::json!(in_flight_count),
@@ -3469,9 +4153,13 @@ fn read_recent_diagnostics_trace_entries(
         let mut chunk = [0_u8; 64 * 1024];
         loop {
             let read = entry.read(&mut chunk).map_err(|e| e.to_string())?;
-            if read == 0 { break; }
+            if read == 0 {
+                break;
+            }
             for byte in &chunk[..read] {
-                if ring.len() == DIAGNOSTICS_TRACE_TAIL_READ_BYTES as usize { ring.pop_front(); }
+                if ring.len() == DIAGNOSTICS_TRACE_TAIL_READ_BYTES as usize {
+                    ring.pop_front();
+                }
                 ring.push_back(*byte);
             }
         }
@@ -3485,7 +4173,9 @@ fn read_recent_diagnostics_trace_entries(
         if bytes.len() as u64 > DIAGNOSTICS_TRACE_TAIL_READ_BYTES {
             let excess = bytes.len() - DIAGNOSTICS_TRACE_TAIL_READ_BYTES as usize;
             bytes.drain(..excess);
-            if let Some(pos) = bytes.iter().position(|byte| *byte == b'\n') { bytes.drain(..=pos); }
+            if let Some(pos) = bytes.iter().position(|byte| *byte == b'\n') {
+                bytes.drain(..=pos);
+            }
         }
     }
     for index in (0..=DIAGNOSTICS_TRACE_RETAINED_FILES).rev() {
@@ -3567,9 +4257,12 @@ fn set_startup_phase(
     state: &str,
     error: Option<String>,
 ) {
-    if let Ok(mut tracker) = startup.lock() {
+    let snapshot = if let Ok(mut tracker) = startup.lock() {
         tracker.set_phase_state(phase_id, state, error.clone());
-    }
+        Some(startup_status_from_tracker(&tracker))
+    } else {
+        None
+    };
     append_diagnostics_trace_row_best_effort(
         paths,
         "startup_phase",
@@ -3581,6 +4274,98 @@ fn set_startup_phase(
         }),
         if state == "error" { "error" } else { "info" },
     );
+    if let (Some(app), Some(snapshot)) = (AGENT_APP_HANDLE.get(), snapshot) {
+        let _ = app.emit(STARTUP_STATUS_EVENT, snapshot);
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn set_startup_hydration_progress(
+    startup: &Arc<Mutex<StartupTracker>>,
+    paths: &AppPaths,
+    phase_id: &str,
+    state: &str,
+    files_planned: Option<u64>,
+    files_completed: Option<u64>,
+    bytes_planned: Option<u64>,
+    bytes_completed: Option<u64>,
+    error: Option<String>,
+) {
+    let snapshot = if let Ok(mut tracker) = startup.lock() {
+        tracker.set_hydration_progress(
+            phase_id,
+            state,
+            files_planned,
+            files_completed,
+            bytes_planned,
+            bytes_completed,
+            error.clone(),
+        );
+        Some(startup_status_from_tracker(&tracker))
+    } else {
+        None
+    };
+    append_diagnostics_trace_row_best_effort(
+        paths,
+        "startup_hydration_progress",
+        serde_json::json!({
+            "phase_id": phase_id,
+            "label": hydration_phase_label(phase_id),
+            "state": state,
+            "files_planned": files_planned,
+            "files_completed": files_completed,
+            "bytes_planned": bytes_planned,
+            "bytes_completed": bytes_completed,
+            "error": error,
+            "revision": snapshot.as_ref().map(|status| status.revision),
+        }),
+        if state == "error" { "error" } else { "info" },
+    );
+    if let (Some(app), Some(snapshot)) = (AGENT_APP_HANDLE.get(), snapshot) {
+        let _ = app.emit(STARTUP_STATUS_EVENT, snapshot);
+    }
+}
+
+fn publish_provider_verification_progress(
+    startup: &Arc<Mutex<StartupTracker>>,
+    paths: &AppPaths,
+    progress: &tools::ProviderVerificationProgress,
+) {
+    let snapshot = if let Ok(mut tracker) = startup.lock() {
+        tracker.apply_provider_progress(progress);
+        Some(startup_status_from_tracker(&tracker))
+    } else {
+        None
+    };
+    append_diagnostics_trace_row_best_effort(
+        paths,
+        "startup_hydration_progress",
+        serde_json::json!({
+            "phase_id": progress.phase,
+            "label": hydration_phase_label(&progress.phase),
+            "state": progress.state,
+            "files_completed": progress.files_completed,
+            "bytes_completed": progress.bytes_completed,
+            "provider_revision": progress.revision,
+            "provider_source_identity": progress.source_identity,
+            "provider_updated_at_ms": progress.updated_at_ms,
+            "provider_progress_fresh": now_epoch_ms_i64().saturating_sub(progress.updated_at_ms) <= 5_000,
+            "admission_state": if progress.foreground_pressure_active { "foreground_yielding" } else { "checkpointed_active" },
+            "foreground_pressure_active": progress.foreground_pressure_active,
+            "held_reason": progress.held_reason,
+            "resource_policy": progress.resource_policy,
+            "error": progress.error,
+            "revision": snapshot.as_ref().map(|status| status.revision),
+        }),
+        if progress.state == "error" {
+            "error"
+        } else {
+            "info"
+        },
+    );
+    if let (Some(app), Some(snapshot)) = (AGENT_APP_HANDLE.get(), snapshot) {
+        let _ = app.emit(STARTUP_STATUS_EVENT, snapshot);
+    }
 }
 
 #[derive(Debug)]
@@ -4288,7 +5073,9 @@ mod tests {
         .contains("invalid localization item id"));
     }
 
-    fn retention_receipt(has_more: bool) -> voxvulgi_engine::youtube_protection::DownloaderRetentionDrainReceipt {
+    fn retention_receipt(
+        has_more: bool,
+    ) -> voxvulgi_engine::youtube_protection::DownloaderRetentionDrainReceipt {
         voxvulgi_engine::youtube_protection::DownloaderRetentionDrainReceipt {
             batches: 1,
             deleted: 100,
@@ -4331,7 +5118,11 @@ mod tests {
         assert_eq!(drains, 6, "backlog must continue beyond one finite round");
         assert_eq!(persistence.last(), Some(&(false, 0)));
         assert!(
-            waits.iter().filter(|duration| **duration == Duration::from_millis(3)).count() >= 2,
+            waits
+                .iter()
+                .filter(|duration| **duration == Duration::from_millis(3))
+                .count()
+                >= 2,
             "each exhausted finite round must yield before rescheduling"
         );
     }
@@ -4591,7 +5382,10 @@ mod tests {
             })
             .collect::<Vec<_>>();
         contents.sort();
-        assert_eq!(contents, vec![b"current".to_vec(), b"old1".to_vec(), b"old2".to_vec()]);
+        assert_eq!(
+            contents,
+            vec![b"current".to_vec(), b"old1".to_vec(), b"old2".to_vec()]
+        );
         assert!(dir.path().join("diagnostics_trace.aggregate.json").exists());
     }
 
@@ -4693,7 +5487,10 @@ mod tests {
         .expect("activate panel capture");
         assert_eq!(activation.incident_id.as_deref(), Some("incident-race"));
         assert_eq!(activation.panel_span_id, "panel-41");
-        assert_eq!(activation.parent_span_id.as_deref(), Some("operator-click-7"));
+        assert_eq!(
+            activation.parent_span_id.as_deref(),
+            Some("operator-click-7")
+        );
         assert_eq!(activation.capture_mode, "incident");
         assert!(activation.activated_armed_capture);
         assert_eq!(load_diagnostics_capture_state(&paths).mode, "incident");
@@ -4718,14 +5515,9 @@ mod tests {
         assert_eq!(rows[0].span_id.as_deref(), Some("jobs-span-1"));
         assert_eq!(rows[0].details["parent_span_id"], "panel-41");
 
-        let second_activation = activate_panel_capture_before_navigation(
-            &paths,
-            "media_library",
-            42,
-            "panel-42",
-            None,
-        )
-        .expect("activate second panel inside incident");
+        let second_activation =
+            activate_panel_capture_before_navigation(&paths, "media_library", 42, "panel-42", None)
+                .expect("activate second panel inside incident");
         assert!(!second_activation.activated_armed_capture);
         let active = load_diagnostics_capture_state(&paths);
         assert_eq!(active.root_span_id.as_deref(), Some("panel-41"));
@@ -4743,7 +5535,10 @@ mod tests {
         )
         .expect("second panel command trace");
         let rows = read_recent_diagnostics_trace_entries(&paths, 5).expect("read trace");
-        assert_eq!(rows.last().expect("last row").details["parent_span_id"], "panel-42");
+        assert_eq!(
+            rows.last().expect("last row").details["parent_span_id"],
+            "panel-42"
+        );
         let final_status = load_diagnostics_capture_state(&paths);
         let incident_dir = std::path::PathBuf::from(
             final_status
@@ -4827,14 +5622,14 @@ mod tests {
         let active = load_diagnostics_capture_state(&paths);
         assert_eq!(active.mode, "incident");
         assert_eq!(active.root_span_id.as_deref(), Some("panel-52"));
-        assert!(!cancel_superseded_panel_capture(
-            &paths,
-            "incident-supersession",
-            "panel-51",
-        )
-        .expect("stale cancel must be refused"));
+        assert!(
+            !cancel_superseded_panel_capture(&paths, "incident-supersession", "panel-51",)
+                .expect("stale cancel must be refused")
+        );
         assert_eq!(
-            load_diagnostics_capture_state(&paths).root_span_id.as_deref(),
+            load_diagnostics_capture_state(&paths)
+                .root_span_id
+                .as_deref(),
             Some("panel-52")
         );
         *diagnostics_capture_state()
@@ -5050,10 +5845,19 @@ mod tests {
             let redacted = redact_diagnostics_value(serde_json::json!({ "message": vector.input }));
             let text = redacted.to_string();
             for secret in vector.secrets {
-                assert!(!text.to_ascii_lowercase().contains(&secret.to_ascii_lowercase()), "secret leaked: {text}");
+                assert!(
+                    !text
+                        .to_ascii_lowercase()
+                        .contains(&secret.to_ascii_lowercase()),
+                    "secret leaked: {text}"
+                );
             }
             for context in vector.preserve {
-                assert!(text.to_ascii_lowercase().contains(&context.to_ascii_lowercase()), "context lost: {text}");
+                assert!(
+                    text.to_ascii_lowercase()
+                        .contains(&context.to_ascii_lowercase()),
+                    "context lost: {text}"
+                );
             }
             assert!(text.contains("<redacted>"));
         }
@@ -5341,14 +6145,21 @@ mod tests {
 
             reconcile_diagnostics_trace_rotation(&trace).expect("first recovery");
             reconcile_diagnostics_trace_rotation(&trace).expect("idempotent recovery");
-            assert!(!trace.with_file_name("diagnostics_trace.rotation_journal.json").exists());
+            assert!(!trace
+                .with_file_name("diagnostics_trace.rotation_journal.json")
+                .exists());
             assert!(!source.exists());
             assert!(zip.exists());
             let aggregate: serde_json::Value = serde_json::from_str(
-                &std::fs::read_to_string(trace.with_file_name("diagnostics_trace.aggregate.json")).unwrap(),
+                &std::fs::read_to_string(trace.with_file_name("diagnostics_trace.aggregate.json"))
+                    .unwrap(),
             )
             .unwrap();
-            assert_eq!(aggregate["rows_total"].as_u64(), Some(1), "boundary {boundary}");
+            assert_eq!(
+                aggregate["rows_total"].as_u64(),
+                Some(1),
+                "boundary {boundary}"
+            );
             assert_eq!(aggregate["merged_generations"].as_array().unwrap().len(), 1);
         }
     }
@@ -5378,10 +6189,18 @@ mod tests {
 
         reconcile_diagnostics_trace_rotation(&trace).expect("reconcile mixed generations");
 
-        assert_eq!(trace_generation_files(&trace, "zip").unwrap().len(), DIAGNOSTICS_TRACE_RETAINED_FILES);
-        assert_eq!(count_compressed_trace_files(&trace), DIAGNOSTICS_TRACE_RETAINED_FILES);
+        assert_eq!(
+            trace_generation_files(&trace, "zip").unwrap().len(),
+            DIAGNOSTICS_TRACE_RETAINED_FILES
+        );
+        assert_eq!(
+            count_compressed_trace_files(&trace),
+            DIAGNOSTICS_TRACE_RETAINED_FILES
+        );
         for index in 1..=DIAGNOSTICS_TRACE_RETAINED_FILES {
-            assert!(!trace.with_file_name(format!("diagnostics_trace.{index}.zip")).exists());
+            assert!(!trace
+                .with_file_name(format!("diagnostics_trace.{index}.zip"))
+                .exists());
         }
     }
 
@@ -5713,6 +6532,53 @@ mod tests {
     }
 
     #[test]
+    fn agent_provider_verify_endpoint_admits_one_worker_and_joins_all_other_requests() {
+        AGENT_PROVIDER_VERIFY_WORKER_ACTIVE.store(false, std::sync::atomic::Ordering::Release);
+        AGENT_PROVIDER_VERIFY_FLIGHT_ID.store(0, std::sync::atomic::Ordering::Release);
+        AGENT_PROVIDER_VERIFY_REQUEST_COUNT.store(0, std::sync::atomic::Ordering::Release);
+
+        let owner = match admit_agent_provider_verify_flight() {
+            AgentProviderVerifyAdmission::Owner {
+                guard,
+                request_count,
+            } => {
+                assert_eq!(request_count, 1);
+                guard
+            }
+            AgentProviderVerifyAdmission::Joined { .. } => panic!("first request must own worker"),
+        };
+        let joins = (0..32)
+            .map(|_| {
+                std::thread::spawn(|| match admit_agent_provider_verify_flight() {
+                    AgentProviderVerifyAdmission::Joined { flight_id, .. } => flight_id,
+                    AgentProviderVerifyAdmission::Owner { .. } => {
+                        panic!("only one request may own the active worker")
+                    }
+                })
+            })
+            .collect::<Vec<_>>();
+        for join in joins {
+            assert_eq!(join.join().expect("join admission probe"), owner.flight_id);
+        }
+        assert_eq!(
+            AGENT_PROVIDER_VERIFY_REQUEST_COUNT.load(std::sync::atomic::Ordering::Acquire),
+            33
+        );
+        drop(owner);
+        assert!(!AGENT_PROVIDER_VERIFY_WORKER_ACTIVE.load(std::sync::atomic::Ordering::Acquire));
+
+        match admit_agent_provider_verify_flight() {
+            AgentProviderVerifyAdmission::Owner { guard, .. } => {
+                assert_eq!(guard.flight_id, 2);
+                drop(guard);
+            }
+            AgentProviderVerifyAdmission::Joined { .. } => {
+                panic!("a terminal worker must release endpoint admission")
+            }
+        }
+    }
+
+    #[test]
     fn headless_audit_disables_runtime_background_work() {
         assert!(runtime_background_work_enabled(false, false));
         assert!(!runtime_background_work_enabled(true, false));
@@ -5738,6 +6604,190 @@ mod tests {
             .expect("db_schema phase");
         assert_eq!(schema.state, "ready");
         assert!(schema.error.is_none());
+    }
+
+    #[test]
+    fn startup_hydration_revisions_are_monotonic_and_terminal_is_stable() {
+        let mut tracker = StartupTracker::new();
+        tracker.set_hydration_progress(
+            "bundle_discovery",
+            "running",
+            Some(10),
+            Some(1),
+            Some(100),
+            Some(10),
+            None,
+        );
+        let discovery_revision = tracker.revision;
+        tracker.set_hydration_progress(
+            "provider_tree_verify",
+            "running",
+            Some(10),
+            Some(8),
+            Some(100),
+            Some(80),
+            None,
+        );
+        assert!(tracker.revision > discovery_revision);
+        tracker.set_hydration_progress(
+            "ready",
+            "ready",
+            Some(10),
+            Some(10),
+            Some(100),
+            Some(100),
+            None,
+        );
+        let terminal_revision = tracker.revision;
+        assert_eq!(tracker.hydration.terminal_outcome.as_deref(), Some("ready"));
+        tracker.set_hydration_progress(
+            "error",
+            "error",
+            None,
+            None,
+            None,
+            None,
+            Some("late error".to_string()),
+        );
+        assert_eq!(tracker.revision, terminal_revision);
+        assert_eq!(tracker.hydration.terminal_outcome.as_deref(), Some("ready"));
+        assert!(tracker.hydration.error.is_none());
+    }
+
+    #[test]
+    fn startup_hydration_maps_foreground_provider_admission_and_resource_policy() {
+        let mut tracker = StartupTracker::new();
+        tracker.apply_provider_progress(&tools::ProviderVerificationProgress {
+            schema_version: 1,
+            semantic_key: "youtube_po_provider_tree_verify".to_string(),
+            source_identity: "fixture-generation".to_string(),
+            phase: "provider_tree_verify".to_string(),
+            state: "running".to_string(),
+            revision: 8,
+            files_completed: 32,
+            files_planned: None,
+            bytes_completed: 8192,
+            bytes_planned: None,
+            scan_count: 1,
+            started_at_ms: now_epoch_ms_i64(),
+            updated_at_ms: now_epoch_ms_i64(),
+            finished_at_ms: None,
+            error: None,
+            foreground_pressure_active: true,
+            held_reason: Some("foreground_navigation_job_or_probe_demand".to_string()),
+            resource_policy: "foreground_checkpoint_4_file_yield_16_file_2ms_sleep".to_string(),
+        });
+
+        assert_eq!(tracker.hydration.admission_state, "foreground_yielding");
+        assert_eq!(
+            tracker.hydration.held_reason.as_deref(),
+            Some("foreground_navigation_job_or_probe_demand")
+        );
+        assert_eq!(
+            tracker.hydration.resource_policy,
+            "foreground_checkpoint_4_file_yield_16_file_2ms_sleep"
+        );
+        assert_eq!(tracker.hydration.provider_revision, Some(8));
+    }
+
+    #[test]
+    fn heartbeat_receipt_reconciles_ingress_queue_and_persistence_boundaries() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let paths = AppPaths::new(dir.path().to_path_buf());
+        paths.ensure_dirs().expect("ensure dirs");
+        let emitted_at_ms = now_epoch_ms_i64();
+        let mut details = serde_json::json!({
+            "source": "test_heartbeat_receipt",
+            "sequence": 1,
+            "emitted_at_ms": emitted_at_ms,
+        });
+        enrich_heartbeat_ingress("main_thread_alive", &mut details);
+        let receipt = append_diagnostics_trace_row_with_ack(
+            &paths,
+            "main_thread_alive",
+            details,
+            "info",
+            true,
+        );
+        assert!(receipt.accepted);
+        assert_eq!(receipt.acknowledgement_stage, "persisted");
+        assert_eq!(receipt.outcome, "persisted");
+        assert!(!receipt.queue_overflow);
+        assert!(receipt.persisted_at_ms.is_some());
+        let rows = read_recent_diagnostics_trace_entries(&paths, 5).expect("trace rows");
+        let row = rows
+            .iter()
+            .find(|row| row.event == "main_thread_alive")
+            .expect("heartbeat row");
+        assert_eq!(row.details["sequence"], 1);
+        assert_eq!(row.details["acknowledgement_stage"], "persisted");
+        assert!(row.details["received_at_ms"].as_i64().is_some());
+        assert!(row.details["persistence_started_at_ms"].as_i64().is_some());
+        assert!(
+            receipt.persisted_at_ms.unwrap()
+                >= row.details["persistence_started_at_ms"].as_i64().unwrap(),
+            "persistence completion must include the actual append/rotation path"
+        );
+        assert!(row.details["queue_dwell_ms"].as_i64().is_some());
+        assert_eq!(row.details["duplicate"], false);
+    }
+
+    #[test]
+    fn heartbeat_duplicate_sequence_is_attributed_without_reordering_source_truth() {
+        let source = format!("test_duplicate_{}", diagnostics_unique_id("heartbeat"));
+        let emitted_at_ms = now_epoch_ms_i64();
+        let mut first = serde_json::json!({
+            "source": source,
+            "sequence": 4,
+            "emitted_at_ms": emitted_at_ms,
+        });
+        enrich_heartbeat_ingress("worker_alive", &mut first);
+        assert_eq!(first["duplicate"], false);
+        let mut duplicate = serde_json::json!({
+            "source": source,
+            "sequence": 4,
+            "emitted_at_ms": emitted_at_ms,
+        });
+        enrich_heartbeat_ingress("worker_alive", &mut duplicate);
+        assert_eq!(duplicate["duplicate"], true);
+        assert_eq!(duplicate["sequence_gap"], 0);
+    }
+
+    #[test]
+    fn heartbeat_source_instance_restart_resets_sequence_truthfully() {
+        let source = format!("test_restart_{}", diagnostics_unique_id("heartbeat"));
+        let emitted_at_ms = now_epoch_ms_i64();
+        let mut prior_instance = serde_json::json!({
+            "source": source,
+            "source_instance": "webview-a",
+            "sequence": 100,
+            "emitted_at_ms": emitted_at_ms,
+        });
+        enrich_heartbeat_ingress("worker_alive", &mut prior_instance);
+        let mut restarted = serde_json::json!({
+            "source": source,
+            "source_instance": "webview-b",
+            "sequence": 1,
+            "emitted_at_ms": emitted_at_ms,
+        });
+        enrich_heartbeat_ingress("worker_alive", &mut restarted);
+        assert_eq!(restarted["duplicate"], false);
+    }
+
+    #[test]
+    fn diagnostics_trace_flush_barrier_observes_every_prior_write() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let paths = AppPaths::new(dir.path().to_path_buf());
+        paths.ensure_dirs().expect("ensure dirs");
+        append_diagnostics_trace_row_best_effort(
+            &paths,
+            "before_flush_barrier",
+            serde_json::json!({"sequence": 1}),
+            "info",
+        );
+        flush_diagnostics_trace_queue(&paths, Duration::from_secs(2)).expect("flush");
+        let rows = read_recent_diagnostics_trace_entries(&paths, 10).expect("trace rows");
+        assert!(rows.iter().any(|row| row.event == "before_flush_barrier"));
     }
 
     #[test]
@@ -5891,6 +6941,8 @@ mod tests {
         db::ensure_schema(&paths).expect("ensure schema");
 
         let startup = StartupStatus {
+            revision: 7,
+            updated_at_ms: 2,
             offline_bundle_state: "ready".to_string(),
             offline_bundle_started_at_ms: Some(1),
             offline_bundle_finished_at_ms: Some(2),
@@ -5915,6 +6967,27 @@ mod tests {
                     error: None,
                 },
             ],
+            hydration: OfflineHydrationProgress {
+                revision: 7,
+                phase_id: "ready".to_string(),
+                phase_label: "Hydration ready".to_string(),
+                state: "ready".to_string(),
+                files_planned: None,
+                files_completed: None,
+                bytes_planned: None,
+                bytes_completed: None,
+                provider_scan_count: Some(1),
+                updated_at_ms: 2,
+                terminal_outcome: Some("ready".to_string()),
+                error: None,
+                provider_revision: Some(3),
+                provider_source_identity: Some("fixture-generation".to_string()),
+                provider_updated_at_ms: Some(2),
+                provider_progress_fresh: true,
+                admission_state: "terminal".to_string(),
+                held_reason: None,
+                resource_policy: "single_flight_32_file_yield_256_file_1ms_checkpoint".to_string(),
+            },
         };
 
         let snapshot = build_diagnostics_app_state_snapshot(
@@ -6059,7 +7132,9 @@ mod tests {
             rusqlite::params![
                 published_generation,
                 published_item,
-                published_dir.join(format!("mux_dub_preview_v1.gen-{}.mkv", "c".repeat(64))).to_string_lossy(),
+                published_dir
+                    .join(format!("mux_dub_preview_v1.gen-{}.mkv", "c".repeat(64)))
+                    .to_string_lossy(),
                 published_dir.join("published-stage.mkv").to_string_lossy(),
             ],
         )
@@ -6077,14 +7152,13 @@ mod tests {
         )
         .expect("published active pointer");
         drop(conn);
-        let error = localization_preview_consumer_path(
-            &paths,
-            published_item,
-            None,
-            published_fixed,
-        )
-        .expect_err("published active lineage must not route to fixed legacy bytes");
-        assert!(error.contains("non-committed publication phase published"), "{error}");
+        let error =
+            localization_preview_consumer_path(&paths, published_item, None, published_fixed)
+                .expect_err("published active lineage must not route to fixed legacy bytes");
+        assert!(
+            error.contains("non-committed publication phase published"),
+            "{error}"
+        );
     }
 }
 
@@ -6570,8 +7644,7 @@ fn diagnostics_key_counts(
 }
 
 fn build_job_queue_snapshot(paths: &AppPaths) -> Result<DiagnosticsJobQueueSnapshot, String> {
-    let conn = db::open(paths).map_err(|e| e.to_string())?;
-    db::migrate(&conn).map_err(|e| e.to_string())?;
+    let conn = db::open_readonly(paths).map_err(|e| e.to_string())?;
     let total = diagnostics_count_value(&conn, "SELECT COUNT(*) FROM job")?;
     let queued = diagnostics_count_value(&conn, "SELECT COUNT(*) FROM job WHERE status='queued'")?;
     let running =
@@ -6621,28 +7694,50 @@ fn build_job_queue_snapshot(paths: &AppPaths) -> Result<DiagnosticsJobQueueSnaps
 }
 
 fn build_library_snapshot(paths: &AppPaths) -> Result<DiagnosticsLibrarySnapshot, String> {
-    let conn = db::open(paths).map_err(|e| e.to_string())?;
-    db::migrate(&conn).map_err(|e| e.to_string())?;
+    let (
+        total_items,
+        by_source_type,
+        by_provider,
+        subtitle_track_count,
+        translated_en_track_count,
+        item_speaker_count,
+        item_voice_plan_count,
+        voice_template_count,
+        voice_cast_pack_count,
+    ) = {
+        let conn = db::open_readonly(paths).map_err(|e| e.to_string())?;
+        (
+            diagnostics_count_value(&conn, "SELECT COUNT(*) FROM library_item")?,
+            diagnostics_key_counts(
+                &conn,
+                "SELECT source_type, COUNT(*) FROM library_item GROUP BY source_type ORDER BY COUNT(*) DESC, source_type ASC",
+            )?,
+            diagnostics_key_counts(
+                &conn,
+                "SELECT provider, COUNT(*) FROM ingest_provenance GROUP BY provider ORDER BY COUNT(*) DESC, provider ASC",
+            )?,
+            diagnostics_count_value(&conn, "SELECT COUNT(*) FROM subtitle_track")?,
+            diagnostics_count_value(
+                &conn,
+                "SELECT COUNT(*) FROM subtitle_track WHERE kind='translated' AND lang='en'",
+            )?,
+            diagnostics_count_value(&conn, "SELECT COUNT(*) FROM item_speaker")?,
+            diagnostics_count_value(&conn, "SELECT COUNT(*) FROM item_voice_plan")?,
+            diagnostics_count_value(&conn, "SELECT COUNT(*) FROM voice_template")?,
+            diagnostics_count_value(&conn, "SELECT COUNT(*) FROM voice_cast_pack")?,
+        )
+    };
 
     Ok(DiagnosticsLibrarySnapshot {
-        total_items: diagnostics_count_value(&conn, "SELECT COUNT(*) FROM library_item")?,
-        by_source_type: diagnostics_key_counts(
-            &conn,
-            "SELECT source_type, COUNT(*) FROM library_item GROUP BY source_type ORDER BY COUNT(*) DESC, source_type ASC",
-        )?,
-        by_provider: diagnostics_key_counts(
-            &conn,
-            "SELECT provider, COUNT(*) FROM ingest_provenance GROUP BY provider ORDER BY COUNT(*) DESC, provider ASC",
-        )?,
-        subtitle_track_count: diagnostics_count_value(&conn, "SELECT COUNT(*) FROM subtitle_track")?,
-        translated_en_track_count: diagnostics_count_value(
-            &conn,
-            "SELECT COUNT(*) FROM subtitle_track WHERE kind='translated' AND lang='en'",
-        )?,
-        item_speaker_count: diagnostics_count_value(&conn, "SELECT COUNT(*) FROM item_speaker")?,
-        item_voice_plan_count: diagnostics_count_value(&conn, "SELECT COUNT(*) FROM item_voice_plan")?,
-        voice_template_count: diagnostics_count_value(&conn, "SELECT COUNT(*) FROM voice_template")?,
-        voice_cast_pack_count: diagnostics_count_value(&conn, "SELECT COUNT(*) FROM voice_cast_pack")?,
+        total_items,
+        by_source_type,
+        by_provider,
+        subtitle_track_count,
+        translated_en_track_count,
+        item_speaker_count,
+        item_voice_plan_count,
+        voice_template_count,
+        voice_cast_pack_count,
         voice_library_profile_count: voice_library::list_voice_library_profiles(paths, None)
             .map(|rows| rows.len() as u64)
             .map_err(|e| e.to_string())?,
@@ -7073,12 +8168,10 @@ fn build_diagnostics_app_state_snapshot(
     })
 }
 
-fn current_startup_status(state: &AppState) -> Result<StartupStatus, String> {
-    let startup = state
-        .startup
-        .lock()
-        .map_err(|_| "startup status lock poisoned".to_string())?;
-    Ok(StartupStatus {
+fn startup_status_from_tracker(startup: &StartupTracker) -> StartupStatus {
+    StartupStatus {
+        revision: startup.revision,
+        updated_at_ms: startup.updated_at_ms,
         offline_bundle_state: startup.offline_bundle_state.clone(),
         offline_bundle_started_at_ms: startup.offline_bundle_started_at_ms,
         offline_bundle_finished_at_ms: startup.offline_bundle_finished_at_ms,
@@ -7086,7 +8179,16 @@ fn current_startup_status(state: &AppState) -> Result<StartupStatus, String> {
         progress_pct: startup.progress_pct,
         active_phase_id: startup.active_phase_id.clone(),
         phases: startup.phases.clone(),
-    })
+        hydration: startup.hydration.clone(),
+    }
+}
+
+fn current_startup_status(state: &AppState) -> Result<StartupStatus, String> {
+    let startup = state
+        .startup
+        .lock()
+        .map_err(|_| "startup status lock poisoned".to_string())?;
+    Ok(startup_status_from_tracker(&startup))
 }
 
 #[tauri::command]
@@ -8926,6 +10028,51 @@ async fn diagnostics_storage_breakdown(
 }
 
 #[tauri::command]
+async fn database_runtime_status(
+    state: State<'_, AppState>,
+) -> Result<DatabaseRuntimeStatus, String> {
+    let _timer = InvokeTimer::start(state.paths.clone(), "database_runtime_status");
+    let database = state.database.clone();
+    tauri::async_runtime::spawn_blocking(move || DatabaseRuntimeStatus {
+        snapshot: database.snapshot(),
+        wal_health: database.wal_health(),
+        contract: DatabaseRuntimeContract {
+            writer_queue_capacity: db::WRITER_QUEUE_CAPACITY,
+            writer_admission_timeout_ms: db::WRITER_ADMISSION_TIMEOUT
+                .as_millis()
+                .min(u64::MAX as u128) as u64,
+            writer_fairness_policy: db::WRITER_FAIRNESS_POLICY,
+            writer_batch_max_operations: db::WRITER_BATCH_MAX_OPERATIONS,
+            read_executor_limit: db::READ_EXECUTOR_LIMIT,
+            read_admission_capacity: db::READ_ADMISSION_CAPACITY,
+            read_admission_timeout_ms: db::READ_ADMISSION_TIMEOUT.as_millis().min(u64::MAX as u128)
+                as u64,
+            long_reader_warning_ms: db::LONG_READER_WARNING_MS,
+            shutdown_drain_timeout_ms: db::SHUTDOWN_DRAIN_TIMEOUT.as_millis().min(u64::MAX as u128)
+                as u64,
+            checkpoint_policy: db::CHECKPOINT_POLICY,
+            cancellation_policy: db::CANCELLATION_POLICY,
+            idempotent_retry_limit: db::IDEMPOTENT_RETRY_LIMIT,
+            operation_receipt_capacity: db::OPERATION_RECEIPT_CAPACITY,
+        },
+    })
+    .await
+    .map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+async fn database_checkpoint_passive(
+    state: State<'_, AppState>,
+) -> Result<db::WalCheckpointReceipt, String> {
+    let _timer = InvokeTimer::start(state.paths.clone(), "database_checkpoint_passive");
+    let database = state.database.clone();
+    tauri::async_runtime::spawn_blocking(move || database.checkpoint_passive())
+        .await
+        .map_err(|e| e.to_string())?
+        .map_err(|e| e.to_string())
+}
+
+#[tauri::command]
 async fn diagnostics_clear_cache(
     state: State<'_, AppState>,
 ) -> Result<diagnostics::CacheClearSummary, String> {
@@ -9548,11 +10695,20 @@ async fn diagnostics_trace_write_event(
         return Err("event is empty".to_string());
     }
 
-    Ok(append_diagnostics_trace_row_best_effort(
+    let mut details = details.unwrap_or(serde_json::Value::Null);
+    if event == "main_thread_alive" {
+        enrich_heartbeat_ingress(&event, &mut details);
+    }
+    let wait_for_persistence = matches!(
+        event.as_str(),
+        "main_thread_alive" | "heartbeat_source_acknowledged"
+    );
+    Ok(append_diagnostics_trace_row_with_ack(
         &state.paths,
         &event,
-        details.unwrap_or(serde_json::Value::Null),
+        details,
         level.as_deref().unwrap_or("info"),
+        wait_for_persistence,
     ))
 }
 
@@ -9625,8 +10781,7 @@ fn localization_pipeline_presets_delete(
     state: State<'_, AppState>,
     preset_id: String,
 ) -> Result<config::LocalizationPipelinePresetCatalog, String> {
-    config::delete_localization_pipeline_preset(&state.paths, &preset_id)
-        .map_err(|e| e.to_string())
+    config::delete_localization_pipeline_preset(&state.paths, &preset_id).map_err(|e| e.to_string())
 }
 
 #[tauri::command]
@@ -9660,12 +10815,8 @@ fn localization_pipeline_preset_apply(
             },
         )
         .map_err(|e| e.to_string())?;
-        config::apply_localization_pipeline_preset_to_item(
-            &state.paths,
-            item_id,
-            preset.clone(),
-        )
-        .map_err(|e| e.to_string())?;
+        config::apply_localization_pipeline_preset_to_item(&state.paths, item_id, preset.clone())
+            .map_err(|e| e.to_string())?;
     }
     config::save_batch_on_import_rules(&state.paths, &preset.batch_rules)
         .map_err(|e| e.to_string())?;
@@ -9788,9 +10939,7 @@ fn root_rebind_task_status(
 }
 
 #[tauri::command]
-fn root_rebind_task_cancel(
-    task_id: String,
-) -> Result<root_rebind::RootRebindTaskStatus, String> {
+fn root_rebind_task_cancel(task_id: String) -> Result<root_rebind::RootRebindTaskStatus, String> {
     root_rebind::cancel_root_rebind_task(task_id.trim()).map_err(|error| error.to_string())
 }
 
@@ -10053,7 +11202,9 @@ fn youtube_auth_open_sign_in(browser_source: String) -> Result<YoutubeSignInLaun
 }
 
 #[tauri::command]
-fn instagram_auth_open_sign_in(browser_source: String) -> Result<InstagramSignInLaunchResult, String> {
+fn instagram_auth_open_sign_in(
+    browser_source: String,
+) -> Result<InstagramSignInLaunchResult, String> {
     let browser_source = jobs::normalize_browser_cookie_source(Some(&browser_source))
         .map_err(|err| err.to_string())?
         .ok_or_else(|| "Choose a supported browser first.".to_string())?;
@@ -10134,7 +11285,7 @@ fn config_instagram_auth_set(
         expected_credential_generation,
         expected_credential_fingerprint.as_deref(),
     )
-        .map_err(|e| jobs::redact_auth_credential_locators(&e.to_string()))?;
+    .map_err(|e| jobs::redact_auth_credential_locators(&e.to_string()))?;
     Ok(InstagramAuthConfigStatus {
         configured: revision.configured,
         manual_cookie_configured: revision.manual_cookie_configured,
@@ -10293,8 +11444,7 @@ fn tools_phase2_packs_install_plan() -> Vec<tools::Phase2PackPlanItem> {
 }
 
 #[tauri::command]
-fn tools_phase2_packs_setup_estimate(
-) -> tools::Phase2PacksSetupEstimate {
+fn tools_phase2_packs_setup_estimate() -> tools::Phase2PacksSetupEstimate {
     tools::phase2_packs_setup_estimate()
 }
 
@@ -10523,6 +11673,35 @@ async fn voice_backends_recommend(
     let request = request.unwrap_or_default();
     tauri::async_runtime::spawn_blocking(move || {
         Ok(voice_backends::recommend_backend(&paths, request))
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
+#[derive(Debug, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+struct VoiceBackendsSnapshot {
+    catalog: voice_backends::VoiceBackendCatalog,
+    recommendation: voice_backends::VoiceBackendRecommendation,
+    performance_tier: tools::PerformanceTierStatus,
+}
+
+#[tauri::command]
+async fn voice_backends_snapshot(
+    state: State<'_, AppState>,
+    request: Option<voice_backends::VoiceBackendRecommendationRequest>,
+) -> Result<VoiceBackendsSnapshot, String> {
+    let paths = state.paths.clone();
+    let request = request.unwrap_or_default();
+    tauri::async_runtime::spawn_blocking(move || {
+        let performance = tools::performance_tier_status(&paths);
+        let catalog = voice_backends::backend_catalog_with_performance(&paths, &performance);
+        let recommendation = voice_backends::recommend_backend_with_catalog(&catalog, request);
+        Ok(VoiceBackendsSnapshot {
+            catalog,
+            recommendation,
+            performance_tier: performance,
+        })
     })
     .await
     .map_err(|e| e.to_string())?
@@ -13431,7 +14610,9 @@ async fn jobs_recover_orphaned_running(
         .map(|value| value.trim().to_string())
         .collect::<Vec<_>>();
     if normalized_ids.is_empty() || normalized_ids.iter().any(|value| value.is_empty()) {
-        return Err("orphaned running-job recovery requires a non-empty exact job-id set".to_string());
+        return Err(
+            "orphaned running-job recovery requires a non-empty exact job-id set".to_string(),
+        );
     }
     normalized_ids.sort();
     let input_count = normalized_ids.len();
@@ -13553,10 +14734,7 @@ async fn media_cleanup_reconciliation_preview(
     state: State<'_, AppState>,
     run_id: String,
 ) -> Result<media_cleanup::MediaCleanupReconciliationSummary, String> {
-    let _timer = InvokeTimer::start(
-        state.paths.clone(),
-        "media_cleanup_reconciliation_preview",
-    );
+    let _timer = InvokeTimer::start(state.paths.clone(), "media_cleanup_reconciliation_preview");
     let paths = state.paths.clone();
     tauri::async_runtime::spawn_blocking(move || {
         media_cleanup::reconciliation_preview(&paths, &run_id).map_err(|e| e.to_string())
@@ -13570,10 +14748,7 @@ async fn media_cleanup_reconciliation_apply(
     state: State<'_, AppState>,
     run_id: String,
 ) -> Result<media_cleanup::MediaCleanupReconciliationSummary, String> {
-    let _timer = InvokeTimer::start(
-        state.paths.clone(),
-        "media_cleanup_reconciliation_apply",
-    );
+    let _timer = InvokeTimer::start(state.paths.clone(), "media_cleanup_reconciliation_apply");
     let paths = state.paths.clone();
     tauri::async_runtime::spawn_blocking(move || {
         media_cleanup::apply_reconciliation(&paths, &run_id).map_err(|e| e.to_string())
@@ -13714,6 +14889,43 @@ fn antibot_pacing_set(
     })
 }
 
+/// A short, fail-safe lease used only to make the provider integrity scan yield more often
+/// while a foreground page generation or job-start boundary needs host resources. This does not
+/// change production-job admission, concurrency, or execution; only verifier checkpoint cadence.
+#[tauri::command]
+fn provider_verification_foreground_demand(
+    state: State<'_, AppState>,
+    consumer_id: String,
+    generation: u64,
+    active: bool,
+) -> Result<tools::ProviderVerificationForegroundDemand, String> {
+    if consumer_id.trim().is_empty() {
+        return Err("provider verification foreground consumer_id is required".to_string());
+    }
+    let receipt = tools::set_youtube_po_provider_verification_foreground_demand(
+        &state.paths,
+        &consumer_id,
+        generation,
+        active,
+    );
+    append_diagnostics_trace_row_best_effort(
+        &state.paths,
+        "provider_verification_foreground_demand",
+        serde_json::json!({
+            "consumer_id": consumer_id,
+            "generation": generation,
+            "requested_active": active,
+            "active": receipt.active,
+            "active_consumers": receipt.active_consumers,
+            "expires_at_ms": receipt.expires_at_ms,
+            "held_reason": receipt.held_reason,
+            "resource_policy": receipt.resource_policy,
+        }),
+        "info",
+    );
+    Ok(receipt)
+}
+
 #[tauri::command]
 async fn youtube_protection_status_get(
     state: State<'_, AppState>,
@@ -13721,7 +14933,12 @@ async fn youtube_protection_status_get(
     request_id: Option<String>,
     span_id: Option<String>,
 ) -> Result<jobs::YoutubeProtectionStatus, String> {
-    let timer = InvokeTimer::start_with_context(state.paths.clone(), "youtube_protection_status_get", request_id, span_id);
+    let timer = InvokeTimer::start_with_context(
+        state.paths.clone(),
+        "youtube_protection_status_get",
+        request_id,
+        span_id,
+    );
     timer.phase("blocking_dispatch", Duration::ZERO);
     let recorder = timer.phase_recorder();
     let paths = state.paths.clone();
@@ -13731,7 +14948,9 @@ async fn youtube_protection_status_get(
             .map_err(|error| error.to_string());
         recorder.phase("policy_db_and_provider_health", started.elapsed());
         result
-    }).await.map_err(|error| error.to_string())?;
+    })
+    .await
+    .map_err(|error| error.to_string())?;
     result
 }
 
@@ -13742,15 +14961,23 @@ async fn youtube_protection_return_to_baseline(
     request_id: Option<String>,
     span_id: Option<String>,
 ) -> Result<jobs::YoutubeProtectionStatus, String> {
-    let timer = InvokeTimer::start_with_context(state.paths.clone(), "youtube_protection_return_to_baseline", request_id, span_id);
+    let timer = InvokeTimer::start_with_context(
+        state.paths.clone(),
+        "youtube_protection_return_to_baseline",
+        request_id,
+        span_id,
+    );
     let recorder = timer.phase_recorder();
     let paths = state.paths.clone();
     tauri::async_runtime::spawn_blocking(move || {
         let started = std::time::Instant::now();
-        let result = jobs::return_youtube_protection_to_baseline(&paths, operation.as_deref()).map_err(|error| error.to_string());
+        let result = jobs::return_youtube_protection_to_baseline(&paths, operation.as_deref())
+            .map_err(|error| error.to_string());
         recorder.phase("policy_mutation", started.elapsed());
         result
-    }).await.map_err(|error| error.to_string())?
+    })
+    .await
+    .map_err(|error| error.to_string())?
 }
 
 #[tauri::command]
@@ -13761,15 +14988,91 @@ async fn youtube_protection_history_get(
     request_id: Option<String>,
     span_id: Option<String>,
 ) -> Result<voxvulgi_engine::youtube_protection::DownloaderPolicyHistory, String> {
-    let timer = InvokeTimer::start_with_context(state.paths.clone(), "youtube_protection_history_get", request_id, span_id);
+    let timer = InvokeTimer::start_with_context(
+        state.paths.clone(),
+        "youtube_protection_history_get",
+        request_id,
+        span_id,
+    );
     let recorder = timer.phase_recorder();
     let paths = state.paths.clone();
     tauri::async_runtime::spawn_blocking(move || {
         let started = std::time::Instant::now();
-        let result = jobs::get_youtube_protection_history(&paths, operation.as_deref(), limit.unwrap_or(100)).map_err(|error| error.to_string());
+        let result = jobs::get_youtube_protection_history(
+            &paths,
+            operation.as_deref(),
+            limit.unwrap_or(100),
+        )
+        .map_err(|error| error.to_string());
         recorder.phase("policy_history_page", started.elapsed());
         result
-    }).await.map_err(|error| error.to_string())?
+    })
+    .await
+    .map_err(|error| error.to_string())?
+}
+
+#[derive(Debug, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+struct YoutubeProtectionSnapshot {
+    download: jobs::YoutubeProtectionStatus,
+    enumeration: jobs::YoutubeProtectionStatus,
+    download_history: voxvulgi_engine::youtube_protection::DownloaderPolicyHistory,
+    enumeration_history: voxvulgi_engine::youtube_protection::DownloaderPolicyHistory,
+    request_ids: std::collections::BTreeMap<String, String>,
+    verified_at_ms: i64,
+}
+
+/// One bounded ordinary-page projection for both YouTube protection lanes.
+///
+/// The reads remain sequential, read-only, and operation-attributed. Full history replay is
+/// deliberately excluded; replay remains an explicit incident/operator action.
+#[tauri::command]
+async fn youtube_protection_snapshot_get(
+    state: State<'_, AppState>,
+    history_limit: Option<usize>,
+    download_request_id: String,
+    enumeration_request_id: String,
+    download_span_id: Option<String>,
+    enumeration_span_id: Option<String>,
+) -> Result<YoutubeProtectionSnapshot, String> {
+    let paths = state.paths.clone();
+    let history_limit = history_limit.unwrap_or(100).clamp(1, 500);
+    tauri::async_runtime::spawn_blocking(move || {
+        let download_timer = InvokeTimer::start_with_context(
+            paths.clone(),
+            "youtube_protection_snapshot_download",
+            Some(download_request_id.clone()),
+            download_span_id,
+        );
+        let enumeration_timer = InvokeTimer::start_with_context(
+            paths.clone(),
+            "youtube_protection_snapshot_enumeration",
+            Some(enumeration_request_id.clone()),
+            enumeration_span_id,
+        );
+        let snapshot_started = std::time::Instant::now();
+        let snapshot = jobs::get_youtube_protection_snapshot(&paths, history_limit)
+            .map_err(|error| error.to_string())?;
+        let elapsed = snapshot_started.elapsed();
+        download_timer.phase("shared_read_transaction", elapsed);
+        enumeration_timer.phase("shared_read_transaction", elapsed);
+        drop(download_timer);
+        drop(enumeration_timer);
+
+        Ok(YoutubeProtectionSnapshot {
+            download: snapshot.download,
+            enumeration: snapshot.enumeration,
+            download_history: snapshot.download_history,
+            enumeration_history: snapshot.enumeration_history,
+            request_ids: std::collections::BTreeMap::from([
+                ("download".to_string(), download_request_id),
+                ("enumeration".to_string(), enumeration_request_id),
+            ]),
+            verified_at_ms: snapshot.verified_at_ms,
+        })
+    })
+    .await
+    .map_err(|error| error.to_string())?
 }
 
 #[tauri::command]
@@ -13780,15 +15083,27 @@ async fn youtube_protection_history_replay(
     request_id: Option<String>,
     span_id: Option<String>,
 ) -> Result<voxvulgi_engine::youtube_protection::DownloaderPolicyReplayReceipt, String> {
-    let timer = InvokeTimer::start_with_context(state.paths.clone(), "youtube_protection_history_replay", request_id, span_id);
+    let timer = InvokeTimer::start_with_context(
+        state.paths.clone(),
+        "youtube_protection_history_replay",
+        request_id,
+        span_id,
+    );
     let recorder = timer.phase_recorder();
     let paths = state.paths.clone();
     tauri::async_runtime::spawn_blocking(move || {
         let started = std::time::Instant::now();
-        let result = jobs::replay_youtube_protection_history(&paths, operation.as_deref(), limit.unwrap_or(500)).map_err(|error| error.to_string());
+        let result = jobs::replay_youtube_protection_history(
+            &paths,
+            operation.as_deref(),
+            limit.unwrap_or(500),
+        )
+        .map_err(|error| error.to_string());
         recorder.phase("policy_replay", started.elapsed());
         result
-    }).await.map_err(|error| error.to_string())?
+    })
+    .await
+    .map_err(|error| error.to_string())?
 }
 
 #[tauri::command]
@@ -13797,10 +15112,18 @@ async fn youtube_protection_tuning_get(
     request_id: Option<String>,
     span_id: Option<String>,
 ) -> Result<voxvulgi_engine::youtube_protection::YoutubeProtectionTuning, String> {
-    let _timer = InvokeTimer::start_with_context(state.paths.clone(), "youtube_protection_tuning_get", request_id, span_id);
+    let _timer = InvokeTimer::start_with_context(
+        state.paths.clone(),
+        "youtube_protection_tuning_get",
+        request_id,
+        span_id,
+    );
     let paths = state.paths.clone();
-    tauri::async_runtime::spawn_blocking(move || jobs::get_youtube_protection_tuning(&paths).map_err(|e| e.to_string()))
-        .await.map_err(|e| e.to_string())?
+    tauri::async_runtime::spawn_blocking(move || {
+        jobs::get_youtube_protection_tuning(&paths).map_err(|e| e.to_string())
+    })
+    .await
+    .map_err(|e| e.to_string())?
 }
 
 #[tauri::command]
@@ -13811,10 +15134,21 @@ async fn youtube_protection_tuning_set(
     request_id: Option<String>,
     span_id: Option<String>,
 ) -> Result<voxvulgi_engine::youtube_protection::YoutubeProtectionTuning, String> {
-    let _timer = InvokeTimer::start_with_context(state.paths.clone(), "youtube_protection_tuning_set", request_id, span_id);
+    let _timer = InvokeTimer::start_with_context(
+        state.paths.clone(),
+        "youtube_protection_tuning_set",
+        request_id,
+        span_id,
+    );
     let paths = state.paths.clone();
-    tauri::async_runtime::spawn_blocking(move || run_youtube_protection_mutation("tuning", mutation_generation, || jobs::set_youtube_protection_tuning_with_generation(&paths, tuning, mutation_generation).map_err(|e| e.to_string())))
-        .await.map_err(|e| e.to_string())?
+    tauri::async_runtime::spawn_blocking(move || {
+        run_youtube_protection_mutation("tuning", mutation_generation, || {
+            jobs::set_youtube_protection_tuning_with_generation(&paths, tuning, mutation_generation)
+                .map_err(|e| e.to_string())
+        })
+    })
+    .await
+    .map_err(|e| e.to_string())?
 }
 
 #[tauri::command]
@@ -13824,10 +15158,21 @@ async fn youtube_protection_tuning_reset(
     request_id: Option<String>,
     span_id: Option<String>,
 ) -> Result<voxvulgi_engine::youtube_protection::YoutubeProtectionTuning, String> {
-    let _timer = InvokeTimer::start_with_context(state.paths.clone(), "youtube_protection_tuning_reset", request_id, span_id);
+    let _timer = InvokeTimer::start_with_context(
+        state.paths.clone(),
+        "youtube_protection_tuning_reset",
+        request_id,
+        span_id,
+    );
     let paths = state.paths.clone();
-    tauri::async_runtime::spawn_blocking(move || run_youtube_protection_mutation("tuning", mutation_generation, || jobs::reset_youtube_protection_tuning_with_generation(&paths, mutation_generation).map_err(|e| e.to_string())))
-        .await.map_err(|e| e.to_string())?
+    tauri::async_runtime::spawn_blocking(move || {
+        run_youtube_protection_mutation("tuning", mutation_generation, || {
+            jobs::reset_youtube_protection_tuning_with_generation(&paths, mutation_generation)
+                .map_err(|e| e.to_string())
+        })
+    })
+    .await
+    .map_err(|e| e.to_string())?
 }
 
 #[tauri::command]
@@ -13837,15 +15182,23 @@ async fn youtube_protection_history_export(
     request_id: Option<String>,
     span_id: Option<String>,
 ) -> Result<jobs::YoutubeProtectionHistoryExportReceipt, String> {
-    let timer = InvokeTimer::start_with_context(state.paths.clone(), "youtube_protection_history_export", request_id, span_id);
+    let timer = InvokeTimer::start_with_context(
+        state.paths.clone(),
+        "youtube_protection_history_export",
+        request_id,
+        span_id,
+    );
     let recorder = timer.phase_recorder();
     let paths = state.paths.clone();
     tauri::async_runtime::spawn_blocking(move || {
         let started = std::time::Instant::now();
-        let result = jobs::export_youtube_protection_history(&paths, operation.as_deref()).map_err(|e| e.to_string());
+        let result = jobs::export_youtube_protection_history(&paths, operation.as_deref())
+            .map_err(|e| e.to_string());
         recorder.phase("policy_export_stream", started.elapsed());
         result
-    }).await.map_err(|e| e.to_string())?
+    })
+    .await
+    .map_err(|e| e.to_string())?
 }
 
 #[tauri::command]
@@ -13856,7 +15209,12 @@ async fn youtube_protection_history_reset(
     request_id: Option<String>,
     span_id: Option<String>,
 ) -> Result<voxvulgi_engine::youtube_protection::DownloaderHistoryResetReceipt, String> {
-    let timer = InvokeTimer::start_with_context(state.paths.clone(), "youtube_protection_history_reset", request_id, span_id);
+    let timer = InvokeTimer::start_with_context(
+        state.paths.clone(),
+        "youtube_protection_history_reset",
+        request_id,
+        span_id,
+    );
     let recorder = timer.phase_recorder();
     let paths = state.paths.clone();
     tauri::async_runtime::spawn_blocking(move || {
@@ -13864,11 +15222,18 @@ async fn youtube_protection_history_reset(
         // Download and enumeration batches are one operator reset intent. A newer first batch
         // invalidates every older continuation, including the other policy sub-operation.
         let result = run_youtube_protection_mutation("history_reset", mutation_generation, || {
-            jobs::reset_youtube_protection_history_with_generation(&paths, operation.as_deref(), mutation_generation).map_err(|e| e.to_string())
+            jobs::reset_youtube_protection_history_with_generation(
+                &paths,
+                operation.as_deref(),
+                mutation_generation,
+            )
+            .map_err(|e| e.to_string())
         });
         recorder.phase("policy_reset_batch", started.elapsed());
         result
-    }).await.map_err(|e| e.to_string())?
+    })
+    .await
+    .map_err(|e| e.to_string())?
 }
 
 #[tauri::command]
@@ -14471,8 +15836,7 @@ fn translation_style_set(
     item_id: String,
     settings: translate::TranslationStyleSettings,
 ) -> Result<translate::TranslationStyleSettings, String> {
-    translate::translation_style_save(&state.paths, &item_id, settings)
-        .map_err(|e| e.to_string())
+    translate::translation_style_save(&state.paths, &item_id, settings).map_err(|e| e.to_string())
 }
 
 #[tauri::command]
@@ -14560,7 +15924,10 @@ fn run_youtube_retention_worker_loop<D, P, C, W>(
     policy: YoutubeRetentionWorkerPolicy,
 ) -> bool
 where
-    D: FnMut() -> Result<voxvulgi_engine::youtube_protection::DownloaderRetentionDrainReceipt, String>,
+    D: FnMut() -> Result<
+        voxvulgi_engine::youtube_protection::DownloaderRetentionDrainReceipt,
+        String,
+    >,
     P: FnMut(bool, u32) -> bool,
     C: FnMut() -> bool,
     W: FnMut(Duration) -> bool,
@@ -14710,8 +16077,8 @@ fn wait_for_youtube_retention_cancel(timeout: Duration) -> bool {
     if YOUTUBE_RETENTION_WORKER_CANCELLED.load(Ordering::Acquire) {
         return true;
     }
-    let (lock, wake) = YOUTUBE_RETENTION_WORKER_WAKE
-        .get_or_init(|| (Mutex::new(()), std::sync::Condvar::new()));
+    let (lock, wake) =
+        YOUTUBE_RETENTION_WORKER_WAKE.get_or_init(|| (Mutex::new(()), std::sync::Condvar::new()));
     let guard = lock
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
@@ -14781,6 +16148,7 @@ pub fn run() {
             // this gate succeeds; those components can otherwise contend for SQLite
             // during first launch after an update.
             let _database_ready = ensure_startup_database_ready(&paths, &startup)?;
+            let database = db::AppDatabase::for_paths(&paths)?;
             spawn_agent_bridge(&AppPaths::normalize_base_dir(&base_dir));
 
             let cli_safe_mode = cli_args.iter().any(|value| value.trim() == "--safe-mode");
@@ -14796,12 +16164,45 @@ pub fn run() {
             let runtime_background_work =
                 runtime_background_work_enabled(safe_mode_enabled, cli_agent_headless);
             if !runtime_background_work {
+                set_startup_hydration_progress(
+                    &startup,
+                    &paths,
+                    "skipped",
+                    "skipped",
+                    None,
+                    None,
+                    None,
+                    None,
+                    None,
+                );
                 set_startup_phase(&startup, &paths, "offline_bundle", "skipped", None);
             } else if let Ok(resource_dir) = app.path().resource_dir() {
+                set_startup_hydration_progress(
+                    &startup,
+                    &paths,
+                    "bundle_discovery",
+                    "pending",
+                    None,
+                    None,
+                    None,
+                    None,
+                    None,
+                );
                 set_startup_phase(&startup, &paths, "offline_bundle", "pending", None);
                 let startup_for_thread = Arc::clone(&startup);
                 let paths_for_bundle = paths.clone();
                 std::thread::spawn(move || {
+                    set_startup_hydration_progress(
+                        &startup_for_thread,
+                        &paths_for_bundle,
+                        "bundle_discovery",
+                        "running",
+                        None,
+                        None,
+                        None,
+                        None,
+                        None,
+                    );
                     set_startup_phase(
                         &startup_for_thread,
                         &paths_for_bundle,
@@ -14809,17 +16210,136 @@ pub fn run() {
                         "running",
                         None,
                     );
+                    set_startup_hydration_progress(
+                        &startup_for_thread,
+                        &paths_for_bundle,
+                        "bundle_application",
+                        "running",
+                        None,
+                        None,
+                        None,
+                        None,
+                        None,
+                    );
                     let result = apply_offline_bundle_if_present(&paths_for_bundle, &resource_dir);
                     match result {
                         Ok(()) => {
+                            set_startup_hydration_progress(
+                                &startup_for_thread,
+                                &paths_for_bundle,
+                                "provider_manifest_load",
+                                "running",
+                                None,
+                                None,
+                                None,
+                                None,
+                                None,
+                            );
                             // Full production dependency-tree authentication is intentionally
                             // performed only on this background hydration boundary. Hot Options
                             // status polling reads the current-process attestation and never
                             // treats a persisted receipt as executable trust.
-                            let provider_integrity =
-                                voxvulgi_engine::tools::verify_youtube_po_provider_node_modules(
-                                    &paths_for_bundle,
-                                );
+                            set_startup_hydration_progress(
+                                &startup_for_thread,
+                                &paths_for_bundle,
+                                "provider_tree_verify",
+                                "running",
+                                None,
+                                None,
+                                None,
+                                None,
+                                None,
+                            );
+                            let verification_paths = paths_for_bundle.clone();
+                            let verification_thread = std::thread::Builder::new()
+                                .name("provider-integrity-single-flight".to_string())
+                                .spawn(move || {
+                                    voxvulgi_engine::tools::verify_youtube_po_provider_node_modules(
+                                        &verification_paths,
+                                    )
+                                });
+                            let verification_thread = match verification_thread {
+                                Ok(thread) => thread,
+                                Err(error) => {
+                                    let error = format!(
+                                        "provider integrity verification thread failed to start: {error}"
+                                    );
+                                    set_startup_hydration_progress(
+                                        &startup_for_thread,
+                                        &paths_for_bundle,
+                                        "error",
+                                        "error",
+                                        None,
+                                        None,
+                                        None,
+                                        None,
+                                        Some(error.clone()),
+                                    );
+                                    set_startup_phase(
+                                        &startup_for_thread,
+                                        &paths_for_bundle,
+                                        "offline_bundle",
+                                        "error",
+                                        Some(error),
+                                    );
+                                    return;
+                                }
+                            };
+                            let mut last_provider_revision = None;
+                            while !verification_thread.is_finished() {
+                                if let Some(progress) =
+                                    tools::youtube_po_provider_verification_progress(
+                                        &paths_for_bundle,
+                                    )
+                                {
+                                    if last_provider_revision != Some(progress.revision) {
+                                        last_provider_revision = Some(progress.revision);
+                                        publish_provider_verification_progress(
+                                            &startup_for_thread,
+                                            &paths_for_bundle,
+                                            &progress,
+                                        );
+                                    }
+                                }
+                                std::thread::sleep(Duration::from_millis(100));
+                            }
+                            let provider_integrity = match verification_thread.join() {
+                                Ok(result) => result,
+                                Err(_) => {
+                                    let error =
+                                        "provider integrity verification thread panicked".to_string();
+                                    set_startup_hydration_progress(
+                                        &startup_for_thread,
+                                        &paths_for_bundle,
+                                        "error",
+                                        "error",
+                                        None,
+                                        None,
+                                        None,
+                                        None,
+                                        Some(error.clone()),
+                                    );
+                                    set_startup_phase(
+                                        &startup_for_thread,
+                                        &paths_for_bundle,
+                                        "offline_bundle",
+                                        "error",
+                                        Some(error),
+                                    );
+                                    return;
+                                }
+                            };
+                            if let Some(progress) =
+                                tools::youtube_po_provider_verification_progress(&paths_for_bundle)
+                            {
+                                if last_provider_revision != Some(progress.revision) {
+                                    publish_provider_verification_progress(
+                                        &startup_for_thread,
+                                        &paths_for_bundle,
+                                        &progress,
+                                    );
+                                }
+                            }
                             let provider_integrity_ready = matches!(
                                 &provider_integrity,
                                 Ok(status) if status.installed
@@ -14848,8 +16368,30 @@ pub fn run() {
                                 })),
                                 Err(error) => Err(error.to_string()),
                             };
+                            set_startup_hydration_progress(
+                                &startup_for_thread,
+                                &paths_for_bundle,
+                                "provider_attestation_publish",
+                                if verification.is_ok() { "ready" } else { "error" },
+                                None,
+                                None,
+                                None,
+                                None,
+                                verification.as_ref().err().cloned(),
+                            );
                             let (phase, error) =
                                 offline_provider_verification_startup_outcome(verification);
+                            set_startup_hydration_progress(
+                                &startup_for_thread,
+                                &paths_for_bundle,
+                                phase,
+                                phase,
+                                None,
+                                None,
+                                None,
+                                None,
+                                error.clone(),
+                            );
                             set_startup_phase(
                                 &startup_for_thread,
                                 &paths_for_bundle,
@@ -14859,6 +16401,17 @@ pub fn run() {
                             );
                         }
                         Err(error) => {
+                            set_startup_hydration_progress(
+                                &startup_for_thread,
+                                &paths_for_bundle,
+                                "error",
+                                "error",
+                                None,
+                                None,
+                                None,
+                                None,
+                                Some(error.clone()),
+                            );
                             set_startup_phase(
                                 &startup_for_thread,
                                 &paths_for_bundle,
@@ -14870,6 +16423,17 @@ pub fn run() {
                     }
                 });
             } else {
+                set_startup_hydration_progress(
+                    &startup,
+                    &paths,
+                    "error",
+                    "error",
+                    None,
+                    None,
+                    None,
+                    None,
+                    Some("resource directory unavailable".to_string()),
+                );
                 set_startup_phase(
                     &startup,
                     &paths,
@@ -15062,6 +16626,7 @@ pub fn run() {
             // rather than restarting from scratch.
             app.manage(AppState {
                 paths,
+                database,
                 runner,
                 safe_mode_enabled: Arc::new(AtomicBool::new(safe_mode_enabled)),
                 safe_mode_cli: cli_safe_mode,
@@ -15073,6 +16638,8 @@ pub fn run() {
         .plugin(tauri_plugin_opener::init())
         .invoke_handler(tauri::generate_handler![
             diagnostics_info,
+            database_runtime_status,
+            database_checkpoint_passive,
             diagnostics_clear_cache,
             diagnostics_thumbnail_cache_clear,
             diagnostics_thumbnail_cache_status,
@@ -15279,9 +16846,11 @@ pub fn run() {
             jobs_track_runtime_set,
             antibot_pacing_get,
             antibot_pacing_set,
+            provider_verification_foreground_demand,
             youtube_protection_status_get,
             youtube_protection_return_to_baseline,
             youtube_protection_history_get,
+            youtube_protection_snapshot_get,
             youtube_protection_history_replay,
             youtube_protection_tuning_get,
             youtube_protection_tuning_set,
@@ -15313,6 +16882,7 @@ pub fn run() {
             voice_library_update,
             voice_backends_catalog,
             voice_backends_recommend,
+            voice_backends_snapshot,
             voice_benchmark_generate,
             voice_benchmark_history_list,
             voice_benchmark_leaderboard_export,
@@ -15416,12 +16986,86 @@ pub fn run() {
         ])
         .build(tauri::generate_context!())
         .expect("error while building tauri application")
-        .run(|_app_handle, event| {
+        .run(|app_handle, event| {
             if let tauri::RunEvent::Exit = event {
                 let _ = voxvulgi_engine::cmd::shutdown_yt_dlp_children();
                 cancel_youtube_retention_worker();
                 signal_watcher_stop();
                 cleanup_agent_bridge_files();
+                if let Some(state) = app_handle.try_state::<AppState>() {
+                    let mut runner_join_succeeded = true;
+                    if let Some(runner) = &state.runner {
+                        let runner_join_started = std::time::Instant::now();
+                        let runner_join =
+                            runner.stop_and_join(jobs::JOB_RUNNER_SHUTDOWN_TIMEOUT);
+                        runner_join_succeeded = runner_join.is_ok();
+                        let runner_panic_count = runner_join
+                            .as_ref()
+                            .ok()
+                            .map(jobs::JobRunnerShutdownReport::panic_count)
+                            .unwrap_or(0);
+                        append_diagnostics_trace_row_with_ack(
+                            &state.paths,
+                            "job_runner_shutdown",
+                            serde_json::json!({
+                                "outcome": if runner_join.is_err() {
+                                    "join_failed"
+                                } else if runner_panic_count > 0 {
+                                    "joined_with_panics"
+                                } else {
+                                    "joined"
+                                },
+                                "elapsed_ms": runner_join_started.elapsed().as_millis() as u64,
+                                "error": runner_join.as_ref().err().map(ToString::to_string),
+                                "scheduler_panics": runner_join.as_ref().ok().map(|report| report.scheduler_panics),
+                                "worker_panics": runner_join.as_ref().ok().map(|report| report.worker_panics),
+                            }),
+                            if runner_join.is_ok() && runner_panic_count == 0 { "info" } else { "error" },
+                            true,
+                        );
+                    }
+                    if runner_join_succeeded {
+                        let before = state.database.snapshot();
+                        let started = std::time::Instant::now();
+                        let drain = state
+                            .database
+                            .shutdown_and_drain(db::SHUTDOWN_DRAIN_TIMEOUT);
+                        append_diagnostics_trace_row_with_ack(
+                            &state.paths,
+                            "database_runtime_shutdown",
+                            serde_json::json!({
+                                "outcome": if drain.is_ok() { "drained" } else { "drain_failed" },
+                                "elapsed_ms": started.elapsed().as_millis() as u64,
+                                "writer_active_before": before.writer_active,
+                                "waiting_writers_before": before.waiting_writers,
+                                "active_readers_before": before.active_readers,
+                                "error": drain.as_ref().err().map(ToString::to_string),
+                            }),
+                            if drain.is_ok() { "info" } else { "error" },
+                            true,
+                        );
+                    } else {
+                        // A timed-out runner may still own or request database work. Do not drain
+                        // underneath it; record the bounded failure while process exit remains the
+                        // final containment boundary.
+                        let snapshot = state.database.snapshot();
+                        append_diagnostics_trace_row_with_ack(
+                            &state.paths,
+                            "database_runtime_shutdown",
+                            serde_json::json!({
+                                "outcome": "skipped_runner_not_joined",
+                                "elapsed_ms": 0,
+                                "writer_active_before": snapshot.writer_active,
+                                "waiting_writers_before": snapshot.waiting_writers,
+                                "active_readers_before": snapshot.active_readers,
+                                "error": "job runner did not join before the bounded shutdown deadline",
+                            }),
+                            "error",
+                            true,
+                        );
+                    }
+                    let _ = flush_diagnostics_trace_queue(&state.paths, Duration::from_secs(5));
+                }
             }
         });
 }

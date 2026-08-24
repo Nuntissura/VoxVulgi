@@ -1455,3 +1455,27 @@ This changelog tracks desktop installer builds produced by `governance/scripts/b
 - Artifacts:
   - `product/desktop/build_target/Current/release/bundle/nsis/VoxVulgi_0.1.179_x64-setup.exe`
 - Notes: Database-first startup serializes schema/default-library readiness before bridge, offline hydration, watcher supervision, and runtime background work; vvwatch startup diagnostics hardened.
+
+## 0.1.180 - 2026-08-23T17:31:26Z
+- Work Packets: `WP-0298`, `WP-0311`, `WP-0312`, `WP-0313`
+- Commit: `93fa9ea`
+- Offline Bundle ID: `offline_full_win64_20260822_201543`
+- Artifacts:
+  - `product/desktop/build_target/Current/release/bundle/nsis/VoxVulgi_0.1.180_x64-setup.exe`
+- Notes: Bounded database runtime, diagnostics demand coordination, provider verification, and remediation release
+
+## 0.1.181 - 2026-08-24T11:09:31Z
+- Work Packets: `WP-0298`, `WP-0308`, `WP-0311`, `WP-0312`, `WP-0313`
+- Commit: `93fa9ea`
+- Offline Bundle ID: `offline_full_win64_20260822_201543`
+- Artifacts:
+  - `product/desktop/build_target/Current/release/bundle/nsis/VoxVulgi_0.1.181_x64-setup.exe`
+- Notes: Bounded runtime remediation and 64 MiB bounded-solid single-unit offline installer release
+
+## 0.1.182 - 2026-08-24T15:19:13Z
+- Work Packets: `WP-0298`, `WP-0308`, `WP-0311`, `WP-0312`, `WP-0313`
+- Commit: `93fa9ea`
+- Offline Bundle ID: `offline_full_win64_20260822_201543`
+- Artifacts:
+  - `product/desktop/build_target/Current/release/bundle/nsis/VoxVulgi_0.1.182_x64-setup.exe`
+- Notes: Close yt-dlp suspended-launch race and correct bounded-solid manifest metadata

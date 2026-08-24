@@ -35,6 +35,24 @@ const YOUTUBE_ARCHIVE_CARRIER_CLEANUP_RETRY_LIMIT: usize = 16;
 const YOUTUBE_ARCHIVE_CARRIER_CLEANUP_ERROR_PREFIX: &str = "archive carrier cleanup:";
 static YOUTUBE_ARCHIVE_MUTATION_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
 
+#[cfg(test)]
+type ArchiveSnapshotTestHook = std::sync::Arc<dyn Fn(&AppPaths) + Send + Sync>;
+#[cfg(test)]
+static ARCHIVE_SNAPSHOT_TEST_HOOK: OnceLock<Mutex<Option<ArchiveSnapshotTestHook>>> =
+    OnceLock::new();
+
+#[cfg(test)]
+fn run_archive_snapshot_test_hook(paths: &AppPaths) {
+    let hook = ARCHIVE_SNAPSHOT_TEST_HOOK
+        .get_or_init(|| Mutex::new(None))
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .clone();
+    if let Some(hook) = hook {
+        hook(paths);
+    }
+}
+
 #[derive(Debug, Default, PartialEq, Eq)]
 struct ArchiveCarrierCleanupReport {
     removed: usize,
@@ -429,10 +447,8 @@ pub fn upsert_youtube_subscription(
     paths: &AppPaths,
     req: YoutubeSubscriptionUpsert,
 ) -> Result<YoutubeSubscriptionRow> {
-    let conn = db::open(paths)?;
-    db::migrate(&conn)?;
-
     let normalized = normalize_upsert(req)?;
+    let conn = db::write_context(paths)?;
     let now = now_ms();
     let input_id = normalized.id.clone();
     let mut updated_existing = false;
@@ -552,6 +568,7 @@ ON CONFLICT(source_url) DO UPDATE SET
             EngineError::InstallFailed("failed to load saved subscription".to_string())
         })?;
     set_subscription_group_memberships_conn(&conn, &row.id, &normalized.group_ids)?;
+    drop(conn);
     sync_auth_session_secret(
         paths,
         row.id.as_str(),
@@ -564,9 +581,9 @@ ON CONFLICT(source_url) DO UPDATE SET
 }
 
 pub fn delete_youtube_subscription(paths: &AppPaths, id: &str) -> Result<()> {
-    let conn = db::open(paths)?;
-    db::migrate(&conn)?;
+    let conn = db::write_context(paths)?;
     conn.execute("DELETE FROM youtube_subscription WHERE id = ?1", [id])?;
+    drop(conn);
     jobs::remove_auth_cookie_secret_path(&paths.youtube_subscription_cookie_secret_path(id));
     Ok(())
 }
@@ -602,8 +619,7 @@ pub fn set_youtube_subscription_manual_status(
         ));
     }
 
-    let conn = db::open(paths)?;
-    db::migrate(&conn)?;
+    let conn = db::write_context(paths)?;
     let now = now_ms();
     let changed = conn.execute(
         r#"
@@ -648,8 +664,7 @@ pub fn set_youtube_subscription_library(
     id: &str,
     library_id: Option<&str>,
 ) -> Result<YoutubeSubscriptionRow> {
-    let conn = db::open(paths)?;
-    db::migrate(&conn)?;
+    let conn = db::write_context(paths)?;
     let normalized_library_id = library_id
         .map(str::trim)
         .filter(|value| !value.is_empty())
@@ -690,8 +705,7 @@ pub fn get_youtube_subscription_by_id(
     paths: &AppPaths,
     id: &str,
 ) -> Result<Option<YoutubeSubscriptionRow>> {
-    let conn = db::open(paths)?;
-    db::migrate(&conn)?;
+    let conn = db::open_readonly(paths)?;
     let row = subscription_by_id_conn(&conn, id)?;
     let Some(row) = row else {
         return Ok(None);
@@ -705,8 +719,7 @@ pub fn get_youtube_subscription_by_id(
 }
 
 pub fn queue_youtube_subscription(paths: &AppPaths, id: &str) -> Result<Vec<jobs::JobRow>> {
-    let conn = db::open(paths)?;
-    db::migrate(&conn)?;
+    let conn = db::open_readonly(paths)?;
     let sub = subscription_by_id_conn(&conn, id)?
         .ok_or_else(|| EngineError::InstallFailed(format!("subscription not found: {id}")))?;
     ensure_subscription_is_not_deleted(&sub)?;
@@ -726,8 +739,7 @@ pub fn queue_all_active_youtube_subscriptions_now(paths: &AppPaths) -> Result<Ve
 }
 
 fn queue_active_youtube_subscriptions(paths: &AppPaths, force: bool) -> Result<Vec<jobs::JobRow>> {
-    let conn = db::open(paths)?;
-    db::migrate(&conn)?;
+    let conn = db::open_readonly(paths)?;
     let mut stmt = conn.prepare(
         r#"
 SELECT
@@ -830,8 +842,7 @@ pub fn upsert_youtube_subscription_group(
     paths: &AppPaths,
     req: YoutubeSubscriptionGroupUpsert,
 ) -> Result<YoutubeSubscriptionGroupRow> {
-    let conn = db::open(paths)?;
-    db::migrate(&conn)?;
+    let conn = db::write_context(paths)?;
     let now = now_ms();
     let name = req.name.trim();
     if name.is_empty() {
@@ -877,8 +888,7 @@ ON CONFLICT(id) DO UPDATE SET
 }
 
 pub fn delete_youtube_subscription_group(paths: &AppPaths, group_id: &str) -> Result<()> {
-    let conn = db::open(paths)?;
-    db::migrate(&conn)?;
+    let conn = db::write_context(paths)?;
     conn.execute(
         "DELETE FROM youtube_subscription_group WHERE id = ?1",
         params![group_id],
@@ -891,15 +901,13 @@ pub fn set_youtube_subscription_groups(
     subscription_id: &str,
     group_ids: Vec<String>,
 ) -> Result<Vec<String>> {
-    let conn = db::open(paths)?;
-    db::migrate(&conn)?;
+    let conn = db::write_context(paths)?;
     set_subscription_group_memberships_conn(&conn, subscription_id, &group_ids)?;
     list_group_ids_for_subscription_conn(&conn, subscription_id)
 }
 
 pub fn clear_youtube_subscription_group_memberships(paths: &AppPaths) -> Result<usize> {
-    let conn = db::open(paths)?;
-    db::migrate(&conn)?;
+    let conn = db::write_context(paths)?;
     let removed = conn.execute("DELETE FROM youtube_subscription_group_member", [])?;
     Ok(removed)
 }
@@ -908,8 +916,7 @@ pub fn queue_youtube_subscription_group(
     paths: &AppPaths,
     group_id: &str,
 ) -> Result<Vec<jobs::JobRow>> {
-    let conn = db::open(paths)?;
-    db::migrate(&conn)?;
+    let conn = db::open_readonly(paths)?;
     let mut stmt = conn.prepare(
         r#"
 SELECT
@@ -964,8 +971,7 @@ ORDER BY sub.updated_at_ms DESC, sub.created_at_ms DESC
 }
 
 pub fn record_subscription_refresh_success(paths: &AppPaths, subscription_id: &str) -> Result<()> {
-    let conn = db::open(paths)?;
-    db::migrate(&conn)?;
+    let conn = db::write_context(paths)?;
     conn.execute(
         r#"
 UPDATE youtube_subscription
@@ -1042,8 +1048,7 @@ pub fn record_subscription_refresh_failure_with_error(
     subscription_id: &str,
     error_message: Option<&str>,
 ) -> Result<()> {
-    let conn = db::open(paths)?;
-    db::migrate(&conn)?;
+    let conn = db::write_context(paths)?;
     let now = now_ms();
     let current_failures: i64 = conn
         .query_row(
@@ -1112,8 +1117,7 @@ pub fn record_subscription_refresh_counts(
     new_found: i64,
     queued: i64,
 ) -> Result<()> {
-    let conn = db::open(paths)?;
-    db::migrate(&conn)?;
+    let conn = db::write_context(paths)?;
     conn.execute(
         r#"
 UPDATE youtube_subscription
@@ -1215,26 +1219,26 @@ pub fn import_existing_downloads_index_only_with_limits(
     let mut imported_items = 0_usize;
     let mut skipped_existing_items = 0_usize;
     let mut failures = 0_usize;
-    let conn = db::open(paths)?;
-    db::migrate(&conn)?;
+    let mut existing_paths: std::collections::HashSet<String> = {
+        let conn = db::open_readonly(paths)?;
+        let mut stmt = conn.prepare("SELECT media_path FROM library_item")?;
+        let rows = stmt.query_map([], |row| row.get::<_, String>(0))?;
+        rows.collect::<rusqlite::Result<std::collections::HashSet<_>>>()?
+    };
 
     for file in media_files.iter() {
         let canonical = file.canonicalize().unwrap_or_else(|_| file.clone());
         let media_path = canonical.to_string_lossy().to_string();
-        let exists: Option<String> = conn
-            .query_row(
-                "SELECT id FROM library_item WHERE media_path = ?1 LIMIT 1",
-                params![media_path],
-                |row| row.get(0),
-            )
-            .optional()?;
-        if exists.is_some() {
+        if existing_paths.contains(&media_path) {
             skipped_existing_items += 1;
             continue;
         }
 
         match library::import_local_file(paths, &canonical) {
-            Ok(_) => imported_items += 1,
+            Ok(_) => {
+                imported_items += 1;
+                existing_paths.insert(media_path);
+            }
             Err(_) => failures += 1,
         }
     }
@@ -1724,8 +1728,7 @@ pub fn import_youtube_subscriptions_json(
         )));
     }
 
-    let conn = db::open(paths)?;
-    db::migrate(&conn)?;
+    let conn = db::write_context(paths)?;
 
     let mut inserted = 0_usize;
     let mut updated = 0_usize;
@@ -1952,8 +1955,7 @@ pub fn import_youtube_subscriptions_4kvdp_dir(
     let bytes = std::fs::read(&subscriptions_path)?;
     let raw_subs: Vec<FourkvdSubscription> = serde_json::from_slice(&bytes)?;
 
-    let conn = db::open(paths)?;
-    db::migrate(&conn)?;
+    let conn = db::write_context(paths)?;
 
     let mut inserted = 0_usize;
     let mut updated = 0_usize;
@@ -2059,6 +2061,7 @@ ON CONFLICT(source_url) DO UPDATE SET
 
     // Optional: seed archive files from subscription_entries.csv.
     let entries_path = dir.join(FOURKVDP_SUBSCRIPTION_ENTRIES_CSV_FILENAME);
+    drop(conn);
     let (
         archive_seeded_subscriptions,
         archive_seeded_entries,
@@ -2066,7 +2069,7 @@ ON CONFLICT(source_url) DO UPDATE SET
         archive_seed_failures,
         _source_memberships_added,
     ) = if entries_path.exists() {
-        seed_archives_from_4kvdp_entries(paths, &conn, &fourk_id_to_source_url, &entries_path)?
+        seed_archives_from_4kvdp_entries(paths, &fourk_id_to_source_url, &entries_path)?
     } else {
         (0, 0, 0, 0, 0)
     };
@@ -2108,15 +2111,16 @@ pub fn import_youtube_subscriptions_4kvdp_state(
     let legacy_conn = open_legacy_4kvdp_state_db(&sqlite_path)?;
     let rows = read_legacy_4kvdp_state_rows(&legacy_conn)?;
 
-    let conn = db::open(paths)?;
-    db::migrate(&conn)?;
     let now = now_ms();
 
-    let group_all_id = ensure_subscription_group_by_name_conn(&conn, LEGACY_4KVDP_GROUP_ALL)?;
-    let group_subscription_id =
-        ensure_subscription_group_by_name_conn(&conn, LEGACY_4KVDP_GROUP_SUBSCRIPTIONS)?;
-    let group_playlist_id =
-        ensure_subscription_group_by_name_conn(&conn, LEGACY_4KVDP_GROUP_PLAYLISTS)?;
+    let (group_all_id, group_subscription_id, group_playlist_id) = {
+        let conn = db::write_context(paths)?;
+        (
+            ensure_subscription_group_by_name_conn(&conn, LEGACY_4KVDP_GROUP_ALL)?,
+            ensure_subscription_group_by_name_conn(&conn, LEGACY_4KVDP_GROUP_SUBSCRIPTIONS)?,
+            ensure_subscription_group_by_name_conn(&conn, LEGACY_4KVDP_GROUP_PLAYLISTS)?,
+        )
+    };
 
     let mut inserted = 0_usize;
     let mut updated = 0_usize;
@@ -2183,10 +2187,12 @@ pub fn import_youtube_subscriptions_4kvdp_state(
             refresh_interval_minutes: Some(DEFAULT_REFRESH_INTERVAL_MINUTES),
         })?;
 
-        let existed =
-            subscription_by_source_url_conn(&conn, normalized.source_url.as_str())?.is_some();
-        conn.execute(
-            r#"
+        let existed = {
+            let conn = db::write_context(paths)?;
+            let existed =
+                subscription_by_source_url_conn(&conn, normalized.source_url.as_str())?.is_some();
+            conn.execute(
+                r#"
 INSERT INTO youtube_subscription (
   id,
   title,
@@ -2218,39 +2224,41 @@ ON CONFLICT(source_url) DO UPDATE SET
   refresh_interval_minutes = excluded.refresh_interval_minutes,
   updated_at_ms = excluded.updated_at_ms
 "#,
-            params![
-                Uuid::new_v4().to_string(),
-                normalized.title,
-                normalized.source_url,
-                normalized.folder_map,
-                normalized.output_dir_override,
-                normalized.library_id,
-                normalized.browser_cookie_source,
-                bool_to_i64(normalized.use_browser_cookies),
-                bool_to_i64(normalized.active),
-                normalized.preset_id,
-                normalized.refresh_interval_minutes,
-                now,
-            ],
-        )?;
+                params![
+                    Uuid::new_v4().to_string(),
+                    normalized.title,
+                    normalized.source_url,
+                    normalized.folder_map,
+                    normalized.output_dir_override,
+                    normalized.library_id,
+                    normalized.browser_cookie_source,
+                    bool_to_i64(normalized.use_browser_cookies),
+                    bool_to_i64(normalized.active),
+                    normalized.preset_id,
+                    normalized.refresh_interval_minutes,
+                    now,
+                ],
+            )?;
 
-        let sub =
-            subscription_by_source_url_conn(&conn, source_url.as_str())?.ok_or_else(|| {
-                EngineError::InstallFailed(
-                    "failed to reload imported legacy subscription".to_string(),
-                )
-            })?;
-        let group_ids = match kind {
-            Legacy4kvdpContainerKind::Subscription => {
-                imported_subscription_sources += 1;
-                vec![group_all_id.clone(), group_subscription_id.clone()]
-            }
-            Legacy4kvdpContainerKind::Playlist => {
-                imported_playlist_sources += 1;
-                vec![group_all_id.clone(), group_playlist_id.clone()]
-            }
+            let sub =
+                subscription_by_source_url_conn(&conn, source_url.as_str())?.ok_or_else(|| {
+                    EngineError::InstallFailed(
+                        "failed to reload imported legacy subscription".to_string(),
+                    )
+                })?;
+            let group_ids = match kind {
+                Legacy4kvdpContainerKind::Subscription => {
+                    imported_subscription_sources += 1;
+                    vec![group_all_id.clone(), group_subscription_id.clone()]
+                }
+                Legacy4kvdpContainerKind::Playlist => {
+                    imported_playlist_sources += 1;
+                    vec![group_all_id.clone(), group_playlist_id.clone()]
+                }
+            };
+            set_subscription_group_memberships_conn(&conn, &sub.id, &group_ids)?;
+            existed
         };
-        set_subscription_group_memberships_conn(&conn, &sub.id, &group_ids)?;
 
         imported_sources += 1;
         if existed {
@@ -2267,14 +2275,9 @@ ON CONFLICT(source_url) DO UPDATE SET
         archive_skipped_entries,
         archive_seed_failures,
         source_memberships_added,
-    ) = seed_archives_from_4kvdp_state_entries(
+    ) = seed_archives_from_4kvdp_state_entries(paths, &legacy_conn, &fourk_id_to_source_url)?;
+    let identity_summary = enrich_imported_youtube_identity_4kvdp_with_legacy(
         paths,
-        &conn,
-        &legacy_conn,
-        &fourk_id_to_source_url,
-    )?;
-    let identity_summary = enrich_imported_youtube_identity_4kvdp_conn(
-        &conn,
         &legacy_conn,
         &sqlite_path,
         false,
@@ -2313,7 +2316,6 @@ ON CONFLICT(source_url) DO UPDATE SET
 
 fn seed_archives_from_4kvdp_entries(
     paths: &AppPaths,
-    conn: &rusqlite::Connection,
     fourk_id_to_source_url: &HashMap<i64, String>,
     entries_path: &Path,
 ) -> Result<(usize, usize, usize, usize, usize)> {
@@ -2360,7 +2362,11 @@ fn seed_archives_from_4kvdp_entries(
     let mut failures = 0_usize;
     let mut memberships_added = 0_usize;
     for (source_url, ids) in by_source_url {
-        let Some(sub) = subscription_by_source_url_conn(conn, source_url.as_str())? else {
+        let sub = {
+            let conn = db::open_readonly(paths)?;
+            subscription_by_source_url_conn(&conn, source_url.as_str())?
+        };
+        let Some(sub) = sub else {
             continue;
         };
 
@@ -2377,9 +2383,10 @@ fn seed_archives_from_4kvdp_entries(
             failures += 1;
             continue;
         }
+        let conn = db::write_context(paths)?;
         for media_id in &ids {
             memberships_added +=
-                upsert_imported_source_membership(conn, media_id, &sub, "4kvdp_export_entry")?;
+                upsert_imported_source_membership(&conn, media_id, &sub, "4kvdp_export_entry")?;
         }
         seeded_subs += 1;
     }
@@ -2395,7 +2402,6 @@ fn seed_archives_from_4kvdp_entries(
 
 fn seed_archives_from_4kvdp_state_entries(
     paths: &AppPaths,
-    conn: &rusqlite::Connection,
     legacy_conn: &rusqlite::Connection,
     fourk_id_to_source_url: &HashMap<i64, String>,
 ) -> Result<(usize, usize, usize, usize, usize)> {
@@ -2438,7 +2444,11 @@ ORDER BY downloader_subscription_info_id ASC, id ASC
     let mut failures = 0_usize;
     let mut memberships_added = 0_usize;
     for (source_url, ids) in by_source_url {
-        let Some(sub) = subscription_by_source_url_conn(conn, source_url.as_str())? else {
+        let sub = {
+            let conn = db::open_readonly(paths)?;
+            subscription_by_source_url_conn(&conn, source_url.as_str())?
+        };
+        let Some(sub) = sub else {
             continue;
         };
 
@@ -2455,9 +2465,10 @@ ORDER BY downloader_subscription_info_id ASC, id ASC
             failures += 1;
             continue;
         }
+        let conn = db::write_context(paths)?;
         for media_id in &ids {
             memberships_added += upsert_imported_source_membership(
-                conn,
+                &conn,
                 media_id,
                 &sub,
                 "4kvdp_subscription_entry",
@@ -2560,10 +2571,8 @@ pub fn enrich_imported_youtube_identity_4kvdp(
         )
     })?;
     let legacy_conn = open_legacy_4kvdp_state_db(&sqlite_path)?;
-    let conn = db::open(paths)?;
-    db::migrate(&conn)?;
-    enrich_imported_youtube_identity_4kvdp_conn(
-        &conn,
+    enrich_imported_youtube_identity_4kvdp_with_legacy(
+        paths,
         &legacy_conn,
         &sqlite_path,
         dry_run,
@@ -2571,8 +2580,8 @@ pub fn enrich_imported_youtube_identity_4kvdp(
     )
 }
 
-fn enrich_imported_youtube_identity_4kvdp_conn(
-    conn: &rusqlite::Connection,
+fn enrich_imported_youtube_identity_4kvdp_with_legacy(
+    paths: &AppPaths,
     legacy_conn: &rusqlite::Connection,
     sqlite_path: &Path,
     dry_run: bool,
@@ -2600,6 +2609,10 @@ fn enrich_imported_youtube_identity_4kvdp_conn(
         .map(|value| i64::try_from(value.as_millis()).unwrap_or(i64::MAX))
         .unwrap_or(0);
     let source_path = sqlite_path.to_string_lossy().to_string();
+    // All legacy SQLite and filesystem metadata acquisition is complete before the app writer
+    // lane is admitted. The remaining work is bounded app-database reconciliation only.
+    let mut app_context = db::write_context(paths)?;
+    let conn: &mut rusqlite::Connection = &mut app_context;
 
     let mut summary = YoutubeImportedIdentityEnrichmentSummary {
         sqlite_path: source_path.clone(),
@@ -3359,8 +3372,7 @@ fn create_archive_merge_intent(
             "youtube archive merge intent target or members are invalid".into(),
         ));
     }
-    let mut conn = db::open(paths)?;
-    db::migrate(&conn)?;
+    let mut conn = db::write_context(paths)?;
     let tx = conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
     let subscription_exists: bool = tx.query_row(
         "SELECT EXISTS(SELECT 1 FROM youtube_subscription WHERE id=?1)",
@@ -3396,8 +3408,7 @@ fn create_archive_merge_intent(
 fn load_pending_archive_merge_intent_rows(
     paths: &AppPaths,
 ) -> Result<Vec<YoutubeArchiveMergeIntentRow>> {
-    let conn = db::open(paths)?;
-    db::migrate(&conn)?;
+    let conn = db::open_readonly(paths)?;
     let mut stmt = conn.prepare(
         "SELECT intent.intent_id,intent.subscription_id,intent.target_archive_path,
                 intent.source_archive_sha256,intent.intended_archive_sha256,
@@ -3450,8 +3461,7 @@ fn load_pending_archive_merge_intent_row_for_subscription(
     paths: &AppPaths,
     subscription_id: &str,
 ) -> Result<Option<YoutubeArchiveMergeIntentRow>> {
-    let conn = db::open(paths)?;
-    db::migrate(&conn)?;
+    let conn = db::open_readonly(paths)?;
     conn.query_row(
         "SELECT intent_id,subscription_id,target_archive_path,source_archive_sha256,
                 intended_archive_sha256,intended_video_ids_json,phase
@@ -3537,8 +3547,7 @@ fn advance_archive_merge_intent_phase(
     from_phase: &str,
     to_phase: &str,
 ) -> Result<()> {
-    let conn = db::open(paths)?;
-    db::migrate(&conn)?;
+    let conn = db::write_context(paths)?;
     let advanced = conn.execute(
         "UPDATE youtube_archive_merge_intent SET phase=?1,updated_at_ms=?2
          WHERE intent_id=?3 AND phase=?4",
@@ -3577,8 +3586,7 @@ fn record_archive_merge_intent_failure(
     row: &YoutubeArchiveMergeIntentRow,
     error: &EngineError,
 ) -> Result<()> {
-    let conn = db::open(paths)?;
-    db::migrate(&conn)?;
+    let conn = db::write_context(paths)?;
     let failed_at_ms = now_ms();
     conn.execute(
         "INSERT INTO youtube_archive_merge_intent_failure(
@@ -3730,8 +3738,6 @@ where
     if candidates.is_empty() {
         return Ok(ArchiveCarrierCleanupReport::default());
     }
-    let receipt_conn = db::open(paths)?;
-    db::migrate(&receipt_conn)?;
     let mut report = ArchiveCarrierCleanupReport::default();
     for (intent_id, subscription_id) in candidates {
         match cleanup_committed_archive_merge_carrier(
@@ -3742,6 +3748,7 @@ where
         ) {
             Ok(removed) => {
                 report.removed += usize::from(removed);
+                let receipt_conn = db::write_context(paths)?;
                 if let Err(error) =
                     resolve_archive_carrier_cleanup_failure(&receipt_conn, &intent_id)
                 {
@@ -3752,6 +3759,7 @@ where
             }
             Err(error) => {
                 report.failed += 1;
+                let receipt_conn = db::write_context(paths)?;
                 record_archive_carrier_cleanup_failure(
                     &receipt_conn,
                     &intent_id,
@@ -3771,6 +3779,7 @@ where
     // attempt. A crash before this CAS safely replays the page; a competing process that already
     // advanced the generation wins without letting this stale pass overwrite newer progress.
     if let Some(last_intent_id) = page_tail {
+        let receipt_conn = db::write_context(paths)?;
         advance_archive_carrier_cleanup_cursor(
             &receipt_conn,
             cursor_generation,
@@ -4078,8 +4087,7 @@ fn apply_archive_merge_projection(
     subscription_id: &str,
     merged: &[String],
 ) -> Result<()> {
-    let mut conn = db::open(paths)?;
-    db::migrate(&conn)?;
+    let mut conn = db::write_context(paths)?;
     let tx = conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
     for video_id in merged {
         tx.execute(
@@ -4141,8 +4149,7 @@ pub(crate) fn merge_youtube_archive_member(
 }
 
 pub(crate) fn mark_youtube_archive_projection_dirty(paths: &AppPaths) -> Result<()> {
-    let conn = db::open(paths)?;
-    db::migrate(&conn)?;
+    let conn = db::write_context(paths)?;
     let changed = conn.execute(
         "UPDATE derived_projection_state SET dirty=1,updated_at_ms=updated_at_ms+1 WHERE projection='youtube_archive'",
         [],
@@ -4581,8 +4588,7 @@ pub fn record_youtube_archive_member(
     subscription_id: &str,
     video_id: &str,
 ) -> Result<()> {
-    let mut conn = db::open(paths)?;
-    db::migrate(&conn)?;
+    let mut conn = db::write_context(paths)?;
     let tx = conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
     tx.execute(
         "INSERT OR IGNORE INTO youtube_subscription_archive_member(subscription_id,video_id,discovered_at_ms) VALUES(?1,?2,?3)",
@@ -4612,13 +4618,14 @@ pub fn rebuild_youtube_subscription_archive_rollups(
         )?;
         let file_generation = youtube_archive_file_generation(paths)?;
         let quarantined = active_archive_merge_quarantine_subscription_ids(paths)?;
-        let mut canonical = compute_youtube_subscriptions_archive_stats(paths)?;
-        canonical.retain(|subscription_id, _| !quarantined.contains(subscription_id));
+        // Parse the canonical archive members before writer admission. This snapshot is carried
+        // into the CAS transaction so no archive open/read can extend the serialized writer lane.
+        let mut canonical_members = compute_youtube_subscriptions_archive_stats(paths)?;
+        canonical_members.retain(|subscription_id, _| !quarantined.contains(subscription_id));
         if youtube_archive_file_generation(paths)? != file_generation {
             continue;
         }
-        let mut conn = db::open(paths)?;
-        db::migrate(&conn)?;
+        let mut conn = db::write_context(paths)?;
         let tx = conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
         let current_generation: i64 = tx.query_row(
             "SELECT updated_at_ms FROM derived_projection_state WHERE projection='youtube_archive'",
@@ -4649,19 +4656,18 @@ pub fn rebuild_youtube_subscription_archive_rollups(
              )",
             [],
         )?;
-        for subscription_id in canonical.keys() {
-            let archive_path = paths.youtube_subscription_archive_state_path(subscription_id);
-            for video_id in read_archive_file_ids(&archive_path)? {
+        for (subscription_id, video_ids) in &canonical_members {
+            for video_id in video_ids {
                 tx.execute(
-                "INSERT OR IGNORE INTO youtube_subscription_archive_member(subscription_id,video_id,discovered_at_ms) VALUES(?1,?2,?3)",
-                params![subscription_id, video_id, now_ms()],
+                    "INSERT OR IGNORE INTO youtube_subscription_archive_member(subscription_id,video_id,discovered_at_ms) VALUES(?1,?2,?3)",
+                    params![subscription_id, video_id, now_ms()],
             )?;
             }
         }
-        for (subscription_id, video_count) in &canonical {
+        for (subscription_id, video_ids) in &canonical_members {
             tx.execute(
             "INSERT INTO youtube_subscription_archive_rollup(subscription_id,video_count,rebuilt_at_ms,source) VALUES(?1,?2,?3,'canonical_rebuild')",
-            params![subscription_id, *video_count as i64, now_ms()],
+            params![subscription_id, video_ids.len() as i64, now_ms()],
         )?;
         }
         let cleared = tx.execute(
@@ -4745,14 +4751,21 @@ fn youtube_archive_file_generation(paths: &AppPaths) -> Result<Vec<(String, u64,
     Ok(generation)
 }
 
-fn compute_youtube_subscriptions_archive_stats(paths: &AppPaths) -> Result<HashMap<String, usize>> {
+// Kept under the established canonical-stat scanner name because desktop contracts distinguish
+// this explicit rebuild-only filesystem path from the routine persisted-rollup reader. The
+// returned member sets are the prepared snapshot from which both counts and rows are published.
+fn compute_youtube_subscriptions_archive_stats(
+    paths: &AppPaths,
+) -> Result<HashMap<String, HashSet<String>>> {
+    #[cfg(test)]
+    run_archive_snapshot_test_hook(paths);
     let state_dir = paths.youtube_subscription_state_dir();
     let entries = match std::fs::read_dir(&state_dir) {
         Ok(entries) => entries,
         Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok(HashMap::new()),
         Err(err) => return Err(err.into()),
     };
-    let mut stats = HashMap::new();
+    let mut snapshot = HashMap::new();
     for entry in entries {
         let entry = entry?;
         if !entry.file_type()?.is_dir() {
@@ -4763,16 +4776,14 @@ fn compute_youtube_subscriptions_archive_stats(paths: &AppPaths) -> Result<HashM
             Err(_) => continue,
         };
         let archive_path = entry.path().join(YT_DLP_ARCHIVE_FILENAME);
-        let count = if archive_path.is_file() {
-            read_archive_file_ids(&archive_path)
-                .map(|ids| ids.len())
-                .unwrap_or(0)
+        let ids = if archive_path.is_file() {
+            read_archive_file_ids(&archive_path).unwrap_or_default()
         } else {
-            0
+            HashSet::new()
         };
-        stats.insert(id, count);
+        snapshot.insert(id, ids);
     }
-    Ok(stats)
+    Ok(snapshot)
 }
 
 /// WP-0261: live per-subscription activity for the consumer "Processing now" signal.
@@ -5049,8 +5060,7 @@ pub(crate) fn refresh_subscription_activity_rollup_for_job(
     paths: &AppPaths,
     job_id: &str,
 ) -> Result<()> {
-    let mut conn = db::open(paths)?;
-    db::migrate(&conn)?;
+    let mut conn = db::write_context(paths)?;
     let subscription_id: Option<String> = conn
         .query_row(
             "SELECT COALESCE(json_extract(j.params_json,'$.subscription_id'), json_extract(parent.params_json,'$.subscription_id')) FROM job j LEFT JOIN job parent ON parent.id=j.batch_id WHERE j.id=?1",
@@ -5102,8 +5112,7 @@ pub fn rebuild_subscription_activity_rollup(
     for _ in 0..4 {
         let generation = db::open_readonly(paths)?.query_row("SELECT updated_at_ms FROM derived_projection_state WHERE projection='subscription_activity'", [], |r| r.get::<_, i64>(0))?;
         let rows = compute_subscription_download_activity(paths)?;
-        let mut conn = db::open(paths)?;
-        db::migrate(&conn)?;
+        let mut conn = db::write_context(paths)?;
         let tx = conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
         let current_generation: i64 = tx.query_row("SELECT updated_at_ms FROM derived_projection_state WHERE projection='subscription_activity'", [], |r| r.get(0))?;
         if current_generation != generation {
@@ -5262,8 +5271,7 @@ fn queue_subscription_internal(
         sub.preset_id.clone(),
     )?;
 
-    let conn = db::open(paths)?;
-    db::migrate(&conn)?;
+    let conn = db::write_context(paths)?;
     conn.execute(
         "UPDATE youtube_subscription SET last_queued_at_ms = ?1, updated_at_ms = ?1 WHERE id = ?2",
         params![now_ms(), sub.id],
@@ -5943,6 +5951,33 @@ impl<T> OptionalRowExt<T> for rusqlite::Result<T> {
 mod tests {
     use super::*;
     use crate::paths::AppPaths;
+
+    struct ArchiveSnapshotHookReset;
+
+    impl Drop for ArchiveSnapshotHookReset {
+        fn drop(&mut self) {
+            if let Some(slot) = ARCHIVE_SNAPSHOT_TEST_HOOK.get() {
+                *slot
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner) = None;
+            }
+        }
+    }
+
+    fn install_archive_snapshot_test_hook(
+        hook: ArchiveSnapshotTestHook,
+    ) -> ArchiveSnapshotHookReset {
+        let mut slot = ARCHIVE_SNAPSHOT_TEST_HOOK
+            .get_or_init(|| Mutex::new(None))
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        assert!(
+            slot.is_none(),
+            "archive snapshot test hook already installed"
+        );
+        *slot = Some(hook);
+        ArchiveSnapshotHookReset
+    }
 
     fn seed_archive_subscription(paths: &AppPaths, subscription_id: &str) {
         let conn = crate::db::open(paths).expect("archive fixture db");
@@ -8762,6 +8797,84 @@ VALUES (?1, ?2, ?3, ?4, 0.0, ?5, ?6, '', ?7)
         let conn = crate::db::open_readonly(&paths).expect("read");
         let state: (i64, i64) = conn.query_row("SELECT dirty,updated_at_ms FROM derived_projection_state WHERE projection='youtube_archive'", [], |r| Ok((r.get(0)?, r.get(1)?))).unwrap();
         assert_eq!(state, (0, 77));
+    }
+
+    #[test]
+    fn blocked_archive_snapshot_does_not_hold_database_writer_admission() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let paths = AppPaths::new(dir.path().join("app_state"));
+        crate::db::ensure_schema(&paths).expect("schema");
+        seed_archive_subscription(&paths, "sub-io-scope");
+        let archive = paths.youtube_subscription_archive_state_path("sub-io-scope");
+        std::fs::create_dir_all(archive.parent().expect("archive parent")).expect("mkdir");
+        std::fs::write(&archive, b"youtube slow-snapshot\n").expect("archive fixture");
+
+        let expected_base = paths.base_dir.clone();
+        let (filesystem_entered_tx, filesystem_entered_rx) = std::sync::mpsc::sync_channel(1);
+        let (filesystem_release_tx, filesystem_release_rx) = std::sync::mpsc::sync_channel(1);
+        let release = std::sync::Arc::new(Mutex::new(filesystem_release_rx));
+        let blocked_once = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let _hook_reset = install_archive_snapshot_test_hook(std::sync::Arc::new({
+            let release = std::sync::Arc::clone(&release);
+            let blocked_once = std::sync::Arc::clone(&blocked_once);
+            move |hook_paths: &AppPaths| {
+                if hook_paths.base_dir != expected_base
+                    || blocked_once.swap(true, std::sync::atomic::Ordering::SeqCst)
+                {
+                    return;
+                }
+                filesystem_entered_tx
+                    .send(())
+                    .expect("announce blocked archive snapshot");
+                release
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+                    .recv()
+                    .expect("release archive snapshot");
+            }
+        }));
+
+        let rebuild_paths = paths.clone();
+        let rebuild = std::thread::spawn(move || {
+            rebuild_youtube_subscription_archive_rollups(&rebuild_paths)
+        });
+        filesystem_entered_rx
+            .recv_timeout(std::time::Duration::from_secs(10))
+            .expect("rebuild reached filesystem snapshot");
+        let admission_snapshot = db::AppDatabase::for_paths(&paths)
+            .expect("database runtime")
+            .snapshot();
+        assert!(
+            !admission_snapshot.writer_active && admission_snapshot.waiting_writers == 0,
+            "archive snapshot entered with writer admission held: {:?}",
+            admission_snapshot.active_operations
+        );
+
+        let writer_paths = paths.clone();
+        let (writer_done_tx, writer_done_rx) = std::sync::mpsc::sync_channel(1);
+        let writer = std::thread::spawn(move || {
+            let result = (|| -> Result<()> {
+                let conn = db::write_context(&writer_paths)?;
+                conn.execute(
+                    "INSERT OR REPLACE INTO meta(key,value) VALUES('archive_io_scope_probe','admitted')",
+                    [],
+                )?;
+                Ok(())
+            })();
+            writer_done_tx.send(result).expect("writer result");
+        });
+        let writer_result = writer_done_rx.recv_timeout(std::time::Duration::from_secs(5));
+
+        filesystem_release_tx
+            .send(())
+            .expect("release archive snapshot");
+        let rebuilt_result = rebuild.join().expect("rebuild thread");
+        writer.join().expect("writer thread");
+        writer_result
+            .expect("unrelated writer must be admitted while archive filesystem work is blocked")
+            .expect("unrelated writer succeeds");
+        let rebuilt = rebuilt_result.expect("rebuild succeeds");
+        assert_eq!(rebuilt.get("sub-io-scope"), Some(&1));
     }
 
     #[test]

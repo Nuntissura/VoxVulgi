@@ -682,8 +682,11 @@ test("visual debugger snapshots capture a bounded app viewport under load", () =
 
 test("read-only SQLite UI connections fail fast on DB contention", () => {
   const dbSource = readRepoFile("..", "engine", "src", "db.rs");
+  const runtimeSource = readRepoFile("..", "engine", "src", "database_runtime.rs");
+  const openReadonlyRawStart = dbSource.indexOf("fn open_readonly_raw");
   const openReadonlyStart = dbSource.indexOf("pub fn open_readonly");
   const migrateStart = dbSource.indexOf("pub fn migrate");
+  const openReadonlyRawBlock = dbSource.slice(openReadonlyRawStart, openReadonlyStart);
   const openReadonlyBlock = dbSource.slice(openReadonlyStart, migrateStart);
 
   assert.match(
@@ -692,12 +695,22 @@ test("read-only SQLite UI connections fail fast on DB contention", () => {
     "read-only UI commands should wait out a WAL checkpoint (WP-0258) instead of erroring with 'database is locked'",
   );
   assert.match(
-    openReadonlyBlock,
+    openReadonlyRawBlock,
     /busy_timeout\(Duration::from_millis\(READ_ONLY_BUSY_TIMEOUT_MS\)\)/,
-    "read-only connections must use the short UI busy timeout",
+    "the runtime-owned read-only connection factory must use the short UI busy timeout",
+  );
+  assert.match(
+    openReadonlyBlock,
+    /AppDatabase::for_paths\(paths\)[\s\S]*\.read_context\(/,
+    "the compatibility UI read boundary must acquire the bounded runtime reader lane",
+  );
+  assert.match(
+    runtimeSource,
+    /pub fn read_context[\s\S]{0,700}open_readonly_raw\(&self\.inner\.database_path\)/,
+    "the runtime reader lane must open through the governed read-only factory",
   );
   assert.doesNotMatch(
-    openReadonlyBlock,
+    openReadonlyRawBlock,
     /from_secs\(10\)/,
     "read-only UI commands must not retain the 10 second busy wait",
   );

@@ -2170,7 +2170,7 @@ pub fn apply_prepared_root_rebind_cancellable(
         write_receipt(paths, &receipt)?;
     }
     if receipt.phase == "database_applying" {
-        let mut conn = db::open(paths)?;
+        let mut conn = db::write_context(paths)?;
         let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
         refuse_affected_running_jobs(&tx, &receipt.from_root, Some(&receipt.to_root), "apply")?;
         reject_unrecorded_database_matches(&tx, &receipt)?;
@@ -2194,7 +2194,7 @@ pub fn apply_prepared_root_rebind_cancellable(
         // Reserve the job database while checking the running set and publishing the
         // feature-root change. A runner cannot transition a newly claimed job to running
         // between this check and the config write.
-        let mut conn = db::open(paths)?;
+        let mut conn = db::write_context(paths)?;
         let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
         refuse_affected_running_jobs(&tx, &receipt.from_root, Some(&receipt.to_root), "apply")?;
         reject_unrecorded_feature_match(paths, &receipt)?;
@@ -2220,7 +2220,7 @@ pub fn apply_prepared_root_rebind_cancellable(
         // Hold a SQLite write reservation from the last stale-snapshot check through alias and
         // receipt publication. Rows created after prepare cannot slip into the old-root gap
         // between validation and the externally visible applied state.
-        let mut conn = db::open(paths)?;
+        let mut conn = db::write_context(paths)?;
         let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
         refuse_affected_running_jobs(&tx, &receipt.from_root, Some(&receipt.to_root), "apply")?;
         reject_unrecorded_database_matches(&tx, &receipt)?;
@@ -2295,35 +2295,39 @@ pub fn rollback_root_rebind(paths: &AppPaths, receipt_id: &str) -> Result<RootRe
     receipt.updated_at_ms = now_ms();
     write_receipt(paths, &receipt)?;
 
-    let mut conn = db::open(paths)?;
-    let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
-    refuse_affected_running_jobs(&tx, &receipt.from_root, Some(&receipt.to_root), "rollback")?;
-    apply_recorded_database_changes(&tx, &receipt.affected_rows, false)?;
-    tx.commit()?;
+    {
+        let mut conn = db::write_context(paths)?;
+        let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        refuse_affected_running_jobs(&tx, &receipt.from_root, Some(&receipt.to_root), "rollback")?;
+        apply_recorded_database_changes(&tx, &receipt.affected_rows, false)?;
+        tx.commit()?;
+    }
     verify_recorded_database_state(paths, &receipt.affected_rows, false)?;
 
     // A second immediate reservation spans the non-database rollback surfaces. If a
     // runner claimed a job after the database rollback committed, this check refuses the
     // continuation; otherwise no job can become running until feature config and aliases
     // both point back to the old root.
-    let mut conn = db::open(paths)?;
-    let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
-    refuse_affected_running_jobs(&tx, &receipt.from_root, Some(&receipt.to_root), "rollback")?;
-    apply_recorded_feature_change(paths, &receipt.affected_rows, false)?;
-    verify_recorded_feature_state(paths, &receipt.affected_rows, false)?;
-
-    let aliases = update_root_aliases(paths, |aliases| {
-        aliases.aliases.retain(|alias| alias.id != receipt.id);
-        Ok(())
-    })?;
-    if aliases
-        .aliases
-        .iter()
-        .any(|alias| alias.id == receipt.id && alias.status == "active")
     {
-        return Err(invalid("root rebind rollback alias verification failed"));
+        let mut conn = db::write_context(paths)?;
+        let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        refuse_affected_running_jobs(&tx, &receipt.from_root, Some(&receipt.to_root), "rollback")?;
+        apply_recorded_feature_change(paths, &receipt.affected_rows, false)?;
+        verify_recorded_feature_state(paths, &receipt.affected_rows, false)?;
+
+        let aliases = update_root_aliases(paths, |aliases| {
+            aliases.aliases.retain(|alias| alias.id != receipt.id);
+            Ok(())
+        })?;
+        if aliases
+            .aliases
+            .iter()
+            .any(|alias| alias.id == receipt.id && alias.status == "active")
+        {
+            return Err(invalid("root rebind rollback alias verification failed"));
+        }
+        tx.commit()?;
     }
-    tx.commit()?;
     receipt.status = "rolled_back".to_string();
     receipt.phase = "rolled_back".to_string();
     receipt.updated_at_ms = now_ms();
@@ -2500,7 +2504,7 @@ mod tests {
     fn queued_destination_dry_run_counts_jobs_not_matching_input_strings() {
         let dir = tempfile::tempdir().unwrap();
         let paths = AppPaths::new(dir.path().join("app"));
-        let conn = db::open(&paths).unwrap();
+        let conn = db::write_context(&paths).unwrap();
         db::migrate(&conn).unwrap();
         let insert = |id: &str, status: &str, params_json: Value| {
             conn.execute(
@@ -2547,7 +2551,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let paths = AppPaths::new(dir.path().join("app"));
         paths.ensure_dirs().unwrap();
-        let conn = db::open(&paths).unwrap();
+        let conn = db::write_context(&paths).unwrap();
         db::migrate(&conn).unwrap();
         drop(conn);
         let old_root = dir.path().join("old");
@@ -2558,7 +2562,7 @@ mod tests {
         std::fs::write(target_root.join("identity.bin"), b"same").unwrap();
         let old_root_text = old_root.to_string_lossy().to_string();
         let target_root_text = target_root.to_string_lossy().to_string();
-        db::open(&paths)
+        db::write_context(&paths)
             .unwrap()
             .execute(
                 "INSERT INTO library_item(id,created_at_ms,source_type,source_uri,title,media_path) VALUES('root-rebind-identity',1,'local_file','file://identity','Identity',?1)",
@@ -2574,7 +2578,7 @@ mod tests {
         .unwrap();
 
         let insert_running = |id: &str, output_dir: &str| {
-            let conn = db::open(&paths).unwrap();
+            let conn = db::write_context(&paths).unwrap();
             conn.execute(
                 "INSERT INTO job(id,type,status,progress,params_json,created_at_ms,logs_path) VALUES(?1,'download_direct_url','running',0,?2,1,'log')",
                 params![
@@ -2586,7 +2590,7 @@ mod tests {
             .unwrap();
         };
         let finish = |id: &str| {
-            db::open(&paths)
+            db::write_context(&paths)
                 .unwrap()
                 .execute("UPDATE job SET status='succeeded' WHERE id=?1", [id])
                 .unwrap();
@@ -2648,7 +2652,7 @@ mod tests {
         let old_root_text = old_root.to_string_lossy().to_string();
         let legacy_path = old_root.join("legacy.mp4").to_string_lossy().to_string();
         std::fs::write(old_root.join("legacy.mp4"), b"identity").unwrap();
-        let conn = db::open(&paths).unwrap();
+        let conn = db::write_context(&paths).unwrap();
         db::migrate(&conn).unwrap();
         conn.execute(
             "INSERT INTO video_library(id,name,root_path,active,kind,created_at_ms,updated_at_ms) VALUES('lib','Library',?1,1,'custom',1,1)",
@@ -2685,10 +2689,11 @@ mod tests {
         crash_receipt.status = "applying".to_string();
         crash_receipt.phase = "database_applying".to_string();
         write_receipt(&paths, &crash_receipt).unwrap();
-        let mut conn = db::open(&paths).unwrap();
+        let mut conn = db::write_context(&paths).unwrap();
         let tx = conn.transaction().unwrap();
         apply_recorded_database_changes(&tx, &receipt.affected_rows, true).unwrap();
         tx.commit().unwrap();
+        drop(conn);
         let partial =
             apply_prepared_root_rebind(&paths, &receipt.id, Some(RootRebindStopAfter::Database))
                 .unwrap();
@@ -2741,7 +2746,7 @@ mod tests {
         std::fs::create_dir_all(&target).unwrap();
         std::fs::write(old_root.join("identity.bin"), b"expected").unwrap();
         std::fs::write(target.join("identity.bin"), b"wrongone").unwrap();
-        let conn = db::open(&paths).unwrap();
+        let conn = db::write_context(&paths).unwrap();
         conn.execute(
             "INSERT INTO library_item(id,created_at_ms,source_type,source_uri,title,media_path) VALUES('identity-item',1,'local_file','file://identity','Identity',?1)",
             [old_root.join("identity.bin").to_string_lossy().to_string()],
@@ -2791,7 +2796,7 @@ mod tests {
         let target = dir.path().join("target");
         std::fs::create_dir_all(&old_root).unwrap();
         std::fs::create_dir_all(&target).unwrap();
-        let conn = db::open(&paths).unwrap();
+        let conn = db::write_context(&paths).unwrap();
         for (index, name) in ["a.mp4", "b.mp4", "c.mp4", "d.mp4"].iter().enumerate() {
             let bytes = format!("canonical-{name}");
             std::fs::write(old_root.join(name), &bytes).unwrap();
@@ -2860,7 +2865,7 @@ mod tests {
             .to_string_lossy()
             .to_string();
         let moved_destination = target.join("downloads").to_string_lossy().to_string();
-        let conn = db::open(&paths).unwrap();
+        let conn = db::write_context(&paths).unwrap();
         db::migrate(&conn).unwrap();
         conn.execute(
             "INSERT INTO library_item(id,created_at_ms,source_type,source_uri,title,media_path) VALUES('identity-item',1,'local_file','file://identity','Identity',?1)",
@@ -2944,7 +2949,7 @@ mod tests {
         std::fs::write(target.join("canonical.mp4"), b"canonical-media").unwrap();
         let old_root_text = old_root.to_string_lossy().to_string();
         let target_text = target.to_string_lossy().to_string();
-        let conn = db::open(&paths).unwrap();
+        let conn = db::write_context(&paths).unwrap();
         db::migrate(&conn).unwrap();
         conn.execute(
             "INSERT INTO video_library(id,name,root_path,active,kind,created_at_ms,updated_at_ms) VALUES('lib','Library',?1,1,'custom',1,1)",
@@ -2976,10 +2981,11 @@ mod tests {
 
         // Deterministic crash failpoint: every side effect has committed, while the durable
         // receipt still describes only the pre-side-effect state.
-        let mut conn = db::open(&paths).unwrap();
+        let mut conn = db::write_context(&paths).unwrap();
         let tx = conn.transaction().unwrap();
         apply_recorded_database_changes(&tx, &receipt.affected_rows, true).unwrap();
         tx.commit().unwrap();
+        drop(conn);
         apply_recorded_feature_change(&paths, &receipt.affected_rows, true).unwrap();
         let mut aliases = load_root_aliases(&paths).unwrap();
         aliases
@@ -2999,10 +3005,11 @@ mod tests {
 
         // A stale external rebound after the receipt said rolled_back must be repaired; the old
         // early-return behavior would have left state rebound while claiming rollback success.
-        let mut conn = db::open(&paths).unwrap();
+        let mut conn = db::write_context(&paths).unwrap();
         let tx = conn.transaction().unwrap();
         apply_recorded_database_changes(&tx, &receipt.affected_rows, true).unwrap();
         tx.commit().unwrap();
+        drop(conn);
         let rolled_back_again = rollback_root_rebind(&paths, &receipt.id).unwrap();
         assert_eq!(rolled_back_again.status, "rolled_back");
         verify_recorded_database_state(&paths, &receipt.affected_rows, false).unwrap();
@@ -3019,7 +3026,7 @@ mod tests {
         std::fs::write(old_root.join("identity.mkv"), b"identity").unwrap();
         std::fs::write(target.join("identity.mkv"), b"identity").unwrap();
         let old_root_text = old_root.to_string_lossy().to_string();
-        let conn = db::open(&paths).unwrap();
+        let conn = db::write_context(&paths).unwrap();
         db::migrate(&conn).unwrap();
         conn.execute(
             "INSERT INTO library_item(id,created_at_ms,source_type,source_uri,title,media_path) VALUES('identity',1,'local_file','file://identity','Identity',?1)",
@@ -3029,7 +3036,7 @@ mod tests {
         drop(conn);
         let receipt = prepare_root_rebind(&paths, &old_root_text, &target, &[]).unwrap();
 
-        let conn = db::open(&paths).unwrap();
+        let conn = db::write_context(&paths).unwrap();
         conn.execute(
             "INSERT INTO video_library(id,name,root_path,active,kind,created_at_ms,updated_at_ms) VALUES('late-library','Late',?1,1,'custom',1,1)",
             [&old_root_text],
@@ -3070,7 +3077,7 @@ mod tests {
         std::fs::write(old_root.join("identity.mkv"), b"identity").unwrap();
         std::fs::write(target.join("identity.mkv"), b"identity").unwrap();
         let old_root_text = old_root.to_string_lossy().to_string();
-        let conn = db::open(&paths).unwrap();
+        let conn = db::write_context(&paths).unwrap();
         db::migrate(&conn).unwrap();
         conn.execute(
             "INSERT INTO library_item(id,created_at_ms,source_type,source_uri,title,media_path) VALUES('identity',1,'local_file','file://identity','Identity',?1)",
@@ -3110,7 +3117,7 @@ mod tests {
         std::fs::create_dir_all(&target).unwrap();
         std::fs::write(old_root.join("identity.mkv"), b"identity").unwrap();
         std::fs::write(target.join("identity.mkv"), b"identity").unwrap();
-        let conn = db::open(&paths).unwrap();
+        let conn = db::write_context(&paths).unwrap();
         db::migrate(&conn).unwrap();
         conn.execute(
             "INSERT INTO library_item(id,created_at_ms,source_type,source_uri,title,media_path) VALUES('identity',1,'local_file','file://identity','Identity',?1)",
@@ -3155,7 +3162,7 @@ mod tests {
         std::fs::create_dir_all(&target).unwrap();
         std::fs::write(old_root.join("identity.mkv"), b"identity").unwrap();
         std::fs::write(target.join("identity.mkv"), b"identity").unwrap();
-        let conn = db::open(&paths).unwrap();
+        let conn = db::write_context(&paths).unwrap();
         db::migrate(&conn).unwrap();
         conn.execute(
             "INSERT INTO library_item(id,created_at_ms,source_type,source_uri,title,media_path) VALUES('identity',1,'local_file','file://identity','Identity',?1)",
@@ -3199,7 +3206,7 @@ mod tests {
         std::fs::write(old_root.join("identity.mkv"), b"identity").unwrap();
         std::fs::write(target.join("identity.mkv"), b"identity").unwrap();
         let old_root_text = old_root.to_string_lossy().to_string();
-        let conn = db::open(&paths).unwrap();
+        let conn = db::write_context(&paths).unwrap();
         db::migrate(&conn).unwrap();
         conn.execute(
             "INSERT INTO library_item(id,created_at_ms,source_type,source_uri,title,media_path) VALUES('identity',1,'local_file','file://identity','Identity',?1)",
@@ -3410,7 +3417,7 @@ mod tests {
         for index in 0..MAX_CANONICAL_IDENTITY_CANDIDATE_PROBES {
             std::fs::write(old_root.join(format!("item-{index:06}.mkv")), b"identity").unwrap();
         }
-        let mut conn = db::open(&paths).unwrap();
+        let mut conn = db::write_context(&paths).unwrap();
         let tx = conn.transaction().unwrap();
         {
             let mut insert = tx

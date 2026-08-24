@@ -230,6 +230,52 @@ fn observe_media_path_with_conn(
     MediaPathObservation::Unreachable
 }
 
+/// Resolve the preflight observation without retaining either reader or writer admission while a
+/// bounded filesystem/NAS probe runs. The exact probe persists through its own short guarded write
+/// and generation check.
+fn observe_media_path_for_preflight(
+    paths: &AppPaths,
+    path: &str,
+    causal: Option<&MediaProbeCausalEnvelope>,
+) -> MediaPathObservation {
+    let now = Instant::now();
+    if let Some((observed_at, observation)) = media_path_observations()
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .get(path)
+        .copied()
+    {
+        if now.duration_since(observed_at) <= MEDIA_PATH_OBSERVATION_TTL {
+            return observation;
+        }
+    }
+
+    let persisted = db::open_readonly(paths).ok().and_then(|conn| {
+        conn.query_row(
+            "SELECT state, next_refresh_at_ms, invalidated_at_ms FROM media_availability_observation WHERE path=?1",
+            [path],
+            |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, i64>(1)?,
+                    row.get::<_, Option<i64>>(2)?,
+                ))
+            },
+        )
+        .optional()
+        .ok()
+        .flatten()
+    });
+    if let Some((state, next_refresh_at_ms, invalidated_at_ms)) = persisted {
+        let observation = media_path_observation_from_str(&state);
+        if invalidated_at_ms.is_none() && next_refresh_at_ms > now_ms() {
+            cache_media_path_observation(path, observation);
+            return observation;
+        }
+    }
+    observe_media_path_fresh_with_causal(paths, path, causal)
+}
+
 /// Execution-boundary callers must not reuse the short-lived observation cache: a cleanup,
 /// relocation, or restore can change a canonical path while an old job remains queued.
 /// The actual filesystem probe stays timeout-bounded and must be called outside a DB
@@ -412,8 +458,7 @@ pub(crate) fn invalidate_media_path_observation_rewrite_memory(old_path: &str, n
 }
 
 fn invalidate_media_path_observation(paths: &AppPaths, path: &str) -> Result<()> {
-    let mut conn = db::open(paths)?;
-    db::migrate(&conn)?;
+    let mut conn = db::write_context(paths)?;
     let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
     persist_media_path_observation_invalidation(&tx, path)?;
     tx.commit()?;
@@ -426,8 +471,7 @@ pub(crate) fn invalidate_media_path_observation_rewrite(
     old_path: &str,
     new_path: &str,
 ) -> Result<()> {
-    let mut conn = db::open(paths)?;
-    db::migrate(&conn)?;
+    let mut conn = db::write_context(paths)?;
     let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
     persist_media_path_observation_rewrite_invalidation(&tx, old_path, new_path)?;
     tx.commit()?;
@@ -469,8 +513,7 @@ fn commit_media_path_observation_if_current(
         MediaPathObservation::Unreachable => 30 * 1000,
         MediaPathObservation::Slow => 15 * 1000,
     };
-    if let Ok(conn) = db::open(paths) {
-        let _ = db::migrate(&conn);
+    if let Ok(conn) = db::write_context(paths) {
         let committed = conn.execute(
             "INSERT INTO media_availability_observation(path,state,observed_at_ms,source,duration_ms,next_refresh_at_ms,invalidated_at_ms) VALUES(?1,?2,?3,?4,?5,?6,NULL) ON CONFLICT(path) DO UPDATE SET state=excluded.state, observed_at_ms=excluded.observed_at_ms, source=excluded.source, duration_ms=excluded.duration_ms, next_refresh_at_ms=excluded.next_refresh_at_ms, invalidated_at_ms=NULL WHERE (media_availability_observation.invalidated_at_ms IS NULL OR media_availability_observation.invalidated_at_ms < ?7) AND media_availability_observation.observed_at_ms <= ?7",
             params![path, state, observed_at_ms, source, duration.as_millis() as i64, observed_at_ms + refresh_after_ms, probe_started_at_ms],
@@ -1008,8 +1051,7 @@ pub fn record_provider_subscription_discovery(
     let source = canonical_media_source(source_url).ok_or_else(|| {
         EngineError::InstallFailed("discovered URL has no canonical media identity".to_string())
     })?;
-    let mut conn = db::open(paths)?;
-    db::migrate(&conn)?;
+    let mut conn = db::write_context(paths)?;
     let tx = conn.transaction()?;
     ensure_source_identity_row_conn(&tx, &source, source_url)?;
     let now = now_ms();
@@ -1079,8 +1121,7 @@ pub fn mark_provider_subscription_item_queued(
     media_id: &str,
     job_id: &str,
 ) -> Result<()> {
-    let conn = db::open(paths)?;
-    db::migrate(&conn)?;
+    let conn = db::write_context(paths)?;
     let now = now_ms();
     conn.execute(
         "UPDATE provider_subscription_item SET state='queued',job_id=?1,queued_at_ms=?2,updated_at_ms=?2 WHERE service=?3 AND subscription_id=?4 AND media_id=?5 AND state<>'materialized'",
@@ -1139,8 +1180,6 @@ pub fn preflight_download_urls_with_causal(
     urls: &[String],
     causal: Option<&MediaProbeCausalEnvelope>,
 ) -> Result<Vec<DownloadPreflightRow>> {
-    let conn = db::open(paths)?;
-    db::migrate(&conn)?;
     let mut seen = HashSet::new();
     let mut out = Vec::with_capacity(urls.len());
     for (input_index, url) in urls.iter().enumerate() {
@@ -1189,27 +1228,31 @@ pub fn preflight_download_urls_with_causal(
             });
             continue;
         }
-        ensure_source_identity_conn(&conn, &source, url)?;
-        let active_job_id = clear_stale_source_claim_conn(&conn, &source)?;
-        let row = conn.query_row(
-            r#"
-SELECT i.library_item_id, li.title, li.media_path, i.last_failed_url, i.last_error, li.file_status
-FROM media_source_identity i
-LEFT JOIN library_item li ON li.id=i.library_item_id
-WHERE i.service=?1 AND i.media_id=?2
-"#,
-            params![source.service, source.media_id],
-            |row| {
-                Ok((
-                    row.get::<_, Option<String>>(0)?,
-                    row.get::<_, Option<String>>(1)?,
-                    row.get::<_, Option<String>>(2)?,
-                    row.get::<_, Option<String>>(3)?,
-                    row.get::<_, Option<String>>(4)?,
-                    row.get::<_, Option<String>>(5)?,
-                ))
-            },
-        )?;
+        let (active_job_id, row) = {
+            let conn = db::write_context(paths)?;
+            ensure_source_identity_conn(&conn, &source, url)?;
+            let active_job_id = clear_stale_source_claim_conn(&conn, &source)?;
+            let row = conn.query_row(
+                r#"
+ SELECT i.library_item_id, li.title, li.media_path, i.last_failed_url, i.last_error, li.file_status
+ FROM media_source_identity i
+ LEFT JOIN library_item li ON li.id=i.library_item_id
+ WHERE i.service=?1 AND i.media_id=?2
+ "#,
+                params![source.service, source.media_id],
+                |row| {
+                    Ok((
+                        row.get::<_, Option<String>>(0)?,
+                        row.get::<_, Option<String>>(1)?,
+                        row.get::<_, Option<String>>(2)?,
+                        row.get::<_, Option<String>>(3)?,
+                        row.get::<_, Option<String>>(4)?,
+                        row.get::<_, Option<String>>(5)?,
+                    ))
+                },
+            )?;
+            (active_job_id, row)
+        };
         let status = if row
             .5
             .as_deref()
@@ -1222,7 +1265,7 @@ WHERE i.service=?1 AND i.media_id=?2
             // Download preflight controls whether an existing canonical item is suppressed or
             // offered for repair. It is an execution-correctness boundary rather than a rendering
             // poll, so an absent/invalid observation receives one bounded exact probe.
-            match observe_media_path_with_conn(paths, &conn, path, causal, true) {
+            match observe_media_path_for_preflight(paths, path, causal) {
                 MediaPathObservation::Present => "present",
                 MediaPathObservation::Missing => "missing",
                 MediaPathObservation::Unreachable => "storage_unreachable",
@@ -1231,10 +1274,26 @@ WHERE i.service=?1 AND i.media_id=?2
         } else {
             "ready"
         };
-        let observation = row.2.as_deref().and_then(|path| conn.query_row(
-            "SELECT state, observed_at_ms, source, duration_ms, next_refresh_at_ms FROM media_availability_observation WHERE path=?1",
-            [path], |r| Ok((r.get::<_, String>(0)?, r.get::<_, i64>(1)?, r.get::<_, String>(2)?, r.get::<_, i64>(3)?, r.get::<_, i64>(4)?))
-        ).optional().ok().flatten());
+        let observation = row.2.as_deref().and_then(|path| {
+            db::open_readonly(paths).ok().and_then(|conn| {
+                conn.query_row(
+                    "SELECT state, observed_at_ms, source, duration_ms, next_refresh_at_ms FROM media_availability_observation WHERE path=?1",
+                    [path],
+                    |r| {
+                        Ok((
+                            r.get::<_, String>(0)?,
+                            r.get::<_, i64>(1)?,
+                            r.get::<_, String>(2)?,
+                            r.get::<_, i64>(3)?,
+                            r.get::<_, i64>(4)?,
+                        ))
+                    },
+                )
+                .optional()
+                .ok()
+                .flatten()
+            })
+        });
         let observed_now = now_ms();
         out.push(DownloadPreflightRow {
             input_index,
@@ -1275,51 +1334,65 @@ pub fn claim_download_source(
     let source = canonical_media_source(source_url).ok_or_else(|| {
         EngineError::InstallFailed("download URL has no canonical media identity".to_string())
     })?;
-    let conn = db::open(paths)?;
-    db::migrate(&conn)?;
-    ensure_source_identity_conn(&conn, &source, source_url)?;
-    // Preserve every ingress association, even when this request correctly resolves to an
-    // already-present or already-active canonical item and therefore creates no new job.
-    conn.execute(
-        "INSERT OR IGNORE INTO media_source_association (id, service, media_id, origin_kind, source_subscription_id, source_job_id, created_at_ms) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
-        params![Uuid::new_v4().to_string(), source.service, source.media_id, origin_kind, source_subscription_id, job_id, now_ms()],
-    )?;
-    upsert_source_membership_conn(&conn, &source, source_subscription_id, "voxvulgi_discovery")?;
-    let item: Option<(String, String, String)> = conn
-        .query_row(
-            r#"
-SELECT li.id, li.media_path, li.file_status
-FROM media_source_identity i
-JOIN library_item li ON li.id=i.library_item_id
-WHERE i.service=?1 AND i.media_id=?2
-"#,
-            params![source.service, source.media_id],
-            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
-        )
-        .optional()?;
-    let operator_deleted_item_id = item.as_ref().and_then(|(item_id, _, file_status)| {
-        matches!(file_status.as_str(), "operator_deleted" | "delete_pending")
-            .then(|| item_id.clone())
-    });
-    if let Some(item_id) = operator_deleted_item_id.as_ref() {
-        if !allow_operator_deleted {
-            return Ok(DownloadSourceClaim::OperatorDeleted(item_id.clone()));
-        }
-    }
-    if let Some(active) = clear_stale_source_claim_conn(&conn, &source)? {
-        // Keep an existing exact redownload authorization intact. Replacing it here would
-        // authorize a job ID that was never enqueued while invalidating the active job.
-        return Ok(DownloadSourceClaim::Active(active));
-    }
-    if let Some(item_id) = operator_deleted_item_id {
+    let item: Option<(String, String, String)> = {
+        let conn = db::write_context(paths)?;
+        ensure_source_identity_conn(&conn, &source, source_url)?;
+        // Preserve every ingress association, even when this request correctly resolves to an
+        // already-present or already-active canonical item and therefore creates no new job.
         conn.execute(
-            "UPDATE library_item SET file_redownload_authorized_job_id=?1, \
-             file_status_changed_at_ms=?2, file_status_change_source='operator_manual_redownload' \
-             WHERE id=?3 AND file_status IN ('operator_deleted','delete_pending')",
-            params![job_id, now_ms(), item_id],
+            "INSERT OR IGNORE INTO media_source_association (id, service, media_id, origin_kind, source_subscription_id, source_job_id, created_at_ms) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+            params![Uuid::new_v4().to_string(), source.service, source.media_id, origin_kind, source_subscription_id, job_id, now_ms()],
         )?;
-    }
-    if let Some((item_id, media_path, file_status)) = item {
+        upsert_source_membership_conn(
+            &conn,
+            &source,
+            source_subscription_id,
+            "voxvulgi_discovery",
+        )?;
+        let item = conn
+            .query_row(
+                r#"
+ SELECT li.id, li.media_path, li.file_status
+ FROM media_source_identity i
+ JOIN library_item li ON li.id=i.library_item_id
+ WHERE i.service=?1 AND i.media_id=?2
+ "#,
+                params![source.service, source.media_id],
+                |row| {
+                    Ok((
+                        row.get::<_, String>(0)?,
+                        row.get::<_, String>(1)?,
+                        row.get::<_, String>(2)?,
+                    ))
+                },
+            )
+            .optional()?;
+        let operator_deleted_item_id = item.as_ref().and_then(|(item_id, _, file_status)| {
+            matches!(file_status.as_str(), "operator_deleted" | "delete_pending")
+                .then(|| item_id.clone())
+        });
+        if let Some(item_id) = operator_deleted_item_id.as_ref() {
+            if !allow_operator_deleted {
+                return Ok(DownloadSourceClaim::OperatorDeleted(item_id.clone()));
+            }
+        }
+        if let Some(active) = clear_stale_source_claim_conn(&conn, &source)? {
+            // Keep an existing exact redownload authorization intact. Replacing it here would
+            // authorize a job ID that was never enqueued while invalidating the active job.
+            return Ok(DownloadSourceClaim::Active(active));
+        }
+        if let Some(item_id) = operator_deleted_item_id {
+            conn.execute(
+                "UPDATE library_item SET file_redownload_authorized_job_id=?1, \
+                 file_status_changed_at_ms=?2, file_status_change_source='operator_manual_redownload' \
+                 WHERE id=?3 AND file_status IN ('operator_deleted','delete_pending')",
+                params![job_id, now_ms(), item_id],
+            )?;
+        }
+        item
+    };
+
+    if let Some((item_id, media_path, file_status)) = item.as_ref() {
         if matches!(file_status.as_str(), "operator_deleted" | "delete_pending")
             && allow_operator_deleted
         {
@@ -1327,7 +1400,9 @@ WHERE i.service=?1 AND i.media_id=?2
             // A file that reappeared out of band remains protected by the normal present check.
         }
         match observe_media_path_fresh(paths, &media_path) {
-            MediaPathObservation::Present => return Ok(DownloadSourceClaim::Present(item_id)),
+            MediaPathObservation::Present => {
+                return Ok(DownloadSourceClaim::Present(item_id.clone()))
+            }
             MediaPathObservation::Unreachable => {
                 return Err(EngineError::InstallFailed(format!(
                     "storage is unreachable while checking canonical media: {media_path}"
@@ -1339,10 +1414,33 @@ WHERE i.service=?1 AND i.media_id=?2
                 )))
             }
             MediaPathObservation::Missing if !allow_missing => {
-                return Ok(DownloadSourceClaim::Missing(item_id))
+                return Ok(DownloadSourceClaim::Missing(item_id.clone()))
             }
             MediaPathObservation::Missing => {}
         }
+    }
+
+    let conn = db::write_context(paths)?;
+    let current_item: Option<(String, String, String)> = conn
+        .query_row(
+            r#"
+SELECT li.id, li.media_path, li.file_status
+FROM media_source_identity i
+JOIN library_item li ON li.id=i.library_item_id
+WHERE i.service=?1 AND i.media_id=?2
+"#,
+            params![source.service, source.media_id],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+        )
+        .optional()?;
+    if current_item != item {
+        return Err(EngineError::InstallFailed(
+            "canonical media state changed during the storage probe; retry the download request"
+                .to_string(),
+        ));
+    }
+    if let Some(active) = clear_stale_source_claim_conn(&conn, &source)? {
+        return Ok(DownloadSourceClaim::Active(active));
     }
     let changed = conn.execute(
         "UPDATE media_source_identity SET active_job_id=?1, repair_state=?2, updated_at_ms=?3 WHERE service=?4 AND media_id=?5 AND active_job_id IS NULL",
@@ -1375,8 +1473,7 @@ pub fn record_source_association(
     let source = canonical_media_source(source_url).ok_or_else(|| {
         EngineError::InstallFailed("source URL has no canonical media identity".to_string())
     })?;
-    let conn = db::open(paths)?;
-    db::migrate(&conn)?;
+    let conn = db::write_context(paths)?;
     ensure_source_identity_conn(&conn, &source, source_url)?;
     conn.execute(
         "INSERT OR IGNORE INTO media_source_association (id, service, media_id, origin_kind, source_subscription_id, source_job_id, created_at_ms) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
@@ -1392,8 +1489,7 @@ pub fn release_download_source_claim(
     failed_url: Option<&str>,
     error: Option<&str>,
 ) -> Result<()> {
-    let conn = db::open(paths)?;
-    db::migrate(&conn)?;
+    let conn = db::write_context(paths)?;
     conn.execute(
         r#"
 UPDATE media_source_identity
@@ -1432,8 +1528,7 @@ pub fn relocate_canonical_media(
         ));
     }
     let canonical_text = canonical.to_string_lossy().to_string();
-    let mut conn = db::open(paths)?;
-    db::migrate(&conn)?;
+    let mut conn = db::write_context(paths)?;
     let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
     let previous_path = tx
         .query_row(
@@ -1480,8 +1575,7 @@ pub fn replace_canonical_source_url(
             "replacement URL points to a different source video".to_string(),
         ));
     }
-    let conn = db::open(paths)?;
-    db::migrate(&conn)?;
+    let conn = db::write_context(paths)?;
     ensure_source_identity_conn(&conn, &replacement, new_url)?;
     conn.execute(
         "UPDATE media_source_identity SET canonical_url=?1, last_failed_url=NULL, last_error=NULL, repair_state=CASE WHEN library_item_id IS NULL THEN 'ready' ELSE 'missing' END, updated_at_ms=?2 WHERE service=?3 AND media_id=?4",
@@ -1491,8 +1585,7 @@ pub fn replace_canonical_source_url(
 }
 
 pub fn remove_canonical_library_record(paths: &AppPaths, item_id: &str) -> Result<bool> {
-    let mut conn = db::open(paths)?;
-    db::migrate(&conn)?;
+    let mut conn = db::write_context(paths)?;
     let tx = conn.transaction()?;
     tx.execute(
         "UPDATE media_source_identity SET library_item_id=NULL, repair_state='record_removed', updated_at_ms=?1 WHERE library_item_id=?2",
@@ -1611,10 +1704,7 @@ fn delete_library_item_file(
     mode: &str,
     change_source: &str,
 ) -> LibraryFileDeleteResult {
-    let mut conn = match db::open(paths).and_then(|conn| {
-        db::migrate(&conn)?;
-        Ok(conn)
-    }) {
+    let mut conn = match db::write_context(paths).and_then(|conn| Ok(conn)) {
         Ok(conn) => conn,
         Err(err) => {
             return LibraryFileDeleteResult {
@@ -1739,6 +1829,9 @@ WHERE status='queued'
             message: err.to_string(),
         };
     }
+    // The durable delete-pending intent is committed. Release writer admission before any
+    // alias resolution, storage probe, trash, or filesystem deletion work.
+    drop(conn);
 
     let physical_media_path = resolve_media_path(paths, &media_path);
     let physical_media_text = physical_media_path
@@ -1770,17 +1863,19 @@ WHERE status='queued'
     };
     if let Err(message) = filesystem_result {
         if !was_pending {
-            let _ = conn.execute(
-                "UPDATE library_item SET file_status='available', \
-                 file_status_changed_at_ms=?1, file_status_change_source=?2, \
-                 file_delete_method=NULL WHERE id=?3 AND file_status='delete_pending'",
-                params![now_ms(), change_source, item_id],
-            );
-            let _ = conn.execute(
-                "UPDATE media_source_identity SET repair_state='ready', updated_at_ms=?1 \
-                 WHERE library_item_id=?2",
-                params![now_ms(), item_id],
-            );
+            if let Ok(conn) = db::write_context(paths) {
+                let _ = conn.execute(
+                    "UPDATE library_item SET file_status='available', \
+                     file_status_changed_at_ms=?1, file_status_change_source=?2, \
+                     file_delete_method=NULL WHERE id=?3 AND file_status='delete_pending'",
+                    params![now_ms(), change_source, item_id],
+                );
+                let _ = conn.execute(
+                    "UPDATE media_source_identity SET repair_state='ready', updated_at_ms=?1 \
+                     WHERE library_item_id=?2",
+                    params![now_ms(), item_id],
+                );
+            }
         }
         return LibraryFileDeleteResult {
             item_id: item_id.to_string(),
@@ -1792,6 +1887,7 @@ WHERE status='queued'
     }
     let physical_observation_path = physical_media_text.filter(|path| path != &media_path);
     let finalization: Result<bool> = (|| {
+        let mut conn = db::write_context(paths)?;
         let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
         persist_media_path_observation_invalidation(&tx, &media_path)?;
         if let Some(physical_path) = physical_observation_path.as_deref() {
@@ -1848,8 +1944,7 @@ pub fn operator_deleted_redownload_target(
     paths: &AppPaths,
     item_id: &str,
 ) -> Result<OperatorDeletedRedownloadTarget> {
-    let conn = db::open(paths)?;
-    db::migrate(&conn)?;
+    let conn = db::open_readonly(paths)?;
     let target = conn
         .query_row(
             r#"
@@ -2174,8 +2269,7 @@ fn set_item_thumbnail_path(
     item_id: &str,
     thumbnail_path: Option<&Path>,
 ) -> Result<()> {
-    let conn = db::open(paths)?;
-    db::migrate(&conn)?;
+    let conn = db::write_context(paths)?;
     let stored = thumbnail_path.map(|value| value.to_string_lossy().to_string());
     conn.execute(
         "UPDATE library_item SET thumbnail_path=?1 WHERE id=?2",
@@ -3011,8 +3105,7 @@ pub fn classify_direct_download_execution(
 /// execution classification. The lineage insert never overwrites an existing row: first durable
 /// evidence wins deterministically, which makes retry/recovery idempotent.
 pub fn record_download_lineage(paths: &AppPaths, input: DownloadLineageInput) -> Result<()> {
-    let mut conn = db::open(paths)?;
-    db::migrate(&conn)?;
+    let mut conn = db::write_context(paths)?;
     let tx = conn.transaction()?;
     record_download_lineage_in_transaction(&tx, input)?;
     tx.commit()?;
@@ -3135,8 +3228,7 @@ pub fn backfill_download_lineage_batch(
     requested_limit: usize,
 ) -> Result<DownloadLineageBackfillState> {
     let limit = requested_limit.clamp(1, MAX_DOWNLOAD_LINEAGE_BACKFILL_BATCH);
-    let mut conn = db::open(paths)?;
-    db::migrate(&conn)?;
+    let mut conn = db::write_context(paths)?;
     let cursor = download_lineage_backfill_cursor(&conn)?;
     let mut stmt = conn.prepare(
         r#"
@@ -3403,12 +3495,10 @@ pub fn resync_local_fallback_downloads(paths: &AppPaths) -> Result<FallbackResyn
     }
     report.configured_reachable = true;
 
-    let mut conn = db::open(paths)?;
-    db::migrate(&conn)?;
-
     let prefix = fallback_root.to_string_lossy().to_string();
     let pattern = format!("{}%", escape_like_pipe(&prefix));
     let rows: Vec<(String, String)> = {
+        let conn = db::open_readonly(paths)?;
         let mut stmt = conn.prepare(
             "SELECT id, media_path FROM library_item WHERE media_path LIKE ?1 ESCAPE '|'",
         )?;
@@ -3478,13 +3568,20 @@ pub fn resync_local_fallback_downloads(paths: &AppPaths) -> Result<FallbackResyn
                 let target_str = target.to_string_lossy().to_string();
                 // Relink the DB BEFORE deleting the local copy, so the item always points
                 // at the verified copy on the configured root even if the delete fails.
-                let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
-                tx.execute(
-                    "UPDATE library_item SET media_path=?1 WHERE id=?2",
-                    params![&target_str, id],
-                )?;
-                persist_media_path_observation_rewrite_invalidation(&tx, &media_path, &target_str)?;
-                tx.commit()?;
+                {
+                    let mut conn = db::write_context(paths)?;
+                    let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
+                    tx.execute(
+                        "UPDATE library_item SET media_path=?1 WHERE id=?2",
+                        params![&target_str, id],
+                    )?;
+                    persist_media_path_observation_rewrite_invalidation(
+                        &tx,
+                        &media_path,
+                        &target_str,
+                    )?;
+                    tx.commit()?;
+                }
                 invalidate_media_path_observation_rewrite_memory(&media_path, &target_str);
                 let _ = std::fs::remove_file(&src);
                 report.moved += 1;
@@ -3510,8 +3607,7 @@ pub fn resync_local_fallback_downloads(paths: &AppPaths) -> Result<FallbackResyn
 }
 
 pub fn upsert_item_metadata(paths: &AppPaths, item: &LibraryItem) -> Result<()> {
-    let mut conn = db::open(paths)?;
-    db::migrate(&conn)?;
+    let mut conn = db::write_context(paths)?;
     let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
     let previous_path = tx
         .query_row(
@@ -3594,8 +3690,6 @@ pub fn transfer_item_metadata_between_roots(
     copy: bool,
 ) -> Result<LibraryItemTransferSummary> {
     let items = list_items_under_roots(paths, &[source_root.to_string()])?;
-    let mut conn = db::open(paths)?;
-    db::migrate(&conn)?;
     let mut copied = 0_usize;
     let mut moved = 0_usize;
     for item in &items {
@@ -3608,6 +3702,7 @@ pub fn transfer_item_metadata_between_roots(
             upsert_item_metadata(paths, &copied_item)?;
             copied = copied.saturating_add(1);
         } else {
+            let mut conn = db::write_context(paths)?;
             let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
             tx.execute(
                 "UPDATE library_item SET media_path = ?1, thumbnail_path = NULL WHERE id = ?2",
@@ -3754,8 +3849,7 @@ pub fn get_item_by_canonical_media_path(
     let media_path_str = canonical.to_string_lossy().to_string();
     let supplied_path_str = media_path.to_string_lossy().to_string();
 
-    let conn = db::open(paths)?;
-    db::migrate(&conn)?;
+    let conn = db::open_readonly(paths)?;
 
     let mut statement = conn.prepare_cached(
         r#"
@@ -3840,8 +3934,7 @@ pub fn add_item_to_localization_workspace(
         ));
     }
 
-    let conn = db::open(paths)?;
-    db::migrate(&conn)?;
+    let conn = db::write_context(paths)?;
     conn.execute(
         r#"
 INSERT INTO localization_workspace_item (
@@ -3891,8 +3984,7 @@ pub fn import_downloaded_file_with_lineage(
     let provider = provider.trim();
     let mut item = prepare_media_item(paths, &downloaded_path, "url_direct", source_url, None)?;
 
-    let mut conn = db::open(paths)?;
-    db::migrate(&conn)?;
+    let mut conn = db::write_context(paths)?;
     let canonical_source = canonical_media_source(source_url);
     if let Some(source) = canonical_source.as_ref() {
         ensure_source_identity_conn(&conn, source, source_url)?;
@@ -4074,8 +4166,7 @@ fn import_media_file(
     title_hint: Option<&str>,
 ) -> Result<LibraryItem> {
     let item = prepare_media_item(paths, media_path, source_type, source_uri, title_hint)?;
-    let conn = db::open(paths)?;
-    db::migrate(&conn)?;
+    let conn = db::write_context(paths)?;
     insert_library_item(&conn, &item)?;
     Ok(item)
 }

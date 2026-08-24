@@ -113,8 +113,7 @@ pub fn upsert_tiktok_subscription(
         .filter(|v| !v.trim().is_empty())
         .unwrap_or_else(|| Uuid::new_v4().to_string());
     let now = now_ms();
-    let conn = db::open(paths)?;
-    db::migrate(&conn)?;
+    let conn = db::write_context(paths)?;
     conn.execute(
         r#"INSERT INTO tiktok_subscription(id,title,source_url,folder_map,output_dir_override,use_browser_cookies,browser_cookie_source,active,refresh_interval_minutes,max_items_per_refresh,provider_name,provider_version,capability_epoch,created_at_ms,updated_at_ms)
 VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,'yt-dlp',?11,1,?12,?12)
@@ -127,8 +126,7 @@ ON CONFLICT(source_url) DO UPDATE SET title=excluded.title,folder_map=excluded.f
 }
 
 pub fn delete_tiktok_subscription(paths: &AppPaths, id: &str) -> Result<()> {
-    let conn = db::open(paths)?;
-    db::migrate(&conn)?;
+    let conn = db::write_context(paths)?;
     let changed = conn.execute(
         "UPDATE tiktok_subscription SET active=0,hold_reason='Archived by operator',next_allowed_refresh_at_ms=NULL,updated_at_ms=?1 WHERE id=?2",
         params![now_ms(), id],
@@ -142,8 +140,7 @@ pub fn delete_tiktok_subscription(paths: &AppPaths, id: &str) -> Result<()> {
 }
 
 pub fn queue_tiktok_subscription(paths: &AppPaths, id: &str) -> Result<Vec<jobs::JobRow>> {
-    let conn = db::open(paths)?;
-    db::migrate(&conn)?;
+    let conn = db::write_context(paths)?;
     let row = by_id(&conn, id)?.ok_or_else(|| {
         EngineError::InstallFailed(format!("TikTok subscription not found: {id}"))
     })?;
@@ -212,8 +209,7 @@ fn queue_row(paths: &AppPaths, row: &TiktokSubscriptionRow) -> Result<Vec<jobs::
         },
     )?];
     let now = now_ms();
-    let conn = db::open(paths)?;
-    db::migrate(&conn)?;
+    let conn = db::write_context(paths)?;
     conn.execute(
         "UPDATE tiktok_subscription SET last_queued_at_ms=?1,last_attempt_at_ms=?1,updated_at_ms=?1 WHERE id=?2",
         params![now, row.id],

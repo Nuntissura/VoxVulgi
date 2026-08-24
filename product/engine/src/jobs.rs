@@ -17,9 +17,66 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
 use std::thread;
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use url::Url;
 use uuid::Uuid;
+
+static JOB_RUNNER_SHUTDOWN_REQUESTED: AtomicBool = AtomicBool::new(false);
+
+struct CurrentJobExecutionContext {
+    paths: AppPaths,
+    job_id: String,
+    last_checked: Instant,
+    canceled: bool,
+}
+
+thread_local! {
+    static CURRENT_JOB_EXECUTION: std::cell::RefCell<Option<CurrentJobExecutionContext>> = const { std::cell::RefCell::new(None) };
+}
+
+struct CurrentJobExecutionGuard;
+
+impl CurrentJobExecutionGuard {
+    fn enter(paths: AppPaths, job_id: String) -> Self {
+        CURRENT_JOB_EXECUTION.with(|slot| {
+            *slot.borrow_mut() = Some(CurrentJobExecutionContext {
+                paths,
+                job_id,
+                last_checked: Instant::now() - Duration::from_secs(1),
+                canceled: false,
+            });
+        });
+        Self
+    }
+}
+
+impl Drop for CurrentJobExecutionGuard {
+    fn drop(&mut self) {
+        CURRENT_JOB_EXECUTION.with(|slot| *slot.borrow_mut() = None);
+    }
+}
+
+pub(crate) fn job_runner_shutdown_requested() -> bool {
+    JOB_RUNNER_SHUTDOWN_REQUESTED.load(Ordering::SeqCst)
+}
+
+pub(crate) fn external_command_cancel_requested() -> bool {
+    if job_runner_shutdown_requested() {
+        return true;
+    }
+    CURRENT_JOB_EXECUTION.with(|slot| {
+        let mut slot = slot.borrow_mut();
+        let Some(context) = slot.as_mut() else {
+            return false;
+        };
+        if context.last_checked.elapsed() >= Duration::from_millis(250) {
+            context.canceled = is_canceled(&context.paths, &context.job_id).unwrap_or(false);
+            context.last_checked = Instant::now();
+        }
+        context.canceled
+    })
+}
+pub const JOB_RUNNER_SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(120);
 
 const DEFAULT_MAX_CONCURRENT_JOBS: usize = 4;
 const MAX_MAX_CONCURRENT_JOBS: usize = 16;
@@ -102,6 +159,11 @@ const META_KEY_RECURRING_DOWNLOAD_MIN_SLEEP: &str = "antibot_recurring_download_
 const META_KEY_RECURRING_DOWNLOAD_MAX_SLEEP: &str = "antibot_recurring_download_max_sleep_secs";
 const META_KEY_ADAPTIVE_PROTECTION_ENABLED: &str = "antibot_adaptive_protection_enabled";
 static ANTIBOT_PACING_WRITE_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+// Subtitle artifact publication is a two-resource operation: select the next database version,
+// publish three filesystem artifacts, then insert the track row. The database writer permit must
+// never span filesystem I/O, so a process-local publication lock preserves version selection
+// across parallel localization workers while each DB admission remains short and non-nested.
+static SUBTITLE_TRACK_PUBLICATION_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
 const DEFAULT_RECURRING_MIN_INTERVAL_SECS: u64 = 60;
 const MAX_RECURRING_MIN_INTERVAL_SECS: u64 = 3600;
 const DEFAULT_RECURRING_JITTER_SECS: u64 = 60;
@@ -1856,8 +1918,7 @@ fn active_localization_import_for_path(
     paths: &AppPaths,
     canonical_path: &str,
 ) -> Result<Option<JobRow>> {
-    let conn = db::open(paths)?;
-    db::migrate(&conn)?;
+    let conn = db::open_readonly(paths)?;
 
     active_localization_import_for_path_conn(&conn, canonical_path)
 }
@@ -1946,8 +2007,7 @@ fn enqueue_completed_import_reuse_job(
         track,
     )?;
     let now = now_ms();
-    let conn = db::open(paths)?;
-    db::migrate(&conn)?;
+    let conn = db::write_context(paths)?;
     conn.execute(
         "UPDATE job SET status=?1, progress=1.0, started_at_ms=?2, finished_at_ms=?3, item_id=?4 WHERE id=?5",
         params![
@@ -1958,6 +2018,7 @@ fn enqueue_completed_import_reuse_job(
             &job.id
         ],
     )?;
+    drop(conn);
     let item_id = item.id.clone();
     let media_path = item.media_path.clone();
     log_line(
@@ -1986,8 +2047,7 @@ fn enqueue_new_localization_import_atomically(
     batch_id: Option<String>,
     track: JobTrack,
 ) -> Result<JobRow> {
-    let mut conn = db::open(paths)?;
-    db::migrate(&conn)?;
+    let mut conn = db::write_context(paths)?;
     let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
     if let Some(existing) = active_localization_import_for_path_conn(&tx, canonical_path)? {
         tx.commit()?;
@@ -2005,6 +2065,7 @@ fn enqueue_new_localization_import_atomically(
         id,
     )?;
     tx.commit()?;
+    drop(conn);
     let _ = subscriptions::refresh_subscription_activity_rollup_for_job(paths, &row.id);
     Ok(row)
 }
@@ -6062,8 +6123,7 @@ pub fn youtube_queue_identity_reconcile(
 ) -> Result<YoutubeQueueIdentityReconcileSummary> {
     let operation_id = format!("youtube-queue-compact-{}", Uuid::new_v4());
     let candidate_limit = limit.unwrap_or(500).clamp(1, 500);
-    let mut conn = db::open(paths)?;
-    db::migrate(&conn)?;
+    let conn = db::open_readonly(paths)?;
     let queue_paused = is_queue_paused_conn(&conn)?;
     let scan = scan_queued_direct_jobs(&conn)?;
     let running_direct_jobs: usize = conn
@@ -6256,6 +6316,7 @@ pub fn youtube_queue_identity_reconcile(
     if dry_run {
         return Ok(summary);
     }
+    drop(conn);
 
     summary.backup = Some(create_verified_queue_identity_backup(
         paths,
@@ -6264,6 +6325,7 @@ pub fn youtube_queue_identity_reconcile(
     )?);
     verify_queue_identity_observations_fresh(paths, &observations)?;
 
+    let mut conn = db::write_context(paths)?;
     let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
     if !is_queue_paused_conn(&tx)? {
         return Err(EngineError::InstallFailed(
@@ -6366,6 +6428,7 @@ pub fn youtube_queue_identity_reconcile(
         }
     }
     tx.commit()?;
+    drop(conn);
     for job_id in canceled_job_ids {
         remove_job_cookie_secret(paths, &job_id);
         let _ = subscriptions::refresh_subscription_activity_rollup_for_job(paths, &job_id);
@@ -6389,8 +6452,7 @@ pub fn youtube_queue_identity_reconcile(
             "source_memberships_preserved": summary.source_memberships_preserved,
         }),
     );
-    let audit_conn = db::open(paths)?;
-    db::migrate(&audit_conn)?;
+    let audit_conn = db::open_readonly(paths)?;
     let audit_scan = scan_queued_direct_jobs(&audit_conn)?;
     let audit_states = youtube_identity_db_states(&audit_conn)?;
     let mut audit_groups: HashMap<String, Vec<&QueuedYoutubeIdentityJob>> = HashMap::new();
@@ -6402,6 +6464,7 @@ pub fn youtube_queue_identity_reconcile(
     }
     summary.remaining_duplicate_identities =
         audit_groups.values().filter(|rows| rows.len() > 1).count();
+    drop(audit_conn);
     for (media_id, rows) in &audit_groups {
         let state = audit_states.get(media_id);
         if state.and_then(|value| value.active_job_id.as_deref())
@@ -6709,24 +6772,34 @@ pub fn set_runtime_max_concurrency(
     paths: &AppPaths,
     max_concurrency: usize,
 ) -> Result<JobRuntimeSettings> {
-    let conn = db::open(paths)?;
-    db::migrate(&conn)?;
     let max_concurrency = max_concurrency.clamp(1, MAX_MAX_CONCURRENT_JOBS);
-    conn.execute(
-        "INSERT INTO meta(key, value) VALUES(?1, ?2)
-         ON CONFLICT(key) DO UPDATE SET value=excluded.value",
-        params![META_KEY_JOBS_MAX_CONCURRENCY, max_concurrency.to_string()],
+    db::AppDatabase::for_paths(paths)?.write(
+        db::DatabaseOperationContext::new("options", "set_runtime_max_concurrency").foreground(),
+        TransactionBehavior::Immediate,
+        |transaction| {
+            transaction.execute(
+                "INSERT INTO meta(key, value) VALUES(?1, ?2)
+                 ON CONFLICT(key) DO UPDATE SET value=excluded.value",
+                params![META_KEY_JOBS_MAX_CONCURRENCY, max_concurrency.to_string()],
+            )?;
+            Ok(())
+        },
     )?;
     Ok(JobRuntimeSettings { max_concurrency })
 }
 
 pub fn set_queue_paused(paths: &AppPaths, paused: bool) -> Result<JobQueueControlState> {
-    let conn = db::open(paths)?;
-    db::migrate(&conn)?;
-    conn.execute(
-        "INSERT INTO meta(key, value) VALUES(?1, ?2)
-         ON CONFLICT(key) DO UPDATE SET value=excluded.value",
-        params![META_KEY_JOBS_QUEUE_PAUSED, if paused { "1" } else { "0" }],
+    db::AppDatabase::for_paths(paths)?.write(
+        db::DatabaseOperationContext::new("queue_control", "set_queue_paused").foreground(),
+        TransactionBehavior::Immediate,
+        |transaction| {
+            transaction.execute(
+                "INSERT INTO meta(key, value) VALUES(?1, ?2)
+                 ON CONFLICT(key) DO UPDATE SET value=excluded.value",
+                params![META_KEY_JOBS_QUEUE_PAUSED, if paused { "1" } else { "0" }],
+            )?;
+            Ok(())
+        },
     )?;
     Ok(JobQueueControlState { paused })
 }
@@ -6736,22 +6809,26 @@ pub fn set_queue_paused(paths: &AppPaths, paused: bool) -> Result<JobQueueContro
 // running. Queued recurring work is remembered (rows persist) and resumes on the next
 // startup (the flag is cleared in `start_runner`) or when the operator updates-all.
 pub fn set_recurring_paused(paths: &AppPaths, paused: bool) -> Result<bool> {
-    let conn = db::open(paths)?;
-    db::migrate(&conn)?;
-    conn.execute(
-        "INSERT INTO meta(key, value) VALUES(?1, ?2)
-         ON CONFLICT(key) DO UPDATE SET value=excluded.value",
-        params![
-            META_KEY_JOBS_RECURRING_PAUSED,
-            if paused { "1" } else { "0" }
-        ],
+    db::AppDatabase::for_paths(paths)?.write(
+        db::DatabaseOperationContext::new("recurring", "set_recurring_paused").foreground(),
+        TransactionBehavior::Immediate,
+        |transaction| {
+            transaction.execute(
+                "INSERT INTO meta(key, value) VALUES(?1, ?2)
+                 ON CONFLICT(key) DO UPDATE SET value=excluded.value",
+                params![
+                    META_KEY_JOBS_RECURRING_PAUSED,
+                    if paused { "1" } else { "0" }
+                ],
+            )?;
+            Ok(())
+        },
     )?;
     Ok(paused)
 }
 
 pub fn is_recurring_paused(paths: &AppPaths) -> Result<bool> {
-    let conn = db::open(paths)?;
-    db::migrate(&conn)?;
+    let conn = db::open_readonly(paths)?;
     is_recurring_paused_conn(&conn)
 }
 
@@ -6769,8 +6846,7 @@ fn is_recurring_paused_conn(conn: &rusqlite::Connection) -> Result<bool> {
 }
 
 pub fn cancel_job(paths: &AppPaths, job_id: &str) -> Result<()> {
-    let conn = db::open(paths)?;
-    db::migrate(&conn)?;
+    let conn = db::write_context(paths)?;
 
     let job_context: Option<(String, Option<String>)> = conn
         .query_row(
@@ -6815,6 +6891,7 @@ WHERE batch_id=?3 AND id<>?4 AND status IN (?5, ?6)
         }
     }
 
+    drop(conn);
     remove_job_cookie_secret(paths, job_id);
     let _ = library::release_download_source_claim(paths, job_id, None, None);
     let _ = subscriptions::refresh_subscription_activity_rollup_for_job(paths, job_id);
@@ -6825,8 +6902,7 @@ pub fn cancel_youtube_subscription_refresh_jobs(
     paths: &AppPaths,
     subscription_id: &str,
 ) -> Result<usize> {
-    let conn = db::open(paths)?;
-    db::migrate(&conn)?;
+    let conn = db::write_context(paths)?;
     let mut stmt = conn.prepare(
         "SELECT id FROM job \
          WHERE type=?1 AND status IN (?2, ?3) \
@@ -6866,10 +6942,10 @@ pub fn cancel_youtube_subscription_refresh_jobs(
 }
 
 pub fn cancel_all_jobs(paths: &AppPaths) -> Result<usize> {
-    let conn = db::open(paths)?;
-    db::migrate(&conn)?;
+    let mut conn = db::write_context(paths)?;
+    let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
     let affected_job_ids = {
-        let mut stmt = conn.prepare("SELECT id FROM job WHERE status IN (?1, ?2)")?;
+        let mut stmt = tx.prepare("SELECT id FROM job WHERE status IN (?1, ?2)")?;
         let rows = stmt
             .query_map(
                 params![JobStatus::Queued.as_str(), JobStatus::Running.as_str()],
@@ -6878,7 +6954,7 @@ pub fn cancel_all_jobs(paths: &AppPaths) -> Result<usize> {
             .collect::<rusqlite::Result<Vec<_>>>()?;
         rows
     };
-    let updated = conn.execute(
+    let updated = tx.execute(
         "UPDATE job SET status=?1, finished_at_ms=?2 WHERE status IN (?3, ?4)",
         params![
             JobStatus::Canceled.as_str(),
@@ -6889,8 +6965,7 @@ pub fn cancel_all_jobs(paths: &AppPaths) -> Result<usize> {
     )?;
 
     if updated > 0 {
-        let _ = clear_dir_entries(&paths.job_secrets_dir());
-        conn.execute(
+        tx.execute(
             r#"
 UPDATE media_source_identity
 SET active_job_id=NULL,
@@ -6901,7 +6976,22 @@ WHERE active_job_id IN (SELECT id FROM job WHERE status='canceled')
             [now_ms()],
         )?;
     }
+    tx.commit()?;
     drop(conn);
+    if updated > 0 {
+        if let Err(error) = clear_dir_entries(&paths.job_secrets_dir()) {
+            crate::diagnostics::emit_trace_event(
+                paths,
+                "job_secret_cleanup_failed",
+                "warn",
+                serde_json::json!({
+                    "operation": "cancel_all_jobs",
+                    "error": error.to_string(),
+                    "canceled_jobs": updated,
+                }),
+            );
+        }
+    }
     for job_id in affected_job_ids {
         let _ = subscriptions::refresh_subscription_activity_rollup_for_job(paths, &job_id);
     }
@@ -7104,8 +7194,7 @@ pub fn clear_failed_jobs_for_item(
         purge_orphan_artifacts: false,
     });
 
-    let conn = db::open(paths)?;
-    db::migrate(&conn)?;
+    let conn = db::write_context(paths)?;
 
     let mut stmt = conn.prepare("SELECT id, logs_path FROM job WHERE item_id=?1 AND status=?2")?;
     let failed: Vec<(String, String)> = stmt
@@ -7164,8 +7253,7 @@ pub fn clear_failed_jobs_for_item(
 }
 
 fn build_job_cleanup_plan(paths: &AppPaths) -> Result<JobCleanupPlan> {
-    let conn = db::open(paths)?;
-    db::migrate(&conn)?;
+    let conn = db::open_readonly(paths)?;
 
     let terminal_statuses = [
         JobStatus::Succeeded.as_str(),
@@ -7250,8 +7338,7 @@ fn build_job_cleanup_plan(paths: &AppPaths) -> Result<JobCleanupPlan> {
 }
 
 pub fn retry_job(paths: &AppPaths, job_id: &str) -> Result<JobRow> {
-    let conn = db::open(paths)?;
-    db::migrate(&conn)?;
+    let conn = db::open_readonly(paths)?;
 
     let (type_str, status_str, params_json, batch_id, persisted_track, legacy_lane): (
         String,
@@ -7301,11 +7388,13 @@ pub fn retry_job(paths: &AppPaths, job_id: &str) -> Result<JobRow> {
         }
         if let Some(key) = direct_download_retry_key_from_params(&params_json) {
             if let Some(active) = active_direct_download_retry_for_key(&conn, job_id, &key)? {
-                link_retry_jobs_conn(&conn, job_id, &active.id, false)?;
+                drop(conn);
+                link_retry_jobs(paths, job_id, &active.id, false)?;
                 return Ok(active);
             }
         }
     }
+    drop(conn);
 
     let item_id = match job_type {
         JobType::AsrLocal => serde_json::from_str::<AsrLocalParams>(&params_json)
@@ -7436,8 +7525,7 @@ fn link_retry_jobs(
     replacement_job_id: &str,
     set_replacement_origin: bool,
 ) -> Result<()> {
-    let conn = db::open(paths)?;
-    db::migrate(&conn)?;
+    let conn = db::write_context(paths)?;
     link_retry_jobs_conn(
         &conn,
         original_job_id,
@@ -7546,8 +7634,7 @@ pub fn retry_failed_jobs_for_batch(
         }
     };
 
-    let conn = db::open(paths)?;
-    db::migrate(&conn)?;
+    let conn = db::write_context(paths)?;
     let active_before = active_job_ids(&conn)?;
     drop(conn);
 
@@ -8356,8 +8443,7 @@ pub fn backfill_job_titles_for_batch(
     batch_id_or_prefix: &str,
     limit: usize,
 ) -> Result<JobTitleBackfillSummary> {
-    let conn = db::open(paths)?;
-    db::migrate(&conn)?;
+    let conn = db::write_context(paths)?;
     let batch_id = resolve_job_batch_id(&conn, batch_id_or_prefix.trim())?;
     let mut rows = job_rows_for_batch_conn(&conn, &batch_id)?;
     let scan_limit = limit.clamp(1, 500);
@@ -8463,8 +8549,7 @@ pub fn delete_terminal_job(paths: &AppPaths, job_id: &str) -> Result<bool> {
         return Err(EngineError::InstallFailed("job_id is empty".to_string()));
     }
 
-    let conn = db::open(paths)?;
-    db::migrate(&conn)?;
+    let conn = db::write_context(paths)?;
     let status_str: Option<String> = conn
         .query_row("SELECT status FROM job WHERE id=?1", [job_id], |row| {
             row.get(0)
@@ -8491,6 +8576,7 @@ pub fn delete_terminal_job(paths: &AppPaths, job_id: &str) -> Result<bool> {
             JobStatus::Canceled.as_str()
         ],
     )?;
+    drop(conn);
     if removed > 0 {
         remove_job_cookie_secret(paths, job_id);
     }
@@ -8527,22 +8613,131 @@ pub fn delete_terminal_jobs_matching_search(
 pub struct JobRunnerHandle {
     stop: Arc<AtomicBool>,
     runtime_state: Arc<Mutex<JobTrackRunnerRuntimeState>>,
+    runner_joins: Arc<Mutex<Vec<thread::JoinHandle<()>>>>,
+    worker_joins: Arc<Mutex<Vec<thread::JoinHandle<()>>>>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct JobRunnerShutdownReport {
+    pub scheduler_panics: usize,
+    pub worker_panics: usize,
+}
+
+impl JobRunnerShutdownReport {
+    pub fn panic_count(&self) -> usize {
+        self.scheduler_panics + self.worker_panics
+    }
 }
 
 impl JobRunnerHandle {
     pub fn stop(&self) {
+        JOB_RUNNER_SHUTDOWN_REQUESTED.store(true, Ordering::SeqCst);
         self.stop.store(true, Ordering::SeqCst);
         update_youtube_gate_runtime(&self.runtime_state, "ready", None, None);
     }
+
+    pub fn stop_and_join(&self, timeout: Duration) -> Result<JobRunnerShutdownReport> {
+        self.stop();
+        let deadline = Instant::now() + timeout;
+        let wait_until_finished = |joins: &Arc<Mutex<Vec<thread::JoinHandle<()>>>>| -> Result<()> {
+            loop {
+                let all_finished = joins
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+                    .iter()
+                    .all(thread::JoinHandle::is_finished);
+                if all_finished {
+                    return Ok(());
+                }
+                if Instant::now() >= deadline {
+                    return Err(EngineError::InstallFailed(
+                        "job runner shutdown timed out before every owned worker joined"
+                            .to_string(),
+                    ));
+                }
+                thread::sleep(Duration::from_millis(20));
+            }
+        };
+        // The scheduler must join first so it cannot publish another worker after the worker
+        // set has been observed. Every claimed job worker is owned by the second registry.
+        wait_until_finished(&self.runner_joins)?;
+        let runner_handles = std::mem::take(
+            &mut *self
+                .runner_joins
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner),
+        );
+        let mut scheduler_panics = 0_usize;
+        for handle in runner_handles {
+            if handle.join().is_err() {
+                scheduler_panics += 1;
+            }
+        }
+        wait_until_finished(&self.worker_joins)?;
+        let worker_handles = std::mem::take(
+            &mut *self
+                .worker_joins
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner),
+        );
+        let mut worker_panics = 0_usize;
+        for handle in worker_handles {
+            if handle.join().is_err() {
+                worker_panics += 1;
+            }
+        }
+        Ok(JobRunnerShutdownReport {
+            scheduler_panics,
+            worker_panics,
+        })
+    }
+}
+
+fn reap_finished_worker_handles(
+    paths: &AppPaths,
+    worker_joins: &Arc<Mutex<Vec<thread::JoinHandle<()>>>>,
+) -> usize {
+    let (finished, unfinished_count) = {
+        let mut registry = worker_joins
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let handles = std::mem::take(&mut *registry);
+        let (finished, unfinished): (Vec<_>, Vec<_>) = handles
+            .into_iter()
+            .partition(thread::JoinHandle::is_finished);
+        let unfinished_count = unfinished.len();
+        *registry = unfinished;
+        (finished, unfinished_count)
+    };
+    let mut panics = 0_usize;
+    for handle in finished {
+        if handle.join().is_err() {
+            panics += 1;
+        }
+    }
+    if panics > 0 {
+        append_engine_diagnostics_trace_row_best_effort(
+            paths,
+            "job_worker_reap",
+            "error",
+            serde_json::json!({
+                "outcome": "completed_worker_panicked",
+                "panics": panics,
+                "unfinished_workers": unfinished_count,
+            }),
+        );
+    }
+    unfinished_count
 }
 
 pub fn start_runner(paths: AppPaths) -> Result<JobRunnerHandle> {
+    JOB_RUNNER_SHUTDOWN_REQUESTED.store(false, Ordering::SeqCst);
     paths.ensure_dirs()?;
-    let conn = db::open(&paths)?;
-    db::migrate(&conn)?;
+    let conn = db::write_context(&paths)?;
 
     // If the app crashed, requeue any running jobs.
     requeue_orphaned_running_jobs(&conn)?;
+    drop(conn);
     // WP-0269 intentionally avoids a startup-wide rewrite of a potentially very large queue.
     // Stamp only a small active slice now; the scheduler continues bounded backfill while its
     // legacy fallback keeps the untouched remainder dispatchable.
@@ -8556,17 +8751,28 @@ pub fn start_runner(paths: AppPaths) -> Result<JobRunnerHandle> {
     update_youtube_gate_runtime(&runtime_state, "ready", None, None);
 
     let prune_paths = paths.clone();
-    thread::spawn(move || {
+    let prune_join = thread::spawn(move || {
         let _ = prune_job_logs(&prune_paths);
     });
 
     let stop_thread = stop.clone();
     let runtime_state_thread = runtime_state.clone();
-    thread::spawn(move || runner_loop(paths, stop_thread, runtime_state_thread));
+    let worker_joins = Arc::new(Mutex::new(Vec::new()));
+    let runner_worker_joins = Arc::clone(&worker_joins);
+    let runner_join = thread::spawn(move || {
+        runner_loop(
+            paths,
+            stop_thread,
+            runtime_state_thread,
+            runner_worker_joins,
+        )
+    });
 
     Ok(JobRunnerHandle {
         stop,
         runtime_state,
+        runner_joins: Arc::new(Mutex::new(vec![prune_join, runner_join])),
+        worker_joins,
     })
 }
 
@@ -8672,8 +8878,7 @@ pub fn recover_orphaned_running_jobs_exact(
         ));
     }
 
-    let mut conn = db::open(paths)?;
-    db::migrate(&conn)?;
+    let mut conn = db::write_context(paths)?;
     let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
     if !is_queue_paused_conn(&tx)? {
         return Err(EngineError::InstallFailed(
@@ -8739,8 +8944,7 @@ pub fn recover_orphaned_running_jobs_exact(
 /// active edge is progressively normalized.
 fn backfill_active_job_tracks_batch(paths: &AppPaths, requested_limit: usize) -> Result<usize> {
     let limit = requested_limit.clamp(1, 500);
-    let mut conn = db::open(paths)?;
-    db::migrate(&conn)?;
+    let mut conn = db::write_context(paths)?;
     // Orphan recovery above has already returned interrupted work to `queued`, and every claim
     // stamps its canonical track atomically. Limiting this normalizer to queued rows preserves
     // the v25 partial-index order instead of merging two status ranges through a temp sort.
@@ -8828,8 +9032,7 @@ fn enqueue_with_type_item_batch_track_and_id(
     track: JobTrack,
     id: String,
 ) -> Result<JobRow> {
-    let conn = db::open(paths)?;
-    db::migrate(&conn)?;
+    let conn = db::write_context(paths)?;
 
     let row = enqueue_with_type_item_batch_track_and_id_conn(
         &conn,
@@ -8928,8 +9131,7 @@ fn enqueue_import_child_if_parent_active(
     params_json: String,
     item_id: Option<String>,
 ) -> Result<Option<JobRow>> {
-    let mut conn = db::open(paths)?;
-    db::migrate(&conn)?;
+    let mut conn = db::write_context(paths)?;
     let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
     let parent_batch: Option<Option<String>> = tx
         .query_row(
@@ -8967,13 +9169,13 @@ fn enqueue_import_child_if_parent_active(
         id,
     )?;
     tx.commit()?;
+    drop(conn);
     let _ = subscriptions::refresh_subscription_activity_rollup_for_job(paths, &row.id);
     Ok(Some(row))
 }
 
 fn job_batch_id(paths: &AppPaths, job_id: &str) -> Result<Option<String>> {
-    let conn = db::open(paths)?;
-    db::migrate(&conn)?;
+    let conn = db::open_readonly(paths)?;
     let batch_id: Option<String> = conn.query_row(
         "SELECT batch_id FROM job WHERE id=?1",
         params![job_id],
@@ -8990,8 +9192,7 @@ fn job_batch_id(paths: &AppPaths, job_id: &str) -> Result<Option<String>> {
 }
 
 fn item_has_active_job(paths: &AppPaths, item_id: &str, job_type: &str) -> Result<bool> {
-    let conn = db::open(paths)?;
-    db::migrate(&conn)?;
+    let conn = db::open_readonly(paths)?;
     let count: i64 = conn.query_row(
         r#"
 SELECT COUNT(*)
@@ -9446,13 +9647,10 @@ fn run_job_stall_watchdog(
     paths: &AppPaths,
     seen: &mut std::collections::HashMap<String, JobProgressMark>,
 ) {
-    let conn = match db::open(paths) {
+    let conn = match db::open_readonly(paths) {
         Ok(c) => c,
         Err(_) => return,
     };
-    if db::migrate(&conn).is_err() {
-        return;
-    }
 
     let rows: Vec<(String, f32)> = {
         let mut stmt = match conn.prepare("SELECT id, progress FROM job WHERE status=?1") {
@@ -9467,6 +9665,7 @@ fn run_job_stall_watchdog(
             Err(_) => return,
         }
     };
+    drop(conn);
 
     let now = std::time::Instant::now();
     let mut still_running: std::collections::HashSet<String> =
@@ -9759,6 +9958,7 @@ fn runner_loop(
     paths: AppPaths,
     stop: Arc<AtomicBool>,
     runtime_state: Arc<Mutex<JobTrackRunnerRuntimeState>>,
+    worker_joins: Arc<Mutex<Vec<thread::JoinHandle<()>>>>,
 ) {
     let mut stall_seen: std::collections::HashMap<String, JobProgressMark> =
         std::collections::HashMap::new();
@@ -9780,6 +9980,7 @@ fn runner_loop(
     let mut youtube_gate_trace_gate = YoutubeGateTraceGate::default();
 
     while !stop.load(Ordering::SeqCst) {
+        reap_finished_worker_handles(&paths, &worker_joins);
         if last_watchdog.elapsed() >= Duration::from_secs(JOB_WATCHDOG_SCAN_INTERVAL_SECS) {
             last_watchdog = std::time::Instant::now();
             run_job_stall_watchdog(&paths, &mut stall_seen);
@@ -9998,6 +10199,7 @@ fn runner_loop(
                         type_str,
                         params_json,
                         track,
+                        &worker_joins,
                     );
                     if !spawned
                         && adaptive_scheduler_policy
@@ -10120,6 +10322,7 @@ fn runner_loop(
                             type_str,
                             params_json,
                             JobTrack::YoutubeRecurring,
+                            &worker_joins,
                         );
                         if !spawned
                             && adaptive_scheduler_policy
@@ -10184,7 +10387,14 @@ fn runner_loop(
                 if stop.load(Ordering::SeqCst) {
                     break;
                 }
-                if claim_and_spawn_for_track(&paths, job_id, type_str, params_json, track) {
+                if claim_and_spawn_for_track(
+                    &paths,
+                    job_id,
+                    type_str,
+                    params_json,
+                    track,
+                    &worker_joins,
+                ) {
                     dispatched_any = true;
                 }
             }
@@ -10619,8 +10829,9 @@ fn claim_job_for_track(
     job_id: &str,
     track: JobTrack,
 ) -> Result<DispatchClaimOutcome> {
-    let mut conn = db::open(paths)?;
-    db::migrate(&conn)?;
+    // Prefetch and potentially probe storage without occupying the serialized writer lane.
+    // The canonical claim is re-read and committed below under one short IMMEDIATE transaction.
+    let conn = db::open_readonly(paths)?;
     let prefetched: Option<(String, String, String)> = conn
         .query_row(
             "SELECT status, type, params_json FROM job WHERE id=?1",
@@ -10661,6 +10872,8 @@ fn claim_job_for_track(
         }
     });
 
+    drop(conn);
+    let mut conn = db::write_context(paths)?;
     let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
     let current: Option<(String, String, String)> = tx
         .query_row(
@@ -10776,6 +10989,7 @@ fn claim_job_for_track(
             params![job_id, now_ms(), source.media_id],
         )?;
         tx.commit()?;
+        drop(conn);
         remove_job_cookie_secret(paths, job_id);
         return Ok(DispatchClaimOutcome::SkippedOperatorDeleted);
     }
@@ -10806,6 +11020,7 @@ fn claim_job_for_track(
                     ),
                 )?;
                 tx.commit()?;
+                drop(conn);
                 remove_job_cookie_secret(paths, job_id);
                 return Ok(DispatchClaimOutcome::SkippedActive);
             }
@@ -10829,6 +11044,7 @@ fn claim_job_for_track(
                 params![now_ms(), source.media_id, job_id],
             )?;
             tx.commit()?;
+            drop(conn);
             remove_job_cookie_secret(paths, job_id);
             Ok(DispatchClaimOutcome::SkippedPresent)
         }
@@ -10878,6 +11094,7 @@ fn claim_and_spawn_for_track(
     type_str: String,
     params_json: String,
     track: JobTrack,
+    worker_joins: &Arc<Mutex<Vec<thread::JoinHandle<()>>>>,
 ) -> bool {
     let outcome = match claim_job_for_track(paths, &job_id, track) {
         Ok(outcome) => outcome,
@@ -10910,8 +11127,10 @@ fn claim_and_spawn_for_track(
         // Construct the guard before handing it to the worker. If OS thread creation panics,
         // unwinding drops the captured guard and cannot strand this job in the envelope map.
         let envelope_guard = JobCausalEnvelopeGuard::new(job_id.clone());
-        thread::spawn(move || {
+        let worker = thread::spawn(move || {
             let _envelope_guard = envelope_guard;
+            let _execution_context =
+                CurrentJobExecutionGuard::enter(paths_worker.clone(), job_id.clone());
             let result = execute_job(
                 &paths_worker,
                 &job_id,
@@ -10923,6 +11142,10 @@ fn claim_and_spawn_for_track(
                 let _ = set_failed(&paths_worker, &job_id, &e.to_string());
             }
         });
+        worker_joins
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .push(worker);
         true
     } else {
         let outcome_name = match outcome {
@@ -11856,8 +12079,7 @@ fn record_instagram_refresh_success(
     subscription_id: &str,
     outcome: &InstagramRefreshOutcome,
 ) -> Result<()> {
-    let conn = db::open(paths)?;
-    db::migrate(&conn)?;
+    let conn = db::write_context(paths)?;
     let now = now_ms();
     let previous_failures: i64 = conn.query_row(
         "SELECT consecutive_failures FROM instagram_subscription WHERE id=?1",
@@ -11894,8 +12116,7 @@ fn record_instagram_refresh_failure(
     subscription_id: &str,
     error: &str,
 ) -> Result<()> {
-    let conn = db::open(paths)?;
-    db::migrate(&conn)?;
+    let conn = db::write_context(paths)?;
     let now = now_ms();
     let previous_failures: i64 = conn.query_row(
         "SELECT consecutive_failures FROM instagram_subscription WHERE id=?1",
@@ -11921,8 +12142,7 @@ fn record_tiktok_refresh_success(
     cursor_json: &str,
     discovery_count: usize,
 ) -> Result<()> {
-    let conn = db::open(paths)?;
-    db::migrate(&conn)?;
+    let conn = db::write_context(paths)?;
     let now = now_ms();
     conn.execute(
         "UPDATE tiktok_subscription SET last_attempt_at_ms=?1,last_success_at_ms=?1,last_error=NULL,last_error_at_ms=NULL,last_failure_class=NULL,last_failure_message_hash=NULL,hold_reason=NULL,consecutive_failures=0,consecutive_successes=consecutive_successes+1,last_canonical_discovery_count=?2,next_allowed_refresh_at_ms=NULL,provider_name='yt-dlp',provider_version=?3,canonical_profile_id=COALESCE(?4,canonical_profile_id),cursor_json=?5,updated_at_ms=?1 WHERE id=?6",
@@ -11936,8 +12156,7 @@ fn record_tiktok_refresh_failure(
     subscription_id: &str,
     error: &str,
 ) -> Result<()> {
-    let conn = db::open(paths)?;
-    db::migrate(&conn)?;
+    let conn = db::write_context(paths)?;
     let now = now_ms();
     let previous_failures: i64 = conn.query_row(
         "SELECT consecutive_failures FROM tiktok_subscription WHERE id=?1",
@@ -11956,6 +12175,166 @@ fn record_tiktok_refresh_failure(
     Ok(())
 }
 
+#[derive(Debug)]
+struct PublishedSubtitleTrack {
+    track_id: String,
+    version: i64,
+    json_path: PathBuf,
+}
+
+#[allow(clippy::too_many_arguments)]
+fn publish_versioned_subtitle_track_with_writer<ArtifactWriter>(
+    paths: &AppPaths,
+    item_id: &str,
+    kind: &str,
+    lang: &str,
+    format: &str,
+    created_by: &str,
+    document: &subtitles::SubtitleDocument,
+    output_dir: &Path,
+    stem: &str,
+    artifact_writer: ArtifactWriter,
+) -> Result<PublishedSubtitleTrack>
+where
+    ArtifactWriter: FnOnce(&subtitles::SubtitleDocument, &Path, &Path, &Path) -> Result<()>,
+{
+    let publication_guard = SUBTITLE_TRACK_PUBLICATION_LOCK
+        .get_or_init(|| Mutex::new(()))
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+
+    // Read admission ends before artifact publication. The process-local publication lock, not a
+    // database permit, prevents another localization worker from selecting the same version.
+    let max_version: Option<i64> = {
+        let conn = db::open_readonly(paths)?;
+        conn.query_row(
+            r#"
+SELECT MAX(version)
+FROM subtitle_track
+WHERE item_id=?1 AND kind=?2 AND lang=?3 AND format=?4
+"#,
+            params![item_id, kind, lang, format],
+            |row| row.get(0),
+        )?
+    };
+    let next_version = max_version.unwrap_or(0) + 1;
+    let versioned_name = |extension: &str| {
+        if next_version <= 1 {
+            output_dir.join(format!("{stem}.{extension}"))
+        } else {
+            output_dir.join(format!("{stem}.v{next_version}.{extension}"))
+        }
+    };
+    let json_path = versioned_name("json");
+    let srt_path = versioned_name("srt");
+    let vtt_path = versioned_name("vtt");
+
+    // This callback performs filesystem work and is intentionally invoked with no DB admission.
+    artifact_writer(document, &json_path, &srt_path, &vtt_path)?;
+
+    let track_id = Uuid::new_v4().to_string();
+    {
+        let conn = db::write_context(paths)?;
+        conn.execute(
+            r#"
+INSERT INTO subtitle_track (
+  id,
+  item_id,
+  kind,
+  lang,
+  format,
+  path,
+  created_by,
+  version
+) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)
+"#,
+            params![
+                &track_id,
+                item_id,
+                kind,
+                lang,
+                format,
+                json_path.to_string_lossy().to_string(),
+                created_by,
+                next_version,
+            ],
+        )?;
+    }
+    drop(publication_guard);
+
+    Ok(PublishedSubtitleTrack {
+        track_id,
+        version: next_version,
+        json_path,
+    })
+}
+
+#[allow(clippy::too_many_arguments)]
+fn publish_versioned_subtitle_track(
+    paths: &AppPaths,
+    item_id: &str,
+    kind: &str,
+    lang: &str,
+    format: &str,
+    created_by: &str,
+    document: &subtitles::SubtitleDocument,
+    output_dir: &Path,
+    stem: &str,
+) -> Result<PublishedSubtitleTrack> {
+    publish_versioned_subtitle_track_with_writer(
+        paths,
+        item_id,
+        kind,
+        lang,
+        format,
+        created_by,
+        document,
+        output_dir,
+        stem,
+        subtitles::write_artifacts,
+    )
+}
+
+fn export_job_provenance_projection(
+    paths: &AppPaths,
+    item_id: &str,
+) -> Result<Vec<serde_json::Value>> {
+    let conn = db::open_readonly(paths)?;
+    let mut stmt = conn.prepare(
+        r#"
+SELECT id, type, status, progress, error, created_at_ms, started_at_ms, finished_at_ms, params_json
+FROM job
+WHERE item_id=?1
+ORDER BY created_at_ms ASC
+"#,
+    )?;
+    let mut rows = stmt.query(params![item_id])?;
+    let mut jobs_json = Vec::new();
+    while let Some(row) = rows.next()? {
+        let id: String = row.get(0)?;
+        let ty: String = row.get(1)?;
+        let status: String = row.get(2)?;
+        let progress: f32 = row.get(3)?;
+        let error: Option<String> = row.get(4)?;
+        let created_at_ms: i64 = row.get(5)?;
+        let started_at_ms: Option<i64> = row.get(6)?;
+        let finished_at_ms: Option<i64> = row.get(7)?;
+        let params_json_str: String = row.get(8)?;
+        jobs_json.push(serde_json::json!({
+            "id": id,
+            "type": ty,
+            "status": status,
+            "progress": progress,
+            "error": error,
+            "created_at_ms": created_at_ms,
+            "started_at_ms": started_at_ms,
+            "finished_at_ms": finished_at_ms,
+            "params_json": params_json_str,
+        }));
+    }
+    Ok(jobs_json)
+}
+
 fn execute_job(
     paths: &AppPaths,
     job_id: &str,
@@ -11963,6 +12342,14 @@ fn execute_job(
     params_json: &str,
     envelope: &JobCausalEnvelope,
 ) -> Result<()> {
+    let verification_demand_consumer = format!("job-start:{job_id}");
+    let verification_demand_generation = now_ms().max(0) as u64;
+    let _ = crate::tools::set_youtube_po_provider_verification_foreground_demand(
+        paths,
+        &verification_demand_consumer,
+        verification_demand_generation,
+        true,
+    );
     let artifacts_dir = paths.job_artifacts_dir(job_id);
     std::fs::create_dir_all(&artifacts_dir)?;
 
@@ -12030,12 +12417,12 @@ fn execute_job(
             set_progress(paths, job_id, 0.75)?;
 
             // Associate created item id.
-            let conn = db::open(paths)?;
-            db::migrate(&conn)?;
+            let conn = db::write_context(paths)?;
             conn.execute(
                 "UPDATE job SET item_id=?1, target_title=?2 WHERE id=?3",
                 params![item.id, item.title, job_id],
             )?;
+            drop(conn);
 
             if is_canceled(paths, job_id)? {
                 log_line(
@@ -13530,46 +13917,29 @@ fn execute_job(
                 return Err(EngineError::InstallFailed(message));
             }
 
-            let json_path = asr_dir.join("source.json");
-            let srt_path = asr_dir.join("source.srt");
-            let vtt_path = asr_dir.join("source.vtt");
-            subtitles::write_artifacts(&doc, &json_path, &srt_path, &vtt_path)?;
-            set_progress(paths, job_id, 0.95)?;
-
-            let track_id = Uuid::new_v4().to_string();
-            let conn = db::open(paths)?;
-            db::migrate(&conn)?;
-            conn.execute(
-                r#"
-INSERT INTO subtitle_track (
-  id,
-  item_id,
-  kind,
-  lang,
-  format,
-  path,
-  created_by,
-  version
-) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)
-"#,
-                params![
-                    &track_id,
-                    &item.id,
-                    "source",
-                    &doc.lang,
-                    "ytfetch_subtitle_json_v1",
-                    json_path.to_string_lossy().to_string(),
-                    format!("asr:{}", p.model_id),
-                    1_i64
-                ],
+            let created_by = format!("asr:{}", p.model_id);
+            let published = publish_versioned_subtitle_track(
+                paths,
+                &item.id,
+                "source",
+                &doc.lang,
+                "ytfetch_subtitle_json_v1",
+                &created_by,
+                &doc,
+                &asr_dir,
+                "source",
             )?;
+            let track_version = published.version;
+            let track_id = published.track_id;
+            let json_path = published.json_path;
+            set_progress(paths, job_id, 0.95)?;
 
             log_line(
                 paths,
                 job_id,
                 "info",
                 "asr_done",
-                serde_json::json!({ "track_id": track_id, "json_path": json_path }),
+                serde_json::json!({ "track_id": track_id, "version": track_version, "json_path": json_path }),
             )?;
 
             if p.batch_on_import {
@@ -13843,64 +14213,22 @@ INSERT INTO subtitle_track (
                 return Err(EngineError::InstallFailed(message));
             }
 
-            let conn = db::open(paths)?;
-            db::migrate(&conn)?;
-            let max_version: Option<i64> = conn.query_row(
-                r#"
-SELECT MAX(version)
-FROM subtitle_track
-WHERE item_id=?1 AND kind=?2 AND lang=?3 AND format=?4
-"#,
-                params![&item.id, "translated", "en", "ytfetch_subtitle_json_v1"],
-                |row| row.get(0),
+            let created_by = format!("translate:whispercpp:{}", p.model_id);
+            let published = publish_versioned_subtitle_track(
+                paths,
+                &item.id,
+                "translated",
+                "en",
+                "ytfetch_subtitle_json_v1",
+                &created_by,
+                &result.doc,
+                &translate_dir,
+                "en",
             )?;
-            let next_version = max_version.unwrap_or(0) + 1;
-
-            let stem = "en";
-            let json_path = if next_version <= 1 {
-                translate_dir.join(format!("{stem}.json"))
-            } else {
-                translate_dir.join(format!("{stem}.v{next_version}.json"))
-            };
-            let srt_path = if next_version <= 1 {
-                translate_dir.join(format!("{stem}.srt"))
-            } else {
-                translate_dir.join(format!("{stem}.v{next_version}.srt"))
-            };
-            let vtt_path = if next_version <= 1 {
-                translate_dir.join(format!("{stem}.vtt"))
-            } else {
-                translate_dir.join(format!("{stem}.v{next_version}.vtt"))
-            };
-
-            subtitles::write_artifacts(&result.doc, &json_path, &srt_path, &vtt_path)?;
+            let track_version = published.version;
+            let track_id = published.track_id;
+            let json_path = published.json_path;
             set_progress(paths, job_id, 0.95)?;
-
-            let track_id = Uuid::new_v4().to_string();
-            conn.execute(
-                r#"
-INSERT INTO subtitle_track (
-  id,
-  item_id,
-  kind,
-  lang,
-  format,
-  path,
-  created_by,
-  version
-) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)
-"#,
-                params![
-                    &track_id,
-                    &item.id,
-                    "translated",
-                    "en",
-                    "ytfetch_subtitle_json_v1",
-                    json_path.to_string_lossy().to_string(),
-                    format!("translate:whispercpp:{}", p.model_id),
-                    next_version,
-                ],
-            )?;
 
             let report_path = artifacts_dir.join("translate_report.json");
             std::fs::write(
@@ -13915,6 +14243,7 @@ INSERT INTO subtitle_track (
                 "translate_done",
                 serde_json::json!({
                     "track_id": track_id,
+                    "version": track_version,
                     "json_path": json_path,
                     "warnings": result.report.warnings.len(),
                     "report_path": report_path
@@ -14653,69 +14982,21 @@ if __name__ == "__main__":
             }
             set_progress(paths, job_id, 0.90)?;
 
-            let conn = db::open(paths)?;
-            db::migrate(&conn)?;
-            let max_version: Option<i64> = conn.query_row(
-                r#"
-SELECT MAX(version)
-FROM subtitle_track
-WHERE item_id=?1 AND kind=?2 AND lang=?3 AND format=?4
-"#,
-                params![
-                    &item.id,
-                    &source_track.kind,
-                    &source_track.lang,
-                    &source_track.format
-                ],
-                |row| row.get(0),
+            let published = publish_versioned_subtitle_track(
+                paths,
+                &item.id,
+                &source_track.kind,
+                &source_track.lang,
+                &source_track.format,
+                &created_by,
+                &labeled,
+                &diarize_dir,
+                "source.speakers",
             )?;
-            let next_version = max_version.unwrap_or(0) + 1;
-
-            let stem = "source.speakers";
-            let json_path = if next_version <= 1 {
-                diarize_dir.join(format!("{stem}.json"))
-            } else {
-                diarize_dir.join(format!("{stem}.v{next_version}.json"))
-            };
-            let srt_path = if next_version <= 1 {
-                diarize_dir.join(format!("{stem}.srt"))
-            } else {
-                diarize_dir.join(format!("{stem}.v{next_version}.srt"))
-            };
-            let vtt_path = if next_version <= 1 {
-                diarize_dir.join(format!("{stem}.vtt"))
-            } else {
-                diarize_dir.join(format!("{stem}.v{next_version}.vtt"))
-            };
-
-            subtitles::write_artifacts(&labeled, &json_path, &srt_path, &vtt_path)?;
+            let track_version = published.version;
+            let track_id = published.track_id;
+            let json_path = published.json_path;
             set_progress(paths, job_id, 0.95)?;
-
-            let track_id = Uuid::new_v4().to_string();
-            conn.execute(
-                r#"
-INSERT INTO subtitle_track (
-  id,
-  item_id,
-  kind,
-  lang,
-  format,
-  path,
-  created_by,
-  version
-) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)
-"#,
-                params![
-                    &track_id,
-                    &item.id,
-                    &source_track.kind,
-                    &source_track.lang,
-                    &source_track.format,
-                    json_path.to_string_lossy().to_string(),
-                    &created_by,
-                    next_version
-                ],
-            )?;
 
             let mut observed_speakers = assignment_segments
                 .iter()
@@ -14782,6 +15063,7 @@ INSERT INTO subtitle_track (
                 "diarize_done",
                 serde_json::json!({
                     "track_id": track_id,
+                    "version": track_version,
                     "json_path": json_path,
                     "diarization_json_path": diarization_json_path,
                     "diarization_report_path": diarization_report_path,
@@ -16787,19 +17069,22 @@ if __name__ == "__main__":
 
             // If there is no TTS audio, output just the selected audio source.
             if inputs.is_empty() {
-                let output = cmd::command(paths.ffmpeg_cmd())
-                    .args(["-nostdin", "-y"])
+                let mut ff = cmd::command(paths.ffmpeg_cmd());
+                ff.args(["-nostdin", "-y"])
                     .arg("-i")
                     .arg(&background_path)
                     .args(["-vn", "-c:a", "pcm_s16le", "-ar", "44100", "-ac", "2"])
-                    .arg(&final_path)
-                    .output()
-                    .map_err(|e| match e.kind() {
-                        std::io::ErrorKind::NotFound => EngineError::ExternalToolMissing {
-                            tool: "ffmpeg".to_string(),
-                        },
-                        _ => EngineError::Io(e),
-                    })?;
+                    .arg(&final_path);
+                let JobCommandOutput::Completed(output) = run_job_command_output(
+                    paths,
+                    &mut ff,
+                    job_id,
+                    "ffmpeg",
+                    "background-only dub mix",
+                )?
+                else {
+                    return Ok(());
+                };
                 if !output.status.success() {
                     return Err(EngineError::ExternalToolFailed {
                         tool: "ffmpeg".to_string(),
@@ -16984,18 +17269,14 @@ if __name__ == "__main__":
                 ff.args(["-c:a", "pcm_s16le", "-ar", "44100", "-ac", "2"]);
                 ff.arg(&final_path);
 
-                let output = ff.output().map_err(|e| match e.kind() {
-                    std::io::ErrorKind::NotFound => EngineError::ExternalToolMissing {
-                        tool: "ffmpeg".to_string(),
-                    },
-                    _ => EngineError::Io(e),
-                });
+                let output =
+                    run_job_command_output(paths, &mut ff, job_id, "ffmpeg", "single-pass dub mix");
 
                 match output {
-                    Ok(o) if o.status.success() => {
+                    Ok(JobCommandOutput::Completed(o)) if o.status.success() => {
                         set_progress(paths, job_id, 0.90)?;
                     }
-                    Ok(o) => {
+                    Ok(JobCommandOutput::Completed(o)) => {
                         used_legacy = true;
                         log_line(
                             paths,
@@ -17007,6 +17288,7 @@ if __name__ == "__main__":
                             }),
                         )?;
                     }
+                    Ok(JobCommandOutput::Canceled) => return Ok(()),
                     Err(e) => {
                         used_legacy = true;
                         log_line(
@@ -17053,8 +17335,8 @@ if __name__ == "__main__":
                         delay_ms
                     );
 
-                    let output = cmd::command(paths.ffmpeg_cmd())
-                        .args(["-nostdin", "-y"])
+                    let mut ff = cmd::command(paths.ffmpeg_cmd());
+                    ff.args(["-nostdin", "-y"])
                         .arg("-i")
                         .arg(&current_mix)
                         .arg("-i")
@@ -17063,14 +17345,17 @@ if __name__ == "__main__":
                         .arg(&filter)
                         .args(["-map", "[m]"])
                         .args(["-c:a", "pcm_s16le", "-ar", "44100", "-ac", "2"])
-                        .arg(&step_out)
-                        .output()
-                        .map_err(|e| match e.kind() {
-                            std::io::ErrorKind::NotFound => EngineError::ExternalToolMissing {
-                                tool: "ffmpeg".to_string(),
-                            },
-                            _ => EngineError::Io(e),
-                        })?;
+                        .arg(&step_out);
+                    let JobCommandOutput::Completed(output) = run_job_command_output(
+                        paths,
+                        &mut ff,
+                        job_id,
+                        "ffmpeg",
+                        "iterative dub mix",
+                    )?
+                    else {
+                        return Ok(());
+                    };
 
                     if !output.status.success() {
                         return Err(EngineError::ExternalToolFailed {
@@ -17097,20 +17382,23 @@ if __name__ == "__main__":
                 let ln_filter = format!(
                     "loudnorm=I={loudness_target_lufs:.1}:TP=-1.5:LRA=11:linear=true,alimiter=limit=0.98"
                 );
-                let ln_out = cmd::command(paths.ffmpeg_cmd())
-                    .args(["-nostdin", "-y"])
+                let mut ff = cmd::command(paths.ffmpeg_cmd());
+                ff.args(["-nostdin", "-y"])
                     .arg("-i")
                     .arg(&final_path)
                     .args(["-af", &ln_filter])
                     .args(["-c:a", "pcm_s16le", "-ar", "44100", "-ac", "2"])
-                    .arg(&loud_path)
-                    .output()
-                    .map_err(|e| match e.kind() {
-                        std::io::ErrorKind::NotFound => EngineError::ExternalToolMissing {
-                            tool: "ffmpeg".to_string(),
-                        },
-                        _ => EngineError::Io(e),
-                    })?;
+                    .arg(&loud_path);
+                let JobCommandOutput::Completed(ln_out) = run_job_command_output(
+                    paths,
+                    &mut ff,
+                    job_id,
+                    "ffmpeg",
+                    "dub mix loudness normalization",
+                )?
+                else {
+                    return Ok(());
+                };
                 if ln_out.status.success() && loud_path.exists() {
                     let _ = std::fs::rename(&loud_path, &final_path);
                 }
@@ -17164,9 +17452,15 @@ if __name__ == "__main__":
                 ff.args(["-map", "[speech]"]);
                 ff.args(["-c:a", "pcm_s16le", "-ar", "44100", "-ac", "2"]);
                 ff.arg(&speech_stem_path);
-                match ff.output() {
-                    Ok(output) if output.status.success() => {}
-                    Ok(output) => {
+                match run_job_command_output(
+                    paths,
+                    &mut ff,
+                    job_id,
+                    "ffmpeg",
+                    "dub speech-stem generation",
+                ) {
+                    Ok(JobCommandOutput::Completed(output)) if output.status.success() => {}
+                    Ok(JobCommandOutput::Completed(output)) => {
                         log_line(
                             paths,
                             job_id,
@@ -17177,6 +17471,7 @@ if __name__ == "__main__":
                             }),
                         )?;
                     }
+                    Ok(JobCommandOutput::Canceled) => return Ok(()),
                     Err(error) => {
                         log_line(
                             paths,
@@ -17588,12 +17883,16 @@ if __name__ == "__main__":
 
             ff.arg(&muxing_path);
 
-            let output = ff.output().map_err(|e| match e.kind() {
-                std::io::ErrorKind::NotFound => EngineError::ExternalToolMissing {
-                    tool: "ffmpeg".to_string(),
-                },
-                _ => EngineError::Io(e),
-            })?;
+            let JobCommandOutput::Completed(output) = run_job_command_output(
+                paths,
+                &mut ff,
+                job_id,
+                "ffmpeg",
+                "localization MKV publication mux",
+            )?
+            else {
+                return Ok(());
+            };
 
             if !output.status.success() {
                 return Err(EngineError::ExternalToolFailed {
@@ -18922,41 +19221,9 @@ if __name__ == "__main__":
                 ));
             }
 
-            // Collect relevant job rows for provenance (best-effort).
-            let conn = db::open(paths)?;
-            db::migrate(&conn)?;
-            let mut jobs_json: Vec<serde_json::Value> = Vec::new();
-            let mut stmt = conn.prepare(
-                r#"
-SELECT id, type, status, progress, error, created_at_ms, started_at_ms, finished_at_ms, params_json
-FROM job
-WHERE item_id=?1
-ORDER BY created_at_ms ASC
-"#,
-            )?;
-            let mut rows = stmt.query(params![&item.id])?;
-            while let Some(row) = rows.next()? {
-                let id: String = row.get(0)?;
-                let ty: String = row.get(1)?;
-                let status: String = row.get(2)?;
-                let progress: f32 = row.get(3)?;
-                let error: Option<String> = row.get(4)?;
-                let created_at_ms: i64 = row.get(5)?;
-                let started_at_ms: Option<i64> = row.get(6)?;
-                let finished_at_ms: Option<i64> = row.get(7)?;
-                let params_json_str: String = row.get(8)?;
-                jobs_json.push(serde_json::json!({
-                    "id": id,
-                    "type": ty,
-                    "status": status,
-                    "progress": progress,
-                    "error": error,
-                    "created_at_ms": created_at_ms,
-                    "started_at_ms": started_at_ms,
-                    "finished_at_ms": finished_at_ms,
-                    "params_json": params_json_str,
-                }));
-            }
+            // Collect the immutable provenance projection under bounded read admission. The
+            // helper owns and releases that context before ZIP filesystem I/O starts.
+            let jobs_json = export_job_provenance_projection(paths, &item.id)?;
 
             let file = std::fs::File::create(&tmp_path)?;
             let mut zip = zip::ZipWriter::new(file);
@@ -19436,8 +19703,7 @@ ORDER BY created_at_ms ASC
 }
 
 fn set_progress(paths: &AppPaths, job_id: &str, progress: f32) -> Result<()> {
-    let conn = db::open(paths)?;
-    db::migrate(&conn)?;
+    let conn = db::write_context(paths)?;
     conn.execute(
         "UPDATE job SET progress=?1 WHERE id=?2 AND status=?3",
         params![
@@ -19452,8 +19718,7 @@ fn set_progress(paths: &AppPaths, job_id: &str, progress: f32) -> Result<()> {
 }
 
 fn set_succeeded(paths: &AppPaths, job_id: &str) -> Result<()> {
-    let conn = db::open(paths)?;
-    db::migrate(&conn)?;
+    let conn = db::write_context(paths)?;
     conn.execute(
         "UPDATE job SET status=?1, progress=1.0, finished_at_ms=?2, error=NULL WHERE id=?3 AND status=?4",
         params![
@@ -19469,8 +19734,7 @@ fn set_succeeded(paths: &AppPaths, job_id: &str) -> Result<()> {
 }
 
 fn set_failed(paths: &AppPaths, job_id: &str, error: &str) -> Result<()> {
-    let conn = db::open(paths)?;
-    db::migrate(&conn)?;
+    let conn = db::write_context(paths)?;
     let changed = conn.execute(
         "UPDATE job SET status=?1, finished_at_ms=?2, error=?3 WHERE id=?4 AND status=?5",
         params![
@@ -19481,6 +19745,7 @@ fn set_failed(paths: &AppPaths, job_id: &str, error: &str) -> Result<()> {
             JobStatus::Running.as_str()
         ],
     )?;
+    let mut failed_url_to_release: Option<Option<String>> = None;
     if changed > 0 {
         let context: Option<(String, String)> = conn
             .query_row(
@@ -19491,24 +19756,28 @@ fn set_failed(paths: &AppPaths, job_id: &str, error: &str) -> Result<()> {
             .optional()?;
         if let Some((job_type, params_json)) = context {
             if job_type == JobType::DownloadDirectUrl.as_str() {
-                let failed_url = direct_download_url_from_params_json(&params_json);
-                let _ = library::release_download_source_claim(
-                    paths,
-                    job_id,
-                    failed_url.as_deref(),
-                    Some(error),
-                );
+                failed_url_to_release = Some(direct_download_url_from_params_json(&params_json));
             }
         }
     }
     drop(conn);
+    if let Some(failed_url) = failed_url_to_release {
+        let _ = library::release_download_source_claim(
+            paths,
+            job_id,
+            failed_url.as_deref(),
+            Some(error),
+        );
+    }
     let _ = subscriptions::refresh_subscription_activity_rollup_for_job(paths, job_id);
     Ok(())
 }
 
 fn is_canceled(paths: &AppPaths, job_id: &str) -> Result<bool> {
-    let conn = db::open(paths)?;
-    db::migrate(&conn)?;
+    if JOB_RUNNER_SHUTDOWN_REQUESTED.load(Ordering::SeqCst) {
+        return Ok(true);
+    }
+    let conn = db::open_readonly(paths)?;
     let status: String = conn.query_row("SELECT status FROM job WHERE id=?1", [job_id], |row| {
         row.get(0)
     })?;
@@ -19516,8 +19785,7 @@ fn is_canceled(paths: &AppPaths, job_id: &str) -> Result<bool> {
 }
 
 fn is_queue_paused(paths: &AppPaths) -> Result<bool> {
-    let conn = db::open(paths)?;
-    db::migrate(&conn)?;
+    let conn = db::open_readonly(paths)?;
     is_queue_paused_conn(&conn)
 }
 
@@ -19682,17 +19950,20 @@ pub fn set_job_track_runtime_settings(
     // Validate before opening a write connection so a bad multi-track request is strictly
     // no-op. The six writes then commit as one SQLite transaction, never as a half-updated set.
     settings.validate()?;
-    let mut conn = db::open(paths)?;
-    db::migrate(&conn)?;
-    let tx = conn.transaction()?;
-    for track in JobTrack::ALL {
-        tx.execute(
-            "INSERT INTO meta(key, value) VALUES(?1, ?2) \
-             ON CONFLICT(key) DO UPDATE SET value=excluded.value",
-            params![track.meta_key(), settings.for_track(track).to_string()],
-        )?;
-    }
-    tx.commit()?;
+    db::AppDatabase::for_paths(paths)?.write(
+        db::DatabaseOperationContext::new("options", "set_job_track_runtime_settings").foreground(),
+        TransactionBehavior::Immediate,
+        |transaction| {
+            for track in JobTrack::ALL {
+                transaction.execute(
+                    "INSERT INTO meta(key, value) VALUES(?1, ?2) \
+                     ON CONFLICT(key) DO UPDATE SET value=excluded.value",
+                    params![track.meta_key(), settings.for_track(track).to_string()],
+                )?;
+            }
+            Ok(())
+        },
+    )?;
     // Return the canonical persisted values rather than echoing request data, so callers see
     // the same settings a subsequent scheduler read observes.
     let persisted = get_job_track_runtime_settings(paths)?;
@@ -19819,8 +20090,7 @@ fn set_antibot_pacing_internal(
         .get_or_init(|| Mutex::new(()))
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
-    let mut conn = db::open(paths)?;
-    db::migrate(&conn)?;
+    let mut conn = db::write_context(paths)?;
     let tx = conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
     if let Some(generation) = mutation_generation {
         youtube_protection::claim_mutation_generation_conn(&tx, "pacing", generation, false)?;
@@ -19897,6 +20167,100 @@ pub struct YoutubeProtectionStatus {
     pub state: youtube_protection::DownloaderPolicySnapshot,
     pub baseline: youtube_protection::DownloaderBaselinePolicy,
     pub effective: youtube_protection::DownloaderEffectivePolicy,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct YoutubeProtectionSnapshotProjection {
+    pub download: YoutubeProtectionStatus,
+    pub enumeration: YoutubeProtectionStatus,
+    pub download_history: youtube_protection::DownloaderPolicyHistory,
+    pub enumeration_history: youtube_protection::DownloaderPolicyHistory,
+    pub verified_at_ms: i64,
+}
+
+/// Reads both YouTube protection lanes and both bounded history pages from one SQLite
+/// read transaction. Filesystem/config discovery is completed before the read slot is held.
+pub fn get_youtube_protection_snapshot(
+    paths: &AppPaths,
+    history_limit: usize,
+) -> Result<YoutubeProtectionSnapshotProjection> {
+    let auth_fingerprint = current_youtube_protection_auth_fingerprint(paths)?;
+    let runtime_capabilities = youtube_protection::runtime_capabilities(paths);
+    let runtime_epoch = runtime_capabilities.epoch.clone();
+    let presets = config::load_download_presets_config(paths)?;
+    let preset = presets
+        .default_preset_id
+        .as_deref()
+        .and_then(|id| presets.presets.iter().find(|preset| preset.id == id))
+        .or_else(|| presets.presets.first())
+        .cloned()
+        .unwrap_or_else(|| {
+            config::DownloadPresetsConfig::default()
+                .presets
+                .into_iter()
+                .next()
+                .expect("default download preset")
+        });
+
+    let mut conn = db::open_readonly(paths)?;
+    let tx = conn.transaction_with_behavior(TransactionBehavior::Deferred)?;
+    let pacing = antibot_pacing_from_conn(&tx);
+    let baseline = youtube_protection::DownloaderBaselinePolicy {
+        concurrent_fragments: preset.yt_dlp_concurrent_fragments.max(1),
+        sleep_interval_secs: preset.yt_dlp_sleep_interval,
+        sleep_requests_secs: preset.yt_dlp_sleep_requests,
+        update_tranche_size: pacing.update_all_batch_size.clamp(1, u32::MAX as usize) as u32,
+        limit_rate: preset.yt_dlp_limit_rate,
+        throttled_rate: preset.yt_dlp_throttled_rate,
+    };
+    let tuning = youtube_protection::load_tuning_conn(&tx)?;
+    let status_for = |operation: &str| -> Result<YoutubeProtectionStatus> {
+        let state = youtube_protection::load_policy_state_conn(
+            &tx,
+            youtube_protection::PROVIDER_YOUTUBE,
+            operation,
+            &auth_fingerprint,
+            &runtime_epoch,
+        )?;
+        let effective = if pacing.adaptive_protection_enabled {
+            youtube_protection::effective_policy_with_tuning(&baseline, &state, now_ms(), &tuning)
+        } else {
+            youtube_protection::baseline_effective_policy(&baseline)
+        };
+        Ok(YoutubeProtectionStatus {
+            automatic_protection_enabled: pacing.adaptive_protection_enabled,
+            runtime_capabilities: runtime_capabilities.clone(),
+            state,
+            baseline: baseline.clone(),
+            effective,
+        })
+    };
+    let download = status_for(youtube_protection::OPERATION_DOWNLOAD)?;
+    let enumeration = status_for(youtube_protection::OPERATION_ENUMERATION)?;
+    let download_history = youtube_protection::policy_history_conn(
+        &tx,
+        youtube_protection::PROVIDER_YOUTUBE,
+        youtube_protection::OPERATION_DOWNLOAD,
+        &auth_fingerprint,
+        &runtime_epoch,
+        history_limit,
+    )?;
+    let enumeration_history = youtube_protection::policy_history_conn(
+        &tx,
+        youtube_protection::PROVIDER_YOUTUBE,
+        youtube_protection::OPERATION_ENUMERATION,
+        &auth_fingerprint,
+        &runtime_epoch,
+        history_limit,
+    )?;
+    tx.commit()?;
+    Ok(YoutubeProtectionSnapshotProjection {
+        download,
+        enumeration,
+        download_history,
+        enumeration_history,
+        verified_at_ms: now_ms(),
+    })
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -20618,12 +20982,21 @@ pub fn instagram_enumeration_dispatch_allowed(paths: &AppPaths) -> bool {
 /// Stamp "now" as the last Instagram enumeration dispatch. Best-effort. Called after enqueuing
 /// a single Instagram subscription's refresh so the next one waits the conservative interval.
 pub fn record_instagram_enumeration_dispatch(paths: &AppPaths) -> Result<()> {
-    let conn = db::open(paths)?;
-    db::migrate(&conn)?;
-    upsert_meta_conn(
-        &conn,
-        META_KEY_INSTAGRAM_LAST_ENUM_DISPATCH_MS,
-        &(now_ms().max(0) as u64).to_string(),
+    let dispatched_at_ms = (now_ms().max(0) as u64).to_string();
+    db::AppDatabase::for_paths(paths)?.write_idempotent(
+        db::DatabaseOperationContext::new(
+            "instagram_subscription_runner",
+            "record_instagram_enumeration_dispatch",
+        )
+        .with_batch_identity(META_KEY_INSTAGRAM_LAST_ENUM_DISPATCH_MS),
+        TransactionBehavior::Immediate,
+        |transaction| {
+            upsert_meta_conn(
+                transaction,
+                META_KEY_INSTAGRAM_LAST_ENUM_DISPATCH_MS,
+                &dispatched_at_ms,
+            )
+        },
     )
 }
 
@@ -20923,10 +21296,10 @@ fn delete_terminal_jobs_by_ids(paths: &AppPaths, job_ids: &[String]) -> Result<u
         return Ok(0);
     }
 
-    let conn = db::open(paths)?;
-    db::migrate(&conn)?;
+    let mut conn = db::write_context(paths)?;
     let tx = conn.unchecked_transaction()?;
     let mut removed = 0_usize;
+    let mut removed_job_ids = Vec::new();
     for job_id in job_ids {
         let affected = tx.execute(
             "DELETE FROM job WHERE id=?1 AND status IN (?2, ?3, ?4)",
@@ -20939,10 +21312,14 @@ fn delete_terminal_jobs_by_ids(paths: &AppPaths, job_ids: &[String]) -> Result<u
         )?;
         removed += affected;
         if affected > 0 {
-            remove_job_cookie_secret(paths, job_id);
+            removed_job_ids.push(job_id.clone());
         }
     }
     tx.commit()?;
+    drop(conn);
+    for job_id in removed_job_ids {
+        remove_job_cookie_secret(paths, &job_id);
+    }
     Ok(removed)
 }
 
@@ -22867,17 +23244,50 @@ enum CommandRunError {
     TimedOut(u64),
 }
 
-fn kill_child_process_tree(child: &mut std::process::Child) {
-    #[cfg(windows)]
-    {
-        let pid = child.id().to_string();
-        let _ = cmd::command("taskkill")
-            .args(["/PID", &pid, "/T", "/F"])
-            .status();
-    }
+enum JobCommandOutput {
+    Completed(std::process::Output),
+    Canceled,
+}
 
-    let _ = child.kill();
-    let _ = child.wait();
+fn run_job_command_output(
+    paths: &AppPaths,
+    cmd: &mut std::process::Command,
+    job_id: &str,
+    tool: &str,
+    operation: &str,
+) -> Result<JobCommandOutput> {
+    match run_command_output_with_control(paths, cmd, Some(job_id), FFMPEG_FILTER_TIMEOUT_SECS) {
+        Ok(output) => Ok(JobCommandOutput::Completed(output)),
+        Err(CommandRunError::Spawn(error)) => {
+            if error.kind() == std::io::ErrorKind::NotFound {
+                Err(EngineError::ExternalToolMissing {
+                    tool: tool.to_string(),
+                })
+            } else {
+                Err(EngineError::Io(error))
+            }
+        }
+        Err(CommandRunError::Wait(error)) => Err(EngineError::Io(error)),
+        Err(CommandRunError::Canceled) => {
+            log_line(
+                paths,
+                job_id,
+                "info",
+                "job_canceled",
+                serde_json::json!({ "operation": operation }),
+            )?;
+            Ok(JobCommandOutput::Canceled)
+        }
+        Err(CommandRunError::TimedOut(limit)) => Err(EngineError::ExternalToolFailed {
+            tool: tool.to_string(),
+            code: None,
+            stderr: format!("{operation} timed out after {limit}s"),
+        }),
+    }
+}
+
+fn kill_child_process_tree(child: &mut std::process::Child) {
+    cmd::terminate_child_process_tree(child);
 }
 
 fn yt_dlp_progress_fraction(line: &str) -> Option<f32> {
@@ -22973,16 +23383,12 @@ fn run_command_output_with_control_inner(
     cmd.stdout(Stdio::piped());
     cmd.stderr(Stdio::piped());
 
-    let mut child = cmd.spawn().map_err(CommandRunError::Spawn)?;
-    if bind_yt_dlp_lifecycle {
-        if let Err(error) = cmd::bind_yt_dlp_child_to_app_lifecycle(&child) {
-            kill_child_process_tree(&mut child);
-            return Err(CommandRunError::Spawn(std::io::Error::new(
-                error.kind(),
-                format!("could not bind yt-dlp to the VoxVulgi process lifecycle: {error}"),
-            )));
-        }
+    let mut child = if bind_yt_dlp_lifecycle {
+        cmd::spawn_yt_dlp_child_to_app_lifecycle(cmd)
+    } else {
+        cmd.spawn()
     }
+    .map_err(CommandRunError::Spawn)?;
 
     let stdout = child.stdout.take().ok_or_else(|| {
         CommandRunError::Wait(std::io::Error::new(ErrorKind::Other, "stdout pipe missing"))
@@ -24300,7 +24706,7 @@ fn stamp_job_target_titles_by_url(
     if title_by_url.is_empty() {
         return;
     }
-    let Ok(conn) = db::open(paths) else {
+    let Ok(conn) = db::write_context(paths) else {
         return;
     };
     for job in jobs {
@@ -25462,8 +25868,8 @@ fn download_direct_media_asset(
         &job_id[..job_id.len().min(8)],
         &attempt_id.to_string()[..8],
     ));
-    let output = cmd::command(paths.ffmpeg_cmd())
-        .args(["-nostdin", "-y"])
+    let mut ff = cmd::command(paths.ffmpeg_cmd());
+    ff.args(["-nostdin", "-y"])
         .arg("-i")
         .arg(&temp_path)
         // Preserve every source video/audio/subtitle stream plus metadata/chapters. Matroska is
@@ -25478,14 +25884,19 @@ fn download_direct_media_asset(
             "-c",
             "copy",
         ])
-        .arg(&muxing_path)
-        .output()
-        .map_err(|e| match e.kind() {
-            std::io::ErrorKind::NotFound => EngineError::ExternalToolMissing {
-                tool: "ffmpeg".to_string(),
-            },
-            _ => EngineError::Io(e),
-        })?;
+        .arg(&muxing_path);
+    let output = match run_job_command_output(
+        paths,
+        &mut ff,
+        job_id,
+        "ffmpeg",
+        "direct-download MKV remux",
+    )? {
+        JobCommandOutput::Completed(output) => output,
+        JobCommandOutput::Canceled => {
+            return Err(EngineError::InstallFailed("job canceled".to_string()));
+        }
+    };
     if !output.status.success() {
         return Err(EngineError::InstallFailed(format!(
             "failed to remux direct download to MKV for {}: {}; source staging retained at {}",
@@ -27315,8 +27726,7 @@ pub fn clear_instagram_auth_block(paths: &AppPaths) -> Result<()> {
     if path.exists() {
         std::fs::remove_file(path)?;
     }
-    let conn = db::open(paths)?;
-    db::migrate(&conn)?;
+    let conn = db::write_context(paths)?;
     conn.execute(
         "UPDATE instagram_subscription SET hold_reason=NULL,next_allowed_refresh_at_ms=NULL,updated_at_ms=?1 WHERE last_failure_class IN ('authentication','challenge_checkpoint')",
         [now_ms()],
@@ -27325,8 +27735,7 @@ pub fn clear_instagram_auth_block(paths: &AppPaths) -> Result<()> {
 }
 
 fn delete_job_by_id(paths: &AppPaths, job_id: &str) -> Result<()> {
-    let conn = db::open(paths)?;
-    db::migrate(&conn)?;
+    let conn = db::write_context(paths)?;
     let _ = conn.execute("DELETE FROM job WHERE id=?1", [job_id])?;
     Ok(())
 }
@@ -27913,8 +28322,7 @@ fn prepare_localization_preview_publication(
         localization_preview_generation(item_id, variant_key, fingerprint)?;
     let qc_json = continuation_intent_json(qc_intent)?;
     let export_json = continuation_intent_json(export_intent)?;
-    let mut conn = db::open(paths)?;
-    db::migrate(&conn)?;
+    let mut conn = db::write_context(paths)?;
     let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
     let source_job: (Option<String>, String) = tx.query_row(
         "SELECT item_id,type FROM job WHERE id=?1",
@@ -28084,8 +28492,7 @@ fn reconcile_existing_localization_preview_publication(
 }
 
 fn mark_localization_preview_published(paths: &AppPaths, generation_id: &str) -> Result<()> {
-    let conn = db::open(paths)?;
-    db::migrate(&conn)?;
+    let conn = db::write_context(paths)?;
     let changed = conn.execute(
         "UPDATE localization_preview_publication SET phase='published',updated_at_ms=?1 WHERE generation_id=?2 AND phase='prepared'",
         params![now_ms(), generation_id],
@@ -28190,8 +28597,7 @@ where
                 .to_string(),
         ));
     }
-    let mut conn = db::open(paths)?;
-    db::migrate(&conn)?;
+    let mut conn = db::write_context(paths)?;
     let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
     let (phase, source_job_id, source_job_created_at_ms): (String, String, i64) = tx.query_row(
         "SELECT p.phase,p.source_job_id,j.created_at_ms FROM localization_preview_publication p JOIN job j ON j.id=p.source_job_id WHERE p.generation_id=?1 AND p.item_id=?2 AND j.item_id=?2 AND j.type=?3",
@@ -28744,8 +29150,8 @@ pub fn export_managed_video_as_mkv(
         .path()
         .join(format!("{file_name}.exporting.mkv"));
 
-    let output = cmd::command(paths.ffmpeg_cmd())
-        .args(["-nostdin", "-y"])
+    let mut ff = cmd::command(paths.ffmpeg_cmd());
+    ff.args(["-nostdin", "-y"])
         .arg("-i")
         .arg(source_path)
         .args([
@@ -28758,14 +29164,8 @@ pub fn export_managed_video_as_mkv(
             "-c",
             "copy",
         ])
-        .arg(&staging_path)
-        .output()
-        .map_err(|error| match error.kind() {
-            std::io::ErrorKind::NotFound => EngineError::ExternalToolMissing {
-                tool: "ffmpeg".to_string(),
-            },
-            _ => EngineError::Io(error),
-        })?;
+        .arg(&staging_path);
+    let output = ffmpeg::run_output(&mut ff, "ffmpeg")?;
     if !output.status.success() {
         return Err(EngineError::ExternalToolFailed {
             tool: "ffmpeg".to_string(),
@@ -28901,19 +29301,13 @@ fn normalized_subtitle_payload(
     stream_map: &str,
     output: &Path,
 ) -> Result<String> {
-    let result = cmd::command(paths.ffmpeg_cmd())
-        .args(["-nostdin", "-y"])
+    let mut ff = cmd::command(paths.ffmpeg_cmd());
+    ff.args(["-nostdin", "-y"])
         .arg("-i")
         .arg(input)
         .args(["-map", stream_map, "-c:s", "srt"])
-        .arg(output)
-        .output()
-        .map_err(|error| match error.kind() {
-            std::io::ErrorKind::NotFound => EngineError::ExternalToolMissing {
-                tool: "ffmpeg".to_string(),
-            },
-            _ => EngineError::Io(error),
-        })?;
+        .arg(output);
+    let result = ffmpeg::run_output(&mut ff, "ffmpeg")?;
     if !result.status.success() {
         return Err(EngineError::ExternalToolFailed {
             tool: "ffmpeg".to_string(),
@@ -30939,6 +31333,162 @@ mod tests {
     use rusqlite::params;
     use std::net::TcpListener;
     use std::path::Path;
+    use std::sync::Barrier;
+
+    fn seed_subtitle_publication_item(paths: &AppPaths, item_id: &str) {
+        db::ensure_schema(paths).expect("schema");
+        let conn = db::open(paths).expect("fixture connection");
+        conn.execute(
+            r#"
+INSERT INTO library_item (
+  id,
+  created_at_ms,
+  source_type,
+  source_uri,
+  title,
+  media_path
+) VALUES (?1, ?2, ?3, ?4, ?5, ?6)
+"#,
+            params![
+                item_id,
+                now_ms(),
+                "local_file",
+                format!("file:///{item_id}"),
+                format!("Item {item_id}"),
+                format!("media/{item_id}.mkv"),
+            ],
+        )
+        .expect("seed library item");
+    }
+
+    fn subtitle_publication_test_document(text: &str) -> SubtitleDocument {
+        SubtitleDocument {
+            schema_version: SUBTITLE_JSON_SCHEMA_VERSION,
+            kind: "translated".to_string(),
+            lang: "en".to_string(),
+            segments: vec![SubtitleSegment {
+                index: 0,
+                start_ms: 0,
+                end_ms: 1_000,
+                text: text.to_string(),
+                speaker: None,
+            }],
+        }
+    }
+
+    #[test]
+    fn subtitle_publication_allows_writer_during_artifact_io_and_releases_export_read() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let paths = AppPaths::new(dir.path().join("app"));
+        seed_subtitle_publication_item(&paths, "item-permit");
+        let output_dir = paths.derived_item_dir("item-permit").join("translate");
+        std::fs::create_dir_all(&output_dir).expect("output dir");
+        let document = subtitle_publication_test_document("permit probe");
+
+        let published = publish_versioned_subtitle_track_with_writer(
+            &paths,
+            "item-permit",
+            "translated",
+            "en",
+            "ytfetch_subtitle_json_v1",
+            "test:permit",
+            &document,
+            &output_dir,
+            "en",
+            |doc, json_path, srt_path, vtt_path| {
+                // A nested-writer regression would reject or stall this admission. Artifact I/O
+                // must run after the version projection released its read permit and before the
+                // short track-row writer is admitted.
+                let conn = db::write_context(&paths)?;
+                conn.execute(
+                    "INSERT OR REPLACE INTO meta(key,value) VALUES ('subtitle_publish_probe','ok')",
+                    [],
+                )?;
+                drop(conn);
+                subtitles::write_artifacts(doc, json_path, srt_path, vtt_path)
+            },
+        )
+        .expect("publication");
+        assert_eq!(published.version, 1);
+        assert!(published.json_path.is_file());
+
+        let projection = export_job_provenance_projection(&paths, "item-permit")
+            .expect("read-only export projection");
+        assert!(projection.is_empty());
+        let conn = db::write_context(&paths).expect("writer after export projection");
+        conn.execute(
+            "INSERT OR REPLACE INTO meta(key,value) VALUES ('export_projection_released','ok')",
+            [],
+        )
+        .expect("writer is not blocked by retained export read context");
+    }
+
+    #[test]
+    fn parallel_subtitle_publications_select_unique_versions_without_db_io_permit_overlap() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let paths = AppPaths::new(dir.path().join("app"));
+        seed_subtitle_publication_item(&paths, "item-parallel");
+        let output_dir = paths.derived_item_dir("item-parallel").join("translate");
+        std::fs::create_dir_all(&output_dir).expect("output dir");
+
+        let worker_count = 6;
+        let barrier = Arc::new(Barrier::new(worker_count));
+        let mut workers = Vec::new();
+        for index in 0..worker_count {
+            let paths = paths.clone();
+            let output_dir = output_dir.clone();
+            let barrier = Arc::clone(&barrier);
+            workers.push(thread::spawn(move || {
+                let document = subtitle_publication_test_document(&format!("parallel {index}"));
+                barrier.wait();
+                publish_versioned_subtitle_track(
+                    &paths,
+                    "item-parallel",
+                    "translated",
+                    "en",
+                    "ytfetch_subtitle_json_v1",
+                    &format!("test:parallel:{index}"),
+                    &document,
+                    &output_dir,
+                    "en",
+                )
+            }));
+        }
+
+        let mut publications = workers
+            .into_iter()
+            .map(|worker| worker.join().expect("worker").expect("publication"))
+            .collect::<Vec<_>>();
+        publications.sort_by_key(|publication| publication.version);
+        assert_eq!(
+            publications
+                .iter()
+                .map(|publication| publication.version)
+                .collect::<Vec<_>>(),
+            vec![1, 2, 3, 4, 5, 6]
+        );
+        let paths_seen = publications
+            .iter()
+            .map(|publication| publication.json_path.clone())
+            .collect::<HashSet<_>>();
+        assert_eq!(paths_seen.len(), worker_count);
+        assert!(publications
+            .iter()
+            .all(|publication| publication.json_path.is_file()));
+
+        let conn = db::open_readonly(&paths).expect("readonly");
+        let (count, distinct_versions): (i64, i64) = conn
+            .query_row(
+                "SELECT COUNT(*),COUNT(DISTINCT version) FROM subtitle_track WHERE item_id='item-parallel'",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .expect("track proof");
+        assert_eq!(
+            (count, distinct_versions),
+            (worker_count as i64, worker_count as i64)
+        );
+    }
 
     #[test]
     fn phase2_install_force_is_explicit_and_legacy_safe() {
@@ -39764,5 +40314,77 @@ VV_MEDIA_POST:{"requested_subtitles":null}"#;
             )
             .expect("checkpoint rows");
         assert_eq!((discoveries, queued), (2, 2));
+    }
+
+    #[test]
+    fn shutdown_joins_owned_execution_worker_before_database_drain() {
+        JOB_RUNNER_SHUTDOWN_REQUESTED.store(false, Ordering::SeqCst);
+        let dir = tempfile::tempdir().expect("tempdir");
+        let paths = AppPaths::new(dir.path().join("shutdown-worker"));
+        db::ensure_schema(&paths).expect("schema");
+        let database = db::AppDatabase::for_paths(&paths).expect("database runtime");
+        let panicking_worker = thread::spawn(|| panic!("intentional shutdown join probe"));
+        let worker_paths = paths.clone();
+        let worker = thread::spawn(move || {
+            let mut command = cmd::command("powershell.exe");
+            command.args([
+                "-NoProfile",
+                "-NonInteractive",
+                "-Command",
+                "Start-Sleep -Seconds 60",
+            ]);
+            let error = ffmpeg::run_output(&mut command, "shutdown_probe")
+                .expect_err("shutdown must cancel and reap owned external command");
+            assert!(error.to_string().contains("shutdown_probe canceled"));
+            let conn = db::write_context(&worker_paths).expect("shutdown worker writer");
+            conn.execute(
+                "INSERT OR REPLACE INTO meta(key,value) VALUES('shutdown_worker','joined')",
+                [],
+            )
+            .expect("shutdown worker terminal write");
+        });
+        let handle = JobRunnerHandle {
+            stop: Arc::new(AtomicBool::new(false)),
+            runtime_state: job_track_runtime_state(&paths),
+            runner_joins: Arc::new(Mutex::new(Vec::new())),
+            worker_joins: Arc::new(Mutex::new(vec![panicking_worker, worker])),
+        };
+
+        let report = handle
+            .stop_and_join(Duration::from_secs(5))
+            .expect("owned worker joins");
+        assert_eq!(report.scheduler_panics, 0);
+        assert_eq!(report.worker_panics, 1);
+        database
+            .shutdown_and_drain(Duration::from_secs(5))
+            .expect("database drains after worker join");
+        JOB_RUNNER_SHUTDOWN_REQUESTED.store(false, Ordering::SeqCst);
+    }
+
+    #[test]
+    fn completed_worker_handle_registry_is_periodically_reaped_and_bounded() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let paths = AppPaths::new(dir.path().join("worker-reap"));
+        paths.ensure_dirs().expect("paths");
+        let handles = (0..512).map(|_| thread::spawn(|| {})).collect::<Vec<_>>();
+        let registry = Arc::new(Mutex::new(handles));
+        let deadline = Instant::now() + Duration::from_secs(5);
+        loop {
+            let all_finished = registry
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .iter()
+                .all(thread::JoinHandle::is_finished);
+            if all_finished {
+                break;
+            }
+            assert!(Instant::now() < deadline, "fixture workers did not finish");
+            thread::yield_now();
+        }
+        assert_eq!(reap_finished_worker_handles(&paths, &registry), 0);
+        assert!(registry
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .is_empty());
     }
 }

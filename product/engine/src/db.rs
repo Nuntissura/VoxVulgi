@@ -1,13 +1,60 @@
 use crate::paths::AppPaths;
 use crate::Result;
 use rusqlite::{Connection, OpenFlags};
+use std::path::Path;
 use std::time::Duration;
+
+#[path = "database_runtime.rs"]
+mod database_runtime;
+
+pub use database_runtime::{
+    ActiveDatabaseOperation, AppDatabase, DatabaseCancellation, DatabaseContentionReceipt,
+    DatabaseMode, DatabaseOperationContext, DatabaseOperationReceipt, DatabasePriority,
+    DatabaseReadContext, DatabaseRuntime, DatabaseRuntimeSnapshot, DatabaseWriteContext,
+    WalCheckpointReceipt, WalHealth, CANCELLATION_POLICY, CHECKPOINT_POLICY,
+    IDEMPOTENT_RETRY_LIMIT, LONG_READER_WARNING_MS, OPERATION_RECEIPT_CAPACITY,
+    READ_ADMISSION_CAPACITY, READ_ADMISSION_TIMEOUT, READ_EXECUTOR_LIMIT, SHUTDOWN_DRAIN_TIMEOUT,
+    WRITER_ADMISSION_TIMEOUT, WRITER_BATCH_MAX_OPERATIONS, WRITER_FAIRNESS_POLICY,
+    WRITER_QUEUE_CAPACITY,
+};
 
 const CURRENT_SCHEMA_VERSION: u32 = 54;
 // WP-0258: raised from 750ms to 4000ms so read-only UI queries wait out a WAL
 // checkpoint instead of erroring "database is locked". Evidence: 47 subscription
 // refreshes failed with "database is locked" under DB contention.
 const READ_ONLY_BUSY_TIMEOUT_MS: u64 = 4000;
+
+/// Exact production exceptions to the app-database runtime boundary.
+///
+/// These paths either own startup schema authority, operate on an isolated replacement,
+/// or adapt a third-party SQLite source. They must not be expanded implicitly.
+pub const DIRECT_SQLITE_ACCESS_EXCEPTIONS: &[(&str, &str)] = &[
+    ("db.rs", "startup migrations and runtime connection factory"),
+    (
+        "root_rebind.rs",
+        "isolated replacement/backup construction and verification",
+    ),
+    (
+        "jobs.rs::create_verified_queue_identity_backup",
+        "isolated verified backup destination and read-only verification",
+    ),
+    (
+        "subscriptions.rs::open_legacy_4kvdp_state_db",
+        "read-only third-party 4KVDP adapter",
+    ),
+    (
+        "src/bin/voxvulgi_imported_identity_enrich.rs",
+        "explicit maintenance CLI",
+    ),
+    (
+        "src/bin/voxvulgi_provider_title_repair.rs",
+        "explicit maintenance CLI",
+    ),
+];
+
+/// Every production caller has an attributed bounded context. Bare [`open`] remains only for
+/// startup schema authority and tests.
+pub const LEGACY_WRITE_CONTEXT_CALLS_REMAINING: usize = 0;
 
 struct MigrationStep {
     version: u32,
@@ -201,10 +248,10 @@ const MIGRATION_STEPS: &[MigrationStep] = &[
     },
 ];
 
-pub fn open(paths: &AppPaths) -> Result<Connection> {
-    paths.ensure_dirs()?;
-
-    let db_path = paths.db_dir().join("app.sqlite");
+fn open_write_raw(db_path: &Path) -> Result<Connection> {
+    if let Some(db_dir) = db_path.parent() {
+        std::fs::create_dir_all(db_dir)?;
+    }
     let conn = Connection::open_with_flags(
         db_path,
         OpenFlags::SQLITE_OPEN_READ_WRITE
@@ -213,16 +260,62 @@ pub fn open(paths: &AppPaths) -> Result<Connection> {
     )?;
 
     conn.busy_timeout(Duration::from_secs(10))?;
-    conn.pragma_update(None, "journal_mode", "WAL")?;
-    // WP-0223: with WAL journal mode, synchronous=NORMAL is the recommended
-    // setting per https://www.sqlite.org/pragma.html#pragma_synchronous —
-    // still crash-safe but skips per-transaction fsync. Eliminates the
-    // checkpoint-stall pattern where job-runner UPDATEs forced read queries
-    // (subscription list, library list) to wait seconds under load.
+    let journal_mode: String = conn.pragma_query_value(None, "journal_mode", |row| row.get(0))?;
+    if !journal_mode.eq_ignore_ascii_case("wal") {
+        conn.pragma_update(None, "journal_mode", "WAL")?;
+    }
     conn.pragma_update(None, "synchronous", "NORMAL")?;
     conn.pragma_update(None, "foreign_keys", "ON")?;
 
     Ok(conn)
+}
+
+fn open_readonly_raw(db_path: &Path) -> Result<Connection> {
+    let conn = Connection::open_with_flags(
+        db_path,
+        OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_FULL_MUTEX,
+    )?;
+
+    conn.busy_timeout(Duration::from_millis(READ_ONLY_BUSY_TIMEOUT_MS))?;
+    conn.pragma_update(None, "query_only", "ON")?;
+    Ok(conn)
+}
+
+/// Acquire the bounded serialized writer lane for the application database.
+///
+/// Existing domain callers intentionally keep this compatibility entrypoint while the
+/// runtime owns admission and connection lifetime. New code should prefer
+/// [`AppDatabase::write`] with a named [`DatabaseOperationContext`].
+#[cfg(not(test))]
+pub fn open(paths: &AppPaths) -> Result<DatabaseWriteContext> {
+    paths.ensure_dirs()?;
+    AppDatabase::for_paths(paths)?
+        .write_context(DatabaseOperationContext::legacy(DatabaseMode::Write))
+}
+
+/// Test fixtures historically keep their setup connection alive while invoking the production
+/// API under test. A fixture connection is not a production database operation and must not own
+/// the serialized writer permit, otherwise the test manufactures re-entrancy that production
+/// source guards forbid. Runtime admission itself is tested through `AppDatabase`/`write_context`.
+#[cfg(test)]
+pub fn open(paths: &AppPaths) -> Result<Connection> {
+    paths.ensure_dirs()?;
+    open_write_raw(&paths.db_dir().join("app.sqlite"))
+}
+
+/// Acquire an attributed bounded write context for an existing domain operation.
+///
+/// The caller location is deliberately captured at the boundary so legacy-shaped domain code
+/// has a unique operation identity while it is progressively moved to transaction closures.
+/// Unlike [`open`], this entrypoint is valid for post-ready production work.
+#[track_caller]
+pub fn write_context(paths: &AppPaths) -> Result<DatabaseWriteContext> {
+    let caller = std::panic::Location::caller();
+    paths.ensure_dirs()?;
+    AppDatabase::for_paths(paths)?.write_context(DatabaseOperationContext::new(
+        caller.file(),
+        format!("{}:{}", caller.file(), caller.line()),
+    ))
 }
 
 // WP-0224: read-only connection used by UI list commands so they bypass
@@ -230,15 +323,15 @@ pub fn open(paths: &AppPaths) -> Result<Connection> {
 // earlier `open() + migrate()` (the app does this in startup). Read-only
 // callers must NOT call `db::migrate(&conn)` — the connection cannot write,
 // and the schema is already up to date when the app reaches the UI.
-pub fn open_readonly(paths: &AppPaths) -> Result<Connection> {
-    let db_path = paths.db_dir().join("app.sqlite");
-    let conn = Connection::open_with_flags(
-        db_path,
-        OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_FULL_MUTEX,
-    )?;
-
-    conn.busy_timeout(Duration::from_millis(READ_ONLY_BUSY_TIMEOUT_MS))?;
-    Ok(conn)
+#[track_caller]
+pub fn open_readonly(paths: &AppPaths) -> Result<DatabaseReadContext> {
+    let caller = std::panic::Location::caller();
+    let source = caller.file().replace('\\', "/");
+    let callsite = format!("{source}:{}", caller.line());
+    AppDatabase::for_paths(paths)?.read_context(DatabaseOperationContext::new(
+        format!("read@{callsite}"),
+        callsite,
+    ))
 }
 
 pub fn migrate(conn: &Connection) -> Result<()> {
@@ -2894,6 +2987,65 @@ mod tests {
     use crate::paths::AppPaths;
     use rusqlite::{params, OptionalExtension};
 
+    fn rust_source_files(root: &std::path::Path) -> Vec<std::path::PathBuf> {
+        fn visit(directory: &std::path::Path, files: &mut Vec<std::path::PathBuf>) {
+            for entry in std::fs::read_dir(directory).expect("read source directory") {
+                let path = entry.expect("source entry").path();
+                if path.is_dir() {
+                    visit(&path, files);
+                } else if path.extension().and_then(|value| value.to_str()) == Some("rs") {
+                    files.push(path);
+                }
+            }
+        }
+        let mut files = Vec::new();
+        visit(root, &mut files);
+        files
+    }
+
+    fn production_source_end(source: &str) -> usize {
+        regex::Regex::new(r"(?m)^#\[cfg\(test\)\]\r?\nmod\s+[A-Za-z0-9_]+\s*\{")
+            .expect("test module pattern")
+            .find(source)
+            .map(|found| found.start())
+            .unwrap_or(source.len())
+    }
+
+    fn attributed_reader_from_first_callsite(paths: &AppPaths) -> Result<()> {
+        drop(open_readonly(paths)?);
+        Ok(())
+    }
+
+    fn attributed_reader_from_second_callsite(paths: &AppPaths) -> Result<()> {
+        drop(open_readonly(paths)?);
+        Ok(())
+    }
+
+    #[test]
+    fn readonly_compatibility_entrypoint_attributes_each_callsite() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let paths = AppPaths::new(dir.path().join("attributed-readers"));
+        ensure_schema(&paths).expect("schema");
+        attributed_reader_from_first_callsite(&paths).expect("first reader");
+        attributed_reader_from_second_callsite(&paths).expect("second reader");
+
+        let receipts = AppDatabase::for_paths(&paths)
+            .expect("database runtime")
+            .snapshot()
+            .recent_receipts
+            .into_iter()
+            .filter(|receipt| receipt.mode == DatabaseMode::Read)
+            .collect::<Vec<_>>();
+        assert_eq!(receipts.len(), 2);
+        assert_ne!(receipts[0].operation, receipts[1].operation);
+        assert_ne!(receipts[0].lane, receipts[1].lane);
+        assert!(receipts
+            .iter()
+            .all(|receipt| receipt.operation.contains("db.rs:")
+                && receipt.lane.starts_with("read@")
+                && receipt.operation != "legacy_read"));
+    }
+
     #[test]
     fn readonly_open_does_not_create_uninitialized_app_dirs() {
         let dir = tempfile::tempdir().expect("tempdir");
@@ -3995,5 +4147,356 @@ CREATE INDEX idx_media_availability_refresh
                 [],
             )
             .is_err());
+    }
+
+    #[test]
+    fn production_modules_do_not_run_post_ready_migrations() {
+        let source_dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
+        let mut violations = Vec::new();
+        for path in rust_source_files(&source_dir) {
+            let name = path
+                .file_name()
+                .and_then(|value| value.to_str())
+                .unwrap_or("");
+            if matches!(name, "db.rs" | "database_runtime.rs") {
+                continue;
+            }
+            let source = std::fs::read_to_string(&path).expect("read source");
+            let production_end = production_source_end(&source);
+            for (line_index, line) in source[..production_end].lines().enumerate() {
+                if line.contains("db::migrate(") || line.contains("crate::db::migrate(") {
+                    violations.push(format!("{}:{}", path.display(), line_index + 1));
+                }
+            }
+        }
+        assert!(
+            violations.is_empty(),
+            "ordinary production modules must not run schema migration: {violations:?}"
+        );
+    }
+
+    #[test]
+    fn direct_sqlite_exception_registry_covers_every_production_factory() {
+        assert_eq!(
+            DIRECT_SQLITE_ACCESS_EXCEPTIONS,
+            &[
+                ("db.rs", "startup migrations and runtime connection factory"),
+                (
+                    "root_rebind.rs",
+                    "isolated replacement/backup construction and verification"
+                ),
+                (
+                    "jobs.rs::create_verified_queue_identity_backup",
+                    "isolated verified backup destination and read-only verification"
+                ),
+                (
+                    "subscriptions.rs::open_legacy_4kvdp_state_db",
+                    "read-only third-party 4KVDP adapter"
+                ),
+                (
+                    "src/bin/voxvulgi_imported_identity_enrich.rs",
+                    "explicit maintenance CLI"
+                ),
+                (
+                    "src/bin/voxvulgi_provider_title_repair.rs",
+                    "explicit maintenance CLI"
+                ),
+            ]
+        );
+
+        let source_dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
+        let mut direct_factory_files = std::collections::BTreeSet::new();
+        for path in rust_source_files(&source_dir) {
+            let name = path
+                .file_name()
+                .and_then(|value| value.to_str())
+                .unwrap_or("");
+            if matches!(name, "db.rs" | "database_runtime.rs") {
+                continue;
+            }
+            let source = std::fs::read_to_string(&path).expect("read source");
+            let production_end = production_source_end(&source);
+            if source[..production_end].lines().any(|line| {
+                line.contains("Connection::open(") || line.contains("Connection::open_with_flags(")
+            }) {
+                direct_factory_files.insert(
+                    path.strip_prefix(&source_dir)
+                        .expect("source-relative path")
+                        .to_string_lossy()
+                        .replace('\\', "/"),
+                );
+            }
+        }
+        assert_eq!(
+            direct_factory_files,
+            std::collections::BTreeSet::from([
+                "bin/voxvulgi_imported_identity_enrich.rs".to_string(),
+                "bin/voxvulgi_provider_title_repair.rs".to_string(),
+                "jobs.rs".to_string(),
+                "root_rebind.rs".to_string(),
+                "subscriptions.rs".to_string(),
+            ]),
+            "new direct SQLite factories require an explicit reviewed exception"
+        );
+
+        let function_pattern =
+            regex::Regex::new(r"^\s*(?:pub(?:\([^)]*\))?\s+)?(?:async\s+)?fn\s+([A-Za-z0-9_]+)")
+                .expect("function signature pattern");
+        let mut direct_factory_functions = std::collections::BTreeSet::new();
+        for path in rust_source_files(&source_dir) {
+            let name = path
+                .file_name()
+                .and_then(|value| value.to_str())
+                .unwrap_or("");
+            if matches!(name, "db.rs" | "database_runtime.rs") {
+                continue;
+            }
+            let relative = path
+                .strip_prefix(&source_dir)
+                .expect("source-relative path")
+                .to_string_lossy()
+                .replace('\\', "/");
+            let source = std::fs::read_to_string(&path).expect("read source");
+            let production_end = production_source_end(&source);
+            let mut current_function = None::<String>;
+            let mut current_function_is_test = false;
+            let mut pending_test_function = false;
+            for line in source[..production_end].lines() {
+                if line.trim() == "#[cfg(test)]" {
+                    pending_test_function = true;
+                    continue;
+                }
+                if let Some(captures) = function_pattern.captures(line) {
+                    current_function = Some(captures[1].to_string());
+                    current_function_is_test = pending_test_function;
+                    pending_test_function = false;
+                } else if !line.trim().is_empty() && !line.trim_start().starts_with("#[") {
+                    pending_test_function = false;
+                }
+                if !current_function_is_test
+                    && (line.contains("Connection::open(")
+                        || line.contains("Connection::open_with_flags("))
+                {
+                    direct_factory_functions.insert(format!(
+                        "{relative}::{}",
+                        current_function.as_deref().unwrap_or("<module>")
+                    ));
+                }
+            }
+        }
+        assert_eq!(
+            direct_factory_functions,
+            std::collections::BTreeSet::from([
+                "bin/voxvulgi_imported_identity_enrich.rs::open_readonly".to_string(),
+                "bin/voxvulgi_provider_title_repair.rs::readonly_counts".to_string(),
+                "bin/voxvulgi_provider_title_repair.rs::readonly_logical_fingerprint".to_string(),
+                "bin/voxvulgi_provider_title_repair.rs::verify_backup".to_string(),
+                "jobs.rs::create_verified_queue_identity_backup".to_string(),
+                "root_rebind.rs::create_verified_backup".to_string(),
+                "root_rebind.rs::verify_prepared_backups".to_string(),
+                "subscriptions.rs::open_legacy_4kvdp_state_db".to_string(),
+            ]),
+            "direct SQLite factories are allowed only inside exact reviewed function blocks"
+        );
+    }
+
+    #[test]
+    fn named_status_and_list_projections_use_bounded_readonly_admission() {
+        let source_dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
+        let contracts: &[(&str, &[&str])] = &[
+            ("diagnostics.rs", &["export_db_and_jobs"]),
+            (
+                "jobs.rs",
+                &[
+                    "active_localization_import_for_path",
+                    "list_jobs",
+                    "list_jobs_live_snapshot",
+                    "list_jobs_for_item",
+                    "is_recurring_paused",
+                    "job_batch_id",
+                    "item_has_active_job",
+                    "is_canceled",
+                    "is_queue_paused",
+                ],
+            ),
+            (
+                "library.rs",
+                &[
+                    "list_items_by_file_status",
+                    "list_subscription_items_by_file_status",
+                    "list_items_under_roots",
+                    "list_youtube_video_candidates",
+                    "list_youtube_single_history",
+                    "list_localization_workspace_items",
+                    "get_item_by_id",
+                    "list_items_by_ids",
+                ],
+            ),
+            (
+                "subscriptions.rs",
+                &[
+                    "list_youtube_subscriptions",
+                    "get_youtube_subscription_by_id",
+                    "list_youtube_subscription_groups",
+                ],
+            ),
+            (
+                "youtube_protection.rs",
+                &[
+                    "get_tuning",
+                    "load_policy_state",
+                    "retention_continuation",
+                    "policy_history",
+                    "policy_outcomes_page",
+                    "policy_transitions_page",
+                    "replay_policy_history_from_store",
+                ],
+            ),
+        ];
+        for (file, functions) in contracts {
+            let source =
+                std::fs::read_to_string(source_dir.join(file)).expect("read projection source");
+            for function in *functions {
+                let needle = format!("fn {function}(");
+                let start = source
+                    .find(&needle)
+                    .unwrap_or_else(|| panic!("missing guarded projection {file}::{function}"));
+                let end = (start + 3_000).min(source.len());
+                let prefix = &source[start..end];
+                assert!(
+                    prefix.contains("db::open_readonly(paths)?"),
+                    "{file}::{function} must acquire a bounded read-only context"
+                );
+                let readonly = prefix.find("db::open_readonly(paths)?").unwrap();
+                let readwrite = prefix.find("db::write_context(paths)?");
+                assert!(
+                    readwrite.is_none() || readwrite.unwrap() > readonly,
+                    "{file}::{function} opens read-write before its read projection"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn youtube_protection_snapshot_is_one_bounded_read_transaction_with_query_parity() {
+        let source_dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
+        let jobs_source =
+            std::fs::read_to_string(source_dir.join("jobs.rs")).expect("read jobs source");
+        let start = jobs_source
+            .find("pub fn get_youtube_protection_snapshot(")
+            .expect("shared YouTube protection snapshot projection");
+        let remainder = &jobs_source[start..];
+        let end = remainder[1..]
+            .find("\npub fn ")
+            .map(|offset| offset + 1)
+            .unwrap_or(remainder.len());
+        let projection = &remainder[..end];
+
+        assert_eq!(
+            projection.matches("db::open_readonly(paths)?").count(),
+            1,
+            "the combined snapshot must acquire exactly one bounded read context"
+        );
+        assert_eq!(
+            projection
+                .matches("transaction_with_behavior(TransactionBehavior::Deferred)")
+                .count(),
+            1,
+            "the combined snapshot must use one coherent deferred read transaction"
+        );
+        assert_eq!(
+            projection
+                .matches("youtube_protection::load_policy_state_conn(")
+                .count(),
+            1,
+            "one shared helper invocation must project both lane states from the transaction"
+        );
+        assert!(
+            projection.contains("status_for(youtube_protection::OPERATION_DOWNLOAD)")
+                && projection.contains("status_for(youtube_protection::OPERATION_ENUMERATION)"),
+            "download and enumeration must use the same transaction-backed status helper"
+        );
+        assert_eq!(
+            projection
+                .matches("youtube_protection::policy_history_conn(")
+                .count(),
+            2,
+            "both bounded history pages must be queried from the same transaction"
+        );
+        for required in [
+            "youtube_protection::load_tuning_conn(&tx)?",
+            "antibot_pacing_from_conn(&tx)",
+            "tx.commit()?",
+        ] {
+            assert!(
+                projection.contains(required),
+                "shared snapshot is missing transaction query contract: {required}"
+            );
+        }
+        for forbidden in [
+            "get_youtube_protection_status(",
+            "get_youtube_protection_history(",
+            "youtube_protection::policy_history(paths",
+            "youtube_protection::load_policy_state(paths",
+        ] {
+            assert!(
+                !projection.contains(forbidden),
+                "shared snapshot must not reopen a per-lane projection: {forbidden}"
+            );
+        }
+
+        let desktop_source = std::fs::read_to_string(
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+                .join("../desktop/src-tauri/src/lib.rs"),
+        )
+        .expect("read desktop command source");
+        let command_start = desktop_source
+            .find("async fn youtube_protection_snapshot_get(")
+            .expect("desktop shared snapshot command");
+        let command_remainder = &desktop_source[command_start..];
+        let command_end = command_remainder[1..]
+            .find("\n#[tauri::command]")
+            .map(|offset| offset + 1)
+            .unwrap_or(command_remainder.len());
+        let command = &command_remainder[..command_end];
+        assert_eq!(
+            command
+                .matches("jobs::get_youtube_protection_snapshot(")
+                .count(),
+            1,
+            "the desktop snapshot command must make one engine projection call"
+        );
+        assert!(!command.contains("jobs::get_youtube_protection_status("));
+        assert!(!command.contains("jobs::get_youtube_protection_history("));
+    }
+
+    #[test]
+    fn production_legacy_write_context_inventory_is_zero() {
+        let source_dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
+        let expected = std::collections::BTreeMap::<String, usize>::new();
+        let mut observed = std::collections::BTreeMap::new();
+        for path in rust_source_files(&source_dir) {
+            let name = path
+                .file_name()
+                .and_then(|value| value.to_str())
+                .unwrap_or("");
+            if matches!(name, "db.rs" | "database_runtime.rs") {
+                continue;
+            }
+            let source = std::fs::read_to_string(&path).expect("read source");
+            let production_end = production_source_end(&source);
+            let count = source[..production_end].matches("db::open(").count();
+            if count > 0 {
+                observed.insert(name.to_string(), count);
+            }
+        }
+        assert_eq!(
+            observed, expected,
+            "legacy boundary inventory changed; review and update it"
+        );
+        assert_eq!(
+            observed.values().sum::<usize>(),
+            LEGACY_WRITE_CONTEXT_CALLS_REMAINING
+        );
     }
 }

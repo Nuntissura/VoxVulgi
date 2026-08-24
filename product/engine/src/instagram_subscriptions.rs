@@ -127,10 +127,8 @@ pub fn upsert_instagram_subscription(
     paths: &AppPaths,
     req: InstagramSubscriptionUpsert,
 ) -> Result<InstagramSubscriptionRow> {
-    let conn = db::open(paths)?;
-    db::migrate(&conn)?;
-
     let normalized = normalize_upsert(req)?;
+    let conn = db::write_context(paths)?;
     let now = now_ms();
     let input_id = normalized.id.clone();
     let mut updated_existing = false;
@@ -238,6 +236,7 @@ ON CONFLICT(source_url) DO UPDATE SET
         subscription_by_source_url_conn(&conn, &normalized.source_url)?.ok_or_else(|| {
             EngineError::InstallFailed("failed to load saved Instagram subscription".to_string())
         })?;
+    drop(conn);
     sync_auth_session_secret(
         paths,
         row.id.as_str(),
@@ -249,8 +248,7 @@ ON CONFLICT(source_url) DO UPDATE SET
 }
 
 pub fn delete_instagram_subscription(paths: &AppPaths, id: &str) -> Result<()> {
-    let conn = db::open(paths)?;
-    db::migrate(&conn)?;
+    let conn = db::write_context(paths)?;
     let changed = conn.execute(
         "UPDATE instagram_subscription SET active=0,hold_reason='Archived by operator',next_allowed_refresh_at_ms=NULL,updated_at_ms=?1 WHERE id=?2",
         params![now_ms(), id],
@@ -264,8 +262,7 @@ pub fn delete_instagram_subscription(paths: &AppPaths, id: &str) -> Result<()> {
 }
 
 pub fn queue_instagram_subscription(paths: &AppPaths, id: &str) -> Result<Vec<jobs::JobRow>> {
-    let conn = db::open(paths)?;
-    db::migrate(&conn)?;
+    let conn = db::write_context(paths)?;
     let sub = subscription_by_id_conn(&conn, id)?.ok_or_else(|| {
         EngineError::InstallFailed(format!("instagram subscription not found: {id}"))
     })?;
@@ -386,8 +383,7 @@ fn queue_subscription_internal(
         browser_cookie_source,
     )?;
 
-    let conn = db::open(paths)?;
-    db::migrate(&conn)?;
+    let conn = db::write_context(paths)?;
     conn.execute(
         "UPDATE instagram_subscription SET last_queued_at_ms = ?1, updated_at_ms = ?1 WHERE id = ?2",
         params![now_ms(), sub.id],

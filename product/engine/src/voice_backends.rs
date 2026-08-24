@@ -74,6 +74,16 @@ pub fn managed_default_backend_id(paths: &AppPaths) -> String {
 
 pub fn backend_catalog(paths: &AppPaths) -> VoiceBackendCatalog {
     let performance = tools::performance_tier_status(paths);
+    backend_catalog_with_performance(paths, &performance)
+}
+
+/// Builds the catalog from an already admitted semantic performance-tier result. Diagnostics and
+/// Options callers can therefore share one Torch/CUDA flight instead of recursively probing from
+/// catalog and recommendation paths.
+pub fn backend_catalog_with_performance(
+    paths: &AppPaths,
+    performance: &tools::PerformanceTierStatus,
+) -> VoiceBackendCatalog {
     let pack = tools::tts_voice_preserving_local_v1_pack_status(paths);
     let byo_status = voice_backend_adapters::catalog_status_overrides(paths).unwrap_or_default();
     let tier = performance.tier.clone();
@@ -297,10 +307,10 @@ pub fn recommend_backend(
     request: VoiceBackendRecommendationRequest,
 ) -> VoiceBackendRecommendation {
     let catalog = backend_catalog(paths);
-    recommend_backend_for_catalog(&catalog, request)
+    recommend_backend_with_catalog(&catalog, request)
 }
 
-fn recommend_backend_for_catalog(
+pub fn recommend_backend_with_catalog(
     catalog: &VoiceBackendCatalog,
     request: VoiceBackendRecommendationRequest,
 ) -> VoiceBackendRecommendation {
@@ -429,7 +439,7 @@ mod tests {
 
     #[test]
     fn balanced_goal_prefers_openvoice() {
-        let rec = recommend_backend_for_catalog(
+        let rec = recommend_backend_with_catalog(
             &test_catalog("gpu"),
             VoiceBackendRecommendationRequest {
                 source_lang: Some("ko".to_string()),
@@ -446,7 +456,7 @@ mod tests {
     fn balanced_goal_follows_readiness_sensitive_managed_default() {
         let mut catalog = test_catalog("cpu");
         catalog.default_backend_id = "cosyvoice".to_string();
-        let rec = recommend_backend_for_catalog(
+        let rec = recommend_backend_with_catalog(
             &catalog,
             VoiceBackendRecommendationRequest {
                 source_lang: Some("ko".to_string()),
@@ -461,7 +471,7 @@ mod tests {
 
     #[test]
     fn identity_goal_prefers_seed_vc_with_gpu_and_multi_ref() {
-        let rec = recommend_backend_for_catalog(
+        let rec = recommend_backend_with_catalog(
             &test_catalog("gpu"),
             VoiceBackendRecommendationRequest {
                 source_lang: Some("ja".to_string()),
@@ -476,7 +486,7 @@ mod tests {
 
     #[test]
     fn expressive_goal_on_cpu_falls_back_to_openvoice() {
-        let rec = recommend_backend_for_catalog(
+        let rec = recommend_backend_with_catalog(
             &test_catalog("cpu"),
             VoiceBackendRecommendationRequest {
                 source_lang: Some("ko".to_string()),

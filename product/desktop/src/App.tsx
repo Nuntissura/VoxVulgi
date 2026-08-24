@@ -270,6 +270,8 @@ type StartupPhase = {
 };
 
 type StartupStatus = {
+  revision: number;
+  updated_at_ms: number;
   offline_bundle_state:
     | "not_started"
     | "pending"
@@ -283,6 +285,27 @@ type StartupStatus = {
   progress_pct: number;
   active_phase_id: string | null;
   phases: StartupPhase[];
+  hydration: {
+    revision: number;
+    phase_id: string;
+    phase_label: string;
+    state: "pending" | "running" | "ready" | "skipped" | "error";
+    files_planned: number | null;
+    files_completed: number | null;
+    bytes_planned: number | null;
+    bytes_completed: number | null;
+    provider_scan_count: number | null;
+    updated_at_ms: number;
+    terminal_outcome: "ready" | "skipped" | "error" | null;
+    error: string | null;
+    provider_revision: number | null;
+    provider_source_identity: string | null;
+    provider_updated_at_ms: number | null;
+    provider_progress_fresh: boolean;
+    admission_state: string;
+    held_reason: string | null;
+    resource_policy: string;
+  };
 };
 
 type HomeLibraryItem = {
@@ -3325,11 +3348,13 @@ function App() {
   const [safeMode, setSafeMode] = useState<SafeModeStatus | null>(null);
   const [safeModeExitNoticeVisible, setSafeModeExitNoticeVisible] = useState(false);
   const [startup, setStartup] = useState<StartupStatus | null>(null);
+  const startupRevisionRef = useRef(-1);
   const [startupDetailsOpen, setStartupDetailsOpen] = useState(false);
   const [shellWindowMode, setShellWindowMode] = useState<ShellWindowMode>("floating");
   const [appInfo, setAppInfo] = useState<ShellAppInfo | null>(null);
   const panelTransitionSequenceRef = useRef(0);
   const panelTransitionActivationRef = useRef<Promise<void>>(Promise.resolve());
+  const providerVerificationPressureGenerationRef = useRef(0);
   const desktopActivity = useDesktopActivity();
 
   const refreshShellWindowMode = useCallback(async () => {
@@ -3377,7 +3402,52 @@ function App() {
   useEffect(() => {
     setFreezeDetectorPage(page);
     setDiagnosticsTracePage(page);
-  }, [page]);
+    if (desktopActivity.active) {
+      const generation = providerVerificationPressureGenerationRef.current + 1;
+      providerVerificationPressureGenerationRef.current = generation;
+      const consumerId = "foreground-navigation";
+      void invoke("provider_verification_foreground_demand", {
+        consumerId,
+        generation,
+        active: true,
+      }).catch(() => undefined);
+      const release = window.setTimeout(() => {
+        void invoke("provider_verification_foreground_demand", {
+          consumerId,
+          generation,
+          active: false,
+        }).catch(() => undefined);
+      }, 1_000);
+      return () => window.clearTimeout(release);
+    }
+  }, [desktopActivity.active, page]);
+
+  // A renewable, process-local lease makes the startup provider verifier yield at smaller
+  // checkpoints only while an interactive Diagnostics/Options page generation has demand.
+  // The engine expires the lease if this WebView disappears before cleanup runs.
+  useEffect(() => {
+    if (!desktopActivity.active || (page !== "diagnostics" && page !== "options")) return;
+    const generation = providerVerificationPressureGenerationRef.current + 1;
+    providerVerificationPressureGenerationRef.current = generation;
+    const consumerId = `foreground-page:${page}`;
+    let disposed = false;
+    const setPressure = (active: boolean) => {
+      void invoke("provider_verification_foreground_demand", {
+        consumerId,
+        generation,
+        active,
+      }).catch(() => undefined);
+    };
+    setPressure(true);
+    const renewal = window.setInterval(() => {
+      if (!disposed) setPressure(true);
+    }, 2_000);
+    return () => {
+      disposed = true;
+      window.clearInterval(renewal);
+      setPressure(false);
+    };
+  }, [desktopActivity.active, page]);
 
   useEffect(() => {
     installConsoleBuffer();
@@ -3674,24 +3744,70 @@ function App() {
     safeLocalStorageSet(ACTIVE_PAGE_KEY, page);
   }, [page]);
 
-  usePollingLoop(
-    async () => {
-      try {
-        const status = await invoke<StartupStatus>("startup_status");
-        setStartup(status);
-      } catch {
-        // Ignore startup status polling errors.
+  useEffect(() => {
+    if (!desktopActivity.active) return;
+    let disposed = false;
+    let unlistenStartup: (() => void) | null = null;
+    let fallbackTimer: number | null = null;
+    let fallbackDelayMs = 5_000;
+    let startupTerminal = false;
+
+    const terminal = (status: StartupStatus) =>
+      !status.phases.some((phase) => phase.state === "pending" || phase.state === "running");
+    const applyStatus = (status: StartupStatus) => {
+      if (!Number.isFinite(status.revision) || status.revision < startupRevisionRef.current) return;
+      const advanced = status.revision > startupRevisionRef.current;
+      startupRevisionRef.current = status.revision;
+      setStartup(status);
+      fallbackDelayMs = advanced ? 5_000 : Math.min(fallbackDelayMs * 2, 30_000);
+      startupTerminal = terminal(status);
+      if (startupTerminal && fallbackTimer !== null) {
+        window.clearTimeout(fallbackTimer);
+        fallbackTimer = null;
       }
-    },
-    {
-      enabled:
-        desktopActivity.active &&
-        (startup === null ||
-          startup.offline_bundle_state === "pending" ||
-          startup.offline_bundle_state === "running"),
-      intervalMs: 1200,
-    },
-  );
+    };
+    const scheduleFallback = () => {
+      if (disposed || startupTerminal || fallbackTimer !== null) return;
+      fallbackTimer = window.setTimeout(async () => {
+        fallbackTimer = null;
+        try {
+          applyStatus(await invoke<StartupStatus>("startup_status"));
+        } catch {
+          fallbackDelayMs = Math.min(fallbackDelayMs * 2, 30_000);
+        }
+        if (!disposed) scheduleFallback();
+      }, fallbackDelayMs);
+    };
+
+    void (async () => {
+      try {
+        unlistenStartup = await listen<StartupStatus>("voxvulgi://startup-status", (event) => {
+          if (disposed) return;
+          applyStatus(event.payload);
+          scheduleFallback();
+        });
+        if (disposed) {
+          unlistenStartup();
+          unlistenStartup = null;
+          return;
+        }
+      } catch {
+        // The bounded snapshot fallback below remains authoritative.
+      }
+      try {
+        applyStatus(await invoke<StartupStatus>("startup_status"));
+      } catch {
+        // Retry through the adaptive fallback.
+      }
+      scheduleFallback();
+    })();
+
+    return () => {
+      disposed = true;
+      unlistenStartup?.();
+      if (fallbackTimer !== null) window.clearTimeout(fallbackTimer);
+    };
+  }, [desktopActivity.active]);
 
   usePollingLoop(
     async () => {
@@ -3995,6 +4111,10 @@ function App() {
     startup?.phases.find((phase) => phase.id === startup.active_phase_id) ??
     startup?.phases.find((phase) => phase.state === "running" || phase.state === "pending") ??
     null;
+  const startupActiveLabel =
+    startup?.offline_bundle_state === "pending" || startup?.offline_bundle_state === "running"
+      ? startup.hydration.phase_label
+      : startupActivePhase?.label ?? "-";
   const startupResolvedCount = startup
     ? startup.phases.filter((phase) => phase.state === "ready" || phase.state === "skipped" || phase.state === "error")
         .length
@@ -4305,11 +4425,37 @@ function App() {
             </div>
             <div className="kv">
               <div className="k">Active phase</div>
-              <div className="v">{startupActivePhase?.label ?? "-"}</div>
+              <div className="v">{startupActiveLabel}</div>
             </div>
             <div className="kv">
               <div className="k">Hydration state</div>
               <div className="v">{startup?.offline_bundle_state ?? "-"}</div>
+            </div>
+            <div className="kv">
+              <div className="k">Hydration progress</div>
+              <div className="v">
+                {startup?.hydration.files_completed != null
+                  ? `${startup.hydration.files_completed.toLocaleString()} / ${startup.hydration.files_planned?.toLocaleString() ?? "?"} files`
+                  : startup?.hydration.state ?? "-"}
+              </div>
+            </div>
+            <div className="kv">
+              <div className="k">Verification admission</div>
+              <div className="v">
+                {startup?.hydration.held_reason ?? startup?.hydration.admission_state ?? "-"}
+              </div>
+            </div>
+            <div className="kv">
+              <div className="k">Verification resource policy</div>
+              <div className="v">{startup?.hydration.resource_policy ?? "-"}</div>
+            </div>
+            <div className="kv">
+              <div className="k">Provider full scans this process</div>
+              <div className="v">{startup?.hydration.provider_scan_count ?? "-"}</div>
+            </div>
+            <div className="kv">
+              <div className="k">Status revision</div>
+              <div className="v">{startup?.revision ?? "-"}</div>
             </div>
             <div style={{ marginTop: 10 }}>
               <div

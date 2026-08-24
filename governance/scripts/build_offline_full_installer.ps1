@@ -111,8 +111,9 @@ function Invoke-SevenZip {
     if ($LASTEXITCODE -ne 0) { throw "7-Zip failed with exit code $LASTEXITCODE.`n$($output -join "`n")" }
     return @($output | ForEach-Object { "$_" })
   }
-  & $Executable @Arguments
-  if ($LASTEXITCODE -ne 0) { throw "7-Zip failed with exit code $LASTEXITCODE." }
+  & $Executable @Arguments 2>&1 | ForEach-Object { Write-Host "$_" }
+  $exitCode = $LASTEXITCODE
+  if ($exitCode -ne 0) { throw "7-Zip failed with exit code $exitCode." }
 }
 
 function Get-SourceTreeDigest {
@@ -143,6 +144,120 @@ function Assert-ArchiveSafeAndValid {
   }
 }
 
+function Assert-ArchiveOmitsRestorableFileMetadata {
+  param([string]$SevenZip, [string]$Archive)
+  $listing = Invoke-SevenZip -Executable $SevenZip -Arguments @('l', '-slt', '-t7z', $Archive) -Capture
+  foreach ($line in $listing) {
+    if ($line -match '^(Modified|Attributes)\s*=\s*(\S.+)$') {
+      throw "Archive contains restorable per-file metadata forbidden by the fast extraction policy: $Archive ($line)"
+    }
+  }
+}
+
+function Get-ArchiveBoundedSolidAudit {
+  param(
+    [string]$SevenZip,
+    [string]$Archive,
+    [int64]$BlockLimitBytes = 64MB
+  )
+  $listing = Invoke-SevenZip -Executable $SevenZip -Arguments @('l', '-slt', '-t7z', $Archive) -Capture
+  $records = New-Object System.Collections.Generic.List[object]
+  $record = [ordered]@{}
+  foreach ($line in $listing) {
+    if ([string]::IsNullOrWhiteSpace($line)) {
+      if ($record.Count -gt 0) {
+        $records.Add($record)
+        $record = [ordered]@{}
+      }
+      continue
+    }
+    if ($line -match '^([^=]+?)\s*=\s*(.*)$') {
+      $record[$Matches[1].Trim()] = $Matches[2].Trim()
+    }
+  }
+  if ($record.Count -gt 0) { $records.Add($record) }
+
+  $summary = @($records | Where-Object { $_.Contains('Solid') -and $_.Contains('Blocks') })
+  if ($summary.Count -ne 1) {
+    throw "Archive bounded-solid audit could not identify exactly one archive summary: $Archive"
+  }
+  [int64]$summaryBlockCount = 0
+  if (-not [int64]::TryParse($summary[0]['Blocks'], [ref]$summaryBlockCount) -or $summaryBlockCount -le 0) {
+    throw "Archive bounded-solid audit found an invalid block count: $Archive ($($summary[0]['Blocks']))"
+  }
+
+  $blockStats = @{}
+  [int64]$blockBackedFileCount = 0
+  foreach ($entry in $records) {
+    if (-not $entry.Contains('Size') -or -not $entry.Contains('Block')) { continue }
+    [int64]$size = 0
+    if (-not [int64]::TryParse($entry['Size'], [ref]$size) -or $size -lt 0) {
+      throw "Archive bounded-solid audit found an invalid entry size: $Archive ($($entry['Path']))"
+    }
+    $blockId = $entry['Block']
+    if ([string]::IsNullOrWhiteSpace($blockId)) {
+      if ($size -gt 0) {
+        throw "Archive bounded-solid audit found non-empty data without a block: $Archive ($($entry['Path']))"
+      }
+      continue
+    }
+    [int64]$parsedBlockId = 0
+    if (-not [int64]::TryParse($blockId, [ref]$parsedBlockId) -or $parsedBlockId -lt 0) {
+      throw "Archive bounded-solid audit found an invalid entry block: $Archive ($($entry['Path']))"
+    }
+    $blockKey = $parsedBlockId.ToString()
+    if (-not $blockStats.ContainsKey($blockKey)) {
+      $blockStats[$blockKey] = [ordered]@{
+        file_count = [int64]0
+        uncompressed_bytes = [int64]0
+        largest_file_bytes = [int64]0
+      }
+    }
+    $stats = $blockStats[$blockKey]
+    if ($size -gt ([int64]::MaxValue - $stats.uncompressed_bytes)) {
+      throw "Archive bounded-solid audit overflowed a block byte total: $Archive (block $blockKey)"
+    }
+    $stats.file_count++
+    $stats.uncompressed_bytes += $size
+    if ($size -gt $stats.largest_file_bytes) { $stats.largest_file_bytes = $size }
+    $blockBackedFileCount++
+  }
+  if ($blockStats.Count -ne $summaryBlockCount) {
+    throw "Archive bounded-solid audit block count mismatch: $Archive (summary=$summaryBlockCount entries=$($blockStats.Count))"
+  }
+  if ($blockBackedFileCount -le 0) {
+    throw "Archive bounded-solid audit found no block-backed payload files: $Archive"
+  }
+
+  [int64]$maxBlockBytes = 0
+  [int64]$maxBlockFileCount = 0
+  [int64]$oversizedSingletonBlockCount = 0
+  foreach ($blockKey in $blockStats.Keys) {
+    $stats = $blockStats[$blockKey]
+    if ($stats.uncompressed_bytes -gt $BlockLimitBytes) {
+      if (($stats.file_count -ne 1) -or ($stats.largest_file_bytes -le $BlockLimitBytes)) {
+        throw "Archive solid block exceeds the governed byte limit without being one oversized singleton file: $Archive (block=$blockKey bytes=$($stats.uncompressed_bytes) files=$($stats.file_count) limit=$BlockLimitBytes)"
+      }
+      $oversizedSingletonBlockCount++
+    }
+    if ($stats.uncompressed_bytes -gt $maxBlockBytes) { $maxBlockBytes = $stats.uncompressed_bytes }
+    if ($stats.file_count -gt $maxBlockFileCount) { $maxBlockFileCount = $stats.file_count }
+  }
+  $solid = $summary[0]['Solid'] -eq '+'
+  if ((-not $solid) -and ($maxBlockFileCount -gt 1)) {
+    throw "Archive contains a shared payload block but does not report the governed bounded-solid mode: $Archive"
+  }
+  return [ordered]@{
+    solid = $solid
+    solid_block_limit_bytes = $BlockLimitBytes
+    block_count = $summaryBlockCount
+    block_backed_file_count = $blockBackedFileCount
+    max_block_uncompressed_bytes = $maxBlockBytes
+    max_block_file_count = $maxBlockFileCount
+    oversized_singleton_block_count = $oversizedSingletonBlockCount
+  }
+}
+
 function Get-ArchiveUncompressedBytes {
   param([string]$SevenZip, [string]$Archive)
   $listing = Invoke-SevenZip -Executable $SevenZip -Arguments @('l', '-slt', '-t7z', $Archive) -Capture
@@ -167,16 +282,23 @@ function New-OrReusePayloadArchive {
     [string]$CacheRoot, [string]$StagePayloadRoot, [switch]$Refresh
   )
   $digest = Get-SourceTreeDigest -SevenZip $SevenZip -Root $SourceRoot
-  $cacheArchive = Join-Path $CacheRoot ("{0}_{1}.7z" -f $Name, $digest)
+  # File bytes and names are the payload identity. Restoring source timestamps/attributes adds a
+  # metadata write for every Python-tree member without changing runtime behavior, so omit both.
+  # Include the archive policy in the cache key so pre-optimization archives cannot be reused.
+  $archivePolicy = 'bounded_solid_lzma2_fast_64m_no_restorable_metadata_v3'
+  $cacheArchive = Join-Path $CacheRoot ("{0}_{1}_{2}.7z" -f $Name, $archivePolicy, $digest)
+  $solidAudit = $null
   if ($Refresh -or -not (Test-Path -LiteralPath $cacheArchive -PathType Leaf)) {
     $partial = "$cacheArchive.partial.$PID"
     if (Test-Path -LiteralPath $partial) { Remove-Item -LiteralPath $partial -Force }
-    Write-Host "Creating non-solid fast archive: $Name"
+    Write-Host "Creating bounded-solid fast archive: $Name"
     try {
       Invoke-SevenZip -Executable $SevenZip -Arguments @(
-        'a', '-t7z', '-mx=1', '-m0=LZMA2', '-ms=off', '-mmt=on', '-y', $partial, (Join-Path $SourceRoot '*')
+        'a', '-t7z', '-mx=1', '-m0=LZMA2', '-ms=64m', '-mtm=off', '-mtr=off', '-mmt=on', '-y', $partial, (Join-Path $SourceRoot '*')
       )
       Assert-ArchiveSafeAndValid -SevenZip $SevenZip -Archive $partial
+      Assert-ArchiveOmitsRestorableFileMetadata -SevenZip $SevenZip -Archive $partial
+      $solidAudit = Get-ArchiveBoundedSolidAudit -SevenZip $SevenZip -Archive $partial
       Move-Item -LiteralPath $partial -Destination $cacheArchive -Force
     } finally {
       if (Test-Path -LiteralPath $partial) { Remove-Item -LiteralPath $partial -Force }
@@ -184,6 +306,8 @@ function New-OrReusePayloadArchive {
   } else {
     Write-Host "Reusing content-matched payload archive: $cacheArchive"
     Assert-ArchiveSafeAndValid -SevenZip $SevenZip -Archive $cacheArchive
+    Assert-ArchiveOmitsRestorableFileMetadata -SevenZip $SevenZip -Archive $cacheArchive
+    $solidAudit = Get-ArchiveBoundedSolidAudit -SevenZip $SevenZip -Archive $cacheArchive
   }
   $stageArchive = Join-Path $StagePayloadRoot "$Name.7z"
   Copy-OrHardLink -Source $cacheArchive -Destination $stageArchive
@@ -193,6 +317,14 @@ function New-OrReusePayloadArchive {
     name = $Name
     source_id = $Name
     source_sha256_data_and_names = $digest
+    archive_policy = $archivePolicy
+    solid = $solidAudit.solid
+    solid_block_limit_bytes = $solidAudit.solid_block_limit_bytes
+    block_count = $solidAudit.block_count
+    block_backed_file_count = $solidAudit.block_backed_file_count
+    max_block_uncompressed_bytes = $solidAudit.max_block_uncompressed_bytes
+    max_block_file_count = $solidAudit.max_block_file_count
+    oversized_singleton_block_count = $solidAudit.oversized_singleton_block_count
     file = "payload/$Name.7z"
     archive_bytes = [int64]$item.Length
     uncompressed_bytes = Get-ArchiveUncompressedBytes -SevenZip $SevenZip -Archive $stageArchive
@@ -298,6 +430,22 @@ if ($ValidateInputsOnly) {
 $iscc = Find-Iscc -Explicit $IsccPath
 $sevenZip = Find-SevenZip -Explicit $SevenZipPath
 $oscdimg = Find-Oscdimg -Explicit $OscdimgPath
+$isccMajor = Get-IsccMajorVersion -Path $iscc
+$sevenZipIdentity = Get-SevenZipVersion -Path $sevenZip
+$sevenZipVersion = "$($sevenZipIdentity.version)"
+$oscdimgBanner = (& $oscdimg -? 2>&1 |
+  ForEach-Object { $_.ToString().Trim() } |
+  Where-Object { $_ } |
+  Select-Object -First 1)
+if (-not $oscdimgBanner) { throw "Unable to resolve non-empty Oscdimg provenance from: $oscdimg" }
+$buildTranscriptPath = Join-Path $OutputDir ("offline_full_build_{0}_{1}.log" -f (Get-Date -Format 'yyyyMMdd_HHmmss'), ($AppVersion -replace '\.', '_'))
+$transcriptStarted = $false
+Start-Transcript -LiteralPath $buildTranscriptPath -Force | Out-Null
+$transcriptStarted = $true
+Write-Host "WP-0308 build transcript: $buildTranscriptPath"
+Write-Host "Inno Setup compiler: $iscc (major=$isccMajor)"
+Write-Host "7-Zip: $sevenZip (version=$sevenZipVersion)"
+Write-Host "Oscdimg: $oscdimg (banner=$oscdimgBanner)"
 if (-not $ArchiveCacheDir) { $ArchiveCacheDir = Join-Path $repoRoot 'product\desktop\build_target\offline_archive_cache' }
 if (-not (Test-Path -LiteralPath $ArchiveCacheDir)) { New-Item -ItemType Directory -Force -Path $ArchiveCacheDir | Out-Null }
 $ArchiveCacheDir = (Resolve-Path -LiteralPath $ArchiveCacheDir).Path
@@ -326,10 +474,17 @@ try {
   foreach ($spec in $archiveSpecs) {
     $archives += New-OrReusePayloadArchive -SevenZip $sevenZip -Name $spec.name -SourceRoot $spec.root -CacheRoot $ArchiveCacheDir -StagePayloadRoot $stagePayloadRoot -Refresh:$RefreshPayloadArchives
   }
+  $realizedSolidArchiveCount = @($archives | Where-Object { $_.solid }).Count
   $payloadManifest = [ordered]@{
     schema_version = 1; wp = 'WP-0308'; app_version = $AppVersion
     created_at_utc = (Get-Date).ToUniversalTime().ToString('yyyy-MM-ddTHH:mm:ssZ')
-    archive_format = '7z'; solid = $false; compression_profile = 'fast-lzma2'; archives = $archives
+    archive_format = '7z'
+    archive_policy = 'bounded_solid_lzma2_fast_64m_no_restorable_metadata_v3'
+    solid_block_limit_bytes = [int64](64MB)
+    realized_solid_archive_count = $realizedSolidArchiveCount
+    realized_non_solid_archive_count = ($archives.Count - $realizedSolidArchiveCount)
+    all_archives_realized_solid = ($realizedSolidArchiveCount -eq $archives.Count)
+    compression_profile = 'fast-lzma2-bounded-solid-64m'; archives = $archives
   }
   [System.IO.File]::WriteAllText(
     (Join-Path $isoRoot 'payload_manifest.json'),
@@ -371,6 +526,12 @@ try {
     bytes = [int64]$isoItem.Length
     sha256 = (Get-FileHash -Algorithm SHA256 -LiteralPath $isoPath).Hash.ToLowerInvariant()
     iso_format = 'UDF-1.02'; root_entrypoint = 'Install_VoxVulgi.exe'; payload = $archives
+    build_transcript = [System.IO.Path]::GetFileName($buildTranscriptPath)
+    tools = [ordered]@{
+      iscc = [ordered]@{ path = $iscc; major_version = $isccMajor }
+      seven_zip = [ordered]@{ path = $sevenZip; version = $sevenZipVersion }
+      oscdimg = [ordered]@{ path = $oscdimg; banner = $oscdimgBanner }
+    }
   }
   [System.IO.File]::WriteAllText($artifactManifestPath, (($artifactManifest | ConvertTo-Json -Depth 8) + "`n"), [System.Text.UTF8Encoding]::new($false))
   Write-Host ''
@@ -381,4 +542,5 @@ try {
   Remove-ManagedWorkTree -Path $stageRoot -AllowedParent $OutputDir
   if ($buildMutexAcquired) { $buildMutex.ReleaseMutex() }
   $buildMutex.Dispose()
+  if ($transcriptStarted) { Stop-Transcript | Out-Null }
 }

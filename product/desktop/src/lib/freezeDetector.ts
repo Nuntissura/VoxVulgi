@@ -32,6 +32,24 @@ let lastEvent: { name: string; ts_ms: number } | null = null;
 let currentPage: string | null = null;
 let mainThreadHeartbeatTimer: number | null = null;
 let mainThreadHeartbeatTick = 0;
+const mainThreadHeartbeatSourceInstance = crypto.randomUUID();
+
+type HeartbeatTraceReceipt = {
+  accepted: boolean;
+  received_at_ms: number;
+  enqueued_at_ms: number;
+  persisted_at_ms: number | null;
+  acknowledged_at_ms: number;
+  acknowledgement_stage: "persisted" | "queued" | "rejected";
+  queue_dwell_ms: number | null;
+  outcome: string;
+  queue_overflow: boolean;
+  heartbeat_duplicates_total: number;
+  heartbeat_late_total: number;
+  duplicate: boolean;
+  late: boolean;
+  sequence_gap: number;
+};
 
 const TRACKED_WINDOW_EVENTS = ["resize", "focus", "blur", "visibilitychange"] as const;
 const MAIN_THREAD_HEARTBEAT_INTERVAL_MS = 30_000;
@@ -42,24 +60,58 @@ export function setFreezeDetectorPage(page: string | null) {
 
 // Fire-and-forget trace write that never raises and never blocks the caller.
 function traceWrite(event: string, details: Record<string, unknown>, level = "info") {
-  void invoke<string>("diagnostics_trace_write_event", { event, details, level }).catch(
+  void invoke("diagnostics_trace_write_event", { event, details, level }).catch(
     () => {
       // best-effort
     },
   );
 }
 
+async function traceHeartbeat(sequence: number) {
+  const emittedAtMs = Date.now();
+  const details = {
+    source: "main_thread",
+    source_instance: mainThreadHeartbeatSourceInstance,
+    sequence,
+    emitted_at_ms: emittedAtMs,
+    uptime_ms: performance.now(),
+    worker_installed: worker !== null,
+    last_event: lastEvent,
+    current_page: currentPage,
+  };
+  try {
+    const receipt = await invoke<HeartbeatTraceReceipt>("diagnostics_trace_write_event", {
+      event: "main_thread_alive",
+      details,
+      level: "info",
+    });
+    const sourceAcknowledgedAtMs = Date.now();
+    traceWrite("heartbeat_source_acknowledged", {
+      ...details,
+      received_at_ms: receipt.received_at_ms,
+      enqueued_at_ms: receipt.enqueued_at_ms,
+      persisted_at_ms: receipt.persisted_at_ms,
+      source_acknowledged_at_ms: sourceAcknowledgedAtMs,
+      acknowledgement_stage: receipt.acknowledgement_stage,
+      queue_dwell_ms: receipt.queue_dwell_ms,
+      queue_overflow: receipt.queue_overflow,
+      duplicate: receipt.duplicate,
+      late: receipt.late,
+      sequence_gap: receipt.sequence_gap,
+      duplicate_overflow_total: receipt.heartbeat_duplicates_total,
+      late_total: receipt.heartbeat_late_total,
+      outcome: receipt.outcome,
+    });
+  } catch {
+    // A missed acknowledgement is itself visible as a missing paired receipt.
+  }
+}
+
 function startMainThreadHeartbeat() {
   if (mainThreadHeartbeatTimer !== null) return;
   const tick = () => {
     mainThreadHeartbeatTick += 1;
-    traceWrite("main_thread_alive", {
-      uptime_ms: performance.now(),
-      tick: mainThreadHeartbeatTick,
-      worker_installed: worker !== null,
-      last_event: lastEvent,
-      current_page: currentPage,
-    });
+    void traceHeartbeat(mainThreadHeartbeatTick);
   };
   // Fire immediately so the first heartbeat lands without waiting 30s.
   tick();

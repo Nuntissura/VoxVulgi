@@ -4,15 +4,15 @@ file_kind: work_packet
 updated_at: 2026-08-23
 ---
 
-<topic id="contract" status="backlog" version="v1" wp="WP-0312" updated_at="2026-08-23">
+<topic id="contract" status="in-progress" version="v1" wp="WP-0312" updated_at="2026-08-23">
 
 # Work Packet: WP-0312 — SQLite runtime access boundary and lock attribution
 
 ## Metadata
 
 - ID: WP-0312
-- Owner: —
-- Status: BACKLOG
+- Owner: Codex
+- Status: IN_PROGRESS
 - Created: 2026-08-23
 - Refinement: `WP-0312_SQLITE_RUNTIME_ACCESS_BOUNDARY_AND_LOCK_ATTRIBUTION_v1_REFINEMENT.md`
 - Board: `../TASK_BOARD.md`
@@ -66,11 +66,14 @@ Retain SQLite while replacing repeated, unowned runtime `open()+migrate()` acces
 
 </topic>
 
-<topic id="status-updates" status="active" version="v1" wp="WP-0312" updated_at="2026-08-23">
+<topic id="status-updates" status="active" version="v1" wp="WP-0312" updated_at="2026-08-24">
 
 # Status updates
 
 - 2026-08-23: Created from a dated schema/database topology inspection, governed v0.1.179 incident evidence, direct production call-site audit, current SQLite/rusqlite primary documentation, and SurrealDB research recorded in backlog WP-0315. No SurrealDB benchmark or migration decision is complete, and no product code or database was changed by this packet authoring.
 - 2026-08-23: Status is BACKLOG. The production engine remains SQLite unless a later operator-approved packet supersedes the technical design after WP-0315 proof.
+- 2026-08-23: Implementation began. Added the bounded database runtime, serialized writer and reader admission, overload/cancellation/shutdown and contention receipts, startup-only migration guards, production-caller migration, checkpoint/long-reader evidence, and short CAS-guarded media-cleanup publication after external I/O. Engine, desktop-contract, frontend-build, Tauri-check, governed-build, and independent adversarial gates passed. Status remains IN_PROGRESS because the exact isolated-clone proof, observation-only current-profile cell, and disposable-VM normal-window proof are not yet available. WP-0315 therefore remains blocked by this hard predecessor.
+- 2026-08-24: The integrated runtime boundary shipped into governed v0.1.181 after the six-pack offline warmup gate, optimized desktop build, NSIS build, 287/287 desktop contracts, and disposable packaged headless startup passed. Status remains `IN_PROGRESS`; the isolated-clone, observation-only current-profile, and disposable-VM normal-window proof cells are still required, so WP-0315 remains blocked.
+- 2026-08-24: The same bounded runtime shipped in governed v0.1.182 after the six-pack warmup gate completed green in 4,731 seconds, optimized EXE/NSIS and single-ISO builds passed, 287/287 contracts passed, and the exact packaged EXE independently reported version 0.1.182 through its isolated headless bridge. Status remains `IN_PROGRESS`; the isolated-clone, observation-only current-profile, and disposable-VM normal-window proof cells remain open, so WP-0315 remains blocked.
 
 </topic>

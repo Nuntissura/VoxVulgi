@@ -765,7 +765,7 @@ pub fn classify_youtube_outcome(error_text: Option<&str>) -> DownloaderOutcomeCl
     DownloaderOutcomeClass::Unknown
 }
 
-fn load_tuning_conn(conn: &rusqlite::Connection) -> Result<YoutubeProtectionTuning> {
+pub(crate) fn load_tuning_conn(conn: &rusqlite::Connection) -> Result<YoutubeProtectionTuning> {
     let value = conn
         .query_row(
             "SELECT value FROM meta WHERE key=?1",
@@ -813,8 +813,7 @@ pub(crate) fn claim_mutation_generation_conn(
 }
 
 pub fn get_tuning(paths: &AppPaths) -> Result<YoutubeProtectionTuning> {
-    let conn = db::open(paths)?;
-    db::migrate(&conn)?;
+    let conn = db::open_readonly(paths)?;
     load_tuning_conn(&conn)
 }
 
@@ -826,12 +825,18 @@ pub fn set_tuning(
         .get_or_init(|| Mutex::new(()))
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
-    let conn = db::open(paths)?;
-    db::migrate(&conn)?;
     let tuning = tuning.normalized();
-    conn.execute(
-        "INSERT INTO meta(key,value) VALUES(?1,?2) ON CONFLICT(key) DO UPDATE SET value=excluded.value",
-        params![TUNING_META_KEY, serde_json::to_string(&tuning)?],
+    let tuning_json = serde_json::to_string(&tuning)?;
+    db::AppDatabase::for_paths(paths)?.write(
+        db::DatabaseOperationContext::new("youtube_protection", "set_tuning").foreground(),
+        TransactionBehavior::Immediate,
+        |transaction| {
+            transaction.execute(
+                "INSERT INTO meta(key,value) VALUES(?1,?2) ON CONFLICT(key) DO UPDATE SET value=excluded.value",
+                params![TUNING_META_KEY, tuning_json],
+            )?;
+            Ok(())
+        },
     )?;
     Ok(tuning)
 }
@@ -845,8 +850,7 @@ pub fn set_tuning_with_generation(
         .get_or_init(|| Mutex::new(()))
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
-    let mut conn = db::open(paths)?;
-    db::migrate(&conn)?;
+    let mut conn = db::write_context(paths)?;
     let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
     claim_mutation_generation_conn(&tx, "tuning", mutation_generation, false)?;
     let tuning = tuning.normalized();
@@ -1009,8 +1013,7 @@ pub fn load_policy_state(
     auth_fingerprint: &str,
     runtime_epoch: &str,
 ) -> Result<DownloaderPolicySnapshot> {
-    let conn = db::open(paths)?;
-    db::migrate(&conn)?;
+    let conn = db::open_readonly(paths)?;
     load_policy_state_conn(&conn, provider, operation, auth_fingerprint, runtime_epoch)
 }
 
@@ -1030,8 +1033,7 @@ pub fn claim_cooldown_canary(
     job_id: &str,
     claimed_at_ms: i64,
 ) -> Result<Option<String>> {
-    let mut conn = db::open(paths)?;
-    db::migrate(&conn)?;
+    let mut conn = db::write_context(paths)?;
     let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
     tx.execute(
         "DELETE FROM downloader_canary_lease WHERE provider=?1 AND operation=?2 \
@@ -1096,15 +1098,19 @@ pub fn claim_cooldown_canary(
 }
 
 pub fn release_cooldown_canary_for_job(paths: &AppPaths, job_id: &str) -> Result<u64> {
-    let conn = db::open(paths)?;
-    db::migrate(&conn)?;
-    Ok(conn.execute(
-        "DELETE FROM downloader_canary_lease WHERE job_id=?1",
-        [job_id],
-    )? as u64)
+    db::AppDatabase::for_paths(paths)?.write(
+        db::DatabaseOperationContext::new("youtube_download", "release_cooldown_canary"),
+        TransactionBehavior::Immediate,
+        |transaction| {
+            Ok(transaction.execute(
+                "DELETE FROM downloader_canary_lease WHERE job_id=?1",
+                [job_id],
+            )? as u64)
+        },
+    )
 }
 
-fn load_policy_state_conn(
+pub(crate) fn load_policy_state_conn(
     conn: &rusqlite::Connection,
     provider: &str,
     operation: &str,
@@ -1181,8 +1187,7 @@ pub fn record_outcome(
     paths: &AppPaths,
     input: RecordDownloaderOutcome<'_>,
 ) -> Result<DownloaderPolicySnapshot> {
-    let mut conn = db::open(paths)?;
-    db::migrate(&conn)?;
+    let mut conn = db::write_context(paths)?;
     let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
     let tuning = load_tuning_conn(&tx)?;
     let outcome_id = Uuid::new_v4().to_string();
@@ -1399,8 +1404,7 @@ pub fn record_observation(
     paths: &AppPaths,
     input: RecordDownloaderOutcome<'_>,
 ) -> Result<DownloaderPolicySnapshot> {
-    let mut conn = db::open(paths)?;
-    db::migrate(&conn)?;
+    let mut conn = db::write_context(paths)?;
     let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
     let tuning = load_tuning_conn(&tx)?;
     let state = load_policy_state_conn(
@@ -1473,8 +1477,7 @@ pub fn compact_outcomes_batch(
     cutoff_ms: i64,
     batch_size: usize,
 ) -> Result<DownloaderRetentionReceipt> {
-    let mut conn = db::open(paths)?;
-    db::migrate(&conn)?;
+    let mut conn = db::write_context(paths)?;
     let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
     let receipt = compact_outcomes_batch_conn(&tx, cutoff_ms, batch_size)?;
     tx.commit()?;
@@ -1524,8 +1527,7 @@ pub fn drain_expired_outcomes(
 }
 
 pub fn retention_continuation(paths: &AppPaths) -> Result<DownloaderRetentionContinuation> {
-    let conn = db::open(paths)?;
-    db::migrate(&conn)?;
+    let conn = db::open_readonly(paths)?;
     conn.query_row(
         "SELECT pending,consecutive_failures,updated_at_ms FROM youtube_retention_continuation WHERE singleton=1",
         [],
@@ -1545,12 +1547,17 @@ pub fn persist_retention_continuation(
     pending: bool,
     consecutive_failures: u32,
 ) -> Result<DownloaderRetentionContinuation> {
-    let conn = db::open(paths)?;
-    db::migrate(&conn)?;
     let updated_at_ms = now_ms();
-    conn.execute(
-        "INSERT INTO youtube_retention_continuation(singleton,pending,consecutive_failures,updated_at_ms) VALUES(1,?1,?2,?3) ON CONFLICT(singleton) DO UPDATE SET pending=excluded.pending,consecutive_failures=excluded.consecutive_failures,updated_at_ms=excluded.updated_at_ms",
-        params![if pending { 1 } else { 0 }, consecutive_failures, updated_at_ms],
+    db::AppDatabase::for_paths(paths)?.write(
+        db::DatabaseOperationContext::new("youtube_retention", "persist_continuation"),
+        TransactionBehavior::Immediate,
+        |transaction| {
+            transaction.execute(
+                "INSERT INTO youtube_retention_continuation(singleton,pending,consecutive_failures,updated_at_ms) VALUES(1,?1,?2,?3) ON CONFLICT(singleton) DO UPDATE SET pending=excluded.pending,consecutive_failures=excluded.consecutive_failures,updated_at_ms=excluded.updated_at_ms",
+                params![if pending { 1 } else { 0 }, consecutive_failures, updated_at_ms],
+            )?;
+            Ok(())
+        },
     )?;
     Ok(DownloaderRetentionContinuation {
         pending,
@@ -1566,8 +1573,7 @@ pub fn return_to_baseline(
     auth_fingerprint: &str,
     runtime_epoch: &str,
 ) -> Result<DownloaderPolicySnapshot> {
-    let mut conn = db::open(paths)?;
-    db::migrate(&conn)?;
+    let mut conn = db::write_context(paths)?;
     let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
     let mut state =
         load_policy_state_conn(&tx, provider, operation, auth_fingerprint, runtime_epoch)?;
@@ -1600,8 +1606,25 @@ pub fn policy_history(
     runtime_epoch: &str,
     limit: usize,
 ) -> Result<DownloaderPolicyHistory> {
-    let conn = db::open(paths)?;
-    db::migrate(&conn)?;
+    let conn = db::open_readonly(paths)?;
+    policy_history_conn(
+        &conn,
+        provider,
+        operation,
+        auth_fingerprint,
+        runtime_epoch,
+        limit,
+    )
+}
+
+pub(crate) fn policy_history_conn(
+    conn: &rusqlite::Connection,
+    provider: &str,
+    operation: &str,
+    auth_fingerprint: &str,
+    runtime_epoch: &str,
+    limit: usize,
+) -> Result<DownloaderPolicyHistory> {
     let limit = limit.clamp(1, 500) as i64;
     let outcomes = {
         let mut statement = conn.prepare(
@@ -1751,8 +1774,7 @@ pub fn policy_outcomes_page(
     cursor: Option<&DownloaderHistoryCursor>,
     limit: usize,
 ) -> Result<DownloaderOutcomePage> {
-    let conn = db::open(paths)?;
-    db::migrate(&conn)?;
+    let conn = db::open_readonly(paths)?;
     let page_size = limit.clamp(1, 1_000);
     let query_limit = page_size.saturating_add(1) as i64;
     let select = "SELECT id,target_fingerprint,occurred_at_ms,outcome_class,error_signature,incident_id,duration_ms,baseline_policy_json,effective_policy_json FROM downloader_outcome";
@@ -1859,8 +1881,7 @@ pub fn policy_transitions_page(
     cursor: Option<&DownloaderHistoryCursor>,
     limit: usize,
 ) -> Result<DownloaderTransitionPage> {
-    let conn = db::open(paths)?;
-    db::migrate(&conn)?;
+    let conn = db::open_readonly(paths)?;
     let page_size = limit.clamp(1, 1_000);
     let query_limit = page_size.saturating_add(1) as i64;
     let select = "SELECT id,before_mode,after_mode,reason,evidence_ids_json,evidence_snapshot_json,occurred_at_ms FROM downloader_policy_transition";
@@ -1955,8 +1976,7 @@ pub fn replay_policy_history_from_store(
         runtime_epoch,
         1,
     )?;
-    let conn = db::open(paths)?;
-    db::migrate(&conn)?;
+    let conn = db::open_readonly(paths)?;
     let mut mode = DownloaderPolicyMode::Normal;
     let mut mode_path = vec![mode];
     let mut mode_path_truncated = false;
@@ -2089,8 +2109,7 @@ fn reset_policy_history_internal(
         .get_or_init(|| Mutex::new(()))
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
-    let mut conn = db::open(paths)?;
-    db::migrate(&conn)?;
+    let mut conn = db::write_context(paths)?;
     let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
     if let Some(generation) = mutation_generation {
         let continuation_active = tx
@@ -2367,6 +2386,10 @@ mod tests {
     fn paths() -> (TempDir, AppPaths) {
         let dir = tempfile::tempdir().expect("tempdir");
         let paths = AppPaths::new(dir.path().join("appdata"));
+        paths.ensure_dirs().expect("test app-data directories");
+        let conn = crate::db::open(&paths).expect("test database");
+        crate::db::migrate(&conn).expect("test schema");
+        drop(conn);
         (dir, paths)
     }
 

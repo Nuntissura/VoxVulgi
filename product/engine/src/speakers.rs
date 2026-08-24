@@ -28,8 +28,7 @@ pub fn list_item_speaker_settings(
     paths: &AppPaths,
     item_id: &str,
 ) -> Result<Vec<ItemSpeakerSetting>> {
-    let conn = db::open(paths)?;
-    db::migrate(&conn)?;
+    let conn = db::open_readonly(paths)?;
 
     let mut stmt = conn.prepare(
         r#"
@@ -146,8 +145,7 @@ pub fn upsert_item_speaker_setting(
         .or(tts_voice_profile_path);
     let tts_voice_profile_paths_json = encode_profile_paths(&tts_voice_profile_paths);
 
-    let conn = db::open(paths)?;
-    db::migrate(&conn)?;
+    let conn = db::write_context(paths)?;
 
     let now = now_ms();
     conn.execute(

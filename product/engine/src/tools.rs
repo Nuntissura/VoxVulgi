@@ -5,9 +5,23 @@ use crate::{pinned_dependency_manifest, vendor_patches};
 use crate::{EngineError, Result};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
-use std::io::{Read, Write};
+use std::io::Write;
 use std::path::{Path, PathBuf};
-use std::sync::OnceLock;
+use std::sync::{Condvar, Mutex, OnceLock};
+
+trait OwnedCommandOutputExt {
+    fn owned_output(&mut self) -> std::io::Result<std::process::Output>;
+}
+
+impl OwnedCommandOutputExt for std::process::Command {
+    fn owned_output(&mut self) -> std::io::Result<std::process::Output> {
+        crate::cmd::run_owned_output(
+            self,
+            std::time::Duration::from_secs(3600),
+            crate::jobs::external_command_cancel_requested,
+        )
+    }
+}
 
 const PYTHON_COMMAND_TIMEOUT_SECS: u64 = 30 * 60;
 // Hashed pack repairs can force-reinstall a full Torch-backed lock after a failed
@@ -102,7 +116,7 @@ fn download_url_to_file_with_curl(url: &str, output_path: &Path, label: &str) ->
         .arg("--output")
         .arg(output_path)
         .arg(url)
-        .output()
+        .owned_output()
         .map_err(|e| EngineError::InstallFailed(format!("could not launch curl: {e}")))?;
 
     if !output.status.success() {
@@ -138,7 +152,10 @@ fn download_url_to_file_with_curl(url: &str, output_path: &Path, label: &str) ->
 }
 
 fn tool_version_first_line(program: impl AsRef<std::ffi::OsStr>) -> Option<String> {
-    let output = crate::cmd::command(program).arg("-version").output().ok()?;
+    let output = crate::cmd::command(program)
+        .arg("-version")
+        .owned_output()
+        .ok()?;
     if !output.status.success() {
         return None;
     }
@@ -522,7 +539,7 @@ fn instagram_profile_enumerator_version(paths: &AppPaths) -> Option<String> {
     let python = python_venv_python_path(paths).ok()?;
     let output = crate::cmd::command(python)
         .args(["-c", "import instaloader; print(instaloader.__version__)"])
-        .output()
+        .owned_output()
         .ok()?;
     if !output.status.success() {
         return None;
@@ -715,6 +732,290 @@ struct ProviderNodeModulesProcessAttestation {
     verified_at_ms: i64,
 }
 
+#[derive(Debug, Clone, Serialize)]
+pub struct ProviderVerificationProgress {
+    pub schema_version: u32,
+    pub semantic_key: String,
+    pub source_identity: String,
+    pub phase: String,
+    pub state: String,
+    pub revision: u64,
+    pub files_completed: u64,
+    pub files_planned: Option<u64>,
+    pub bytes_completed: u64,
+    pub bytes_planned: Option<u64>,
+    pub scan_count: u64,
+    pub started_at_ms: i64,
+    pub updated_at_ms: i64,
+    pub finished_at_ms: Option<i64>,
+    pub error: Option<String>,
+    pub foreground_pressure_active: bool,
+    pub held_reason: Option<String>,
+    pub resource_policy: String,
+}
+
+const PROVIDER_VERIFICATION_FOREGROUND_LEASE_MS: i64 = 5_000;
+const PROVIDER_VERIFICATION_BACKGROUND_POLICY: &str =
+    "single_flight_32_file_yield_256_file_1ms_checkpoint";
+const PROVIDER_VERIFICATION_FOREGROUND_POLICY: &str =
+    "foreground_checkpoint_4_file_yield_16_file_2ms_sleep";
+
+#[derive(Debug, Clone)]
+struct ProviderVerificationForegroundLease {
+    generation: u64,
+    expires_at_ms: i64,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct ProviderVerificationForegroundDemand {
+    pub active: bool,
+    pub active_consumers: usize,
+    pub generation: u64,
+    pub expires_at_ms: Option<i64>,
+    pub held_reason: Option<String>,
+    pub resource_policy: String,
+}
+
+fn provider_verification_foreground_slots(
+) -> &'static Mutex<HashMap<PathBuf, HashMap<String, ProviderVerificationForegroundLease>>> {
+    static PRESSURE: OnceLock<
+        Mutex<HashMap<PathBuf, HashMap<String, ProviderVerificationForegroundLease>>>,
+    > = OnceLock::new();
+    PRESSURE.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+fn provider_verification_resource_policy(active: bool) -> &'static str {
+    if active {
+        PROVIDER_VERIFICATION_FOREGROUND_POLICY
+    } else {
+        PROVIDER_VERIFICATION_BACKGROUND_POLICY
+    }
+}
+
+fn provider_verification_foreground_demand_for_key(
+    server_dir: &Path,
+    generation: u64,
+) -> ProviderVerificationForegroundDemand {
+    let now = now_ms();
+    let mut slots = provider_verification_foreground_slots()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let Some(leases) = slots.get_mut(server_dir) else {
+        return ProviderVerificationForegroundDemand {
+            active: false,
+            active_consumers: 0,
+            generation,
+            expires_at_ms: None,
+            held_reason: None,
+            resource_policy: PROVIDER_VERIFICATION_BACKGROUND_POLICY.to_string(),
+        };
+    };
+    leases.retain(|_, lease| lease.expires_at_ms > now);
+    let active_consumers = leases.len();
+    let active = active_consumers > 0;
+    let expires_at_ms = leases.values().map(|lease| lease.expires_at_ms).max();
+    if !active {
+        slots.remove(server_dir);
+    }
+    ProviderVerificationForegroundDemand {
+        active,
+        active_consumers,
+        generation,
+        expires_at_ms,
+        held_reason: active.then(|| "foreground_navigation_job_or_probe_demand".to_string()),
+        resource_policy: provider_verification_resource_policy(active).to_string(),
+    }
+}
+
+/// Register or clear a short foreground-demand lease for navigation, job start, or probes.
+/// The lease expires automatically if the WebView disappears, and stale clears cannot
+/// release a newer generation. This changes only provider-verification checkpoints.
+pub fn set_youtube_po_provider_verification_foreground_demand(
+    paths: &AppPaths,
+    consumer_id: &str,
+    generation: u64,
+    active: bool,
+) -> ProviderVerificationForegroundDemand {
+    let server_dir = paths.youtube_po_provider_server_dir();
+    let now = now_ms();
+    let consumer_id = consumer_id.trim();
+    if !consumer_id.is_empty() {
+        let mut slots = provider_verification_foreground_slots()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let leases = slots.entry(server_dir.clone()).or_default();
+        leases.retain(|_, lease| lease.expires_at_ms > now);
+        let current_generation = leases
+            .get(consumer_id)
+            .map(|lease| lease.generation)
+            .unwrap_or(0);
+        if generation >= current_generation {
+            if active {
+                leases.insert(
+                    consumer_id.to_string(),
+                    ProviderVerificationForegroundLease {
+                        generation,
+                        expires_at_ms: now
+                            .saturating_add(PROVIDER_VERIFICATION_FOREGROUND_LEASE_MS),
+                    },
+                );
+            } else {
+                leases.remove(consumer_id);
+            }
+        }
+        if leases.is_empty() {
+            slots.remove(&server_dir);
+        }
+    }
+    provider_verification_foreground_demand_for_key(&server_dir, generation)
+}
+
+fn provider_verification_progress_slots(
+) -> &'static Mutex<HashMap<PathBuf, ProviderVerificationProgress>> {
+    static PROGRESS: OnceLock<Mutex<HashMap<PathBuf, ProviderVerificationProgress>>> =
+        OnceLock::new();
+    PROGRESS.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+pub fn youtube_po_provider_verification_progress(
+    paths: &AppPaths,
+) -> Option<ProviderVerificationProgress> {
+    provider_verification_progress_slots()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .get(&paths.youtube_po_provider_server_dir())
+        .cloned()
+}
+
+fn begin_provider_verification_progress(paths: &AppPaths) {
+    let now = now_ms();
+    let server_dir = paths.youtube_po_provider_server_dir();
+    let previous = provider_verification_progress_slots()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .get(&server_dir)
+        .cloned();
+    let previous_revision = previous
+        .as_ref()
+        .map(|progress| progress.revision)
+        .unwrap_or(0);
+    let scan_count = previous
+        .as_ref()
+        .map(|progress| progress.scan_count)
+        .unwrap_or(0);
+    let installed_identity = load_provider_installed_identity(paths).ok().flatten();
+    let source_identity = format!(
+        "generation={}|root={}|directory={}|commit={}",
+        provider_install_generation(),
+        paths.youtube_po_provider_dir().to_string_lossy(),
+        provider_directory_identity(&paths.youtube_po_provider_dir())
+            .unwrap_or_else(|_| "unavailable".to_string()),
+        installed_identity
+            .as_ref()
+            .map(|identity| identity.commit_nonce.as_str())
+            .unwrap_or("unbound"),
+    );
+    provider_verification_progress_slots()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .insert(
+            server_dir,
+            ProviderVerificationProgress {
+                schema_version: 1,
+                semantic_key: "youtube_po_provider_tree_verify".to_string(),
+                source_identity,
+                phase: "provider_manifest_load".to_string(),
+                state: "running".to_string(),
+                revision: previous_revision.saturating_add(1),
+                files_completed: 0,
+                files_planned: None,
+                bytes_completed: 0,
+                bytes_planned: None,
+                scan_count,
+                started_at_ms: now,
+                updated_at_ms: now,
+                finished_at_ms: None,
+                error: None,
+                foreground_pressure_active: false,
+                held_reason: None,
+                resource_policy: PROVIDER_VERIFICATION_BACKGROUND_POLICY.to_string(),
+            },
+        );
+}
+
+fn mark_provider_verification_scan_started(server_dir: &Path) {
+    let mut slots = provider_verification_progress_slots()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    if let Some(progress) = slots.get_mut(server_dir) {
+        progress.scan_count = progress.scan_count.saturating_add(1);
+        progress.revision = progress.revision.saturating_add(1);
+        progress.updated_at_ms = now_ms();
+    }
+}
+
+fn update_provider_verification_progress(
+    server_dir: &Path,
+    phase: &str,
+    files_completed: u64,
+    bytes_completed: u64,
+) {
+    let demand = provider_verification_foreground_demand_for_key(server_dir, 0);
+    let mut slots = provider_verification_progress_slots()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    if let Some(progress) = slots.get_mut(server_dir) {
+        progress.phase = phase.to_string();
+        progress.files_completed = files_completed;
+        progress.bytes_completed = bytes_completed;
+        progress.updated_at_ms = now_ms();
+        progress.revision = progress.revision.saturating_add(1);
+        progress.foreground_pressure_active = demand.active;
+        progress.held_reason = demand.held_reason;
+        progress.resource_policy = demand.resource_policy;
+    }
+}
+
+fn finish_provider_verification_progress(paths: &AppPaths, error: Option<String>) {
+    let server_dir = paths.youtube_po_provider_server_dir();
+    let installed_identity = load_provider_installed_identity(paths).ok().flatten();
+    let terminal_source_identity = format!(
+        "generation={}|root={}|directory={}|commit={}",
+        provider_install_generation(),
+        paths.youtube_po_provider_dir().to_string_lossy(),
+        provider_directory_identity(&paths.youtube_po_provider_dir())
+            .unwrap_or_else(|_| "unavailable".to_string()),
+        installed_identity
+            .as_ref()
+            .map(|identity| identity.commit_nonce.as_str())
+            .unwrap_or("unbound"),
+    );
+    let mut slots = provider_verification_progress_slots()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    if let Some(progress) = slots.get_mut(&server_dir) {
+        let now = now_ms();
+        progress.phase = "provider_attestation_publish".to_string();
+        let succeeded = error.is_none();
+        progress.source_identity = terminal_source_identity;
+        progress.state = if succeeded { "ready" } else { "error" }.to_string();
+        progress.error = error;
+        progress.updated_at_ms = now;
+        progress.finished_at_ms = Some(now);
+        // A single-pass tree walk does not know its final totals before it finishes. Only a
+        // successful terminal scan may promote the observed totals to exact planned totals. An
+        // interrupted or early-failing scan must remain visibly incomplete/unknown.
+        if succeeded {
+            progress.files_planned = Some(progress.files_completed);
+            progress.bytes_planned = Some(progress.bytes_completed);
+        }
+        progress.revision = progress.revision.saturating_add(1);
+        progress.foreground_pressure_active = false;
+        progress.held_reason = None;
+        progress.resource_policy = "verification_complete".to_string();
+    }
+}
+
 fn provider_node_modules_process_attestations(
 ) -> &'static std::sync::Mutex<HashMap<PathBuf, ProviderNodeModulesProcessAttestation>> {
     static ATTESTATIONS: std::sync::OnceLock<
@@ -728,6 +1029,13 @@ fn provider_node_modules_process_invalidations(
     static INVALIDATIONS: std::sync::OnceLock<std::sync::Mutex<HashMap<PathBuf, String>>> =
         std::sync::OnceLock::new();
     INVALIDATIONS.get_or_init(|| std::sync::Mutex::new(HashMap::new()))
+}
+
+fn provider_verification_terminal_errors(
+) -> &'static std::sync::Mutex<HashMap<PathBuf, (String, String)>> {
+    static ERRORS: std::sync::OnceLock<std::sync::Mutex<HashMap<PathBuf, (String, String)>>> =
+        std::sync::OnceLock::new();
+    ERRORS.get_or_init(|| std::sync::Mutex::new(HashMap::new()))
 }
 
 fn provider_node_modules_integrity_receipt_path(server_dir: &Path) -> PathBuf {
@@ -851,15 +1159,120 @@ impl Drop for ProviderIntegrityVerificationGuard {
 pub fn verify_youtube_po_provider_node_modules(
     paths: &AppPaths,
 ) -> Result<YoutubePoProviderInstallStatus> {
-    let _lifecycle_guard = youtube_po_provider_lifecycle_lock()
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner);
     paths.ensure_dirs()?;
-    let _interprocess_guard = acquire_youtube_po_provider_install_interprocess_lock(
+    let server_dir = paths.youtube_po_provider_server_dir();
+    let lifecycle = youtube_po_provider_lifecycle_lock();
+    let (_lifecycle_guard, waited_for_active_flight) = match lifecycle.try_lock() {
+        Ok(guard) => (guard, false),
+        Err(std::sync::TryLockError::WouldBlock) => (
+            lifecycle
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner),
+            true,
+        ),
+        Err(std::sync::TryLockError::Poisoned(error)) => (error.into_inner(), false),
+    };
+    verify_youtube_po_provider_node_modules_single_flight_locked(
+        paths,
+        &server_dir,
+        waited_for_active_flight,
+    )
+}
+
+fn verify_youtube_po_provider_node_modules_single_flight_locked(
+    paths: &AppPaths,
+    server_dir: &Path,
+    waited_for_active_flight: bool,
+) -> Result<YoutubePoProviderInstallStatus> {
+    match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        verify_youtube_po_provider_node_modules_single_flight_inner(
+            paths,
+            server_dir,
+            waited_for_active_flight,
+        )
+    })) {
+        Ok(result) => result,
+        Err(_) => {
+            let shared_error = remember_provider_verification_terminal_error(
+                server_dir,
+                provider_install_generation(),
+                EngineError::InstallFailed(
+                    "provider verification worker panicked before producing a terminal receipt"
+                        .to_string(),
+                ),
+            );
+            finish_provider_verification_progress(paths, Some(shared_error.to_string()));
+            Err(shared_error)
+        }
+    }
+}
+
+fn verify_youtube_po_provider_node_modules_single_flight_inner(
+    paths: &AppPaths,
+    server_dir: &Path,
+    waited_for_active_flight: bool,
+) -> Result<YoutubePoProviderInstallStatus> {
+    let generation = provider_install_generation();
+    if waited_for_active_flight {
+        if provider_node_modules_process_attestation(server_dir).is_some() {
+            // The producer owns the canonical progress receipt. A waiter consumes the same
+            // successful terminal without publishing a synthetic second scan.
+            return Ok(youtube_po_provider_install_status(paths));
+        }
+        if let Some((terminal_generation, error)) = provider_verification_terminal_errors()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .get(server_dir)
+            .cloned()
+        {
+            if terminal_generation == generation {
+                return Err(EngineError::InstallFailed(error));
+            }
+        }
+    }
+    provider_verification_terminal_errors()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .remove(server_dir);
+    let _interprocess_guard = match acquire_youtube_po_provider_install_interprocess_lock(
         paths,
         YOUTUBE_PO_PROVIDER_INSTALL_LOCK_TIMEOUT_MS,
-    )?;
-    verify_youtube_po_provider_node_modules_locked(paths)
+    ) {
+        Ok(guard) => guard,
+        Err(error) => {
+            return Err(remember_provider_verification_terminal_error(
+                server_dir, generation, error,
+            ));
+        }
+    };
+    match verify_youtube_po_provider_node_modules_locked(paths) {
+        Ok(status) => Ok(status),
+        Err(error) => Err(remember_provider_verification_terminal_error(
+            server_dir, generation, error,
+        )),
+    }
+}
+
+#[cfg(test)]
+fn provider_verification_injected_panic() -> &'static std::sync::atomic::AtomicBool {
+    static PANIC_ONCE: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+    &PANIC_ONCE
+}
+
+fn remember_provider_verification_terminal_error(
+    server_dir: &Path,
+    generation: String,
+    error: EngineError,
+) -> EngineError {
+    let shared_error = match error {
+        EngineError::InstallFailed(message) => message,
+        other => other.to_string(),
+    };
+    provider_verification_terminal_errors()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .insert(server_dir.to_path_buf(), (generation, shared_error.clone()));
+    EngineError::InstallFailed(shared_error)
 }
 
 fn require_exact_committed_provider_identity_lineage(
@@ -871,8 +1284,7 @@ fn require_exact_committed_provider_identity_lineage(
             "provider installed identity is not bound to v48 committed lineage".to_string(),
         ));
     }
-    let conn = crate::db::open(paths)?;
-    crate::db::migrate(&conn)?;
+    let conn = crate::db::open_readonly(paths)?;
     let bound: i64 = conn.query_row(
         "SELECT COUNT(*) FROM provider_install_lineage lineage
          WHERE lineage.attempt_id=?1 AND lineage.commit_nonce=?2
@@ -922,7 +1334,10 @@ fn authenticate_stored_managed_provider_identity_at(
     )
 }
 
-fn authenticate_authoritative_installed_provider_identity(paths: &AppPaths) -> Result<()> {
+fn authenticate_authoritative_installed_provider_identity(
+    paths: &AppPaths,
+    progress_key: Option<&Path>,
+) -> Result<()> {
     let identity = load_provider_installed_identity(paths)?.ok_or_else(|| {
         EngineError::InstallFailed(
             "provider payload has no authoritative committed complete-tree identity".to_string(),
@@ -957,27 +1372,54 @@ fn authenticate_authoritative_installed_provider_identity(paths: &AppPaths) -> R
         canonical_provider_node_tree_sha256_hex,
         "Node",
     )?;
-    verify_published_directory_lineage(
-        &paths.youtube_po_provider_dir(),
-        &identity.provider_directory_identity,
-        &identity.provider_tree_sha256,
-        canonical_provider_application_tree_sha256_hex,
-        "provider",
-    )
+    let provider_root = paths.youtube_po_provider_dir();
+    let actual_directory_identity = provider_directory_identity(&provider_root)?;
+    if actual_directory_identity != identity.provider_directory_identity {
+        return Err(EngineError::InstallFailed(
+            "provider published directory is a different filesystem object than the sealed staging directory".to_string(),
+        ));
+    }
+    let actual_tree = match progress_key {
+        Some(key) => {
+            canonical_provider_application_tree_sha256_hex_with_progress(&provider_root, key)
+        }
+        None => canonical_provider_application_tree_sha256_hex(&provider_root),
+    }
+    .ok_or_else(|| {
+        EngineError::InstallFailed(
+            "provider complete published tree could not be authenticated".to_string(),
+        )
+    })?;
+    if !actual_tree.eq_ignore_ascii_case(&identity.provider_tree_sha256) {
+        return Err(EngineError::HashMismatch {
+            path: provider_root,
+            expected: identity.provider_tree_sha256,
+            actual: actual_tree,
+        });
+    }
+    Ok(())
 }
 
 fn authenticate_embedded_complete_provider_payload(
     paths: &AppPaths,
 ) -> Result<ProviderInstalledIdentity> {
+    authenticate_embedded_complete_provider_payload_with_progress(paths, None)
+}
+
+fn authenticate_embedded_complete_provider_payload_with_progress(
+    paths: &AppPaths,
+    progress_key: Option<&Path>,
+) -> Result<ProviderInstalledIdentity> {
     authenticate_published_node_payload(paths)?;
     authenticate_published_provider_payload(paths)?;
     let manifest = pinned_dependency_manifest::manifest();
-    authenticate_complete_provider_trees_against(
+    authenticate_complete_provider_trees_against_with_progress(
         paths,
         &manifest.node_windows.complete_tree_sha256_hex,
         &manifest
             .youtube_po_provider
             .application_complete_tree_sha256_hex,
+        progress_key,
     )
 }
 
@@ -985,6 +1427,20 @@ fn authenticate_complete_provider_trees_against(
     paths: &AppPaths,
     expected_node_tree_sha256: &str,
     expected_provider_tree_sha256: &str,
+) -> Result<ProviderInstalledIdentity> {
+    authenticate_complete_provider_trees_against_with_progress(
+        paths,
+        expected_node_tree_sha256,
+        expected_provider_tree_sha256,
+        None,
+    )
+}
+
+fn authenticate_complete_provider_trees_against_with_progress(
+    paths: &AppPaths,
+    expected_node_tree_sha256: &str,
+    expected_provider_tree_sha256: &str,
+    progress_key: Option<&Path>,
 ) -> Result<ProviderInstalledIdentity> {
     let node_tree_sha256 = canonical_provider_node_tree_sha256_hex(&paths.node_runtime_dir())
         .ok_or_else(|| {
@@ -999,14 +1455,18 @@ fn authenticate_complete_provider_trees_against(
             actual: node_tree_sha256,
         });
     }
-    let provider_tree_sha256 =
-        canonical_provider_application_tree_sha256_hex(&paths.youtube_po_provider_dir())
-            .ok_or_else(|| {
-                EngineError::InstallFailed(
-                    "offline provider application tree could not be completely authenticated"
-                        .to_string(),
-                )
-            })?;
+    let provider_root = paths.youtube_po_provider_dir();
+    let provider_tree_sha256 = match progress_key {
+        Some(key) => {
+            canonical_provider_application_tree_sha256_hex_with_progress(&provider_root, key)
+        }
+        None => canonical_provider_application_tree_sha256_hex(&provider_root),
+    }
+    .ok_or_else(|| {
+        EngineError::InstallFailed(
+            "offline provider application tree could not be completely authenticated".to_string(),
+        )
+    })?;
     if !provider_tree_sha256.eq_ignore_ascii_case(expected_provider_tree_sha256) {
         return Err(EngineError::HashMismatch {
             path: paths.youtube_po_provider_dir(),
@@ -1049,7 +1509,15 @@ pub fn write_youtube_po_provider_portable_attestation(paths: &AppPaths) -> Resul
 }
 
 fn adopt_embedded_complete_provider_payload(paths: &AppPaths) -> Result<()> {
-    let verified = authenticate_embedded_complete_provider_payload(paths)?;
+    adopt_embedded_complete_provider_payload_with_progress(paths, None)
+}
+
+fn adopt_embedded_complete_provider_payload_with_progress(
+    paths: &AppPaths,
+    progress_key: Option<&Path>,
+) -> Result<()> {
+    let verified =
+        authenticate_embedded_complete_provider_payload_with_progress(paths, progress_key)?;
     commit_adopted_provider_identity(paths, verified)
 }
 
@@ -1057,6 +1525,8 @@ fn commit_adopted_provider_identity(
     paths: &AppPaths,
     verified: ProviderInstalledIdentity,
 ) -> Result<()> {
+    #[cfg(test)]
+    crate::db::ensure_schema(paths)?;
     if let Some(existing) = load_provider_installed_identity(paths)? {
         let legacy_unbound =
             existing.lineage_attempt_id.is_empty() && existing.commit_nonce.is_empty();
@@ -1111,8 +1581,7 @@ fn commit_adopted_provider_identity(
             "could not establish offline provider adoption process identity".to_string(),
         )
     })?;
-    let mut conn = crate::db::open(paths)?;
-    crate::db::migrate(&conn)?;
+    let mut conn = crate::db::write_context(paths)?;
     let tx = conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
     let owners: i64 = tx.query_row("SELECT COUNT(*) FROM provider_install_owner", [], |row| {
         row.get(0)
@@ -1258,7 +1727,8 @@ fn reconcile_provider_lineage_before_verification(paths: &AppPaths) -> Result<()
             "provider install lineage was not authoritatively cleared".to_string(),
         ));
     }
-    match authenticate_authoritative_installed_provider_identity(paths) {
+    let progress_key = paths.youtube_po_provider_server_dir();
+    match authenticate_authoritative_installed_provider_identity(paths, Some(&progress_key)) {
         Ok(()) => Ok(()),
         Err(error) => {
             let legacy_or_absent =
@@ -1268,8 +1738,10 @@ fn reconcile_provider_lineage_before_verification(paths: &AppPaths) -> Result<()
             if !legacy_or_absent {
                 return Err(error);
             }
-            adopt_embedded_complete_provider_payload(paths)?;
-            authenticate_authoritative_installed_provider_identity(paths)
+            // The adoption transaction commits the exact complete-tree identity authenticated by
+            // the single progress-aware pass above. Rewalking the same provider bytes here would
+            // make first-run verification two full scans and invalidate the producer receipt.
+            adopt_embedded_complete_provider_payload_with_progress(paths, Some(&progress_key))
         }
     }
 }
@@ -1277,8 +1749,27 @@ fn reconcile_provider_lineage_before_verification(paths: &AppPaths) -> Result<()
 fn verify_youtube_po_provider_node_modules_locked(
     paths: &AppPaths,
 ) -> Result<YoutubePoProviderInstallStatus> {
+    begin_provider_verification_progress(paths);
+    #[cfg(test)]
+    if provider_verification_injected_panic().swap(false, std::sync::atomic::Ordering::SeqCst) {
+        mark_provider_verification_scan_started(&paths.youtube_po_provider_server_dir());
+        std::thread::sleep(std::time::Duration::from_millis(100));
+        panic!("injected provider verification panic after progress started");
+    }
+    let result = verify_youtube_po_provider_node_modules_inner(paths);
+    finish_provider_verification_progress(
+        paths,
+        result.as_ref().err().map(std::string::ToString::to_string),
+    );
+    result
+}
+
+fn verify_youtube_po_provider_node_modules_inner(
+    paths: &AppPaths,
+) -> Result<YoutubePoProviderInstallStatus> {
     let server_dir = paths.youtube_po_provider_server_dir();
     clear_provider_node_modules_process_attestation(&server_dir);
+    update_provider_verification_progress(&server_dir, "provider_manifest_load", 0, 0);
     if let Err(error) = reconcile_provider_lineage_before_verification(paths) {
         let _ = std::fs::remove_file(provider_node_modules_integrity_receipt_path(&server_dir));
         provider_node_modules_process_invalidations()
@@ -1301,22 +1792,13 @@ fn verify_youtube_po_provider_node_modules_locked(
         ));
     }
     let _guard = ProviderIntegrityVerificationGuard;
-    let node_modules_dir = server_dir.join("node_modules");
     let expected = &pinned_dependency_manifest::manifest()
         .youtube_po_provider
         .node_modules_tree_sha256_hex;
-    let actual = match authenticate_provider_node_modules_tree(&node_modules_dir, expected) {
-        Ok(actual) => actual,
-        Err(error) => {
-            let _ = std::fs::remove_file(provider_node_modules_integrity_receipt_path(&server_dir));
-            provider_node_modules_process_invalidations()
-                .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner)
-                .insert(server_dir, error.to_string());
-            return Err(error);
-        }
-    };
-    attest_provider_node_modules_tree(&server_dir, &actual)?;
+    // The complete provider-tree authentication above includes every server/node_modules byte.
+    // Rewalking that child tree would double the dominant startup I/O. A successful match to the
+    // pinned complete-tree digest therefore publishes its pinned child digest directly.
+    attest_provider_node_modules_tree(&server_dir, expected)?;
     Ok(youtube_po_provider_install_status(paths))
 }
 
@@ -1391,6 +1873,18 @@ fn canonical_directory_tree_sha256_hex_with_exclusions(
     root: &Path,
     exact_excluded_files: &[&str],
 ) -> Option<String> {
+    canonical_directory_tree_sha256_hex_with_exclusions_and_progress(
+        root,
+        exact_excluded_files,
+        None,
+    )
+}
+
+fn canonical_directory_tree_sha256_hex_with_exclusions_and_progress(
+    root: &Path,
+    exact_excluded_files: &[&str],
+    mut progress: Option<&mut dyn FnMut(u64, u64)>,
+) -> Option<String> {
     use sha2::Digest;
     const MAX_FILES: usize = 12_000;
     const MAX_TOTAL_BYTES: u64 = 512 * 1024 * 1024;
@@ -1438,6 +1932,18 @@ fn canonical_directory_tree_sha256_hex_with_exclusions(
                 return None;
             }
             files.insert(relative, file_sha256_hex(&path)?);
+            let files_completed = files.len() as u64;
+            if let Some(callback) = progress.as_deref_mut() {
+                callback(files_completed, total_bytes);
+            }
+            // Bound continuous filesystem/AV pressure without weakening complete-byte hashing.
+            // The current process remains interactive and the single-flight retains ownership.
+            if files_completed % 32 == 0 {
+                std::thread::yield_now();
+            }
+            if files_completed % 256 == 0 {
+                std::thread::sleep(std::time::Duration::from_millis(1));
+            }
         }
     }
     if files.is_empty() {
@@ -1477,12 +1983,91 @@ fn canonical_provider_application_tree_sha256_hex(root: &Path) -> Option<String>
     canonical_directory_tree_sha256_hex_with_exclusions(root, PROVIDER_APPLICATION_TREE_EXCLUSIONS)
 }
 
+fn canonical_provider_application_tree_sha256_hex_with_progress(
+    root: &Path,
+    progress_key: &Path,
+) -> Option<String> {
+    mark_provider_verification_scan_started(progress_key);
+    let mut last_revision_files = 0_u64;
+    let mut demand = provider_verification_foreground_demand_for_key(progress_key, 0);
+    let mut observer = |files_completed: u64, bytes_completed: u64| {
+        if files_completed == 1 || files_completed % 4 == 0 {
+            demand = provider_verification_foreground_demand_for_key(progress_key, 0);
+        }
+        if files_completed == 1 || files_completed.saturating_sub(last_revision_files) >= 16 {
+            update_provider_verification_progress(
+                progress_key,
+                "provider_tree_verify",
+                files_completed,
+                bytes_completed,
+            );
+            last_revision_files = files_completed;
+        }
+        if demand.active {
+            if files_completed % 4 == 0 {
+                std::thread::yield_now();
+            }
+            if files_completed % 16 == 0 {
+                std::thread::sleep(std::time::Duration::from_millis(2));
+            }
+        }
+    };
+    canonical_directory_tree_sha256_hex_with_exclusions_and_progress(
+        root,
+        PROVIDER_APPLICATION_TREE_EXCLUSIONS,
+        Some(&mut observer),
+    )
+}
+
 fn authenticate_provider_node_modules_tree(root: &Path, expected: &str) -> Result<String> {
-    let actual = canonical_directory_tree_sha256_hex(root).ok_or_else(|| {
-        EngineError::InstallFailed(
-            "installed provider production dependency tree could not be authenticated".to_string(),
-        )
-    })?;
+    authenticate_provider_node_modules_tree_impl(root, expected, None)
+}
+
+fn authenticate_provider_node_modules_tree_with_progress(
+    root: &Path,
+    expected: &str,
+    progress_key: &Path,
+) -> Result<String> {
+    let mut last_revision_files = 0_u64;
+    let mut demand = provider_verification_foreground_demand_for_key(progress_key, 0);
+    let mut observer = |files_completed: u64, bytes_completed: u64| {
+        if files_completed == 1 || files_completed % 4 == 0 {
+            demand = provider_verification_foreground_demand_for_key(progress_key, 0);
+        }
+        if files_completed == 1 || files_completed.saturating_sub(last_revision_files) >= 16 {
+            update_provider_verification_progress(
+                progress_key,
+                "provider_tree_verify",
+                files_completed,
+                bytes_completed,
+            );
+            last_revision_files = files_completed;
+        }
+        if demand.active {
+            if files_completed % 4 == 0 {
+                std::thread::yield_now();
+            }
+            if files_completed % 16 == 0 {
+                std::thread::sleep(std::time::Duration::from_millis(2));
+            }
+        }
+    };
+    authenticate_provider_node_modules_tree_impl(root, expected, Some(&mut observer))
+}
+
+fn authenticate_provider_node_modules_tree_impl(
+    root: &Path,
+    expected: &str,
+    progress: Option<&mut dyn FnMut(u64, u64)>,
+) -> Result<String> {
+    let actual =
+        canonical_directory_tree_sha256_hex_with_exclusions_and_progress(root, &[], progress)
+            .ok_or_else(|| {
+                EngineError::InstallFailed(
+                    "installed provider production dependency tree could not be authenticated"
+                        .to_string(),
+                )
+            })?;
     if !actual.eq_ignore_ascii_case(expected) {
         #[cfg(test)]
         if let Some(capture_root) =
@@ -1934,7 +2519,7 @@ fn run_provider_npm(
             command.env_remove(name);
         }
     }
-    command.output().map_err(|error| {
+    command.owned_output().map_err(|error| {
         EngineError::InstallFailed(format!("provider npm command failed to start: {error}"))
     })
 }
@@ -2315,8 +2900,7 @@ fn claim_provider_install_owner(
         ));
     }
     let stage_root = validated_provider_stage_root(paths, attempt_id, stage_root)?;
-    let mut conn = crate::db::open(paths)?;
-    crate::db::migrate(&conn)?;
+    let mut conn = crate::db::write_context(paths)?;
     let tx = conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
     let owner = match tx.query_row(
         "SELECT attempt_id,owner_pid,owner_process_identity,commit_nonce FROM provider_install_owner WHERE singleton=1",
@@ -2423,8 +3007,7 @@ fn persist_provider_install_lineage(
         ));
     }
     let stage_root = validated_provider_stage_root(paths, attempt_id, stage_root)?;
-    let mut conn = crate::db::open(paths)?;
-    crate::db::migrate(&conn)?;
+    let mut conn = crate::db::write_context(paths)?;
     let tx = conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
     let owner = match tx.query_row(
         "SELECT attempt_id,commit_nonce FROM provider_install_owner WHERE singleton=1",
@@ -2537,8 +3120,7 @@ fn seal_provider_install_lineage(
     provider_tree_sha256: &str,
 ) -> Result<()> {
     let stage_root = validated_provider_stage_root(paths, attempt_id, stage_root)?;
-    let mut conn = crate::db::open(paths)?;
-    crate::db::migrate(&conn)?;
+    let mut conn = crate::db::write_context(paths)?;
     let tx = conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
     let changed = tx.execute(
         "UPDATE provider_install_lineage
@@ -2594,8 +3176,7 @@ where
     W: FnOnce(&AppPaths, &str, &Path) -> Result<()>,
 {
     let stage_root = validated_provider_stage_root(paths, attempt_id, stage_root)?;
-    let mut conn = crate::db::open(paths)?;
-    crate::db::migrate(&conn)?;
+    let mut conn = crate::db::write_context(paths)?;
     let tx = conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
     let identity = tx.query_row(
         "SELECT node_directory_identity,provider_directory_identity,node_tree_sha256,provider_tree_sha256,commit_nonce
@@ -2671,8 +3252,7 @@ where
 }
 
 fn load_provider_installed_identity(paths: &AppPaths) -> Result<Option<ProviderInstalledIdentity>> {
-    let conn = crate::db::open(paths)?;
-    crate::db::migrate(&conn)?;
+    let conn = crate::db::open_readonly(paths)?;
     match conn.query_row(
         "SELECT lineage_attempt_id,commit_nonce,install_generation,
                 node_directory_identity,provider_directory_identity,
@@ -2809,8 +3389,7 @@ fn restore_governed_provider_replacement_if_present(
 }
 
 fn load_provider_install_lineage(paths: &AppPaths) -> Result<Option<ProviderInstallLineage>> {
-    let conn = crate::db::open(paths)?;
-    crate::db::migrate(&conn)?;
+    let conn = crate::db::open_readonly(paths)?;
     let unresolved_lineage_count: i64 = conn.query_row(
         "SELECT COUNT(*) FROM provider_install_lineage lineage
          WHERE NOT EXISTS(
@@ -2866,8 +3445,7 @@ fn load_provider_install_lineage(paths: &AppPaths) -> Result<Option<ProviderInst
 }
 
 fn delete_provider_install_lineage(paths: &AppPaths, attempt_id: &str) -> Result<()> {
-    let conn = crate::db::open(paths)?;
-    crate::db::migrate(&conn)?;
+    let conn = crate::db::write_context(paths)?;
     conn.execute(
         "DELETE FROM provider_install_lineage WHERE attempt_id=?1",
         [attempt_id],
@@ -2876,8 +3454,7 @@ fn delete_provider_install_lineage(paths: &AppPaths, attempt_id: &str) -> Result
 }
 
 fn release_provider_install_owner(paths: &AppPaths, attempt_id: &str) -> Result<()> {
-    let mut conn = crate::db::open(paths)?;
-    crate::db::migrate(&conn)?;
+    let mut conn = crate::db::write_context(paths)?;
     let tx = conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
     let changed = tx.execute(
         "DELETE FROM provider_install_owner
@@ -2899,8 +3476,7 @@ fn release_provider_install_owner(paths: &AppPaths, attempt_id: &str) -> Result<
 }
 
 fn abort_prepublication_provider_install(paths: &AppPaths, attempt_id: &str) -> Result<()> {
-    let mut conn = crate::db::open(paths)?;
-    crate::db::migrate(&conn)?;
+    let mut conn = crate::db::write_context(paths)?;
     let tx = conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
     let state = match tx.query_row(
         "SELECT lineage.stage_root,lineage.phase,owner.owner_pid,owner.owner_process_identity
@@ -2942,6 +3518,7 @@ fn abort_prepublication_provider_install(paths: &AppPaths, attempt_id: &str) -> 
         [attempt_id],
     )?;
     tx.commit()?;
+    drop(conn);
     let _ = std::fs::remove_file(provider_install_attempt_receipt_path(paths));
     let stage_root = PathBuf::from(stage_root);
     if stage_root.exists() {
@@ -2990,8 +3567,7 @@ fn abort_owned_provider_install_after_complete_rollback(
         "rolled-back provider",
     )?;
 
-    let mut conn = crate::db::open(paths)?;
-    crate::db::migrate(&conn)?;
+    let mut conn = crate::db::write_context(paths)?;
     let tx = conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
     let owner_deleted = tx.execute(
         "DELETE FROM provider_install_owner
@@ -3009,6 +3585,7 @@ fn abort_owned_provider_install_after_complete_rollback(
         ));
     }
     tx.commit()?;
+    drop(conn);
     let _ = std::fs::remove_file(provider_install_attempt_receipt_path(paths));
     std::fs::remove_dir_all(stage_root)?;
     Ok(())
@@ -3835,7 +4412,7 @@ pub fn install_youtube_po_provider(paths: &AppPaths) -> Result<YoutubePoProvider
                 .join("tsc.cmd"),
         )
         .current_dir(&server_stage)
-        .output()
+        .owned_output()
         .map_err(|error| {
             EngineError::InstallFailed(format!(
                 "provider TypeScript compiler failed to start: {error}"
@@ -3915,7 +4492,7 @@ pub fn install_youtube_po_provider(paths: &AppPaths) -> Result<YoutubePoProvider
                 "const c=require('canvas'); if(typeof c.createCanvas!=='function') process.exit(2); c.createCanvas(1,1).toBuffer();",
             ])
             .current_dir(&server_stage)
-            .output()
+            .owned_output()
             .map_err(|error| {
                 EngineError::InstallFailed(format!(
                     "provider canvas smoke probe failed to start: {error}"
@@ -3928,7 +4505,7 @@ pub fn install_youtube_po_provider(paths: &AppPaths) -> Result<YoutubePoProvider
             .arg(server_stage.join("build").join("generate_once.js"))
             .arg("--version")
             .current_dir(&server_stage)
-            .output()
+            .owned_output()
             .map_err(|error| {
                 EngineError::InstallFailed(format!(
                     "provider version probe failed to start: {error}"
@@ -4106,6 +4683,7 @@ pub struct YoutubePoProviderRuntimeStatus {
 
 struct ManagedYoutubePoProvider {
     child: std::process::Child,
+    server_dir: PathBuf,
     port: u16,
     provider_version: String,
     install_identity: String,
@@ -4314,9 +4892,12 @@ pub fn youtube_po_provider_runtime_status(paths: &AppPaths) -> YoutubePoProvider
         let health_version = running
             .then(|| ping_youtube_po_provider(managed.port))
             .flatten();
-        let healthy = health_version.as_deref() == Some(managed.provider_version.as_str())
+        let healthy = managed.server_dir == paths.youtube_po_provider_server_dir()
+            && health_version.as_deref() == Some(managed.provider_version.as_str())
             && managed.install_identity == identity;
-        clear = !running || managed.install_identity != identity;
+        clear = !running
+            || managed.server_dir != paths.youtube_po_provider_server_dir()
+            || managed.install_identity != identity;
         YoutubePoProviderRuntimeStatus {
             installed: installed.installed,
             running,
@@ -4352,37 +4933,60 @@ pub fn youtube_po_provider_runtime_status(paths: &AppPaths) -> YoutubePoProvider
 }
 
 pub fn ensure_youtube_po_provider(paths: &AppPaths) -> Result<YoutubePoProviderRuntimeStatus> {
-    let _lifecycle_guard = youtube_po_provider_lifecycle_lock()
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner);
     paths.ensure_dirs()?;
-    let _interprocess_guard = acquire_youtube_po_provider_install_interprocess_lock(
-        paths,
-        YOUTUBE_PO_PROVIDER_INSTALL_LOCK_TIMEOUT_MS,
-    )?;
+    let server_dir = paths.youtube_po_provider_server_dir();
+    let lifecycle = youtube_po_provider_lifecycle_lock();
+    let (_lifecycle_guard, waited_for_active_flight) = match lifecycle.try_lock() {
+        Ok(guard) => (guard, false),
+        Err(std::sync::TryLockError::WouldBlock) => (
+            lifecycle
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner),
+            true,
+        ),
+        Err(std::sync::TryLockError::Poisoned(error)) => (error.into_inner(), false),
+    };
     if provider_node_modules_integrity_verifying().load(std::sync::atomic::Ordering::Acquire) {
         return Err(EngineError::InstallFailed(
             "provider dependency integrity verification is still in progress".to_string(),
         ));
     }
-    // Every launch/relaunch boundary re-authenticates the final installed dependency bytes.
-    // An earlier current-process attestation cannot remain launch authority after a same-process
-    // filesystem mutation.
-    verify_youtube_po_provider_node_modules_locked(paths)?;
+
+    // Every execution gate re-authenticates the complete authoritative trees while both
+    // lifecycle locks are held. A healthy child cannot authorize later lazy module loads after
+    // same-process filesystem tamper. A failed scan also tears down and reaps the owned child.
+    if let Err(error) = verify_youtube_po_provider_node_modules_single_flight_locked(
+        paths,
+        &server_dir,
+        waited_for_active_flight,
+    ) {
+        *youtube_po_provider_slot()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = None;
+        return Err(error);
+    }
     let installed = youtube_po_provider_install_status(paths);
     if !installed.installed {
-        return Err(EngineError::InstallFailed(
-            installed
-                .readiness_error
-                .unwrap_or_else(|| "PO provider payload is unavailable".to_string()),
-        ));
+        *youtube_po_provider_slot()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = None;
+        clear_provider_node_modules_process_attestation(&server_dir);
+        let readiness_error = installed
+            .readiness_error
+            .unwrap_or_else(|| "PO provider payload is unavailable".to_string());
+        provider_node_modules_process_invalidations()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .insert(server_dir, readiness_error.clone());
+        return Err(EngineError::InstallFailed(readiness_error));
     }
     let identity = provider_install_identity(&installed);
     let mut slot = youtube_po_provider_slot()
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
     if let Some(managed) = slot.as_mut() {
-        if managed.install_identity == identity
+        if managed.server_dir == server_dir
+            && managed.install_identity == identity
             && managed.child.try_wait()?.is_none()
             && ping_youtube_po_provider(managed.port).as_deref()
                 == Some(managed.provider_version.as_str())
@@ -4473,6 +5077,7 @@ pub fn ensure_youtube_po_provider(paths: &AppPaths) -> Result<YoutubePoProviderR
         .unwrap_or_else(std::sync::PoisonError::into_inner);
     *slot = Some(ManagedYoutubePoProvider {
         child,
+        server_dir,
         port,
         provider_version: installed.provider_version,
         install_identity: identity,
@@ -4883,7 +5488,7 @@ fn python_distribution_versions(
     let output = match crate::cmd::command(python)
         .args(["-c", &code])
         .env("PYTHONNOUSERSITE", "1")
-        .output()
+        .owned_output()
     {
         Ok(output) => output,
         Err(_) => {
@@ -5016,7 +5621,7 @@ fn tool_version_first_line_with_arg(
     program: impl AsRef<std::ffi::OsStr>,
     arg: &str,
 ) -> Option<String> {
-    let output = crate::cmd::command(program).arg(arg).output().ok()?;
+    let output = crate::cmd::command(program).arg(arg).owned_output().ok()?;
     if !output.status.success() {
         return None;
     }
@@ -5297,6 +5902,363 @@ pub fn generate_pack_integrity_manifest(paths: &AppPaths) -> Result<PackIntegrit
     })
 }
 
+const CAPABILITY_PROBE_CACHE_TTL_MS: i64 = 30_000;
+const CAPABILITY_PROBE_WAITER_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(120);
+const CAPABILITY_PROBE_CHILD_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(90);
+
+#[derive(Debug, Clone)]
+struct SemanticProbeCache<T> {
+    source_identity: String,
+    verified_at_ms: i64,
+    value: T,
+}
+
+#[derive(Debug)]
+struct SemanticProbeState<T> {
+    running: bool,
+    epoch: u64,
+    next_flight_id: u64,
+    active_flight_id: Option<u64>,
+    active_waiters: usize,
+    cache: Option<SemanticProbeCache<T>>,
+    terminal_by_flight: HashMap<u64, SharedSemanticProbeTerminal<T>>,
+}
+
+#[derive(Debug, Clone)]
+struct SharedSemanticProbeTerminal<T> {
+    source_identity: String,
+    remaining_waiters: usize,
+    outcome: SemanticProbeOutcome<T>,
+}
+
+#[derive(Debug)]
+struct SemanticProbeSlot<T> {
+    state: Mutex<SemanticProbeState<T>>,
+    wake: Condvar,
+}
+
+#[derive(Debug, Clone)]
+struct SemanticProbeOutcome<T> {
+    value: Option<T>,
+    verified_at_ms: i64,
+    source_identity: String,
+    freshness: &'static str,
+    shared_flight: bool,
+    probe_state: &'static str,
+    error: Option<String>,
+}
+
+impl<T: Clone> SemanticProbeSlot<T> {
+    fn new() -> Self {
+        Self {
+            state: Mutex::new(SemanticProbeState {
+                running: false,
+                epoch: 0,
+                next_flight_id: 0,
+                active_flight_id: None,
+                active_waiters: 0,
+                cache: None,
+                terminal_by_flight: HashMap::new(),
+            }),
+            wake: Condvar::new(),
+        }
+    }
+
+    fn run<F>(&self, source_identity: String, compute: F) -> SemanticProbeOutcome<T>
+    where
+        F: FnOnce() -> std::result::Result<T, String>,
+    {
+        let mut waited_for_shared_flight = false;
+        let mut joined_flight_id: Option<u64> = None;
+        let mut compute = Some(compute);
+        loop {
+            let now = now_ms();
+            let mut state = self
+                .state
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            if let Some(flight_id) = joined_flight_id {
+                let terminal = state.terminal_by_flight.get(&flight_id).cloned();
+                if let Some(mut terminal) = terminal {
+                    let remove_terminal =
+                        if let Some(stored) = state.terminal_by_flight.get_mut(&flight_id) {
+                            stored.remaining_waiters = stored.remaining_waiters.saturating_sub(1);
+                            stored.remaining_waiters == 0
+                        } else {
+                            false
+                        };
+                    if remove_terminal {
+                        state.terminal_by_flight.remove(&flight_id);
+                    }
+                    joined_flight_id = None;
+                    if terminal.source_identity == source_identity {
+                        terminal.outcome.shared_flight = true;
+                        if terminal.outcome.probe_state == "verified" {
+                            terminal.outcome.freshness = "shared_flight";
+                        }
+                        return terminal.outcome;
+                    }
+                }
+            }
+            if let Some(cache) = state.cache.as_ref().filter(|cache| {
+                cache.source_identity == source_identity
+                    && now.saturating_sub(cache.verified_at_ms) <= CAPABILITY_PROBE_CACHE_TTL_MS
+            }) {
+                return SemanticProbeOutcome {
+                    value: Some(cache.value.clone()),
+                    verified_at_ms: cache.verified_at_ms,
+                    source_identity,
+                    freshness: if waited_for_shared_flight {
+                        "shared_flight"
+                    } else {
+                        "cached"
+                    },
+                    shared_flight: waited_for_shared_flight,
+                    probe_state: "verified",
+                    error: None,
+                };
+            }
+            if state.running {
+                if joined_flight_id.is_none() {
+                    joined_flight_id = state.active_flight_id;
+                    state.active_waiters = state.active_waiters.saturating_add(1);
+                }
+                let (next, timeout) = self
+                    .wake
+                    .wait_timeout(state, CAPABILITY_PROBE_WAITER_TIMEOUT)
+                    .unwrap_or_else(std::sync::PoisonError::into_inner);
+                state = next;
+                if timeout.timed_out() && state.running {
+                    if state.active_flight_id == joined_flight_id {
+                        state.active_waiters = state.active_waiters.saturating_sub(1);
+                    }
+                    let stale = state
+                        .cache
+                        .as_ref()
+                        .filter(|cache| cache.source_identity == source_identity)
+                        .cloned();
+                    drop(state);
+                    return SemanticProbeOutcome {
+                        value: stale.as_ref().map(|cache| cache.value.clone()),
+                        verified_at_ms: stale.as_ref().map(|cache| cache.verified_at_ms).unwrap_or(0),
+                        source_identity: source_identity.clone(),
+                        freshness: if stale.is_some() { "stale_timeout" } else { "timeout" },
+                        shared_flight: true,
+                        probe_state: "timeout",
+                        error: Some("semantic probe waiter timed out before the shared native probe completed".to_string()),
+                    };
+                }
+                waited_for_shared_flight = true;
+                continue;
+            }
+            state.running = true;
+            state.next_flight_id = state.next_flight_id.wrapping_add(1);
+            let flight_id = state.next_flight_id;
+            state.active_flight_id = Some(flight_id);
+            state.active_waiters = 0;
+            let flight_epoch = state.epoch;
+            drop(state);
+
+            let computed = std::panic::catch_unwind(std::panic::AssertUnwindSafe(
+                compute
+                    .take()
+                    .expect("probe computation starts exactly once"),
+            ));
+            let mut state = self
+                .state
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            state.running = false;
+            state.active_flight_id = None;
+            let joined_waiters = std::mem::take(&mut state.active_waiters);
+            match computed {
+                Ok(Ok(value)) if state.epoch == flight_epoch => {
+                    let verified_at_ms = now_ms();
+                    state.cache = Some(SemanticProbeCache {
+                        source_identity: source_identity.clone(),
+                        verified_at_ms,
+                        value: value.clone(),
+                    });
+                    let outcome = SemanticProbeOutcome {
+                        value: Some(value),
+                        verified_at_ms,
+                        source_identity: source_identity.clone(),
+                        freshness: "verified",
+                        shared_flight: false,
+                        probe_state: "verified",
+                        error: None,
+                    };
+                    if joined_waiters > 0 {
+                        state.terminal_by_flight.insert(
+                            flight_id,
+                            SharedSemanticProbeTerminal {
+                                source_identity: source_identity.clone(),
+                                remaining_waiters: joined_waiters,
+                                outcome: outcome.clone(),
+                            },
+                        );
+                    }
+                    self.wake.notify_all();
+                    return outcome;
+                }
+                Ok(Ok(_)) => {
+                    let outcome = SemanticProbeOutcome {
+                        value: None,
+                        verified_at_ms: 0,
+                        source_identity: source_identity.clone(),
+                        freshness: "superseded",
+                        shared_flight: false,
+                        probe_state: "superseded",
+                        error: Some("probe result was discarded because its source changed during execution".to_string()),
+                    };
+                    if joined_waiters > 0 {
+                        state.terminal_by_flight.insert(
+                            flight_id,
+                            SharedSemanticProbeTerminal {
+                                source_identity: source_identity.clone(),
+                                remaining_waiters: joined_waiters,
+                                outcome: outcome.clone(),
+                            },
+                        );
+                    }
+                    self.wake.notify_all();
+                    return outcome;
+                }
+                Ok(Err(error)) => {
+                    let stale = state
+                        .cache
+                        .as_ref()
+                        .filter(|cache| cache.source_identity == source_identity)
+                        .cloned();
+                    let outcome = SemanticProbeOutcome {
+                        value: stale.as_ref().map(|cache| cache.value.clone()),
+                        verified_at_ms: stale
+                            .as_ref()
+                            .map(|cache| cache.verified_at_ms)
+                            .unwrap_or(0),
+                        source_identity: source_identity.clone(),
+                        freshness: if stale.is_some() {
+                            "stale_failed"
+                        } else {
+                            "failed"
+                        },
+                        shared_flight: false,
+                        probe_state: "failed",
+                        error: Some(error),
+                    };
+                    if joined_waiters > 0 {
+                        state.terminal_by_flight.insert(
+                            flight_id,
+                            SharedSemanticProbeTerminal {
+                                source_identity: source_identity.clone(),
+                                remaining_waiters: joined_waiters,
+                                outcome: outcome.clone(),
+                            },
+                        );
+                    }
+                    self.wake.notify_all();
+                    return outcome;
+                }
+                Err(payload) => {
+                    if joined_waiters > 0 {
+                        state.terminal_by_flight.insert(
+                            flight_id,
+                            SharedSemanticProbeTerminal {
+                                source_identity: source_identity.clone(),
+                                remaining_waiters: joined_waiters,
+                                outcome: SemanticProbeOutcome {
+                                    value: None,
+                                    verified_at_ms: 0,
+                                    source_identity: source_identity.clone(),
+                                    freshness: "failed",
+                                    shared_flight: true,
+                                    probe_state: "failed",
+                                    error: Some("semantic probe computation panicked".to_string()),
+                                },
+                            },
+                        );
+                    }
+                    self.wake.notify_all();
+                    drop(state);
+                    std::panic::resume_unwind(payload);
+                }
+            }
+        }
+    }
+
+    fn invalidate(&self) {
+        let mut state = self
+            .state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        state.epoch = state.epoch.wrapping_add(1);
+        state.cache = None;
+        drop(state);
+        self.wake.notify_all();
+    }
+}
+
+fn performance_tier_probe_slot(
+) -> &'static SemanticProbeSlot<(Vec<String>, Option<bool>, Option<u32>)> {
+    static SLOT: OnceLock<SemanticProbeSlot<(Vec<String>, Option<bool>, Option<u32>)>> =
+        OnceLock::new();
+    SLOT.get_or_init(SemanticProbeSlot::new)
+}
+
+fn demucs_status_probe_slot() -> &'static SemanticProbeSlot<(Option<String>, Option<u32>)> {
+    static SLOT: OnceLock<SemanticProbeSlot<(Option<String>, Option<u32>)>> = OnceLock::new();
+    SLOT.get_or_init(SemanticProbeSlot::new)
+}
+
+fn capability_probe_source_identity(paths: &AppPaths, semantic_key: &str) -> String {
+    use sha2::Digest;
+    let python = venv_python_path(&paths.python_venv_dir());
+    let python_metadata = std::fs::metadata(&python).ok();
+    let site_packages = paths.python_venv_dir().join("Lib").join("site-packages");
+    let site_metadata = std::fs::metadata(&site_packages).ok();
+    let modified = |metadata: &Option<std::fs::Metadata>| {
+        metadata
+            .as_ref()
+            .and_then(|value| value.modified().ok())
+            .and_then(|value| value.duration_since(std::time::UNIX_EPOCH).ok())
+            .map(|value| value.as_nanos())
+            .unwrap_or(0)
+    };
+    let payload = format!(
+        "semantic={semantic_key}|python={}|python_len={}|python_mtime={}|site_len={}|site_mtime={}|cuda_visible={}",
+        python.to_string_lossy(),
+        python_metadata.as_ref().map(|value| value.len()).unwrap_or(0),
+        modified(&python_metadata),
+        site_metadata.as_ref().map(|value| value.len()).unwrap_or(0),
+        modified(&site_metadata),
+        std::env::var("CUDA_VISIBLE_DEVICES").unwrap_or_default(),
+    );
+    hex::encode_upper(sha2::Sha256::digest(payload.as_bytes()))
+}
+
+/// Invalidates the current-process Diagnostics/Options capability-probe caches after a repair,
+/// payload promotion, Python override, or managed-pack mutation. Production inference/jobs are
+/// deliberately outside this cache and its two-probe admission domain.
+pub fn invalidate_capability_probe_cache() {
+    performance_tier_probe_slot().invalidate();
+    demucs_status_probe_slot().invalidate();
+}
+
+struct CapabilityProbeInvalidationGuard;
+
+impl CapabilityProbeInvalidationGuard {
+    fn new() -> Self {
+        invalidate_capability_probe_cache();
+        Self
+    }
+}
+
+impl Drop for CapabilityProbeInvalidationGuard {
+    fn drop(&mut self) {
+        invalidate_capability_probe_cache();
+    }
+}
+
 #[derive(Debug, Clone, Serialize)]
 pub struct PerformanceTierStatus {
     pub tier: String,
@@ -5305,11 +6267,54 @@ pub struct PerformanceTierStatus {
     pub recommended_separation_backend: String,
     pub recommended_diarization_backend: String,
     pub recommended_tts_vc_device: String,
+    pub verified_at_ms: i64,
+    pub source_identity: String,
+    pub freshness: String,
+    pub shared_flight: bool,
+    /// PID of the one Python/Torch probe computation that produced this result.
+    /// Cached and shared consumers receive the same PID as provenance; missing runtime
+    /// and waiter-timeout fallbacks report `None`.
+    pub child_pid: Option<u32>,
+    pub probe_state: String,
+    pub probe_error: Option<String>,
 }
 
 pub fn performance_tier_status(paths: &AppPaths) -> PerformanceTierStatus {
-    let gpu_names = detect_gpu_names_best_effort();
-    let torch_cuda_available = detect_torch_cuda_best_effort(paths);
+    let source_identity = capability_probe_source_identity(paths, "performance_tier_torch_cuda");
+    if !venv_python_path(&paths.python_venv_dir()).exists() {
+        return PerformanceTierStatus {
+            tier: "cpu".to_string(),
+            gpu_names: Vec::new(),
+            torch_cuda_available: None,
+            recommended_separation_backend: "spleeter (baseline)".to_string(),
+            recommended_diarization_backend: "baseline".to_string(),
+            recommended_tts_vc_device: "cpu".to_string(),
+            verified_at_ms: now_ms(),
+            source_identity,
+            freshness: "verified_missing_runtime".to_string(),
+            shared_flight: false,
+            child_pid: None,
+            probe_state: "missing_runtime".to_string(),
+            probe_error: None,
+        };
+    }
+    let outcome = performance_tier_probe_slot().run(source_identity, || {
+        detect_torch_cuda(paths).map(|(torch_cuda_available, child_pid)| {
+            (
+                detect_gpu_names_best_effort(),
+                torch_cuda_available,
+                child_pid,
+            )
+        })
+    });
+    let (gpu_names, torch_cuda_available, computed_child_pid) =
+        outcome.value.unwrap_or_else(|| (Vec::new(), None, None));
+    let child_pid = computed_child_pid.or_else(|| {
+        outcome
+            .error
+            .as_deref()
+            .and_then(capability_probe_pid_from_error)
+    });
 
     let tier = if torch_cuda_available.unwrap_or(false) || !gpu_names.is_empty() {
         "gpu".to_string()
@@ -5338,6 +6343,13 @@ pub fn performance_tier_status(paths: &AppPaths) -> PerformanceTierStatus {
         recommended_separation_backend,
         recommended_diarization_backend,
         recommended_tts_vc_device,
+        verified_at_ms: outcome.verified_at_ms,
+        source_identity: outcome.source_identity,
+        freshness: outcome.freshness.to_string(),
+        shared_flight: outcome.shared_flight,
+        child_pid,
+        probe_state: outcome.probe_state.to_string(),
+        probe_error: outcome.error,
     }
 }
 
@@ -5345,10 +6357,16 @@ fn detect_gpu_names_best_effort() -> Vec<String> {
     // Best-effort, cross-platform-ish detection.
     let mut out: Vec<String> = Vec::new();
 
-    if let Ok(output) = crate::cmd::command("nvidia-smi")
-        .args(["--query-gpu=name", "--format=csv,noheader"])
-        .output()
-    {
+    let mut command = crate::cmd::command("nvidia-smi");
+    command.args(["--query-gpu=name", "--format=csv,noheader"]);
+    // nvidia-smi can hang behind a wedged driver. It is only a best-effort
+    // supplement to the bounded Torch probe, so give it the same owned-child
+    // timeout/kill/reap contract instead of blocking a semantic flight forever.
+    if let Ok((output, _child_pid)) = wait_for_owned_capability_probe(
+        &mut command,
+        "nvidia_smi_gpu_name",
+        std::time::Duration::from_secs(10),
+    ) {
         if output.status.success() {
             let text = String::from_utf8_lossy(&output.stdout);
             for line in text.lines() {
@@ -5363,25 +6381,73 @@ fn detect_gpu_names_best_effort() -> Vec<String> {
     out
 }
 
-fn detect_torch_cuda_best_effort(paths: &AppPaths) -> Option<bool> {
+fn capability_probe_pid_from_error(error: &str) -> Option<u32> {
+    let marker = " pid ";
+    let start = error.find(marker)? + marker.len();
+    let digits = error[start..]
+        .chars()
+        .take_while(|character| character.is_ascii_digit())
+        .collect::<String>();
+    (!digits.is_empty())
+        .then(|| digits.parse::<u32>().ok())
+        .flatten()
+}
+
+fn wait_for_owned_capability_probe(
+    command: &mut std::process::Command,
+    probe_label: &str,
+    timeout: std::time::Duration,
+) -> std::result::Result<(std::process::Output, u32), String> {
+    crate::cmd::run_owned_output_with_pid(
+        command,
+        timeout,
+        crate::jobs::external_command_cancel_requested,
+    )
+    .map_err(|error| format!("{probe_label} failed: {error}"))
+}
+
+fn detect_torch_cuda(paths: &AppPaths) -> std::result::Result<(Option<bool>, Option<u32>), String> {
     let venv_python = venv_python_path(&paths.python_venv_dir());
     if !venv_python.exists() {
-        return None;
+        return Err("managed Python runtime is missing".to_string());
     }
-    let output = crate::cmd::command(&venv_python)
-        .args([
+    let mut command = crate::cmd::command(&venv_python);
+    command.args([
             "-c",
             "import json\ntry:\n import torch\n print(json.dumps({'cuda': bool(torch.cuda.is_available())}))\nexcept Exception as e:\n print(json.dumps({'error': str(e)}))\n",
-        ])
-        .output()
-        .ok()?;
+        ]);
+    let (output, child_pid) = wait_for_owned_capability_probe(
+        &mut command,
+        "Torch capability probe",
+        CAPABILITY_PROBE_CHILD_TIMEOUT,
+    )?;
     if !output.status.success() {
-        return None;
+        return Err(format!(
+            "Torch capability probe pid {child_pid} exited unsuccessfully: {}",
+            String::from_utf8_lossy(&output.stderr).trim()
+        ));
     }
     let text = String::from_utf8_lossy(&output.stdout);
-    let last = text.lines().rev().find(|l| !l.trim().is_empty())?.trim();
-    let v: serde_json::Value = serde_json::from_str(last).ok()?;
-    v.get("cuda").and_then(|b| b.as_bool())
+    let Some(last) = text.lines().rev().find(|l| !l.trim().is_empty()) else {
+        return Err(format!(
+            "Torch capability probe pid {child_pid} produced no JSON result"
+        ));
+    };
+    let parsed = serde_json::from_str::<serde_json::Value>(last.trim()).map_err(|error| {
+        format!("Torch capability probe pid {child_pid} returned malformed JSON: {error}")
+    })?;
+    if let Some(error) = parsed.get("error").and_then(|value| value.as_str()) {
+        return Err(format!(
+            "Torch import failed in probe pid {child_pid}: {error}"
+        ));
+    }
+    let value = parsed
+        .get("cuda")
+        .and_then(|cuda| cuda.as_bool())
+        .ok_or_else(|| {
+            format!("Torch capability probe pid {child_pid} omitted boolean cuda state")
+        })?;
+    Ok((Some(value), Some(child_pid)))
 }
 
 pub fn portable_python_status(paths: &AppPaths) -> PortablePythonStatus {
@@ -5396,6 +6462,7 @@ pub fn portable_python_status(paths: &AppPaths) -> PortablePythonStatus {
 }
 
 pub fn install_portable_python(paths: &AppPaths) -> Result<PortablePythonStatus> {
+    let _probe_invalidation = CapabilityProbeInvalidationGuard::new();
     #[cfg(not(windows))]
     {
         let _ = paths;
@@ -5488,6 +6555,7 @@ pub fn install_portable_python(paths: &AppPaths) -> Result<PortablePythonStatus>
 }
 
 pub fn install_python_toolchain(paths: &AppPaths) -> Result<PythonToolchainStatus> {
+    let _probe_invalidation = CapabilityProbeInvalidationGuard::new();
     paths.ensure_dirs()?;
 
     let resolved = resolve_base_python(paths).ok_or_else(|| {
@@ -5507,11 +6575,13 @@ pub fn install_python_toolchain(paths: &AppPaths) -> Result<PythonToolchainStatu
         for arg in &resolved.args {
             cmd.arg(arg);
         }
-        let output = cmd
-            .args(["-m", "venv"])
-            .arg(&venv_dir)
-            .output()
-            .map_err(|e| EngineError::InstallFailed(format!("failed to create venv: {e}")))?;
+        cmd.args(["-m", "venv"]).arg(&venv_dir);
+        let output = crate::cmd::run_owned_output(
+            &mut cmd,
+            std::time::Duration::from_secs(600),
+            crate::jobs::external_command_cancel_requested,
+        )
+        .map_err(|e| EngineError::InstallFailed(format!("failed to create venv: {e}")))?;
         if !output.status.success() {
             let stderr = String::from_utf8_lossy(&output.stderr);
             return Err(EngineError::InstallFailed(format!(
@@ -5721,7 +6791,7 @@ fn python_version(program: &std::path::Path, base_args: &[String]) -> Option<Str
     for arg in base_args {
         cmd.arg(arg);
     }
-    let output = cmd.arg("--version").output().ok()?;
+    let output = cmd.arg("--version").owned_output().ok()?;
     if !output.status.success() {
         return None;
     }
@@ -5744,7 +6814,7 @@ fn python_version(program: &std::path::Path, base_args: &[String]) -> Option<Str
 fn pip_version(venv_python: &std::path::Path) -> Option<String> {
     let output = crate::cmd::command(venv_python)
         .args(["-m", "pip", "--version"])
-        .output()
+        .owned_output()
         .ok()?;
     if !output.status.success() {
         return None;
@@ -5795,6 +6865,7 @@ pub fn spleeter_pack_status(paths: &AppPaths) -> SpleeterPackStatus {
 }
 
 pub fn install_spleeter_pack(paths: &AppPaths) -> Result<SpleeterPackStatus> {
+    let _probe_invalidation = CapabilityProbeInvalidationGuard::new();
     // Ensure venv exists first.
     let _ = install_python_toolchain(paths)?;
     let venv_python = python_venv_python_path(paths)?;
@@ -6441,6 +7512,13 @@ fn parse_python_major_minor(version: &str) -> Option<(u32, u32)> {
 pub struct DemucsPackStatus {
     pub installed: bool,
     pub demucs_version: Option<String>,
+    pub verified_at_ms: i64,
+    pub source_identity: String,
+    pub freshness: String,
+    pub shared_flight: bool,
+    pub child_pid: Option<u32>,
+    pub probe_state: String,
+    pub probe_error: Option<String>,
 }
 
 /// WP-0229: production Phase2 installs avoid rerunning pip and model warmup when
@@ -6456,21 +7534,46 @@ pub fn install_spleeter_pack_if_needed(paths: &AppPaths) -> Result<SpleeterPackS
 pub fn demucs_pack_status(paths: &AppPaths) -> DemucsPackStatus {
     let venv_dir = paths.python_venv_dir();
     let venv_python = venv_python_path(&venv_dir);
+    let source_identity = capability_probe_source_identity(paths, "demucs_module_status");
     if !venv_python.exists() {
         return DemucsPackStatus {
             installed: false,
             demucs_version: None,
+            verified_at_ms: now_ms(),
+            source_identity,
+            freshness: "verified_missing_runtime".to_string(),
+            shared_flight: false,
+            child_pid: None,
+            probe_state: "missing_runtime".to_string(),
+            probe_error: None,
         };
     }
 
-    let demucs_version = python_module_version(&venv_python, "demucs_infer");
+    let outcome = demucs_status_probe_slot().run(source_identity, || {
+        python_module_version_with_pid(&venv_python, "demucs_infer")
+    });
+    let (demucs_version, computed_child_pid) = outcome.value.unwrap_or((None, None));
+    let child_pid = computed_child_pid.or_else(|| {
+        outcome
+            .error
+            .as_deref()
+            .and_then(capability_probe_pid_from_error)
+    });
     DemucsPackStatus {
         installed: demucs_version.is_some(),
         demucs_version,
+        verified_at_ms: outcome.verified_at_ms,
+        source_identity: outcome.source_identity,
+        freshness: outcome.freshness.to_string(),
+        shared_flight: outcome.shared_flight,
+        child_pid,
+        probe_state: outcome.probe_state.to_string(),
+        probe_error: outcome.error,
     }
 }
 
 pub fn install_demucs_pack(paths: &AppPaths) -> Result<DemucsPackStatus> {
+    let _probe_invalidation = CapabilityProbeInvalidationGuard::new();
     // Ensure venv exists first.
     let _ = install_python_toolchain(paths)?;
     let venv_python = python_venv_python_path(paths)?;
@@ -6544,6 +7647,7 @@ pub fn install_demucs_pack(paths: &AppPaths) -> Result<DemucsPackStatus> {
         "demucs warmup failed",
     );
 
+    invalidate_capability_probe_cache();
     let status = demucs_pack_status(paths);
     let _ = generate_pack_integrity_manifest(paths);
     Ok(status)
@@ -6738,6 +7842,7 @@ pub fn diarization_pack_status(paths: &AppPaths) -> DiarizationPackStatus {
 }
 
 pub fn install_diarization_pack(paths: &AppPaths) -> Result<DiarizationPackStatus> {
+    let _probe_invalidation = CapabilityProbeInvalidationGuard::new();
     // Ensure venv exists first.
     let _ = install_python_toolchain(paths)?;
     let venv_python = python_venv_python_path(paths)?;
@@ -6844,6 +7949,7 @@ pub fn tts_preview_pack_status(paths: &AppPaths) -> TtsPreviewPackStatus {
 }
 
 pub fn install_tts_preview_pack(paths: &AppPaths) -> Result<TtsPreviewPackStatus> {
+    let _probe_invalidation = CapabilityProbeInvalidationGuard::new();
     // Ensure venv exists first.
     let _ = install_python_toolchain(paths)?;
     let venv_python = python_venv_python_path(paths)?;
@@ -7149,6 +8255,7 @@ fn cosyvoice_warmup_args(
 /// The CosyVoice repo code + Matcha-TTS ship via the offline payload (too large to embed,
 /// too fragile to git-clone at runtime); the venv + 4.86 GB model are downloaded here.
 pub fn install_voice_clone_cosyvoice_v1_pack(paths: &AppPaths) -> Result<CosyVoicePackStatus> {
+    let _probe_invalidation = CapabilityProbeInvalidationGuard::new();
     paths.ensure_dirs()?;
     let backend_dir = paths.cosyvoice_backend_dir();
 
@@ -7199,13 +8306,13 @@ pub fn install_voice_clone_cosyvoice_v1_pack(paths: &AppPaths) -> Result<CosyVoi
         for arg in &resolved.args {
             cmd.arg(arg);
         }
-        let output = cmd
-            .args(["-m", "venv"])
-            .arg(&venv_dir)
-            .output()
-            .map_err(|e| {
-                EngineError::InstallFailed(format!("failed to create CosyVoice venv: {e}"))
-            })?;
+        cmd.args(["-m", "venv"]).arg(&venv_dir);
+        let output = crate::cmd::run_owned_output(
+            &mut cmd,
+            std::time::Duration::from_secs(600),
+            crate::jobs::external_command_cancel_requested,
+        )
+        .map_err(|e| EngineError::InstallFailed(format!("failed to create CosyVoice venv: {e}")))?;
         if !output.status.success() {
             let stderr = String::from_utf8_lossy(&output.stderr);
             return Err(EngineError::InstallFailed(format!(
@@ -7394,6 +8501,7 @@ pub fn tts_neural_local_v1_pack_status(paths: &AppPaths) -> TtsNeuralLocalV1Pack
 }
 
 pub fn install_tts_neural_local_v1_pack(paths: &AppPaths) -> Result<TtsNeuralLocalV1PackStatus> {
+    let _probe_invalidation = CapabilityProbeInvalidationGuard::new();
     // Ensure venv exists first.
     let _ = install_python_toolchain(paths)?;
     let venv_python = python_venv_python_path(paths)?;
@@ -7706,6 +8814,7 @@ pub fn tts_voice_preserving_local_v1_pack_status(
 pub fn install_tts_voice_preserving_local_v1_pack(
     paths: &AppPaths,
 ) -> Result<TtsVoicePreservingLocalV1PackStatus> {
+    let _probe_invalidation = CapabilityProbeInvalidationGuard::new();
     let _ = install_python_toolchain(paths)?;
     let venv_python = python_venv_python_path(paths)?;
     let pin = &pinned_dependency_manifest::manifest().tts_voice_preserving_local_v1;
@@ -7988,7 +9097,7 @@ print(json.dumps(voices, ensure_ascii=False))
     );
 
     let output = cmd
-        .output()
+        .owned_output()
         .map_err(|e| EngineError::InstallFailed(format!("failed to list pyttsx3 voices: {e}")))?;
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);
@@ -8022,7 +9131,7 @@ fn python_module_version(python: &std::path::Path, module: &str) -> Option<Strin
     );
     let output = crate::cmd::command(python)
         .args(["-c", &code])
-        .output()
+        .owned_output()
         .ok()?;
     if !output.status.success() {
         return None;
@@ -8038,14 +9147,66 @@ fn python_module_version(python: &std::path::Path, module: &str) -> Option<Strin
     })
 }
 
+fn python_module_version_with_pid(
+    python: &std::path::Path,
+    module: &str,
+) -> std::result::Result<(Option<String>, Option<u32>), String> {
+    let code = format!(
+        "import importlib, json\ntry:\n m=importlib.import_module({module:?})\n print(json.dumps({{'state':'installed','version':getattr(m,'__version__', 'installed') or 'installed'}}))\nexcept ModuleNotFoundError as e:\n if e.name == {module:?}: print(json.dumps({{'state':'missing'}}))\n else: print(json.dumps({{'state':'failed','error':str(e)}}))\nexcept Exception as e:\n print(json.dumps({{'state':'failed','error':str(e)}}))\n"
+    );
+    let mut command = crate::cmd::command(python);
+    command.args(["-c", &code]);
+    let (output, child_pid) = wait_for_owned_capability_probe(
+        &mut command,
+        "Python module probe",
+        CAPABILITY_PROBE_CHILD_TIMEOUT,
+    )?;
+    if !output.status.success() {
+        return Err(format!(
+            "Python module probe pid {child_pid} exited unsuccessfully: {}",
+            String::from_utf8_lossy(&output.stderr).trim()
+        ));
+    }
+    let text = String::from_utf8_lossy(&output.stdout);
+    let line = text
+        .lines()
+        .rev()
+        .find(|line| !line.trim().is_empty())
+        .ok_or_else(|| format!("Python module probe pid {child_pid} produced no JSON result"))?;
+    let parsed: serde_json::Value = serde_json::from_str(line.trim()).map_err(|error| {
+        format!("Python module probe pid {child_pid} returned malformed JSON: {error}")
+    })?;
+    match parsed.get("state").and_then(|value| value.as_str()) {
+        Some("installed") => Ok((
+            parsed
+                .get("version")
+                .and_then(|value| value.as_str())
+                .map(str::to_string),
+            Some(child_pid),
+        )),
+        Some("missing") => Ok((None, Some(child_pid))),
+        Some("failed") => Err(format!(
+            "Python module import failed in probe pid {child_pid}: {}",
+            parsed
+                .get("error")
+                .and_then(|value| value.as_str())
+                .unwrap_or("unknown error")
+        )),
+        _ => Err(format!(
+            "Python module probe pid {child_pid} returned an unknown state"
+        )),
+    }
+}
+
 fn python_module_available(python: &std::path::Path, module: &str) -> bool {
     let code = format!(
         "import importlib.util\ntry:\n    found = importlib.util.find_spec({module:?}) is not None\nexcept Exception:\n    found = False\nraise SystemExit(0 if found else 1)\n"
     );
-    crate::cmd::command(python)
-        .args(["-c", &code])
-        .status()
-        .map(|status| status.success())
+    let mut command = crate::cmd::command(python);
+    command.args(["-c", &code]);
+    command
+        .owned_output()
+        .map(|output| output.status.success())
         .unwrap_or(false)
 }
 
@@ -8053,7 +9214,7 @@ fn python_distribution_version(python: &std::path::Path, distribution: &str) -> 
     let code = format!("import importlib.metadata as m\nprint(m.version({distribution:?}))\n");
     let output = crate::cmd::command(python)
         .args(["-c", &code])
-        .output()
+        .owned_output()
         .ok()?;
     if !output.status.success() {
         return None;
@@ -8134,53 +9295,21 @@ fn run_python_checked_with_timeout(
     cmd.env("HF_HUB_DOWNLOAD_TIMEOUT", "300");
     cmd.env("HF_HUB_ETAG_TIMEOUT", "30");
 
-    cmd.stdout(std::process::Stdio::piped());
-    cmd.stderr(std::process::Stdio::piped());
-
-    let mut child = cmd
-        .spawn()
-        .map_err(|e| EngineError::InstallFailed(format!("{error_prefix}: {e}")))?;
-    let started = std::time::Instant::now();
-    loop {
-        if let Some(status) = child
-            .try_wait()
-            .map_err(|e| EngineError::InstallFailed(format!("{error_prefix}: {e}")))?
-        {
-            let mut stderr = Vec::new();
-            if let Some(mut pipe) = child.stderr.take() {
-                let _ = pipe.read_to_end(&mut stderr);
-            }
-            if let Some(mut pipe) = child.stdout.take() {
-                let mut stdout = Vec::new();
-                let _ = pipe.read_to_end(&mut stdout);
-            }
-            if !status.success() {
-                let stderr = String::from_utf8_lossy(&stderr);
-                return Err(EngineError::InstallFailed(format!(
-                    "{error_prefix} (code={:?}): {}",
-                    status.code(),
-                    stderr.trim()
-                )));
-            }
-            return Ok(());
-        }
-
-        if started.elapsed() > std::time::Duration::from_secs(timeout_secs) {
-            let _ = child.kill();
-            let output = child
-                .wait_with_output()
-                .map_err(|e| EngineError::InstallFailed(format!("{error_prefix}: {e}")))?;
-            let stderr = String::from_utf8_lossy(&output.stderr);
-            let stderr = stderr.trim();
-            return Err(EngineError::InstallFailed(format!(
-                "{error_prefix} timed out after {timeout_secs}s{}{}",
-                if stderr.is_empty() { "" } else { ": " },
-                stderr
-            )));
-        }
-
-        std::thread::sleep(std::time::Duration::from_millis(500));
+    let output = crate::cmd::run_owned_output(
+        &mut cmd,
+        std::time::Duration::from_secs(timeout_secs),
+        crate::jobs::external_command_cancel_requested,
+    )
+    .map_err(|error| EngineError::InstallFailed(format!("{error_prefix}: {error}")))?;
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        return Err(EngineError::InstallFailed(format!(
+            "{error_prefix} (code={:?}): {}",
+            output.status.code(),
+            stderr.trim()
+        )));
     }
+    Ok(())
 }
 
 fn run_python_checked_with_retries(
@@ -8212,6 +9341,365 @@ fn run_python_checked_with_retries(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn provider_verification_foreground_pressure_is_generation_safe_and_observable() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let paths = AppPaths::new(dir.path().join("app"));
+
+        let active =
+            set_youtube_po_provider_verification_foreground_demand(&paths, "diagnostics", 2, true);
+        assert!(active.active);
+        assert_eq!(active.active_consumers, 1);
+        assert_eq!(
+            active.held_reason.as_deref(),
+            Some("foreground_navigation_job_or_probe_demand")
+        );
+        assert_eq!(
+            active.resource_policy,
+            PROVIDER_VERIFICATION_FOREGROUND_POLICY
+        );
+
+        let stale_clear =
+            set_youtube_po_provider_verification_foreground_demand(&paths, "diagnostics", 1, false);
+        assert!(
+            stale_clear.active,
+            "a stale generation cannot clear a newer lease"
+        );
+
+        begin_provider_verification_progress(&paths);
+        update_provider_verification_progress(
+            &paths.youtube_po_provider_server_dir(),
+            "provider_tree_verify",
+            16,
+            4096,
+        );
+        let progress = youtube_po_provider_verification_progress(&paths).expect("progress");
+        assert!(progress.foreground_pressure_active);
+        assert_eq!(progress.held_reason, active.held_reason);
+        assert_eq!(progress.resource_policy, active.resource_policy);
+
+        let cleared =
+            set_youtube_po_provider_verification_foreground_demand(&paths, "diagnostics", 2, false);
+        assert!(!cleared.active);
+        assert_eq!(
+            cleared.resource_policy,
+            PROVIDER_VERIFICATION_BACKGROUND_POLICY
+        );
+    }
+
+    #[test]
+    fn provider_verification_checkpoint_policies_keep_foreground_chunks_smaller() {
+        assert_eq!(
+            provider_verification_resource_policy(false),
+            "single_flight_32_file_yield_256_file_1ms_checkpoint"
+        );
+        assert_eq!(
+            provider_verification_resource_policy(true),
+            "foreground_checkpoint_4_file_yield_16_file_2ms_sleep"
+        );
+    }
+
+    #[test]
+    fn provider_verification_failure_keeps_unknown_planned_totals_truthful() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let paths = AppPaths::new(dir.path().join("app"));
+        paths.ensure_dirs().expect("ensure app dirs");
+        begin_provider_verification_progress(&paths);
+        update_provider_verification_progress(
+            &paths.youtube_po_provider_server_dir(),
+            "provider_tree_verify",
+            2,
+            1024,
+        );
+        finish_provider_verification_progress(&paths, Some("interrupted".to_string()));
+
+        let progress = youtube_po_provider_verification_progress(&paths).expect("progress");
+        assert_eq!(progress.state, "error");
+        assert_eq!(progress.files_completed, 2);
+        assert_eq!(progress.bytes_completed, 1024);
+        assert_eq!(progress.files_planned, None);
+        assert_eq!(progress.bytes_planned, None);
+    }
+
+    #[test]
+    fn concurrent_provider_ensure_shares_injected_panic_terminal() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let paths = AppPaths::new(dir.path().join("app"));
+        paths.ensure_dirs().expect("ensure app dirs");
+        provider_verification_injected_panic().store(true, std::sync::atomic::Ordering::SeqCst);
+        let barrier = std::sync::Arc::new(std::sync::Barrier::new(3));
+        let calls = (0..2)
+            .map(|_| {
+                let paths = paths.clone();
+                let barrier = std::sync::Arc::clone(&barrier);
+                std::thread::spawn(move || {
+                    barrier.wait();
+                    ensure_youtube_po_provider(&paths)
+                        .expect_err("injected verifier panic must fail closed")
+                        .to_string()
+                })
+            })
+            .collect::<Vec<_>>();
+        barrier.wait();
+        let errors = calls
+            .into_iter()
+            .map(|call| call.join().expect("ensure caller join"))
+            .collect::<Vec<_>>();
+        assert_eq!(errors[0], errors[1]);
+        assert!(errors[0].contains("panicked before producing a terminal receipt"));
+        assert!(youtube_po_provider_slot()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .is_none());
+        let progress = youtube_po_provider_verification_progress(&paths)
+            .expect("panic after progress start must leave a terminal receipt");
+        assert_eq!(progress.state, "error");
+        assert!(progress.finished_at_ms.is_some());
+        assert_eq!(progress.error.as_deref(), Some(errors[0].as_str()));
+        assert_eq!(progress.scan_count, 1);
+    }
+
+    #[test]
+    fn progress_aware_complete_provider_authentication_is_one_counted_scan() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let paths = AppPaths::new(dir.path().join("app"));
+        paths.ensure_dirs().expect("ensure app dirs");
+        std::fs::create_dir_all(paths.node_runtime_dir()).expect("node dir");
+        std::fs::create_dir_all(paths.youtube_po_provider_dir()).expect("provider dir");
+        std::fs::write(paths.node_runtime_dir().join("node_fixture"), b"node").expect("node");
+        std::fs::write(
+            paths.youtube_po_provider_dir().join("provider_fixture"),
+            b"provider",
+        )
+        .expect("provider");
+        let expected_node =
+            canonical_provider_node_tree_sha256_hex(&paths.node_runtime_dir()).expect("node root");
+        let expected_provider =
+            canonical_provider_application_tree_sha256_hex(&paths.youtube_po_provider_dir())
+                .expect("provider root");
+
+        begin_provider_verification_progress(&paths);
+        let progress_key = paths.youtube_po_provider_server_dir();
+        authenticate_complete_provider_trees_against_with_progress(
+            &paths,
+            &expected_node,
+            &expected_provider,
+            Some(&progress_key),
+        )
+        .expect("single-pass authentication");
+        finish_provider_verification_progress(&paths, None);
+
+        let progress = youtube_po_provider_verification_progress(&paths).expect("progress");
+        assert_eq!(progress.state, "ready");
+        assert_eq!(progress.scan_count, 1);
+        assert_eq!(progress.files_planned, Some(progress.files_completed));
+        assert_eq!(progress.bytes_planned, Some(progress.bytes_completed));
+        assert!(progress.files_completed >= 1);
+        assert!(progress.bytes_completed >= 8);
+    }
+
+    #[test]
+    fn semantic_probe_single_flight_shares_one_computation_and_invalidates() {
+        let slot = std::sync::Arc::new(SemanticProbeSlot::<u32>::new());
+        let starts = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let gate = std::sync::Arc::new(std::sync::Barrier::new(8));
+        let mut workers = Vec::new();
+        for _ in 0..8 {
+            let slot = slot.clone();
+            let starts = starts.clone();
+            let gate = gate.clone();
+            workers.push(std::thread::spawn(move || {
+                gate.wait();
+                slot.run("same-runtime".to_string(), || {
+                    starts.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                    std::thread::sleep(std::time::Duration::from_millis(40));
+                    Ok(42)
+                })
+            }));
+        }
+        let outcomes = workers
+            .into_iter()
+            .map(|worker| worker.join().expect("probe waiter"))
+            .collect::<Vec<_>>();
+        assert!(outcomes.iter().all(|outcome| outcome.value == Some(42)));
+        assert_eq!(starts.load(std::sync::atomic::Ordering::SeqCst), 1);
+        assert!(outcomes.iter().any(|outcome| outcome.shared_flight));
+
+        slot.invalidate();
+        let rerun = slot.run("same-runtime".to_string(), || {
+            starts.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            Ok(43)
+        });
+        assert_eq!(rerun.value, Some(43));
+        assert_eq!(starts.load(std::sync::atomic::Ordering::SeqCst), 2);
+    }
+
+    #[test]
+    fn semantic_probe_failure_is_shared_once_then_a_later_request_can_retry() {
+        let slot = std::sync::Arc::new(SemanticProbeSlot::<u32>::new());
+        let starts = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let gate = std::sync::Arc::new(std::sync::Barrier::new(8));
+        let mut workers = Vec::new();
+        for _ in 0..8 {
+            let slot = slot.clone();
+            let starts = starts.clone();
+            let gate = gate.clone();
+            workers.push(std::thread::spawn(move || {
+                gate.wait();
+                slot.run("failed-runtime".to_string(), || {
+                    starts.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                    std::thread::sleep(std::time::Duration::from_millis(100));
+                    Err("shared injected failure from probe pid 4242".to_string())
+                })
+            }));
+        }
+        let outcomes = workers
+            .into_iter()
+            .map(|worker| worker.join().expect("failed probe waiter"))
+            .collect::<Vec<_>>();
+        assert_eq!(starts.load(std::sync::atomic::Ordering::SeqCst), 1);
+        assert!(outcomes
+            .iter()
+            .all(|outcome| outcome.probe_state == "failed"));
+        assert!(outcomes.iter().all(|outcome| {
+            outcome.error.as_deref() == Some("shared injected failure from probe pid 4242")
+        }));
+        assert_eq!(
+            outcomes
+                .iter()
+                .filter(|outcome| outcome.shared_flight)
+                .count(),
+            7,
+            "every joined consumer must receive the owner's one terminal failure",
+        );
+
+        let retry = slot.run("failed-runtime".to_string(), || {
+            starts.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            Ok(9)
+        });
+        assert_eq!(retry.value, Some(9));
+        assert_eq!(starts.load(std::sync::atomic::Ordering::SeqCst), 2);
+    }
+
+    #[test]
+    fn owned_capability_probe_timeout_terminates_and_reaps_the_child() {
+        #[cfg(windows)]
+        let mut command = {
+            let mut command = crate::cmd::command("ping.exe");
+            command.args(["-n", "30", "127.0.0.1"]);
+            command
+        };
+        #[cfg(not(windows))]
+        let mut command = {
+            let mut command = crate::cmd::command("sh");
+            command.args(["-c", "sleep 30"]);
+            command
+        };
+        let started = std::time::Instant::now();
+        let error = wait_for_owned_capability_probe(
+            &mut command,
+            "bounded capability fixture",
+            std::time::Duration::from_millis(100),
+        )
+        .expect_err("sleeping owned child must time out");
+        assert!(error.contains("pid "));
+        assert!(error.contains("was terminated"));
+        assert!(started.elapsed() < std::time::Duration::from_secs(5));
+    }
+
+    #[test]
+    fn semantic_probe_panic_releases_flight_for_retry() {
+        let slot = SemanticProbeSlot::<u32>::new();
+        let panicked = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let _ = slot.run("runtime".to_string(), || panic!("injected"));
+        }));
+        assert!(panicked.is_err());
+        let retry = slot.run("runtime".to_string(), || Ok(7));
+        assert_eq!(retry.value, Some(7));
+        assert_eq!(retry.freshness, "verified");
+    }
+
+    #[test]
+    fn semantic_probe_invalidation_discards_in_flight_completion() {
+        let slot = std::sync::Arc::new(SemanticProbeSlot::<u32>::new());
+        let (started_tx, started_rx) = std::sync::mpsc::channel();
+        let (resume_tx, resume_rx) = std::sync::mpsc::channel();
+        let worker_slot = slot.clone();
+        let worker = std::thread::spawn(move || {
+            worker_slot.run("runtime-a".to_string(), || {
+                started_tx.send(()).expect("signal probe start");
+                resume_rx.recv().expect("resume probe");
+                Ok(11)
+            })
+        });
+        started_rx.recv().expect("probe started");
+        slot.invalidate();
+        resume_tx.send(()).expect("release probe");
+        let superseded = worker.join().expect("probe worker");
+        assert_eq!(superseded.probe_state, "superseded");
+        assert_eq!(superseded.value, None);
+
+        let fresh = slot.run("runtime-b".to_string(), || Ok(12));
+        assert_eq!(fresh.value, Some(12));
+        assert_eq!(fresh.probe_state, "verified");
+    }
+
+    #[test]
+    fn semantic_probe_waiter_with_new_identity_runs_once_after_old_terminal() {
+        let slot = std::sync::Arc::new(SemanticProbeSlot::<u32>::new());
+        let (started_tx, started_rx) = std::sync::mpsc::channel();
+        let (resume_tx, resume_rx) = std::sync::mpsc::channel();
+        let owner_slot = slot.clone();
+        let owner = std::thread::spawn(move || {
+            owner_slot.run("runtime-a".to_string(), || {
+                started_tx.send(()).expect("signal old probe start");
+                resume_rx.recv().expect("resume old probe");
+                Ok(11)
+            })
+        });
+        started_rx.recv().expect("old probe started");
+
+        let new_starts = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let waiter_slot = slot.clone();
+        let waiter_starts = new_starts.clone();
+        let waiter = std::thread::spawn(move || {
+            waiter_slot.run("runtime-b".to_string(), || {
+                waiter_starts.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                Ok(12)
+            })
+        });
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
+        loop {
+            let joined = slot
+                .state
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .active_waiters;
+            if joined == 1 {
+                break;
+            }
+            assert!(
+                std::time::Instant::now() < deadline,
+                "new identity did not join old flight"
+            );
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
+        slot.invalidate();
+        resume_tx.send(()).expect("release old probe");
+        assert_eq!(owner.join().expect("old owner").probe_state, "superseded");
+        let fresh = waiter.join().expect("new identity waiter");
+        assert_eq!(fresh.value, Some(12));
+        assert_eq!(new_starts.load(std::sync::atomic::Ordering::SeqCst), 1);
+        assert!(
+            slot.state
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .terminal_by_flight
+                .is_empty(),
+            "a waiter gated behind a different source identity must consume the old terminal slot",
+        );
+    }
 
     #[cfg(windows)]
     #[test]
@@ -9313,7 +10801,7 @@ mod tests {
                 mismatch.then_some("BAD_LEGACY_ROOT"),
             );
             assert!(
-                authenticate_authoritative_installed_provider_identity(&paths).is_err(),
+                authenticate_authoritative_installed_provider_identity(&paths, None).is_err(),
                 "a parseable v47 row must never be accepted before transactional binding"
             );
             let result = commit_adopted_provider_identity(&paths, verified);
@@ -10531,6 +12019,9 @@ mod tests {
         ));
         let paths = AppPaths::new(base.clone());
         paths.ensure_dirs().unwrap();
+        let conn = crate::db::open(&paths).unwrap();
+        crate::db::migrate(&conn).unwrap();
+        drop(conn);
         let traversal_id = format!("{}\\..\\..\\outside", uuid::Uuid::new_v4());
         let traversal_root = paths
             .tools_dir()
@@ -10571,7 +12062,8 @@ mod tests {
     }
 
     #[test]
-    fn launch_revalidates_and_rejects_a_tampered_previously_attested_tree() {
+    fn launch_rejects_an_incomplete_attestation_without_spawning() {
+        let _guard = PROVIDER_INTEGRITY_TEST_LOCK.lock().unwrap();
         let base = std::env::temp_dir().join(format!(
             "voxvulgi_provider_launch_revalidation_{}_{}",
             std::process::id(),
@@ -10580,32 +12072,186 @@ mod tests {
         let paths = AppPaths::new(base.clone());
         paths.ensure_dirs().unwrap();
         let server = paths.youtube_po_provider_server_dir();
-        let node_modules = server.join("node_modules");
-        std::fs::create_dir_all(&node_modules).unwrap();
-        std::fs::write(node_modules.join("tampered.js"), b"not pinned").unwrap();
+        let dependency_dir = server
+            .join("node_modules")
+            .join("fixture_dependency")
+            .join("dist");
+        std::fs::create_dir_all(&dependency_dir).unwrap();
+        let nested_dependency = dependency_dir.join("index.js");
+        std::fs::write(&nested_dependency, b"trusted-byte").unwrap();
         let expected = pinned_dependency_manifest::manifest()
             .youtube_po_provider
             .node_modules_tree_sha256_hex
             .clone();
-        provider_node_modules_process_attestations()
-            .lock()
-            .unwrap()
-            .insert(
-                server.clone(),
-                ProviderNodeModulesProcessAttestation {
-                    install_generation: provider_install_generation(),
-                    tree_sha256_hex: expected,
-                    verified_at_ms: now_ms(),
-                },
-            );
+        attest_provider_node_modules_tree(&server, &expected).unwrap();
         assert!(provider_node_modules_process_attestation(&server).is_some());
+        let modified = std::fs::metadata(&nested_dependency)
+            .unwrap()
+            .modified()
+            .unwrap();
+        std::fs::write(&nested_dependency, b"tampered-byt").unwrap();
+        std::fs::File::options()
+            .write(true)
+            .open(&nested_dependency)
+            .unwrap()
+            .set_times(std::fs::FileTimes::new().set_modified(modified))
+            .unwrap();
+        let scans_before = youtube_po_provider_verification_progress(&paths)
+            .map(|progress| progress.scan_count)
+            .unwrap_or(0);
         assert!(ensure_youtube_po_provider(&paths).is_err());
+        let progress = youtube_po_provider_verification_progress(&paths)
+            .expect("launch reauthentication progress");
+        assert_eq!(
+            progress.scan_count, scans_before,
+            "an incomplete fixture must fail lineage authentication before a tree scan"
+        );
         assert!(provider_node_modules_process_attestation(&server).is_none());
+        assert!(youtube_po_provider_slot().lock().unwrap().is_none());
         assert_eq!(
             youtube_po_provider_install_status(&paths).node_modules_integrity_state,
             "invalid"
         );
         let _ = std::fs::remove_dir_all(base);
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn exact_provider_launch_rejects_same_size_nested_tamper_before_spawn() {
+        let Some(fixture_base) =
+            std::env::var_os("VOXVULGI_EXACT_PROVIDER_FIXTURE_BASE_DIR").map(PathBuf::from)
+        else {
+            eprintln!(
+                "VOXVULGI_EXACT_PROVIDER_FIXTURE_BASE_DIR not set; exact provider launch tamper proof skipped"
+            );
+            return;
+        };
+        if std::env::var("VOXVULGI_EXACT_PROVIDER_FIXTURE_MUTATION_APPROVED").as_deref() != Ok("1")
+        {
+            eprintln!(
+                "VOXVULGI_EXACT_PROVIDER_FIXTURE_MUTATION_APPROVED=1 not set; mutation proof skipped"
+            );
+            return;
+        }
+        let _guard = PROVIDER_INTEGRITY_TEST_LOCK.lock().unwrap();
+        let paths = AppPaths::new(fixture_base);
+        let normal_base = std::env::var_os("APPDATA")
+            .map(PathBuf::from)
+            .map(|root| root.join("com.voxvulgi.voxvulgi"));
+        assert_ne!(
+            normal_base
+                .as_deref()
+                .and_then(|path| path.canonicalize().ok()),
+            paths.base_dir.canonicalize().ok(),
+            "the exact mutation fixture must never be the operator's normal app-data root"
+        );
+
+        let baseline = ensure_youtube_po_provider(&paths)
+            .expect("the supplied exact fixture must start from a verified baseline");
+        assert!(baseline.healthy, "exact fixture baseline must be running");
+        let baseline_pid = baseline.process_id.expect("baseline provider pid");
+        let server = paths.youtube_po_provider_server_dir();
+        let mut stack = vec![server.join("node_modules")];
+        let mut nested_dependency = None;
+        while let Some(directory) = stack.pop() {
+            for entry in std::fs::read_dir(&directory).expect("walk exact node_modules fixture") {
+                let entry = entry.expect("read exact node_modules entry");
+                let path = entry.path();
+                let metadata = entry.metadata().expect("read exact dependency metadata");
+                if metadata.is_dir() {
+                    stack.push(path);
+                } else if metadata.is_file() && metadata.len() > 0 {
+                    nested_dependency = Some(path);
+                    break;
+                }
+            }
+            if nested_dependency.is_some() {
+                break;
+            }
+        }
+        let nested_dependency = nested_dependency.expect("exact fixture nested dependency file");
+        let mut bytes = std::fs::read(&nested_dependency).expect("read exact dependency bytes");
+        let original_mtime = filetime::FileTime::from_last_modification_time(
+            &std::fs::metadata(&nested_dependency).expect("read exact dependency timestamp"),
+        );
+        bytes[0] ^= 0x01;
+        std::fs::write(&nested_dependency, &bytes).expect("write same-size nested tamper");
+        filetime::set_file_mtime(&nested_dependency, original_mtime)
+            .expect("restore nested dependency timestamp");
+
+        let scans_before = youtube_po_provider_verification_progress(&paths)
+            .expect("baseline provider progress")
+            .scan_count;
+        let launch_result = ensure_youtube_po_provider(&paths);
+        let progress = youtube_po_provider_verification_progress(&paths)
+            .expect("tamper verification progress");
+        let slot_empty = youtube_po_provider_slot().lock().unwrap().is_none();
+        let integrity_state =
+            youtube_po_provider_install_status(&paths).node_modules_integrity_state;
+        bytes[0] ^= 0x01;
+        std::fs::write(&nested_dependency, &bytes).expect("restore exact dependency bytes");
+        filetime::set_file_mtime(&nested_dependency, original_mtime)
+            .expect("restore exact dependency timestamp after proof");
+
+        let error = launch_result.expect_err("same-size nested tamper must fail before spawn");
+        let error_text = error.to_string();
+        assert!(
+            error_text.contains("integrity")
+                || error_text.contains("tree")
+                || error_text.contains("hash mismatch"),
+            "unexpected tamper failure: {error_text}"
+        );
+        assert_eq!(progress.scan_count, scans_before + 1);
+        assert!(slot_empty);
+        assert_eq!(integrity_state, "invalid");
+        assert!(
+            provider_process_identity(baseline_pid).is_none(),
+            "tamper rejection must terminate and reap the previously healthy provider child"
+        );
+
+        verify_youtube_po_provider_node_modules(&paths)
+            .expect("restored exact fixture must re-attest before shared-failure proof");
+        let original_bytes = std::fs::read(&nested_dependency).expect("read restored dependency");
+        let restored_mtime = filetime::FileTime::from_last_modification_time(
+            &std::fs::metadata(&nested_dependency).expect("read restored dependency timestamp"),
+        );
+        let mut second_tamper = original_bytes.clone();
+        second_tamper[0] ^= 0x01;
+        std::fs::write(&nested_dependency, &second_tamper)
+            .expect("write concurrent same-size tamper");
+        filetime::set_file_mtime(&nested_dependency, restored_mtime)
+            .expect("restore concurrent tamper timestamp");
+        let shared_scans_before = youtube_po_provider_verification_progress(&paths)
+            .expect("restored baseline progress")
+            .scan_count;
+        let barrier = std::sync::Arc::new(std::sync::Barrier::new(6));
+        let mut callers = Vec::new();
+        for _ in 0..6 {
+            let caller_paths = paths.clone();
+            let caller_barrier = std::sync::Arc::clone(&barrier);
+            callers.push(std::thread::spawn(move || {
+                caller_barrier.wait();
+                verify_youtube_po_provider_node_modules(&caller_paths)
+                    .expect_err("all exact tamper waiters must receive one failure")
+                    .to_string()
+            }));
+        }
+        let errors = callers
+            .into_iter()
+            .map(|caller| caller.join().expect("provider verification waiter"))
+            .collect::<Vec<_>>();
+        std::fs::write(&nested_dependency, &original_bytes)
+            .expect("restore exact dependency after concurrent proof");
+        filetime::set_file_mtime(&nested_dependency, restored_mtime)
+            .expect("restore exact dependency timestamp after concurrent proof");
+        assert!(errors.windows(2).all(|pair| pair[0] == pair[1]));
+        assert_eq!(
+            youtube_po_provider_verification_progress(&paths)
+                .expect("shared failure progress")
+                .scan_count,
+            shared_scans_before + 1,
+            "concurrent callers for one tampered generation must share one failed scan"
+        );
     }
 
     #[cfg(windows)]
@@ -10656,7 +12302,7 @@ mod tests {
                 "--registry=https://registry.npmjs.org/",
             ])
             .current_dir(&app)
-            .output()
+            .owned_output()
             .unwrap();
         assert!(lock.status.success(), "fixture lock generation failed");
         std::fs::write(

@@ -590,7 +590,7 @@ mod tests {
     use std::f32::consts::PI;
 
     fn seed_item(paths: &AppPaths, item_id: &str, media_path: &Path) {
-        let conn = db::open(paths).expect("open db");
+        let conn = db::write_context(paths).expect("open db");
         db::migrate(&conn).expect("migrate");
         conn.execute(
             "INSERT INTO library_item (id, created_at_ms, source_type, source_uri, title, media_path) VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
@@ -648,7 +648,7 @@ mod tests {
             ),
         )
         .expect("write track");
-        let conn = db::open(paths).expect("open db");
+        let conn = db::write_context(paths).expect("open db");
         db::migrate(&conn).expect("migrate");
         conn.execute(
             "INSERT INTO subtitle_track (id, item_id, kind, lang, format, path, created_by, version) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",

@@ -41,8 +41,7 @@ pub fn get_item_voice_plan(paths: &AppPaths, item_id: &str) -> Result<Option<Ite
     if item_id.is_empty() {
         return Err(EngineError::InstallFailed("item_id is empty".to_string()));
     }
-    let conn = db::open(paths)?;
-    db::migrate(&conn)?;
+    let conn = db::open_readonly(paths)?;
     let mut stmt = conn.prepare(
         r#"
 SELECT
@@ -82,8 +81,7 @@ pub fn upsert_item_voice_plan(
     let selected_variant_label = normalize_optional_string(update.selected_variant_label);
     let notes = normalize_optional_string(update.notes);
 
-    let conn = db::open(paths)?;
-    db::migrate(&conn)?;
+    let conn = db::write_context(paths)?;
     let now = now_ms();
     conn.execute(
         r#"
@@ -129,8 +127,7 @@ pub fn delete_item_voice_plan(paths: &AppPaths, item_id: &str) -> Result<()> {
     if item_id.is_empty() {
         return Err(EngineError::InstallFailed("item_id is empty".to_string()));
     }
-    let conn = db::open(paths)?;
-    db::migrate(&conn)?;
+    let conn = db::write_context(paths)?;
     conn.execute(
         "DELETE FROM item_voice_plan WHERE item_id=?1",
         params![item_id],

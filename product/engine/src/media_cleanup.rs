@@ -24,6 +24,26 @@ thread_local! {
     static FORCE_CLEANUP_APPLY_COMPENSATION_FAILURE: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
 }
 
+#[cfg(test)]
+static CLEANUP_HASH_IO_TEST_HOOK: std::sync::OnceLock<
+    std::sync::Mutex<Option<std::sync::Arc<dyn Fn() + Send + Sync>>>,
+> = std::sync::OnceLock::new();
+
+#[cfg(test)]
+fn run_cleanup_hash_io_test_hook() {
+    let hook = CLEANUP_HASH_IO_TEST_HOOK
+        .get_or_init(|| std::sync::Mutex::new(None))
+        .lock()
+        .expect("cleanup hash hook lock")
+        .clone();
+    if let Some(hook) = hook {
+        hook();
+    }
+}
+
+#[cfg(not(test))]
+fn run_cleanup_hash_io_test_hook() {}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct MediaCleanupRun {
     pub id: String,
@@ -117,8 +137,44 @@ struct CleanupFileRow {
     path: String,
     size_bytes: i64,
     modified_ms: i64,
+    file_identity: Option<String>,
     library_item_id: Option<String>,
     media_id: Option<String>,
+}
+
+#[derive(Debug, Clone)]
+struct InventoriedFile {
+    path: String,
+    size_bytes: i64,
+    modified_ms: i64,
+    file_identity: Option<String>,
+    library_item_id: Option<String>,
+    media_id: Option<String>,
+}
+
+#[derive(Debug, Clone)]
+struct CleanupDatabaseSnapshot {
+    size_bytes: i64,
+    modified_ms: i64,
+    file_identity: Option<String>,
+    state: String,
+}
+
+struct PreparedReconciliationCandidate {
+    candidate_id: String,
+    kind: String,
+    physical_path: Option<String>,
+    library_item_id: Option<String>,
+    library_path: Option<String>,
+    evidence_kind: String,
+    evidence_value: Option<String>,
+    disposition: String,
+}
+
+#[derive(Default)]
+struct PreparedReconciliation {
+    media_ids: Vec<(String, String)>,
+    candidates: Vec<PreparedReconciliationCandidate>,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -189,8 +245,7 @@ pub fn create_inventory_run(
         }
     }
 
-    let conn = db::open(paths)?;
-    db::migrate(&conn)?;
+    let conn = db::write_context(paths)?;
     let id = Uuid::new_v4().to_string();
     let now = now_ms();
     conn.execute(
@@ -241,9 +296,8 @@ pub fn advance_inventory(
     max_files: Option<usize>,
 ) -> Result<MediaCleanupAdvanceSummary> {
     let max_files = max_files.unwrap_or(500).clamp(1, 10_000);
-    let conn = db::open(paths)?;
-    db::migrate(&conn)?;
-    let row = conn
+    let read = db::open_readonly(paths)?;
+    let row = read
         .query_row(
             "SELECT scan_queue_json, stage FROM media_cleanup_run WHERE id=?1",
             [run_id],
@@ -253,14 +307,16 @@ pub fn advance_inventory(
         .ok_or_else(|| EngineError::InstallFailed("cleanup run not found".to_string()))?;
     if row.1 != "inventory" {
         return Ok(MediaCleanupAdvanceSummary {
-            run: get_run_conn(&conn, run_id)?.expect("run exists"),
+            run: get_run_conn(&read, run_id)?.expect("run exists"),
             processed_files: 0,
             remaining_inventory_entries: serde_json::from_str::<Vec<String>>(&row.0)
                 .unwrap_or_default()
                 .len(),
         });
     }
-    if cleanup_active_job_count(&conn)? > 0 {
+    if cleanup_active_job_count(&read)? > 0 {
+        drop(read);
+        let conn = db::write_context(paths)?;
         conn.execute(
             "UPDATE media_cleanup_run SET status='paused', updated_at_ms=?1 WHERE id=?2",
             params![now_ms(), run_id],
@@ -274,9 +330,11 @@ pub fn advance_inventory(
         });
     }
     let mut queue: Vec<String> = serde_json::from_str(&row.0)?;
-    let library_by_path = library_identity_by_normalized_path(paths, &conn)?;
+    let library_by_path = library_identity_by_normalized_path(paths, &read)?;
+    drop(read);
     let mut processed_files = 0_usize;
     let mut bytes_scanned = 0_u64;
+    let mut inventoried = Vec::new();
 
     while processed_files < max_files {
         let Some(current) = queue.pop() else {
@@ -315,43 +373,58 @@ pub fn advance_inventory(
             .unwrap_or((None, None));
         let modified_ms = modified_ms(&metadata);
         let file_identity = native_file_identity(&canonical_path).ok();
-        conn.execute(
-            r#"
-INSERT INTO media_cleanup_file (
-  run_id, path, size_bytes, modified_ms, file_identity, library_item_id, media_id, state, updated_at_ms
-) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, 'inventoried', ?8)
-ON CONFLICT(run_id, path) DO UPDATE SET
-  size_bytes=excluded.size_bytes,
-  modified_ms=excluded.modified_ms,
-  file_identity=excluded.file_identity,
-  library_item_id=excluded.library_item_id,
-  media_id=excluded.media_id,
-  prefix_sha256=NULL,
-  suffix_sha256=NULL,
-  full_sha256=NULL,
-  group_id=NULL,
-  state='inventoried',
-  last_error=NULL,
-  updated_at_ms=excluded.updated_at_ms
-"#,
-            params![
-                run_id,
-                path_text,
-                i64::try_from(metadata.len()).unwrap_or(i64::MAX),
-                modified_ms,
-                file_identity,
-                library_item_id,
-                media_id,
-                now_ms()
-            ],
-        )?;
+        inventoried.push(InventoriedFile {
+            path: path_text,
+            size_bytes: i64::try_from(metadata.len()).unwrap_or(i64::MAX),
+            modified_ms,
+            file_identity,
+            library_item_id,
+            media_id,
+        });
     }
     let stage = if queue.is_empty() {
         "reconciliation"
     } else {
         "inventory"
     };
-    conn.execute(
+    let next_queue_json = serde_json::to_string(&queue)?;
+    let mut conn = db::write_context(paths)?;
+    let tx = conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+    if cleanup_active_job_count(&tx)? > 0 {
+        return Err(EngineError::InstallFailed(
+            "cleanup inventory lost its zero-running-jobs boundary".to_string(),
+        ));
+    }
+    let unchanged: i64 = tx.query_row(
+        "SELECT COUNT(*) FROM media_cleanup_run WHERE id=?1 AND stage='inventory' AND scan_queue_json=?2",
+        params![run_id, row.0],
+        |result| result.get(0),
+    )?;
+    if unchanged != 1 {
+        return Err(EngineError::InstallFailed(
+            "cleanup inventory state changed while filesystem scanning was in progress; retry"
+                .to_string(),
+        ));
+    }
+    let now = now_ms();
+    for file in inventoried {
+        tx.execute(
+            r#"
+INSERT INTO media_cleanup_file (
+  run_id, path, size_bytes, modified_ms, file_identity, library_item_id, media_id, state, updated_at_ms
+) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, 'inventoried', ?8)
+ON CONFLICT(run_id, path) DO UPDATE SET
+  size_bytes=excluded.size_bytes, modified_ms=excluded.modified_ms,
+  file_identity=excluded.file_identity, library_item_id=excluded.library_item_id,
+  media_id=excluded.media_id, prefix_sha256=NULL, suffix_sha256=NULL,
+  full_sha256=NULL, group_id=NULL, state='inventoried', last_error=NULL,
+  updated_at_ms=excluded.updated_at_ms
+"#,
+            params![run_id, file.path, file.size_bytes, file.modified_ms, file.file_identity,
+                file.library_item_id, file.media_id, now],
+        )?;
+    }
+    let changed = tx.execute(
         r#"
 UPDATE media_cleanup_run SET
   scan_queue_json=?1,
@@ -360,19 +433,27 @@ UPDATE media_cleanup_run SET
   files_scanned=files_scanned+?3,
   bytes_scanned=bytes_scanned+?4,
   updated_at_ms=?5
-WHERE id=?6
+WHERE id=?6 AND stage='inventory' AND scan_queue_json=?7
 "#,
         params![
-            serde_json::to_string(&queue)?,
+            next_queue_json,
             stage,
             i64::try_from(processed_files).unwrap_or(i64::MAX),
             i64::try_from(bytes_scanned).unwrap_or(i64::MAX),
-            now_ms(),
-            run_id
+            now,
+            run_id,
+            row.0
         ],
     )?;
+    if changed != 1 {
+        return Err(EngineError::InstallFailed(
+            "cleanup inventory state changed before publication; retry".to_string(),
+        ));
+    }
+    tx.commit()?;
+    let read = db::open_readonly(paths)?;
     Ok(MediaCleanupAdvanceSummary {
-        run: get_run_conn(&conn, run_id)?.expect("run exists"),
+        run: get_run_conn(&read, run_id)?.expect("run exists"),
         processed_files,
         remaining_inventory_entries: queue.len(),
     })
@@ -382,9 +463,8 @@ pub fn reconciliation_preview(
     paths: &AppPaths,
     run_id: &str,
 ) -> Result<MediaCleanupReconciliationSummary> {
-    let mut conn = db::open(paths)?;
-    db::migrate(&conn)?;
-    let stage: String = conn
+    let read = db::open_readonly(paths)?;
+    let stage: String = read
         .query_row(
             "SELECT stage FROM media_cleanup_run WHERE id=?1",
             [run_id],
@@ -397,12 +477,15 @@ pub fn reconciliation_preview(
             "finish inventory before preparing reconciliation".to_string(),
         ));
     }
-    let existing: i64 = conn.query_row(
+    let existing: i64 = read.query_row(
         "SELECT COUNT(*) FROM media_cleanup_reconciliation_candidate WHERE run_id=?1",
         [run_id],
         |row| row.get(0),
     )?;
     if existing == 0 && stage == "reconciliation" {
+        let prepared = prepare_reconciliation_candidates(paths, &read, run_id)?;
+        drop(read);
+        let mut conn = db::write_context(paths)?;
         let tx = conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
         let still_empty: i64 = tx.query_row(
             "SELECT COUNT(*) FROM media_cleanup_reconciliation_candidate WHERE run_id=?1",
@@ -410,21 +493,49 @@ pub fn reconciliation_preview(
             |row| row.get(0),
         )?;
         if still_empty == 0 {
-            prepare_reconciliation_candidates(paths, &tx, run_id)?;
+            let still_stage = cleanup_run_stage(&tx, run_id)?;
+            if still_stage != "reconciliation" {
+                return Err(EngineError::InstallFailed(
+                    "cleanup reconciliation state changed while evidence was prepared; retry"
+                        .to_string(),
+                ));
+            }
+            for (path, media_id) in prepared.media_ids {
+                tx.execute(
+                    "UPDATE media_cleanup_file SET media_id=?1, updated_at_ms=?2 WHERE run_id=?3 AND path=?4 AND media_id IS NULL",
+                    params![media_id, now_ms(), run_id, path],
+                )?;
+            }
+            for candidate in prepared.candidates {
+                insert_reconciliation_candidate(
+                    &tx,
+                    run_id,
+                    &candidate.candidate_id,
+                    &candidate.kind,
+                    candidate.physical_path.as_deref(),
+                    candidate.library_item_id.as_deref(),
+                    candidate.library_path.as_deref(),
+                    &candidate.evidence_kind,
+                    candidate.evidence_value.as_deref(),
+                    &candidate.disposition,
+                    now_ms(),
+                )?;
+            }
         }
         tx.commit()?;
+        return reconciliation_summary_conn(&conn, run_id);
     }
-    reconciliation_summary_conn(&conn, run_id)
+    reconciliation_summary_conn(&read, run_id)
 }
 
 pub fn apply_reconciliation(
     paths: &AppPaths,
     run_id: &str,
 ) -> Result<MediaCleanupReconciliationSummary> {
-    let mut conn = db::open(paths)?;
-    db::migrate(&conn)?;
     let preview = reconciliation_preview(paths, run_id)?;
-    ensure_cleanup_apply_boundary(&conn)?;
+    let read = db::open_readonly(paths)?;
+    ensure_cleanup_apply_boundary(&read)?;
+    drop(read);
     let mut failed = 0_usize;
 
     for candidate in preview
@@ -433,6 +544,8 @@ pub fn apply_reconciliation(
         .filter(|row| row.disposition == "deterministic_relink")
     {
         let result = (|| -> Result<()> {
+            let read = db::open_readonly(paths)?;
+            ensure_cleanup_apply_boundary(&read)?;
             let physical_path = candidate.physical_path.as_deref().ok_or_else(|| {
                 EngineError::InstallFailed("relink candidate has no physical path".to_string())
             })?;
@@ -442,7 +555,8 @@ pub fn apply_reconciliation(
             let old_path = candidate.library_path.as_deref().ok_or_else(|| {
                 EngineError::InstallFailed("relink candidate has no prior library path".to_string())
             })?;
-            verify_inventoried_file_unchanged(&conn, run_id, physical_path)?;
+            let inventory_snapshot = cleanup_database_snapshot(&read, run_id, physical_path)?;
+            verify_inventoried_file_unchanged(&read, run_id, physical_path)?;
             match std::fs::metadata(old_path) {
                 Ok(old_metadata) if old_metadata.is_file() && old_metadata.len() == 0 => {}
                 Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
@@ -457,8 +571,10 @@ pub fn apply_reconciliation(
                     )));
                 }
             }
+            drop(read);
+            let mut conn = db::write_context(paths)?;
             let tx = begin_cleanup_apply_transaction(&mut conn)?;
-            verify_inventoried_file_unchanged(&tx, run_id, physical_path)?;
+            verify_cleanup_snapshot_in_database(&tx, run_id, physical_path, &inventory_snapshot)?;
             let current_path = library_item_media_path(&tx, library_item_id)?.ok_or_else(|| {
                 EngineError::InstallFailed(format!(
                     "reconciliation library item is missing: {library_item_id}"
@@ -497,6 +613,7 @@ pub fn apply_reconciliation(
         })();
         if let Err(error) = result {
             failed += 1;
+            let conn = db::write_context(paths)?;
             conn.execute(
                 "UPDATE media_cleanup_reconciliation_candidate SET error=?1, updated_at_ms=?2 WHERE run_id=?3 AND candidate_id=?4 AND disposition='deterministic_relink'",
                 params![error.to_string(), now_ms(), run_id, candidate.candidate_id],
@@ -510,13 +627,16 @@ pub fn apply_reconciliation(
         .filter(|row| row.disposition == "index_new")
     {
         let result = (|| -> Result<String> {
+            let read = db::open_readonly(paths)?;
+            ensure_cleanup_apply_boundary(&read)?;
             let physical_path = candidate.physical_path.as_deref().ok_or_else(|| {
                 EngineError::InstallFailed("index candidate has no physical path".to_string())
             })?;
             let canonical_path = Path::new(physical_path).canonicalize()?;
             let canonical_path_string = canonical_path.to_string_lossy().to_string();
-            verify_inventoried_file_unchanged(&conn, run_id, physical_path)?;
-            let existing = library_items_for_media_path(paths, &conn, &canonical_path_string)?
+            let inventory_snapshot = cleanup_database_snapshot(&read, run_id, physical_path)?;
+            verify_inventoried_file_unchanged(&read, run_id, physical_path)?;
+            let existing = library_items_for_media_path(paths, &read, &canonical_path_string)?
                 .into_iter()
                 .next()
                 .map(|item| item.library_item_id);
@@ -530,13 +650,17 @@ pub fn apply_reconciliation(
                     None,
                 )?),
             };
+            drop(read);
+            let mut conn = db::write_context(paths)?;
             let tx = begin_cleanup_apply_transaction(&mut conn)?;
-            verify_inventoried_file_unchanged(&tx, run_id, physical_path)?;
-            let current_existing =
-                library_items_for_media_path(paths, &tx, &canonical_path_string)?
-                    .into_iter()
-                    .next()
-                    .map(|item| item.library_item_id);
+            verify_cleanup_snapshot_in_database(&tx, run_id, physical_path, &inventory_snapshot)?;
+            let current_existing = tx
+                .query_row(
+                    "SELECT id FROM library_item WHERE media_path=?1 ORDER BY id LIMIT 1",
+                    [&canonical_path_string],
+                    |row| row.get::<_, String>(0),
+                )
+                .optional()?;
             let item_id = if let Some(item_id) = current_existing {
                 item_id
             } else {
@@ -563,6 +687,7 @@ pub fn apply_reconciliation(
             Ok(_) => {}
             Err(error) => {
                 failed += 1;
+                let conn = db::write_context(paths)?;
                 conn.execute(
                     "UPDATE media_cleanup_reconciliation_candidate SET error=?1, updated_at_ms=?2 WHERE run_id=?3 AND candidate_id=?4 AND disposition='index_new'",
                     params![error.to_string(), now_ms(), run_id, candidate.candidate_id],
@@ -571,18 +696,22 @@ pub fn apply_reconciliation(
         }
     }
 
+    let conn = db::write_context(paths)?;
+    ensure_cleanup_apply_boundary(&conn)?;
     conn.execute(
         "UPDATE media_cleanup_run SET stage=CASE WHEN ?1=0 THEN 'hashing' ELSE 'reconciliation' END, status=CASE WHEN ?1=0 THEN 'running' ELSE 'attention' END, updated_at_ms=?2 WHERE id=?3",
         params![i64::try_from(failed).unwrap_or(i64::MAX), now_ms(), run_id],
     )?;
-    reconciliation_summary_conn(&conn, run_id)
+    drop(conn);
+    let read = db::open_readonly(paths)?;
+    reconciliation_summary_conn(&read, run_id)
 }
 
 fn prepare_reconciliation_candidates(
     paths: &AppPaths,
     conn: &rusqlite::Connection,
     run_id: &str,
-) -> Result<()> {
+) -> Result<PreparedReconciliation> {
     #[derive(Clone)]
     struct PhysicalRow {
         path: String,
@@ -600,6 +729,7 @@ fn prepare_reconciliation_candidates(
         filename_key: String,
     }
 
+    let mut prepared = PreparedReconciliation::default();
     let roots_json: String = conn.query_row(
         "SELECT roots_json FROM media_cleanup_run WHERE id=?1",
         [run_id],
@@ -659,10 +789,9 @@ fn prepare_reconciliation_candidates(
                 .entry(media_id.clone())
                 .or_default()
                 .push(row.path.clone());
-            conn.execute(
-                "UPDATE media_cleanup_file SET media_id=?1, updated_at_ms=?2 WHERE run_id=?3 AND path=?4 AND media_id IS NULL",
-                params![media_id, now_ms(), run_id, row.path],
-            )?;
+            prepared
+                .media_ids
+                .push((row.path.clone(), media_id.clone()));
         }
         physical_by_filename
             .entry(row.filename_key.clone())
@@ -686,7 +815,6 @@ fn prepare_reconciliation_candidates(
 
     let mut matched_library_items = HashSet::new();
     let mut ambiguous_library_items = HashSet::new();
-    let now = now_ms();
     for row in physical_rows
         .iter()
         .filter(|row| row.library_item_id.is_none())
@@ -784,19 +912,20 @@ fn prepare_reconciliation_candidates(
                 "review_only".to_string(),
             )
         };
-        insert_reconciliation_candidate(
-            conn,
-            run_id,
-            &stable_cleanup_candidate_id(run_id, &row.path, library_item_id.as_deref()),
-            &kind,
-            Some(&row.path),
-            library_item_id.as_deref(),
-            library_path.as_deref(),
-            &evidence_kind,
-            evidence_value.as_deref(),
-            &disposition,
-            now,
-        )?;
+        prepared.candidates.push(PreparedReconciliationCandidate {
+            candidate_id: stable_cleanup_candidate_id(
+                run_id,
+                &row.path,
+                library_item_id.as_deref(),
+            ),
+            kind,
+            physical_path: Some(row.path.clone()),
+            library_item_id,
+            library_path,
+            evidence_kind,
+            evidence_value,
+            disposition,
+        });
     }
 
     let inventoried_keys = physical_rows
@@ -830,25 +959,23 @@ fn prepare_reconciliation_candidates(
         {
             continue;
         }
-        insert_reconciliation_candidate(
-            conn,
-            run_id,
-            &stable_cleanup_candidate_id(run_id, &row.media_path, Some(&row.id)),
-            if zero_byte {
+        prepared.candidates.push(PreparedReconciliationCandidate {
+            candidate_id: stable_cleanup_candidate_id(run_id, &row.media_path, Some(&row.id)),
+            kind: if zero_byte {
                 "zero_byte_library_path"
             } else {
                 "missing_library_path"
-            },
-            None,
-            Some(&row.id),
-            Some(&row.media_path),
-            "no_unique_physical_match",
-            None,
-            "review_only",
-            now,
-        )?;
+            }
+            .to_string(),
+            physical_path: None,
+            library_item_id: Some(row.id.clone()),
+            library_path: Some(row.media_path.clone()),
+            evidence_kind: "no_unique_physical_match".to_string(),
+            evidence_value: None,
+            disposition: "review_only".to_string(),
+        });
     }
-    Ok(())
+    Ok(prepared)
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -1024,6 +1151,48 @@ fn verify_inventoried_file_unchanged(
     Ok(())
 }
 
+/// Database-only half of the inventory CAS. Filesystem identity and content checks must be
+/// completed before entering writer admission; this helper only proves the canonical row still
+/// exists in an applicable state while the short publication transaction owns the writer.
+fn verify_cleanup_snapshot_in_database(
+    conn: &rusqlite::Connection,
+    run_id: &str,
+    physical_path: &str,
+    expected: &CleanupDatabaseSnapshot,
+) -> Result<()> {
+    let present: i64 = conn.query_row(
+        "SELECT COUNT(*) FROM media_cleanup_file WHERE run_id=?1 AND path=?2 AND size_bytes=?3 AND modified_ms=?4 AND file_identity IS ?5 AND state=?6",
+        params![run_id, physical_path, expected.size_bytes, expected.modified_ms, expected.file_identity, expected.state],
+        |row| row.get(0),
+    )?;
+    if present != 1 {
+        return Err(EngineError::InstallFailed(format!(
+            "cleanup inventory row changed before publication: {physical_path}"
+        )));
+    }
+    Ok(())
+}
+
+fn cleanup_database_snapshot(
+    conn: &rusqlite::Connection,
+    run_id: &str,
+    physical_path: &str,
+) -> Result<CleanupDatabaseSnapshot> {
+    conn.query_row(
+        "SELECT size_bytes,modified_ms,file_identity,state FROM media_cleanup_file WHERE run_id=?1 AND path=?2",
+        params![run_id, physical_path],
+        |row| {
+            Ok(CleanupDatabaseSnapshot {
+                size_bytes: row.get(0)?,
+                modified_ms: row.get(1)?,
+                file_identity: row.get(2)?,
+                state: row.get(3)?,
+            })
+        },
+    )
+    .map_err(Into::into)
+}
+
 #[cfg(windows)]
 fn native_file_identity(path: &Path) -> Result<String> {
     let file = File::open(path)?;
@@ -1064,9 +1233,8 @@ pub fn advance_hashing(
     max_files: Option<usize>,
 ) -> Result<MediaCleanupAdvanceSummary> {
     let max_files = max_files.unwrap_or(25).clamp(1, 500);
-    let conn = db::open(paths)?;
-    db::migrate(&conn)?;
-    let stage: String = conn
+    let read = db::open_readonly(paths)?;
+    let stage: String = read
         .query_row(
             "SELECT stage FROM media_cleanup_run WHERE id=?1",
             [run_id],
@@ -1086,12 +1254,14 @@ pub fn advance_hashing(
     }
     if stage == "review" || stage == "complete" {
         return Ok(MediaCleanupAdvanceSummary {
-            run: get_run_conn(&conn, run_id)?.expect("run exists"),
+            run: get_run_conn(&read, run_id)?.expect("run exists"),
             processed_files: 0,
             remaining_inventory_entries: 0,
         });
     }
-    if cleanup_active_job_count(&conn)? > 0 {
+    if cleanup_active_job_count(&read)? > 0 {
+        drop(read);
+        let conn = db::write_context(paths)?;
         conn.execute(
             "UPDATE media_cleanup_run SET status='paused', updated_at_ms=?1 WHERE id=?2",
             params![now_ms(), run_id],
@@ -1103,19 +1273,29 @@ pub fn advance_hashing(
         });
     }
 
-    let prefix_rows = pending_prefix_rows(&conn, run_id, max_files)?;
+    let prefix_rows = pending_prefix_rows(&read, run_id, max_files)?;
     if !prefix_rows.is_empty() {
-        for row in &prefix_rows {
-            match verify_inventoried_file_unchanged(&conn, run_id, &row.path)
-                .and_then(|_| staged_hashes_with_cache(&conn, row, false))
-            {
+        let cached = load_digest_cache_rows(&read, &prefix_rows)?;
+        drop(read);
+        let results = prefix_rows
+            .iter()
+            .map(|row| staged_hashes_with_snapshot_cache(row, false, cached.get(&row.path)))
+            .collect::<Vec<_>>();
+        let mut conn = db::write_context(paths)?;
+        let tx = conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+        ensure_hash_publication_boundary(&tx, run_id)?;
+        for (row, result) in prefix_rows.iter().zip(results) {
+            match result {
                 Ok((prefix, suffix, _)) => {
-                    conn.execute(
-                        "UPDATE media_cleanup_file SET prefix_sha256=?1, suffix_sha256=?2, state='staged_hashed', last_error=NULL, updated_at_ms=?3 WHERE run_id=?4 AND path=?5",
-                        params![prefix, suffix, now_ms(), run_id, row.path],
+                    let changed = tx.execute(
+                        "UPDATE media_cleanup_file SET prefix_sha256=?1, suffix_sha256=?2, state='staged_hashed', last_error=NULL, updated_at_ms=?3 WHERE run_id=?4 AND path=?5 AND size_bytes=?6 AND modified_ms=?7 AND file_identity IS ?8 AND prefix_sha256 IS NULL",
+                        params![prefix, suffix, now_ms(), run_id, row.path, row.size_bytes, row.modified_ms, row.file_identity],
                     )?;
+                    if changed != 1 {
+                        return Err(hash_snapshot_changed(&row.path));
+                    }
                     upsert_digest_cache(
-                        &conn,
+                        &tx,
                         &row.path,
                         row.size_bytes,
                         row.modified_ms,
@@ -1124,33 +1304,45 @@ pub fn advance_hashing(
                         None,
                     )?;
                 }
-                Err(error) => record_hash_error(&conn, run_id, &row.path, &error.to_string())?,
+                Err(error) => record_hash_error(&tx, run_id, &row.path, &error.to_string())?,
             }
         }
-        conn.execute(
+        tx.execute(
             "UPDATE media_cleanup_run SET status='paused', stage='hashing', updated_at_ms=?1 WHERE id=?2",
             params![now_ms(), run_id],
         )?;
+        tx.commit()?;
+        let read = db::open_readonly(paths)?;
         return Ok(MediaCleanupAdvanceSummary {
-            run: get_run_conn(&conn, run_id)?.expect("run exists"),
+            run: get_run_conn(&read, run_id)?.expect("run exists"),
             processed_files: prefix_rows.len(),
-            remaining_inventory_entries: count_pending_hash_rows(&conn, run_id)?,
+            remaining_inventory_entries: count_pending_hash_rows(&read, run_id)?,
         });
     }
 
-    let full_rows = pending_full_rows(&conn, run_id, max_files)?;
+    let full_rows = pending_full_rows(&read, run_id, max_files)?;
     if !full_rows.is_empty() {
-        for row in &full_rows {
-            match verify_inventoried_file_unchanged(&conn, run_id, &row.path)
-                .and_then(|_| staged_hashes_with_cache(&conn, row, true))
-            {
+        let cached = load_digest_cache_rows(&read, &full_rows)?;
+        drop(read);
+        let results = full_rows
+            .iter()
+            .map(|row| staged_hashes_with_snapshot_cache(row, true, cached.get(&row.path)))
+            .collect::<Vec<_>>();
+        let mut conn = db::write_context(paths)?;
+        let tx = conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+        ensure_hash_publication_boundary(&tx, run_id)?;
+        for (row, result) in full_rows.iter().zip(results) {
+            match result {
                 Ok((prefix, suffix, full)) => {
-                    conn.execute(
-                        "UPDATE media_cleanup_file SET prefix_sha256=?1, suffix_sha256=?2, full_sha256=?3, state='fully_hashed', last_error=NULL, updated_at_ms=?4 WHERE run_id=?5 AND path=?6",
-                        params![prefix, suffix, full, now_ms(), run_id, row.path],
+                    let changed = tx.execute(
+                        "UPDATE media_cleanup_file SET prefix_sha256=?1, suffix_sha256=?2, full_sha256=?3, state='fully_hashed', last_error=NULL, updated_at_ms=?4 WHERE run_id=?5 AND path=?6 AND size_bytes=?7 AND modified_ms=?8 AND file_identity IS ?9 AND full_sha256 IS NULL",
+                        params![prefix, suffix, full, now_ms(), run_id, row.path, row.size_bytes, row.modified_ms, row.file_identity],
                     )?;
+                    if changed != 1 {
+                        return Err(hash_snapshot_changed(&row.path));
+                    }
                     upsert_digest_cache(
-                        &conn,
+                        &tx,
                         &row.path,
                         row.size_bytes,
                         row.modified_ms,
@@ -1159,17 +1351,21 @@ pub fn advance_hashing(
                         Some(&full),
                     )?;
                 }
-                Err(error) => record_hash_error(&conn, run_id, &row.path, &error.to_string())?,
+                Err(error) => record_hash_error(&tx, run_id, &row.path, &error.to_string())?,
             }
         }
+        tx.commit()?;
+        let read = db::open_readonly(paths)?;
         return Ok(MediaCleanupAdvanceSummary {
-            run: get_run_conn(&conn, run_id)?.expect("run exists"),
+            run: get_run_conn(&read, run_id)?.expect("run exists"),
             processed_files: full_rows.len(),
-            remaining_inventory_entries: count_pending_hash_rows(&conn, run_id)?,
+            remaining_inventory_entries: count_pending_hash_rows(&read, run_id)?,
         });
     }
 
-    build_duplicate_groups(&conn, run_id)?;
+    drop(read);
+    build_duplicate_groups(paths, run_id)?;
+    let conn = db::open_readonly(paths)?;
     Ok(MediaCleanupAdvanceSummary {
         run: get_run_conn(&conn, run_id)?.expect("run exists"),
         processed_files: 0,
@@ -1257,8 +1453,7 @@ pub fn set_group_decision(
             "cleanup decision must be approved, rejected, or pending".to_string(),
         ));
     }
-    let conn = db::open(paths)?;
-    db::migrate(&conn)?;
+    let conn = db::write_context(paths)?;
     let stage = cleanup_run_stage(&conn, run_id)?;
     if stage != "review" {
         return Err(EngineError::InstallFailed(format!(
@@ -1306,16 +1501,15 @@ pub fn set_group_decision(
 }
 
 pub fn apply_approved_groups(paths: &AppPaths, run_id: &str) -> Result<MediaCleanupApplySummary> {
-    let mut conn = db::open(paths)?;
-    db::migrate(&conn)?;
-    ensure_cleanup_apply_boundary(&conn)?;
-    let stage = cleanup_run_stage(&conn, run_id)?;
+    let read = db::open_readonly(paths)?;
+    ensure_cleanup_apply_boundary(&read)?;
+    let stage = cleanup_run_stage(&read, run_id)?;
     if stage != "review" && stage != "rollback" {
         return Err(EngineError::InstallFailed(format!(
             "cleanup quarantine requires review stage; current stage is {stage}"
         )));
     }
-    let quarantine_root: String = conn
+    let quarantine_root: String = read
         .query_row(
             "SELECT quarantine_root FROM media_cleanup_run WHERE id=?1",
             [run_id],
@@ -1328,6 +1522,7 @@ pub fn apply_approved_groups(paths: &AppPaths, run_id: &str) -> Result<MediaClea
                 "choose a quarantine folder before applying cleanup".to_string(),
             )
         })?;
+    drop(read);
     let groups = list_groups(paths, run_id)?
         .into_iter()
         .filter(|group| group.decision == "approved")
@@ -1350,14 +1545,7 @@ pub fn apply_approved_groups(paths: &AppPaths, run_id: &str) -> Result<MediaClea
             .iter()
             .filter(|member| member.path != group.keeper_path)
         {
-            match apply_one_action(
-                paths,
-                &mut conn,
-                run_id,
-                &group,
-                member,
-                Path::new(&quarantine_root),
-            ) {
+            match apply_one_action(paths, run_id, &group, member, Path::new(&quarantine_root)) {
                 Ok(bytes) => {
                     summary.applied_actions += 1;
                     summary.bytes_quarantined = summary.bytes_quarantined.saturating_add(bytes);
@@ -1366,6 +1554,8 @@ pub fn apply_approved_groups(paths: &AppPaths, run_id: &str) -> Result<MediaClea
             }
         }
     }
+    let conn = db::write_context(paths)?;
+    ensure_cleanup_apply_boundary(&conn)?;
     conn.execute(
         "UPDATE media_cleanup_run SET status=?1, stage='quarantine', updated_at_ms=?2 WHERE id=?3",
         params![
@@ -1382,10 +1572,9 @@ pub fn apply_approved_groups(paths: &AppPaths, run_id: &str) -> Result<MediaClea
 }
 
 pub fn rollback_run(paths: &AppPaths, run_id: &str) -> Result<MediaCleanupApplySummary> {
-    let mut conn = db::open(paths)?;
-    db::migrate(&conn)?;
-    ensure_cleanup_apply_boundary(&conn)?;
-    let mut stmt = conn.prepare(
+    let read = db::open_readonly(paths)?;
+    ensure_cleanup_apply_boundary(&read)?;
+    let mut stmt = read.prepare(
         r#"
 SELECT id, source_path, quarantine_path, keeper_library_item_id,
        source_library_item_id, relinked_media_ids_json, size_bytes, full_sha256
@@ -1409,6 +1598,7 @@ ORDER BY created_at_ms DESC
         })?
         .collect::<rusqlite::Result<Vec<_>>>()?;
     drop(stmt);
+    drop(read);
     let mut summary = MediaCleanupApplySummary {
         run_id: run_id.to_string(),
         approved_groups: 0,
@@ -1420,7 +1610,8 @@ ORDER BY created_at_ms DESC
         let source = PathBuf::from(&action.1);
         let quarantine = PathBuf::from(&action.2);
         let result = (|| -> Result<()> {
-            let tx = begin_cleanup_apply_transaction(&mut conn)?;
+            let read = db::open_readonly(paths)?;
+            ensure_cleanup_apply_boundary(&read)?;
             let source_exists = source.exists();
             let quarantine_exists = quarantine.exists();
             if source_exists && quarantine_exists {
@@ -1438,7 +1629,7 @@ ORDER BY created_at_ms DESC
                 )));
             }
             let relink_journal = parse_cleanup_relink_journal(&action.5)?;
-            let keeper_path: String = tx.query_row(
+            let keeper_path: String = read.query_row(
                 "SELECT keeper_path FROM media_cleanup_action WHERE id=?1",
                 [&action.0],
                 |row| row.get::<_, String>(0),
@@ -1461,7 +1652,7 @@ ORDER BY created_at_ms DESC
             };
             let mut source_library_paths = Vec::new();
             for source_item in &journaled_source_paths {
-                let current_path = library_item_media_path(&tx, &source_item.library_item_id)?
+                let current_path = library_item_media_path(&read, &source_item.library_item_id)?
                     .ok_or_else(|| {
                         EngineError::InstallFailed(format!(
                             "rollback source library item is missing: {}",
@@ -1487,11 +1678,14 @@ ORDER BY created_at_ms DESC
                     source_item.original_media_path.clone(),
                 ));
             }
+            drop(read);
             if quarantine_exists {
                 move_verified(&quarantine, &source, action.6, &action.7)?;
             } else {
                 verify_path(&source, action.6, &action.7)?;
             }
+            let mut conn = db::write_context(paths)?;
+            let tx = begin_cleanup_apply_transaction(&mut conn)?;
             let database_result = (|| -> Result<()> {
                 for (source_item, current_path, original_path) in &source_library_paths {
                     if current_path != original_path {
@@ -1567,7 +1761,7 @@ ORDER BY created_at_ms DESC
                     )));
                 }
                 let action_changed = tx.execute(
-                    "UPDATE media_cleanup_action SET status='rolled_back', rolled_back_at_ms=?1, updated_at_ms=?1 WHERE id=?2",
+                    "UPDATE media_cleanup_action SET status='rolled_back', rolled_back_at_ms=?1, updated_at_ms=?1 WHERE id=?2 AND status IN ('planned','applied','attention')",
                     params![now_ms(), action.0],
                 )?;
                 if action_changed != 1 {
@@ -1592,6 +1786,7 @@ ORDER BY created_at_ms DESC
             })();
             if let Err(database_error) = database_result {
                 drop(tx);
+                drop(conn);
                 let mut compensation_error = None;
                 if quarantine_exists && source.exists() && !quarantine.exists() {
                     if let Err(error) = move_verified(&source, &quarantine, action.6, &action.7) {
@@ -1602,6 +1797,7 @@ ORDER BY created_at_ms DESC
                 // filesystem boundary. Persist invalidation independently before returning the
                 // attention result so a restart cannot trust the pre-rollback observation.
                 let invalidation_result = (|| -> Result<()> {
+                    let mut conn = db::write_context(paths)?;
                     let tx = conn.unchecked_transaction()?;
                     for (_, current_path, original_path) in &source_library_paths {
                         library::persist_media_path_observation_rewrite_invalidation(
@@ -1657,6 +1853,7 @@ ORDER BY created_at_ms DESC
             Ok(()) => summary.applied_actions += 1,
             Err(error) => {
                 summary.failed_actions += 1;
+                let conn = db::write_context(paths)?;
                 conn.execute(
                     "UPDATE media_cleanup_action SET status='attention', error=?1, updated_at_ms=?2 WHERE id=?3",
                     params![error.to_string(), now_ms(), action.0],
@@ -1665,11 +1862,13 @@ ORDER BY created_at_ms DESC
         }
     }
     let (reconciliation_rolled_back, reconciliation_failed) =
-        rollback_reconciliation_relinks(paths, &mut conn, run_id)?;
+        rollback_reconciliation_relinks(paths, run_id)?;
     summary.applied_actions = summary
         .applied_actions
         .saturating_add(reconciliation_rolled_back);
     summary.failed_actions = summary.failed_actions.saturating_add(reconciliation_failed);
+    let conn = db::write_context(paths)?;
+    ensure_cleanup_apply_boundary(&conn)?;
     conn.execute(
         "UPDATE media_cleanup_run SET status=?1, stage='rollback', updated_at_ms=?2 WHERE id=?3",
         params![
@@ -1685,12 +1884,9 @@ ORDER BY created_at_ms DESC
     Ok(summary)
 }
 
-fn rollback_reconciliation_relinks(
-    paths: &AppPaths,
-    conn: &mut rusqlite::Connection,
-    run_id: &str,
-) -> Result<(usize, usize)> {
-    let mut stmt = conn.prepare(
+fn rollback_reconciliation_relinks(paths: &AppPaths, run_id: &str) -> Result<(usize, usize)> {
+    let read = db::open_readonly(paths)?;
+    let mut stmt = read.prepare(
         "SELECT candidate_id,physical_path,library_item_id,library_path FROM media_cleanup_reconciliation_candidate WHERE run_id=?1 AND disposition='applied' AND library_item_id IS NOT NULL ORDER BY candidate_id DESC",
     )?;
     let rows = stmt
@@ -1704,12 +1900,13 @@ fn rollback_reconciliation_relinks(
         })?
         .collect::<rusqlite::Result<Vec<_>>>()?;
     drop(stmt);
+    drop(read);
     let mut rolled_back = 0_usize;
     let mut failed = 0_usize;
     for (candidate_id, physical_path, library_item_id, original_path) in rows {
         let result = (|| -> Result<()> {
-            let tx = begin_cleanup_apply_transaction(conn)?;
-            let current = library_item_media_path(&tx, &library_item_id)?.ok_or_else(|| {
+            let read = db::open_readonly(paths)?;
+            let current = library_item_media_path(&read, &library_item_id)?.ok_or_else(|| {
                 EngineError::InstallFailed(format!(
                     "reconciliation rollback library item is missing: {library_item_id}"
                 ))
@@ -1719,6 +1916,20 @@ fn rollback_reconciliation_relinks(
             {
                 return Err(EngineError::InstallFailed(format!(
                     "reconciliation rollback refused to overwrite a path changed after apply: item={library_item_id}; current={current}"
+                )));
+            }
+            drop(read);
+            let mut conn = db::write_context(paths)?;
+            let tx = begin_cleanup_apply_transaction(&mut conn)?;
+            let still_current =
+                library_item_media_path(&tx, &library_item_id)?.ok_or_else(|| {
+                    EngineError::InstallFailed(format!(
+                        "reconciliation rollback library item is missing: {library_item_id}"
+                    ))
+                })?;
+            if still_current != current {
+                return Err(EngineError::InstallFailed(format!(
+                    "reconciliation rollback path changed concurrently: {library_item_id}"
                 )));
             }
             if current != original_path {
@@ -1749,6 +1960,7 @@ fn rollback_reconciliation_relinks(
             Ok(()) => rolled_back += 1,
             Err(error) => {
                 failed += 1;
+                let conn = db::write_context(paths)?;
                 conn.execute(
                     "UPDATE media_cleanup_reconciliation_candidate SET disposition='rollback_attention', error=?1, updated_at_ms=?2 WHERE run_id=?3 AND candidate_id=?4",
                     params![error.to_string(), now_ms(), run_id, candidate_id],
@@ -1761,13 +1973,13 @@ fn rollback_reconciliation_relinks(
 
 fn apply_one_action(
     paths: &AppPaths,
-    conn: &mut rusqlite::Connection,
     run_id: &str,
     group: &MediaCleanupGroup,
     member: &MediaCleanupGroupMember,
     quarantine_root: &Path,
 ) -> Result<u64> {
-    ensure_cleanup_apply_boundary(conn)?;
+    let read = db::open_readonly(paths)?;
+    ensure_cleanup_apply_boundary(&read)?;
     let source = PathBuf::from(&member.path);
     let keeper = PathBuf::from(&group.keeper_path);
     if paths_equivalent_with_aliases(paths, &member.path, &group.keeper_path) {
@@ -1776,8 +1988,10 @@ fn apply_one_action(
             member.path
         )));
     }
-    verify_inventoried_file_unchanged(conn, run_id, &member.path)?;
-    verify_inventoried_file_unchanged(conn, run_id, &group.keeper_path)?;
+    let source_snapshot = cleanup_database_snapshot(&read, run_id, &member.path)?;
+    let keeper_snapshot = cleanup_database_snapshot(&read, run_id, &group.keeper_path)?;
+    verify_inventoried_file_unchanged(&read, run_id, &member.path)?;
+    verify_inventoried_file_unchanged(&read, run_id, &group.keeper_path)?;
     verify_path(
         &source,
         i64::try_from(group.size_bytes).unwrap_or(i64::MAX),
@@ -1789,7 +2003,7 @@ fn apply_one_action(
         &group.full_sha256,
     )?;
     if let Some(source_item) = member.library_item_id.as_deref() {
-        let current_path = library_item_media_path(conn, source_item)?.ok_or_else(|| {
+        let current_path = library_item_media_path(&read, source_item)?.ok_or_else(|| {
             EngineError::InstallFailed(format!(
                 "cleanup source library item is missing: {source_item}"
             ))
@@ -1801,7 +2015,7 @@ fn apply_one_action(
             )));
         }
     }
-    let source_library_paths = library_items_for_media_path(paths, conn, &member.path)?;
+    let source_library_paths = library_items_for_media_path(paths, &read, &member.path)?;
     let source_library_path = member.library_item_id.as_deref().and_then(|source_item| {
         source_library_paths
             .iter()
@@ -1814,7 +2028,7 @@ fn apply_one_action(
         ));
     }
     if let Some(keeper_item) = group.keeper_library_item_id.as_deref() {
-        let current_path = library_item_media_path(conn, keeper_item)?.ok_or_else(|| {
+        let current_path = library_item_media_path(&read, keeper_item)?.ok_or_else(|| {
             EngineError::InstallFailed(format!(
                 "cleanup keeper library item is missing: {keeper_item}"
             ))
@@ -1826,7 +2040,7 @@ fn apply_one_action(
             )));
         }
     }
-    let keeper_library_paths = library_items_for_media_path(paths, conn, &group.keeper_path)?;
+    let keeper_library_paths = library_items_for_media_path(paths, &read, &group.keeper_path)?;
     let keeper_library_path = group
         .keeper_library_item_id
         .as_deref()
@@ -1854,7 +2068,7 @@ fn apply_one_action(
         extension
     ));
     let relinked_identities = if group.keeper_library_item_id.is_some() {
-        identities_for_library_items(conn, &source_library_paths)?
+        identities_for_library_items(&read, &source_library_paths)?
     } else {
         Vec::new()
     };
@@ -1863,56 +2077,75 @@ fn apply_one_action(
         .filter(|identity| identity.service == "youtube")
         .map(|identity| identity.media_id.clone())
         .collect::<Vec<_>>();
+    drop(read);
     let now = now_ms();
-    conn.execute(
-        r#"
+    {
+        let mut conn = db::write_context(paths)?;
+        let tx = begin_cleanup_apply_transaction(&mut conn)?;
+        verify_cleanup_snapshot_in_database(&tx, run_id, &member.path, &source_snapshot)?;
+        verify_cleanup_snapshot_in_database(&tx, run_id, &group.keeper_path, &keeper_snapshot)?;
+        for source_item in &source_library_paths {
+            let current = library_item_media_path(&tx, &source_item.library_item_id)?;
+            if current.as_deref() != Some(source_item.original_media_path.as_str()) {
+                return Err(EngineError::InstallFailed(format!(
+                    "cleanup source library path changed before action planning: {}",
+                    source_item.library_item_id
+                )));
+            }
+        }
+        tx.execute(
+            r#"
 INSERT INTO media_cleanup_action (
   id, run_id, group_id, source_path, quarantine_path, keeper_path,
   source_library_item_id, keeper_library_item_id, relinked_media_ids_json,
   size_bytes, full_sha256, status, created_at_ms, updated_at_ms
 ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, 'planned', ?12, ?12)
 "#,
-        params![
-            action_id,
-            run_id,
-            group.group_id,
-            member.path,
-            quarantine_path.to_string_lossy(),
-            group.keeper_path,
-            member.library_item_id,
-            group.keeper_library_item_id,
-            serde_json::to_string(&CleanupRelinkJournal {
-                version: 2,
-                media_ids: relinked_media_ids.clone(),
-                source_library_media_path: source_library_path.clone(),
-                source_library_paths: source_library_paths.clone(),
-                identities: relinked_identities.clone(),
-            })?,
-            i64::try_from(group.size_bytes).unwrap_or(i64::MAX),
-            group.full_sha256,
-            now
-        ],
-    )?;
-    let result = (|| -> Result<()> {
-        let tx = begin_cleanup_apply_transaction(conn)?;
-        verify_inventoried_file_unchanged(&tx, run_id, &member.path)?;
-        verify_inventoried_file_unchanged(&tx, run_id, &group.keeper_path)?;
-        verify_path(
-            &source,
-            i64::try_from(group.size_bytes).unwrap_or(i64::MAX),
-            &group.full_sha256,
+            params![
+                action_id,
+                run_id,
+                group.group_id,
+                member.path,
+                quarantine_path.to_string_lossy(),
+                group.keeper_path,
+                member.library_item_id,
+                group.keeper_library_item_id,
+                serde_json::to_string(&CleanupRelinkJournal {
+                    version: 2,
+                    media_ids: relinked_media_ids.clone(),
+                    source_library_media_path: source_library_path.clone(),
+                    source_library_paths: source_library_paths.clone(),
+                    identities: relinked_identities.clone(),
+                })?,
+                i64::try_from(group.size_bytes).unwrap_or(i64::MAX),
+                group.full_sha256,
+                now
+            ],
         )?;
-        verify_path(
-            &keeper,
-            i64::try_from(group.size_bytes).unwrap_or(i64::MAX),
-            &group.full_sha256,
+        tx.commit()?;
+    }
+
+    // The durable planned row is committed before crossing the filesystem boundary.
+    // No writer admission or SQLite transaction is held while files are read or moved.
+    let move_result = move_verified(
+        &source,
+        &quarantine_path,
+        i64::try_from(group.size_bytes).unwrap_or(i64::MAX),
+        &group.full_sha256,
+    );
+    let result = move_result.and_then(|_| (|| -> Result<()> {
+        let mut conn = db::write_context(paths)?;
+        let tx = begin_cleanup_apply_transaction(&mut conn)?;
+        let planned: i64 = tx.query_row(
+            "SELECT COUNT(*) FROM media_cleanup_action WHERE id=?1 AND run_id=?2 AND status='planned'",
+            params![action_id, run_id],
+            |row| row.get(0),
         )?;
-        move_verified(
-            &source,
-            &quarantine_path,
-            i64::try_from(group.size_bytes).unwrap_or(i64::MAX),
-            &group.full_sha256,
-        )?;
+        if planned != 1 {
+            return Err(EngineError::InstallFailed(format!(
+                "cleanup action journal changed before publication: {action_id}"
+            )));
+        }
         for source_item in &source_library_paths {
             let changed = tx.execute(
                 "UPDATE library_item SET media_path=?1 WHERE id=?2 AND media_path=?3",
@@ -1950,8 +2183,8 @@ INSERT INTO media_cleanup_action (
             }
         }
         let cleanup_file_changed = tx.execute(
-            "UPDATE media_cleanup_file SET state='quarantined', updated_at_ms=?1 WHERE run_id=?2 AND path=?3",
-            params![now_ms(), run_id, member.path],
+            "UPDATE media_cleanup_file SET state='quarantined', updated_at_ms=?1 WHERE run_id=?2 AND path=?3 AND size_bytes=?4 AND modified_ms=?5 AND file_identity IS ?6 AND state=?7",
+            params![now_ms(), run_id, member.path, source_snapshot.size_bytes, source_snapshot.modified_ms, source_snapshot.file_identity, source_snapshot.state],
         )?;
         if cleanup_file_changed != 1 {
             return Err(EngineError::InstallFailed(format!(
@@ -2018,7 +2251,7 @@ INSERT INTO media_cleanup_action (
             &quarantine_path.to_string_lossy(),
         );
         Ok(())
-    })();
+    })());
     if let Err(error) = result {
         let moved_to_quarantine = quarantine_path.exists() && !source.exists();
         let recovery_error = if moved_to_quarantine {
@@ -2035,6 +2268,7 @@ INSERT INTO media_cleanup_action (
         let still_quarantined = quarantine_path.exists() && !source.exists();
         let invalidation_error = if still_quarantined {
             (|| -> Result<()> {
+                let mut conn = db::write_context(paths)?;
                 let tx = conn.unchecked_transaction()?;
                 if source_library_paths.is_empty() {
                     library::persist_media_path_observation_rewrite_invalidation(
@@ -2083,6 +2317,7 @@ INSERT INTO media_cleanup_action (
                 format!("{error_text}; persisting attention-path availability invalidation also failed: {invalidation}")
             })
             .unwrap_or(error_text);
+        let conn = db::write_context(paths)?;
         conn.execute(
             "UPDATE media_cleanup_action SET status=?1, error=?2, updated_at_ms=?3 WHERE id=?4",
             params![
@@ -2301,19 +2536,21 @@ fn verify_path(path: &Path, size_bytes: i64, sha256: &str) -> Result<()> {
     Ok(())
 }
 
-fn build_duplicate_groups(conn: &rusqlite::Connection, run_id: &str) -> Result<()> {
+fn build_duplicate_groups(paths: &AppPaths, run_id: &str) -> Result<()> {
     #[derive(Clone)]
     struct ByteCandidate {
         path: String,
         library_item_id: Option<String>,
     }
+    struct GroupPlan {
+        group_id: String,
+        hash: String,
+        size: i64,
+        members: Vec<ByteCandidate>,
+    }
 
-    conn.execute("DELETE FROM media_cleanup_group WHERE run_id=?1", [run_id])?;
-    conn.execute(
-        "UPDATE media_cleanup_file SET group_id=NULL WHERE run_id=?1",
-        [run_id],
-    )?;
-    let mut stmt = conn.prepare(
+    let read = db::open_readonly(paths)?;
+    let mut stmt = read.prepare(
         r#"
 SELECT full_sha256, size_bytes, COUNT(*)
 FROM media_cleanup_file
@@ -2332,9 +2569,11 @@ ORDER BY full_sha256
             ))
         })?
         .collect::<rusqlite::Result<Vec<_>>>()?;
-    let mut reclaimable_total = 0_i64;
+    drop(stmt);
+    let mut plans = Vec::new();
+    let mut byte_errors = Vec::new();
     for (hash, size, _) in groups {
-        let mut member_stmt = conn.prepare(
+        let mut member_stmt = read.prepare(
             r#"
 SELECT path, library_item_id
 FROM media_cleanup_file
@@ -2368,10 +2607,10 @@ ORDER BY
                     }
                     Ok(false) => {}
                     Err(error) => {
-                        conn.execute(
-                            "UPDATE media_cleanup_file SET state='hash_error', last_error=?1, group_id=NULL, updated_at_ms=?2 WHERE run_id=?3 AND path=?4",
-                            params![format!("byte confirmation failed: {error}"), now_ms(), run_id, candidate.path],
-                        )?;
+                        byte_errors.push((
+                            candidate.path.clone(),
+                            format!("byte confirmation failed: {error}"),
+                        ));
                         placed = true;
                         break;
                     }
@@ -2393,32 +2632,58 @@ ORDER BY
                 format!("sha256:{hash}:bytes:{duplicate_cluster_index}")
             };
             duplicate_cluster_index += 1;
-            let count = i64::try_from(cluster.len()).unwrap_or(i64::MAX);
-            let reclaimable = size.saturating_mul(count.saturating_sub(1));
-            reclaimable_total = reclaimable_total.saturating_add(reclaimable);
-            let keeper = &cluster[0];
-            conn.execute(
-                "INSERT INTO media_cleanup_group (run_id, group_id, full_sha256, size_bytes, member_count, keeper_path, keeper_library_item_id, reclaimable_bytes, decision, created_at_ms, updated_at_ms) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, 'pending', ?9, ?9)",
-                params![run_id, group_id, hash, size, count, keeper.path, keeper.library_item_id, reclaimable, now_ms()],
-            )?;
-            for member in cluster {
-                conn.execute(
-                    "UPDATE media_cleanup_file SET group_id=?1 WHERE run_id=?2 AND path=?3",
-                    params![group_id, run_id, member.path],
-                )?;
-            }
+            plans.push(GroupPlan {
+                group_id,
+                hash: hash.clone(),
+                size,
+                members: cluster,
+            });
         }
     }
-    let duplicate_groups: i64 = conn.query_row(
+    drop(read);
+
+    let mut conn = db::write_context(paths)?;
+    let tx = conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+    ensure_hash_publication_boundary(&tx, run_id)?;
+    tx.execute("DELETE FROM media_cleanup_group WHERE run_id=?1", [run_id])?;
+    tx.execute(
+        "UPDATE media_cleanup_file SET group_id=NULL WHERE run_id=?1",
+        [run_id],
+    )?;
+    for (path, error) in byte_errors {
+        tx.execute(
+            "UPDATE media_cleanup_file SET state='hash_error', last_error=?1, group_id=NULL, updated_at_ms=?2 WHERE run_id=?3 AND path=?4",
+            params![error, now_ms(), run_id, path],
+        )?;
+    }
+    let mut reclaimable_total = 0_i64;
+    for plan in plans {
+        let count = i64::try_from(plan.members.len()).unwrap_or(i64::MAX);
+        let reclaimable = plan.size.saturating_mul(count.saturating_sub(1));
+        reclaimable_total = reclaimable_total.saturating_add(reclaimable);
+        let keeper = &plan.members[0];
+        tx.execute(
+            "INSERT INTO media_cleanup_group (run_id, group_id, full_sha256, size_bytes, member_count, keeper_path, keeper_library_item_id, reclaimable_bytes, decision, created_at_ms, updated_at_ms) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, 'pending', ?9, ?9)",
+            params![run_id, plan.group_id, plan.hash, plan.size, count, keeper.path, keeper.library_item_id, reclaimable, now_ms()],
+        )?;
+        for member in plan.members {
+            tx.execute(
+                "UPDATE media_cleanup_file SET group_id=?1 WHERE run_id=?2 AND path=?3",
+                params![plan.group_id, run_id, member.path],
+            )?;
+        }
+    }
+    let duplicate_groups: i64 = tx.query_row(
         "SELECT COUNT(*) FROM media_cleanup_group WHERE run_id=?1",
         [run_id],
         |row| row.get(0),
     )?;
-    build_variant_review_rows(conn, run_id)?;
-    conn.execute(
+    build_variant_review_rows(&tx, run_id)?;
+    tx.execute(
         "UPDATE media_cleanup_run SET status='review', stage='review', duplicate_groups=?1, reclaimable_bytes=?2, updated_at_ms=?3 WHERE id=?4",
         params![duplicate_groups, reclaimable_total, now_ms(), run_id],
     )?;
+    tx.commit()?;
     Ok(())
 }
 
@@ -2590,7 +2855,7 @@ fn pending_prefix_rows(
 ) -> Result<Vec<CleanupFileRow>> {
     let mut stmt = conn.prepare(
         r#"
-SELECT f.path, f.size_bytes, f.modified_ms, f.library_item_id, f.media_id
+SELECT f.path, f.size_bytes, f.modified_ms, f.file_identity, f.library_item_id, f.media_id
 FROM media_cleanup_file f
 WHERE f.run_id=?1
   AND f.prefix_sha256 IS NULL
@@ -2616,7 +2881,7 @@ fn pending_full_rows(
 ) -> Result<Vec<CleanupFileRow>> {
     let mut stmt = conn.prepare(
         r#"
-SELECT f.path, f.size_bytes, f.modified_ms, f.library_item_id, f.media_id
+SELECT f.path, f.size_bytes, f.modified_ms, f.file_identity, f.library_item_id, f.media_id
 FROM media_cleanup_file f
 WHERE f.run_id=?1
   AND f.full_sha256 IS NULL
@@ -2649,8 +2914,9 @@ fn collect_cleanup_rows<P: rusqlite::Params>(
                 path: row.get(0)?,
                 size_bytes: row.get(1)?,
                 modified_ms: row.get(2)?,
-                library_item_id: row.get(3)?,
-                media_id: row.get(4)?,
+                file_identity: row.get(3)?,
+                library_item_id: row.get(4)?,
+                media_id: row.get(5)?,
             })
         })?
         .collect::<rusqlite::Result<Vec<_>>>()?)
@@ -2662,6 +2928,7 @@ fn staged_hashes(
     expected_modified_ms: i64,
     include_full: bool,
 ) -> Result<(String, String, String)> {
+    run_cleanup_hash_io_test_hook();
     let metadata = std::fs::metadata(path)?;
     if i64::try_from(metadata.len()).unwrap_or(i64::MAX) != expected_size
         || modified_ms(&metadata) != expected_modified_ms
@@ -2683,10 +2950,10 @@ fn staged_hashes(
     Ok((prefix, suffix, full))
 }
 
-fn staged_hashes_with_cache(
-    conn: &rusqlite::Connection,
+fn staged_hashes_with_snapshot_cache(
     row: &CleanupFileRow,
     include_full: bool,
+    cached: Option<&(Option<String>, Option<String>, Option<String>)>,
 ) -> Result<(String, String, String)> {
     let metadata = std::fs::metadata(&row.path)?;
     if i64::try_from(metadata.len()).unwrap_or(i64::MAX) != row.size_bytes
@@ -2697,29 +2964,18 @@ fn staged_hashes_with_cache(
             row.path
         )));
     }
-    let cached = conn
-        .query_row(
-            r#"
-SELECT prefix_sha256, suffix_sha256, full_sha256
-FROM media_file_digest_cache
-WHERE path=?1 AND size_bytes=?2 AND modified_ms=?3
-"#,
-            params![row.path, row.size_bytes, row.modified_ms],
-            |cache_row| {
-                Ok((
-                    cache_row.get::<_, Option<String>>(0)?,
-                    cache_row.get::<_, Option<String>>(1)?,
-                    cache_row.get::<_, Option<String>>(2)?,
-                ))
-            },
-        )
-        .optional()?;
+    if row.file_identity.as_deref() != native_file_identity(Path::new(&row.path)).ok().as_deref() {
+        return Err(EngineError::InstallFailed(format!(
+            "file identity changed after inventory: {}",
+            row.path
+        )));
+    }
     if let Some((Some(prefix), Some(suffix), full)) = cached {
         if !include_full {
-            return Ok((prefix, suffix, String::new()));
+            return Ok((prefix.clone(), suffix.clone(), String::new()));
         }
         if let Some(full) = full {
-            return Ok((prefix, suffix, full));
+            return Ok((prefix.clone(), suffix.clone(), full.clone()));
         }
     }
     staged_hashes(
@@ -2728,6 +2984,45 @@ WHERE path=?1 AND size_bytes=?2 AND modified_ms=?3
         row.modified_ms,
         include_full,
     )
+}
+
+type DigestCacheSnapshot = HashMap<String, (Option<String>, Option<String>, Option<String>)>;
+
+fn load_digest_cache_rows(
+    conn: &rusqlite::Connection,
+    rows: &[CleanupFileRow],
+) -> Result<DigestCacheSnapshot> {
+    let mut result = HashMap::new();
+    let mut stmt = conn.prepare(
+        "SELECT prefix_sha256,suffix_sha256,full_sha256 FROM media_file_digest_cache WHERE path=?1 AND size_bytes=?2 AND modified_ms=?3",
+    )?;
+    for row in rows {
+        if let Some(value) = stmt
+            .query_row(
+                params![row.path, row.size_bytes, row.modified_ms],
+                |cache_row| Ok((cache_row.get(0)?, cache_row.get(1)?, cache_row.get(2)?)),
+            )
+            .optional()?
+        {
+            result.insert(row.path.clone(), value);
+        }
+    }
+    Ok(result)
+}
+
+fn ensure_hash_publication_boundary(conn: &rusqlite::Connection, run_id: &str) -> Result<()> {
+    if cleanup_run_stage(conn, run_id)? != "hashing" || cleanup_active_job_count(conn)? != 0 {
+        return Err(EngineError::InstallFailed(
+            "cleanup hashing state changed while file I/O was in progress; retry".to_string(),
+        ));
+    }
+    Ok(())
+}
+
+fn hash_snapshot_changed(path: &str) -> EngineError {
+    EngineError::InstallFailed(format!(
+        "cleanup hash snapshot changed before publication: {path}; retry"
+    ))
 }
 
 fn hash_window(file: &mut File, offset: u64, size: u64) -> Result<String> {
@@ -3079,7 +3374,11 @@ mod tests {
             .expect("pause queue");
 
         let tx = begin_cleanup_apply_transaction(&mut owner).expect("cleanup transaction");
-        let contender = db::open(&paths).expect("contender db");
+        // Bypass the application writer admission lane deliberately in this test: the
+        // invariant under test is that the cleanup transaction also retains SQLite's
+        // own write boundary against an independent connection.
+        let contender =
+            rusqlite::Connection::open(paths.db_dir().join("app.sqlite")).expect("contender db");
         contender
             .busy_timeout(std::time::Duration::ZERO)
             .expect("zero busy timeout");
@@ -3207,6 +3506,100 @@ mod tests {
         drop(conn);
         let resumed_hash = advance_hashing(&paths, &run.id, Some(100)).expect("hash resume");
         assert_eq!(resumed_hash.run.stage, "review");
+    }
+
+    #[test]
+    fn blocked_hash_io_releases_writer_admission_and_stale_snapshot_is_refused() {
+        use std::sync::atomic::{AtomicBool, Ordering};
+        use std::sync::{Arc, Barrier};
+
+        let dir = tempfile::tempdir().expect("tempdir");
+        let app_root = dir.path().join("app_data");
+        let paths = AppPaths::new(app_root.clone());
+        db::ensure_schema(&paths).expect("schema");
+        let media_root = dir.path().join("media");
+        std::fs::create_dir_all(&media_root).expect("media root");
+        std::fs::write(media_root.join("a.mkv"), b"same-size-a").expect("first media");
+        std::fs::write(media_root.join("b.mkv"), b"same-size-b").expect("second media");
+        let run =
+            create_inventory_run(&paths, vec![media_root.to_string_lossy().to_string()], None)
+                .expect("run");
+        while get_run(&paths, &run.id)
+            .expect("run")
+            .expect("run exists")
+            .stage
+            == "inventory"
+        {
+            advance_inventory(&paths, &run.id, Some(100)).expect("inventory");
+        }
+        let conn = db::write_context(&paths).expect("pause writer");
+        conn.execute(
+            "INSERT INTO meta(key,value) VALUES('jobs_queue_paused','1') ON CONFLICT(key) DO UPDATE SET value='1'",
+            [],
+        )
+        .expect("pause queue");
+        drop(conn);
+        reconciliation_preview(&paths, &run.id).expect("preview");
+        apply_reconciliation(&paths, &run.id).expect("apply reconciliation");
+
+        let entered = Arc::new(Barrier::new(2));
+        let release = Arc::new(Barrier::new(2));
+        let first = Arc::new(AtomicBool::new(true));
+        let hook_entered = Arc::clone(&entered);
+        let hook_release = Arc::clone(&release);
+        let hook_first = Arc::clone(&first);
+        *CLEANUP_HASH_IO_TEST_HOOK
+            .get_or_init(|| std::sync::Mutex::new(None))
+            .lock()
+            .expect("hook lock") = Some(Arc::new(move || {
+            if hook_first.swap(false, Ordering::SeqCst) {
+                hook_entered.wait();
+                hook_release.wait();
+            }
+        }));
+
+        let worker_run = run.id.clone();
+        let worker = std::thread::spawn(move || {
+            let worker_paths = AppPaths::new(app_root);
+            advance_hashing(&worker_paths, &worker_run, Some(1))
+        });
+        entered.wait();
+
+        // The hashing thread is deliberately stopped inside filesystem I/O. A distinct writer
+        // must still acquire admission, and changing the canonical snapshot must make the hash
+        // publication fail its CAS rather than publishing stale digests.
+        let conn = db::write_context(&paths).expect("writer while hash I/O is blocked");
+        let changed = conn
+            .execute(
+                "UPDATE media_cleanup_file SET modified_ms=modified_ms+1 WHERE run_id=?1",
+                [&run.id],
+            )
+            .expect("mutate canonical hash snapshot");
+        assert_eq!(changed, 2);
+        drop(conn);
+        *CLEANUP_HASH_IO_TEST_HOOK
+            .get()
+            .expect("hook initialized")
+            .lock()
+            .expect("hook lock") = None;
+        release.wait();
+
+        let error = worker
+            .join()
+            .expect("hash worker join")
+            .expect_err("stale hash snapshot must be refused");
+        assert!(error
+            .to_string()
+            .contains("snapshot changed before publication"));
+        let read = db::open_readonly(&paths).expect("read db");
+        let published: i64 = read
+            .query_row(
+                "SELECT COUNT(*) FROM media_cleanup_file WHERE run_id=?1 AND prefix_sha256 IS NOT NULL",
+                [&run.id],
+                |row| row.get(0),
+            )
+            .expect("published count");
+        assert_eq!(published, 0, "stale hashes must not be partially published");
     }
 
     #[test]
@@ -4247,8 +4640,15 @@ END;
             )
             .expect("forced digest row");
         }
+        conn.execute(
+            "UPDATE media_cleanup_run SET stage='hashing' WHERE id=?1",
+            [&run.id],
+        )
+        .expect("hashing stage");
+        drop(conn);
 
-        build_duplicate_groups(&conn, &run.id).expect("collision grouping");
+        build_duplicate_groups(&paths, &run.id).expect("collision grouping");
+        let conn = db::open_readonly(&paths).expect("read collision result");
         assert_eq!(
             conn.query_row(
                 "SELECT COUNT(*) FROM media_cleanup_group WHERE run_id=?1",
@@ -4259,6 +4659,7 @@ END;
             0,
             "matching stored digests must not override different bytes"
         );
+        drop(conn);
         let collision_variants = list_variants(&paths, &run.id).expect("collision variants");
         assert_eq!(
             collision_variants[0].evidence["classification"],
@@ -4266,7 +4667,15 @@ END;
         );
 
         std::fs::write(&right, b"aaaa").expect("make exact duplicate");
-        build_duplicate_groups(&conn, &run.id).expect("exact grouping");
+        let conn = db::write_context(&paths).expect("reset hashing stage");
+        conn.execute(
+            "UPDATE media_cleanup_run SET stage='hashing' WHERE id=?1",
+            [&run.id],
+        )
+        .expect("hashing stage");
+        drop(conn);
+        build_duplicate_groups(&paths, &run.id).expect("exact grouping");
+        let conn = db::open_readonly(&paths).expect("read exact result");
         assert_eq!(
             conn.query_row(
                 "SELECT COUNT(*) FROM media_cleanup_group WHERE run_id=?1",

@@ -1115,6 +1115,8 @@ function Get-TraceSummary([string]$AppDir, $CurrentProcessPid, $ProcessStartedAt
         command_incomplete_count = 0
         max_command_overlap = 0
         database_contention_count = 0
+        database_contention_internal_count = 0
+        database_contention_external_or_unknown_count = 0
         panel_transition_count = 0
         slow_panel_transitions = @()
         cleanup_stage_commands = @()
@@ -1133,6 +1135,17 @@ function Get-TraceSummary([string]$AppDir, $CurrentProcessPid, $ProcessStartedAt
         startup_latest_phases = @()
         startup_incomplete_phases = @()
         startup_schema_running = $false
+        startup_hydration_latest = $null
+        startup_hydration_event_count = 0
+        heartbeat_ack_count = 0
+        heartbeat_main_ack_count = 0
+        heartbeat_worker_ack_count = 0
+        heartbeat_late_count = 0
+        heartbeat_duplicate_count = 0
+        heartbeat_queue_overflow_count = 0
+        heartbeat_emit_to_receive_max_ms = 0
+        heartbeat_queue_dwell_max_ms = 0
+        heartbeat_persist_to_source_ack_max_ms = 0
         error = $null
     }
     if (-not $summary.exists) {
@@ -1206,6 +1219,36 @@ function Get-TraceSummary([string]$AppDir, $CurrentProcessPid, $ProcessStartedAt
             $summary.startup_incomplete_phases |
                 Where-Object { $_.phase_id -eq "db_schema" }
         ).Count -gt 0
+        $hydrationRows = @(
+            $traceRows |
+                Where-Object { $_.event -eq "startup_hydration_progress" } |
+                Sort-Object { [int64]$_.details.revision }
+        )
+        $summary.startup_hydration_event_count = $hydrationRows.Count
+        if ($hydrationRows.Count -gt 0) {
+            $summary.startup_hydration_latest = $hydrationRows[-1].details
+        }
+        $heartbeatAckRows = @($traceRows | Where-Object { $_.event -eq "heartbeat_source_acknowledged" })
+        $summary.heartbeat_ack_count = $heartbeatAckRows.Count
+        $summary.heartbeat_main_ack_count = @($heartbeatAckRows | Where-Object { $_.details.source -eq "main_thread" }).Count
+        $summary.heartbeat_worker_ack_count = @($heartbeatAckRows | Where-Object { $_.details.source -eq "worker" }).Count
+        $summary.heartbeat_late_count = @($heartbeatAckRows | Where-Object { [bool]$_.details.late }).Count
+        $summary.heartbeat_duplicate_count = @($heartbeatAckRows | Where-Object { [bool]$_.details.duplicate }).Count
+        $summary.heartbeat_queue_overflow_count = @($heartbeatAckRows | Where-Object { [bool]$_.details.queue_overflow }).Count
+        foreach ($row in $heartbeatAckRows) {
+            if ($null -ne $row.details.received_at_ms -and $null -ne $row.details.emitted_at_ms) {
+                $emitToReceive = [int64]$row.details.received_at_ms - [int64]$row.details.emitted_at_ms
+                if ($emitToReceive -gt $summary.heartbeat_emit_to_receive_max_ms) { $summary.heartbeat_emit_to_receive_max_ms = $emitToReceive }
+            }
+            if ($null -ne $row.details.source_acknowledged_at_ms -and $null -ne $row.details.persisted_at_ms) {
+                $persistToAck = [int64]$row.details.source_acknowledged_at_ms - [int64]$row.details.persisted_at_ms
+                if ($persistToAck -gt $summary.heartbeat_persist_to_source_ack_max_ms) { $summary.heartbeat_persist_to_source_ack_max_ms = $persistToAck }
+            }
+            if ($null -ne $row.details.queue_dwell_ms) {
+                $queueDwell = [int64]$row.details.queue_dwell_ms
+                if ($queueDwell -gt $summary.heartbeat_queue_dwell_max_ms) { $summary.heartbeat_queue_dwell_max_ms = $queueDwell }
+            }
+        }
         $summary.top_slow_commands = @(
             $traceRows |
                 Where-Object { $_.event -eq "command_slow" } |
@@ -1242,6 +1285,18 @@ function Get-TraceSummary([string]$AppDir, $CurrentProcessPid, $ProcessStartedAt
         $summary.max_command_overlap = $maxOverlap
         $summary.database_contention_count = @(
             $traceRows | Where-Object { $_.event -in @("database_locked", "database_busy") }
+        ).Count
+        $summary.database_contention_internal_count = @(
+            $traceRows | Where-Object {
+                $_.event -in @("database_locked", "database_busy") -and
+                $_.details.contention.classification -eq "internal_candidates"
+            }
+        ).Count
+        $summary.database_contention_external_or_unknown_count = @(
+            $traceRows | Where-Object {
+                $_.event -in @("database_locked", "database_busy") -and
+                $_.details.contention.classification -eq "external_or_unknown"
+            }
         ).Count
         $panelRows = @($traceRows | Where-Object { $_.event -eq "panel_switch_rendered" })
         $summary.panel_transition_count = $panelRows.Count
@@ -1690,6 +1745,10 @@ function Write-Summary([string]$RunDir, [object[]]$Samples, [hashtable]$Metadata
         $null = $md.AppendLine("- Startup phase events: $($latestTrace.startup_phase_event_count)")
         $null = $md.AppendLine("- Startup phase errors: $($latestTrace.startup_phase_error_count)")
         $null = $md.AppendLine("- Startup database lock errors: $($latestTrace.startup_database_lock_error_count)")
+        $null = $md.AppendLine("- Hydration progress events: $($latestTrace.startup_hydration_event_count)")
+        if ($latestTrace.startup_hydration_latest) {
+            $null = $md.AppendLine("- Latest hydration revision/phase/state: $($latestTrace.startup_hydration_latest.revision) / $($latestTrace.startup_hydration_latest.phase_id) / $($latestTrace.startup_hydration_latest.state)")
+        }
         $incompletePhaseText = @(
             $latestTrace.startup_incomplete_phases |
                 ForEach-Object { "$($_.phase_id)=$($_.state)" }
@@ -1704,10 +1763,18 @@ function Write-Summary([string]$RunDir, [object[]]$Samples, [hashtable]$Metadata
     }
     if ($latestTrace) {
         $null = $md.AppendLine()
+        $null = $md.AppendLine("## Heartbeat Delivery")
+        $null = $md.AppendLine("- Source acknowledgements total/main/worker: $($latestTrace.heartbeat_ack_count) / $($latestTrace.heartbeat_main_ack_count) / $($latestTrace.heartbeat_worker_ack_count)")
+        $null = $md.AppendLine("- Late/duplicate/overflow: $($latestTrace.heartbeat_late_count) / $($latestTrace.heartbeat_duplicate_count) / $($latestTrace.heartbeat_queue_overflow_count)")
+        $null = $md.AppendLine("- Max emitted-to-native-receive / queue-dwell / persisted-to-source-ack: $($latestTrace.heartbeat_emit_to_receive_max_ms) / $($latestTrace.heartbeat_queue_dwell_max_ms) / $($latestTrace.heartbeat_persist_to_source_ack_max_ms) ms")
+    }
+    if ($latestTrace) {
+        $null = $md.AppendLine()
         $null = $md.AppendLine("## Contention and Navigation")
         $null = $md.AppendLine("- Maximum overlapping commands: $($latestTrace.max_command_overlap)")
         $null = $md.AppendLine("- Commands started/completed/incomplete: $($latestTrace.command_started_count) / $($latestTrace.command_completed_count) / $($latestTrace.command_incomplete_count)")
         $null = $md.AppendLine("- Database busy/locked events: $($latestTrace.database_contention_count)")
+        $null = $md.AppendLine("- Classified internal / external-or-unknown: $($latestTrace.database_contention_internal_count) / $($latestTrace.database_contention_external_or_unknown_count)")
         $null = $md.AppendLine("- Panel transitions measured: $($latestTrace.panel_transition_count)")
         $null = $md.AppendLine("- Correlated incident events: $($latestTrace.incident_event_count) across $(@($latestTrace.incident_ids).Count) incident ID(s)")
         $null = $md.AppendLine("- Frontend long tasks: $($latestTrace.frontend_long_task_count); max $($latestTrace.frontend_long_task_max_ms) ms")

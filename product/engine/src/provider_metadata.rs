@@ -274,8 +274,7 @@ pub fn repair_provider_titles_page(
     requested_limit: usize,
 ) -> Result<ProviderTitleRepairPageReceipt> {
     let limit = requested_limit.clamp(1, 500);
-    let mut conn = db::open(paths)?;
-    db::migrate(&conn)?;
+    let mut conn = db::write_context(paths)?;
     let checkpoint = conn.query_row(
         "SELECT state,after_job_created_at_ms,after_job_id,scanned_count,repaired_count,conflict_count,unavailable_count FROM media_provider_metadata_repair_checkpoint WHERE singleton=1",
         [],
@@ -505,8 +504,7 @@ pub fn repair_provider_titles_page(
 }
 
 pub fn reset_provider_title_repair_checkpoint(paths: &AppPaths, now_ms: i64) -> Result<()> {
-    let conn = db::open(paths)?;
-    db::migrate(&conn)?;
+    let conn = db::write_context(paths)?;
     conn.execute(
         "UPDATE media_provider_metadata_repair_checkpoint SET
            state='idle',after_job_created_at_ms=NULL,after_job_id=NULL,scanned_count=0,
@@ -784,8 +782,7 @@ pub fn upsert_provider_metadata(
     observation: ProviderMetadataObservation,
 ) -> Result<ProviderMetadataUpsertReceipt> {
     let observation = normalize_provider_metadata_observation(observation)?;
-    let mut conn = db::open(paths)?;
-    db::migrate(&conn)?;
+    let mut conn = db::write_context(paths)?;
     let tx = conn.transaction()?;
     let receipt = upsert_provider_metadata_tx(&tx, observation)?;
     tx.commit()?;
@@ -803,8 +800,7 @@ pub fn upsert_provider_metadata_batch(
         .into_iter()
         .map(normalize_provider_metadata_observation)
         .collect::<Result<Vec<_>>>()?;
-    let mut conn = db::open(paths)?;
-    db::migrate(&conn)?;
+    let mut conn = db::write_context(paths)?;
     let tx = conn.transaction()?;
     let mut receipts = Vec::with_capacity(observations.len());
     for observation in observations {
@@ -826,8 +822,7 @@ pub fn set_operator_title_override(
     let media_id = required_trimmed(media_id, "media_id")?;
     let title = required_trimmed(title, "operator title")?;
     let attribution = required_trimmed(attribution, "override attribution")?;
-    let conn = db::open(paths)?;
-    db::migrate(&conn)?;
+    let conn = db::write_context(paths)?;
     conn.execute(
         "INSERT INTO media_title_override(service,media_id,title,attribution,created_at_ms,updated_at_ms)
          VALUES(?1,?2,?3,?4,?5,?5)
@@ -1211,7 +1206,7 @@ mod tests {
         let dir = tempfile::tempdir().expect("tempdir");
         let paths = AppPaths::new(dir.path().join("app"));
         db::ensure_schema(&paths).expect("schema");
-        let conn = db::open(&paths).expect("open");
+        let conn = db::write_context(&paths).expect("open");
         conn.execute(
             "INSERT INTO library_item(id,created_at_ms,source_type,source_uri,title,media_path) VALUES('item-1',1,'local_file','C:/media/file.mkv','Imported clean title','C:/media/file.mkv')",
             [],
@@ -1261,7 +1256,7 @@ mod tests {
         assert_eq!(item.value, "Operator title");
         assert_eq!(item.provenance, DisplayTitleProvenance::OperatorOverride);
 
-        let conn = db::open(&paths).expect("open");
+        let conn = db::write_context(&paths).expect("open");
         conn.execute(
             "INSERT INTO library_download_lineage(item_id,source_job_id,service,origin_kind,work_track,item_created_at_ms,recorded_at_ms) VALUES('item-1','job-ig','instagram','single','instagram',1,1)",
             [],
@@ -1331,7 +1326,7 @@ mod tests {
             metadata.media_id = media_id.to_string();
             metadata.canonical_url = Some(format!("https://www.youtube.com/watch?v={media_id}"));
             upsert_provider_metadata(&paths, metadata).expect("metadata");
-            let conn = db::open(&paths).expect("open");
+            let conn = db::write_context(&paths).expect("open");
             conn.execute(
                 "INSERT INTO job(id,type,status,progress,params_json,created_at_ms,logs_path,target_title)
                  VALUES(?1,'download_direct_url','failed',0,?2,?3,?4,?5)",
@@ -1345,7 +1340,7 @@ mod tests {
             )
             .expect("job");
         }
-        let conn = db::open(&paths).expect("open");
+        let conn = db::write_context(&paths).expect("open");
         conn.execute(
             "INSERT INTO job(id,type,status,progress,params_json,created_at_ms,logs_path,target_title)
              VALUES('job-5','download_direct_url','failed',0,'{}',5,'job-5.jsonl',NULL)",

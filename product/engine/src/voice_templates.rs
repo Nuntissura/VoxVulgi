@@ -74,8 +74,7 @@ pub struct VoiceTemplateSpeakerUpdate {
 }
 
 pub fn list_voice_templates(paths: &AppPaths) -> Result<Vec<VoiceTemplate>> {
-    let conn = db::open(paths)?;
-    db::migrate(&conn)?;
+    let conn = db::open_readonly(paths)?;
 
     let mut stmt = conn.prepare(
         r#"
@@ -138,8 +137,7 @@ pub fn get_voice_template(paths: &AppPaths, template_id: &str) -> Result<VoiceTe
         ));
     }
 
-    let conn = db::open(paths)?;
-    db::migrate(&conn)?;
+    let conn = db::open_readonly(paths)?;
 
     let template = conn.query_row(
         r#"
@@ -286,11 +284,18 @@ pub fn create_voice_template_from_item(
     let template_dir = paths.voice_template_dir(&template_id);
     let profiles_dir = paths.voice_template_profiles_dir(&template_id);
     std::fs::create_dir_all(&profiles_dir)?;
+    let mut copied_by_speaker = Vec::with_capacity(item_speakers.len());
+    for speaker in &item_speakers {
+        copied_by_speaker.push(copy_template_references(
+            &profiles_dir,
+            &speaker.speaker_key,
+            &speaker.tts_voice_profile_paths,
+        )?);
+    }
 
     let now = now_ms();
     let result = (|| -> Result<()> {
-        let mut conn = db::open(paths)?;
-        db::migrate(&conn)?;
+        let mut conn = db::write_context(paths)?;
         let tx = conn.transaction()?;
         tx.execute(
             r#"
@@ -309,12 +314,7 @@ INSERT INTO voice_template (
             params![template_id, name, now, now],
         )?;
 
-        for speaker in &item_speakers {
-            let copied_references = copy_template_references(
-                &profiles_dir,
-                &speaker.speaker_key,
-                &speaker.tts_voice_profile_paths,
-            )?;
+        for (speaker, copied_references) in item_speakers.iter().zip(copied_by_speaker.iter()) {
             insert_template_speaker_row(&tx, &template_id, speaker, &copied_references, now)?;
         }
 
@@ -344,8 +344,7 @@ pub fn update_voice_template_speaker(
         ));
     }
 
-    let mut conn = db::open(paths)?;
-    db::migrate(&conn)?;
+    let mut conn = db::write_context(paths)?;
     let tx = conn.transaction()?;
     let now = now_ms();
     let updated = tx.execute(
@@ -385,6 +384,7 @@ WHERE template_id=?1 AND speaker_key=?2
         params![template_id, now],
     )?;
     tx.commit()?;
+    drop(conn);
 
     get_voice_template(paths, template_id)
 }
@@ -433,11 +433,8 @@ pub fn add_voice_template_reference(
     let template_profiles_dir = paths.voice_template_profiles_dir(template_id);
     std::fs::create_dir_all(&template_profiles_dir)?;
 
-    let mut conn = db::open(paths)?;
-    db::migrate(&conn)?;
-    let tx = conn.transaction()?;
-
-    let exists = tx.query_row(
+    let read_conn = db::open_readonly(paths)?;
+    let exists = read_conn.query_row(
         "SELECT COUNT(*) FROM voice_template_speaker WHERE template_id=?1 AND speaker_key=?2",
         params![template_id, speaker_key],
         |row| row.get::<_, i64>(0),
@@ -448,17 +445,35 @@ pub fn add_voice_template_reference(
         )));
     }
 
-    let next_sort_order = tx.query_row(
+    let next_sort_order = read_conn.query_row(
         "SELECT COALESCE(MAX(sort_order), -1) + 1 FROM voice_template_reference WHERE template_id=?1 AND speaker_key=?2",
         params![template_id, speaker_key],
         |row| row.get::<_, i64>(0),
     )?;
-    let copied = copy_single_template_reference(
+    drop(read_conn);
+    let mut copied = copy_single_template_reference(
         &template_profiles_dir,
         speaker_key,
         source_path,
         label,
         next_sort_order,
+    )?;
+    let mut conn = db::write_context(paths)?;
+    let tx = conn.transaction()?;
+    let still_exists = tx.query_row(
+        "SELECT COUNT(*) FROM voice_template_speaker WHERE template_id=?1 AND speaker_key=?2",
+        params![template_id, speaker_key],
+        |row| row.get::<_, i64>(0),
+    )?;
+    if still_exists == 0 {
+        return Err(EngineError::InstallFailed(format!(
+            "template speaker disappeared before reference commit: {template_id}/{speaker_key}"
+        )));
+    }
+    copied.sort_order = tx.query_row(
+        "SELECT COALESCE(MAX(sort_order), -1) + 1 FROM voice_template_reference WHERE template_id=?1 AND speaker_key=?2",
+        params![template_id, speaker_key],
+        |row| row.get::<_, i64>(0),
     )?;
     insert_template_reference_row(&tx, template_id, &copied)?;
     refresh_template_speaker_profile_cache(&tx, template_id, speaker_key)?;
@@ -486,8 +501,7 @@ pub fn remove_voice_template_reference(
         ));
     }
 
-    let mut conn = db::open(paths)?;
-    db::migrate(&conn)?;
+    let mut conn = db::write_context(paths)?;
     let tx = conn.transaction()?;
     let reference_path: String = tx.query_row(
         "SELECT path FROM voice_template_reference WHERE template_id=?1 AND speaker_key=?2 AND reference_id=?3",
@@ -504,6 +518,7 @@ pub fn remove_voice_template_reference(
         params![template_id, now_ms()],
     )?;
     tx.commit()?;
+    drop(conn);
 
     let reference_path = Path::new(&reference_path);
     if reference_path.exists() {
@@ -521,8 +536,7 @@ pub fn delete_voice_template(paths: &AppPaths, template_id: &str) -> Result<()> 
         ));
     }
 
-    let mut conn = db::open(paths)?;
-    db::migrate(&conn)?;
+    let mut conn = db::write_context(paths)?;
     let tx = conn.transaction()?;
     tx.execute(
         "DELETE FROM voice_template_reference WHERE template_id=?1",
@@ -537,6 +551,7 @@ pub fn delete_voice_template(paths: &AppPaths, template_id: &str) -> Result<()> 
         params![template_id],
     )?;
     tx.commit()?;
+    drop(conn);
 
     let template_dir = paths.voice_template_dir(template_id);
     if template_dir.exists() {
@@ -676,8 +691,7 @@ fn set_voice_template_voice_plan_default(
         ));
     }
 
-    let mut conn = db::open(paths)?;
-    db::migrate(&conn)?;
+    let mut conn = db::write_context(paths)?;
     let tx = conn.transaction()?;
     let now = now_ms();
     let updated = tx.execute(

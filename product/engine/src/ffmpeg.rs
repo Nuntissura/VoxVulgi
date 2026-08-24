@@ -4,6 +4,36 @@ use crate::{EngineError, Result};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
+use std::time::Duration;
+
+const FFMPEG_COMMAND_TIMEOUT_SECS: u64 = 1800;
+
+pub(crate) fn run_output(
+    command: &mut std::process::Command,
+    tool: &str,
+) -> Result<std::process::Output> {
+    cmd::run_owned_output(
+        command,
+        Duration::from_secs(FFMPEG_COMMAND_TIMEOUT_SECS),
+        crate::jobs::external_command_cancel_requested,
+    )
+    .map_err(|error| match error.kind() {
+        std::io::ErrorKind::NotFound => EngineError::ExternalToolMissing {
+            tool: tool.to_string(),
+        },
+        std::io::ErrorKind::Interrupted => EngineError::ExternalToolFailed {
+            tool: tool.to_string(),
+            code: None,
+            stderr: format!("{tool} canceled"),
+        },
+        std::io::ErrorKind::TimedOut => EngineError::ExternalToolFailed {
+            tool: tool.to_string(),
+            code: None,
+            stderr: format!("{tool} timed out after {FFMPEG_COMMAND_TIMEOUT_SECS}s"),
+        },
+        _ => EngineError::Io(error),
+    })
+}
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct SubtitleStreamProbe {
@@ -34,7 +64,8 @@ pub struct MediaProbe {
 }
 
 pub fn probe(paths: &AppPaths, input: &Path) -> Result<MediaProbe> {
-    let output = cmd::command(paths.ffprobe_cmd())
+    let mut command = cmd::command(paths.ffprobe_cmd());
+    command
         .args([
             "-v",
             "error",
@@ -43,14 +74,8 @@ pub fn probe(paths: &AppPaths, input: &Path) -> Result<MediaProbe> {
             "-show_format",
             "-show_streams",
         ])
-        .arg(input)
-        .output()
-        .map_err(|e| match e.kind() {
-            std::io::ErrorKind::NotFound => EngineError::ExternalToolMissing {
-                tool: "ffprobe".to_string(),
-            },
-            _ => EngineError::Io(e),
-        })?;
+        .arg(input);
+    let output = run_output(&mut command, "ffprobe")?;
 
     if !output.status.success() {
         return Err(EngineError::ExternalToolFailed {
@@ -153,7 +178,8 @@ pub fn generate_thumbnail(
         0.0
     };
 
-    let output = cmd::command(paths.ffmpeg_cmd())
+    let mut command = cmd::command(paths.ffmpeg_cmd());
+    command
         .args(["-nostdin", "-y"])
         .args(["-ss", &format!("{ts:.3}")])
         .arg("-i")
@@ -161,14 +187,8 @@ pub fn generate_thumbnail(
         .args(["-frames:v", "1"])
         .args(["-vf", "scale='min(480,iw)':-2"])
         .args(["-q:v", "3"])
-        .arg(output_image)
-        .output()
-        .map_err(|e| match e.kind() {
-            std::io::ErrorKind::NotFound => EngineError::ExternalToolMissing {
-                tool: "ffmpeg".to_string(),
-            },
-            _ => EngineError::Io(e),
-        })?;
+        .arg(output_image);
+    let output = run_output(&mut command, "ffmpeg")?;
 
     if !output.status.success() {
         return Err(EngineError::ExternalToolFailed {
@@ -186,20 +206,15 @@ pub fn extract_audio_wav_16k_mono(paths: &AppPaths, input: &Path, output_wav: &P
         std::fs::create_dir_all(parent)?;
     }
 
-    let output = cmd::command(paths.ffmpeg_cmd())
+    let mut command = cmd::command(paths.ffmpeg_cmd());
+    command
         .args(["-nostdin", "-y"])
         .arg("-i")
         .arg(input)
         .args(["-vn", "-ac", "1", "-ar", "16000"])
         .args(["-c:a", "pcm_s16le"])
-        .arg(output_wav)
-        .output()
-        .map_err(|e| match e.kind() {
-            std::io::ErrorKind::NotFound => EngineError::ExternalToolMissing {
-                tool: "ffmpeg".to_string(),
-            },
-            _ => EngineError::Io(e),
-        })?;
+        .arg(output_wav);
+    let output = run_output(&mut command, "ffmpeg")?;
 
     if !output.status.success() {
         return Err(EngineError::ExternalToolFailed {
@@ -226,7 +241,8 @@ pub fn extract_audio_clip_wav_16k_mono(
     let duration_ms = (end_ms - start_ms).max(1);
     let duration_seconds = (duration_ms as f64) / 1000.0;
 
-    let output = cmd::command(paths.ffmpeg_cmd())
+    let mut command = cmd::command(paths.ffmpeg_cmd());
+    command
         .args(["-nostdin", "-y"])
         .args(["-ss", &format!("{start_seconds:.3}")])
         .arg("-i")
@@ -234,14 +250,8 @@ pub fn extract_audio_clip_wav_16k_mono(
         .args(["-t", &format!("{duration_seconds:.3}")])
         .args(["-vn", "-ac", "1", "-ar", "16000"])
         .args(["-c:a", "pcm_s16le"])
-        .arg(output_wav)
-        .output()
-        .map_err(|e| match e.kind() {
-            std::io::ErrorKind::NotFound => EngineError::ExternalToolMissing {
-                tool: "ffmpeg".to_string(),
-            },
-            _ => EngineError::Io(e),
-        })?;
+        .arg(output_wav);
+    let output = run_output(&mut command, "ffmpeg")?;
 
     if !output.status.success() {
         return Err(EngineError::ExternalToolFailed {
@@ -281,19 +291,13 @@ pub fn concat_wav_files_16k_mono(
         .map(|index| format!("[{index}:a]"))
         .collect::<String>();
     let filter = format!("{concat_inputs}concat=n={}:v=0:a=1[out]", inputs.len());
-    let output = command
+    command
         .args(["-filter_complex", &filter])
         .args(["-map", "[out]"])
         .args(["-ac", "1", "-ar", "16000"])
         .args(["-c:a", "pcm_s16le"])
-        .arg(output_wav)
-        .output()
-        .map_err(|e| match e.kind() {
-            std::io::ErrorKind::NotFound => EngineError::ExternalToolMissing {
-                tool: "ffmpeg".to_string(),
-            },
-            _ => EngineError::Io(e),
-        })?;
+        .arg(output_wav);
+    let output = run_output(&mut command, "ffmpeg")?;
 
     if !output.status.success() {
         return Err(EngineError::ExternalToolFailed {
@@ -315,20 +319,15 @@ pub fn extract_audio_wav_44k_stereo(
         std::fs::create_dir_all(parent)?;
     }
 
-    let output = cmd::command(paths.ffmpeg_cmd())
+    let mut command = cmd::command(paths.ffmpeg_cmd());
+    command
         .args(["-nostdin", "-y"])
         .arg("-i")
         .arg(input)
         .args(["-vn", "-ac", "2", "-ar", "44100"])
         .args(["-c:a", "pcm_s16le"])
-        .arg(output_wav)
-        .output()
-        .map_err(|e| match e.kind() {
-            std::io::ErrorKind::NotFound => EngineError::ExternalToolMissing {
-                tool: "ffmpeg".to_string(),
-            },
-            _ => EngineError::Io(e),
-        })?;
+        .arg(output_wav);
+    let output = run_output(&mut command, "ffmpeg")?;
 
     if !output.status.success() {
         return Err(EngineError::ExternalToolFailed {

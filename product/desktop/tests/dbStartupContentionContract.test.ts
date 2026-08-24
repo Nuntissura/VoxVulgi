@@ -75,12 +75,12 @@ test("default video library bootstrap is explicit startup work, not hidden list 
   );
   assert.match(
     tauriSource,
-    /db::ensure_schema\(&paths\)\?;[\s\S]{0,1800}video_libraries::ensure_default_video_library\(&paths\)\?;/,
+    /db::ensure_schema\(paths\)\?;[\s\S]{0,1800}video_libraries::ensure_default_video_library\(paths\)\?;/,
     "startup should reconcile governed storage state and create the default video library before the UI can refresh Video Archiver",
   );
-  const schemaIndex = tauriSource.indexOf("db::ensure_schema(&paths)?;");
+  const schemaIndex = tauriSource.indexOf("db::ensure_schema(paths)?;");
   const defaultLibraryIndex = tauriSource.indexOf(
-    "video_libraries::ensure_default_video_library(&paths)?;",
+    "video_libraries::ensure_default_video_library(paths)?;",
     schemaIndex,
   );
   assert.ok(schemaIndex >= 0 && defaultLibraryIndex > schemaIndex);

@@ -37,6 +37,25 @@ let started = false;
 // continue, the Worker died or never installed.
 const WORKER_ALIVE_INTERVAL_MS = 30_000;
 let lastAliveAt = 0;
+let workerAliveSequence = 0;
+const workerHeartbeatSourceInstance = crypto.randomUUID();
+
+type HeartbeatTraceReceipt = {
+  accepted: boolean;
+  received_at_ms: number;
+  enqueued_at_ms: number;
+  persisted_at_ms: number | null;
+  acknowledged_at_ms: number;
+  acknowledgement_stage: "persisted" | "queued" | "rejected";
+  queue_dwell_ms: number | null;
+  outcome: string;
+  queue_overflow: boolean;
+  heartbeat_duplicates_total: number;
+  heartbeat_late_total: number;
+  duplicate: boolean;
+  late: boolean;
+  sequence_gap: number;
+};
 
 let nextPingId = 1;
 let lastSentPingId = 0;
@@ -108,11 +127,35 @@ function startLoop() {
       }
       if (now - lastAliveAt >= WORKER_ALIVE_INTERVAL_MS) {
         lastAliveAt = now;
-        postFreezeEvent("worker_alive" as never, {
+        workerAliveSequence += 1;
+        const heartbeat = {
+          source: "worker",
+          source_instance: workerHeartbeatSourceInstance,
+          sequence: workerAliveSequence,
+          emitted_at_ms: now,
           uptime_ms: now,
           ping_interval_ms: pingIntervalMs,
           freeze_threshold_ms: freezeThresholdMs,
           in_freeze: inFreeze,
+        };
+        void postFreezeEvent("worker_alive", heartbeat).then((receipt) => {
+          if (!receipt) return;
+          void postFreezeEvent("heartbeat_source_acknowledged", {
+            ...heartbeat,
+            received_at_ms: receipt.received_at_ms,
+            enqueued_at_ms: receipt.enqueued_at_ms,
+            persisted_at_ms: receipt.persisted_at_ms,
+            source_acknowledged_at_ms: Date.now(),
+            acknowledgement_stage: receipt.acknowledgement_stage,
+            queue_dwell_ms: receipt.queue_dwell_ms,
+            queue_overflow: receipt.queue_overflow,
+            duplicate: receipt.duplicate,
+            late: receipt.late,
+            sequence_gap: receipt.sequence_gap,
+            duplicate_overflow_total: receipt.heartbeat_duplicates_total,
+            late_total: receipt.heartbeat_late_total,
+            outcome: receipt.outcome,
+          });
         });
       }
     } catch {
@@ -125,23 +168,28 @@ function startLoop() {
 }
 
 function postFreezeEvent(
-  event: "freeze_detected" | "freeze_recovered" | "worker_alive",
+  event: "freeze_detected" | "freeze_recovered" | "worker_alive" | "heartbeat_source_acknowledged",
   details: Record<string, unknown>,
-) {
-  if (bridgePort == null) return;
+): Promise<HeartbeatTraceReceipt | null> {
+  if (bridgePort == null) return Promise.resolve(null);
   const url = `http://127.0.0.1:${bridgePort}/agent/freeze_event`;
   const level = event === "worker_alive" ? "info" : "warn";
   const body = JSON.stringify({ event, details, level });
   const ctrl = new AbortController();
   const timeoutId = setTimeout(() => ctrl.abort(), 3000);
-  fetch(url, {
+  return fetch(url, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body,
     signal: ctrl.signal,
   })
+    .then(async (response) => {
+      if (!response.ok) return null;
+      return (await response.json()) as HeartbeatTraceReceipt;
+    })
     .catch(() => {
       // best-effort: the detector must never raise
+      return null;
     })
     .finally(() => clearTimeout(timeoutId));
 }

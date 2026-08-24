@@ -15,9 +15,11 @@ const readRepo = (...parts: string[]) => readFileSync(join(repoRoot, ...parts), 
 
 test("adaptive YouTube policy is exposed without rewriting saved baselines", () => {
   const options = readDesktop("src", "pages", "OptionsPage.tsx");
+  const snapshot = readDesktop("src", "lib", "youtubeProtectionSnapshot.ts");
   const registry = readDesktop("src", "lib", "optionsSettingsRegistry.ts");
-  assert.match(options, /youtube_protection_status_get[\s\S]*operation: "download"/);
-  assert.match(options, /youtube_protection_status_get[\s\S]*operation: "enumeration"/);
+  assert.match(options, /loadYoutubeProtectionSnapshot<YoutubeProtectionStatus, YoutubeProtectionHistory>/);
+  assert.match(snapshot, /youtube_protection_snapshot_get/);
+  assert.match(snapshot, /downloadRequestId:[\s\S]*enumerationRequestId:/);
   assert.match(options, /downloaderEffectiveById/);
   assert.match(options, /pacingEffectiveById/);
   assert.match(options, /Automatic YouTube protection temporarily applies a stricter effective value without rewriting this saved setting/);
@@ -44,7 +46,7 @@ test("adaptive YouTube policy is exposed without rewriting saved baselines", () 
   assert.doesNotMatch(registry, /download_presets_set:yt_dlp_/);
   assert.match(options, /async function refreshYoutubeProtectionStatuses/);
   assert.ok(
-    (options.match(/await refreshYoutubeProtectionStatuses\(\)/g) ?? []).length >= 5,
+    (options.match(/await refreshYoutubeProtectionStatuses\((?:true)?\)/g) ?? []).length >= 5,
     "profile, custom, pacing, downloader reset, and pacing reset must all refresh both statuses",
   );
 });
@@ -99,8 +101,11 @@ test("normal, adaptive, and unlimited-rate projections preserve saved/effective 
 
 test("Diagnostics exposes bounded history replay transition evidence and runtime epochs", () => {
   const diagnostics = readDesktop("src", "pages", "DiagnosticsPage.tsx");
-  assert.match(diagnostics, /youtube_protection_history_get/);
+  const snapshot = readDesktop("src", "lib", "youtubeProtectionSnapshot.ts");
+  assert.match(diagnostics, /loadYoutubeProtectionSnapshot/);
+  assert.match(snapshot, /youtube_protection_snapshot_get/);
   assert.match(diagnostics, /youtube_protection_history_replay/);
+  assert.match(diagnostics, /history replay not run automatically/);
   assert.match(diagnostics, /data-testid=\{`youtube-protection-diagnostics-\$\{operation\}`\}/);
   assert.match(diagnostics, /\["download", "enumeration"\] as const/);
   assert.match(diagnostics, /rollup_event_total/);
@@ -143,6 +148,7 @@ test("runtime persistence and command boundaries retain distinct rate concepts",
   assert.match(tauri, /youtube_protection_status_get/);
   assert.match(tauri, /youtube_protection_return_to_baseline/);
   assert.match(tauri, /youtube_protection_history_get/);
+  assert.match(tauri, /youtube_protection_snapshot_get/);
   assert.match(tauri, /youtube_protection_history_replay/);
   assert.match(tauri, /youtube_protection_tuning_get/);
   assert.match(tauri, /youtube_protection_tuning_set/);

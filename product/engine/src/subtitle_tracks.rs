@@ -4,7 +4,13 @@ use crate::{db, EngineError, Result};
 use rusqlite::params;
 use serde::{Deserialize, Serialize};
 use std::path::Path;
+use std::sync::{Mutex, OnceLock};
 use uuid::Uuid;
+
+// Version selection and three-file publication are one logical operation, but filesystem I/O
+// must not run under AppDatabase writer admission. Serialize this narrow publication surface so
+// concurrent editor saves cannot choose the same version while keeping DB permits short.
+static SUBTITLE_VERSION_PUBLICATION_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SubtitleTrackRow {
@@ -118,8 +124,22 @@ pub fn load_document_from_path(path: &Path) -> Result<SubtitleDocument> {
 pub fn save_new_version(
     paths: &AppPaths,
     base_track_id: &str,
-    mut doc: SubtitleDocument,
+    doc: SubtitleDocument,
 ) -> Result<SubtitleTrackRow> {
+    save_new_version_with_writer(paths, base_track_id, doc, |doc, json, srt, vtt| {
+        crate::subtitles::write_artifacts(doc, json, srt, vtt)
+    })
+}
+
+fn save_new_version_with_writer<ArtifactWriter>(
+    paths: &AppPaths,
+    base_track_id: &str,
+    mut doc: SubtitleDocument,
+    artifact_writer: ArtifactWriter,
+) -> Result<SubtitleTrackRow>
+where
+    ArtifactWriter: FnOnce(&SubtitleDocument, &Path, &Path, &Path) -> Result<()>,
+{
     let base = get_track(paths, base_track_id)?;
     if doc.schema_version != SUBTITLE_JSON_SCHEMA_VERSION {
         return Err(EngineError::InstallFailed(format!(
@@ -134,18 +154,23 @@ pub fn save_new_version(
         doc.lang = base.lang.clone();
     }
 
-    let conn = db::open(paths)?;
-    db::migrate(&conn)?;
+    let publication_guard = SUBTITLE_VERSION_PUBLICATION_LOCK
+        .get_or_init(|| Mutex::new(()))
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
 
-    let max_version: Option<i64> = conn.query_row(
-        r#"
+    let max_version: Option<i64> = {
+        let conn = db::open_readonly(paths)?;
+        conn.query_row(
+            r#"
 SELECT MAX(version)
 FROM subtitle_track
 WHERE item_id=?1 AND kind=?2 AND lang=?3 AND format=?4
 "#,
-        params![&base.item_id, &base.kind, &base.lang, &base.format],
-        |row| row.get(0),
-    )?;
+            params![&base.item_id, &base.kind, &base.lang, &base.format],
+            |row| row.get(0),
+        )?
+    };
     let next_version = max_version.unwrap_or(0).max(base.version) + 1;
 
     let base_path = Path::new(&base.path);
@@ -158,9 +183,12 @@ WHERE item_id=?1 AND kind=?2 AND lang=?3 AND format=?4
     let srt_path = parent.join(format!("{stem}.v{next_version}.srt"));
     let vtt_path = parent.join(format!("{stem}.v{next_version}.vtt"));
 
-    crate::subtitles::write_artifacts(&doc, &json_path, &srt_path, &vtt_path)?;
+    // The publication lock preserves version selection while this deliberately slow filesystem
+    // phase runs. No AppDatabase read or writer admission is alive across the callback.
+    artifact_writer(&doc, &json_path, &srt_path, &vtt_path)?;
 
     let id = Uuid::new_v4().to_string();
+    let conn = db::write_context(paths)?;
     conn.execute(
         r#"
 INSERT INTO subtitle_track (
@@ -185,6 +213,8 @@ INSERT INTO subtitle_track (
             next_version
         ],
     )?;
+    drop(conn);
+    drop(publication_guard);
 
     Ok(SubtitleTrackRow {
         id,
@@ -236,6 +266,8 @@ mod tests {
     use super::*;
     use crate::paths::AppPaths;
     use crate::subtitles::{SubtitleDocument, SubtitleSegment};
+    use std::sync::mpsc;
+    use std::time::Duration;
     use std::time::{SystemTime, UNIX_EPOCH};
 
     #[test]
@@ -258,7 +290,7 @@ mod tests {
 
         // Seed a library item row.
         let item_id = "item-1";
-        let conn = db::open(&paths).expect("open");
+        let conn = db::open(&paths).expect("open fixture");
         db::migrate(&conn).expect("migrate");
         conn.execute(
             r#"
@@ -344,6 +376,139 @@ INSERT INTO subtitle_track (
 
         let all = list_tracks(&paths, item_id).expect("list");
         assert_eq!(all.len(), 2);
+    }
+
+    #[test]
+    fn blocked_subtitle_artifact_write_does_not_hold_database_writer_admission() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let paths = AppPaths::new(dir.path().join("app_state"));
+        let (base_track_id, base_doc) = seed_save_fixture(&paths, "permit");
+        let save_paths = paths.clone();
+        let (filesystem_entered_tx, filesystem_entered_rx) = mpsc::sync_channel(1);
+        let (filesystem_release_tx, filesystem_release_rx) = mpsc::sync_channel(1);
+        let save = std::thread::spawn(move || {
+            save_new_version_with_writer(
+                &save_paths,
+                &base_track_id,
+                base_doc,
+                move |doc, json, srt, vtt| {
+                    filesystem_entered_tx
+                        .send(())
+                        .expect("announce blocked I/O");
+                    filesystem_release_rx.recv().expect("release blocked I/O");
+                    crate::subtitles::write_artifacts(doc, json, srt, vtt)
+                },
+            )
+        });
+
+        filesystem_entered_rx
+            .recv_timeout(Duration::from_secs(2))
+            .expect("save reached filesystem phase");
+        let writer_paths = paths.clone();
+        let (writer_done_tx, writer_done_rx) = mpsc::sync_channel(1);
+        let writer = std::thread::spawn(move || {
+            let result = (|| -> Result<()> {
+                let conn = db::write_context(&writer_paths)?;
+                conn.execute(
+                    "INSERT OR REPLACE INTO meta(key,value) VALUES('subtitle_io_scope_probe','admitted')",
+                    [],
+                )?;
+                Ok(())
+            })();
+            writer_done_tx.send(result).expect("writer result");
+        });
+
+        let writer_result = writer_done_rx.recv_timeout(Duration::from_secs(2));
+        filesystem_release_tx.send(()).expect("release save");
+        let save_result = save.join().expect("save thread");
+        writer.join().expect("writer thread");
+        writer_result
+            .expect("unrelated writer must be admitted while filesystem work is blocked")
+            .expect("unrelated writer succeeds");
+        save_result.expect("save succeeds");
+    }
+
+    #[test]
+    fn concurrent_subtitle_saves_publish_distinct_monotonic_versions() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let paths = AppPaths::new(dir.path().join("app_state"));
+        let (base_track_id, base_doc) = seed_save_fixture(&paths, "versions");
+        let mut workers = Vec::new();
+        for text in ["first edit", "second edit"] {
+            let paths = paths.clone();
+            let track_id = base_track_id.clone();
+            let mut doc = base_doc.clone();
+            doc.segments[0].text = text.to_string();
+            workers.push(std::thread::spawn(move || {
+                save_new_version(&paths, &track_id, doc)
+            }));
+        }
+        let mut saved = workers
+            .into_iter()
+            .map(|worker| worker.join().expect("save thread").expect("save"))
+            .collect::<Vec<_>>();
+        saved.sort_by_key(|row| row.version);
+        assert_eq!(
+            saved.iter().map(|row| row.version).collect::<Vec<_>>(),
+            vec![2, 3]
+        );
+        assert_ne!(saved[0].path, saved[1].path);
+        let texts = saved
+            .iter()
+            .map(|row| {
+                load_document_from_path(Path::new(&row.path))
+                    .expect("published document")
+                    .segments[0]
+                    .text
+                    .clone()
+            })
+            .collect::<std::collections::HashSet<_>>();
+        assert_eq!(
+            texts,
+            std::collections::HashSet::from(["first edit".to_string(), "second edit".to_string()])
+        );
+    }
+
+    fn seed_save_fixture(paths: &AppPaths, suffix: &str) -> (String, SubtitleDocument) {
+        db::ensure_schema(paths).expect("schema");
+        let item_id = format!("item-{suffix}");
+        let conn = db::open(paths).expect("open fixture");
+        db::migrate(&conn).expect("migrate");
+        conn.execute(
+            "INSERT INTO library_item(id,created_at_ms,source_type,source_uri,title,media_path) VALUES(?1,?2,'local_file','file:///tmp','Test','media/test.mkv')",
+            params![&item_id, now_ms_test()],
+        )
+        .expect("insert item");
+        let base_dir = paths.derived_item_dir(&item_id).join("asr");
+        std::fs::create_dir_all(&base_dir).expect("mkdir");
+        let base_json_path = base_dir.join("source.json");
+        let base_doc = SubtitleDocument {
+            schema_version: SUBTITLE_JSON_SCHEMA_VERSION,
+            kind: "source".to_string(),
+            lang: "ja".to_string(),
+            segments: vec![SubtitleSegment {
+                index: 0,
+                start_ms: 0,
+                end_ms: 1000,
+                text: "hello".to_string(),
+                speaker: None,
+            }],
+        };
+        crate::subtitles::write_artifacts(
+            &base_doc,
+            &base_json_path,
+            &base_dir.join("source.srt"),
+            &base_dir.join("source.vtt"),
+        )
+        .expect("base artifacts");
+        let track_id = format!("track-{suffix}");
+        conn.execute(
+            "INSERT INTO subtitle_track(id,item_id,kind,lang,format,path,created_by,version) VALUES(?1,?2,'source','ja','ytfetch_subtitle_json_v1',?3,'asr:test',1)",
+            params![&track_id, &item_id, base_json_path.to_string_lossy().to_string()],
+        )
+        .expect("insert track");
+        drop(conn);
+        (track_id, base_doc)
     }
 
     fn now_ms_test() -> i64 {

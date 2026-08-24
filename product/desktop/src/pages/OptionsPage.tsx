@@ -12,6 +12,14 @@ import {
 import { openPathBestEffort } from "../lib/pathOpener";
 import { safeLocalStorageGet, safeLocalStorageSet } from "../lib/persist";
 import {
+  DemandSupersededError,
+  createDemandGeneration,
+  diagnosticsDemandCoordinator,
+  type DemandGeneration,
+  type DiagnosticsDemandSnapshot,
+} from "../lib/diagnosticsDemandCoordinator";
+import { loadYoutubeProtectionSnapshot } from "../lib/youtubeProtectionSnapshot";
+import {
   beginInstagramCapabilityEpoch,
   beginInstagramMutationEpoch,
   invalidateInstagramCapabilityEpoch,
@@ -680,6 +688,7 @@ export function OptionsPage() {
   const moduleNavigationStateRef = useRef(new Map<OptionsModuleId, { scrollTop: number; focusId: string | null }>());
   const youtubeProtectionStatusRequestRef = useRef(0);
   const videoModuleLoadGenerationRef = useRef(0);
+  const videoDemandGenerationRef = useRef<DemandGeneration | null>(null);
   const pacingMutationGenerationRef = useRef(0);
   const tuningMutationGenerationRef = useRef(0);
   const historyMutationGenerationRef = useRef(0);
@@ -762,6 +771,7 @@ export function OptionsPage() {
   const [youtubeProtectionTuningHydrationState, setYoutubeProtectionTuningHydrationState] = useState<"loading" | "ready" | "unavailable">("loading");
   const [youtubeProtectionBusy, setYoutubeProtectionBusy] = useState(false);
   const [youtubeProtectionMessage, setYoutubeProtectionMessage] = useState("");
+  const [youtubeProtectionDemand, setYoutubeProtectionDemand] = useState<DiagnosticsDemandSnapshot | null>(null);
   const [jobsDraft, setJobsDraft] = useState<JobRuntimeDraft>(DEFAULT_JOB_RUNTIME_DRAFT);
   const [jobsBaseline, setJobsBaseline] = useState<Partial<JobRuntimeSettings> | null>(null);
   const [jobsRuntimeRows, setJobsRuntimeRows] = useState<Partial<Record<keyof JobRuntimeSettings, JobTrackRuntimeRow>> | null>(null);
@@ -783,12 +793,31 @@ export function OptionsPage() {
     videoModuleLoadGenerationRef.current = generation;
     youtubeProtectionStatusRequestRef.current += 1;
     if (activeModule !== "video_archiver") return;
+    const demandGeneration = createDemandGeneration("options.video_archiver");
+    videoDemandGenerationRef.current = demandGeneration;
     let canceled = false;
     setPacingHydrationState("loading");
     setYoutubeProtectionTuningHydrationState("loading");
-    invoke<AntiBotPacing>(optionsPersistenceAdapterContract("antibot_pacing").canonicalReaderRoute!)
-      .then((p) => {
-        if (canceled || videoModuleLoadGenerationRef.current !== generation) return;
+    void diagnosticsDemandCoordinator.request("options.video-protection-config", demandGeneration, async () => {
+      let pacing: AntiBotPacing | null = null;
+      let pacingError: unknown = null;
+      let tuning: YoutubeProtectionTuning | null = null;
+      let tuningError: unknown = null;
+      try {
+        pacing = await invoke<AntiBotPacing>(optionsPersistenceAdapterContract("antibot_pacing").canonicalReaderRoute!);
+      } catch (error) {
+        pacingError = error;
+      }
+      try {
+        tuning = await invoke<YoutubeProtectionTuning>(optionsPersistenceAdapterContract("youtube_protection_tuning").canonicalReaderRoute!);
+      } catch (error) {
+        tuningError = error;
+      }
+      return { pacing, pacingError, tuning, tuningError };
+    }, { onState: setYoutubeProtectionDemand }).then(({ value }) => {
+      if (canceled || videoModuleLoadGenerationRef.current !== generation) return;
+      if (value.pacing) {
+        const p = value.pacing;
         setPacingBaseline(p);
         setPacingAdaptiveEnabled(p.adaptive_protection_enabled);
         setPacingRecurringSecs(String(p.recurring_min_interval_secs));
@@ -798,44 +827,39 @@ export function OptionsPage() {
         setPacingDownloadMinSleep(String(p.recurring_download_min_sleep_secs));
         setPacingDownloadMaxSleep(String(p.recurring_download_max_sleep_secs));
         setPacingHydrationState("ready");
-      })
-      .catch((error) => {
-        if (canceled || videoModuleLoadGenerationRef.current !== generation) return;
+      } else {
         setPacingBaseline(null);
         setPacingHydrationState("unavailable");
-        setPacingMessage(`Pacing settings unavailable: ${String(error)}`);
-      });
-    refreshYoutubeProtectionStatuses()
+        setPacingMessage(`Pacing settings unavailable: ${String(value.pacingError)}`);
+      }
+      if (value.tuning) {
+        setYoutubeProtectionTuning(value.tuning);
+        setYoutubeProtectionTuningBaseline(value.tuning);
+        setYoutubeProtectionTuningHydrationState("ready");
+      } else {
+        setYoutubeProtectionTuning(null);
+        setYoutubeProtectionTuningBaseline(null);
+        setYoutubeProtectionTuningHydrationState("unavailable");
+        setYoutubeProtectionMessage(`Advanced protection settings unavailable: ${String(value.tuningError)}`);
+      }
+    }).catch((error) => {
+      if (error instanceof DemandSupersededError || canceled || videoModuleLoadGenerationRef.current !== generation) return;
+      setPacingHydrationState("unavailable");
+      setYoutubeProtectionTuningHydrationState("unavailable");
+      setYoutubeProtectionMessage(`Protection settings unavailable: ${String(error)}`);
+    });
+    refreshYoutubeProtectionStatuses(false, demandGeneration)
       .catch((error) => {
-        if (!canceled && videoModuleLoadGenerationRef.current === generation) {
+        if (!(error instanceof DemandSupersededError) && !canceled && videoModuleLoadGenerationRef.current === generation) {
           setYoutubeProtectionStatus(null);
           setYoutubeEnumerationProtectionStatus(null);
           setYoutubeProtectionMessage(`Protection status unavailable: ${String(error)}`);
         }
       });
-    invoke<YoutubeProtectionHistory>("youtube_protection_history_get", { operation: "download", limit: 25 })
-      .then((history) => {
-        if (!canceled && videoModuleLoadGenerationRef.current === generation) setYoutubeProtectionHistory(history);
-      })
-      .catch(() => {
-        if (!canceled && videoModuleLoadGenerationRef.current === generation) setYoutubeProtectionHistory(null);
-      });
-    invoke<YoutubeProtectionTuning>(optionsPersistenceAdapterContract("youtube_protection_tuning").canonicalReaderRoute!)
-      .then((tuning) => {
-        if (canceled || videoModuleLoadGenerationRef.current !== generation) return;
-        setYoutubeProtectionTuning(tuning);
-        setYoutubeProtectionTuningBaseline(tuning);
-        setYoutubeProtectionTuningHydrationState("ready");
-      })
-      .catch((error) => {
-        if (canceled || videoModuleLoadGenerationRef.current !== generation) return;
-        setYoutubeProtectionTuning(null);
-        setYoutubeProtectionTuningBaseline(null);
-        setYoutubeProtectionTuningHydrationState("unavailable");
-        setYoutubeProtectionMessage(`Advanced protection settings unavailable: ${String(error)}`);
-      });
     return () => {
       canceled = true;
+      diagnosticsDemandCoordinator.cancelGeneration(demandGeneration);
+      if (videoDemandGenerationRef.current === demandGeneration) videoDemandGenerationRef.current = null;
       videoModuleLoadGenerationRef.current += 1;
       youtubeProtectionStatusRequestRef.current += 1;
       pacingMutationGenerationRef.current = nextYoutubeProtectionMutationGeneration();
@@ -846,20 +870,27 @@ export function OptionsPage() {
     };
   }, [activeModule]);
 
-  async function refreshYoutubeProtectionStatuses() {
+  async function refreshYoutubeProtectionStatuses(
+    force = true,
+    requestedGeneration: DemandGeneration | null = videoDemandGenerationRef.current,
+  ) {
+    if (!requestedGeneration || requestedGeneration.canceled) {
+      throw new DemandSupersededError("Video Archiver Options is not active");
+    }
     const generation = youtubeProtectionStatusRequestRef.current + 1;
     youtubeProtectionStatusRequestRef.current = generation;
-    const requestId = `options-youtube-protection-${generation}-${Date.now()}`;
-    const context = { requestId, spanId: "options-youtube-protection" };
-    const [download, enumeration] = await Promise.all([
-      invoke<YoutubeProtectionStatus>("youtube_protection_status_get", { operation: "download", ...context }),
-      invoke<YoutubeProtectionStatus>("youtube_protection_status_get", { operation: "enumeration", ...context }),
-    ]);
-    if (youtubeProtectionStatusRequestRef.current === generation) {
-      setYoutubeProtectionStatus(download);
-      setYoutubeEnumerationProtectionStatus(enumeration);
+    const result = await diagnosticsDemandCoordinator.request(
+      "protection.snapshot",
+      requestedGeneration,
+      () => loadYoutubeProtectionSnapshot<YoutubeProtectionStatus, YoutubeProtectionHistory>("options", 100),
+      { force, onState: setYoutubeProtectionDemand },
+    );
+    if (youtubeProtectionStatusRequestRef.current === generation && !requestedGeneration.canceled) {
+      setYoutubeProtectionStatus(result.value.download);
+      setYoutubeEnumerationProtectionStatus(result.value.enumeration);
+      setYoutubeProtectionHistory(result.value.downloadHistory);
     }
-    return { download, enumeration };
+    return { download: result.value.download, enumeration: result.value.enumeration };
   }
 
   async function saveAntiBotPacing() {
@@ -933,9 +964,8 @@ export function OptionsPage() {
       if (videoModuleLoadGenerationRef.current !== moduleGeneration) return;
       setYoutubeProtectionStatus(status);
       setYoutubeEnumerationProtectionStatus(enumerationStatus);
-      const history = await invoke<YoutubeProtectionHistory>("youtube_protection_history_get", { operation: "download", limit: 25 });
+      await refreshYoutubeProtectionStatuses(true);
       if (videoModuleLoadGenerationRef.current !== moduleGeneration) return;
-      setYoutubeProtectionHistory(history);
       setYoutubeProtectionMessage("Automatic protection returned to the saved baseline.");
     } catch (error) {
       if (videoModuleLoadGenerationRef.current === moduleGeneration) setYoutubeProtectionMessage(`Error: ${String(error)}`);
@@ -962,13 +992,8 @@ export function OptionsPage() {
       if (videoModuleLoadGenerationRef.current !== moduleGeneration || tuningMutationGenerationRef.current !== mutationGeneration) return;
       setYoutubeProtectionTuning(saved);
       setYoutubeProtectionTuningBaseline(saved);
-      const [downloadStatus, enumerationStatus] = await Promise.all([
-        invoke<YoutubeProtectionStatus>("youtube_protection_status_get", { operation: "download" }),
-        invoke<YoutubeProtectionStatus>("youtube_protection_status_get", { operation: "enumeration" }),
-      ]);
+      await refreshYoutubeProtectionStatuses(true);
       if (videoModuleLoadGenerationRef.current !== moduleGeneration || tuningMutationGenerationRef.current !== mutationGeneration) return;
-      setYoutubeProtectionStatus(downloadStatus);
-      setYoutubeEnumerationProtectionStatus(enumerationStatus);
       setYoutubeProtectionMessage("Advanced protection settings saved and applied to future commands.");
     } catch (error) {
       if (videoModuleLoadGenerationRef.current === moduleGeneration && tuningMutationGenerationRef.current === mutationGeneration) setYoutubeProtectionMessage(`Error: ${String(error)}`);
@@ -992,13 +1017,8 @@ export function OptionsPage() {
       if (videoModuleLoadGenerationRef.current !== moduleGeneration || tuningMutationGenerationRef.current !== mutationGeneration) return;
       setYoutubeProtectionTuning(saved);
       setYoutubeProtectionTuningBaseline(saved);
-      const [downloadStatus, enumerationStatus] = await Promise.all([
-        invoke<YoutubeProtectionStatus>("youtube_protection_status_get", { operation: "download" }),
-        invoke<YoutubeProtectionStatus>("youtube_protection_status_get", { operation: "enumeration" }),
-      ]);
+      await refreshYoutubeProtectionStatuses(true);
       if (videoModuleLoadGenerationRef.current !== moduleGeneration || tuningMutationGenerationRef.current !== mutationGeneration) return;
-      setYoutubeProtectionStatus(downloadStatus);
-      setYoutubeEnumerationProtectionStatus(enumerationStatus);
       setYoutubeProtectionMessage("Advanced protection settings restored to safe defaults.");
     } catch (error) {
       if (videoModuleLoadGenerationRef.current === moduleGeneration && tuningMutationGenerationRef.current === mutationGeneration) setYoutubeProtectionMessage(`Error: ${String(error)}`);
@@ -1059,15 +1079,8 @@ export function OptionsPage() {
         receipts.push(await resetOperation(operation));
       }
       const deleted = receipts.reduce((total, receipt) => total + receipt.outcomes_deleted + receipt.transitions_deleted + receipt.rollups_deleted + receipt.states_deleted, 0);
-      const [downloadStatus, enumerationStatus, history] = await Promise.all([
-        invoke<YoutubeProtectionStatus>("youtube_protection_status_get", { operation: "download" }),
-        invoke<YoutubeProtectionStatus>("youtube_protection_status_get", { operation: "enumeration" }),
-        invoke<YoutubeProtectionHistory>("youtube_protection_history_get", { operation: "download", limit: 25 }),
-      ]);
+      await refreshYoutubeProtectionStatuses(true);
       if (videoModuleLoadGenerationRef.current !== moduleGeneration || historyMutationGenerationRef.current !== mutationGeneration) return;
-      setYoutubeProtectionStatus(downloadStatus);
-      setYoutubeEnumerationProtectionStatus(enumerationStatus);
-      setYoutubeProtectionHistory(history);
       setYoutubeProtectionMessage(`Current-epoch protection history reset (${deleted} records removed).`);
     } catch (error) {
       if (videoModuleLoadGenerationRef.current === moduleGeneration && historyMutationGenerationRef.current === mutationGeneration) setYoutubeProtectionMessage(`Error: ${String(error)}`);
@@ -2957,12 +2970,7 @@ export function OptionsPage() {
       if (tuningMutationGenerationRef.current !== mutationGeneration) throw new Error("Protection tuning reset was superseded by a newer intent.");
       setYoutubeProtectionTuning(saved);
       setYoutubeProtectionTuningBaseline(saved);
-      const [downloadStatus, enumerationStatus] = await Promise.all([
-        invoke<YoutubeProtectionStatus>("youtube_protection_status_get", { operation: "download" }),
-        invoke<YoutubeProtectionStatus>("youtube_protection_status_get", { operation: "enumeration" }),
-      ]);
-      setYoutubeProtectionStatus(downloadStatus);
-      setYoutubeEnumerationProtectionStatus(enumerationStatus);
+      await refreshYoutubeProtectionStatuses(true);
       return "Automatic protection rules restored to safe defaults.";
     }
     if (adapter === "local_storage") {
@@ -4734,6 +4742,14 @@ export function OptionsPage() {
             </span>
           </span>
         </label>
+        <div className="kv" data-testid="youtube-protection-demand-state">
+          <div className="k">Protection data</div>
+          <div className="v">
+            {youtubeProtectionDemand
+              ? `${youtubeProtectionDemand.state} · ${youtubeProtectionDemand.verified_at_ms ? `verified ${new Date(youtubeProtectionDemand.verified_at_ms).toLocaleString()} · fresh for ${Math.round(youtubeProtectionDemand.freshness_ms / 1000)}s` : "not yet verified"}${youtubeProtectionDemand.shared ? " · shared request" : ""}`
+              : "idle · not yet requested"}
+          </div>
+        </div>
         {youtubeProtectionStatus ? (
           <div className="kv" data-testid="youtube-protection-status">
             <div className="k">Current protection mode</div>
@@ -4759,6 +4775,14 @@ export function OptionsPage() {
           </div>
         ) : null}
         <div className="row" style={{ marginTop: 8 }}>
+          <button
+            type="button"
+            data-agent-safe-action="true"
+            onClick={() => void refreshYoutubeProtectionStatuses(true)}
+            disabled={youtubeProtectionDemand?.state === "queued" || youtubeProtectionDemand?.state === "loading"}
+          >
+            Refresh protection status
+          </button>
           <button
             type="button"
             onClick={returnYoutubeProtectionToBaseline}
