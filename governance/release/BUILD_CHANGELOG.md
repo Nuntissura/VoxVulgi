@@ -1479,3 +1479,11 @@ This changelog tracks desktop installer builds produced by `governance/scripts/b
 - Artifacts:
   - `product/desktop/build_target/Current/release/bundle/nsis/VoxVulgi_0.1.182_x64-setup.exe`
 - Notes: Close yt-dlp suspended-launch race and correct bounded-solid manifest metadata
+
+## 0.1.183 - 2026-08-24T19:41:07Z
+- Work Packets: `WP-0308`
+- Commit: `4f4f476`
+- Offline Bundle ID: `offline_full_win64_20260822_201543`
+- Artifacts:
+  - `product/desktop/build_target/Current/release/bundle/nsis/VoxVulgi_0.1.183_x64-setup.exe`
+- Notes: Fix Inno 7.1 runtime timestamp Type Mismatch and add regression coverage

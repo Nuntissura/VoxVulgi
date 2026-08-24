@@ -8,6 +8,7 @@ param(
   [Parameter(Mandatory = $true)][string]$AppVersion,
   [switch]$ValidateInputsOnly,
   [switch]$RefreshPayloadArchives,
+  [switch]$AuditPayloadSources,
   [string]$ArchiveCacheDir,
   [string]$IsccPath,
   [string]$SevenZipPath,
@@ -125,6 +126,62 @@ function Get-SourceTreeDigest {
     throw "7-Zip did not report the source-tree SHA256 for data and names: $Root"
   }
   return $Matches[1].ToLowerInvariant()
+}
+
+function Get-SourceTreeMetadataSnapshot {
+  param([string]$Root)
+  $resolvedRoot = (Resolve-Path -LiteralPath $Root).Path.TrimEnd('\')
+  $records = [System.Collections.Generic.List[string]]::new()
+  [int64]$fileCount = 0
+  [int64]$directoryCount = 0
+  [int64]$totalBytes = 0
+  [int64]$latestWriteTicks = (Get-Item -LiteralPath $resolvedRoot -Force).LastWriteTimeUtc.Ticks
+  foreach ($item in Get-ChildItem -LiteralPath $resolvedRoot -Force -Recurse) {
+    if ($item.LinkType -or (($item.Attributes -band [System.IO.FileAttributes]::ReparsePoint) -ne 0)) {
+      throw "Offline payload source contains a link or reparse point: $($item.FullName)"
+    }
+    $relative = [System.IO.Path]::GetRelativePath($resolvedRoot, $item.FullName).Replace('\', '/')
+    $ticks = $item.LastWriteTimeUtc.Ticks
+    if ($ticks -gt $latestWriteTicks) { $latestWriteTicks = $ticks }
+    if ($item.PSIsContainer) {
+      $directoryCount++
+      $records.Add("D`t$relative`t$ticks")
+    } else {
+      $fileCount++
+      $length = [int64]$item.Length
+      $totalBytes += $length
+      $records.Add("F`t$relative`t$length`t$ticks")
+    }
+  }
+  $sorted = $records.ToArray()
+  [Array]::Sort($sorted, [System.StringComparer]::Ordinal)
+  $hasher = [System.Security.Cryptography.IncrementalHash]::CreateHash([System.Security.Cryptography.HashAlgorithmName]::SHA256)
+  try {
+    foreach ($record in $sorted) {
+      $hasher.AppendData([System.Text.Encoding]::UTF8.GetBytes("$record`n"))
+    }
+    $digest = [Convert]::ToHexString($hasher.GetHashAndReset()).ToLowerInvariant()
+  } finally {
+    $hasher.Dispose()
+  }
+  return [ordered]@{
+    sha256 = $digest
+    file_count = $fileCount
+    directory_count = $directoryCount
+    total_bytes = $totalBytes
+    latest_write_utc = ([DateTime]::new($latestWriteTicks, [DateTimeKind]::Utc)).ToString('o')
+  }
+}
+
+function Write-JsonAtomic {
+  param([string]$Path, [object]$Value)
+  $partial = "$Path.partial.$PID"
+  try {
+    [System.IO.File]::WriteAllText($partial, (($Value | ConvertTo-Json -Depth 10) + "`n"), [System.Text.UTF8Encoding]::new($false))
+    Move-Item -LiteralPath $partial -Destination $Path -Force
+  } finally {
+    if (Test-Path -LiteralPath $partial) { Remove-Item -LiteralPath $partial -Force }
+  }
 }
 
 function Assert-ArchiveSafeAndValid {
@@ -279,14 +336,56 @@ function Copy-OrHardLink {
 function New-OrReusePayloadArchive {
   param(
     [string]$SevenZip, [string]$Name, [string]$SourceRoot,
-    [string]$CacheRoot, [string]$StagePayloadRoot, [switch]$Refresh
+    [string]$CacheRoot, [string]$StagePayloadRoot, [switch]$Refresh,
+    [switch]$AuditSource, [object]$PriorAttestation
   )
-  $digest = Get-SourceTreeDigest -SevenZip $SevenZip -Root $SourceRoot
   # File bytes and names are the payload identity. Restoring source timestamps/attributes adds a
   # metadata write for every Python-tree member without changing runtime behavior, so omit both.
   # Include the archive policy in the cache key so pre-optimization archives cannot be reused.
   $archivePolicy = 'bounded_solid_lzma2_fast_64m_no_restorable_metadata_v3'
-  $cacheArchive = Join-Path $CacheRoot ("{0}_{1}_{2}.7z" -f $Name, $archivePolicy, $digest)
+  $metadata = Get-SourceTreeMetadataSnapshot -Root $SourceRoot
+  $receiptPath = Join-Path $CacheRoot ("{0}_{1}.cache.json" -f $Name, $archivePolicy)
+  $receipt = $null
+  if ((-not $Refresh) -and (-not $AuditSource) -and (Test-Path -LiteralPath $receiptPath -PathType Leaf)) {
+    try { $receipt = Get-Content -LiteralPath $receiptPath -Raw | ConvertFrom-Json } catch { $receipt = $null }
+    if (-not $receipt -or $receipt.schema_version -ne 1 -or $receipt.source_id -ne $Name -or
+        $receipt.archive_policy -ne $archivePolicy -or $receipt.source_metadata_sha256 -ne $metadata.sha256 -or
+        [int64]$receipt.source_file_count -ne $metadata.file_count -or
+        [int64]$receipt.source_directory_count -ne $metadata.directory_count -or
+        [int64]$receipt.source_total_bytes -ne $metadata.total_bytes) {
+      $receipt = $null
+    }
+  }
+  $verificationMode = 'full_source_audit'
+  if ($receipt) {
+    $digest = "$($receipt.source_sha256_data_and_names)"
+    $cacheArchive = Join-Path $CacheRoot "$($receipt.archive_file)"
+    $expectedArchiveSha256 = "$($receipt.archive_sha256)".ToLowerInvariant()
+    $fullAuditUtc = "$($receipt.full_source_audit_utc)"
+    $verificationMode = 'metadata_receipt_fast_path'
+    Write-Host "FAST PATH: source bytes unchanged by durable metadata receipt: $Name"
+  } elseif ((-not $Refresh) -and (-not $AuditSource) -and $PriorAttestation) {
+    if ($PriorAttestation.created_at_utc -is [DateTime]) {
+      $priorAuditUtc = ([DateTime]$PriorAttestation.created_at_utc).ToUniversalTime()
+    } else {
+      $priorAuditUtc = [DateTime]::Parse("$($PriorAttestation.created_at_utc)", [System.Globalization.CultureInfo]::InvariantCulture, [System.Globalization.DateTimeStyles]::RoundtripKind).ToUniversalTime()
+    }
+    $latestWriteUtc = [DateTime]::Parse($metadata.latest_write_utc, [System.Globalization.CultureInfo]::InvariantCulture, [System.Globalization.DateTimeStyles]::RoundtripKind).ToUniversalTime()
+    if ($latestWriteUtc -le $priorAuditUtc -and $PriorAttestation.payload) {
+      $digest = "$($PriorAttestation.payload.source_sha256_data_and_names)"
+      $cacheArchive = Join-Path $CacheRoot ("{0}_{1}_{2}.7z" -f $Name, $archivePolicy, $digest)
+      $expectedArchiveSha256 = "$($PriorAttestation.payload.sha256)".ToLowerInvariant()
+      $fullAuditUtc = $priorAuditUtc.ToString('o')
+      $verificationMode = 'prior_full_audit_import_fast_path'
+      Write-Host "FAST PATH: importing prior full-audit attestation without re-reading source bytes: $Name"
+    }
+  }
+  if (-not $digest) {
+    $digest = Get-SourceTreeDigest -SevenZip $SevenZip -Root $SourceRoot
+    $cacheArchive = Join-Path $CacheRoot ("{0}_{1}_{2}.7z" -f $Name, $archivePolicy, $digest)
+    $expectedArchiveSha256 = $null
+    $fullAuditUtc = (Get-Date).ToUniversalTime().ToString('o')
+  }
   $solidAudit = $null
   if ($Refresh -or -not (Test-Path -LiteralPath $cacheArchive -PathType Leaf)) {
     $partial = "$cacheArchive.partial.$PID"
@@ -305,6 +404,12 @@ function New-OrReusePayloadArchive {
     }
   } else {
     Write-Host "Reusing content-matched payload archive: $cacheArchive"
+    if ($expectedArchiveSha256) {
+      $observedArchiveSha256 = (Get-FileHash -Algorithm SHA256 -LiteralPath $cacheArchive).Hash.ToLowerInvariant()
+      if ($observedArchiveSha256 -ne $expectedArchiveSha256) {
+        throw "Cached payload archive SHA256 does not match its durable attestation: $cacheArchive"
+      }
+    }
     Assert-ArchiveSafeAndValid -SevenZip $SevenZip -Archive $cacheArchive
     Assert-ArchiveOmitsRestorableFileMetadata -SevenZip $SevenZip -Archive $cacheArchive
     $solidAudit = Get-ArchiveBoundedSolidAudit -SevenZip $SevenZip -Archive $cacheArchive
@@ -313,7 +418,8 @@ function New-OrReusePayloadArchive {
   Copy-OrHardLink -Source $cacheArchive -Destination $stageArchive
   $item = Get-Item -LiteralPath $stageArchive
   if ($item.Length -le 0) { throw "Payload archive is empty: $stageArchive" }
-  return [ordered]@{
+  $archiveSha256 = (Get-FileHash -Algorithm SHA256 -LiteralPath $stageArchive).Hash.ToLowerInvariant()
+  $result = [ordered]@{
     name = $Name
     source_id = $Name
     source_sha256_data_and_names = $digest
@@ -328,8 +434,29 @@ function New-OrReusePayloadArchive {
     file = "payload/$Name.7z"
     archive_bytes = [int64]$item.Length
     uncompressed_bytes = Get-ArchiveUncompressedBytes -SevenZip $SevenZip -Archive $stageArchive
-    sha256 = (Get-FileHash -Algorithm SHA256 -LiteralPath $stageArchive).Hash.ToLowerInvariant()
+    sha256 = $archiveSha256
+    source_metadata_sha256 = $metadata.sha256
+    source_verification_mode = $verificationMode
+    full_source_audit_utc = $fullAuditUtc
   }
+  $cacheReceipt = [ordered]@{
+    schema_version = 1
+    source_id = $Name
+    archive_policy = $archivePolicy
+    source_metadata_sha256 = $metadata.sha256
+    source_file_count = $metadata.file_count
+    source_directory_count = $metadata.directory_count
+    source_total_bytes = $metadata.total_bytes
+    source_latest_write_utc = $metadata.latest_write_utc
+    source_sha256_data_and_names = $digest
+    full_source_audit_utc = $fullAuditUtc
+    archive_file = [System.IO.Path]::GetFileName($cacheArchive)
+    archive_bytes = [int64]$item.Length
+    archive_sha256 = $archiveSha256
+    bounded_solid_audit = $solidAudit
+  }
+  Write-JsonAtomic -Path $receiptPath -Value $cacheReceipt
+  return $result
 }
 
 function Remove-ManagedWorkTree {
@@ -450,6 +577,26 @@ if (-not $ArchiveCacheDir) { $ArchiveCacheDir = Join-Path $repoRoot 'product\des
 if (-not (Test-Path -LiteralPath $ArchiveCacheDir)) { New-Item -ItemType Directory -Force -Path $ArchiveCacheDir | Out-Null }
 $ArchiveCacheDir = (Resolve-Path -LiteralPath $ArchiveCacheDir).Path
 
+$priorAttestations = @{}
+if (-not $AuditPayloadSources -and -not $RefreshPayloadArchives) {
+  $priorManifests = @(Get-ChildItem -LiteralPath $OutputDir -Filter 'VoxVulgi_*_x64_offline_full.artifacts.json' -File -ErrorAction SilentlyContinue |
+    Where-Object { $_.FullName -ne (Join-Path $OutputDir ("VoxVulgi_{0}_x64_offline_full.artifacts.json" -f $AppVersion)) } |
+    Sort-Object LastWriteTimeUtc -Descending)
+  foreach ($candidate in $priorManifests) {
+    try { $prior = Get-Content -LiteralPath $candidate.FullName -Raw | ConvertFrom-Json } catch { continue }
+    if (-not $prior.created_at_utc -or -not $prior.payload) { continue }
+    foreach ($entry in @($prior.payload)) {
+      if ($entry.name -and -not $priorAttestations.ContainsKey("$($entry.name)")) {
+        $priorAttestations["$($entry.name)"] = [pscustomobject]@{
+          created_at_utc = $prior.created_at_utc
+          artifact_manifest = $candidate.Name
+          payload = $entry
+        }
+      }
+    }
+  }
+}
+
 $stageRoot = Join-Path $OutputDir ('.wp0308_iso_stage_{0}' -f $PID)
 $isoRoot = Join-Path $stageRoot 'iso_root'
 $stagePayloadRoot = Join-Path $isoRoot 'payload'
@@ -472,7 +619,13 @@ try {
   )
   $archives = @()
   foreach ($spec in $archiveSpecs) {
-    $archives += New-OrReusePayloadArchive -SevenZip $sevenZip -Name $spec.name -SourceRoot $spec.root -CacheRoot $ArchiveCacheDir -StagePayloadRoot $stagePayloadRoot -Refresh:$RefreshPayloadArchives
+    $archives += New-OrReusePayloadArchive -SevenZip $sevenZip -Name $spec.name -SourceRoot $spec.root -CacheRoot $ArchiveCacheDir -StagePayloadRoot $stagePayloadRoot -Refresh:$RefreshPayloadArchives -AuditSource:$AuditPayloadSources -PriorAttestation $priorAttestations[$spec.name]
+  }
+  foreach ($index in 0..($archiveSpecs.Count - 1)) {
+    $afterSnapshot = Get-SourceTreeMetadataSnapshot -Root $archiveSpecs[$index].root
+    if ($afterSnapshot.sha256 -ne $archives[$index].source_metadata_sha256) {
+      throw "Offline payload source changed while the installer was being assembled: $($archiveSpecs[$index].name)"
+    }
   }
   $realizedSolidArchiveCount = @($archives | Where-Object { $_.solid }).Count
   $payloadManifest = [ordered]@{

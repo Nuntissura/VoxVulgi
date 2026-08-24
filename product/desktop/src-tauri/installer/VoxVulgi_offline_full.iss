@@ -156,7 +156,12 @@ procedure RewritePyvenv(VenvName: String); forward;
 
 function CreatePayloadGeneration: String;
 begin
-  Result := GetDateTimeString('yyyymmdd_hhnnss_zzz', '', '');
+  { Pascal-script GetDateTimeString requires Char separators. Empty String
+    arguments compile but fail at runtime with "Type Mismatch" under Inno 7.1.
+    Add an explicit three-digit numeric suffix because `zzz` is not a supported
+    runtime date/time format token. }
+  Result := GetDateTimeString('yyyymmdd_hhnnss', #0, #0) + '_' +
+    Format('%.3d', [Random(1000)]);
 end;
 
 function PayloadBaseDir: String;
@@ -1035,7 +1040,7 @@ begin
     RaiseException('Unable to create the durable installer log directory: ' + LogDir);
   end;
   DestLog := LogDir + '\installer_{#AppVersion}_' +
-    GetDateTimeString('yyyymmdd_hhnnss', '', '') + '.log';
+    GetDateTimeString('yyyymmdd_hhnnss', #0, #0) + '.log';
   if not CopyFile(SourceLog, DestLog, False) then
   begin
     Log('VV_INSTALLER_EVENT installer_log_persist_failed kind=final destination=' +

@@ -145,7 +145,7 @@ The external-archive fixture must use the governed 64 MiB bounded-solid policy, 
 .\governance\scripts\build_offline_full_installer.ps1 @vv_installer_args
 ```
 
-Use `-RefreshPayloadArchives` only when forcing regeneration of content-matched archives. Routine builds hash inputs, test cached archives, and reuse matching 64 MiB bounded-solid archives from `product/desktop/build_target/offline_archive_cache`. A cache entry created under the retired non-solid policy is not content-equivalent and must not be reused.
+Use `-RefreshPayloadArchives` only when forcing regeneration of content-matched archives; it implies a fresh source-byte audit. Use `-AuditPayloadSources` for a fresh source-byte audit without forcing archive recreation. Routine builds must use the atomic per-source metadata receipts in `product/desktop/build_target/offline_archive_cache`, reuse the prior full-audit digest only when the receipt matches, and must not recursively hash source file bytes on a valid receipt hit. Routine reuse still verifies the cached archive SHA-256, `7z t`, path safety, metadata policy, bounded-solid layout, and a second source-metadata snapshot before ISO creation. Missing, invalid, or changed receipts fall back to a full source audit. A cache entry created under the retired non-solid policy is not content-equivalent and must not be reused.
 
 </topic>
 

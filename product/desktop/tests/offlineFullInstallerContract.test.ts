@@ -313,6 +313,45 @@ test("archive build is fast, reusable, integrity-checked, and path-audited", () 
   assert.match(driver, /Unable to resolve non-empty Oscdimg provenance/);
 });
 
+test("routine offline rebuilds reuse durable payload receipts without source-byte hashing", () => {
+  const { driver } = installerSources();
+
+  assert.match(driver, /\[switch\]\$AuditPayloadSources/);
+  assert.match(driver, /function Get-SourceTreeMetadataSnapshot/);
+  assert.match(driver, /source_metadata_sha256 = \$metadata\.sha256/);
+  assert.match(driver, /source_file_count = \$metadata\.file_count/);
+  assert.match(driver, /source_directory_count = \$metadata\.directory_count/);
+  assert.match(driver, /source_total_bytes = \$metadata\.total_bytes/);
+  assert.match(driver, /function Write-JsonAtomic/);
+  assert.match(driver, /\.partial\.\$PID/);
+  assert.match(
+    driver,
+    /if \(\$receipt\)[\s\S]{0,900}\$verificationMode = 'metadata_receipt_fast_path'/,
+  );
+  assert.match(
+    driver,
+    /if \(-not \$digest\) \{[\s\S]{0,180}Get-SourceTreeDigest/,
+    "source bytes may be hashed only after the receipt/prior-attestation fast paths miss",
+  );
+  assert.match(
+    driver,
+    /\(-not \$Refresh\) -and \(-not \$AuditSource\)[\s\S]{0,240}\.cache\.json/,
+  );
+  assert.match(
+    driver,
+    /-Refresh:\$RefreshPayloadArchives -AuditSource:\$AuditPayloadSources/,
+  );
+  assert.match(driver, /Cached payload archive SHA256 does not match its durable attestation/);
+  assert.match(driver, /Assert-ArchiveSafeAndValid -SevenZip \$SevenZip -Archive \$cacheArchive/);
+  assert.match(
+    driver,
+    /Get-SourceTreeMetadataSnapshot -Root \$archiveSpecs\[\$index\]\.root[\s\S]{0,240}source changed while the installer was being assembled/,
+    "source metadata must be re-read after archive staging to catch concurrent changes",
+  );
+  assert.match(driver, /source_verification_mode = \$verificationMode/);
+  assert.match(driver, /full_source_audit_utc = \$fullAuditUtc/);
+});
+
 test("ISO uses UDF and the wrapper preserves update elevation and durable logs", () => {
   const { definition, driver } = installerSources();
 
@@ -371,7 +410,26 @@ test("installer logging proves payload boundaries and the installed core version
   }
 
   assert.match(definition, /installer_\{#AppVersion\}_latest\.log/);
-  assert.match(definition, /GetDateTimeString\('yyyymmdd_hhnnss'/);
+  assert.match(
+    definition,
+    /GetDateTimeString\('yyyymmdd_hhnnss', #0, #0\)/,
+    "Pascal runtime timestamp separators must be Char values, not empty Strings.",
+  );
+  assert.doesNotMatch(
+    definition,
+    /GetDateTimeString\([^\r\n]*,\s*'',\s*''\s*\)/,
+    "Inno 7.1 compiles empty String separators but raises Type Mismatch at runtime.",
+  );
+  assert.doesNotMatch(
+    definition,
+    /GetDateTimeString\([^\r\n]*zzz/,
+    "The Pascal runtime timestamp must not rely on the unsupported zzz token.",
+  );
+  assert.match(
+    definition,
+    /Format\('%\.3d', \[Random\(1000\)\]\)/,
+    "Payload generations must retain the validated three-digit numeric suffix.",
+  );
   assert.match(definition, /RegQueryStringValue\(HKLM64/);
   assert.match(definition, /RegQueryStringValue\(HKLM32/);
   assert.match(definition, /GetVersionNumbersString\(InstalledBinary, BinaryVersion\)/);
