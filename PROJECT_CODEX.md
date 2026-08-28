@@ -1,12 +1,18 @@
 # VoxVulgi - Project Codex (How to Operate This Repo)
 
 Date: 2026-02-19  
-This repo is organized into two sides: `product/` and `governance/`.
+This repo has three separate top-level sibling worktrees: product code in `product/`, repo governance in `governance/`, and offline-installer work in `offline-installer-runtime/`.
+
+## Critical release entrypoint
+
+Before full-offline installer work, follow the single canonical guide: [`offline-installer-runtime/GUIDE.md`](offline-installer-runtime/GUIDE.md). Do not create a second guide or treat an unproved ISO as deliverable.
 
 ## 1) Repo layout (canonical)
 
 - `product/` - the actual app code (UI + job engine + workers).
 - `governance/` - specs + how we work: templates, scripts, and workflow artifacts (task board, roadmap, work packets).
+- `offline-installer-runtime/` - the full-offline installer worktree and the only full-offline installer guide, wrapper, scripts, contracts, packaging state, and packaging outputs.
+- `product/`, `governance/`, and `offline-installer-runtime/` are peer folders under the repository root. None is nested inside another, and offline-installer work does not use `product/` or `governance/` as its worktree.
 
 ## 2) Workflow (simple and strict)
 
@@ -73,9 +79,9 @@ Pick the first real implementation WP from `governance/workflow/ROADMAP.md` and 
 
 - Desktop Windows packaging uses a two-tier distribution strategy:
   1. **Core App Installer (NSIS)**: Produces the per-machine application binary, uninstaller, shortcuts, and maintenance mode selector.
-  2. **Single-unit Full Offline ISO (Inno Setup 7+)**: Produces one UDF ISO with root `Install_VoxVulgi.exe` and external non-solid payload archives extracted natively by Inno. No public companion `.bin` slices, manual archive extraction, terminal, Python/pip, or network step is allowed (`governance/scripts/build_offline_full_installer.ps1`).
+  2. **Single-unit Full Offline ISO (Inno Setup 7+)**: Produces one UDF ISO with root `Install_VoxVulgi.exe` and five non-solid `.7z` payload archives under the ISO's `payload/` folder, verified and extracted natively by Inno. The user launches only the root executable; no manual archive extraction, terminal, Python/pip, or network step is allowed (`offline-installer-runtime/scripts/build_offline_full_installer.ps1`).
 - The full-offline ISO is also the public updater: every public install AND update artifact carries the complete dependency payload (all models, portable Python, wheels, caches, tools), and an update must never require network downloads for the default path. Running it over an existing install performs `Update` semantics — settings and database preserved, dependency payload trees refreshed; only the explicit full actions remove user data.
-- Before creating any full-offline installer or updater, follow the single canonical no-context procedure in `governance/release/OFFLINE_INSTALLER_BUILD_MANUAL.md`. Normative gates are `[VV-INSTALL-001]` through `[VV-INSTALL-010]` in `AGENTS.md`, mirrored in `CLAUDE.md`, with architecture detail in `TECHNICAL_DESIGN.md` section 2.1.
+- Before creating any full-offline installer or updater, follow `offline-installer-runtime/GUIDE.md`; it owns the full-offline installer definition and workflow.
 - Use and preserve these maintenance labels in installer UX/copy:
   - `Update`
   - `Reinstall (keep preferences and options)`
